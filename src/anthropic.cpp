@@ -1,0 +1,299 @@
+#include "moha/anthropic.hpp"
+
+#include <cstdlib>
+#include <sstream>
+#include <vector>
+
+#include <curl/curl.h>
+#include <nlohmann/json.hpp>
+
+#include "moha/tools.hpp"
+
+namespace moha::anthropic {
+
+using json = nlohmann::json;
+
+namespace {
+
+// --- SSE parser -------------------------------------------------------------
+struct SseState {
+    std::string buf;
+    std::string event_name;
+    std::string data_accum;
+};
+
+size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata);
+
+struct StreamCtx {
+    EventSink sink;
+    void* cancel; // unused — kept for future cancellation hook
+    SseState sse;
+    // Tool-use tracking (current block index in-flight)
+    std::string current_tool_id;
+    std::string current_tool_name;
+    bool in_tool_use = false;
+};
+
+void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& data) {
+    if (data.empty() || data == "[DONE]") return;
+    json j;
+    try { j = json::parse(data); } catch (...) { return; }
+    if (name == "message_start") {
+        ctx.sink(StreamStarted{});
+        if (j.contains("message") && j["message"].contains("usage")) {
+            int in = j["message"]["usage"].value("input_tokens", 0);
+            ctx.sink(StreamUsage{in, 0});
+        }
+    } else if (name == "content_block_start") {
+        auto block = j.value("content_block", json::object());
+        auto type = block.value("type", "");
+        if (type == "tool_use") {
+            ctx.current_tool_id = block.value("id", "");
+            ctx.current_tool_name = block.value("name", "");
+            ctx.in_tool_use = true;
+            ctx.sink(StreamToolUseStart{ctx.current_tool_id, ctx.current_tool_name});
+        }
+    } else if (name == "content_block_delta") {
+        auto delta = j.value("delta", json::object());
+        auto type = delta.value("type", "");
+        if (type == "text_delta") {
+            ctx.sink(StreamTextDelta{delta.value("text", "")});
+        } else if (type == "input_json_delta") {
+            ctx.sink(StreamToolUseDelta{delta.value("partial_json", "")});
+        }
+    } else if (name == "content_block_stop") {
+        if (ctx.in_tool_use) {
+            ctx.sink(StreamToolUseEnd{});
+            ctx.in_tool_use = false;
+            ctx.current_tool_id.clear();
+            ctx.current_tool_name.clear();
+        }
+    } else if (name == "message_delta") {
+        if (j.contains("usage")) {
+            int out = j["usage"].value("output_tokens", 0);
+            ctx.sink(StreamUsage{0, out});
+        }
+    } else if (name == "message_stop") {
+        ctx.sink(StreamFinished{});
+    } else if (name == "error") {
+        auto err = j.value("error", json::object());
+        ctx.sink(StreamError{err.value("message", "unknown error")});
+    }
+}
+
+void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
+    ctx.sse.buf.append(data, len);
+    size_t pos = 0;
+    while (true) {
+        size_t nl = ctx.sse.buf.find('\n', pos);
+        if (nl == std::string::npos) break;
+        std::string line = ctx.sse.buf.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) {
+            if (!ctx.sse.data_accum.empty() || !ctx.sse.event_name.empty())
+                dispatch_event(ctx, ctx.sse.event_name, ctx.sse.data_accum);
+            ctx.sse.event_name.clear();
+            ctx.sse.data_accum.clear();
+        } else if (line.rfind("event:", 0) == 0) {
+            size_t s = 6; while (s < line.size() && line[s] == ' ') ++s;
+            ctx.sse.event_name = line.substr(s);
+        } else if (line.rfind("data:", 0) == 0) {
+            size_t s = 5; while (s < line.size() && line[s] == ' ') ++s;
+            if (!ctx.sse.data_accum.empty()) ctx.sse.data_accum += "\n";
+            ctx.sse.data_accum += line.substr(s);
+        }
+    }
+    ctx.sse.buf.erase(0, pos);
+}
+
+size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* ctx = static_cast<StreamCtx*>(userdata);
+    (void)ctx->cancel;
+    feed_sse(*ctx, ptr, size * nmemb);
+    return size * nmemb;
+}
+
+json tool_spec_to_json(const ToolSpec& s) {
+    json j;
+    j["name"] = s.name;
+    j["description"] = s.description;
+    j["input_schema"] = s.input_schema;
+    return j;
+}
+
+} // namespace
+
+json build_messages(const Thread& t) {
+    json msgs = json::array();
+    for (const auto& m : t.messages) {
+        json jm;
+        jm["role"] = (m.role == Role::User) ? "user" : "assistant";
+        json content = json::array();
+        if (!m.text.empty()) {
+            content.push_back({{"type", "text"}, {"text", m.text}});
+        }
+        for (const auto& tc : m.tool_calls) {
+            if (m.role == Role::Assistant) {
+                content.push_back({
+                    {"type", "tool_use"},
+                    {"id", tc.id},
+                    {"name", tc.name},
+                    {"input", tc.args},
+                });
+            }
+        }
+        // Append tool_result blocks as user messages (Anthropic convention).
+        if (!content.empty()) { jm["content"] = content; msgs.push_back(jm); }
+
+        if (m.role == Role::Assistant && !m.tool_calls.empty()) {
+            json user_msg;
+            user_msg["role"] = "user";
+            json results = json::array();
+            for (const auto& tc : m.tool_calls) {
+                if (tc.status == ToolUse::Status::Done ||
+                    tc.status == ToolUse::Status::Error ||
+                    tc.status == ToolUse::Status::Rejected) {
+                    results.push_back({
+                        {"type", "tool_result"},
+                        {"tool_use_id", tc.id},
+                        {"content", tc.output.empty() ? "(no output)" : tc.output},
+                        {"is_error", tc.status == ToolUse::Status::Error ||
+                                     tc.status == ToolUse::Status::Rejected},
+                    });
+                }
+            }
+            if (!results.empty()) {
+                user_msg["content"] = results;
+                msgs.push_back(user_msg);
+            }
+        }
+    }
+    return msgs;
+}
+
+std::string default_system_prompt() {
+    std::ostringstream oss;
+    oss << "You are Moha, a terminal coding assistant based on Claude. "
+        << "You work in the user's current directory. "
+        << "Use the provided tools to read, edit, and run shell commands when needed. "
+        << "Be concise. When proposing file edits, prefer the edit tool over write. "
+        << "Before running destructive shell commands, explain what you're doing.\n";
+    return oss.str();
+}
+
+std::vector<ToolSpec> default_tools() {
+    std::vector<ToolSpec> out;
+    for (const auto& td : tools::registry()) {
+        out.push_back({td.name, td.description, td.input_schema});
+    }
+    return out;
+}
+
+// ----------------------------------------------------------------------------
+
+void run_stream_sync(Request req, EventSink sink) {
+    if (req.auth_header.empty()) {
+        sink(StreamError{"not authenticated — run 'moha login' or set ANTHROPIC_API_KEY"});
+        return;
+    }
+    CURL* curl = curl_easy_init();
+    if (!curl) { sink(StreamError{"curl_easy_init failed"}); return; }
+
+    const bool is_oauth = (req.auth_style == auth::Style::Bearer);
+
+    json body;
+    body["model"] = req.model;
+    body["max_tokens"] = req.max_tokens;
+    body["stream"] = true;
+
+    // For OAuth, prepend a billing-header text block so subscription billing
+    // is attributed correctly; the real system prompt follows.
+    if (is_oauth) {
+        json sys = json::array();
+        sys.push_back({
+            {"type", "text"},
+            {"text", "x-anthropic-billing-header: cc_version=0.1.0;"
+                     " cc_entrypoint=cli; cch=00000;"}
+        });
+        sys.push_back({
+            {"type", "text"},
+            {"text", req.system_prompt},
+            {"cache_control", {{"type", "ephemeral"}}}
+        });
+        body["system"] = std::move(sys);
+    } else {
+        body["system"] = req.system_prompt;
+    }
+
+    body["messages"] = build_messages({"", "", req.messages, {}, {}});
+    if (!req.tools.empty()) {
+        json tools_j = json::array();
+        for (const auto& t : req.tools) tools_j.push_back(tool_spec_to_json(t));
+        body["tools"] = std::move(tools_j);
+    }
+    std::string body_str = body.dump();
+
+    StreamCtx ctx{sink, nullptr, {}, {}, {}, false};
+
+    struct curl_slist* headers = nullptr;
+    std::string auth_hdr = is_oauth
+        ? (std::string("Authorization: ") + req.auth_header)
+        : (std::string("x-api-key: ") + req.auth_header);
+    headers = curl_slist_append(headers, auth_hdr.c_str());
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+    if (is_oauth) {
+        headers = curl_slist_append(headers,
+            "anthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31,"
+            "context-management-2025-06-27,compact-2026-01-12");
+    } else {
+        headers = curl_slist_append(headers,
+            "anthropic-beta: prompt-caching-2024-07-31,"
+            "context-management-2025-06-27,compact-2026-01-12");
+    }
+    headers = curl_slist_append(headers, "content-type: application/json");
+    headers = curl_slist_append(headers, "accept: text/event-stream");
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body_str.size());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    // HTTP/1.1 + identity encoding so each SSE event flushes to our callback
+    // the moment it arrives, instead of being buffered inside a gzip stream.
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+    auth::apply_tls_options(curl);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+    if (rc != CURLE_OK && rc != CURLE_WRITE_ERROR) {
+        sink(StreamError{std::string("http: ") + curl_easy_strerror(rc)});
+    } else if (http >= 400) {
+        std::string body_err = ctx.sse.buf;
+        std::string msg = std::string("HTTP ") + std::to_string(http);
+        try {
+            auto j = json::parse(body_err);
+            if (j.contains("error") && j["error"].contains("message"))
+                msg += ": " + j["error"]["message"].get<std::string>();
+            else if (j.contains("message"))
+                msg += ": " + j["message"].get<std::string>();
+            else
+                msg += ": " + body_err.substr(0, 300);
+        } catch (...) {
+            if (!body_err.empty()) msg += ": " + body_err.substr(0, 300);
+        }
+        if (http == 401 || http == 403)
+            msg += "  (run 'moha login' to re-authenticate)";
+        sink(StreamError{msg});
+    }
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+}
+
+} // namespace moha::anthropic

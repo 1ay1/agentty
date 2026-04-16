@@ -1,0 +1,12 @@
+build/
+cmake-build-*/
+.cache/
+.claude/
+compile_commands.json
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+.env
+credentials.json
