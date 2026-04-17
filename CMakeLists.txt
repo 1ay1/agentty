@@ -67,7 +67,6 @@ add_executable(moha
 
     # ── view: per-panel Element factories ────────────────────────────
     src/view/helpers.cpp
-    src/view/header.cpp
     src/view/thread.cpp
     src/view/composer.cpp
     src/view/statusbar.cpp
@@ -93,5 +92,5 @@ endif()
 if(MSVC)
     target_compile_options(moha PRIVATE /W4 /utf-8)
 else()
-    target_compile_options(moha PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(moha PRIVATE -Wall -Wextra -Wpedantic -Wno-deprecated-declarations)
 endif()

@@ -40,7 +40,7 @@ Element fallback_card(const ToolUse& tc) {
     maya::ToolCall::Config cfg;
     cfg.tool_name = tc.name.value;
     cfg.kind = maya::ToolCallKind::Other;
-    if (!tc.args.empty()) cfg.description = tc.args.dump();
+    if (tc.args.is_object() && !tc.args.empty()) cfg.description = tc.args.dump();
     maya::ToolCall card(cfg);
     card.set_expanded(tc.expanded);
     using S = ToolUse::Status;
@@ -58,8 +58,9 @@ Element fallback_card(const ToolUse& tc) {
 } // namespace
 
 Element render_tool_call(const ToolUse& tc) {
-    auto path = tc.args.value("path", "");
-    auto cmd  = tc.args.value("command", "");
+    const bool has_args = tc.args.is_object();
+    auto path = has_args ? tc.args.value("path", "") : std::string{};
+    auto cmd  = has_args ? tc.args.value("command", "") : std::string{};
 
     if (tc.name == "read") {
         ReadTool rt(path.empty() ? tc.name.value : path);
@@ -86,8 +87,8 @@ Element render_tool_call(const ToolUse& tc) {
     if (tc.name == "edit") {
         EditTool et(path.empty() ? tc.name.value : path);
         et.set_expanded(tc.expanded);
-        et.set_old_text(tc.args.value("old_string", ""));
-        et.set_new_text(tc.args.value("new_string", ""));
+        et.set_old_text(has_args ? tc.args.value("old_string", "") : "");
+        et.set_new_text(has_args ? tc.args.value("new_string", "") : "");
         et.set_status(map_status<EditTool>(tc.status,
             EditStatus::Applying, EditStatus::Failed, EditStatus::Applied));
         return et.build();
@@ -95,7 +96,7 @@ Element render_tool_call(const ToolUse& tc) {
     if (tc.name == "write") {
         WriteTool wt(path.empty() ? tc.name.value : path);
         wt.set_expanded(tc.expanded);
-        wt.set_content(tc.args.value("content", ""));
+        wt.set_content(has_args ? tc.args.value("content", "") : "");
         wt.set_max_preview_lines(8);
         wt.set_status(map_status<WriteTool>(tc.status,
             WriteStatus::Writing, WriteStatus::Failed, WriteStatus::Written));
@@ -140,15 +141,16 @@ Element thread_panel(const Model& m) {
     if (m.stream.active && !m.current.messages.empty()
         && m.current.messages.back().role == Role::Assistant) {
         auto spin = m.stream.spinner;
-        spin.set_style(fg_bold(warn));
-        rows.push_back(h(
+        spin.set_style(fg_bold(accent));
+        rows.push_back((h(
             spin.build(),
             text(" Thinking\u2026", fg_italic(muted))
-        ).build());
+        ) | padding(0, 0, 0, 2)).build());
     }
     if (rows.empty()) {
-        rows.push_back(text("Start a conversation \u2014 ask me to read, edit, or run anything.",
-                            fg_italic(muted)));
+        rows.push_back(
+            (v(text("Ask me to read, edit, or run anything.",
+                    fg_italic(muted))) | padding(2, 0)).build());
     }
     return (v(std::move(rows)) | padding(0, 1)).build();
 }

@@ -13,15 +13,13 @@ using namespace maya::dsl;
 Element model_picker(const Model& m) {
     if (!m.model_picker.open) return text("");
     std::vector<Element> rows;
-    rows.push_back(text("Select model", fg_bold(fg)));
-    rows.push_back(text(""));
     int i = 0;
     for (const auto& mi : m.available_models) {
         bool sel    = i == m.model_picker.index;
         bool active = mi.id == m.model_id;
         auto prefix = sel ? text("\u203A ", fg_bold(accent)) : text("  ");
         auto star   = mi.favorite ? text("\u2605 ", fg_of(warn)) : text("  ");
-        auto active_mark = active ? text(" (active)", fg_of(success)) : text("");
+        auto active_mark = active ? text(" \u2713", fg_of(success)) : text("");
         rows.push_back(h(prefix, star,
             text(mi.display_name,
                  sel ? fg_bold(fg) : fg_of(muted)),
@@ -29,21 +27,25 @@ Element model_picker(const Model& m) {
         ++i;
     }
     rows.push_back(text(""));
-    rows.push_back(text("\u2191\u2193 move  Enter select  F favorite  Esc close",
-                        fg_dim(muted)));
+    rows.push_back(h(
+        text("\u2191\u2193", fg_of(fg)), text(" move  ", fg_dim(muted)),
+        text("Enter", fg_of(fg)), text(" select  ", fg_dim(muted)),
+        text("F", fg_of(fg)), text(" favorite  ", fg_dim(muted)),
+        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
+    ).build());
     auto content = (v(std::move(rows)) | padding(1, 2) | width(50));
     return (v(content.build())
             | border(BorderStyle::Round) | bcolor(accent)
-            | btext(" Models ")).build();
+            | btext(" Models ", BorderTextPos::Top, BorderTextAlign::Center)
+            ).build();
 }
 
 Element thread_list(const Model& m) {
     if (!m.thread_list.open) return text("");
     std::vector<Element> rows;
-    rows.push_back(text("Recent threads", fg_bold(fg)));
-    rows.push_back(text(""));
-    if (m.threads.empty())
-        rows.push_back(text("No threads yet.", fg_italic(muted)));
+    if (m.threads.empty()) {
+        rows.push_back(text("  No threads yet.", fg_italic(muted)));
+    }
     int i = 0;
     for (const auto& t : m.threads) {
         bool sel = i == m.thread_list.index;
@@ -57,50 +59,54 @@ Element thread_list(const Model& m) {
         if (++i > 15) break;
     }
     rows.push_back(text(""));
-    rows.push_back(text("\u2191\u2193 move  Enter open  N new  Esc close",
-                        fg_dim(muted)));
+    rows.push_back(h(
+        text("\u2191\u2193", fg_of(fg)), text(" move  ", fg_dim(muted)),
+        text("Enter", fg_of(fg)), text(" open  ", fg_dim(muted)),
+        text("N", fg_of(fg)), text(" new  ", fg_dim(muted)),
+        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
+    ).build());
     auto content = (v(std::move(rows)) | padding(1, 2) | width(60));
     return (v(content.build())
             | border(BorderStyle::Round) | bcolor(info)
-            | btext(" Threads ")).build();
+            | btext(" Threads ", BorderTextPos::Top, BorderTextAlign::Center)
+            ).build();
 }
 
 Element command_palette(const Model& m) {
     if (!m.command_palette.open) return text("");
-    static const std::pair<const char*, const char*> kCmds[] = {
-        {"New thread",         "Start a fresh conversation"},
-        {"Review changes",     "Open diff review pane"},
-        {"Accept all changes", "Apply every pending hunk"},
-        {"Reject all changes", "Discard every pending hunk"},
-        {"Cycle profile",      "Write \u2192 Ask \u2192 Minimal"},
-        {"Open model picker",  ""},
-        {"Open threads",       ""},
-        {"Quit",               "Exit moha"},
-    };
+
     std::vector<Element> rows;
     rows.push_back(h(text("\u203A ", fg_bold(highlight)),
-        text(m.command_palette.query.empty() ? "(type to filter)"
+        text(m.command_palette.query.empty() ? "type to filter\u2026"
                                               : m.command_palette.query,
-             m.command_palette.query.empty() ? fg_of(muted) : fg_of(fg))
+             m.command_palette.query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
     rows.push_back(sep);
+
     int i = 0;
-    for (const auto& [name, desc] : kCmds) {
+    for (const auto& cmd : kCommands) {
+        std::string_view name{cmd.label};
+        std::string_view desc{cmd.description};
         if (!m.command_palette.query.empty()
-            && std::string_view{name}.find(m.command_palette.query) == std::string_view::npos)
+            && name.find(m.command_palette.query) == std::string_view::npos)
             continue;
         bool sel = i == m.command_palette.index;
         auto prefix = sel ? text("\u203A ", fg_bold(highlight)) : text("  ");
         rows.push_back(h(prefix,
-            text(name, sel ? fg_bold(fg) : fg_of(muted)),
+            text(std::string{name}, sel ? fg_bold(fg) : fg_of(muted)),
             spacer(),
-            text(desc, fg_dim(muted))).build());
+            text(std::string{desc}, fg_dim(muted))).build());
         ++i;
     }
+    if (i == 0) {
+        rows.push_back(text("  no matches", fg_italic(muted)));
+    }
+
     auto content = (v(std::move(rows)) | padding(1, 2) | width(70));
     return (v(content.build())
             | border(BorderStyle::Round) | bcolor(highlight)
-            | btext(" Command ")).build();
+            | btext(" Command Palette ", BorderTextPos::Top, BorderTextAlign::Center)
+            ).build();
 }
 
 } // namespace moha::ui

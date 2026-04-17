@@ -1,7 +1,6 @@
 #include "moha/view/statusbar.hpp"
 
-#include <format>
-#include <string_view>
+#include <maya/widget/activity_bar.hpp>
 
 #include "moha/view/helpers.hpp"
 #include "moha/view/palette.hpp"
@@ -12,40 +11,39 @@ using namespace maya;
 using namespace maya::dsl;
 
 namespace {
-std::string_view ready_label(Phase p) {
-    switch (p) {
-        case Phase::Idle:               return "ready";
-        case Phase::Streaming:          return "streaming";
-        case Phase::AwaitingPermission: return "awaiting permission";
-        case Phase::ExecutingTool:      return "executing tool";
-    }
-    return "?";
-}
-
-inline Element shortcut(const char* keys, const char* desc) {
-    using namespace maya::dsl;
-    return h(text(keys, fg_dim(muted)),
-             text(desc, fg_dim(muted))).build();
+Element shortcut_hint(const char* key, const char* label) {
+    return h(
+        text(key, fg_bold(fg)),
+        text(label, fg_dim(muted))
+    ).build();
 }
 } // namespace
 
 Element status_bar(const Model& m) {
+    ActivityBar bar;
+    bar.set_model(m.model_id.value);
+    bar.set_tokens(m.stream.tokens_in, m.stream.tokens_out);
+
     int pct = m.stream.context_max > 0
                 ? (m.stream.tokens_in + m.stream.tokens_out) * 100 / m.stream.context_max
                 : 0;
-    return h(
-        text(" "),
-        text(ready_label(m.stream.phase), fg_of(success)),
-        text("   "),
-        text(std::format("{}%", pct), fg_of(pct > 80 ? danger : muted)),
-        spacer(),
-        text("Ctrl+/ model  ",     fg_dim(muted)),
-        text("Shift+Tab profile  ",fg_dim(muted)),
-        text("Ctrl+J threads  ",   fg_dim(muted)),
-        text("Ctrl+K palette  ",   fg_dim(muted)),
-        text("Ctrl+R review  ",    fg_dim(muted)),
-        text("Ctrl+C quit",        fg_dim(muted))
-    ).build();
+    bar.set_context_percent(pct);
+    bar.set_status(std::string{phase_label(m.stream.phase)});
+    bar.add_section("", std::string{profile_label(m.profile)},
+        Style{}.with_fg(profile_color(m.profile)));
+
+    auto shortcuts = h(
+        text(" ", fg_dim(muted)),
+        shortcut_hint("^/", " model  "),
+        shortcut_hint("S-Tab", " profile  "),
+        shortcut_hint("^J", " threads  "),
+        shortcut_hint("^K", " palette  "),
+        shortcut_hint("^R", " review  "),
+        shortcut_hint("^N", " new  "),
+        shortcut_hint("^C", " quit")
+    );
+
+    return v(bar.build(), shortcuts.build()).build();
 }
 
 } // namespace moha::ui

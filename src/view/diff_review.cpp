@@ -41,13 +41,14 @@ Element diff_review(const Model& m) {
 
     std::vector<Element> rows;
     rows.push_back(h(
-        text("File ", fg_of(muted)),
-        text(std::format("{}/{}", m.diff_review.file_index + 1, m.pending_changes.size()),
-             fg_of(fg)),
-        text("  "),
         text(fc.path, fg_bold(fg)),
         spacer(),
-        text(std::format("+{} -{}", fc.added, fc.removed), fg_of(success))
+        text(std::format("+{}", fc.added), fg_of(success)),
+        text(" "),
+        text(std::format("-{}", fc.removed), fg_of(danger)),
+        text("  "),
+        text(std::format("file {}/{}", m.diff_review.file_index + 1,
+                         m.pending_changes.size()), fg_dim(muted))
     ).build());
     rows.push_back(sep);
 
@@ -56,8 +57,8 @@ Element diff_review(const Model& m) {
         bool sel = hi == m.diff_review.hunk_index;
         rows.push_back(h(
             sel ? text("\u203A ", fg_bold(accent)) : text("  "),
-            text(std::format("hunk @@ -{} +{}", h_.old_start, h_.new_start),
-                 fg_of(muted)),
+            text(std::format("@@ -{},{} +{},{}", h_.old_start, h_.old_len,
+                             h_.new_start, h_.new_len), fg_of(muted)),
             text("  "),
             text(hunk_status_tag(h_.status), fg_of(hunk_status_color(h_.status)))
         ).build());
@@ -66,12 +67,20 @@ Element diff_review(const Model& m) {
         ++hi;
     }
     rows.push_back(sep);
-    rows.push_back(text("\u2191\u2193 hunk  \u2190\u2192 file  Y accept  N reject  A all  X none  Esc close",
-                        fg_dim(muted)));
+    rows.push_back(h(
+        text("\u2191\u2193", fg_of(fg)), text(" hunk  ", fg_dim(muted)),
+        text("\u2190\u2192", fg_of(fg)), text(" file  ", fg_dim(muted)),
+        text("Y", fg_of(success)), text(" accept  ", fg_dim(muted)),
+        text("N", fg_of(danger)), text(" reject  ", fg_dim(muted)),
+        text("A", fg_of(success)), text(" all  ", fg_dim(muted)),
+        text("X", fg_of(danger)), text(" none  ", fg_dim(muted)),
+        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
+    ).build());
     auto content = (v(std::move(rows)) | padding(1, 2));
     return (v(content.build())
             | border(BorderStyle::Round) | bcolor(muted)
-            | btext(" Review Changes ")).build();
+            | btext(" Review Changes ", BorderTextPos::Top, BorderTextAlign::Center)
+            ).build();
 }
 
 } // namespace moha::ui

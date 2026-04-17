@@ -24,7 +24,9 @@ Element changes_strip(const Model& m) {
         h(text("Changes ", fg_bold(warn)),
           text(std::format("({} files)", m.pending_changes.size()), fg_of(muted)),
           spacer(),
-          text("R review  A accept-all  X reject-all", fg_dim(muted))
+          text("Ctrl+R", fg_of(fg)), text(" review  ", fg_dim(muted)),
+          text("A", fg_of(success)), text(" accept  ", fg_dim(muted)),
+          text("X", fg_of(danger)), text(" reject", fg_dim(muted))
         ).build(),
         fc.build()
     ) | border(BorderStyle::Round) | bcolor(warn) | padding(0, 1));

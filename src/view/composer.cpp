@@ -15,7 +15,7 @@ Element composer(const Model& m) {
     std::string placeholder;
     if (display.empty()) {
         placeholder = (m.stream.phase == Phase::Streaming)
-            ? "(streaming \u2014 type to queue)"
+            ? "streaming \u2014 type to queue\u2026"
             : "ask a question, or give an instruction\u2026";
     }
 
@@ -31,18 +31,20 @@ Element composer(const Model& m) {
             : text(placeholder, fg_italic(muted))
     ) | padding(0, 1) | height(rows);
 
+    auto bdr_color = m.stream.phase == Phase::Streaming ? warn
+                   : m.stream.phase == Phase::AwaitingPermission ? danger
+                   : muted;
+
     auto hint = h(
-        text("@", fg_of(highlight)),
-        text(" mention  ", fg_dim(muted)),
-        text("Enter", fg_of(fg)),    text(" send  ",    fg_dim(muted)),
-        text("Alt+Enter", fg_of(fg)),text(" newline  ", fg_dim(muted)),
-        text("Ctrl+E", fg_of(fg)),   text(" expand",    fg_dim(muted))
+        text("Enter", fg_of(fg)), text(" send  ", fg_dim(muted)),
+        text("Alt+Enter", fg_of(fg)), text(" newline  ", fg_dim(muted)),
+        text("Ctrl+E", fg_of(fg)), text(" expand", fg_dim(muted))
     );
 
     return (v(inner.build(), hint.build())
             | border(BorderStyle::Round)
-            | bcolor(muted)
-            | btext(" compose ", BorderTextPos::Top, BorderTextAlign::Start)).build();
+            | bcolor(bdr_color)
+           ).build();
 }
 
 } // namespace moha::ui
