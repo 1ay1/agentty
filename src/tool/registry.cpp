@@ -95,7 +95,7 @@ ToolDef tool_read() {
         int shown = 0;
         while (std::getline(iss, line)) {
             if (n >= offset && shown < limit) {
-                out << n << "\t" << line << "\n";
+                out << line << "\n";
                 shown++;
             }
             n++;
@@ -220,6 +220,28 @@ ToolDef tool_bash() {
     return t;
 }
 
+bool should_skip_dir(const std::string& name) {
+    static const std::vector<std::string> skip = {
+        ".git", "node_modules", "build", "target", "__pycache__",
+        ".cache", "vendor", "dist", "out", ".next", ".venv",
+        "cmake-build-debug", "cmake-build-release", ".idea", ".vscode",
+        "_deps", "third_party", "thirdparty", "3rdparty", "external",
+    };
+    for (const auto& s : skip) if (name == s) return true;
+    return false;
+}
+
+bool is_binary_file(const fs::path& p) {
+    std::ifstream ifs(p, std::ios::binary);
+    if (!ifs) return true;
+    char buf[512];
+    ifs.read(buf, sizeof(buf));
+    auto n = ifs.gcount();
+    for (int i = 0; i < n; ++i)
+        if (buf[i] == '\0') return true;
+    return false;
+}
+
 // ---- Grep ------------------------------------------------------------------
 ToolDef tool_grep() {
     ToolDef t;
@@ -252,17 +274,21 @@ ToolDef tool_grep() {
                     fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
+            auto fn = it->path().filename().string();
+            if (it->is_directory(ec)) {
+                if (should_skip_dir(fn)) { it.disable_recursion_pending(); continue; }
+                continue;
+            }
             if (!it->is_regular_file(ec)) continue;
-            auto p = it->path();
-            auto fn = p.filename().string();
             if (fn.starts_with(".")) continue;
+            auto p = it->path();
             if (!file_glob.empty()) {
                 auto dot = file_glob.find_last_of('.');
                 if (dot != std::string::npos) {
-                    auto ext = file_glob.substr(dot);
-                    if (p.extension() != ext) continue;
+                    if (p.extension() != file_glob.substr(dot)) continue;
                 }
             }
+            if (is_binary_file(p)) continue;
             std::ifstream ifs(p);
             if (!ifs) continue;
             std::string line;
@@ -307,6 +333,11 @@ ToolDef tool_glob() {
                     fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
+            auto fn = it->path().filename().string();
+            if (it->is_directory(ec)) {
+                if (should_skip_dir(fn)) { it.disable_recursion_pending(); continue; }
+                continue;
+            }
             if (!it->is_regular_file(ec)) continue;
             auto s = it->path().string();
             if (s.find(pat) != std::string::npos) {
@@ -360,7 +391,7 @@ ToolDef tool_list_dir() {
             if (count > 1000) return;
             std::string indent(depth * 2, ' ');
             auto fn = entry.path().filename().string();
-            if (fn.starts_with(".") && depth > 0) return;
+            if ((fn.starts_with(".") || should_skip_dir(fn)) && depth > 0) return;
             if (entry.is_directory(ec)) {
                 out << indent << fn << "/\n";
             } else if (entry.is_regular_file(ec)) {

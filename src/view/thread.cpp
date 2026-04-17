@@ -4,8 +4,11 @@
 #include <vector>
 
 #include <maya/widget/bash_tool.hpp>
+#include <maya/widget/diff_view.hpp>
 #include <maya/widget/edit_tool.hpp>
 #include <maya/widget/fetch_tool.hpp>
+#include <maya/widget/git_graph.hpp>
+#include <maya/widget/git_status.hpp>
 #include <maya/widget/markdown.hpp>
 #include <maya/widget/message.hpp>
 #include <maya/widget/read_tool.hpp>
@@ -24,6 +27,8 @@ using namespace maya::dsl;
 
 namespace {
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
 template <class W, class StatusEnum>
 StatusEnum map_status(ToolUse::Status s, StatusEnum running, StatusEnum failed,
                       StatusEnum done) {
@@ -38,23 +43,9 @@ StatusEnum map_status(ToolUse::Status s, StatusEnum running, StatusEnum failed,
     return done;
 }
 
-Element fallback_card(const ToolUse& tc) {
-    maya::ToolCall::Config cfg;
-    cfg.tool_name = tc.name.value;
-    cfg.kind = maya::ToolCallKind::Other;
-    if (tc.args.is_object() && !tc.args.empty()) cfg.description = tc.args.dump();
-    maya::ToolCall card(cfg);
-    card.set_expanded(tc.expanded);
-    using S = ToolUse::Status;
-    if (tc.status == S::Running || tc.status == S::Pending)
-        card.set_status(maya::ToolCallStatus::Running);
-    else if (tc.status == S::Error || tc.status == S::Rejected)
-        card.set_status(maya::ToolCallStatus::Failed);
-    else
-        card.set_status(maya::ToolCallStatus::Completed);
-    if (!tc.output.empty())
-        card.set_content(text(tc.output, fg_of(muted)));
-    return card.build();
+maya::ToolCallStatus tc_status(ToolUse::Status s) {
+    return map_status<maya::ToolCall>(s,
+        ToolCallStatus::Running, ToolCallStatus::Failed, ToolCallStatus::Completed);
 }
 
 std::string safe_arg(const nlohmann::json& args, const char* key) {
@@ -62,52 +53,123 @@ std::string safe_arg(const nlohmann::json& args, const char* key) {
     return args.value(key, "");
 }
 
+int safe_int_arg(const nlohmann::json& args, const char* key, int def) {
+    if (!args.is_object() || !args.contains(key)) return def;
+    return args.value(key, def);
+}
+
+int count_lines(const std::string& s) {
+    int n = 0;
+    for (char c : s) if (c == '\n') n++;
+    return n + (!s.empty() && s.back() != '\n' ? 1 : 0);
+}
+
+int parse_exit_code(const std::string& output) {
+    auto pos = output.rfind("[exit code ");
+    if (pos == std::string::npos) return 0;
+    try { return std::stoi(output.substr(pos + 11)); } catch(...) { return 1; }
+}
+
+Element tool_card(const std::string& name, ToolCallKind kind,
+                  const std::string& desc, ToolUse::Status status,
+                  bool expanded, const std::string& output) {
+    maya::ToolCall::Config cfg;
+    cfg.tool_name = name;
+    cfg.kind = kind;
+    cfg.description = desc;
+    maya::ToolCall card(cfg);
+    card.set_expanded(expanded);
+    card.set_status(tc_status(status));
+    if (!output.empty())
+        card.set_content(text(output, fg_of(muted)));
+    return card.build();
+}
+
+Element parse_grep_result(const ToolUse& tc, const std::string& pattern) {
+    SearchResult sr(SearchKind::Grep, pattern);
+    sr.set_expanded(tc.expanded);
+    sr.set_max_matches_per_file(3);
+    sr.set_status(map_status<SearchResult>(tc.status,
+        SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
+    if (!tc.output.empty() && tc.status == ToolUse::Status::Done
+        && tc.output != "no matches") {
+        SearchFileGroup current_group;
+        std::istringstream iss(tc.output);
+        std::string line;
+        int total_groups = 0;
+        while (std::getline(iss, line)) {
+            if (line.starts_with("[>")) break;
+            auto c1 = line.find(':');
+            if (c1 == std::string::npos) continue;
+            auto c2 = line.find(':', c1 + 1);
+            if (c2 == std::string::npos) continue;
+            std::string file = line.substr(0, c1);
+            if (file.starts_with("./")) file = file.substr(2);
+            int lineno = 0;
+            try { lineno = std::stoi(line.substr(c1+1, c2-c1-1)); } catch(...) {}
+            std::string content = line.substr(c2 + 1);
+            while (!content.empty() && (content.front() == ' ' || content.front() == '\t'))
+                content.erase(content.begin());
+            if (current_group.file_path != file) {
+                if (!current_group.file_path.empty()) {
+                    sr.add_group(std::move(current_group));
+                    if (++total_groups >= 10) break;
+                }
+                current_group = SearchFileGroup{file, {}};
+            }
+            current_group.matches.push_back({lineno, content});
+        }
+        if (!current_group.file_path.empty())
+            sr.add_group(std::move(current_group));
+    }
+    return sr.build();
+}
+
 } // namespace
+
+// ════════════════════════════════════════════════════════════════════════
+// render_tool_call — every tool gets a bordered card with status icon
+// ════════════════════════════════════════════════════════════════════════
 
 Element render_tool_call(const ToolUse& tc) {
     auto path = safe_arg(tc.args, "path");
     auto cmd  = safe_arg(tc.args, "command");
 
-    // ── File: read ──────────────────────────────────────────────────
+    // ── read ────────────────────────────────────────────────────────
     if (tc.name == "read") {
-        ReadTool rt(path.empty() ? tc.name.value : path);
+        ReadTool rt(path.empty() ? "read" : path);
         rt.set_expanded(tc.expanded);
+        rt.set_start_line(safe_int_arg(tc.args, "offset", 1));
         rt.set_status(map_status<ReadTool>(tc.status,
             ReadStatus::Reading, ReadStatus::Failed, ReadStatus::Success));
         if (tc.status != ToolUse::Status::Pending && tc.status != ToolUse::Status::Running) {
             rt.set_content(tc.output);
+            rt.set_total_lines(count_lines(tc.output));
             rt.set_max_lines(12);
         }
         return rt.build();
     }
 
-    // ── Shell: bash ─────────────────────────────────────────────────
-    if (tc.name == "bash") {
-        BashTool bt(cmd.empty() ? tc.name.value : cmd);
-        bt.set_expanded(tc.expanded);
-        bt.set_max_output_lines(10);
-        bt.set_status(map_status<BashTool>(tc.status,
-            BashStatus::Running, BashStatus::Failed, BashStatus::Success));
-        if (tc.status == ToolUse::Status::Done) bt.set_exit_code(0);
-        if (tc.status != ToolUse::Status::Pending && tc.status != ToolUse::Status::Running)
-            bt.set_output(tc.output);
-        return bt.build();
+    // ── list_dir (same style as read) ───────────────────────────────
+    if (tc.name == "list_dir") {
+        auto dir = path.empty() ? safe_arg(tc.args, "path") : path;
+        if (dir.empty()) dir = ".";
+        ReadTool rt(dir);
+        rt.set_expanded(tc.expanded);
+        rt.set_start_line(0);
+        rt.set_status(map_status<ReadTool>(tc.status,
+            ReadStatus::Reading, ReadStatus::Failed, ReadStatus::Success));
+        if (!tc.output.empty()) {
+            rt.set_content(tc.output);
+            rt.set_total_lines(count_lines(tc.output));
+            rt.set_max_lines(25);
+        }
+        return rt.build();
     }
 
-    // ── File: edit ──────────────────────────────────────────────────
-    if (tc.name == "edit") {
-        EditTool et(path.empty() ? tc.name.value : path);
-        et.set_expanded(tc.expanded);
-        et.set_old_text(safe_arg(tc.args, "old_string"));
-        et.set_new_text(safe_arg(tc.args, "new_string"));
-        et.set_status(map_status<EditTool>(tc.status,
-            EditStatus::Applying, EditStatus::Failed, EditStatus::Applied));
-        return et.build();
-    }
-
-    // ── File: write ─────────────────────────────────────────────────
+    // ── write ───────────────────────────────────────────────────────
     if (tc.name == "write") {
-        WriteTool wt(path.empty() ? tc.name.value : path);
+        WriteTool wt(path.empty() ? "write" : path);
         wt.set_expanded(tc.expanded);
         wt.set_content(safe_arg(tc.args, "content"));
         wt.set_max_preview_lines(8);
@@ -116,51 +178,73 @@ Element render_tool_call(const ToolUse& tc) {
         return wt.build();
     }
 
-    // ── Search: grep ────────────────────────────────────────────────
-    if (tc.name == "grep") {
-        auto pattern = safe_arg(tc.args, "pattern");
-        SearchResult sr(SearchKind::Grep, pattern);
-        sr.set_expanded(tc.expanded);
-        sr.set_status(map_status<SearchResult>(tc.status,
-            SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
-        if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
-            SearchFileGroup current_group;
-            std::istringstream iss(tc.output);
-            std::string line;
-            while (std::getline(iss, line)) {
-                auto c1 = line.find(':');
-                if (c1 == std::string::npos) continue;
-                auto c2 = line.find(':', c1 + 1);
-                if (c2 == std::string::npos) continue;
-                std::string file = line.substr(0, c1);
-                int lineno = 0;
-                try { lineno = std::stoi(line.substr(c1+1, c2-c1-1)); } catch(...) {}
-                std::string content = line.substr(c2 + 1);
-                if (current_group.file_path != file) {
-                    if (!current_group.file_path.empty())
-                        sr.add_group(std::move(current_group));
-                    current_group = SearchFileGroup{file, {}};
-                }
-                current_group.matches.push_back({lineno, content});
-            }
-            if (!current_group.file_path.empty())
-                sr.add_group(std::move(current_group));
-        }
-        return sr.build();
+    // ── edit ────────────────────────────────────────────────────────
+    if (tc.name == "edit") {
+        EditTool et(path.empty() ? "edit" : path);
+        et.set_expanded(tc.expanded);
+        et.set_old_text(safe_arg(tc.args, "old_string"));
+        et.set_new_text(safe_arg(tc.args, "new_string"));
+        et.set_status(map_status<EditTool>(tc.status,
+            EditStatus::Applying, EditStatus::Failed, EditStatus::Applied));
+        return et.build();
     }
 
-    // ── Search: glob ────────────────────────────────────────────────
+    // ── bash ────────────────────────────────────────────────────────
+    if (tc.name == "bash") {
+        BashTool bt(cmd.empty() ? "bash" : cmd);
+        bt.set_expanded(tc.expanded);
+        bt.set_max_output_lines(10);
+        bt.set_status(map_status<BashTool>(tc.status,
+            BashStatus::Running, BashStatus::Failed, BashStatus::Success));
+        if (tc.status == ToolUse::Status::Done || tc.status == ToolUse::Status::Error) {
+            int rc = parse_exit_code(tc.output);
+            bt.set_exit_code(rc);
+            if (rc != 0) bt.set_status(BashStatus::Failed);
+            bt.set_output(tc.output);
+        }
+        return bt.build();
+    }
+
+    // ── diagnostics (same style as bash) ────────────────────────────
+    if (tc.name == "diagnostics") {
+        auto diag_cmd = safe_arg(tc.args, "command");
+        BashTool bt(diag_cmd.empty() ? "diagnostics" : diag_cmd);
+        bt.set_expanded(tc.expanded);
+        bt.set_max_output_lines(20);
+        if (tc.status == ToolUse::Status::Done || tc.status == ToolUse::Status::Error) {
+            int rc = parse_exit_code(tc.output);
+            bt.set_exit_code(rc);
+            bt.set_status(rc == 0 ? BashStatus::Success : BashStatus::Failed);
+            bt.set_output(tc.output);
+        } else {
+            bt.set_status(map_status<BashTool>(tc.status,
+                BashStatus::Running, BashStatus::Failed, BashStatus::Success));
+        }
+        return bt.build();
+    }
+
+    // ── grep / find_definition (SearchResult widget) ────────────────
+    if (tc.name == "grep" || tc.name == "find_definition") {
+        auto pattern = tc.name == "grep"
+            ? safe_arg(tc.args, "pattern")
+            : safe_arg(tc.args, "symbol");
+        return parse_grep_result(tc, pattern);
+    }
+
+    // ── glob (SearchResult widget) ──────────────────────────────────
     if (tc.name == "glob") {
         auto pattern = safe_arg(tc.args, "pattern");
         SearchResult sr(SearchKind::Glob, pattern);
         sr.set_expanded(tc.expanded);
         sr.set_status(map_status<SearchResult>(tc.status,
             SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
-        if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
+        if (!tc.output.empty() && tc.status == ToolUse::Status::Done
+            && tc.output != "no matches") {
             SearchFileGroup group{"", {}};
             std::istringstream iss(tc.output);
             std::string line;
             while (std::getline(iss, line)) {
+                if (line.starts_with("./")) line = line.substr(2);
                 if (!line.empty()) group.matches.push_back({0, line});
             }
             if (!group.matches.empty()) sr.add_group(std::move(group));
@@ -168,52 +252,18 @@ Element render_tool_call(const ToolUse& tc) {
         return sr.build();
     }
 
-    // ── Search: find_definition ─────────────────────────────────────
-    if (tc.name == "find_definition") {
-        auto sym = safe_arg(tc.args, "symbol");
-        SearchResult sr(SearchKind::Grep, sym);
-        sr.set_expanded(tc.expanded);
-        sr.set_status(map_status<SearchResult>(tc.status,
-            SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
-        if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
-            SearchFileGroup current_group;
-            std::istringstream iss(tc.output);
-            std::string line;
-            while (std::getline(iss, line)) {
-                auto c1 = line.find(':');
-                if (c1 == std::string::npos) continue;
-                auto c2 = line.find(':', c1 + 1);
-                if (c2 == std::string::npos) continue;
-                std::string file = line.substr(0, c1);
-                int lineno = 0;
-                try { lineno = std::stoi(line.substr(c1+1, c2-c1-1)); } catch(...) {}
-                std::string content = line.substr(c2 + 1);
-                if (current_group.file_path != file) {
-                    if (!current_group.file_path.empty())
-                        sr.add_group(std::move(current_group));
-                    current_group = SearchFileGroup{file, {}};
-                }
-                current_group.matches.push_back({lineno, content});
-            }
-            if (!current_group.file_path.empty())
-                sr.add_group(std::move(current_group));
-        }
-        return sr.build();
-    }
-
-    // ── Web: web_fetch ──────────────────────────────────────────────
+    // ── web_fetch (FetchTool widget) ────────────────────────────────
     if (tc.name == "web_fetch") {
         auto url = safe_arg(tc.args, "url");
         FetchTool ft(url);
         ft.set_expanded(tc.expanded);
+        ft.set_max_body_lines(15);
         ft.set_status(map_status<FetchTool>(tc.status,
             FetchStatus::Fetching, FetchStatus::Failed, FetchStatus::Done));
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
-            // Parse "HTTP CODE (content-type)\n\nbody" format
             auto first_nl = tc.output.find('\n');
             if (first_nl != std::string::npos) {
                 auto header = tc.output.substr(0, first_nl);
-                // Extract status code
                 auto sp = header.find(' ');
                 if (sp != std::string::npos) {
                     try { ft.set_status_code(std::stoi(header.substr(sp+1))); } catch(...) {}
@@ -234,71 +284,146 @@ Element render_tool_call(const ToolUse& tc) {
         return ft.build();
     }
 
-    // ── Web: web_search ─────────────────────────────────────────────
+    // ── web_search (FetchTool widget, same bordered style) ──────────
     if (tc.name == "web_search") {
         auto query = safe_arg(tc.args, "query");
         FetchTool ft("search: " + query);
         ft.set_expanded(tc.expanded);
+        ft.set_max_body_lines(20);
         ft.set_status(map_status<FetchTool>(tc.status,
             FetchStatus::Fetching, FetchStatus::Failed, FetchStatus::Done));
-        if (!tc.output.empty()) ft.set_body(tc.output);
+        if (!tc.output.empty()) {
+            ft.set_status_code(200);
+            ft.set_body(tc.output);
+        }
         return ft.build();
     }
 
-    // ── File: list_dir ──────────────────────────────────────────────
-    if (tc.name == "list_dir") {
-        auto dir_path = safe_arg(tc.args, "path");
-        if (dir_path.empty()) dir_path = ".";
-        ReadTool rt(dir_path);
-        rt.set_expanded(tc.expanded);
-        rt.set_status(map_status<ReadTool>(tc.status,
-            ReadStatus::Reading, ReadStatus::Failed, ReadStatus::Success));
-        if (!tc.output.empty()) {
-            rt.set_content(tc.output);
-            rt.set_max_lines(20);
-        }
-        return rt.build();
-    }
-
-    // ── Diagnostics ─────────────────────────────────────────────────
-    if (tc.name == "diagnostics") {
-        BashTool bt(safe_arg(tc.args, "command").empty() ? "diagnostics" : safe_arg(tc.args, "command"));
-        bt.set_expanded(tc.expanded);
-        bt.set_max_output_lines(20);
-        bt.set_status(map_status<BashTool>(tc.status,
-            BashStatus::Running, BashStatus::Failed, BashStatus::Success));
-        if (!tc.output.empty()) bt.set_output(tc.output);
-        return bt.build();
-    }
-
-    // ── Git tools ───────────────────────────────────────────────────
-    if (tc.name == "git_status" || tc.name == "git_diff" ||
-        tc.name == "git_log" || tc.name == "git_commit") {
+    // ── git_status (GitStatusWidget inside a ToolCall card) ─────────
+    if (tc.name == "git_status") {
         maya::ToolCall::Config cfg;
-        cfg.tool_name = tc.name.value;
-        cfg.kind = maya::ToolCallKind::Other;
-        if (tc.name == "git_commit")
-            cfg.description = safe_arg(tc.args, "message");
-        else if (tc.name == "git_log")
-            cfg.description = safe_arg(tc.args, "ref");
-        else if (tc.name == "git_diff")
-            cfg.description = safe_arg(tc.args, "ref");
+        cfg.tool_name = "git_status";
+        cfg.kind = ToolCallKind::Other;
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
-        using S = ToolUse::Status;
-        if (tc.status == S::Running || tc.status == S::Pending)
-            card.set_status(maya::ToolCallStatus::Running);
-        else if (tc.status == S::Error || tc.status == S::Rejected)
-            card.set_status(maya::ToolCallStatus::Failed);
-        else
-            card.set_status(maya::ToolCallStatus::Completed);
-        if (!tc.output.empty())
-            card.set_content(text(tc.output, fg_of(muted)));
+        card.set_status(tc_status(tc.status));
+        if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
+            GitStatusWidget gs;
+            gs.set_compact(false);
+            int modified = 0, staged = 0, untracked = 0, deleted = 0;
+            std::istringstream iss(tc.output);
+            std::string line;
+            while (std::getline(iss, line)) {
+                if (line.starts_with("# branch.head "))
+                    gs.set_branch(line.substr(14));
+                else if (line.starts_with("# branch.ab ")) {
+                    auto ab = line.substr(12);
+                    auto sp = ab.find(' ');
+                    if (sp != std::string::npos) {
+                        try { gs.set_ahead(std::stoi(ab.substr(0, sp))); } catch(...) {}
+                        try { gs.set_behind(-std::stoi(ab.substr(sp+1))); } catch(...) {}
+                    }
+                } else if (line.size() >= 2) {
+                    if (line[0] == '?') { untracked++; continue; }
+                    if (line[0] != '1' && line[0] != '2') continue;
+                    if (line.size() < 4) continue;
+                    char x = line[2], y = line[3];
+                    if (x != '.') staged++;
+                    if (y == 'M') modified++;
+                    else if (y == 'D') deleted++;
+                }
+            }
+            gs.set_dirty(modified, staged, untracked);
+            gs.set_deleted(deleted);
+            card.set_content(gs.build());
+        }
         return card.build();
     }
 
-    return fallback_card(tc);
+    // ── git_log (GitGraph inside a ToolCall card) ───────────────────
+    if (tc.name == "git_log") {
+        maya::ToolCall::Config cfg;
+        cfg.tool_name = "git_log";
+        cfg.kind = ToolCallKind::Other;
+        cfg.description = safe_arg(tc.args, "ref");
+        maya::ToolCall card(cfg);
+        card.set_expanded(tc.expanded);
+        card.set_status(tc_status(tc.status));
+        if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
+            GitGraph gg;
+            gg.set_show_hash(true);
+            gg.set_show_author(true);
+            gg.set_show_time(true);
+            std::istringstream iss(tc.output);
+            std::string line;
+            bool first = true;
+            while (std::getline(iss, line)) {
+                if (line.empty() || line[0] == ' ') continue;
+                GitCommit gc;
+                auto sp1 = line.find(' ');
+                if (sp1 == std::string::npos) continue;
+                gc.hash = line.substr(0, sp1);
+                auto sp2 = line.find(' ', sp1 + 1);
+                if (sp2 != std::string::npos) {
+                    gc.time = line.substr(sp1 + 1, sp2 - sp1 - 1);
+                    gc.author = line.substr(sp2 + 1);
+                }
+                std::string msg_line;
+                if (std::getline(iss, msg_line)) {
+                    while (!msg_line.empty() && msg_line.front() == ' ')
+                        msg_line.erase(msg_line.begin());
+                    gc.message = msg_line;
+                }
+                gc.is_head = first;
+                first = false;
+                gg.add_commit(std::move(gc));
+            }
+            card.set_content(gg.build());
+        }
+        return card.build();
+    }
+
+    // ── git_diff (DiffView inside a ToolCall card) ──────────────────
+    if (tc.name == "git_diff") {
+        auto ref = safe_arg(tc.args, "ref");
+        auto diff_path = safe_arg(tc.args, "path");
+        std::string desc;
+        if (!ref.empty()) desc += ref;
+        if (!diff_path.empty()) { if (!desc.empty()) desc += " "; desc += diff_path; }
+
+        maya::ToolCall::Config cfg;
+        cfg.tool_name = "git_diff";
+        cfg.kind = ToolCallKind::Other;
+        cfg.description = desc.empty() ? "working tree" : desc;
+        maya::ToolCall card(cfg);
+        card.set_expanded(tc.expanded);
+        card.set_status(tc_status(tc.status));
+        if (!tc.output.empty() && tc.status == ToolUse::Status::Done
+            && tc.output != "no changes") {
+            DiffView dv("", tc.output);
+            card.set_content(dv.build());
+        }
+        return card.build();
+    }
+
+    // ── git_commit (ToolCall card) ──────────────────────────────────
+    if (tc.name == "git_commit") {
+        return tool_card("git_commit", ToolCallKind::Execute,
+            safe_arg(tc.args, "message"), tc.status, tc.expanded, tc.output);
+    }
+
+    // ── todo (ToolCall card) ────────────────────────────────────────
+    if (tc.name == "todo") {
+        return tool_card("todo", ToolCallKind::Other,
+            "", tc.status, tc.expanded, tc.output);
+    }
+
+    return tool_card(tc.name.value, ToolCallKind::Other,
+        tc.args.is_object() && !tc.args.empty() ? tc.args.dump() : "",
+        tc.status, tc.expanded, tc.output);
 }
+
+// ════════════════════════════════════════════════════════════════════════
 
 Element render_message(const Message& msg, int turn_num, const Model& m) {
     std::vector<Element> rows;
