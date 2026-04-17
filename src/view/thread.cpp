@@ -17,6 +17,7 @@
 #include <maya/widget/turn_divider.hpp>
 #include <maya/widget/write_tool.hpp>
 
+#include "moha/view/helpers.hpp"
 #include "moha/view/palette.hpp"
 #include "moha/view/permission.hpp"
 
@@ -436,7 +437,7 @@ Element render_message(const Message& msg, int turn_num, const Model& m) {
         if (msg.checkpoint_id) rows.push_back(render_checkpoint_divider());
         rows.push_back(TurnDivider(TurnRole::User, turn_num).build());
         rows.push_back(text(""));
-        rows.push_back(UserMessage::build(msg.text));
+        rows.push_back((v(UserMessage::build(msg.text)) | grow(1.0f)).build());
         rows.push_back(text(""));
     } else if (msg.role == Role::Assistant) {
         rows.push_back(TurnDivider(TurnRole::Assistant, turn_num).build());
@@ -466,18 +467,53 @@ Element thread_panel(const Model& m) {
     if (m.stream.active && !m.current.messages.empty()
         && m.current.messages.back().role == Role::Assistant) {
         auto spin = m.stream.spinner;
-        spin.set_style(fg_bold(accent));
+        spin.set_style(fg_bold(phase_color(m.stream.phase)));
+        std::string verb{phase_verb(m.stream.phase)};
         rows.push_back((h(
             spin.build(),
-            text(" Thinking\u2026", fg_italic(muted))
+            text(" " + verb + "\u2026", fg_italic(muted))
         ) | padding(0, 0, 0, 2)).build());
     }
     if (rows.empty()) {
-        rows.push_back(
-            (v(text("Ask me to read, edit, or run anything.",
-                    fg_italic(muted))) | padding(2, 0)).build());
+        // Wordmark-style welcome — quiet brand presence + the one detail
+        // that orients the user (which model they're talking to). A blank
+        // thread is the loneliest screen in the app; give it a focal point.
+        auto brand = h(spacer(),
+            text("\u2726  ", fg_bold(accent)),
+            text("moha", fg_bold(fg)),
+            text("  \u2726", fg_dim(accent)),
+            spacer()).build();
+
+        auto subtitle = h(spacer(),
+            text("a calm middleware between you and the model",
+                 fg_italic(muted)),
+            spacer()).build();
+
+        auto model_line = h(spacer(),
+            text("model  ", fg_dim(muted)),
+            text(m.model_id.value, fg_of(fg)),
+            spacer()).build();
+
+        auto prompt_hint = h(spacer(),
+            text("press  ", fg_dim(muted)),
+            text("Enter", fg_bold(fg)),
+            text("  to send  \u00B7  ", fg_dim(muted)),
+            text("^K", fg_bold(fg)),
+            text("  for the palette", fg_dim(muted)),
+            spacer()).build();
+
+        rows.push_back((v(
+            text(""), text(""), text(""),
+            brand,
+            text(""),
+            subtitle,
+            text(""), text(""),
+            model_line,
+            text(""), text(""),
+            prompt_hint
+        )).build());
     }
-    return (v(std::move(rows)) | padding(0, 1)).build();
+    return (v(std::move(rows)) | padding(0, 1) | grow(1.0f)).build();
 }
 
 } // namespace moha::ui
