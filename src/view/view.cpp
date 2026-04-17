@@ -35,7 +35,7 @@ Element view(const Model& m) {
     if (has_overlay)
         return zstack({std::move(base),
             vstack().align_items(Align::Center).justify(Justify::End)(
-                vstack().bg(Color::black())(std::move(overlay)))});
+                vstack().bg(Color::default_color())(std::move(overlay)))});
 
     return base;
 }

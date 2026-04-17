@@ -15,6 +15,9 @@ using namespace maya::dsl;
 Element model_picker(const Model& m) {
     if (!m.model_picker.open) return text("");
     std::vector<Element> rows;
+    if (m.available_models.empty()) {
+        rows.push_back(text("  Loading models\u2026", fg_italic(muted)));
+    }
     int i = 0;
     for (const auto& mi : m.available_models) {
         bool sel    = i == m.model_picker.index;

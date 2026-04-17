@@ -217,12 +217,22 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             m.stream.active = false;
             m.stream.phase = Phase::Idle;
             m.stream.status = "error: " + e.message;
+            // Always surface the error inline so it is visible regardless of
+            // how much content the turn had produced before failing.
             if (!m.current.messages.empty()
-                && m.current.messages.back().role == Role::Assistant
-                && m.current.messages.back().text.empty()
-                && m.current.messages.back().streaming_text.empty()
-                && m.current.messages.back().tool_calls.empty()) {
-                m.current.messages.back().text = "\u26A0 " + e.message;
+                && m.current.messages.back().role == Role::Assistant) {
+                auto& last = m.current.messages.back();
+                if (!last.streaming_text.empty()) {
+                    if (last.text.empty()) last.text = std::move(last.streaming_text);
+                    else                   last.text += std::move(last.streaming_text);
+                    last.streaming_text.clear();
+                }
+                if (last.text.empty() && last.tool_calls.empty()) {
+                    last.text = "\u26A0 " + e.message;
+                } else {
+                    if (!last.text.empty() && last.text.back() != '\n') last.text += '\n';
+                    last.text += "\u26A0 " + e.message;
+                }
             }
             return done(std::move(m));
         },

@@ -17,6 +17,36 @@ maya::Color profile_color(Profile p) noexcept {
     return fg;
 }
 
+std::string_view phase_glyph(Phase p) noexcept {
+    switch (p) {
+        case Phase::Idle:               return "●";
+        case Phase::Streaming:          return "◐";
+        case Phase::AwaitingPermission: return "⚠";
+        case Phase::ExecutingTool:      return "▶";
+    }
+    return "●";
+}
+
+std::string_view phase_verb(Phase p) noexcept {
+    switch (p) {
+        case Phase::Idle:               return "Ready";
+        case Phase::Streaming:          return "Streaming";
+        case Phase::AwaitingPermission: return "Awaiting";
+        case Phase::ExecutingTool:      return "Running";
+    }
+    return "Ready";
+}
+
+maya::Color phase_color(Phase p) noexcept {
+    switch (p) {
+        case Phase::Idle:               return muted;
+        case Phase::Streaming:          return highlight;
+        case Phase::AwaitingPermission: return warn;
+        case Phase::ExecutingTool:      return success;
+    }
+    return fg;
+}
+
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {
     auto tt = std::chrono::system_clock::to_time_t(tp);
     std::tm tm{};

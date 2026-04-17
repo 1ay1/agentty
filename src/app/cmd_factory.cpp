@@ -124,8 +124,14 @@ Cmd<Msg> kick_pending_tools(Model& m) {
 
 Cmd<Msg> fetch_models() {
     return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
-        auto models = anthropic::list_models(deps().auth_header, deps().auth_style);
-        dispatch(ModelsLoaded{std::move(models)});
+        try {
+            auto models = anthropic::list_models(deps().auth_header, deps().auth_style);
+            dispatch(ModelsLoaded{std::move(models)});
+        } catch (const std::exception& e) {
+            dispatch(StreamError{std::string{"models fetch: "} + e.what()});
+        } catch (...) {
+            dispatch(StreamError{"models fetch: unknown exception"});
+        }
     });
 }
 

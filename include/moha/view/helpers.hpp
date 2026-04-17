@@ -16,6 +16,12 @@ namespace moha::ui {
 [[nodiscard]] maya::Color profile_color(Profile p) noexcept;
 [[nodiscard]] inline std::string_view phase_label(Phase p) noexcept    { return to_string(p); }
 
+// Status-bar styling — glyph + verb form for the current phase, and a
+// terminal color picked to communicate urgency at a glance.
+[[nodiscard]] std::string_view phase_glyph(Phase p) noexcept;
+[[nodiscard]] std::string_view phase_verb(Phase p) noexcept;
+[[nodiscard]] maya::Color      phase_color(Phase p) noexcept;
+
 [[nodiscard]] std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp);
 
 // UTF-8 helpers.
