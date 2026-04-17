@@ -22,4 +22,6 @@ namespace moha::app::cmd {
 // Mutates `m` (sets phase, may push a placeholder assistant message).
 [[nodiscard]] maya::Cmd<Msg> kick_pending_tools(Model& m);
 
+[[nodiscard]] maya::Cmd<Msg> fetch_models();
+
 } // namespace moha::app::cmd

@@ -296,4 +296,62 @@ void run_stream_sync(Request req, EventSink sink) {
     curl_easy_cleanup(curl);
 }
 
+namespace {
+size_t write_string_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* buf = static_cast<std::string*>(userdata);
+    buf->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+} // namespace
+
+std::vector<ModelInfo> list_models(const std::string& auth_header,
+                                   auth::Style auth_style) {
+    std::vector<ModelInfo> result;
+    if (auth_header.empty()) return result;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return result;
+
+    const bool is_oauth = (auth_style == auth::Style::Bearer);
+    struct curl_slist* headers = nullptr;
+    std::string auth_hdr = is_oauth
+        ? (std::string("Authorization: ") + auth_header)
+        : (std::string("x-api-key: ") + auth_header);
+    headers = curl_slist_append(headers, auth_hdr.c_str());
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+    headers = curl_slist_append(headers, "content-type: application/json");
+
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/models?limit=100");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_string_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    auth::apply_tls_options(curl);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK || http != 200) return result;
+
+    try {
+        auto j = json::parse(response);
+        for (const auto& m : j.value("data", json::array())) {
+            auto id = m.value("id", "");
+            auto name = m.value("display_name", id);
+            if (id.empty()) continue;
+            result.push_back(ModelInfo{
+                .id = ModelId{id},
+                .display_name = name,
+                .provider = "anthropic",
+            });
+        }
+    } catch (...) {}
+
+    return result;
+}
+
 } // namespace moha::anthropic

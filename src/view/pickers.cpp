@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include <maya/widget/plan_view.hpp>
+
 #include "moha/view/helpers.hpp"
 #include "moha/view/palette.hpp"
 
@@ -106,6 +108,51 @@ Element command_palette(const Model& m) {
     return (v(content.build())
             | border(BorderStyle::Round) | bcolor(highlight)
             | btext(" Command Palette ", BorderTextPos::Top, BorderTextAlign::Center)
+            ).build();
+}
+
+Element todo_modal(const Model& m) {
+    if (!m.todo.open) return text("");
+
+    std::vector<Element> rows;
+
+    if (m.todo.items.empty()) {
+        rows.push_back(text("  No tasks yet.", fg_italic(muted)));
+        rows.push_back(text("  The agent will create tasks as it works.", fg_dim(muted)));
+    } else {
+        maya::PlanView plan;
+        for (const auto& item : m.todo.items) {
+            maya::TaskStatus ts;
+            switch (item.status) {
+                case TodoStatus::Pending:    ts = maya::TaskStatus::Pending; break;
+                case TodoStatus::InProgress: ts = maya::TaskStatus::InProgress; break;
+                case TodoStatus::Completed:  ts = maya::TaskStatus::Completed; break;
+            }
+            plan.add(item.content, ts);
+        }
+        rows.push_back(plan.build());
+
+        int total = static_cast<int>(m.todo.items.size());
+        int done_count = 0;
+        for (const auto& item : m.todo.items)
+            if (item.status == TodoStatus::Completed) ++done_count;
+        rows.push_back(text(""));
+        rows.push_back(h(
+            text("  " + std::to_string(done_count) + "/" + std::to_string(total),
+                 fg_bold(done_count == total ? success : info)),
+            text(" completed", fg_dim(muted))
+        ).build());
+    }
+
+    rows.push_back(text(""));
+    rows.push_back(h(
+        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
+    ).build());
+
+    auto content = (v(std::move(rows)) | padding(1, 2) | width(60));
+    return (v(content.build())
+            | border(BorderStyle::Round) | bcolor(info)
+            | btext(" Plan ", BorderTextPos::Top, BorderTextAlign::Center)
             ).build();
 }
 

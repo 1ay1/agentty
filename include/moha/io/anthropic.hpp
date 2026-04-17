@@ -48,4 +48,8 @@ std::string default_system_prompt();
 // Tool specs corresponding to our local tool implementations.
 std::vector<ToolSpec> default_tools();
 
+// Fetch available models from Anthropic API. Returns parsed ModelInfo list.
+std::vector<ModelInfo> list_models(const std::string& auth_header,
+                                   auth::Style auth_style);
+
 } // namespace moha::anthropic

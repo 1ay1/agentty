@@ -16,21 +16,27 @@ using namespace maya::dsl;
 
 Element view(const Model& m) {
     std::vector<Element> rows;
-    rows.push_back((v(thread_panel(m)) | grow_<1>).build());
+    rows.push_back(thread_panel(m));
     rows.push_back(changes_strip(m));
     rows.push_back(composer(m));
     rows.push_back(status_bar(m));
 
     auto base = (v(std::move(rows)) | pad<1>).build();
 
-    if (m.model_picker.open)
-        return v(base, center()(model_picker(m))).build();
-    if (m.thread_list.open)
-        return v(base, center()(thread_list(m))).build();
-    if (m.command_palette.open)
-        return v(base, center()(command_palette(m))).build();
-    if (m.diff_review.open)
-        return v(base, diff_review(m)).build();
+    Element overlay;
+    bool has_overlay = false;
+
+    if (m.model_picker.open)        { overlay = model_picker(m);  has_overlay = true; }
+    else if (m.thread_list.open)    { overlay = thread_list(m);   has_overlay = true; }
+    else if (m.command_palette.open){ overlay = command_palette(m);has_overlay = true; }
+    else if (m.diff_review.open)    { overlay = diff_review(m);   has_overlay = true; }
+    else if (m.todo.open)           { overlay = todo_modal(m);    has_overlay = true; }
+
+    if (has_overlay)
+        return zstack({std::move(base),
+            vstack().align_items(Align::Center).justify(Justify::End)(
+                vstack().bg(Color::black())(std::move(overlay)))});
+
     return base;
 }
 

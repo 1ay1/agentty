@@ -105,4 +105,11 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     return Cmd<Msg>::batch(std::move(cmds));
 }
 
+Cmd<Msg> fetch_models() {
+    return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
+        auto models = anthropic::list_models(deps().auth_header, deps().auth_style);
+        dispatch(ModelsLoaded{std::move(models)});
+    });
+}
+
 } // namespace moha::app::cmd

@@ -38,6 +38,7 @@ Element status_bar(const Model& m) {
         shortcut_hint("S-Tab", " profile  "),
         shortcut_hint("^J", " threads  "),
         shortcut_hint("^K", " palette  "),
+        shortcut_hint("^T", " plan  "),
         shortcut_hint("^R", " review  "),
         shortcut_hint("^N", " new  "),
         shortcut_hint("^C", " quit")

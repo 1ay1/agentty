@@ -187,7 +187,7 @@ struct ThreadListState {
 
 enum class Command : uint8_t {
     NewThread, ReviewChanges, AcceptAll, RejectAll,
-    CycleProfile, OpenModels, OpenThreads, Quit,
+    CycleProfile, OpenModels, OpenThreads, OpenPlan, Quit,
 };
 
 struct CommandDef {
@@ -204,7 +204,8 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::CycleProfile,   "Cycle profile",      "Write \u2192 Ask \u2192 Minimal"},
     CommandDef{Command::OpenModels,     "Open model picker",  ""},
     CommandDef{Command::OpenThreads,    "Open threads",       ""},
-    CommandDef{Command::Quit,           "Quit",               "Exit moha"},
+    CommandDef{Command::OpenPlan,      "Open plan",          "View task progress"},
+    CommandDef{Command::Quit,          "Quit",               "Exit moha"},
 };
 
 struct CommandPaletteState {
@@ -217,6 +218,18 @@ struct DiffReviewState {
     bool open       = false;
     int  file_index = 0;
     int  hunk_index = 0;
+};
+
+enum class TodoStatus : uint8_t { Pending, InProgress, Completed };
+
+struct TodoItem {
+    std::string content;
+    TodoStatus  status = TodoStatus::Pending;
+};
+
+struct TodoState {
+    bool open = false;
+    std::vector<TodoItem> items;
 };
 
 // ============================================================================
@@ -242,6 +255,7 @@ struct Model {
     ThreadListState     thread_list;
     CommandPaletteState command_palette;
     DiffReviewState     diff_review;
+    TodoState           todo;
     int                 thread_scroll = 0;
 };
 

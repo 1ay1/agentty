@@ -85,10 +85,10 @@ Element tool_card(const std::string& name, ToolCallKind kind,
     return card.build();
 }
 
-Element parse_grep_result(const ToolUse& tc, const std::string& pattern) {
+Element parse_grep_result(const ToolUse& tc, const std::string& pattern, bool collapsed) {
     SearchResult sr(SearchKind::Grep, pattern);
-    sr.set_expanded(tc.expanded);
-    sr.set_max_matches_per_file(3);
+    sr.set_expanded(!collapsed);
+    sr.set_max_matches_per_file(2);
     sr.set_status(map_status<SearchResult>(tc.status,
         SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
     if (!tc.output.empty() && tc.status == ToolUse::Status::Done
@@ -135,17 +135,21 @@ Element render_tool_call(const ToolUse& tc) {
     auto path = safe_arg(tc.args, "path");
     auto cmd  = safe_arg(tc.args, "command");
 
+    bool done = tc.status == ToolUse::Status::Done
+             || tc.status == ToolUse::Status::Error
+             || tc.status == ToolUse::Status::Rejected;
+
     // ── read ────────────────────────────────────────────────────────
     if (tc.name == "read") {
         ReadTool rt(path.empty() ? "read" : path);
-        rt.set_expanded(tc.expanded);
+        rt.set_expanded(!done);
         rt.set_start_line(safe_int_arg(tc.args, "offset", 1));
         rt.set_status(map_status<ReadTool>(tc.status,
             ReadStatus::Reading, ReadStatus::Failed, ReadStatus::Success));
-        if (tc.status != ToolUse::Status::Pending && tc.status != ToolUse::Status::Running) {
+        if (done) {
             rt.set_content(tc.output);
             rt.set_total_lines(count_lines(tc.output));
-            rt.set_max_lines(12);
+            rt.set_max_lines(6);
         }
         return rt.build();
     }
@@ -162,7 +166,7 @@ Element render_tool_call(const ToolUse& tc) {
         if (!tc.output.empty()) {
             rt.set_content(tc.output);
             rt.set_total_lines(count_lines(tc.output));
-            rt.set_max_lines(25);
+            rt.set_max_lines(8);
         }
         return rt.build();
     }
@@ -172,7 +176,7 @@ Element render_tool_call(const ToolUse& tc) {
         WriteTool wt(path.empty() ? "write" : path);
         wt.set_expanded(tc.expanded);
         wt.set_content(safe_arg(tc.args, "content"));
-        wt.set_max_preview_lines(8);
+        wt.set_max_preview_lines(4);
         wt.set_status(map_status<WriteTool>(tc.status,
             WriteStatus::Writing, WriteStatus::Failed, WriteStatus::Written));
         return wt.build();
@@ -193,10 +197,10 @@ Element render_tool_call(const ToolUse& tc) {
     if (tc.name == "bash") {
         BashTool bt(cmd.empty() ? "bash" : cmd);
         bt.set_expanded(tc.expanded);
-        bt.set_max_output_lines(10);
+        bt.set_max_output_lines(5);
         bt.set_status(map_status<BashTool>(tc.status,
             BashStatus::Running, BashStatus::Failed, BashStatus::Success));
-        if (tc.status == ToolUse::Status::Done || tc.status == ToolUse::Status::Error) {
+        if (done) {
             int rc = parse_exit_code(tc.output);
             bt.set_exit_code(rc);
             if (rc != 0) bt.set_status(BashStatus::Failed);
@@ -210,8 +214,8 @@ Element render_tool_call(const ToolUse& tc) {
         auto diag_cmd = safe_arg(tc.args, "command");
         BashTool bt(diag_cmd.empty() ? "diagnostics" : diag_cmd);
         bt.set_expanded(tc.expanded);
-        bt.set_max_output_lines(20);
-        if (tc.status == ToolUse::Status::Done || tc.status == ToolUse::Status::Error) {
+        bt.set_max_output_lines(8);
+        if (done) {
             int rc = parse_exit_code(tc.output);
             bt.set_exit_code(rc);
             bt.set_status(rc == 0 ? BashStatus::Success : BashStatus::Failed);
@@ -228,7 +232,8 @@ Element render_tool_call(const ToolUse& tc) {
         auto pattern = tc.name == "grep"
             ? safe_arg(tc.args, "pattern")
             : safe_arg(tc.args, "symbol");
-        return parse_grep_result(tc, pattern);
+        bool collapsed = tc.status == ToolUse::Status::Done;
+        return parse_grep_result(tc, pattern, collapsed);
     }
 
     // ── glob (SearchResult widget) ──────────────────────────────────
@@ -257,7 +262,7 @@ Element render_tool_call(const ToolUse& tc) {
         auto url = safe_arg(tc.args, "url");
         FetchTool ft(url);
         ft.set_expanded(tc.expanded);
-        ft.set_max_body_lines(15);
+        ft.set_max_body_lines(6);
         ft.set_status(map_status<FetchTool>(tc.status,
             FetchStatus::Fetching, FetchStatus::Failed, FetchStatus::Done));
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
@@ -289,7 +294,7 @@ Element render_tool_call(const ToolUse& tc) {
         auto query = safe_arg(tc.args, "query");
         FetchTool ft("search: " + query);
         ft.set_expanded(tc.expanded);
-        ft.set_max_body_lines(20);
+        ft.set_max_body_lines(8);
         ft.set_status(map_status<FetchTool>(tc.status,
             FetchStatus::Fetching, FetchStatus::Failed, FetchStatus::Done));
         if (!tc.output.empty()) {

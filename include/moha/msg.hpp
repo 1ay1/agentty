@@ -45,6 +45,7 @@ struct CloseModelPicker {};
 struct ModelPickerMove { int delta; };
 struct ModelPickerSelect {};
 struct ModelPickerToggleFavorite {};
+struct ModelsLoaded { std::vector<ModelInfo> models; };
 
 struct OpenThreadList {};
 struct CloseThreadList {};
@@ -58,6 +59,11 @@ struct CommandPaletteInput { char32_t ch; };
 struct CommandPaletteBackspace {};
 struct CommandPaletteMove { int delta; };
 struct CommandPaletteSelect {};
+
+// ── Todo modal ──────────────────────────────────────────────────────────
+struct OpenTodoModal {};
+struct CloseTodoModal {};
+struct UpdateTodos { std::vector<TodoItem> items; };
 
 // ── Profile / mode ───────────────────────────────────────────────────────
 struct CycleProfile {};
@@ -95,10 +101,11 @@ using Msg = std::variant<
     StreamUsage, StreamFinished, StreamError,
     ToolExecOutput,
     PermissionApprove, PermissionReject, PermissionApproveAlways,
-    OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerSelect, ModelPickerToggleFavorite,
+    OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerSelect, ModelPickerToggleFavorite, ModelsLoaded,
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListSelect, NewThread,
     OpenCommandPalette, CloseCommandPalette, CommandPaletteInput,
     CommandPaletteBackspace, CommandPaletteMove, CommandPaletteSelect,
+    OpenTodoModal, CloseTodoModal, UpdateTodos,
     CycleProfile,
     OpenDiffReview, CloseDiffReview, DiffReviewMove,
     DiffReviewNextFile, DiffReviewPrevFile,

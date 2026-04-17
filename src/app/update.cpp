@@ -228,7 +228,22 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Tool execution result ───────────────────────────────────────
         [&](ToolExecOutput& e) -> Step {
-            apply_tool_output(m, e.id, std::move(e.output), e.error);  // ToolCallId
+            for (const auto& msg_ : m.current.messages)
+                for (const auto& tc : msg_.tool_calls)
+                    if (tc.id == e.id && tc.name == "todo" && !e.error) {
+                        auto todos = tc.args.value("todos", json::array());
+                        m.todo.items.clear();
+                        for (const auto& td : todos) {
+                            TodoItem item;
+                            item.content = td.value("content", "");
+                            auto st = td.value("status", "pending");
+                            item.status = st == "completed"   ? TodoStatus::Completed
+                                        : st == "in_progress" ? TodoStatus::InProgress
+                                                              : TodoStatus::Pending;
+                            m.todo.items.push_back(std::move(item));
+                        }
+                    }
+            apply_tool_output(m, e.id, std::move(e.output), e.error);
             auto cmd = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(cmd)};
         },
@@ -265,6 +280,19 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         // ── Model picker ────────────────────────────────────────────────
         [&](OpenModelPicker) -> Step {
             m.model_picker.open = true;
+            for (int i = 0; i < static_cast<int>(m.available_models.size()); ++i)
+                if (m.available_models[i].id == m.model_id) m.model_picker.index = i;
+            return {std::move(m), cmd::fetch_models()};
+        },
+        [&](ModelsLoaded& e) -> Step {
+            auto settings = deps().load_settings();
+            m.available_models.clear();
+            for (auto& mi : e.models) {
+                for (const auto& fav : settings.favorite_models)
+                    if (mi.id == fav) mi.favorite = true;
+                m.available_models.push_back(std::move(mi));
+            }
+            m.model_picker.index = 0;
             for (int i = 0; i < static_cast<int>(m.available_models.size()); ++i)
                 if (m.available_models[i].id == m.model_id) m.model_picker.index = i;
             return done(std::move(m));
@@ -364,8 +392,23 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 case 4: return update(std::move(m), CycleProfile{});
                 case 5: return update(std::move(m), OpenModelPicker{});
                 case 6: return update(std::move(m), OpenThreadList{});
-                case 7: return update(std::move(m), Quit{});
+                case 7: return update(std::move(m), OpenTodoModal{});
+                case 8: return update(std::move(m), Quit{});
             }
+            return done(std::move(m));
+        },
+
+        // ── Todo modal ──────────────────────────────────────────────────
+        [&](OpenTodoModal) -> Step {
+            m.todo.open = true;
+            return done(std::move(m));
+        },
+        [&](CloseTodoModal) -> Step {
+            m.todo.open = false;
+            return done(std::move(m));
+        },
+        [&](UpdateTodos& e) -> Step {
+            m.todo.items = std::move(e.items);
             return done(std::move(m));
         },
 

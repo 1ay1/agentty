@@ -102,6 +102,13 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)
+        && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
+        return CloseTodoModal{};
+    return std::nullopt;
+}
+
 std::optional<Msg> on_global(const KeyEvent& ev) {
     if (ev.mods.ctrl) {
         if (auto* ck = std::get_if<CharKey>(&ev.key)) {
@@ -112,6 +119,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case 'k': case 'K': return OpenCommandPalette{};
                 case 'r': case 'R': return OpenDiffReview{};
                 case 'n': case 'N': return NewThread{};
+                case 't': case 'T': return OpenTodoModal{};
                 case 'e': case 'E': return ComposerToggleExpand{};
             }
         }
@@ -152,6 +160,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_models  = m.model_picker.open;
     const bool in_threads = m.thread_list.open;
     const bool in_diff    = m.diff_review.open;
+    const bool in_todo    = m.todo.open;
 
     auto key_sub = Sub<Msg>::on_key(
         [=](const KeyEvent& ev) -> std::optional<Msg> {
@@ -160,6 +169,7 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_models)  return on_model_picker(ev);
             if (in_threads) return on_thread_list(ev);
             if (in_diff)    return on_diff_review(ev);
+            if (in_todo)    if (auto r = on_todo_modal(ev)) return r;
             if (auto m = on_global(ev))   return m;
             return on_composer(ev);
         });
