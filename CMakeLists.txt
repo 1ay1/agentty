@@ -48,11 +48,34 @@ find_package(OpenSSL REQUIRED)
 
 add_executable(moha
     src/main.cpp
-    src/anthropic.cpp
-    src/auth.cpp
-    src/tools.cpp
-    src/persistence.cpp
-    src/diff.cpp
+
+    # ── io: HTTP / persistence / auth / diffing ──────────────────────
+    src/io/anthropic.cpp
+    src/io/auth.cpp
+    src/io/persistence.cpp
+    src/io/diff.cpp
+
+    # ── tool: registry + definitions ─────────────────────────────────
+    src/tool/registry.cpp
+
+    # ── app: Elm-style runtime (init / update / subscribe / cmd) ─────
+    src/app/deps.cpp
+    src/app/init.cpp
+    src/app/cmd_factory.cpp
+    src/app/update.cpp
+    src/app/subscribe.cpp
+
+    # ── view: per-panel Element factories ────────────────────────────
+    src/view/helpers.cpp
+    src/view/header.cpp
+    src/view/thread.cpp
+    src/view/composer.cpp
+    src/view/statusbar.cpp
+    src/view/changes.cpp
+    src/view/pickers.cpp
+    src/view/diff_review.cpp
+    src/view/permission.cpp
+    src/view/view.cpp
 )
 
 target_include_directories(moha PRIVATE include)

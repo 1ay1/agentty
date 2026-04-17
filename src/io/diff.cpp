@@ -1,4 +1,4 @@
-#include "moha/diff.hpp"
+#include "moha/io/diff.hpp"
 
 #include <algorithm>
 #include <sstream>

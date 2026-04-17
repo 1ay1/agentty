@@ -1,4 +1,4 @@
-#include "moha/persistence.hpp"
+#include "moha/io/persistence.hpp"
 
 #include <cstdlib>
 #include <fstream>
@@ -74,15 +74,16 @@ static Message message_from_json(const json& j) {
     if (j.contains("tool_calls")) {
         for (const auto& t : j["tool_calls"]) {
             ToolUse tc;
-            tc.id = t.value("id", "");
-            tc.name = t.value("name", "");
+            tc.id = ToolCallId{t.value("id", "")};
+            tc.name = ToolName{t.value("name", "")};
             tc.args = t.value("args", json::object());
             tc.output = t.value("output", "");
             tc.status = static_cast<ToolUse::Status>(t.value("status", 0));
             m.tool_calls.push_back(std::move(tc));
         }
     }
-    if (j.contains("checkpoint_id")) m.checkpoint_id = j["checkpoint_id"].get<std::string>();
+    if (j.contains("checkpoint_id"))
+        m.checkpoint_id = CheckpointId{j["checkpoint_id"].get<std::string>()};
     return m;
 }
 
@@ -97,7 +98,7 @@ std::vector<Thread> load_all_threads() {
         try {
             json j; ifs >> j;
             Thread t;
-            t.id = j.value("id", "");
+            t.id = ThreadId{j.value("id", "")};
             t.title = j.value("title", "");
             if (j.contains("created_at"))
                 t.created_at = std::chrono::system_clock::time_point{
@@ -130,13 +131,13 @@ void save_thread(const Thread& t) {
     json msgs = json::array();
     for (const auto& m : t.messages) msgs.push_back(message_to_json(m));
     j["messages"] = std::move(msgs);
-    std::ofstream ofs(threads_dir() / (t.id + ".json"));
+    std::ofstream ofs(threads_dir() / (t.id.value + ".json"));
     ofs << j.dump(2);
 }
 
-void delete_thread(const std::string& id) {
+void delete_thread(const ThreadId& id) {
     std::error_code ec;
-    fs::remove(threads_dir() / (id + ".json"), ec);
+    fs::remove(threads_dir() / (id.value + ".json"), ec);
 }
 
 Settings load_settings() {
@@ -145,9 +146,10 @@ Settings load_settings() {
     if (!ifs) return s;
     try {
         json j; ifs >> j;
-        s.model_id = j.value("model_id", "");
+        s.model_id = ModelId{j.value("model_id", "")};
         s.profile = static_cast<Profile>(j.value("profile", 0));
-        s.favorite_models = j.value("favorite_models", std::vector<std::string>{});
+        auto favs = j.value("favorite_models", std::vector<std::string>{});
+        for (auto& f : favs) s.favorite_models.push_back(ModelId{std::move(f)});
     } catch (...) {}
     return s;
 }
@@ -156,21 +158,23 @@ void save_settings(const Settings& s) {
     json j;
     j["model_id"] = s.model_id;
     j["profile"] = static_cast<int>(s.profile);
-    j["favorite_models"] = s.favorite_models;
+    json favs = json::array();
+    for (const auto& mid : s.favorite_models) favs.push_back(mid);
+    j["favorite_models"] = std::move(favs);
     std::ofstream ofs(data_dir() / "settings.json");
     ofs << j.dump(2);
 }
 
-std::string new_id() {
+ThreadId new_id() {
     static std::mt19937_64 rng{std::random_device{}()};
     std::uniform_int_distribution<uint64_t> dist;
     std::ostringstream oss;
     oss << std::hex << dist(rng);
-    return oss.str();
+    return ThreadId{oss.str()};
 }
 
-std::string title_from_first_message(const std::string& text) {
-    std::string t = text;
+std::string title_from_first_message(std::string_view text) {
+    std::string t{text};
     for (auto& c : t) if (c == '\n' || c == '\r') c = ' ';
     if (t.size() > 60) { t.resize(57); t += "..."; }
     if (t.empty()) t = "New thread";

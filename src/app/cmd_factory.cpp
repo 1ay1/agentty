@@ -1,0 +1,108 @@
+#include "moha/app/cmd_factory.hpp"
+
+#include <utility>
+
+#include "moha/io/anthropic.hpp"
+#include "moha/app/deps.hpp"
+#include "moha/tool/tool.hpp"
+#include "moha/tool/registry.hpp"
+#include "moha/view/helpers.hpp"
+
+namespace moha::app::cmd {
+
+using maya::Cmd;
+
+Cmd<Msg> launch_stream(const Model& m) {
+    io::ProviderRequest req;
+    req.model         = m.model_id.value;
+    req.system_prompt = anthropic::default_system_prompt();
+    req.messages      = m.current.messages;
+
+    if (m.profile != Profile::Minimal) {
+        for (const auto& t : tools::registry()) {
+            if (m.profile == Profile::Ask
+                && (t.name == "write" || t.name == "edit" || t.name == "bash"))
+                continue;
+            req.tools.push_back({t.name.value, t.description, t.input_schema});
+        }
+    }
+    req.auth_header = deps().auth_header;
+    req.auth_style  = deps().auth_style;
+
+    return Cmd<Msg>::task([req = std::move(req)](std::function<void(Msg)> dispatch) mutable {
+        deps().stream(std::move(req), [dispatch = std::move(dispatch)](Msg m) {
+            dispatch(std::move(m));
+        });
+    });
+}
+
+Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
+    return Cmd<Msg>::task(
+        [id = std::move(id),
+         name = std::move(tool_name),
+         args = std::move(args)]
+        (std::function<void(Msg)> dispatch) {
+            auto result = tool::DynamicDispatch::execute(name.value, args);
+            if (result) {
+                dispatch(ToolExecOutput{id, std::move(result->text), false});
+            } else {
+                dispatch(ToolExecOutput{id, std::move(result.error().message), true});
+            }
+        });
+}
+
+Cmd<Msg> kick_pending_tools(Model& m) {
+    if (m.current.messages.empty()) return Cmd<Msg>::none();
+    auto& last = m.current.messages.back();
+    if (last.role != Role::Assistant) return Cmd<Msg>::none();
+
+    std::vector<Cmd<Msg>> cmds;
+    bool any_pending = false;
+
+    for (auto& tc : last.tool_calls) {
+        if (tc.status == ToolUse::Status::Pending) {
+            const bool needs_perm = tool::DynamicDispatch::needs_permission(tc.name.value, m.profile);
+            if (needs_perm && !m.pending_permission) {
+                m.pending_permission = PendingPermission{
+                    tc.id, tc.name,
+                    "Tool " + tc.name.value + " needs permission under "
+                        + std::string{ui::profile_label(m.profile)} + " profile"};
+                m.stream.phase = Phase::AwaitingPermission;
+                return Cmd<Msg>::none();
+            }
+            if (!needs_perm) {
+                tc.status = ToolUse::Status::Running;
+                cmds.push_back(run_tool(tc.id, tc.name, tc.args));
+                m.stream.phase = Phase::ExecutingTool;
+                any_pending = true;
+            }
+        } else if (tc.status == ToolUse::Status::Running) {
+            any_pending = true;
+        }
+    }
+
+    if (!any_pending) {
+        bool has_results = false;
+        for (const auto& tc : last.tool_calls) {
+            if (tc.status == ToolUse::Status::Done
+                || tc.status == ToolUse::Status::Error
+                || tc.status == ToolUse::Status::Rejected) {
+                has_results = true;
+                break;
+            }
+        }
+        if (has_results) {
+            m.stream.phase = Phase::Streaming;
+            m.stream.active = true;
+            Message placeholder;
+            placeholder.role = Role::Assistant;
+            m.current.messages.push_back(std::move(placeholder));
+            cmds.push_back(launch_stream(m));
+        } else {
+            m.stream.phase = Phase::Idle;
+        }
+    }
+    return Cmd<Msg>::batch(std::move(cmds));
+}
+
+} // namespace moha::app::cmd

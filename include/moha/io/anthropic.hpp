@@ -6,7 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "moha/auth.hpp"
+#include "moha/io/auth.hpp"
 #include "moha/model.hpp"
 #include "moha/msg.hpp"
 

@@ -1,4 +1,4 @@
-#include "moha/tools.hpp"
+#include "moha/tool/registry.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,7 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "moha/diff.hpp"
+#include "moha/io/diff.hpp"
 
 namespace moha::tools {
 
@@ -37,7 +37,7 @@ void write_file(const fs::path& p, const std::string& content) {
 // ---- Read ------------------------------------------------------------------
 ToolDef tool_read() {
     ToolDef t;
-    t.name = "read";
+    t.name = ToolName{std::string{"read"}};
     t.description = "Read a file from the filesystem. Returns up to 2000 lines "
                     "starting at an optional offset.";
     t.input_schema = json{
@@ -54,9 +54,11 @@ ToolDef tool_read() {
         std::string path = args.value("path", "");
         int offset = args.value("offset", 1);
         int limit  = args.value("limit", 2000);
-        if (path.empty()) return {"error: path required", true, std::nullopt};
+        if (path.empty())
+            return std::unexpected(ToolError{"path required"});
         std::error_code ec;
-        if (!fs::exists(path, ec)) return {"error: file not found: " + path, true, std::nullopt};
+        if (!fs::exists(path, ec))
+            return std::unexpected(ToolError{"file not found: " + path});
         auto content = read_file(path);
         std::istringstream iss(content);
         std::ostringstream out;
@@ -70,7 +72,7 @@ ToolDef tool_read() {
             }
             n++;
         }
-        return {out.str(), false, std::nullopt};
+        return ToolOutput{out.str(), std::nullopt};
     };
     return t;
 }
@@ -78,7 +80,7 @@ ToolDef tool_read() {
 // ---- Write -----------------------------------------------------------------
 ToolDef tool_write() {
     ToolDef t;
-    t.name = "write";
+    t.name = ToolName{std::string{"write"}};
     t.description = "Write (or overwrite) a file with the given contents. "
                     "Requires permission except in Write profile.";
     t.input_schema = json{
@@ -93,7 +95,8 @@ ToolDef tool_write() {
     t.execute = [](const json& args) -> ExecResult {
         std::string path = args.value("path", "");
         std::string content = args.value("content", "");
-        if (path.empty()) return {"error: path required", true, std::nullopt};
+        if (path.empty())
+            return std::unexpected(ToolError{"path required"});
         std::string original;
         std::error_code ec;
         if (fs::exists(path, ec)) original = read_file(path);
@@ -102,7 +105,7 @@ ToolDef tool_write() {
         std::ostringstream msg;
         msg << "wrote " << path << " (" << change.added << "+ "
             << change.removed << "-)";
-        return {msg.str(), false, std::move(change)};
+        return ToolOutput{msg.str(), std::move(change)};
     };
     return t;
 }
@@ -110,7 +113,7 @@ ToolDef tool_write() {
 // ---- Edit ------------------------------------------------------------------
 ToolDef tool_edit() {
     ToolDef t;
-    t.name = "edit";
+    t.name = ToolName{std::string{"edit"}};
     t.description = "Edit a file by replacing an exact old_string with new_string. "
                     "The old_string must be uniquely present.";
     t.input_schema = json{
@@ -129,12 +132,15 @@ ToolDef tool_edit() {
         std::string old_s = args.value("old_string", "");
         std::string new_s = args.value("new_string", "");
         bool all = args.value("replace_all", false);
-        if (path.empty()) return {"error: path required", true, std::nullopt};
+        if (path.empty())
+            return std::unexpected(ToolError{"path required"});
         std::error_code ec;
-        if (!fs::exists(path, ec)) return {"error: file not found: " + path, true, std::nullopt};
+        if (!fs::exists(path, ec))
+            return std::unexpected(ToolError{"file not found: " + path});
         std::string original = read_file(path);
         std::string updated = original;
-        if (old_s.empty()) return {"error: old_string empty", true, std::nullopt};
+        if (old_s.empty())
+            return std::unexpected(ToolError{"old_string empty"});
         if (all) {
             size_t pos = 0; int n = 0;
             while ((pos = updated.find(old_s, pos)) != std::string::npos) {
@@ -142,13 +148,13 @@ ToolDef tool_edit() {
                 pos += new_s.size();
                 n++;
             }
-            if (n == 0) return {"error: old_string not found", true, std::nullopt};
+            if (n == 0) return std::unexpected(ToolError{"old_string not found"});
         } else {
             auto pos = updated.find(old_s);
             if (pos == std::string::npos)
-                return {"error: old_string not found", true, std::nullopt};
+                return std::unexpected(ToolError{"old_string not found"});
             if (updated.find(old_s, pos + 1) != std::string::npos)
-                return {"error: old_string is not unique; pass replace_all=true", true, std::nullopt};
+                return std::unexpected(ToolError{"old_string is not unique; pass replace_all=true"});
             updated.replace(pos, old_s.size(), new_s);
         }
         auto change = diff::compute(path, original, updated);
@@ -156,7 +162,7 @@ ToolDef tool_edit() {
         std::ostringstream msg;
         msg << "edited " << path << " (" << change.added << "+ "
             << change.removed << "-)";
-        return {msg.str(), false, std::move(change)};
+        return ToolOutput{msg.str(), std::move(change)};
     };
     return t;
 }
@@ -164,7 +170,7 @@ ToolDef tool_edit() {
 // ---- Bash ------------------------------------------------------------------
 ToolDef tool_bash() {
     ToolDef t;
-    t.name = "bash";
+    t.name = ToolName{std::string{"bash"}};
     t.description = "Run a shell command. Output is truncated at 30k chars. "
                     "Requires permission outside of Write profile.";
     t.input_schema = json{
@@ -178,7 +184,8 @@ ToolDef tool_bash() {
     t.needs_permission = [](Profile p){ return p != Profile::Write; };
     t.execute = [](const json& args) -> ExecResult {
         std::string cmd = args.value("command", "");
-        if (cmd.empty()) return {"error: command required", true, std::nullopt};
+        if (cmd.empty())
+            return std::unexpected(ToolError{"command required"});
 #ifdef _WIN32
         std::string wrapped = "bash -lc \"" + cmd + "\" 2>&1";
         FILE* pipe = _popen(wrapped.c_str(), "r");
@@ -186,7 +193,7 @@ ToolDef tool_bash() {
         std::string wrapped = cmd + " 2>&1";
         FILE* pipe = popen(wrapped.c_str(), "r");
 #endif
-        if (!pipe) return {"error: popen failed", true, std::nullopt};
+        if (!pipe) return std::unexpected(ToolError{"popen failed"});
         std::ostringstream out;
         std::array<char, 4096> buf{};
         size_t total = 0;
@@ -202,7 +209,7 @@ ToolDef tool_bash() {
 #endif
         std::string output = out.str();
         if (rc != 0) output += "\n[exit code " + std::to_string(rc) + "]";
-        return {output, rc != 0, std::nullopt};
+        return ToolOutput{std::move(output), std::nullopt};
     };
     return t;
 }
@@ -210,7 +217,7 @@ ToolDef tool_bash() {
 // ---- Grep ------------------------------------------------------------------
 ToolDef tool_grep() {
     ToolDef t;
-    t.name = "grep";
+    t.name = ToolName{std::string{"grep"}};
     t.description = "Search for a regex pattern across files.";
     t.input_schema = json{
         {"type","object"},
@@ -226,9 +233,11 @@ ToolDef tool_grep() {
         std::string pat = args.value("pattern", "");
         std::string root = args.value("path", ".");
         std::string glob = args.value("glob", "");
-        if (pat.empty()) return {"error: pattern required", true, std::nullopt};
+        if (pat.empty()) return std::unexpected(ToolError{"pattern required"});
         std::regex re;
-        try { re = std::regex(pat); } catch (...) { return {"error: bad regex", true, std::nullopt}; }
+        try { re = std::regex(pat); } catch (...) {
+            return std::unexpected(ToolError{"bad regex"});
+        }
         std::ostringstream out;
         int matches = 0;
         std::error_code ec;
@@ -240,7 +249,7 @@ ToolDef tool_grep() {
             auto fn = p.filename().string();
             if (!glob.empty()) {
                 std::string g = glob;
-                for (auto& c : g) if (c == '.') c = '\0'; // crude contains check
+                for (auto& c : g) if (c == '.') c = '\0';
                 if (fn.find(glob.substr(glob.find_last_of('.') == std::string::npos ? 0 : glob.find_last_of('.'))) == std::string::npos)
                     continue;
             }
@@ -257,8 +266,8 @@ ToolDef tool_grep() {
             }
         }
         done:
-        if (matches == 0) return {"no matches", false, std::nullopt};
-        return {out.str(), false, std::nullopt};
+        if (matches == 0) return ToolOutput{"no matches", std::nullopt};
+        return ToolOutput{out.str(), std::nullopt};
     };
     return t;
 }
@@ -266,7 +275,7 @@ ToolDef tool_grep() {
 // ---- Glob ------------------------------------------------------------------
 ToolDef tool_glob() {
     ToolDef t;
-    t.name = "glob";
+    t.name = ToolName{std::string{"glob"}};
     t.description = "Find files by name pattern (simple substring match).";
     t.input_schema = json{
         {"type","object"},
@@ -293,8 +302,8 @@ ToolDef tool_glob() {
                 if (++n > 500) { out << "[>500, truncated]\n"; break; }
             }
         }
-        if (n == 0) return {"no matches", false, std::nullopt};
-        return {out.str(), false, std::nullopt};
+        if (n == 0) return ToolOutput{"no matches", std::nullopt};
+        return ToolOutput{out.str(), std::nullopt};
     };
     return t;
 }
@@ -302,7 +311,7 @@ ToolDef tool_glob() {
 // ---- Todo ------------------------------------------------------------------
 ToolDef tool_todo() {
     ToolDef t;
-    t.name = "todo";
+    t.name = ToolName{std::string{"todo"}};
     t.description = "Maintain the session todo list (overwrites full list).";
     t.input_schema = json{
         {"type","object"},
@@ -329,7 +338,7 @@ ToolDef tool_todo() {
             char mark = st == "completed" ? 'x' : st == "in_progress" ? '-' : ' ';
             out << "[" << mark << "] " << td.value("content", "") << "\n";
         }
-        return {out.str(), false, std::nullopt};
+        return ToolOutput{out.str(), std::nullopt};
     };
     return t;
 }

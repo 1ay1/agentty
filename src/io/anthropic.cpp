@@ -1,4 +1,4 @@
-#include "moha/anthropic.hpp"
+#include "moha/io/anthropic.hpp"
 
 #include <cstdlib>
 #include <sstream>
@@ -7,7 +7,7 @@
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
-#include "moha/tools.hpp"
+#include "moha/tool/registry.hpp"
 
 namespace moha::anthropic {
 
@@ -51,7 +51,7 @@ void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& 
             ctx.current_tool_id = block.value("id", "");
             ctx.current_tool_name = block.value("name", "");
             ctx.in_tool_use = true;
-            ctx.sink(StreamToolUseStart{ctx.current_tool_id, ctx.current_tool_name});
+            ctx.sink(StreamToolUseStart{ToolCallId{ctx.current_tool_id}, ToolName{ctx.current_tool_name}});
         }
     } else if (name == "content_block_delta") {
         auto delta = j.value("delta", json::object());
@@ -116,7 +116,7 @@ size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 json tool_spec_to_json(const ToolSpec& s) {
     json j;
-    j["name"] = s.name;
+    j["name"] = s.name;  // std::string, serializes directly
     j["description"] = s.description;
     j["input_schema"] = s.input_schema;
     return j;
@@ -137,8 +137,8 @@ json build_messages(const Thread& t) {
             if (m.role == Role::Assistant) {
                 content.push_back({
                     {"type", "tool_use"},
-                    {"id", tc.id},
-                    {"name", tc.name},
+                    {"id", tc.id.value},
+                    {"name", tc.name.value},
                     {"input", tc.args},
                 });
             }
@@ -156,7 +156,7 @@ json build_messages(const Thread& t) {
                     tc.status == ToolUse::Status::Rejected) {
                     results.push_back({
                         {"type", "tool_result"},
-                        {"tool_use_id", tc.id},
+                        {"tool_use_id", tc.id.value},
                         {"content", tc.output.empty() ? "(no output)" : tc.output},
                         {"is_error", tc.status == ToolUse::Status::Error ||
                                      tc.status == ToolUse::Status::Rejected},
@@ -185,7 +185,7 @@ std::string default_system_prompt() {
 std::vector<ToolSpec> default_tools() {
     std::vector<ToolSpec> out;
     for (const auto& td : tools::registry()) {
-        out.push_back({td.name, td.description, td.input_schema});
+        out.push_back({td.name.value, td.description, td.input_schema});
     }
     return out;
 }
@@ -203,7 +203,7 @@ void run_stream_sync(Request req, EventSink sink) {
     const bool is_oauth = (req.auth_style == auth::Style::Bearer);
 
     json body;
-    body["model"] = req.model;
+    body["model"] = req.model;  // std::string from Request
     body["max_tokens"] = req.max_tokens;
     body["stream"] = true;
 
@@ -226,7 +226,7 @@ void run_stream_sync(Request req, EventSink sink) {
         body["system"] = req.system_prompt;
     }
 
-    body["messages"] = build_messages({"", "", req.messages, {}, {}});
+    body["messages"] = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
     if (!req.tools.empty()) {
         json tools_j = json::array();
         for (const auto& t : req.tools) tools_j.push_back(tool_spec_to_json(t));

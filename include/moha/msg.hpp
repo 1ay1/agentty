@@ -1,13 +1,14 @@
 #pragma once
+// moha::Msg — every event the runtime can process, as a closed variant.
 
 #include <string>
 #include <variant>
 
-#include <nlohmann/json.hpp>
+#include "moha/model.hpp"
 
 namespace moha {
 
-// ---- Composer ---------------------------------------------------------------
+// ── Composer ─────────────────────────────────────────────────────────────
 struct ComposerCharInput { char32_t ch; };
 struct ComposerBackspace {};
 struct ComposerEnter {};
@@ -20,25 +21,25 @@ struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
 struct ComposerPaste { std::string text; };
 
-// ---- Streaming from Anthropic ----------------------------------------------
+// ── Streaming from provider ──────────────────────────────────────────────
 struct StreamStarted {};
 struct StreamTextDelta { std::string text; };
-struct StreamToolUseStart { std::string id; std::string name; };
+struct StreamToolUseStart { ToolCallId id; ToolName name; };
 struct StreamToolUseDelta { std::string partial_json; };
 struct StreamToolUseEnd {};
 struct StreamUsage { int input_tokens; int output_tokens; };
 struct StreamFinished {};
 struct StreamError { std::string message; };
 
-// ---- Tool execution (local) -------------------------------------------------
-struct ToolExecOutput { std::string tool_call_id; std::string output; bool error; };
+// ── Tool execution (local) ───────────────────────────────────────────────
+struct ToolExecOutput { ToolCallId id; std::string output; bool error; };
 
-// ---- Permission -------------------------------------------------------------
+// ── Permission ───────────────────────────────────────────────────────────
 struct PermissionApprove {};
 struct PermissionReject {};
 struct PermissionApproveAlways {};
 
-// ---- Navigation / modals ----------------------------------------------------
+// ── Navigation / modals ──────────────────────────────────────────────────
 struct OpenModelPicker {};
 struct CloseModelPicker {};
 struct ModelPickerMove { int delta; };
@@ -58,10 +59,10 @@ struct CommandPaletteBackspace {};
 struct CommandPaletteMove { int delta; };
 struct CommandPaletteSelect {};
 
-// ---- Profile / mode ---------------------------------------------------------
+// ── Profile / mode ───────────────────────────────────────────────────────
 struct CycleProfile {};
 
-// ---- Diff review ------------------------------------------------------------
+// ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
 struct CloseDiffReview {};
 struct DiffReviewMove { int delta; };
@@ -72,14 +73,14 @@ struct RejectHunk {};
 struct AcceptAllChanges {};
 struct RejectAllChanges {};
 
-// ---- Checkpoint -------------------------------------------------------------
-struct RestoreCheckpoint { std::string checkpoint_id; };
+// ── Checkpoint ───────────────────────────────────────────────────────────
+struct RestoreCheckpoint { CheckpointId id; };
 
-// ---- Thread ----------------------------------------------------------------
+// ── Thread / misc ────────────────────────────────────────────────────────
 struct ScrollThread { int delta; };
-struct ToggleToolExpanded { std::string tool_call_id; };
+struct ToggleToolExpanded { ToolCallId id; };
 
-// ---- Tick / meta ------------------------------------------------------------
+// ── Tick / meta ──────────────────────────────────────────────────────────
 struct Tick {};
 struct Quit {};
 struct NoOp {};
