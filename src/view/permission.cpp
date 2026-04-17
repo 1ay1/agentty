@@ -16,10 +16,18 @@ Element render_inline_permission(const PendingPermission& pp, const ToolUse& tc)
     std::string desc;
     if (!tc.args.is_object()) {
         desc = pp.reason;
-    } else if (tc.name == "bash") {
+    } else if (tc.name == "bash" || tc.name == "diagnostics") {
         desc = tc.args.value("command", "");
-    } else if (tc.name == "read" || tc.name == "edit" || tc.name == "write") {
+    } else if (tc.name == "read" || tc.name == "edit" || tc.name == "write" || tc.name == "list_dir") {
         desc = tc.args.value("path", "");
+    } else if (tc.name == "web_fetch") {
+        desc = tc.args.value("url", "");
+    } else if (tc.name == "web_search") {
+        desc = tc.args.value("query", "");
+    } else if (tc.name == "git_commit") {
+        desc = tc.args.value("message", "");
+    } else if (tc.name == "find_definition") {
+        desc = tc.args.value("symbol", "");
     } else {
         desc = tc.args.dump();
     }
