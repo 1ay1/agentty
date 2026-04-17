@@ -448,7 +448,7 @@ Element render_message(const Message& msg, int turn_num, const Model& m) {
             rows.push_back(text(""));
         }
         for (const auto& tc : msg.tool_calls) {
-            rows.push_back(render_tool_call(tc));
+            rows.push_back((v(render_tool_call(tc)) | grow(1.0f)).build());
             if (m.pending_permission && m.pending_permission->id == tc.id)
                 rows.push_back(render_inline_permission(*m.pending_permission, tc));
             rows.push_back(text(""));

@@ -15,25 +15,12 @@ using namespace maya;
 using namespace maya::dsl;
 
 Element view(const Model& m) {
-    // Use the runtime BoxBuilder so we can set explicit width=percent(100)
-    // and align_items=Stretch on the chrome — these don't reliably propagate
-    // through nested DSL pipe wrappers, which leaves the composer/statusbar
-    // hugging their intrinsic content size instead of spanning the terminal.
-    auto thread_row = vstack()
-        .width(Dimension::percent(100))
-        .grow(1.0f)
-        .align_items(Align::Stretch)
-        (thread_panel(m));
-
-    auto base = vstack()
-        .padding(1)
-        .width(Dimension::percent(100))
-        .grow(1.0f)
-        .align_items(Align::Stretch)
-        (std::move(thread_row),
-         changes_strip(m),
-         composer(m),
-         status_bar(m));
+    auto base = (v(
+        v(thread_panel(m)) | grow(1.0f),
+        changes_strip(m),
+        composer(m),
+        status_bar(m)
+    ) | pad<1> | grow(1.0f)).build();
 
     Element overlay;
     bool has_overlay = false;

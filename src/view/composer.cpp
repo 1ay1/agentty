@@ -55,16 +55,11 @@ Element composer(const Model& m) {
         text("Ctrl+E",    fg_bold(fg)),     text(" expand",  fg_dim(muted))
     );
 
-    // Use the runtime BoxBuilder directly with width=100% so the composer
-    // always spans the full terminal width, regardless of intrinsic content
-    // size. Stretch alignment alone wasn't reliably propagating through the
-    // nested wrapper layers from runtime pipe modifiers.
-    return maya::detail::vstack()
-        .border(BorderStyle::Round)
-        .border_color(bdr_color)
-        .width(Dimension::percent(100))
-        .grow(1.0f)
-        (inner.build(), hint.build());
+    return (v(inner.build(), hint.build())
+            | border(BorderStyle::Round)
+            | bcolor(bdr_color)
+            | grow(1.0f)
+           ).build();
 }
 
 } // namespace moha::ui
