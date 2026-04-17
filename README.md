@@ -2,7 +2,9 @@
 
 A native terminal client for Claude — written in modern C++26, rendered on a custom TUI engine, no Electron, no Node, no browser.
 
-![moha](maya.png)
+<p align="center">
+  <img src="maya.png" alt="moha" />
+</p>
 
 ```
 moha = the model + maya (the renderer) + you
