@@ -103,3 +103,15 @@ else()
         target_compile_options(moha PRIVATE -Wno-maybe-uninitialized)
     endif()
 endif()
+
+# Opt-in sanitizer build: `cmake -B build-san -DMOHA_SANITIZE=address,undefined`.
+# Separate from CMAKE_BUILD_TYPE so CI / contributors can flip it without
+# redefining the whole toolchain.
+set(MOHA_SANITIZE "" CACHE STRING
+    "Comma-separated sanitizers for moha (e.g. address,undefined or thread). Empty to disable.")
+if(MOHA_SANITIZE AND NOT MSVC)
+    message(STATUS "moha: building with -fsanitize=${MOHA_SANITIZE}")
+    target_compile_options(moha PRIVATE
+        -fsanitize=${MOHA_SANITIZE} -fno-omit-frame-pointer -g)
+    target_link_options(moha PRIVATE -fsanitize=${MOHA_SANITIZE})
+endif()

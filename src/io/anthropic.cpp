@@ -13,6 +13,21 @@ namespace moha::anthropic {
 
 using json = nlohmann::json;
 
+// Anthropic API version / beta headers. Rotate here — every caller picks them
+// up. Keep groups small so a caller can opt in with less scope if needed.
+namespace headers {
+    inline constexpr const char* version           = "anthropic-version: 2023-06-01";
+    inline constexpr const char* beta_oauth_full   =
+        "anthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31,"
+        "context-management-2025-06-27,compact-2026-01-12";
+    inline constexpr const char* beta_apikey_full  =
+        "anthropic-beta: prompt-caching-2024-07-31,"
+        "context-management-2025-06-27,compact-2026-01-12";
+    inline constexpr const char* beta_oauth_only   = "anthropic-beta: oauth-2025-04-20";
+    inline constexpr const char* content_type_json = "content-type: application/json";
+    inline constexpr const char* accept_sse        = "accept: text/event-stream";
+} // namespace headers
+
 namespace {
 
 // --- SSE parser -------------------------------------------------------------
@@ -259,18 +274,12 @@ void run_stream_sync(Request req, EventSink sink) {
         ? (std::string("Authorization: ") + req.auth_header)
         : (std::string("x-api-key: ") + req.auth_header);
     headers = curl_slist_append(headers, auth_hdr.c_str());
-    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
-    if (is_oauth) {
-        headers = curl_slist_append(headers,
-            "anthropic-beta: oauth-2025-04-20,prompt-caching-2024-07-31,"
-            "context-management-2025-06-27,compact-2026-01-12");
-    } else {
-        headers = curl_slist_append(headers,
-            "anthropic-beta: prompt-caching-2024-07-31,"
-            "context-management-2025-06-27,compact-2026-01-12");
-    }
-    headers = curl_slist_append(headers, "content-type: application/json");
-    headers = curl_slist_append(headers, "accept: text/event-stream");
+    headers = curl_slist_append(headers, anthropic::headers::version);
+    headers = curl_slist_append(headers,
+        is_oauth ? anthropic::headers::beta_oauth_full
+                 : anthropic::headers::beta_apikey_full);
+    headers = curl_slist_append(headers, anthropic::headers::content_type_json);
+    headers = curl_slist_append(headers, anthropic::headers::accept_sse);
 
     curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -340,10 +349,10 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
         ? (std::string("Authorization: ") + auth_header)
         : (std::string("x-api-key: ") + auth_header);
     headers = curl_slist_append(headers, auth_hdr.c_str());
-    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+    headers = curl_slist_append(headers, anthropic::headers::version);
     if (is_oauth)
-        headers = curl_slist_append(headers, "anthropic-beta: oauth-2025-04-20");
-    headers = curl_slist_append(headers, "content-type: application/json");
+        headers = curl_slist_append(headers, anthropic::headers::beta_oauth_only);
+    headers = curl_slist_append(headers, anthropic::headers::content_type_json);
 
     std::string response;
     curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/models?limit=100");

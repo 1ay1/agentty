@@ -200,7 +200,20 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 && m.current.messages.back().role == Role::Assistant
                 && !m.current.messages.back().tool_calls.empty()) {
                 auto& tc = m.current.messages.back().tool_calls.back();
-                try { tc.args = json::parse(tc.args_streaming); } catch (...) {}
+                // Empty args_streaming is legitimate for argumentless tools;
+                // args was seeded to {} at StreamToolUseStart.
+                if (!tc.args_streaming.empty()) {
+                    try {
+                        tc.args = json::parse(tc.args_streaming);
+                    } catch (const std::exception& ex) {
+                        // Fail the tool loudly instead of silently running with {}.
+                        // Status::Error shorts the kick loop and the output is fed
+                        // back to the model so it can self-correct on the next turn.
+                        tc.status = ToolUse::Status::Error;
+                        tc.output = std::string{"invalid tool arguments: "} + ex.what()
+                                  + "\nraw: " + tc.args_streaming;
+                    }
+                }
             }
             return done(std::move(m));
         },

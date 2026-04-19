@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -10,9 +11,15 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#endif
 
 #include "moha/io/diff.hpp"
 
@@ -42,14 +49,85 @@ void write_file(const fs::path& p, const std::string& content) {
 
 std::string run_command(const std::string& cmd, int max_chars = 30000,
                         int timeout_secs = 120) {
-    // Enforce a wall-clock timeout via GNU coreutils `timeout`. Without this,
-    // a hung command (network wait, infinite loop, REPL with no stdin close)
-    // blocks the worker thread forever and the UI hangs on the spinner.
+    // Enforce a wall-clock timeout. Without this, a hung command (network wait,
+    // infinite loop, REPL with no stdin close) blocks the worker thread forever
+    // and the UI hangs on the spinner.
 #ifdef _WIN32
-    // Windows lacks a portable equivalent — fall through with no timeout.
-    std::string wrapped = cmd + " 2>&1";
-    FILE* pipe = _popen(wrapped.c_str(), "r");
-    (void)timeout_secs;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return "[CreatePipe failed]";
+    // Only the child should inherit the write end of the pipe.
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError  = wr;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi{};
+    // CreateProcessA mutates the command-line buffer — copy to writable memory.
+    std::string cmdline = "cmd.exe /C " + cmd;
+    BOOL ok = CreateProcessA(
+        nullptr, cmdline.data(), nullptr, nullptr,
+        TRUE, 0, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr); // parent keeps only the read end
+    if (!ok) {
+        CloseHandle(rd);
+        return "[CreateProcess failed]";
+    }
+
+    // Watchdog terminates the child after the deadline. We poll instead of
+    // WaitForSingleObject(timeout) so the main thread can drain the pipe
+    // concurrently and avoid pipe-buffer-fill deadlocks.
+    std::atomic<bool> timed_out{false};
+    std::atomic<bool> main_done{false};
+    std::thread watchdog([&, hproc = pi.hProcess]{
+        const auto deadline = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(timeout_secs);
+        while (!main_done.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                timed_out.store(true, std::memory_order_release);
+                TerminateProcess(hproc, 1);
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+
+    std::ostringstream out;
+    std::array<char, 4096> buf{};
+    size_t total = 0;
+    DWORD n = 0;
+    while (ReadFile(rd, buf.data(), (DWORD)buf.size(), &n, nullptr) && n > 0) {
+        if (total + n > (size_t)max_chars) {
+            out.write(buf.data(), (std::streamsize)((size_t)max_chars - total));
+            out << "\n[output truncated]";
+            total = (size_t)max_chars;
+            TerminateProcess(pi.hProcess, 1);
+            break;
+        }
+        out.write(buf.data(), (std::streamsize)n);
+        total += n;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    main_done.store(true, std::memory_order_release);
+    watchdog.join();
+
+    CloseHandle(rd);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    std::string output = out.str();
+    if (timed_out.load(std::memory_order_acquire))
+        output += "\n[timed out after " + std::to_string(timeout_secs) + "s]";
+    else if (exit_code != 0)
+        output += "\n[exit code " + std::to_string(exit_code) + "]";
+    return output;
 #else
     std::string wrapped = "timeout --kill-after=2s " + std::to_string(timeout_secs)
                         + "s sh -c " + [&]{
@@ -59,7 +137,6 @@ std::string run_command(const std::string& cmd, int max_chars = 30000,
         return q;
     }() + " 2>&1";
     FILE* pipe = popen(wrapped.c_str(), "r");
-#endif
     if (!pipe) return "[popen failed]";
     std::ostringstream out;
     std::array<char, 4096> buf{};
@@ -69,11 +146,7 @@ std::string run_command(const std::string& cmd, int max_chars = 30000,
         total += std::strlen(buf.data());
         if (total > (size_t)max_chars) { out << "\n[output truncated]"; break; }
     }
-#ifdef _WIN32
-    int rc = _pclose(pipe);
-#else
     int rc = pclose(pipe);
-#endif
     std::string output = out.str();
     // GNU `timeout` exits 124 on timeout, 137 on KILL after grace.
     if (rc == 124 * 256 || rc == 137 * 256)
@@ -81,6 +154,7 @@ std::string run_command(const std::string& cmd, int max_chars = 30000,
     else if (rc != 0)
         output += "\n[exit code " + std::to_string(rc) + "]";
     return output;
+#endif
 }
 
 // ---- Read ------------------------------------------------------------------

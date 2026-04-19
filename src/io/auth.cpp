@@ -1,6 +1,7 @@
 #include "moha/io/auth.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #  include <windows.h>
 #  include <shellapi.h>
 #else
+#  include <fcntl.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
 #endif
@@ -84,6 +86,14 @@ void apply_tls_options(void* handle) {
         && std::string(ins) != "0" && std::string(ins) != "false") {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        // apply_tls_options is called per-handle; warn exactly once.
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                "warning: MOHA_INSECURE is set — TLS certificate verification is disabled. "
+                "Auth credentials are exposed to MITM. Unset the variable to restore safety.\n");
+        }
     }
 }
 
@@ -96,6 +106,36 @@ static void restrict_perms(const fs::path& p) {
     (void)p; // best-effort — Windows ACLs are out of scope here
 #else
     ::chmod(p.c_str(), S_IRUSR | S_IWUSR);
+#endif
+}
+
+// POSIX: create the file with mode 0600 from the start so there is no window
+// where it exists world-readable between open() and chmod().
+// Windows: fall back to std::ofstream (ACLs are out of scope here).
+static bool write_private(const fs::path& p, const std::string& content) {
+#ifdef _WIN32
+    std::ofstream ofs(p, std::ios::trunc);
+    if (!ofs) return false;
+    ofs.write(content.data(), (std::streamsize)content.size());
+    return static_cast<bool>(ofs);
+#else
+    int fd = ::open(p.c_str(),
+                    O_WRONLY | O_CREAT | O_TRUNC,
+                    S_IRUSR | S_IWUSR);
+    if (fd < 0) return false;
+    const char* buf = content.data();
+    size_t remaining = content.size();
+    while (remaining > 0) {
+        ssize_t n = ::write(fd, buf, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            return false;
+        }
+        buf += n;
+        remaining -= (size_t)n;
+    }
+    return ::close(fd) == 0;
 #endif
 }
 
@@ -126,12 +166,8 @@ bool save_credentials(const Credentials& c) {
     j["refresh_token"] = c.refresh_token;
     j["expires_at"] = c.expires_at_ms;
     fs::path p = credentials_path();
-    {
-        std::ofstream ofs(p, std::ios::trunc);
-        if (!ofs) return false;
-        ofs << j.dump(2);
-    }
-    restrict_perms(p);
+    if (!write_private(p, j.dump(2))) return false;
+    restrict_perms(p); // belt-and-suspenders for pre-existing files
     return true;
 }
 
