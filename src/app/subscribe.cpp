@@ -178,8 +178,14 @@ Sub<Msg> subscribe(const Model& m) {
         return ComposerPaste{std::move(s)};
     });
 
-    auto tick = Sub<Msg>::every(std::chrono::milliseconds(16), Tick{});
-    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
+    // Only subscribe to Tick while the spinner is visible. With fps=0 the
+    // maya loop is purely event-driven; an unconditional 16ms tick would
+    // force a render 60× per second even when nothing is changing.
+    if (m.stream.active) {
+        auto tick = Sub<Msg>::every(std::chrono::milliseconds(33), Tick{});
+        return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
+    }
+    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub));
 }
 
 } // namespace moha::app

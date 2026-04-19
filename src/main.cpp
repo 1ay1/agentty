@@ -99,6 +99,9 @@ int main(int argc, char** argv) {
     io::FsStore           store;
     app::install(provider, store, creds.header_value(), creds.style());
 
-    maya::run<app::MohaApp>({.title = "moha", .fps = 30, .mode = maya::Mode::Inline});
+    // fps = 0 → pure event-driven: maya only renders on Msg / input / timer.
+    // The spinner-tick subscription (gated on stream.active) supplies frames
+    // while streaming; idle moha costs zero CPU.
+    maya::run<app::MohaApp>({.title = "moha", .fps = 0, .mode = maya::Mode::Inline});
     return 0;
 }

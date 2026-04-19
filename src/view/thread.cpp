@@ -28,6 +28,25 @@ using namespace maya::dsl;
 
 namespace {
 
+// Cached markdown render for an assistant message body.  Completed messages
+// are immutable (mutators in update.cpp must reset cached_md_element), so
+// once built the Element is reused across every frame.  The streaming tail
+// uses StreamingMarkdown — block-boundary cache → O(new_chars) per delta.
+Element cached_markdown_for(const Message& msg) {
+    if (msg.text.empty()) {
+        if (!msg.stream_md)
+            msg.stream_md = std::make_shared<maya::StreamingMarkdown>();
+        msg.stream_md->set_content(msg.streaming_text);
+        return msg.stream_md->build();
+    }
+    if (!msg.cached_md_element) {
+        msg.cached_md_element =
+            std::make_shared<Element>(maya::markdown(msg.text));
+        msg.stream_md.reset();
+    }
+    return *msg.cached_md_element;
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 template <class W, class StatusEnum>
@@ -425,7 +444,7 @@ Element render_tool_call(const ToolUse& tc) {
     }
 
     return tool_card(tc.name.value, ToolCallKind::Other,
-        tc.args.is_object() && !tc.args.empty() ? tc.args.dump() : "",
+        tc.args.is_object() && !tc.args.empty() ? tc.args_dump() : "",
         tc.status, tc.expanded, tc.output);
 }
 
@@ -442,9 +461,9 @@ Element render_message(const Message& msg, int turn_num, const Model& m) {
     } else if (msg.role == Role::Assistant) {
         rows.push_back(TurnDivider(TurnRole::Assistant, turn_num).build());
         rows.push_back(text(""));
-        std::string body = msg.text.empty() ? msg.streaming_text : msg.text;
-        if (!body.empty()) {
-            rows.push_back((v(markdown(body)) | padding(0, 0, 0, 2)).build());
+        bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
+        if (has_body) {
+            rows.push_back((v(cached_markdown_for(msg)) | padding(0, 0, 0, 2)).build());
             rows.push_back(text(""));
         }
         for (const auto& tc : msg.tool_calls) {

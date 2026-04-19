@@ -10,6 +10,17 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Link-time optimization — enabled by default in Release/RelWithDebInfo, off
+# in Debug (would drag build times without shipping value). Supported by
+# GCC, Clang, MSVC, and AppleClang; CMake picks the right flag per toolchain.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT MOHA_HAS_IPO OUTPUT MOHA_IPO_ERR)
+if(MOHA_HAS_IPO AND (CMAKE_BUILD_TYPE STREQUAL "Release"
+                     OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"
+                     OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 include(FetchContent)
 
 set(MAYA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)

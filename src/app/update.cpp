@@ -58,8 +58,17 @@ Cmd<Msg> finalize_turn(Model& m) {
         if (last.role == Role::Assistant && !last.streaming_text.empty()) {
             if (last.text.empty()) last.text = std::move(last.streaming_text);
             else                   last.text += std::move(last.streaming_text);
-            last.streaming_text.clear();
+            // Release the moved-from buffer's capacity and drop the
+            // StreamingMarkdown + now-stale Element cache; next render
+            // rebuilds from the finalized text.
+            std::string{}.swap(last.streaming_text);
+            last.cached_md_element.reset();
+            last.stream_md.reset();
         }
+        // Free per-tool-call streaming JSON buffers — args is already parsed
+        // by this point, and the raw text is never read again.
+        for (auto& tc : last.tool_calls)
+            std::string{}.swap(tc.args_streaming);
     }
     deps().save_thread(m.current);
     auto kp = cmd::kick_pending_tools(m);
@@ -191,7 +200,10 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 && !m.current.messages.back().tool_calls.empty()) {
                 auto& tc = m.current.messages.back().tool_calls.back();
                 tc.args_streaming += e.partial_json;
-                try { tc.args = json::parse(tc.args_streaming); } catch (...) {}
+                // Defer parsing until StreamToolUseEnd — partial JSON fails
+                // every parse attempt during streaming, and the cost is O(n^2)
+                // in the arg size. args_streaming alone is enough to render
+                // a progress hint in the view.
             }
             return done(std::move(m));
         },
@@ -205,6 +217,10 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 if (!tc.args_streaming.empty()) {
                     try {
                         tc.args = json::parse(tc.args_streaming);
+                        tc.mark_args_dirty();
+                        // Args is now the canonical form; drop the raw stream
+                        // buffer so we don't hold two copies until finalize.
+                        std::string{}.swap(tc.args_streaming);
                     } catch (const std::exception& ex) {
                         // Fail the tool loudly instead of silently running with {}.
                         // Status::Error shorts the kick loop and the output is fed
@@ -212,6 +228,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                         tc.status = ToolUse::Status::Error;
                         tc.output = std::string{"invalid tool arguments: "} + ex.what()
                                   + "\nraw: " + tc.args_streaming;
+                        std::string{}.swap(tc.args_streaming);
                     }
                 }
             }
@@ -238,7 +255,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 if (!last.streaming_text.empty()) {
                     if (last.text.empty()) last.text = std::move(last.streaming_text);
                     else                   last.text += std::move(last.streaming_text);
-                    last.streaming_text.clear();
+                    std::string{}.swap(last.streaming_text);
                 }
                 if (last.text.empty() && last.tool_calls.empty()) {
                     last.text = "\u26A0 " + e.message;
@@ -246,6 +263,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                     if (!last.text.empty() && last.text.back() != '\n') last.text += '\n';
                     last.text += "\u26A0 " + e.message;
                 }
+                // text just got mutated — drop stale render caches.
+                last.cached_md_element.reset();
+                last.stream_md.reset();
+                for (auto& tc : last.tool_calls)
+                    std::string{}.swap(tc.args_streaming);
             }
             return done(std::move(m));
         },

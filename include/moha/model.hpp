@@ -5,6 +5,7 @@
 #include <chrono>
 #include <compare>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -12,6 +13,14 @@
 
 #include <nlohmann/json.hpp>
 #include <maya/widget/spinner.hpp>
+
+// Forward declarations — storing these as shared_ptr keeps model.hpp from
+// having to pull in the full maya element/streaming headers (which would
+// transitively drag layout/render types across every translation unit).
+namespace maya {
+    struct Element;
+    class  StreamingMarkdown;
+}
 
 namespace moha {
 
@@ -101,6 +110,22 @@ struct ToolUse {
     std::string    output;
     Status         status   = Status::Pending;
     bool           expanded = true;
+
+    // Lazy cache of args.dump() for the view. args.dump() is O(args) per call
+    // and showed up in per-frame views (thread/permission cards) for tools
+    // without a bespoke renderer. Invalidate via mark_args_dirty() whenever
+    // `args` is mutated.
+    mutable std::string args_dump_cache;
+    mutable bool        args_dump_valid = false;
+
+    void mark_args_dirty() { args_dump_valid = false; args_dump_cache.clear(); }
+    const std::string& args_dump() const {
+        if (!args_dump_valid) {
+            args_dump_cache = args.dump();
+            args_dump_valid = true;
+        }
+        return args_dump_cache;
+    }
 };
 
 struct Message {
@@ -110,6 +135,16 @@ struct Message {
     std::vector<ToolUse> tool_calls;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     std::optional<CheckpointId> checkpoint_id;
+
+    // ── Per-message render cache (not persisted, not semantic) ──────────
+    // A finalized message's text is immutable in this codebase (only
+    // finalize_turn / StreamError append to it), so we parse once and
+    // reuse the Element forever.  Mutators must reset cached_md_element
+    // explicitly.  The streaming tail gets its own StreamingMarkdown —
+    // block-boundary cached → O(new_chars) per delta.
+    // shared_ptr keeps Message trivially copyable (Model is value-type).
+    mutable std::shared_ptr<maya::Element>            cached_md_element;
+    mutable std::shared_ptr<maya::StreamingMarkdown>  stream_md;
 };
 
 struct Thread {

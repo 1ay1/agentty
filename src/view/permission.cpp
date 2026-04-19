@@ -29,7 +29,7 @@ Element render_inline_permission(const PendingPermission& pp, const ToolUse& tc)
     } else if (tc.name == "find_definition") {
         desc = tc.args.value("symbol", "");
     } else {
-        desc = tc.args.dump();
+        desc = tc.args_dump();
     }
 
     Permission::Config cfg;

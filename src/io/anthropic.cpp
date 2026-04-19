@@ -32,6 +32,9 @@ namespace {
 
 // --- SSE parser -------------------------------------------------------------
 struct SseState {
+    // Pre-reserve so typical chunk sizes (CURLOPT_BUFFERSIZE default 16 KB)
+    // don't force a cascade of reallocations during a fast stream.
+    SseState() { buf.reserve(32 * 1024); data_accum.reserve(8 * 1024); }
     std::string buf;
     std::string event_name;
     std::string data_accum;
