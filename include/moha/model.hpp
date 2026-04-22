@@ -244,6 +244,23 @@ struct StreamState {
     int context_max = 200000;
     std::string status;
     maya::Spinner<maya::SpinnerStyle::Dots> spinner{};
+    // How many times the current user turn has been transparently retried
+    // because the upstream stream cut off mid-tool-input. Reset on every
+    // fresh user submit. Capped (see kMaxTruncationRetries in update.cpp)
+    // so a persistently broken upstream surfaces as a real error eventually
+    // instead of looping forever.
+    int truncation_retries = 0;
+    // ── Live tok/s speedometer ──────────────────────────────────────────
+    // Anthropic only emits `message_delta.usage.output_tokens` rarely (often
+    // just once before message_stop), so the official `tokens_out` is stale
+    // for nearly the whole stream. We instead accumulate the byte length of
+    // every text/json delta as it arrives, divide by ~4 (Claude tokenizer
+    // averages ~3.5–4 bytes/token), and use that as the live rate source.
+    // `first_delta_at` is stamped on the first non-empty delta so the
+    // divisor excludes time-to-first-token (TTFT). Both reset on every
+    // StreamStarted so each sub-turn after a tool exec measures cleanly.
+    std::size_t live_delta_bytes = 0;
+    std::chrono::steady_clock::time_point first_delta_at{};
 };
 
 struct ModelPickerState {

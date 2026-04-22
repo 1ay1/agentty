@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ranges>
 #include <span>
 #include <utility>
 
@@ -265,6 +266,83 @@ void update_stream_preview(ToolUse& tc) {
           || n == "todo")        { if (n == "git_commit") try_set("message"); pull_desc(); }
 }
 
+// Truncation guard: after the stream parses/salvages tool args, verify the
+// minimum fields the *target tool* actually needs. A common failure mode is
+// the wire dropping between `display_description`'s closing `"` and the
+// `"content":` that should follow — `close_partial_json` then strips the
+// dangling `,` and produces a well-formed but content-less object. If we ran
+// the tool on that, write would silently produce an empty file and the model
+// would retry on a cryptic "content required" loop. Returns non-empty string
+// ("content", "old_string", …) naming a missing required field; empty when
+// the shape is complete enough to dispatch.
+std::string_view missing_required_field(std::string_view tool_name,
+                                        const json& args) {
+    if (!args.is_object()) return "(args)";
+    auto is_nonempty_string_any = [&](std::span<const std::string_view> keys) {
+        for (auto k : keys) {
+            auto it = args.find(std::string{k});
+            if (it == args.end() || !it->is_string()) continue;
+            if (!it->get_ref<const std::string&>().empty()) return true;
+        }
+        return false;
+    };
+    if (tool_name == "write") {
+        if (!is_nonempty_string_any(kPathAliases))    return "path";
+        if (!is_nonempty_string_any(kContentAliases)) return "content";
+    } else if (tool_name == "edit") {
+        if (!is_nonempty_string_any(kPathAliases))    return "path";
+        auto it = args.find("edits");
+        if (it != args.end() && it->is_array() && !it->empty()) return {};
+        if (!is_nonempty_string_any(kOldStrAliases))  return "old_string";
+        if (!is_nonempty_string_any(kNewStrAliases))  return "new_string";
+    } else if (tool_name == "bash" || tool_name == "diagnostics") {
+        auto it = args.find("command");
+        if (it == args.end() || !it->is_string()
+            || it->get_ref<const std::string&>().empty()) return "command";
+    } else if (tool_name == "read" || tool_name == "list_dir"
+            || tool_name == "glob"
+            || tool_name == "git_diff"  || tool_name == "git_log") {
+        // `path` is nice-to-have but not strictly required (list_dir/glob
+        // default to cwd; read without path is already a tool error).
+    } else if (tool_name == "grep") {
+        auto it = args.find("pattern");
+        if (it == args.end() || !it->is_string()
+            || it->get_ref<const std::string&>().empty()) return "pattern";
+    } else if (tool_name == "find_definition") {
+        auto it = args.find("symbol");
+        if (it == args.end() || !it->is_string()
+            || it->get_ref<const std::string&>().empty()) return "symbol";
+    } else if (tool_name == "web_fetch") {
+        auto it = args.find("url");
+        if (it == args.end() || !it->is_string()
+            || it->get_ref<const std::string&>().empty()) return "url";
+    } else if (tool_name == "git_commit") {
+        auto it = args.find("message");
+        if (it == args.end() || !it->is_string()
+            || it->get_ref<const std::string&>().empty()) return "message";
+    }
+    return {};
+}
+
+// Check missing-required against the parsed/salvaged args and, if something's
+// absent, mark the tool as Error with a message framed for *the model* — so
+// it can tell this apart from "your tool call was wrong" (which would prompt
+// the same bad output again) and emit a fresh tool_use with the missing field.
+// Returns true when the tool was marked Error (caller should not dispatch).
+bool guard_truncated_tool_args(ToolUse& tc) {
+    auto missing = missing_required_field(tc.name.value, tc.args);
+    if (missing.empty()) return false;
+    tc.status = ToolUse::Status::Error;
+    tc.output = std::string{"Tool call arguments look incomplete — `"}
+              + std::string{missing}
+              + "` is missing. This usually means the stream was truncated "
+                "before the full tool input arrived. Please emit a fresh "
+                "tool call with every required field populated (including `"
+              + std::string{missing} + "`).";
+    tc.finished_at = std::chrono::steady_clock::now();
+    return true;
+}
+
 // Rescue partial args when json::parse fails on the raw SSE buffer (truncated
 // mid-content, malformed escape, etc). We best-effort sniff each expected
 // scalar field and hand the result back as a json object — if at least one
@@ -379,6 +457,7 @@ Step submit_message(Model m) {
     m.current.updated_at = std::chrono::system_clock::now();
     m.stream.phase = Phase::Streaming;
     m.stream.active = true;
+    m.stream.truncation_retries = 0;
     auto virt = maybe_virtualize(m);
     auto launch = cmd::launch_stream(m);
     auto cmd = virt.is_none()
@@ -387,8 +466,16 @@ Step submit_message(Model m) {
     return {std::move(m), std::move(cmd)};
 }
 
-Cmd<Msg> finalize_turn(Model& m) {
+// Cap on transparent retries per user turn before we give up and surface the
+// truncation as a real Error to the model. Two attempts is enough to ride
+// out an intermittent edge-side idle-timeout cut, but small enough that a
+// genuinely broken upstream surfaces quickly instead of looping.
+constexpr int kMaxTruncationRetries = 2;
+
+Cmd<Msg> finalize_turn(Model& m, std::string_view stop_reason = {}) {
     m.stream.active = false;
+    bool any_truncated = false;
+    const bool max_tokens_hit = (stop_reason == "max_tokens");
     if (!m.current.messages.empty()) {
         auto& last = m.current.messages.back();
         if (last.role == Role::Assistant && !last.streaming_text.empty()) {
@@ -425,8 +512,69 @@ Cmd<Msg> finalize_turn(Model& m) {
                 }
             }
             std::string{}.swap(tc.args_streaming);
+            if (tc.status == ToolUse::Status::Pending) {
+                if (guard_truncated_tool_args(tc)) any_truncated = true;
+            }
         }
     }
+
+    // ── Surface a clear error on max_tokens cutoff ─────────────────────
+    // Retrying does nothing useful when stop_reason==max_tokens: the model
+    // would just burn its budget the same way again. Replace the generic
+    // "stream was truncated" guard message with one that names the actual
+    // cause so the model can shrink its output (smaller diff, edit instead
+    // of write, fewer files at once).
+    if (any_truncated && max_tokens_hit
+        && !m.current.messages.empty()
+        && m.current.messages.back().role == Role::Assistant) {
+        for (auto& tc : m.current.messages.back().tool_calls) {
+            if (tc.status == ToolUse::Status::Error
+                && tc.output.starts_with("Tool call arguments look incomplete")) {
+                tc.output = "Output token cap (max_tokens) was reached before "
+                            "the tool input finished streaming, so the call "
+                            "was cut off. Retry with a smaller payload — for "
+                            "long files, prefer the `edit` tool over `write`, "
+                            "or split the change across multiple calls.";
+            }
+        }
+    }
+
+    // ── Transparent retry on upstream truncation ───────────────────────
+    // libcurl's TCP keepalive can't prevent an upstream LB (Anthropic edge,
+    // Cloudflare, etc.) from closing an idle connection. When that happens
+    // mid-tool-input, we get a truncated args buffer and the model sees a
+    // confusing red "content required" card. Instead, drop the half-baked
+    // assistant turn and silently re-launch — the user message before it is
+    // intact, so the next attempt runs with the same context. We only retry
+    // when nothing useful was already produced (no rendered text, no
+    // completed tool calls), to avoid clobbering work the user can already
+    // see. Capped at kMaxTruncationRetries. Skipped when the truncation was
+    // caused by hitting max_tokens (retry would loop on the same cap).
+    if (any_truncated
+        && !max_tokens_hit
+        && m.stream.truncation_retries < kMaxTruncationRetries
+        && !m.current.messages.empty()
+        && m.current.messages.back().role == Role::Assistant) {
+        auto& last = m.current.messages.back();
+        const bool has_committed_work =
+            !last.text.empty() ||
+            std::ranges::any_of(last.tool_calls, [](const auto& tc) {
+                return tc.status == ToolUse::Status::Done
+                    || tc.status == ToolUse::Status::Running;
+            });
+        if (!has_committed_work) {
+            ++m.stream.truncation_retries;
+            m.current.messages.pop_back();  // drop the truncated assistant turn
+            Message placeholder;
+            placeholder.role = Role::Assistant;
+            m.current.messages.push_back(std::move(placeholder));
+            m.stream.phase = Phase::Streaming;
+            m.stream.active = true;
+            m.stream.status = "retrying (upstream cut off)…";
+            return cmd::launch_stream(m);
+        }
+    }
+
     deps().save_thread(m.current);
     auto kp = cmd::kick_pending_tools(m);
 
@@ -537,12 +685,22 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](StreamStarted) -> Step {
             m.stream.active = true;
             m.stream.started = std::chrono::steady_clock::now();
+            // Reset the live-rate accumulator so each sub-turn (post-tool)
+            // measures its own generation speed instead of polluting the
+            // average with the previous turn's bytes.
+            m.stream.live_delta_bytes = 0;
+            m.stream.first_delta_at = {};
             return done(std::move(m));
         },
         [&](StreamTextDelta& e) -> Step {
             if (!m.current.messages.empty()
                 && m.current.messages.back().role == Role::Assistant)
                 m.current.messages.back().streaming_text += e.text;
+            if (!e.text.empty()) {
+                if (m.stream.first_delta_at.time_since_epoch().count() == 0)
+                    m.stream.first_delta_at = std::chrono::steady_clock::now();
+                m.stream.live_delta_bytes += e.text.size();
+            }
             return done(std::move(m));
         },
         [&](StreamToolUseStart& e) -> Step {
@@ -563,6 +721,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamToolUseDelta& e) -> Step {
+            if (!e.partial_json.empty()) {
+                if (m.stream.first_delta_at.time_since_epoch().count() == 0)
+                    m.stream.first_delta_at = std::chrono::steady_clock::now();
+                m.stream.live_delta_bytes += e.partial_json.size();
+            }
             if (!m.current.messages.empty()
                 && m.current.messages.back().role == Role::Assistant
                 && !m.current.messages.back().tool_calls.empty()) {
@@ -609,6 +772,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                         }
                     }
                 }
+                // Required-field check is deferred to finalize_turn so the
+                // turn-level retry logic owns the single decision point —
+                // running it here too would mark the tool Error before
+                // finalize_turn gets a chance to silently re-launch the
+                // stream on truncation.
             }
             return done(std::move(m));
         },
@@ -617,8 +785,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             if (e.output_tokens) m.stream.tokens_out  = e.output_tokens;
             return done(std::move(m));
         },
-        [&](StreamFinished) -> Step {
-            auto cmd = finalize_turn(m);
+        [&](StreamFinished e) -> Step {
+            auto cmd = finalize_turn(m, e.stop_reason);
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {

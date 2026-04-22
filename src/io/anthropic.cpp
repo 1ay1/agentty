@@ -124,6 +124,10 @@ struct StreamCtx {
     bool in_tool_use = false;
     // Terminal-event tracking — exactly one of finished/errored must fire.
     bool terminated = false;
+    // Stashed from message_delta so we can hand it to StreamFinished. Lets
+    // the reducer tell "natural end" / "tool_use" apart from "max_tokens"
+    // (which leaves the in-flight tool_use block truncated).
+    std::string stop_reason;
     // simdjson parser is stateful and caches its scratch buffer across
     // iterate() calls — reusing one per stream avoids a malloc per SSE frame.
     // Co-located with StreamCtx because run_stream_sync is single-threaded.
@@ -229,6 +233,12 @@ void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& 
             int out = j["usage"].value("output_tokens", 0);
             ctx.sink(StreamUsage{0, out});
         }
+        // Capture `delta.stop_reason` for the upcoming message_stop. Anthropic
+        // sends this here, not on message_stop itself.
+        if (j.contains("delta") && j["delta"].contains("stop_reason")
+            && j["delta"]["stop_reason"].is_string()) {
+            ctx.stop_reason = j["delta"]["stop_reason"].get<std::string>();
+        }
     } else if (name == "message_stop") {
         // If the upstream skipped content_block_stop for a tool_use block
         // (proxy cutoff, etc.), synthesize one so the reducer parses
@@ -239,7 +249,7 @@ void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& 
             ctx.current_tool_id.clear();
             ctx.current_tool_name.clear();
         }
-        ctx.sink(StreamFinished{});
+        ctx.sink(StreamFinished{ctx.stop_reason});
         ctx.terminated = true;
     } else if (name == "error") {
         auto err = j.value("error", json::object());
@@ -375,13 +385,38 @@ std::string default_system_prompt() {
     try { cwd = std::filesystem::current_path().string(); } catch (...) {}
 
     std::ostringstream oss;
-    oss << "You are Moha, a terminal coding assistant based on Claude. "
-        << "You work in the user's current directory. "
-        << "Use the provided tools to read, edit, and run shell commands when needed. "
-        << "Be concise. When proposing file edits, prefer the edit tool over write. "
-        << "Use the write tool to create files and edit to modify them — never shell out "
-        << "(cat/echo/sed/heredoc) for file IO; one tool call per file change. "
-        << "Before running destructive shell commands, explain what you're doing.\n\n"
+    oss << "You are Moha, a terminal coding assistant based on Claude, "
+        << "working in the user's current directory like Zed's agent or "
+        << "Claude Code. Be concise; let tool cards speak for themselves "
+        << "rather than narrating every step.\n\n"
+        << "<file-editing>\n"
+        << "  - Modify existing files with `edit` (one or more "
+        << "old_text→new_text substitutions). It produces a clean diff and "
+        << "streams less data than rewriting the whole file.\n"
+        << "  - Use `write` ONLY when (a) creating a brand-new file, or "
+        << "(b) regenerating an entire file from scratch (format conversion, "
+        << "full code generation). Never use `write` to change a few lines "
+        << "of an existing file.\n"
+        << "  - When editing, `read` the file first if you don't already "
+        << "have its current contents — `edit.old_text` must match exactly.\n"
+        << "  - NEVER shell out (cat/echo/sed/heredoc/printf) for file IO. "
+        << "One `write` or `edit` call per file change.\n"
+        << "  - ALWAYS include a brief `display_description` on `write` "
+        << "and `edit` calls (e.g. 'Add retry on 429'). It shows in the "
+        << "tool card while the file streams, so the user sees what you "
+        << "are doing before the bytes finish arriving.\n"
+        << "  - Tool inputs stream as JSON. The schemas list `path` first "
+        << "for a reason: emit it (and `display_description`) before the "
+        << "long fields (`content`, `edits`) so the UI paints meaningful "
+        << "context immediately. Don't reorder.\n"
+        << "</file-editing>\n\n"
+        << "<shell>\n"
+        << "  - Use `bash` for commands. Explain destructive ones before "
+        << "running.\n"
+        << "  - For listing/searching files, prefer the dedicated tools "
+        << "(`list_dir`, `glob`, `grep`, `find_definition`) over shelling "
+        << "out — they give the UI structured cards.\n"
+        << "</shell>\n\n"
         << "<environment>\n"
         << "  os: " << os_name << "\n"
         << "  shell: " << shell << "\n";
@@ -415,7 +450,8 @@ void run_stream_sync(Request req, EventSink sink) {
     // (e.g. proxy buffering, server cutoff). UI must not be left spinning.
     auto emit_terminal = [&](StreamCtx& ctx, std::optional<std::string> err) {
         if (ctx.terminated) return;
-        if (err) sink(StreamError{*err}); else sink(StreamFinished{});
+        if (err) sink(StreamError{*err});
+        else     sink(StreamFinished{ctx.stop_reason});
         ctx.terminated = true;
     };
 
@@ -465,6 +501,7 @@ void run_stream_sync(Request req, EventSink sink) {
         std::string{},                      // current_tool_name
         false,                              // in_tool_use
         false,                              // terminated
+        std::string{},                      // stop_reason
         simdjson::ondemand::parser{},       // simd_parser
         simdjson::padded_string{},          // simd_scratch
     };
@@ -480,6 +517,12 @@ void run_stream_sync(Request req, EventSink sink) {
                  : anthropic::headers::beta_apikey_full);
     headers = curl_slist_append(headers, anthropic::headers::content_type_json);
     headers = curl_slist_append(headers, anthropic::headers::accept_sse);
+    // Suppress libcurl's auto-added `Expect: 100-continue` for POST bodies
+    // > 1 KB. Anthropic's edge does NOT honor 100-continue, so libcurl
+    // would wait its 1-second internal timeout before giving up and sending
+    // the body anyway — a flat 1s of latency on every turn. Sending the
+    // empty header value tells libcurl to omit the line entirely.
+    headers = curl_slist_append(headers, "Expect:");
 
     curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -493,27 +536,60 @@ void run_stream_sync(Request req, EventSink sink) {
     // installs a SIGALRM handler that is not thread-safe. Force the
     // alarm-free code path.
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    // Bound the *connect* phase only. Once we're streaming, silence between
+    // SSE events is normal (extended thinking, large tool_input streaming),
+    // so we deliberately leave CURLOPT_TIMEOUT unset. 10 s is enough for any
+    // healthy network and short enough that a dead-network user gets a real
+    // error instead of an indefinite spinner.
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+#ifdef CURLOPT_TCP_FASTOPEN
+    // TCP Fast Open: piggyback POST data on the SYN when the kernel has a
+    // valid TFO cookie for api.anthropic.com (saves 1 RTT on cold connect,
+    // no-op on warm reuse). Linux kernel needs net.ipv4.tcp_fastopen=1 to
+    // honor the client side; harmless if disabled.
+    curl_easy_setopt(curl, CURLOPT_TCP_FASTOPEN, 1L);
+#endif
+    // TCP keepalive is enough to detect genuinely dead sockets without
+    // punishing legit silence between SSE events — Anthropic stalls output
+    // during extended thinking, bulk tool-input streaming of large files,
+    // and model compute spikes. A 90 s low-speed guard here killed the
+    // connection mid-tool-input-stream and delivered a truncated args
+    // buffer to finalize (manifesting as "content required" on write). Use
+    // short keepalive probes so a *truly* dead connection is still caught
+    // in < 2 minutes, without interrupting a slow but live stream.
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE,  30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
-    // Stall guard: if the stream delivers fewer than 1 byte/sec for 90 s,
-    // curl aborts with CURLE_OPERATION_TIMEDOUT instead of hanging forever.
-    // Without this a stalled TLS connection (Schannel/Windows has occasional
-    // buffering quirks) leaves the UI stuck on "Streaming…".
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
-    // HTTP/1.1 + identity encoding so each SSE event flushes to our callback
-    // the moment it arrives, instead of being buffered inside a gzip stream.
-    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1);
+    // HTTP/2 over TLS (negotiated via ALPN, falls back to 1.1 if the peer
+    // doesn't advertise h2). HTTP/2 is what Claude Code, Zed, and the
+    // official Anthropic SDKs use — multiplexed streams survive idle
+    // intermediary timeouts better than long-lived 1.1 connections, and
+    // each DATA frame flushes to our callback as it arrives so SSE latency
+    // is unchanged. The previous 1.1 + identity combo was needed only as a
+    // workaround for gzip buffering, which doesn't apply over h2 framing.
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2TLS);
+    curl_easy_setopt(curl, CURLOPT_PIPEWAIT, 1L);  // wait for h2 negotiation
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
-    // Write to our callback directly; 0 or low buffer keeps latency down.
-    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 4096L);
+    // Read buffer for the SSE callback. Each HTTP/2 DATA frame already flushes
+    // to the callback as it arrives, so this is the *upper bound* per-call,
+    // not a coalescing buffer — Anthropic SSE frames are typically 200–800 B,
+    // so even a single 16 KB buffer fits dozens at no latency cost. Bigger
+    // than 4 KB reduces syscall/callback overhead under fast streams.
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 16L * 1024L);
     auth::apply_tls_options(curl);
     auth::apply_shared_cache(curl);
 
     CURLcode rc = curl_easy_perform(curl);
     long http = 0;
+    long http_ver = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
-    dbg("==== curl rc=%d http=%ld ====\n", (int)rc, http);
+    curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &http_ver);
+    dbg("==== curl rc=%d http=%ld proto=HTTP/%s ====\n",
+        (int)rc, http,
+        http_ver == CURL_HTTP_VERSION_2_0 ? "2"
+        : http_ver == CURL_HTTP_VERSION_1_1 ? "1.1"
+        : http_ver == CURL_HTTP_VERSION_3 ? "3" : "?");
     if (rc != CURLE_OK && rc != CURLE_WRITE_ERROR) {
         emit_terminal(ctx, std::string("http: ") + curl_easy_strerror(rc));
     } else if (http >= 400) {
@@ -576,6 +652,13 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_string_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_2TLS);
+    curl_easy_setopt(curl, CURLOPT_PIPEWAIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+#ifdef CURLOPT_TCP_FASTOPEN
+    curl_easy_setopt(curl, CURLOPT_TCP_FASTOPEN, 1L);
+#endif
     auth::apply_tls_options(curl);
     auth::apply_shared_cache(curl);
 

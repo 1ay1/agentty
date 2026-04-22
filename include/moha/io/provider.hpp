@@ -34,7 +34,7 @@ struct ProviderRequest {
     std::string system_prompt;
     std::vector<Message> messages;
     std::vector<ProviderToolSpec> tools;
-    int max_tokens = 8192;
+    int max_tokens = 32000;
 
     std::string auth_header;
     auth::Style auth_style = auth::Style::ApiKey;

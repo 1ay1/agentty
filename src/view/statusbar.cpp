@@ -57,16 +57,6 @@ std::string ctx_bar_glyphs(int pct, int cells) {
     return out;
 }
 
-// Elapsed seconds since streaming began — clamped to 0 for
-// not-yet-initialized time_points so the formatters stay well-defined.
-float stream_elapsed_sec(const StreamState& s) {
-    if (!s.active) return 0.0f;
-    auto now = std::chrono::steady_clock::now();
-    auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - s.started).count();
-    return diff > 0 ? static_cast<float>(diff) / 1000.0f : 0.0f;
-}
-
 // Full-width divider that separates the composer from the status row.
 Element divider_line() {
     return Element{ComponentElement{
@@ -165,14 +155,29 @@ Element status_bar(const Model& m) {
 
     std::vector<Element> right_parts;
 
-    // Live tokens/sec during streaming — acts as a speedometer. Hidden
-    // when idle (would just show stale numbers from the previous turn).
-    if (is_streaming && m.stream.tokens_out > 0) {
-        float sec = stream_elapsed_sec(m.stream);
-        if (sec >= 0.5f) {
-            float rate = static_cast<float>(m.stream.tokens_out) / sec;
+    // Live tokens/sec during streaming — acts as a speedometer. Driven by
+    // local delta-byte accumulation (~4 B/token for Claude tokenizer)
+    // because Anthropic only emits message_delta.usage rarely, often once
+    // before message_stop. Divisor is time since the FIRST delta (not since
+    // message_start) so TTFT doesn't drag the rate down. Shown the moment
+    // we have ~250 ms of post-first-token data.
+    if (is_streaming && m.stream.first_delta_at.time_since_epoch().count() != 0) {
+        auto now = std::chrono::steady_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - m.stream.first_delta_at).count();
+        if (ms >= 250) {
+            double sec = static_cast<double>(ms) / 1000.0;
+            // 4 B/token: middle of Claude tokenizer range (~3.5–4.5 for
+            // English/code). Conservative — slightly underestimates speed.
+            double approx_tok = static_cast<double>(m.stream.live_delta_bytes) / 4.0;
+            double rate = approx_tok / sec;
             char buf[24];
-            std::snprintf(buf, sizeof(buf), "%.0f tok/s", static_cast<double>(rate));
+            // Show one decimal under 10 tok/s so slow streams don't read as
+            // a flat "2 tok/s" — that's where precision matters most.
+            if (rate < 10.0)
+                std::snprintf(buf, sizeof(buf), "%.1f tok/s", rate);
+            else
+                std::snprintf(buf, sizeof(buf), "%.0f tok/s", rate);
             right_parts.push_back(text(buf, fg_of(success).with_bold()));
             right_parts.push_back(sep_dot());
         }

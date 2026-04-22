@@ -240,22 +240,31 @@ ToolDef tool_edit() {
     ToolDef t;
     t.name = ToolName{std::string{"edit"}};
     t.description =
-        "Edit an existing file by applying one or more text substitutions. "
-        "Pass `edits: [{old_text, new_text}, ...]` — every edit is applied in "
-        "order, each old_text must be uniquely present (or pass replace_all). "
-        "Whitespace on line ends is ignored when matching, but indentation is "
-        "not. Include a brief `display_description` explaining the change so "
-        "the user sees what the edit is for.";
+        "Modify an EXISTING file by applying one or more targeted text "
+        "substitutions. PREFER this tool over `write` whenever you are "
+        "changing only part of a file — it streams less data and produces "
+        "a reviewable diff. Pass `edits: [{old_text, new_text}, ...]`; "
+        "every edit is applied in order, each `old_text` must be uniquely "
+        "present in the file (or pass `replace_all: true`). Trailing-"
+        "whitespace differences are tolerated when matching, but indentation "
+        "is not — copy `old_text` verbatim from a recent `read`. Include a "
+        "brief `display_description` (e.g. 'Fix null-deref in auth.cpp') — "
+        "it shows in the card while edits stream.";
+    // Property order matters for streaming UX (see write.cpp for context).
+    // path → display_description → edits puts the small fields first so the
+    // tool card paints meaningful content within ~1s of the model starting
+    // to emit, rather than after the entire edits[] array streams.
     t.input_schema = json{
         {"type","object"},
         {"required", {"path","edits"}},
         {"properties", {
-            {"display_description", {{"type","string"},
-                {"description","One-line summary shown in the UI while the "
-                               "edit streams — e.g. 'Fix null-deref in "
-                               "auth.cpp'. Optional but strongly recommended."}}},
             {"path", {{"type","string"},
-                {"description","Absolute or relative path of the file."}}},
+                {"description","Absolute or relative path of the existing "
+                               "file. Stream this FIRST."}}},
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the card while "
+                               "edits stream — e.g. 'Fix null-deref in "
+                               "auth.cpp'. Stream second."}}},
             {"edits", {
                 {"type","array"},
                 {"description","One or more edits, applied in order."},

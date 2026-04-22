@@ -28,7 +28,12 @@ struct StreamToolUseStart { ToolCallId id; ToolName name; };
 struct StreamToolUseDelta { std::string partial_json; };
 struct StreamToolUseEnd {};
 struct StreamUsage { int input_tokens; int output_tokens; };
-struct StreamFinished {};
+// `stop_reason` mirrors Anthropic's message_delta.delta.stop_reason
+// ("end_turn", "tool_use", "max_tokens", "stop_sequence", or empty when the
+// stream ended without one). The reducer uses this to distinguish a clean
+// turn end from a token-cap cutoff that left tool args truncated — the
+// latter shouldn't be silently retried.
+struct StreamFinished { std::string stop_reason; };
 struct StreamError { std::string message; };
 
 // ── Tool execution (local) ───────────────────────────────────────────────

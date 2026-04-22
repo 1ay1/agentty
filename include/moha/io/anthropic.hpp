@@ -23,7 +23,14 @@ struct Request {
     std::string system_prompt;
     std::vector<Message> messages;
     std::vector<ToolSpec> tools;
-    int max_tokens = 8192;
+    // 32000 covers all Claude 4.x models (opus-4.x caps at 32k; sonnet/haiku
+    // 4.x go higher). The previous 8192 default was capping mid-tool-input on
+    // long write/edit calls — model would burn its budget streaming
+    // input_json_delta for a large `content` field, hit the cap, and
+    // Anthropic would emit message_stop with stop_reason=max_tokens, leaving
+    // the tool args truncated. Claude Code and Zed both run far higher caps
+    // for the same reason.
+    int max_tokens = 32000;
 
     // Auth — caller fills this from auth::resolve().
     std::string auth_header;                 // "Bearer <t>" or raw API key

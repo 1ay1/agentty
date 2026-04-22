@@ -7,12 +7,14 @@
 #include <maya/widget/diff_view.hpp>
 #include <maya/widget/edit_tool.hpp>
 #include <maya/widget/fetch_tool.hpp>
+#include <maya/widget/git_commit_tool.hpp>
 #include <maya/widget/git_graph.hpp>
 #include <maya/widget/git_status.hpp>
 #include <maya/widget/markdown.hpp>
 #include <maya/widget/message.hpp>
 #include <maya/widget/read_tool.hpp>
 #include <maya/widget/search_result.hpp>
+#include <maya/widget/todo_list.hpp>
 #include <maya/widget/tool_call.hpp>
 #include <maya/widget/turn_divider.hpp>
 #include <maya/widget/write_tool.hpp>
@@ -359,20 +361,25 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── write ───────────────────────────────────────────────────────
     if (tc.name == "write") {
-        // The widget puts the description in its title bar and the path on
-        // the first body row, so we pass them separately rather than gluing
-        // them into one truncated header.
-        auto file_path = path.empty() ? std::string{"(no path)"} : path;
+        // While streaming, fall back from path → description → "(streaming…)"
+        // so the card never sits on a static "(no path)" — that read as
+        // "stuck" even when the model was actively generating.
+        std::string file_path;
+        if (!path.empty())      file_path = path;
+        else if (!desc.empty()) file_path = desc;
+        else                    file_path = "(streaming\xe2\x80\xa6)";
         // On error, fall back to the generic card so the failure reason
         // from the tool (permission denied, disk full, etc.) is visible.
         // WriteTool has no error-text surface.
         if (tc.status == ToolUse::Status::Error || tc.status == ToolUse::Status::Rejected) {
             return tool_card("write", ToolCallKind::Edit,
-                with_desc(file_path, desc),
+                with_desc(path.empty() ? std::string{"write"} : path, desc),
                 tc.status, tc.expanded, tc.output, elapsed);
         }
         WriteTool wt(file_path);
-        if (!desc.empty()) wt.set_description(desc);
+        // Only set description as a separate field when path is real;
+        // otherwise we already promoted it into the title above.
+        if (!desc.empty() && !path.empty()) wt.set_description(desc);
         // Auto-expand while the model is still streaming `content` (Pending)
         // or the tool is writing to disk (Running) so the user sees a live
         // preview of the file being produced. Collapses on Done; user can
@@ -388,7 +395,14 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── edit ────────────────────────────────────────────────────────
     if (tc.name == "edit") {
-        auto header = with_desc(path.empty() ? std::string{"edit"} : path, desc);
+        // Same path → desc → "(streaming…)" fallback as write so the card
+        // never reads as stuck while the model is mid-stream.
+        std::string base;
+        if (!path.empty())      base = path;
+        else if (!desc.empty()) base = desc;
+        else                    base = "(streaming\xe2\x80\xa6)";
+        auto header = (!path.empty() && !desc.empty())
+                          ? with_desc(base, desc) : base;
         if (tc.status == ToolUse::Status::Error || tc.status == ToolUse::Status::Rejected) {
             return tool_card("edit", ToolCallKind::Edit,
                 header, tc.status, tc.expanded, tc.output, elapsed);
@@ -645,17 +659,44 @@ Element render_tool_call_uncached(const ToolUse& tc) {
         return card.build();
     }
 
-    // ── git_commit (ToolCall card) ──────────────────────────────────
+    // ── git_commit (GitCommitTool widget) ───────────────────────────
     if (tc.name == "git_commit") {
         auto msg = safe_arg(tc.args, "message");
-        return tool_card("git_commit", ToolCallKind::Execute,
-            with_desc(msg, desc), tc.status, tc.expanded, tc.output, elapsed);
+        GitCommitTool gc(msg.empty() ? desc : msg);
+        gc.set_expanded(tc.expanded);
+        gc.set_status(map_status<GitCommitTool>(tc.status,
+            GitCommitStatus::Running, GitCommitStatus::Failed, GitCommitStatus::Done));
+        gc.set_elapsed(elapsed);
+        if (!tc.output.empty()) gc.set_output(tc.output);
+        return gc.build();
     }
 
-    // ── todo (ToolCall card) ────────────────────────────────────────
+    // ── todo (TodoListTool widget) ──────────────────────────────────
     if (tc.name == "todo") {
-        return tool_card("todo", ToolCallKind::Other,
-            desc, tc.status, tc.expanded, tc.output, elapsed);
+        TodoListTool tl;
+        tl.set_description(desc);
+        tl.set_elapsed(elapsed);
+        tl.set_expanded(true);
+        tl.set_status(map_status<TodoListTool>(tc.status,
+            TodoListStatus::Running, TodoListStatus::Failed, TodoListStatus::Done));
+        // Pull items straight from the model-supplied args so the card
+        // reflects the intended state even while `run_todo` is still in-flight
+        // (and so failure cards still show what was attempted).
+        if (tc.args.is_object()) {
+            if (auto it = tc.args.find("todos"); it != tc.args.end() && it->is_array()) {
+                for (const auto& td : *it) {
+                    if (!td.is_object()) continue;
+                    TodoListItem item;
+                    item.content = td.value("content", "");
+                    auto s = td.value("status", std::string{"pending"});
+                    item.status = s == "completed"   ? TodoItemStatus::Completed
+                                : s == "in_progress" ? TodoItemStatus::InProgress
+                                                     : TodoItemStatus::Pending;
+                    tl.add(std::move(item));
+                }
+            }
+        }
+        return tl.build();
     }
 
     return tool_card(tc.name.value, ToolCallKind::Other,
