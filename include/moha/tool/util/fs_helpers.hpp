@@ -27,6 +27,21 @@ namespace fs = std::filesystem;
 // absolute — so error messages name an unambiguous location.
 [[nodiscard]] fs::path normalize_path(std::string s);
 
+// Strong typedef for an already-normalised filesystem path. The only way
+// to construct one is from a raw string via `NormalizedPath{"..."}`, which
+// calls `normalize_path` — so "did I already normalize this?" is answered
+// by the type. Passed by value (cheap: holds a single fs::path).
+struct NormalizedPath {
+    fs::path value;
+
+    explicit NormalizedPath(std::string raw) : value(normalize_path(std::move(raw))) {}
+    explicit NormalizedPath(fs::path p) : value(std::move(p)) {}
+
+    [[nodiscard]] const fs::path& path() const noexcept { return value; }
+    [[nodiscard]] std::string string() const { return value.string(); }
+    [[nodiscard]] bool empty() const noexcept { return value.empty(); }
+};
+
 // True for directory names we want recursive traversals (grep / glob /
 // list_dir) to skip by default. Keeps the skip list in one place so tools
 // stay in sync (e.g. adding `_deps` to every tool at once).

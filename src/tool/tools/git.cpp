@@ -1,7 +1,10 @@
 #include "moha/tool/tools.hpp"
+#include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/subprocess.hpp"
+#include "moha/tool/util/tool_args.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -9,6 +12,27 @@
 namespace moha::tools {
 
 using json = nlohmann::json;
+
+// ── git_status ───────────────────────────────────────────────────────────
+
+namespace {
+
+struct GitStatusArgs {
+    std::string root;
+};
+
+std::expected<GitStatusArgs, ToolError> parse_git_status_args(const json& j) {
+    util::ArgReader ar(j);
+    return GitStatusArgs{ar.str("path", ".")};
+}
+
+ExecResult run_git_status(const GitStatusArgs& a) {
+    auto output = util::run_argv({"git", "-C", a.root, "status",
+                                  "--porcelain=v2", "--branch"});
+    return ToolOutput{std::move(output), std::nullopt};
+}
+
+} // namespace
 
 ToolDef tool_git_status() {
     ToolDef t;
@@ -22,14 +46,40 @@ ToolDef tool_git_status() {
         }},
     };
     t.needs_permission = [](Profile){ return false; };
-    t.execute = [](const json& args) -> ExecResult {
-        std::string root = args.value("path", ".");
-        auto output = util::run_argv({"git", "-C", root, "status",
-                                      "--porcelain=v2", "--branch"});
-        return ToolOutput{std::move(output), std::nullopt};
-    };
+    t.execute = util::adapt<GitStatusArgs>(parse_git_status_args, run_git_status);
     return t;
 }
+
+// ── git_diff ─────────────────────────────────────────────────────────────
+
+namespace {
+
+struct GitDiffArgs {
+    std::string path;
+    bool staged;
+    std::string ref;
+};
+
+std::expected<GitDiffArgs, ToolError> parse_git_diff_args(const json& j) {
+    util::ArgReader ar(j);
+    return GitDiffArgs{
+        ar.str("path", ""),
+        ar.boolean("staged", false),
+        ar.str("ref", ""),
+    };
+}
+
+ExecResult run_git_diff(const GitDiffArgs& a) {
+    std::vector<std::string> argv = {"git", "diff", "--stat", "-p"};
+    if (a.staged) argv.push_back("--cached");
+    if (!a.ref.empty()) argv.push_back(a.ref);
+    if (!a.path.empty()) { argv.push_back("--"); argv.push_back(a.path); }
+    auto output = util::run_argv(argv, 50000);
+    if (output.empty()) return ToolOutput{"no changes", std::nullopt};
+    return ToolOutput{std::move(output), std::nullopt};
+}
+
+} // namespace
 
 ToolDef tool_git_diff() {
     ToolDef t;
@@ -45,20 +95,48 @@ ToolDef tool_git_diff() {
         }},
     };
     t.needs_permission = [](Profile){ return false; };
-    t.execute = [](const json& args) -> ExecResult {
-        std::string path = args.value("path", "");
-        bool staged = args.value("staged", false);
-        std::string ref = args.value("ref", "");
-        std::vector<std::string> argv = {"git", "diff", "--stat", "-p"};
-        if (staged) argv.push_back("--cached");
-        if (!ref.empty()) argv.push_back(ref);
-        if (!path.empty()) { argv.push_back("--"); argv.push_back(path); }
-        auto output = util::run_argv(argv, 50000);
-        if (output.empty()) return ToolOutput{"no changes", std::nullopt};
-        return ToolOutput{std::move(output), std::nullopt};
-    };
+    t.execute = util::adapt<GitDiffArgs>(parse_git_diff_args, run_git_diff);
     return t;
 }
+
+// ── git_log ──────────────────────────────────────────────────────────────
+
+namespace {
+
+struct GitLogArgs {
+    int count;
+    std::string path;
+    std::string ref;
+    bool oneline;
+};
+
+std::expected<GitLogArgs, ToolError> parse_git_log_args(const json& j) {
+    util::ArgReader ar(j);
+    return GitLogArgs{
+        ar.integer("count", 20),
+        ar.str("path", ""),
+        ar.str("ref", "HEAD"),
+        ar.boolean("oneline", false),
+    };
+}
+
+ExecResult run_git_log(const GitLogArgs& a) {
+    std::vector<std::string> argv = {"git", "log"};
+    if (a.oneline) {
+        argv.push_back("--oneline");
+    } else {
+        argv.push_back("--format=%h %ad %an%n  %s");
+        argv.push_back("--date=short");
+    }
+    argv.push_back("-" + std::to_string(a.count));
+    argv.push_back(a.ref);
+    if (!a.path.empty()) { argv.push_back("--"); argv.push_back(a.path); }
+    auto output = util::run_argv(argv);
+    if (output.empty()) return ToolOutput{"no commits", std::nullopt};
+    return ToolOutput{std::move(output), std::nullopt};
+}
+
+} // namespace
 
 ToolDef tool_git_log() {
     ToolDef t;
@@ -74,27 +152,57 @@ ToolDef tool_git_log() {
         }},
     };
     t.needs_permission = [](Profile){ return false; };
-    t.execute = [](const json& args) -> ExecResult {
-        int count = args.value("count", 20);
-        std::string path = args.value("path", "");
-        std::string ref = args.value("ref", "HEAD");
-        bool oneline = args.value("oneline", false);
-        std::vector<std::string> argv = {"git", "log"};
-        if (oneline) {
-            argv.push_back("--oneline");
-        } else {
-            argv.push_back("--format=%h %ad %an%n  %s");
-            argv.push_back("--date=short");
-        }
-        argv.push_back("-" + std::to_string(count));
-        argv.push_back(ref);
-        if (!path.empty()) { argv.push_back("--"); argv.push_back(path); }
-        auto output = util::run_argv(argv);
-        if (output.empty()) return ToolOutput{"no commits", std::nullopt};
-        return ToolOutput{std::move(output), std::nullopt};
-    };
+    t.execute = util::adapt<GitLogArgs>(parse_git_log_args, run_git_log);
     return t;
 }
+
+// ── git_commit ───────────────────────────────────────────────────────────
+
+namespace {
+
+struct GitCommitArgs {
+    std::string message;
+    std::vector<std::string> files;
+    bool stage_all;
+};
+
+std::expected<GitCommitArgs, ToolError> parse_git_commit_args(const json& j) {
+    util::ArgReader ar(j);
+    auto msg_opt = ar.require_str("message");
+    if (!msg_opt)
+        return std::unexpected(ToolError{"commit message required"});
+    std::vector<std::string> files;
+    if (const json* f = ar.raw("files"); f && f->is_array()) {
+        files.reserve(f->size());
+        for (const auto& el : *f) {
+            if (el.is_string()) files.push_back(el.get<std::string>());
+            else                files.push_back(el.dump());
+        }
+    }
+    return GitCommitArgs{
+        *std::move(msg_opt),
+        std::move(files),
+        ar.boolean("stage_all", false),
+    };
+}
+
+ExecResult run_git_commit(const GitCommitArgs& a) {
+    if (a.stage_all) {
+        auto out = util::run_argv({"git", "add", "-A"});
+        if (out.find("[exit code") != std::string::npos)
+            return std::unexpected(ToolError{"git add failed: " + out});
+    } else {
+        for (const auto& f : a.files) {
+            auto out = util::run_argv({"git", "add", f});
+            if (out.find("[exit code") != std::string::npos)
+                return std::unexpected(ToolError{"git add failed: " + out});
+        }
+    }
+    auto output = util::run_argv({"git", "commit", "-m", a.message});
+    return ToolOutput{std::move(output), std::nullopt};
+}
+
+} // namespace
 
 ToolDef tool_git_commit() {
     ToolDef t;
@@ -112,27 +220,7 @@ ToolDef tool_git_commit() {
         }},
     };
     t.needs_permission = [](Profile){ return true; };
-    t.execute = [](const json& args) -> ExecResult {
-        std::string message = args.value("message", "");
-        bool stage_all = args.value("stage_all", false);
-        if (message.empty())
-            return std::unexpected(ToolError{"commit message required"});
-
-        if (stage_all) {
-            auto out = util::run_argv({"git", "add", "-A"});
-            if (out.find("[exit code") != std::string::npos)
-                return std::unexpected(ToolError{"git add failed: " + out});
-        } else if (args.contains("files") && args["files"].is_array()) {
-            for (const auto& f : args["files"]) {
-                auto out = util::run_argv({"git", "add", f.get<std::string>()});
-                if (out.find("[exit code") != std::string::npos)
-                    return std::unexpected(ToolError{"git add failed: " + out});
-            }
-        }
-
-        auto output = util::run_argv({"git", "commit", "-m", message});
-        return ToolOutput{std::move(output), std::nullopt};
-    };
+    t.execute = util::adapt<GitCommitArgs>(parse_git_commit_args, run_git_commit);
     return t;
 }
 
