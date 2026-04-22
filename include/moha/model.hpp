@@ -130,13 +130,39 @@ struct ToolUse {
     mutable std::string args_dump_cache;
     mutable bool        args_dump_valid = false;
 
-    void mark_args_dirty() { args_dump_valid = false; args_dump_cache.clear(); }
+    void mark_args_dirty() {
+        args_dump_valid = false;
+        args_dump_cache.clear();
+        render_cache.reset();
+    }
     const std::string& args_dump() const {
         if (!args_dump_valid) {
             args_dump_cache = args.dump();
             args_dump_valid = true;
         }
         return args_dump_cache;
+    }
+
+    // Frame-rate render cache. render_tool_call() rebuilds the bordered card
+    // (Yoga layout + paint) every frame; for terminal-state tools (Done /
+    // Error / Rejected) that's pure waste — the card never changes again.
+    // We stash the built Element here and return it directly until a
+    // mutator bumps the key.  Pending/Running tools stay uncached so the
+    // live elapsed counter keeps ticking.
+    mutable std::shared_ptr<maya::Element> render_cache;
+    mutable std::uint64_t render_cache_key = 0;
+
+    // Cheap FNV-1a over the bits that actually show on a terminal-state
+    // card. `args` is covered indirectly — mark_args_dirty() drops the
+    // cache — so it's left out of the hash. `progress_text` / `started_at`
+    // only matter while Running, when we bypass the cache altogether.
+    [[nodiscard]] std::uint64_t compute_render_key() const {
+        std::uint64_t k = 1469598103934665603ULL;  // FNV offset basis
+        auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
+        mix(output.size());
+        mix(static_cast<std::uint64_t>(status));
+        mix(expanded ? 1ULL : 0ULL);
+        return k;
     }
 };
 

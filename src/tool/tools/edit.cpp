@@ -1,4 +1,5 @@
 #include "moha/tool/tools.hpp"
+#include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
 #include "moha/io/diff.hpp"
 
@@ -31,30 +32,27 @@ ToolDef tool_edit() {
     };
     t.needs_permission = [](Profile p){ return p != Profile::Write; };
     t.execute = [](const json& args) -> ExecResult {
-        if (!args.is_object())
+        util::ArgReader ar(args);
+        if (!ar.is_object())
             return std::unexpected(ToolError{"args must be an object"});
-        std::string raw = args.value("path", "");
-        if (raw.empty())
+        auto raw = ar.require_str("path");
+        if (!raw)
             return std::unexpected(ToolError{"path required"});
         // old_string is the needle — genuinely required. new_string is
         // optional: a missing field or null means "delete the match", which
         // is the same shape as new_string:"". We'd rather silently accept
         // that than flash a red error card for a recoverable model slip.
-        if (!args.contains("old_string") || !args["old_string"].is_string())
+        auto old_opt = ar.require_str("old_string");
+        if (!old_opt)
             return std::unexpected(ToolError{"old_string required (must be a string)"});
-        std::string old_s = args["old_string"].get<std::string>();
-        std::string new_s;
-        if (args.contains("new_string")) {
-            const auto& v = args["new_string"];
-            if (v.is_string())      new_s = v.get<std::string>();
-            else if (!v.is_null())  new_s = v.dump();
-        }
-        bool all = args.value("replace_all", false);
+        std::string old_s = *std::move(old_opt);
+        std::string new_s = ar.str("new_string", "");
+        bool all = ar.boolean("replace_all", false);
         if (old_s.empty())
             return std::unexpected(ToolError{"old_string cannot be empty"});
         if (old_s == new_s)
             return std::unexpected(ToolError{"old_string and new_string are identical — nothing to change"});
-        auto p = util::normalize_path(raw);
+        auto p = util::normalize_path(*raw);
         std::error_code ec;
         if (!fs::exists(p, ec))
             return std::unexpected(ToolError{"file not found: " + p.string()

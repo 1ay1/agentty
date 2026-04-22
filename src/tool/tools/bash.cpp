@@ -1,4 +1,5 @@
 #include "moha/tool/tools.hpp"
+#include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/bash_validate.hpp"
 #include "moha/tool/util/subprocess.hpp"
 
@@ -41,12 +42,14 @@ ToolDef tool_bash() {
     };
     t.needs_permission = [](Profile p){ return p != Profile::Write; };
     t.execute = [](const json& args) -> ExecResult {
-        std::string cmd = args.value("command", "");
-        if (cmd.empty())
+        util::ArgReader ar(args);
+        auto cmd_opt = ar.require_str("command");
+        if (!cmd_opt)
             return std::unexpected(ToolError{"command required"});
+        std::string cmd = *std::move(cmd_opt);
         if (auto why = util::validate_bash_command(cmd); !why.empty())
             return std::unexpected(ToolError{std::move(why)});
-        int timeout = args.value("timeout", 120);
+        int timeout = ar.integer("timeout", 120);
         if (timeout <= 0 || timeout > 600) timeout = 120;
         auto t0 = std::chrono::steady_clock::now();
         auto r = util::run_command_s(cmd, 30000, timeout);

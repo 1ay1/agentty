@@ -1,4 +1,5 @@
 #include "moha/tool/tools.hpp"
+#include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
 
 #include <filesystem>
@@ -29,11 +30,13 @@ ToolDef tool_read() {
     };
     t.needs_permission = [](Profile p){ return p == Profile::Minimal; };
     t.execute = [](const json& args) -> ExecResult {
-        std::string raw = args.value("path", "");
-        int offset = args.value("offset", 1);
-        int limit  = args.value("limit", 2000);
-        if (raw.empty())
+        util::ArgReader ar(args);
+        auto path_opt = ar.require_str("path");
+        if (!path_opt)
             return std::unexpected(ToolError{"path required"});
+        std::string raw = *std::move(path_opt);
+        int offset = ar.integer("offset", 1);
+        int limit  = ar.integer("limit", 2000);
         auto p = util::normalize_path(raw);
         std::error_code ec;
         if (!fs::exists(p, ec))

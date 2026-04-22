@@ -41,6 +41,13 @@ std::filesystem::path credentials_path();
 // (MOHA_INSECURE=1) to a libcurl handle. Call this on every handle moha creates.
 void apply_tls_options(void* curl_easy_handle);
 
+// Attach the process-wide CURLSH share (SSL sessions + DNS + connection
+// cache) to an easy handle, so the next request to api.anthropic.com reuses
+// the TCP/TLS connection from the previous one instead of paying a fresh
+// handshake (~80–120ms on first byte). Thread-safe — the share carries its
+// own locks. Call after curl_easy_init and before curl_easy_perform.
+void apply_shared_cache(void* curl_easy_handle);
+
 // Disk I/O
 std::optional<Credentials> load_credentials();
 bool save_credentials(const Credentials& c);     // writes with 0600 perms where supported

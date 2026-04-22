@@ -81,7 +81,20 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 
-FetchContent_MakeAvailable(nlohmann_json)
+# simdjson — used on the SSE hot path (content_block_delta) where we parse
+# hundreds of small JSON docs per second during streaming. nlohmann is fine
+# for config + cold events; simdjson's ondemand API is 3–5× faster for the
+# "open doc, read two fields, throw away" pattern that dominates here.
+set(SIMDJSON_BUILD_STATIC_LIB ON  CACHE INTERNAL "")
+set(SIMDJSON_DEVELOPER_MODE   OFF CACHE INTERNAL "")
+FetchContent_Declare(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG        v3.10.1
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(nlohmann_json simdjson)
 
 if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
@@ -110,6 +123,7 @@ add_executable(moha
     src/tool/util/glob.cpp
     src/tool/util/subprocess.cpp
     src/tool/util/bash_validate.cpp
+    src/tool/util/arg_reader.cpp
     src/tool/tools/read.cpp
     src/tool/tools/write.cpp
     src/tool/tools/edit.cpp
@@ -147,6 +161,7 @@ target_include_directories(moha PRIVATE include)
 target_link_libraries(moha PRIVATE
     maya::maya
     nlohmann_json::nlohmann_json
+    simdjson::simdjson
     CURL::libcurl
     OpenSSL::Crypto
     Threads::Threads
@@ -224,4 +239,48 @@ if(MOHA_SANITIZE AND NOT MSVC)
     target_compile_options(moha PRIVATE
         -fsanitize=${MOHA_SANITIZE} -fno-omit-frame-pointer -g)
     target_link_options(moha PRIVATE -fsanitize=${MOHA_SANITIZE})
+endif()
+
+# ── Profile-guided optimization (opt-in, two phases) ────────────────────
+# Phase 1: `cmake -B build-pgogen -DMOHA_PGO=generate` → build + run the
+#          app through a realistic workload (a couple of chat turns + tool
+#          calls is enough; the counters are written on exit).
+# Phase 2: `cmake -B build-pgouse -DMOHA_PGO=use` → rebuild using the
+#          counters — typical gain on streaming + layout hot paths is
+#          8–12% wall-clock, 3–6% binary size on MSVC/GCC/Clang.
+# The profile data directory is kept out of build/ so switching generators
+# or blowing away build/ doesn't lose your collected profile.
+set(MOHA_PGO "" CACHE STRING
+    "Profile-guided optimization: 'generate', 'use', or empty.")
+set(MOHA_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo-data" CACHE PATH
+    "Directory where PGO profile counters live across generate/use phases.")
+if(MOHA_PGO)
+    file(MAKE_DIRECTORY "${MOHA_PGO_DIR}")
+    if(MSVC)
+        if(MOHA_PGO STREQUAL "generate")
+            target_link_options(moha PRIVATE "/GENPROFILE:PGD=${MOHA_PGO_DIR}/moha.pgd")
+        elseif(MOHA_PGO STREQUAL "use")
+            target_link_options(moha PRIVATE "/USEPROFILE:PGD=${MOHA_PGO_DIR}/moha.pgd")
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        if(MOHA_PGO STREQUAL "generate")
+            target_compile_options(moha PRIVATE -fprofile-instr-generate)
+            target_link_options(moha PRIVATE -fprofile-instr-generate)
+        elseif(MOHA_PGO STREQUAL "use")
+            # Expect `llvm-profdata merge -output=moha.profdata ${MOHA_PGO_DIR}/*.profraw`
+            # to be run between the two builds.
+            target_compile_options(moha PRIVATE "-fprofile-instr-use=${MOHA_PGO_DIR}/moha.profdata")
+            target_link_options(moha PRIVATE "-fprofile-instr-use=${MOHA_PGO_DIR}/moha.profdata")
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        if(MOHA_PGO STREQUAL "generate")
+            target_compile_options(moha PRIVATE "-fprofile-generate=${MOHA_PGO_DIR}")
+            target_link_options(moha PRIVATE "-fprofile-generate=${MOHA_PGO_DIR}")
+        elseif(MOHA_PGO STREQUAL "use")
+            target_compile_options(moha PRIVATE
+                "-fprofile-use=${MOHA_PGO_DIR}" -fprofile-correction)
+            target_link_options(moha PRIVATE "-fprofile-use=${MOHA_PGO_DIR}")
+        endif()
+    endif()
+    message(STATUS "moha: PGO phase = ${MOHA_PGO} (data dir: ${MOHA_PGO_DIR})")
 endif()

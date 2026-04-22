@@ -1,4 +1,5 @@
 #include "moha/tool/tools.hpp"
+#include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
 #include "moha/io/diff.hpp"
 
@@ -29,39 +30,20 @@ ToolDef tool_write() {
     };
     t.needs_permission = [](Profile p){ return p != Profile::Write; };
     t.execute = [](const json& args) -> ExecResult {
-        std::string raw = args.value("path", "");
-        if (raw.empty())
+        util::ArgReader ar(args);
+        auto raw = ar.require_str("path");
+        if (!raw)
             return std::unexpected(ToolError{"path required"});
-        // Recover from common Claude tool-call shapes instead of failing:
-        //   • content missing            → empty file
-        //   • content: null              → empty file
-        //   • content: number/bool       → coerce via dump()
-        //   • content: array of strings  → join with "\n" (sometimes emitted
-        //                                   when the model gets confused and
-        //                                   treats content as "lines")
-        // The output below names what we received so the model can re-issue
-        // with proper content if it intended otherwise, without a red error.
+        // Tolerant coercion: missing/null/array/number content all produce a
+        // writable string rather than a red error — the note tells the model
+        // what we inferred so it can retry with a proper string if needed.
+        std::string note;
         std::string content;
-        std::string coercion_note;
-        if (args.is_object() && args.contains("content")) {
-            const auto& c = args["content"];
-            if (c.is_string())       content = c.get<std::string>();
-            else if (c.is_null())    coercion_note = " (content was null — wrote empty file)";
-            else if (c.is_array()) {
-                for (std::size_t i = 0; i < c.size(); ++i) {
-                    if (i) content += '\n';
-                    if (c[i].is_string()) content += c[i].get<std::string>();
-                    else                  content += c[i].dump();
-                }
-                coercion_note = " (content was an array — joined with newlines)";
-            } else {
-                content = c.dump();
-                coercion_note = " (content was not a string — coerced)";
-            }
-        } else {
-            coercion_note = " (no `content` field provided — wrote empty file; re-run with content if that was not intended)";
-        }
-        auto p = util::normalize_path(raw);
+        if (!ar.has("content"))
+            note = " (no `content` field provided — wrote empty file; re-run with content if that was not intended)";
+        else
+            content = ar.str("content", "", &note);
+        auto p = util::normalize_path(*raw);
         std::string original;
         std::error_code ec;
         bool exists = fs::exists(p, ec);
@@ -82,7 +64,7 @@ ToolDef tool_write() {
         std::ostringstream msg;
         msg << (exists ? "Overwrote " : "Created ") << p.string()
             << " (" << change.added << "+ " << change.removed << "-)"
-            << coercion_note;
+            << note;
         return ToolOutput{msg.str(), std::move(change)};
     };
     return t;

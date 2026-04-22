@@ -10,6 +10,7 @@
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+#include <simdjson.h>
 
 #include "moha/tool/registry.hpp"
 
@@ -123,11 +124,72 @@ struct StreamCtx {
     bool in_tool_use = false;
     // Terminal-event tracking — exactly one of finished/errored must fire.
     bool terminated = false;
+    // simdjson parser is stateful and caches its scratch buffer across
+    // iterate() calls — reusing one per stream avoids a malloc per SSE frame.
+    // Co-located with StreamCtx because run_stream_sync is single-threaded.
+    simdjson::ondemand::parser simd_parser;
+    simdjson::padded_string     simd_scratch;
 };
+
+// Fast path: content_block_delta dominates stream volume (one per output
+// token).  simdjson's ondemand walks the bytes in-place, grabs the two
+// strings we need, and returns without ever materialising a DOM.  Falls
+// back to caller for anything unexpected (unknown delta.type).
+// Returns true if the event was fully handled.
+bool dispatch_content_block_delta_fast(StreamCtx& ctx, const std::string& data) {
+    // simdjson needs SIMDJSON_PADDING bytes of slack past end-of-buffer;
+    // grow the scratch buffer to fit and copy there each frame. The scratch
+    // lives on StreamCtx so the allocator only grows once per stream.
+    const std::size_t need = data.size() + simdjson::SIMDJSON_PADDING;
+    if (ctx.simd_scratch.size() < need) {
+        ctx.simd_scratch = simdjson::padded_string(need);
+    }
+    std::memcpy(ctx.simd_scratch.data(), data.data(), data.size());
+    std::memset(ctx.simd_scratch.data() + data.size(), 0, simdjson::SIMDJSON_PADDING);
+
+    simdjson::ondemand::document doc;
+    if (ctx.simd_parser.iterate(ctx.simd_scratch.data(), data.size(), need).get(doc))
+        return false;
+
+    simdjson::ondemand::object root;
+    if (doc.get_object().get(root)) return false;
+
+    // Pull `delta.type` first (ondemand is forward-only). Anthropic always
+    // emits `delta` before the top-level `index`, but guard anyway.
+    simdjson::ondemand::object delta;
+    if (root["delta"].get_object().get(delta)) return false;
+
+    std::string_view delta_type;
+    if (delta["type"].get_string().get(delta_type)) return false;
+
+    if (delta_type == "text_delta") {
+        std::string_view text;
+        if (delta["text"].get_string().get(text)) return false;
+        ctx.sink(StreamTextDelta{std::string{text}});
+        return true;
+    }
+    if (delta_type == "input_json_delta") {
+        std::string_view partial;
+        if (delta["partial_json"].get_string().get(partial)) return false;
+        ctx.sink(StreamToolUseDelta{std::string{partial}});
+        return true;
+    }
+    // Unknown delta type — let the nlohmann fallback log/ignore.
+    return false;
+}
 
 void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& data) {
     if (data.empty() || data == "[DONE]") return;
     dbg("<< event=%s data=%s\n", name.c_str(), data.c_str());
+
+    // Hot path first — ~95% of events during a streaming turn.
+    if (name == "content_block_delta"
+        && dispatch_content_block_delta_fast(ctx, data)) {
+        return;
+    }
+
+    // Cold paths: parsed once per tool call or per message. nlohmann is
+    // easier to audit and the cost is negligible at this cardinality.
     json j;
     try { j = json::parse(data); } catch (...) { return; }
     if (name == "message_start") {
@@ -146,6 +208,8 @@ void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& 
             ctx.sink(StreamToolUseStart{ToolCallId{ctx.current_tool_id}, ToolName{ctx.current_tool_name}});
         }
     } else if (name == "content_block_delta") {
+        // Fast path returned false — fallback in case Anthropic adds a new
+        // delta type we don't recognise. Mirrors the old logic exactly.
         auto delta = j.value("delta", json::object());
         auto type = delta.value("type", "");
         if (type == "text_delta") {
@@ -382,7 +446,19 @@ void run_stream_sync(Request req, EventSink sink) {
 
     dbg("==== request ====\n%s\n==== /request ====\n", body_str.c_str());
 
-    StreamCtx ctx{sink, nullptr, {}, {}, {}, false, false};
+    // simdjson types have explicit default ctors, so designated-init skips
+    // them — write each field long-hand.
+    StreamCtx ctx{
+        sink,                               // sink
+        nullptr,                            // cancel
+        SseState{},                         // sse
+        std::string{},                      // current_tool_id
+        std::string{},                      // current_tool_name
+        false,                              // in_tool_use
+        false,                              // terminated
+        simdjson::ondemand::parser{},       // simd_parser
+        simdjson::padded_string{},          // simd_scratch
+    };
 
     struct curl_slist* headers = nullptr;
     std::string auth_hdr = is_oauth
@@ -419,6 +495,7 @@ void run_stream_sync(Request req, EventSink sink) {
     // Write to our callback directly; 0 or low buffer keeps latency down.
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 4096L);
     auth::apply_tls_options(curl);
+    auth::apply_shared_cache(curl);
 
     CURLcode rc = curl_easy_perform(curl);
     long http = 0;
@@ -487,6 +564,7 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
     auth::apply_tls_options(curl);
+    auth::apply_shared_cache(curl);
 
     CURLcode rc = curl_easy_perform(curl);
     long http = 0;

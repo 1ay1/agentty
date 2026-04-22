@@ -1,6 +1,7 @@
 #include "moha/io/auth.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <system_error>
@@ -73,6 +75,65 @@ fs::path config_dir() {
 }
 
 fs::path credentials_path() { return config_dir() / "credentials.json"; }
+
+// ---------------------------------------------------------------------------
+// CURL share handle — one process-wide SSL session + DNS + connection cache.
+// ---------------------------------------------------------------------------
+// libcurl's default is per-easy caches; a fresh curl_easy_init pays TLS
+// handshake + DNS for every request even when they go to the same host.
+// CURLSH lets us opt into shared caches so turn N+1 reuses the TCP/TLS
+// session of turn N to api.anthropic.com — saving ~80–120ms of handshake
+// on every follow-up call.
+//
+// The share carries its own locks; we just hand libcurl a mutex per data
+// kind. Built once lazily, never destroyed (process-lifetime).
+namespace {
+
+struct ShareBundle {
+    CURLSH* share = nullptr;
+    std::array<std::mutex, CURL_LOCK_DATA_LAST> locks {};
+};
+
+ShareBundle& share_bundle() {
+    // Heap-allocate and leak: libcurl holds a pointer to `locks` via
+    // CURLSHOPT_USERDATA, so the object must outlive every curl handle
+    // that references the share. Process-lifetime leak is cheaper than
+    // careful teardown across unknown destruction order.
+    static ShareBundle* b = [] {
+        auto* bb = new ShareBundle;
+        bb->share = curl_share_init();
+        if (!bb->share) return bb;
+        curl_share_setopt(bb->share, CURLSHOPT_LOCKFUNC,
+            +[](CURL*, curl_lock_data data, curl_lock_access, void* user) {
+                auto* self = static_cast<ShareBundle*>(user);
+                if (static_cast<int>(data) >= 0
+                    && static_cast<int>(data) < CURL_LOCK_DATA_LAST)
+                    self->locks[data].lock();
+            });
+        curl_share_setopt(bb->share, CURLSHOPT_UNLOCKFUNC,
+            +[](CURL*, curl_lock_data data, void* user) {
+                auto* self = static_cast<ShareBundle*>(user);
+                if (static_cast<int>(data) >= 0
+                    && static_cast<int>(data) < CURL_LOCK_DATA_LAST)
+                    self->locks[data].unlock();
+            });
+        curl_share_setopt(bb->share, CURLSHOPT_USERDATA, bb);
+        curl_share_setopt(bb->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        curl_share_setopt(bb->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        curl_share_setopt(bb->share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+        return bb;
+    }();
+    return *b;
+}
+
+} // namespace
+
+void apply_shared_cache(void* handle) {
+    CURL* curl = static_cast<CURL*>(handle);
+    if (!curl) return;
+    auto& b = share_bundle();
+    if (b.share) curl_easy_setopt(curl, CURLOPT_SHARE, b.share);
+}
 
 void apply_tls_options(void* handle) {
     CURL* curl = static_cast<CURL*>(handle);
@@ -284,6 +345,7 @@ HttpResult http_post_form(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_collect_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &r.body);
     apply_tls_options(curl);
+    apply_shared_cache(curl);
     r.rc = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &r.http);
     curl_slist_free_all(hdr);

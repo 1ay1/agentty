@@ -279,7 +279,30 @@ Element parse_grep_result(const ToolUse& tc, const std::string& pattern, bool co
 // render_tool_call — every tool gets a bordered card with status icon
 // ════════════════════════════════════════════════════════════════════════
 
+Element render_tool_call_uncached(const ToolUse& tc);
+
+// Terminal-state card cache. A chat with 40 tool calls rebuilds 40 borders
+// + 40 Yoga layouts + 40 text runs every frame otherwise — even when
+// nothing about those cards has changed in minutes. We only cache when the
+// tool has reached a terminal status; running/pending tools rebuild so the
+// live elapsed counter keeps ticking.
 Element render_tool_call(const ToolUse& tc) {
+    const bool terminal = tc.status == ToolUse::Status::Done
+                       || tc.status == ToolUse::Status::Error
+                       || tc.status == ToolUse::Status::Rejected;
+    if (terminal) {
+        auto key = tc.compute_render_key();
+        if (tc.render_cache && tc.render_cache_key == key)
+            return *tc.render_cache;
+        auto built = render_tool_call_uncached(tc);
+        tc.render_cache     = std::make_shared<Element>(built);
+        tc.render_cache_key = key;
+        return built;
+    }
+    return render_tool_call_uncached(tc);
+}
+
+Element render_tool_call_uncached(const ToolUse& tc) {
     auto path = safe_arg(tc.args, "path");
     auto cmd  = safe_arg(tc.args, "command");
 
