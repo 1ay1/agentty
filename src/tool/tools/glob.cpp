@@ -21,6 +21,7 @@ namespace {
 struct GlobArgs {
     std::string pattern;
     std::string root;
+    std::string display_description;
 };
 
 std::expected<GlobArgs, ToolError> parse_glob_args(const json& j) {
@@ -28,7 +29,11 @@ std::expected<GlobArgs, ToolError> parse_glob_args(const json& j) {
     auto pat_opt = ar.require_str("pattern");
     if (!pat_opt)
         return std::unexpected(ToolError::invalid_args("pattern required"));
-    return GlobArgs{*std::move(pat_opt), ar.str("path", ".")};
+    return GlobArgs{
+        *std::move(pat_opt),
+        ar.str("path", "."),
+        ar.str("display_description", ""),
+    };
 }
 
 ExecResult run_glob(const GlobArgs& a) {
@@ -61,8 +66,10 @@ ExecResult run_glob(const GlobArgs& a) {
         return ToolOutput{"no matches. Try a different pattern, or `list_dir` "
                           "on parent directories to see what exists.",
                           std::nullopt};
-    return ToolOutput{"Found " + std::to_string(n) + " file(s):\n" + out.str(),
-                      std::nullopt};
+    std::string body = "Found " + std::to_string(n) + " file(s):\n" + out.str();
+    if (!a.display_description.empty())
+        body = a.display_description + "\n\n" + body;
+    return ToolOutput{std::move(body), std::nullopt};
 }
 
 } // namespace
@@ -77,6 +84,8 @@ ToolDef tool_glob() {
         {"type","object"},
         {"required", {"pattern"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"pattern", {{"type","string"}, {"description","Glob pattern, e.g. *.cpp"}}},
             {"path",    {{"type","string"}, {"description","Root directory (default: cwd)"}}},
         }},

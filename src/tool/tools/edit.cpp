@@ -1,13 +1,17 @@
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
+#include "moha/tool/util/fuzzy_match.hpp"
 #include "moha/tool/util/tool_args.hpp"
 #include "moha/io/diff.hpp"
 
+#include <algorithm>
 #include <filesystem>
+#include <format>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -18,114 +22,213 @@ namespace fs = std::filesystem;
 
 namespace {
 
-struct EditArgs {
-    util::NormalizedPath path;
-    std::string old_string;
-    std::string new_string;
-    bool replace_all;
+struct OneEdit {
+    std::string old_text;
+    std::string new_text;
+    bool        replace_all = false;
 };
 
+struct EditArgs {
+    util::NormalizedPath  path;
+    std::vector<OneEdit>  edits;
+    std::string           display_description;  // one-line UI summary; optional
+};
+
+// Accepts three shapes, in preference order:
+//   1. `edits: [{old_text, new_text, replace_all?}, ...]`   (new canonical)
+//   2. `old_text` / `new_text` at top level    (Zed's legacy single-edit)
+//   3. `old_string` / `new_string` at top level (moha's original schema)
+// Missing / wrong-typed fields are tolerated where recoverable — we only
+// return an error when there is genuinely nothing to do.
 std::expected<EditArgs, ToolError> parse_edit_args(const json& j) {
     util::ArgReader ar(j);
     if (!ar.is_object())
         return std::unexpected(ToolError::invalid_args("args must be an object"));
-    auto raw = ar.require_str("path");
-    if (!raw)
+
+    auto path_opt = ar.require_str("path");
+    if (!path_opt)
         return std::unexpected(ToolError::invalid_args("path required"));
-    // old_string is the needle — genuinely required. new_string is
-    // optional: a missing field or null means "delete the match", which
-    // is the same shape as new_string:"". We'd rather silently accept
-    // that than flash a red error card for a recoverable model slip.
-    auto old_opt = ar.require_str("old_string");
-    if (!old_opt)
-        return std::unexpected(ToolError::invalid_args("old_string required (must be a string)"));
-    std::string old_s = *std::move(old_opt);
-    if (old_s.empty())
-        return std::unexpected(ToolError::invalid_args("old_string cannot be empty"));
-    std::string new_s = ar.str("new_string", "");
-    if (old_s == new_s)
-        return std::unexpected(ToolError::invalid_args("old_string and new_string are identical — nothing to change"));
+
+    std::string desc = ar.str("display_description", "");
+    std::vector<OneEdit> edits;
+
+    // Shape 1: edits array.
+    if (auto raw = ar.raw("edits"); raw && raw->is_array()) {
+        edits.reserve(raw->size());
+        int idx = 0;
+        for (const auto& e : *raw) {
+            ++idx;
+            if (!e.is_object())
+                return std::unexpected(ToolError::invalid_args(
+                    std::format("edits[{}]: expected object", idx - 1)));
+            util::ArgReader sub(e);
+            auto old_opt = sub.require_str("old_text");
+            // Accept old_string too.
+            if (!old_opt) old_opt = sub.require_str("old_string");
+            if (!old_opt)
+                return std::unexpected(ToolError::invalid_args(
+                    std::format("edits[{}]: old_text required", idx - 1)));
+            std::string new_text = sub.str("new_text", "");
+            if (new_text.empty() && sub.has("new_string"))
+                new_text = sub.str("new_string", "");
+            edits.push_back(OneEdit{
+                std::move(*old_opt),
+                std::move(new_text),
+                sub.boolean("replace_all", false),
+            });
+        }
+    } else {
+        // Shape 2/3: single edit at top level (old_text or old_string).
+        auto old_opt = ar.require_str("old_string");
+        if (!old_opt) old_opt = ar.require_str("old_text");
+        if (!old_opt)
+            return std::unexpected(ToolError::invalid_args(
+                "no edits provided — pass either `edits: [...]` or "
+                "`old_string`/`new_string` at top level"));
+        std::string new_s = ar.str("new_string", "");
+        if (new_s.empty() && ar.has("new_text"))
+            new_s = ar.str("new_text", "");
+        edits.push_back(OneEdit{
+            std::move(*old_opt), std::move(new_s),
+            ar.boolean("replace_all", false),
+        });
+    }
+
+    if (edits.empty())
+        return std::unexpected(ToolError::invalid_args(
+            "edits array is empty — nothing to change"));
+
+    // Per-edit sanity: empty old_text is never legal; identical old/new is
+    // a no-op we'd rather not silently accept.
+    for (std::size_t i = 0; i < edits.size(); ++i) {
+        const auto& e = edits[i];
+        if (e.old_text.empty())
+            return std::unexpected(ToolError::invalid_args(
+                std::format("edits[{}]: old_text cannot be empty", i)));
+        if (e.old_text == e.new_text)
+            return std::unexpected(ToolError::invalid_args(std::format(
+                "edits[{}]: old_text and new_text are identical — nothing to change",
+                i)));
+    }
+
     return EditArgs{
-        util::NormalizedPath{std::move(*raw)},
-        std::move(old_s),
-        std::move(new_s),
-        ar.boolean("replace_all", false),
+        util::NormalizedPath{std::move(*path_opt)},
+        std::move(edits),
+        std::move(desc),
     };
+}
+
+// Apply a single edit to `buf`. Returns number of replacements; sets `err`
+// on terminal failure (ambiguous match, not found).
+int apply_one(std::string& buf, const OneEdit& e,
+              const std::string& path_str, std::string& err) {
+    if (e.replace_all) {
+        // Exact match, build fresh buffer.
+        std::string out;
+        out.reserve(buf.size());
+        std::size_t cursor = 0;
+        int n = 0;
+        for (;;) {
+            auto pos = buf.find(e.old_text, cursor);
+            if (pos == std::string::npos) break;
+            out.append(buf, cursor, pos - cursor);
+            out.append(e.new_text);
+            cursor = pos + e.old_text.size();
+            ++n;
+        }
+        if (n == 0) {
+            err = "old_text not found in " + path_str;
+            return 0;
+        }
+        out.append(buf, cursor, std::string::npos);
+        buf = std::move(out);
+        return n;
+    }
+
+    auto m = util::fuzzy_find(buf, e.old_text);
+    if (!m.ok) {
+        if (m.count >= 2) {
+            err = std::format(
+                "old_text appears {} times in {}. Add surrounding context to "
+                "make it unique, or pass replace_all=true.", m.count, path_str);
+        } else {
+            // Hint: indentation mismatch is the common cause.
+            std::string hint;
+            std::string squashed_old, squashed_buf;
+            for (char c : e.old_text)
+                if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+                    squashed_old += c;
+            for (char c : buf)
+                if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+                    squashed_buf += c;
+            if (!squashed_old.empty()
+                && squashed_buf.find(squashed_old) != std::string::npos)
+                hint = " (the text exists but whitespace differs — match the "
+                       "exact indentation)";
+            err = "old_text not found in " + path_str + hint;
+        }
+        return 0;
+    }
+    // Splice.
+    std::string out;
+    out.reserve(buf.size() - m.len + e.new_text.size());
+    out.append(buf, 0, m.pos);
+    out.append(e.new_text);
+    out.append(buf, m.pos + m.len, std::string::npos);
+    buf = std::move(out);
+    return 1;
 }
 
 ExecResult run_edit(const EditArgs& a) {
     const auto& p = a.path.path();
     std::error_code ec;
     if (!fs::exists(p, ec))
-        return std::unexpected(ToolError::not_found("file not found: " + a.path.string()
-            + ". Run `list_dir` on the parent directory or `glob` by name to verify."));
+        return std::unexpected(ToolError::not_found("file not found: "
+            + a.path.string()
+            + ". Run `list_dir` on the parent directory or `glob` by name "
+              "to verify."));
     if (!fs::is_regular_file(p, ec))
-        return std::unexpected(ToolError::not_a_file("not a regular file: " + a.path.string()));
+        return std::unexpected(ToolError::not_a_file(
+            "not a regular file: " + a.path.string()));
+
     std::string original = util::read_file(p);
-    std::string updated = original;
-    if (a.replace_all) {
-        size_t pos = 0; int n = 0;
-        while ((pos = updated.find(a.old_string, pos)) != std::string::npos) {
-            updated.replace(pos, a.old_string.size(), a.new_string);
-            pos += a.new_string.size();
-            n++;
+    std::string updated  = original;
+    int total_replacements = 0;
+
+    // Apply in order. If any edit fails, report which one and abort — we'd
+    // rather surface a precise error than leave the file half-transformed.
+    for (std::size_t i = 0; i < a.edits.size(); ++i) {
+        std::string err;
+        int n = apply_one(updated, a.edits[i], a.path.string(), err);
+        if (n == 0) {
+            std::string ctx = a.edits.size() == 1
+                ? err
+                : std::format("edits[{}]: {}", i, err);
+            // Preserve the error category based on the message shape.
+            if (err.find("appears") != std::string::npos)
+                return std::unexpected(ToolError::ambiguous(std::move(ctx)));
+            return std::unexpected(ToolError::no_match(std::move(ctx)));
         }
-        if (n == 0)
-            return std::unexpected(ToolError::no_match("old_string not found in " + a.path.string()));
-    } else {
-        auto pos = updated.find(a.old_string);
-        if (pos == std::string::npos) {
-            // Help the model localize its error: if the string isn't
-            // unique, whitespace is the most common cause.
-            std::string hint;
-            std::string squashed_old, squashed_new;
-            for (char c : a.old_string) if (c != ' ' && c != '\t' && c != '\n') squashed_old += c;
-            for (char c : updated) if (c != ' ' && c != '\t' && c != '\n') squashed_new += c;
-            if (!squashed_old.empty()
-                && squashed_new.find(squashed_old) != std::string::npos)
-                hint = " (the text exists but whitespace differs — match the exact indentation)";
-            return std::unexpected(ToolError::no_match("old_string not found in " + a.path.string() + hint));
-        }
-        if (auto pos2 = updated.find(a.old_string, pos + 1); pos2 != std::string::npos) {
-            // Ambiguous match — name each occurrence with its line
-            // number so the model can pick unique surrounding context
-            // on retry.
-            auto line_of = [&](size_t off) {
-                int n = 1;
-                for (size_t i = 0; i < off && i < updated.size(); ++i)
-                    if (updated[i] == '\n') n++;
-                return n;
-            };
-            std::ostringstream msg;
-            msg << "old_string appears multiple times in " << a.path.string()
-                << ". Matches at lines: " << line_of(pos);
-            size_t cursor = pos2;
-            int count = 2;
-            while (cursor != std::string::npos && count <= 5) {
-                msg << ", " << line_of(cursor);
-                cursor = updated.find(a.old_string, cursor + 1);
-                count++;
-            }
-            if (cursor != std::string::npos) msg << ", ...";
-            msg << ". Add surrounding context to make old_string unique, "
-                   "or pass replace_all=true to replace every occurrence.";
-            return std::unexpected(ToolError::ambiguous(msg.str()));
-        }
-        updated.replace(pos, a.old_string.size(), a.new_string);
+        total_replacements += n;
     }
+
     if (original == updated)
-        return ToolOutput{"No edits were made — old_string and new_string "
+        return ToolOutput{"No edits were made — all old_text / new_text pairs "
                           "produced identical content.", std::nullopt};
+
     auto change = diff::compute(a.path.string(), original, updated);
-    if (auto err = util::write_file(p, updated); !err.empty())
-        return std::unexpected(ToolError::io(err));
-    // ```diff fenced block so the model sees exactly what changed —
-    // makes follow-up edits more accurate and mirrors Zed's
-    // EditFileTool output shape.
+    if (auto werr = util::write_file(p, updated); !werr.empty())
+        return std::unexpected(ToolError::io(werr));
+
     std::string unified = diff::render_unified(change);
     std::ostringstream msg;
+    if (!a.display_description.empty())
+        msg << a.display_description << "\n\n";
     msg << "Edited " << a.path.string() << " (" << change.added << "+ "
-        << change.removed << "-):\n\n```diff\n" << unified;
+        << change.removed << "-";
+    if (a.edits.size() > 1)
+        msg << ", " << a.edits.size() << " edits";
+    msg << "):\n\n```diff\n" << unified;
     if (unified.empty() || unified.back() != '\n') msg << "\n";
     msg << "```";
     return ToolOutput{msg.str(), std::move(change)};
@@ -136,16 +239,44 @@ ExecResult run_edit(const EditArgs& a) {
 ToolDef tool_edit() {
     ToolDef t;
     t.name = ToolName{std::string{"edit"}};
-    t.description = "Edit a file by replacing an exact old_string with new_string. "
-                    "The old_string must be uniquely present unless replace_all is set.";
+    t.description =
+        "Edit an existing file by applying one or more text substitutions. "
+        "Pass `edits: [{old_text, new_text}, ...]` — every edit is applied in "
+        "order, each old_text must be uniquely present (or pass replace_all). "
+        "Whitespace on line ends is ignored when matching, but indentation is "
+        "not. Include a brief `display_description` explaining the change so "
+        "the user sees what the edit is for.";
     t.input_schema = json{
         {"type","object"},
-        {"required", {"path","old_string","new_string"}},
+        {"required", {"path","edits"}},
         {"properties", {
-            {"path",       {{"type","string"}}},
-            {"old_string", {{"type","string"}}},
-            {"new_string", {{"type","string"}}},
-            {"replace_all",{{"type","boolean"}, {"default", false}}},
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI while the "
+                               "edit streams — e.g. 'Fix null-deref in "
+                               "auth.cpp'. Optional but strongly recommended."}}},
+            {"path", {{"type","string"},
+                {"description","Absolute or relative path of the file."}}},
+            {"edits", {
+                {"type","array"},
+                {"description","One or more edits, applied in order."},
+                {"items", {
+                    {"type","object"},
+                    {"required", {"old_text","new_text"}},
+                    {"properties", {
+                        {"old_text",  {{"type","string"},
+                            {"description","Exact text to find. Must be "
+                                "unique unless replace_all is true. "
+                                "Trailing-whitespace differences are "
+                                "tolerated, indentation is not."}}},
+                        {"new_text",  {{"type","string"},
+                            {"description","Replacement text."}}},
+                        {"replace_all",{{"type","boolean"},
+                            {"default", false},
+                            {"description","Replace every occurrence "
+                                "instead of exactly one."}}},
+                    }},
+                }},
+            }},
         }},
     };
     t.needs_permission = [](Profile p){ return p != Profile::Write; };

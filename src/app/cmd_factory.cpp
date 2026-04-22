@@ -102,7 +102,9 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             }
             if (!needs_perm) {
                 tc.status = ToolUse::Status::Running;
-                tc.started_at = std::chrono::steady_clock::now();
+                // started_at was stamped at StreamToolUseStart so the
+                // timer covers the full card lifetime (args streaming +
+                // execution). Don't re-stamp here.
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
                 m.stream.phase = Phase::ExecutingTool;
                 // Keep the Tick subscription alive during tool execution so

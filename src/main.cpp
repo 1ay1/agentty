@@ -99,6 +99,11 @@ int main(int argc, char** argv) {
     io::FsStore           store;
     app::install(provider, store, creds.header_value(), creds.style());
 
+    // Pre-warm TLS to api.anthropic.com on a detached background thread.
+    // The first prompt the user types will reuse the SSL session + DNS +
+    // connection cache, skipping ~150–300 ms of first-byte handshake.
+    auth::prewarm_anthropic();
+
     // fps = 0 → pure event-driven: maya only renders on Msg / input / timer.
     // The spinner-tick subscription (gated on stream.active) supplies frames
     // while streaming; idle moha costs zero CPU.

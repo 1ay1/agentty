@@ -9,10 +9,12 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <atomic>
 #include <mutex>
 #include <random>
 #include <sstream>
 #include <system_error>
+#include <thread>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -133,6 +135,33 @@ void apply_shared_cache(void* handle) {
     if (!curl) return;
     auto& b = share_bundle();
     if (b.share) curl_easy_setopt(curl, CURLOPT_SHARE, b.share);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-warm: open TCP+TLS to api.anthropic.com while the user is still typing,
+// so the first real request skips ~150–300 ms of handshake. Runs detached.
+// ---------------------------------------------------------------------------
+void prewarm_anthropic() {
+    static std::atomic<bool> started{false};
+    bool expected = false;
+    if (!started.compare_exchange_strong(expected, true)) return;
+
+    std::thread([]{
+        CURL* curl = curl_easy_init();
+        if (!curl) return;
+        curl_easy_setopt(curl, CURLOPT_URL, "https://api.anthropic.com/v1/messages");
+        curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+        curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+        apply_tls_options(curl);
+        apply_shared_cache(curl);
+        // We intentionally ignore the return code — a failure here is harmless
+        // (the real request on Enter will retry with proper error reporting).
+        (void)curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+    }).detach();
 }
 
 void apply_tls_options(void* handle) {

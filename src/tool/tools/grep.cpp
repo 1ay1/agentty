@@ -28,6 +28,7 @@ struct GrepArgs {
     std::string file_glob;
     bool case_sensitive;
     int offset;
+    std::string display_description;
 };
 
 std::expected<GrepArgs, ToolError> parse_grep_args(const json& j) {
@@ -43,6 +44,7 @@ std::expected<GrepArgs, ToolError> parse_grep_args(const json& j) {
         ar.str("glob", ""),
         ar.boolean("case_sensitive", false),
         offset,
+        ar.str("display_description", ""),
     };
 }
 
@@ -152,7 +154,10 @@ ExecResult run_grep(const GrepArgs& a) {
     } else {
         out << "Showing all " << total_matches << " matches.";
     }
-    return ToolOutput{out.str(), std::nullopt};
+    std::string body = out.str();
+    if (!a.display_description.empty())
+        body = a.display_description + "\n\n" + body;
+    return ToolOutput{std::move(body), std::nullopt};
 }
 
 } // namespace
@@ -168,6 +173,8 @@ ToolDef tool_grep() {
         {"type","object"},
         {"required", {"pattern"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"pattern",        {{"type","string"}, {"description","Regex pattern to search for"}}},
             {"path",           {{"type","string"}, {"description","Directory to search (default: cwd)"}}},
             {"glob",           {{"type","string"}, {"description","File extension filter (e.g. *.cpp)"}}},

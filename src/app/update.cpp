@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <span>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
 #include "moha/app/cmd_factory.hpp"
 #include "moha/app/deps.hpp"
+#include "moha/tool/util/partial_json.hpp"
 #include "moha/view/helpers.hpp"
 
 namespace moha::app {
@@ -116,6 +118,57 @@ std::optional<std::string> sniff_string_progressive(const std::string& raw,
     return out;  // open string — return partial
 }
 
+// Keys models sometimes emit in place of our canonical field name. Mirrors
+// the ArgReader alias table — keep in sync.
+constexpr std::string_view kPathAliases[]    = {"path", "file_path", "filepath", "filename"};
+constexpr std::string_view kOldStrAliases[]  = {"old_string", "old_str", "oldStr"};
+constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_str", "newStr"};
+constexpr std::string_view kContentAliases[] = {"content", "file_text", "text",
+                                                 "file_content", "contents",
+                                                 "body", "data"};
+constexpr std::string_view kDisplayDescription = "display_description";
+
+std::optional<std::string> sniff_any(const std::string& raw,
+                                     std::span<const std::string_view> keys,
+                                     bool partial) {
+    for (auto k : keys) {
+        auto v = partial ? sniff_string_progressive(raw, k)
+                         : sniff_string(raw, k);
+        if (v) return v;
+    }
+    return std::nullopt;
+}
+
+// Attempt to parse the streaming buffer via the partial-JSON closer. Returns
+// an object when the result is a parseable object, otherwise nullopt. This is
+// strictly more capable than the regex sniffer — it handles nested objects
+// (edits[].old_text) and escaped quotes — but we still fall back to the
+// sniffer for fields the partial closer can't yet expose (e.g. when the
+// current field's value is itself a partial string that won't close until
+// later).
+std::optional<json> try_parse_partial(const std::string& raw) {
+    if (raw.empty()) return std::nullopt;
+    try {
+        auto closed = moha::tools::util::close_partial_json(raw);
+        auto parsed = json::parse(closed, /*cb=*/nullptr, /*allow_exceptions=*/false);
+        if (parsed.is_discarded() || !parsed.is_object()) return std::nullopt;
+        return parsed;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// Pull a string out of a parsed partial object, trying canonical + aliases.
+std::optional<std::string> get_string_any(const json& obj,
+                                          std::span<const std::string_view> keys) {
+    for (auto k : keys) {
+        auto it = obj.find(std::string{k});
+        if (it == obj.end()) continue;
+        if (it->is_string()) return it->get<std::string>();
+    }
+    return std::nullopt;
+}
+
 // For a given tool, fill `tc.args` with whichever scalar field is most useful
 // to display in the card header. We write into `tc.args` (rather than a
 // separate preview field) so the existing view code — which reads path /
@@ -129,26 +182,87 @@ void update_stream_preview(ToolUse& tc) {
             tc.mark_args_dirty();
         }
     };
-    auto try_set = [&](std::string_view key) {
-        if (auto v = sniff_string(tc.args_streaming, key)) { set_arg(key, *v); return true; }
+    auto try_set = [&](std::string_view canon,
+                       std::span<const std::string_view> keys = {}) {
+        auto ks = keys.empty() ? std::span{&canon, 1} : keys;
+        if (auto v = sniff_any(tc.args_streaming, ks, /*partial=*/false)) {
+            set_arg(canon, *v); return true;
+        }
         return false;
     };
-    auto try_set_partial = [&](std::string_view key) {
-        if (auto v = sniff_string_progressive(tc.args_streaming, key)) { set_arg(key, *v); return true; }
+    auto try_set_partial = [&](std::string_view canon,
+                               std::span<const std::string_view> keys = {}) {
+        auto ks = keys.empty() ? std::span{&canon, 1} : keys;
+        if (auto v = sniff_any(tc.args_streaming, ks, /*partial=*/true)) {
+            set_arg(canon, *v); return true;
+        }
         return false;
+    };
+    // Partial-JSON first pass: if we can close the buffer into a parseable
+    // object, pull structured fields directly (including nested edits[0]).
+    // Falls through to regex sniffing for anything the closer can't yield.
+    auto parsed = try_parse_partial(tc.args_streaming);
+    auto try_struct = [&](std::string_view canon,
+                          std::span<const std::string_view> keys) -> bool {
+        if (!parsed) return false;
+        if (auto s = get_string_any(*parsed, keys)) {
+            set_arg(canon, *s);
+            return true;
+        }
+        return false;
+    };
+    // Edit tool: read the first edit's old_text / new_text so the UI shows a
+    // live diff even while the model is mid-stream.
+    auto try_struct_first_edit = [&](std::string_view canon,
+                                     std::string_view field) -> bool {
+        if (!parsed) return false;
+        auto it = parsed->find("edits");
+        if (it == parsed->end() || !it->is_array() || it->empty()) return false;
+        const auto& first = (*it)[0];
+        if (!first.is_object()) return false;
+        auto f = first.find(std::string{field});
+        if (f == first.end() || !f->is_string()) return false;
+        set_arg(canon, f->get<std::string>());
+        return true;
+    };
+
+    // Every tool may carry a `display_description`; pull it up-front so the
+    // card title can reflect it the moment the field closes in the stream.
+    auto pull_desc = [&] {
+        if (!try_struct("display_description", std::span{&kDisplayDescription, 1}))
+            (void)try_set("display_description", std::span{&kDisplayDescription, 1});
     };
     const auto& n = tc.name.value;
-    if      (n == "read" || n == "list_dir") try_set("path");
-    else if (n == "write") { try_set("path"); try_set_partial("content"); }
-    else if (n == "edit")  { try_set("path"); try_set_partial("old_string"); try_set_partial("new_string"); }
-    else if (n == "bash")  { try_set("command"); }
-    else if (n == "grep")  { try_set("pattern"); try_set("path"); }
-    else if (n == "glob")  { try_set("pattern"); }
-    else if (n == "find_definition") try_set("symbol");
-    else if (n == "web_fetch")       try_set("url");
-    else if (n == "web_search")      try_set("query");
-    else if (n == "diagnostics")     try_set("command");
-    else if (n == "git_commit")      try_set("message");
+    if      (n == "read" || n == "list_dir") {
+        if (!try_struct("path", kPathAliases)) try_set("path", kPathAliases);
+        pull_desc();
+    }
+    else if (n == "write") {
+        if (!try_struct("path", kPathAliases)) try_set("path", kPathAliases);
+        pull_desc();
+        if (!try_struct("content", kContentAliases))
+            try_set_partial("content", kContentAliases);
+    }
+    else if (n == "edit") {
+        if (!try_struct("path", kPathAliases)) try_set("path", kPathAliases);
+        pull_desc();
+        // Prefer the nested edits[0] shape (new canonical); fall back to
+        // top-level old_string/new_string (legacy).
+        if (!try_struct_first_edit("old_string", "old_text"))
+            try_set_partial("old_string", kOldStrAliases);
+        if (!try_struct_first_edit("new_string", "new_text"))
+            try_set_partial("new_string", kNewStrAliases);
+    }
+    else if (n == "bash")  { try_set("command"); pull_desc(); }
+    else if (n == "grep")  { try_set("pattern"); try_set("path", kPathAliases); pull_desc(); }
+    else if (n == "glob")  { try_set("pattern"); pull_desc(); }
+    else if (n == "find_definition") { try_set("symbol"); pull_desc(); }
+    else if (n == "web_fetch")       { try_set("url");    pull_desc(); }
+    else if (n == "web_search")      { try_set("query");  pull_desc(); }
+    else if (n == "diagnostics")     { try_set("command"); pull_desc(); }
+    else if (n == "git_status" || n == "git_diff"
+          || n == "git_log"    || n == "git_commit"
+          || n == "todo")        { if (n == "git_commit") try_set("message"); pull_desc(); }
 }
 
 // Rescue partial args when json::parse fails on the raw SSE buffer (truncated
@@ -157,23 +271,39 @@ void update_stream_preview(ToolUse& tc) {
 // usable field came through, the tool gets to run instead of the whole turn
 // dying on a cosmetic parse error. Returns {} when nothing salvageable.
 json salvage_args(const ToolUse& tc) {
+    // First try: close the partial JSON and parse it structurally. This
+    // preserves nested shapes like edits[] and object fields that the regex
+    // sniffer can't see. If parsing succeeds and gives us a usable object,
+    // return it directly; the tool's own parser will handle tolerance.
+    if (auto parsed = try_parse_partial(tc.args_streaming)) {
+        if (!parsed->empty()) return *parsed;
+    }
+    // Fallback: walk known scalar keys with the regex sniffer. Only hit when
+    // the partial closer couldn't yield any object (deeply malformed buffer).
     json out = json::object();
-    auto pick = [&](std::string_view key) {
-        if (auto v = sniff_string_progressive(tc.args_streaming, key))
-            out[std::string{key}] = *v;
+    auto pick = [&](std::string_view canon,
+                    std::span<const std::string_view> keys = {}) {
+        auto ks = keys.empty() ? std::span{&canon, 1} : keys;
+        if (auto v = sniff_any(tc.args_streaming, ks, /*partial=*/true))
+            out[std::string{canon}] = *v;
     };
     const auto& n = tc.name.value;
-    if      (n == "read" || n == "list_dir") { pick("path"); }
-    else if (n == "write") { pick("path"); pick("content"); }
-    else if (n == "edit")  { pick("path"); pick("old_string"); pick("new_string"); }
+    if      (n == "read" || n == "list_dir") { pick("path", kPathAliases); }
+    else if (n == "write") { pick("path", kPathAliases); pick("content", kContentAliases); }
+    else if (n == "edit")  { pick("path", kPathAliases);
+                             pick("old_string", kOldStrAliases);
+                             pick("new_string", kNewStrAliases); }
     else if (n == "bash")  { pick("command"); }
-    else if (n == "grep")  { pick("pattern"); pick("path"); }
+    else if (n == "grep")  { pick("pattern"); pick("path", kPathAliases); }
     else if (n == "glob")  { pick("pattern"); }
     else if (n == "find_definition") { pick("symbol"); }
     else if (n == "web_fetch")       { pick("url"); }
     else if (n == "web_search")      { pick("query"); }
     else if (n == "diagnostics")     { pick("command"); }
     else if (n == "git_commit")      { pick("message"); }
+    // display_description applies to every tool and often wins the race vs
+    // the required field — include it in the salvaged fallback too.
+    pick("display_description", std::span{&kDisplayDescription, 1});
     return out;
 }
 
@@ -271,10 +401,31 @@ Cmd<Msg> finalize_turn(Model& m) {
             last.cached_md_element.reset();
             last.stream_md.reset();
         }
-        // Free per-tool-call streaming JSON buffers — args is already parsed
-        // by this point, and the raw text is never read again.
-        for (auto& tc : last.tool_calls)
+        // Flush any tool_calls whose StreamToolUseEnd never fired — Anthropic
+        // normally sends content_block_stop per tool block, but proxies /
+        // message_stop cut-offs can skip it. Without this, write/edit tools
+        // would run with only the progressive-sniffer partials that
+        // update_stream_preview accumulated, which for long content is
+        // typically empty or truncated. Parse if we can, salvage if we can't,
+        // mark Error if neither works.
+        for (auto& tc : last.tool_calls) {
+            if (!tc.args_streaming.empty() && tc.status == ToolUse::Status::Pending) {
+                try {
+                    tc.args = json::parse(tc.args_streaming);
+                    tc.mark_args_dirty();
+                } catch (const std::exception& ex) {
+                    auto salvaged = salvage_args(tc);
+                    if (!salvaged.empty()) {
+                        tc.args = std::move(salvaged);
+                        tc.mark_args_dirty();
+                    } else {
+                        tc.status = ToolUse::Status::Error;
+                        tc.output = std::string{"tool args never closed: "} + ex.what();
+                    }
+                }
+            }
             std::string{}.swap(tc.args_streaming);
+        }
     }
     deps().save_thread(m.current);
     auto kp = cmd::kick_pending_tools(m);
@@ -402,6 +553,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 tc.name = e.name;
                 tc.status = ToolUse::Status::Pending;
                 tc.args = json::object();
+                // Stamp start now so the card shows a live timer during the
+                // args-streaming phase too, not just during execution —
+                // lets the user tell "model hasn't started emitting" from
+                // "execution is slow" at a glance.
+                tc.started_at = std::chrono::steady_clock::now();
                 m.current.messages.back().tool_calls.push_back(std::move(tc));
             }
             return done(std::move(m));
@@ -488,8 +644,20 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // text just got mutated — drop stale render caches.
                 last.cached_md_element.reset();
                 last.stream_md.reset();
-                for (auto& tc : last.tool_calls)
+                // Any tool_call still Pending at stream-error time will never
+                // dispatch — no content_block_stop reached us and there's no
+                // more stream. Mark them Error so the UI doesn't spin forever
+                // on an orphaned "writing…" card. Running tools are in-flight
+                // on a worker thread; leave them alone, their ToolExecOutput
+                // will still arrive.
+                for (auto& tc : last.tool_calls) {
+                    if (tc.status == ToolUse::Status::Pending) {
+                        tc.status = ToolUse::Status::Error;
+                        if (tc.output.empty())
+                            tc.output = "stream ended before tool args closed";
+                    }
                     std::string{}.swap(tc.args_streaming);
+                }
             }
             return done(std::move(m));
         },
@@ -539,7 +707,9 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 for (auto& tc : msg_.tool_calls)
                     if (tc.id == id) {
                         tc.status = ToolUse::Status::Running;
-                        tc.started_at = std::chrono::steady_clock::now();
+                        // started_at stays at StreamToolUseStart time — the
+                        // card shows total lifetime including the permission
+                        // wait, which is exactly what the user cares about.
                         cmds.push_back(cmd::run_tool(tc.id, tc.name, tc.args));
                     }
             m.pending_permission.reset();

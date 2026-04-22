@@ -25,6 +25,7 @@ struct ListDirArgs {
     std::string root;
     bool recursive;
     int max_depth;
+    std::string display_description;
 };
 
 std::expected<ListDirArgs, ToolError> parse_list_dir_args(const json& j) {
@@ -33,6 +34,7 @@ std::expected<ListDirArgs, ToolError> parse_list_dir_args(const json& j) {
         ar.str("path", "."),
         ar.boolean("recursive", false),
         ar.integer("max_depth", 3),
+        ar.str("display_description", ""),
     };
 }
 
@@ -91,7 +93,10 @@ ExecResult run_list_dir(const ListDirArgs& a) {
         for (auto& e : entries) list_entry(e, 0);
     }
     if (count == 0) return ToolOutput{"empty directory", std::nullopt};
-    return ToolOutput{out.str(), std::nullopt};
+    std::string body = out.str();
+    if (!a.display_description.empty())
+        body = a.display_description + "\n\n" + body;
+    return ToolOutput{std::move(body), std::nullopt};
 }
 
 } // namespace
@@ -104,6 +109,8 @@ ToolDef tool_list_dir() {
     t.input_schema = json{
         {"type","object"},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"path",      {{"type","string"}, {"description","Directory to list (default: cwd)"}}},
             {"recursive", {{"type","boolean"}, {"description","List recursively (default: false)"}}},
             {"max_depth", {{"type","integer"}, {"description","Max depth for recursive listing (default: 3)"}}},

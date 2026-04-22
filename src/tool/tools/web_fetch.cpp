@@ -29,6 +29,7 @@ struct WebFetchArgs {
     std::string url;
     HttpMethod method;
     std::vector<std::pair<std::string, std::string>> headers;
+    std::string display_description;
 };
 
 // Shared with web_search via extern linkage — both tools cap response size
@@ -54,6 +55,7 @@ std::expected<WebFetchArgs, ToolError> parse_web_fetch_args(const json& j) {
         std::move(url),
         parse_method(ar.str("method", "GET")),
         std::move(hdrs),
+        ar.str("display_description", ""),
     };
 }
 
@@ -117,7 +119,10 @@ ExecResult run_web_fetch(const WebFetchArgs& a) {
     if (!content_type.empty()) out << " (" << content_type << ")";
     out << "\n\n" << body;
     if (body.size() >= kMaxFetchBytes) out << "\n[body truncated at 200KB]";
-    return ToolOutput{out.str(), std::nullopt};
+    std::string s = out.str();
+    if (!a.display_description.empty())
+        s = a.display_description + "\n\n" + s;
+    return ToolOutput{std::move(s), std::nullopt};
 }
 
 } // namespace
@@ -131,6 +136,8 @@ ToolDef tool_web_fetch() {
         {"type","object"},
         {"required", {"url"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"url",     {{"type","string"}, {"description","The URL to fetch"}}},
             {"method",  {{"type","string"}, {"description","HTTP method (default: GET)"}}},
             {"headers", {{"type","object"}, {"description","Additional headers as key-value pairs"}}},

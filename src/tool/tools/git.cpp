@@ -19,16 +19,22 @@ namespace {
 
 struct GitStatusArgs {
     std::string root;
+    std::string display_description;
 };
 
 std::expected<GitStatusArgs, ToolError> parse_git_status_args(const json& j) {
     util::ArgReader ar(j);
-    return GitStatusArgs{ar.str("path", ".")};
+    return GitStatusArgs{
+        ar.str("path", "."),
+        ar.str("display_description", ""),
+    };
 }
 
 ExecResult run_git_status(const GitStatusArgs& a) {
     auto output = util::run_argv({"git", "-C", a.root, "status",
                                   "--porcelain=v2", "--branch"});
+    if (!a.display_description.empty())
+        output = a.display_description + "\n\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -42,6 +48,8 @@ ToolDef tool_git_status() {
     t.input_schema = json{
         {"type","object"},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"path", {{"type","string"}, {"description","Repository path (default: cwd)"}}},
         }},
     };
@@ -58,6 +66,7 @@ struct GitDiffArgs {
     std::string path;
     bool staged;
     std::string ref;
+    std::string display_description;
 };
 
 std::expected<GitDiffArgs, ToolError> parse_git_diff_args(const json& j) {
@@ -66,6 +75,7 @@ std::expected<GitDiffArgs, ToolError> parse_git_diff_args(const json& j) {
         ar.str("path", ""),
         ar.boolean("staged", false),
         ar.str("ref", ""),
+        ar.str("display_description", ""),
     };
 }
 
@@ -76,6 +86,8 @@ ExecResult run_git_diff(const GitDiffArgs& a) {
     if (!a.path.empty()) { argv.push_back("--"); argv.push_back(a.path); }
     auto output = util::run_argv(argv, 50000);
     if (output.empty()) return ToolOutput{"no changes", std::nullopt};
+    if (!a.display_description.empty())
+        output = a.display_description + "\n\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -89,6 +101,8 @@ ToolDef tool_git_diff() {
     t.input_schema = json{
         {"type","object"},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"path",    {{"type","string"}, {"description","File or directory to diff"}}},
             {"staged",  {{"type","boolean"}, {"description","Show staged changes (default: false)"}}},
             {"ref",     {{"type","string"}, {"description","Git ref or range (e.g. HEAD~3, main..HEAD)"}}},
@@ -108,6 +122,7 @@ struct GitLogArgs {
     std::string path;
     std::string ref;
     bool oneline;
+    std::string display_description;
 };
 
 std::expected<GitLogArgs, ToolError> parse_git_log_args(const json& j) {
@@ -117,6 +132,7 @@ std::expected<GitLogArgs, ToolError> parse_git_log_args(const json& j) {
         ar.str("path", ""),
         ar.str("ref", "HEAD"),
         ar.boolean("oneline", false),
+        ar.str("display_description", ""),
     };
 }
 
@@ -133,6 +149,8 @@ ExecResult run_git_log(const GitLogArgs& a) {
     if (!a.path.empty()) { argv.push_back("--"); argv.push_back(a.path); }
     auto output = util::run_argv(argv);
     if (output.empty()) return ToolOutput{"no commits", std::nullopt};
+    if (!a.display_description.empty())
+        output = a.display_description + "\n\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -145,6 +163,8 @@ ToolDef tool_git_log() {
     t.input_schema = json{
         {"type","object"},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"count",   {{"type","integer"}, {"description","Number of commits (default: 20)"}}},
             {"path",    {{"type","string"}, {"description","Filter by file path"}}},
             {"ref",     {{"type","string"}, {"description","Branch or ref (default: HEAD)"}}},
@@ -164,6 +184,7 @@ struct GitCommitArgs {
     std::string message;
     std::vector<std::string> files;
     bool stage_all;
+    std::string display_description;
 };
 
 std::expected<GitCommitArgs, ToolError> parse_git_commit_args(const json& j) {
@@ -183,6 +204,7 @@ std::expected<GitCommitArgs, ToolError> parse_git_commit_args(const json& j) {
         *std::move(msg_opt),
         std::move(files),
         ar.boolean("stage_all", false),
+        ar.str("display_description", ""),
     };
 }
 
@@ -199,6 +221,8 @@ ExecResult run_git_commit(const GitCommitArgs& a) {
         }
     }
     auto output = util::run_argv({"git", "commit", "-m", a.message});
+    if (!a.display_description.empty())
+        output = a.display_description + "\n\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -213,6 +237,8 @@ ToolDef tool_git_commit() {
         {"type","object"},
         {"required", {"message"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"message",   {{"type","string"}, {"description","Commit message"}}},
             {"files",     {{"type","array"}, {"items",{{"type","string"}}},
                            {"description","Files to stage before committing"}}},

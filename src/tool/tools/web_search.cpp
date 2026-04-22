@@ -21,6 +21,7 @@ namespace {
 struct WebSearchArgs {
     std::string query;
     int count;
+    std::string display_description;
 };
 
 std::expected<WebSearchArgs, ToolError> parse_web_search_args(const json& j) {
@@ -28,7 +29,11 @@ std::expected<WebSearchArgs, ToolError> parse_web_search_args(const json& j) {
     auto q_opt = ar.require_str("query");
     if (!q_opt)
         return std::unexpected(ToolError::invalid_args("query required"));
-    return WebSearchArgs{*std::move(q_opt), ar.integer("count", 10)};
+    return WebSearchArgs{
+        *std::move(q_opt),
+        ar.integer("count", 10),
+        ar.str("display_description", ""),
+    };
 }
 
 ExecResult run_web_search(const WebSearchArgs& a) {
@@ -138,7 +143,10 @@ ExecResult run_web_search(const WebSearchArgs& a) {
     }
 
     if (found == 0) return ToolOutput{"no results found for: " + a.query, std::nullopt};
-    return ToolOutput{out.str(), std::nullopt};
+    std::string s = out.str();
+    if (!a.display_description.empty())
+        s = a.display_description + "\n\n" + s;
+    return ToolOutput{std::move(s), std::nullopt};
 }
 
 } // namespace
@@ -152,6 +160,8 @@ ToolDef tool_web_search() {
         {"type","object"},
         {"required", {"query"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"query", {{"type","string"}, {"description","Search query"}}},
             {"count", {{"type","integer"}, {"description","Max results (default: 10)"}}},
         }},

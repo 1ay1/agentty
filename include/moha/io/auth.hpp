@@ -48,6 +48,14 @@ void apply_tls_options(void* curl_easy_handle);
 // own locks. Call after curl_easy_init and before curl_easy_perform.
 void apply_shared_cache(void* curl_easy_handle);
 
+// Populate the shared DNS / SSL-session / connection caches for
+// api.anthropic.com on a detached background thread. Call once at startup
+// while the user is still typing; by the time they hit Enter, the TLS
+// handshake is already paid for and the first request jumps straight to
+// HTTP POST. Returns immediately; safe to call multiple times (no-op after
+// first). Requires curl_global_init to have been called.
+void prewarm_anthropic();
+
 // Disk I/O
 std::optional<Credentials> load_credentials();
 bool save_credentials(const Credentials& c);     // writes with 0600 perms where supported

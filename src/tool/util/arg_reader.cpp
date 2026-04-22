@@ -3,15 +3,61 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <span>
 
 namespace moha::tools::util {
 
 using nlohmann::json;
 
+namespace {
+// Accept the common aliases the model emits when its tool-use schema gets
+// cross-trained with Anthropic's built-in text_editor (`file_path`), or
+// when it abbreviates. Lookup is case-sensitive for speed; aliases are the
+// escape hatch. Keep this table tiny — every miss pays the walk cost.
+constexpr std::string_view kAliasesPath[]       = {"file_path", "filepath", "filename"};
+constexpr std::string_view kAliasesFilePath[]   = {"path",      "filepath", "filename"};
+constexpr std::string_view kAliasesOldString[]  = {"old_str",   "oldStr"};
+constexpr std::string_view kAliasesNewString[]  = {"new_str",   "newStr"};
+// Anthropic's built-in text_editor tool uses `file_text` for create-command
+// content. Models heavily cross-trained on that spec emit file_text even when
+// our schema says "content" — without this alias the file lands empty.
+constexpr std::string_view kAliasesContent[]    = {"file_text", "text",
+                                                    "file_content", "contents",
+                                                    "body", "data"};
+// Zed's read_file_tool uses `start_line` / `end_line` rather than
+// offset / limit. We accept either so a model trained on Zed's surface
+// doesn't page-fault on us.
+constexpr std::string_view kAliasesOffset[]     = {"start_line", "start", "from_line"};
+constexpr std::string_view kAliasesLimit[]      = {"end_line",   "num_lines", "max_lines",
+                                                    "count",      "line_count"};
+// Terminal/shell — `cd` / `cwd` / `workdir` / `working_directory` all show up.
+constexpr std::string_view kAliasesCd[]         = {"cwd", "workdir", "working_directory",
+                                                    "directory"};
+constexpr std::string_view kAliasesCommand[]    = {"cmd", "shell_command"};
+
+std::span<const std::string_view> aliases_for(std::string_view key) noexcept {
+    if (key == "path")       return {kAliasesPath};
+    if (key == "file_path")  return {kAliasesFilePath};
+    if (key == "old_string") return {kAliasesOldString};
+    if (key == "new_string") return {kAliasesNewString};
+    if (key == "content")    return {kAliasesContent};
+    if (key == "offset")     return {kAliasesOffset};
+    if (key == "limit")      return {kAliasesLimit};
+    if (key == "cd")         return {kAliasesCd};
+    if (key == "command")    return {kAliasesCommand};
+    return {};
+}
+} // namespace
+
 const json* ArgReader::raw(std::string_view key) const noexcept {
     if (!args_.is_object()) return nullptr;
-    auto it = args_.find(std::string{key});
-    return it == args_.end() ? nullptr : &*it;
+    if (auto it = args_.find(std::string{key}); it != args_.end())
+        return &*it;
+    for (auto alt : aliases_for(key)) {
+        if (auto it = args_.find(std::string{alt}); it != args_.end())
+            return &*it;
+    }
+    return nullptr;
 }
 
 std::string ArgReader::str(std::string_view key,

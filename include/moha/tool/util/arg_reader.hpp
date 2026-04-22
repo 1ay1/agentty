@@ -22,8 +22,12 @@ public:
 
     [[nodiscard]] bool is_object() const noexcept { return args_.is_object(); }
 
+    // Alias-aware: `has("content")` is true when the model sent `file_text`,
+    // `text`, `body`, etc. Must match `raw()` / `str()` semantics or callers
+    // that gate on `has` (e.g. write's required-content check) will spuriously
+    // reject valid alias-shaped calls.
     [[nodiscard]] bool has(std::string_view key) const {
-        return args_.is_object() && args_.contains(std::string{key});
+        return raw(key) != nullptr;
     }
 
     // Missing / null -> def. number/bool -> coerced. array -> newline-join

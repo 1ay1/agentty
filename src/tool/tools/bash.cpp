@@ -5,8 +5,10 @@
 #include "moha/tool/util/tool_args.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 #include <nlohmann/json.hpp>
 
@@ -19,6 +21,8 @@ namespace {
 struct BashArgs {
     std::string command;
     int timeout;
+    std::string cd;
+    std::string display_description;
 };
 
 std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
@@ -30,13 +34,41 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
     if (auto why = util::validate_bash_command(cmd); !why.empty())
         return std::unexpected(ToolError::invalid_args(std::move(why)));
     int timeout = ar.integer("timeout", 120);
+    // Also accept `timeout_ms` (Zed's convention). Convert to seconds.
+    if (ar.has("timeout_ms")) {
+        int ms = ar.integer("timeout_ms", 0);
+        if (ms > 0) timeout = (ms + 999) / 1000;
+    }
     if (timeout <= 0 || timeout > 600) timeout = 120;
-    return BashArgs{std::move(cmd), timeout};
+    std::string cd = ar.str("cd", "");
+    if (!cd.empty()) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(cd, ec))
+            return std::unexpected(ToolError::invalid_args(
+                "cd '" + cd + "' is not a directory"));
+    }
+    return BashArgs{
+        std::move(cmd),
+        timeout,
+        std::move(cd),
+        ar.str("display_description", ""),
+    };
 }
 
 ExecResult run_bash(const BashArgs& a) {
     auto t0 = std::chrono::steady_clock::now();
-    auto r = util::run_command_s(a.command, 30000, a.timeout);
+    // When `cd` is set, prefix `cd <dir> && …`. Shell handles quoting via
+    // single quotes (literal); we escape only embedded single quotes.
+    std::string effective = a.command;
+    if (!a.cd.empty()) {
+        std::string q;
+        q.reserve(a.cd.size() + 4);
+        q.push_back('\'');
+        for (char c : a.cd) { if (c == '\'') q += "'\\''"; else q.push_back(c); }
+        q.push_back('\'');
+        effective = "cd " + q + " && " + a.command;
+    }
+    auto r = util::run_command_s(effective, 30000, a.timeout);
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
 
@@ -86,7 +118,10 @@ ExecResult run_bash(const BashArgs& a) {
                    + std::to_string((elapsed_ms % 1000) / 100) + " s"))
             << "]";
 
-    return ToolOutput{out.str(), std::nullopt};
+    std::string body = out.str();
+    if (!a.display_description.empty())
+        body = a.display_description + "\n\n" + body;
+    return ToolOutput{std::move(body), std::nullopt};
 }
 
 } // namespace
@@ -114,8 +149,16 @@ ToolDef tool_bash() {
         {"type","object"},
         {"required", {"command"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI — e.g. "
+                               "'Run the test suite'. Optional but strongly "
+                               "recommended."}}},
             {"command", {{"type","string"}, {"description","The shell command to execute"}}},
-            {"timeout", {{"type","integer"}, {"description","Timeout in seconds (default 120)"}}},
+            {"cd",      {{"type","string"}, {"description",
+                "Working directory for the command. If set, runs as `cd <dir> && <command>`."}}},
+            {"timeout", {{"type","integer"}, {"description","Timeout in seconds (default 120, max 600)"}}},
+            {"timeout_ms", {{"type","integer"}, {"description",
+                "Alternative timeout in milliseconds (rounded up to seconds)."}}},
         }},
     };
     t.needs_permission = [](Profile p){ return p != Profile::Write; };

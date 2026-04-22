@@ -21,7 +21,8 @@ namespace {
 struct WriteArgs {
     util::NormalizedPath path;
     std::string content;
-    std::string coercion_note;  // non-empty when `content` was coerced/missing
+    std::string display_description;
+    std::string coercion_note;  // non-empty when `content` was coerced from non-string
 };
 
 std::expected<WriteArgs, ToolError> parse_write_args(const json& j) {
@@ -29,18 +30,22 @@ std::expected<WriteArgs, ToolError> parse_write_args(const json& j) {
     auto raw = ar.require_str("path");
     if (!raw)
         return std::unexpected(ToolError::invalid_args("path required"));
-    // Tolerant coercion: missing/null/array/number content all produce a
-    // writable string rather than a red error — the note tells the model
-    // what we inferred so it can retry with a proper string if needed.
-    std::string note;
-    std::string content;
+    // `content` is required. Silently writing an empty file when the field is
+    // missing (previous behavior) was the root of "write succeeds but the
+    // file is empty on disk" — models dropping the arg for any reason,
+    // partial/cut SSE streams, or salvage_args producing path-only objects
+    // all ended up with a zero-byte file and a cheerful green "Written" card.
+    // Fail loudly instead; the model can retry with content.
     if (!ar.has("content"))
-        note = " (no `content` field provided — wrote empty file; re-run with content if that was not intended)";
-    else
-        content = ar.str("content", "", &note);
+        return std::unexpected(ToolError::invalid_args(
+            "content required (got path but no content — nothing written). "
+            "Re-run with the full file body in the `content` field."));
+    std::string note;
+    std::string content = ar.str("content", "", &note);
     return WriteArgs{
         util::NormalizedPath{std::move(*raw)},
         std::move(content),
+        ar.str("display_description", ""),
         std::move(note),
     };
 }
@@ -64,7 +69,11 @@ ExecResult run_write(const WriteArgs& a) {
     auto change = diff::compute(a.path.string(), original, a.content);
     if (auto err = util::write_file(p, a.content); !err.empty())
         return std::unexpected(ToolError::io(err));
-    auto msg = std::format("{} {} ({}+ {}-){}",
+    std::string prefix;
+    if (!a.display_description.empty())
+        prefix = a.display_description + "\n\n";
+    auto msg = std::format("{}{} {} ({}+ {}-){}",
+                           prefix,
                            exists ? "Overwrote" : "Created",
                            a.path.string(), change.added, change.removed,
                            a.coercion_note);
@@ -77,11 +86,16 @@ ToolDef tool_write() {
     ToolDef t;
     t.name = ToolName{std::string{"write"}};
     t.description = "Write (or overwrite) a file with the given contents. "
-                    "Creates parent directories as needed.";
+                    "Creates parent directories as needed. Include a brief "
+                    "`display_description` so the user sees what's being "
+                    "written — e.g. 'Generate nerd-themed landing page'.";
     t.input_schema = json{
         {"type","object"},
         {"required", {"path","content"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI while the "
+                               "file streams. Optional but strongly recommended."}}},
             {"path",    {{"type","string"}}},
             {"content", {{"type","string"}}},
         }},

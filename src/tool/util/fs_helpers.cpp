@@ -1,15 +1,41 @@
 #include "moha/tool/util/fs_helpers.hpp"
 
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#  include <io.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
+#endif
+
 namespace moha::tools::util {
 
 std::string read_file(const fs::path& p) {
+    // Size-then-read: avoid the ifstream→ostringstream→.str() chain, which
+    // double-allocates and copies through the streambuf. One stat, one
+    // malloc, one read. Fallback to streambuf drain if the size isn't known
+    // (e.g. /proc, pipes) — those produce file_size==0 or throw.
+    std::error_code ec;
+    auto sz = fs::file_size(p, ec);
     std::ifstream ifs(p, std::ios::binary);
     if (!ifs) return {};
+    if (!ec && sz > 0) {
+        std::string out;
+        out.resize(sz);
+        ifs.read(out.data(), static_cast<std::streamsize>(sz));
+        if (auto got = ifs.gcount(); static_cast<uintmax_t>(got) != sz)
+            out.resize(static_cast<size_t>(got));
+        return out;
+    }
     std::ostringstream oss; oss << ifs.rdbuf();
     return oss.str();
 }
@@ -21,11 +47,57 @@ std::string write_file(const fs::path& p, std::string_view content) {
         fs::create_directories(parent, ec);
         if (ec) return "failed to create directory '" + parent.string() + "': " + ec.message();
     }
-    std::ofstream ofs(p, std::ios::binary | std::ios::trunc);
-    if (!ofs) return "cannot open '" + p.string() + "' for writing";
-    ofs.write(content.data(), (std::streamsize)content.size());
-    ofs.flush();
-    if (!ofs) return "write to '" + p.string() + "' failed (disk full, locked, or permission denied)";
+    // Drop down to the POSIX/Win32 fd so we can fsync before returning
+    // success. ofstream::flush only empties the libstdc++ streambuf into the
+    // OS — power-loss / crash can still lose the bytes, and on some FUSE
+    // and network filesystems the data isn't readable by the next open until
+    // fsync completes. Tools report "wrote N bytes" *after* the data is safe.
+#ifdef _WIN32
+    int fd = -1;
+    auto s = p.string();
+    if (_sopen_s(&fd, s.c_str(), _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY,
+                 _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0 || fd < 0)
+        return "cannot open '" + p.string() + "' for writing";
+#else
+    int fd = ::open(p.c_str(),
+                    O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return std::string("cannot open '") + p.string() + "' for writing: "
+             + std::strerror(errno);
+#endif
+    const char* data = content.data();
+    size_t remaining = content.size();
+    while (remaining > 0) {
+#ifdef _WIN32
+        int n = _write(fd, data, static_cast<unsigned>(
+            remaining > 0x7fffffff ? 0x7fffffff : remaining));
+#else
+        ssize_t n = ::write(fd, data, remaining);
+        if (n < 0 && errno == EINTR) continue;
+#endif
+        if (n <= 0) {
+            std::string err = std::string("write to '") + p.string()
+                + "' failed: " + std::strerror(errno);
+#ifdef _WIN32
+            _close(fd);
+#else
+            ::close(fd);
+#endif
+            return err;
+        }
+        data += n;
+        remaining -= static_cast<size_t>(n);
+    }
+    // fsync: data is durable before we report success. Ignore errors on
+    // filesystems that don't support it (e.g. /tmp on tmpfs fdatasync is
+    // cheap; /proc returns EINVAL — harmless).
+#ifdef _WIN32
+    (void)_commit(fd);
+    _close(fd);
+#else
+    (void)::fdatasync(fd);
+    ::close(fd);
+#endif
     return {};
 }
 

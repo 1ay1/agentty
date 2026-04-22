@@ -19,6 +19,7 @@ namespace {
 
 struct DiagnosticsArgs {
     std::string command;  // empty means auto-detect
+    std::string display_description;
 };
 
 // Typed detection result — stringly-typed "cmake" / "cargo" would let a
@@ -51,7 +52,10 @@ enum class BuildSystem { None, CMake, Cargo, Go, Node, Make };
 
 std::expected<DiagnosticsArgs, ToolError> parse_diagnostics_args(const json& j) {
     util::ArgReader ar(j);
-    return DiagnosticsArgs{ar.str("command", "")};
+    return DiagnosticsArgs{
+        ar.str("command", ""),
+        ar.str("display_description", ""),
+    };
 }
 
 ExecResult run_diagnostics(const DiagnosticsArgs& a) {
@@ -64,6 +68,8 @@ ExecResult run_diagnostics(const DiagnosticsArgs& a) {
     auto output = auto_argv.empty() ? util::run_command(a.command)
                                     : util::run_argv(auto_argv);
     if (output.empty()) return ToolOutput{"no diagnostics (clean build)", std::nullopt};
+    if (!a.display_description.empty())
+        output = a.display_description + "\n\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -77,6 +83,8 @@ ToolDef tool_diagnostics() {
     t.input_schema = json{
         {"type","object"},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"command", {{"type","string"}, {"description",
                 "Custom build command. If omitted, auto-detects."}}},
         }},

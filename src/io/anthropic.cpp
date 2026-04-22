@@ -230,6 +230,15 @@ void dispatch_event(StreamCtx& ctx, const std::string& name, const std::string& 
             ctx.sink(StreamUsage{0, out});
         }
     } else if (name == "message_stop") {
+        // If the upstream skipped content_block_stop for a tool_use block
+        // (proxy cutoff, etc.), synthesize one so the reducer parses
+        // args_streaming → args before finalize wipes the buffer.
+        if (ctx.in_tool_use) {
+            ctx.sink(StreamToolUseEnd{});
+            ctx.in_tool_use = false;
+            ctx.current_tool_id.clear();
+            ctx.current_tool_name.clear();
+        }
         ctx.sink(StreamFinished{});
         ctx.terminated = true;
     } else if (name == "error") {
@@ -480,6 +489,10 @@ void run_stream_sync(Request req, EventSink sink) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+    // NOSIGNAL: we run on background threads; libcurl's default DNS path
+    // installs a SIGALRM handler that is not thread-safe. Force the
+    // alarm-free code path.
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
     // Stall guard: if the stream delivers fewer than 1 byte/sec for 90 s,

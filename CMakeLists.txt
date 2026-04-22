@@ -85,7 +85,6 @@ FetchContent_Declare(
 # hundreds of small JSON docs per second during streaming. nlohmann is fine
 # for config + cold events; simdjson's ondemand API is 3–5× faster for the
 # "open doc, read two fields, throw away" pattern that dominates here.
-set(SIMDJSON_BUILD_STATIC_LIB ON  CACHE INTERNAL "")
 set(SIMDJSON_DEVELOPER_MODE   OFF CACHE INTERNAL "")
 FetchContent_Declare(
     simdjson
@@ -102,6 +101,16 @@ endif()
 
 # Treat maya's headers as system so its warnings don't surface in moha builds.
 set_target_properties(maya PROPERTIES SYSTEM TRUE)
+
+# Same treatment for simdjson's headers — upstream's `operator "" _padded`
+# trips -Wdeprecated-literal-operator under C++23, and it isn't our bug to
+# fix. SYSTEM suppresses diagnostics from the included headers.
+if(TARGET simdjson)
+    set_target_properties(simdjson PROPERTIES SYSTEM TRUE)
+endif()
+if(TARGET simdjson_static)
+    set_target_properties(simdjson_static PROPERTIES SYSTEM TRUE)
+endif()
 
 find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
@@ -124,6 +133,8 @@ add_executable(moha
     src/tool/util/subprocess.cpp
     src/tool/util/bash_validate.cpp
     src/tool/util/arg_reader.cpp
+    src/tool/util/partial_json.cpp
+    src/tool/util/fuzzy_match.cpp
     src/tool/tools/read.cpp
     src/tool/tools/write.cpp
     src/tool/tools/edit.cpp

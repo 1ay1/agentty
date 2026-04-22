@@ -84,6 +84,15 @@ int count_lines(const std::string& s) {
     return n + (!s.empty() && s.back() != '\n' ? 1 : 0);
 }
 
+// Prepend the model's `display_description` to a card title when set:
+//   "Fix null-deref in auth.cpp  ·  src/auth.cpp"
+// When desc is empty the title is returned unchanged, so callers don't need
+// to branch at the call site.
+std::string with_desc(std::string_view title, const std::string& desc) {
+    if (desc.empty()) return std::string{title};
+    return desc + "  \u00B7  " + std::string{title};
+}
+
 // Seconds spent on this tool call so far. For running tools, "now - started";
 // for finished tools, "finished - started". Returns 0 if started_at is unset
 // (tool still Pending). Called every Tick frame while a tool runs, so the
@@ -305,6 +314,7 @@ Element render_tool_call(const ToolUse& tc) {
 Element render_tool_call_uncached(const ToolUse& tc) {
     auto path = safe_arg(tc.args, "path");
     auto cmd  = safe_arg(tc.args, "command");
+    auto desc = safe_arg(tc.args, "display_description");
 
     bool done = tc.status == ToolUse::Status::Done
              || tc.status == ToolUse::Status::Error
@@ -315,7 +325,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── read ────────────────────────────────────────────────────────
     if (tc.name == "read") {
-        ReadTool rt(path.empty() ? "read" : path);
+        ReadTool rt(with_desc(path.empty() ? "read" : path, desc));
         rt.set_expanded(!done);
         rt.set_start_line(safe_int_arg(tc.args, "offset", 1));
         rt.set_status(map_status<ReadTool>(tc.status,
@@ -333,7 +343,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
     if (tc.name == "list_dir") {
         auto dir = path.empty() ? safe_arg(tc.args, "path") : path;
         if (dir.empty()) dir = ".";
-        ReadTool rt(dir);
+        ReadTool rt(with_desc(dir, desc));
         rt.set_expanded(tc.expanded);
         rt.set_start_line(0);
         rt.set_status(map_status<ReadTool>(tc.status,
@@ -349,21 +359,27 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── write ───────────────────────────────────────────────────────
     if (tc.name == "write") {
+        // The widget puts the description in its title bar and the path on
+        // the first body row, so we pass them separately rather than gluing
+        // them into one truncated header.
+        auto file_path = path.empty() ? std::string{"(no path)"} : path;
         // On error, fall back to the generic card so the failure reason
         // from the tool (permission denied, disk full, etc.) is visible.
         // WriteTool has no error-text surface.
         if (tc.status == ToolUse::Status::Error || tc.status == ToolUse::Status::Rejected) {
             return tool_card("write", ToolCallKind::Edit,
-                path.empty() ? "write" : path, tc.status, tc.expanded, tc.output, elapsed);
+                with_desc(file_path, desc),
+                tc.status, tc.expanded, tc.output, elapsed);
         }
-        WriteTool wt(path.empty() ? "write" : path);
+        WriteTool wt(file_path);
+        if (!desc.empty()) wt.set_description(desc);
         // Auto-expand while the model is still streaming `content` (Pending)
         // or the tool is writing to disk (Running) so the user sees a live
         // preview of the file being produced. Collapses on Done; user can
         // still toggle open via tc.expanded.
         wt.set_expanded(!done || tc.expanded);
         wt.set_content(safe_arg(tc.args, "content"));
-        wt.set_max_preview_lines(4);
+        wt.set_max_preview_lines(6);
         wt.set_status(map_status<WriteTool>(tc.status,
             WriteStatus::Writing, WriteStatus::Failed, WriteStatus::Written));
         wt.set_elapsed(elapsed);
@@ -372,11 +388,12 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── edit ────────────────────────────────────────────────────────
     if (tc.name == "edit") {
+        auto header = with_desc(path.empty() ? std::string{"edit"} : path, desc);
         if (tc.status == ToolUse::Status::Error || tc.status == ToolUse::Status::Rejected) {
             return tool_card("edit", ToolCallKind::Edit,
-                path.empty() ? "edit" : path, tc.status, tc.expanded, tc.output, elapsed);
+                header, tc.status, tc.expanded, tc.output, elapsed);
         }
-        EditTool et(path.empty() ? "edit" : path);
+        EditTool et(header);
         // Auto-expand while streaming old/new strings so a big refactor's
         // progress is visible — same rationale as write.
         et.set_expanded(!done || tc.expanded);
@@ -390,7 +407,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── bash ────────────────────────────────────────────────────────
     if (tc.name == "bash") {
-        BashTool bt(cmd.empty() ? "bash" : cmd);
+        BashTool bt(with_desc(cmd.empty() ? "bash" : cmd, desc));
         bt.set_expanded(tc.expanded);
         bt.set_max_output_lines(5);
         bt.set_status(map_status<BashTool>(tc.status,
@@ -413,7 +430,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
     // ── diagnostics (same style as bash) ────────────────────────────
     if (tc.name == "diagnostics") {
         auto diag_cmd = safe_arg(tc.args, "command");
-        BashTool bt(diag_cmd.empty() ? "diagnostics" : diag_cmd);
+        BashTool bt(with_desc(diag_cmd.empty() ? "diagnostics" : diag_cmd, desc));
         bt.set_expanded(tc.expanded);
         bt.set_max_output_lines(8);
         bt.set_elapsed(elapsed);
@@ -444,7 +461,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
     // ── glob (SearchResult widget) ──────────────────────────────────
     if (tc.name == "glob") {
         auto pattern = safe_arg(tc.args, "pattern");
-        SearchResult sr(SearchKind::Glob, pattern);
+        SearchResult sr(SearchKind::Glob, with_desc(pattern, desc));
         sr.set_expanded(tc.expanded);
         sr.set_status(map_status<SearchResult>(tc.status,
             SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
@@ -466,7 +483,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
     // ── web_fetch (FetchTool widget) ────────────────────────────────
     if (tc.name == "web_fetch") {
         auto url = safe_arg(tc.args, "url");
-        FetchTool ft(url);
+        FetchTool ft(with_desc(url, desc));
         ft.set_expanded(tc.expanded);
         ft.set_max_body_lines(6);
         ft.set_status(map_status<FetchTool>(tc.status,
@@ -499,7 +516,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
     // ── web_search (FetchTool widget, same bordered style) ──────────
     if (tc.name == "web_search") {
         auto query = safe_arg(tc.args, "query");
-        FetchTool ft("search: " + query);
+        FetchTool ft(with_desc("search: " + query, desc));
         ft.set_expanded(tc.expanded);
         ft.set_max_body_lines(8);
         ft.set_status(map_status<FetchTool>(tc.status,
@@ -517,6 +534,7 @@ Element render_tool_call_uncached(const ToolUse& tc) {
         maya::ToolCall::Config cfg;
         cfg.tool_name = "git_status";
         cfg.kind = ToolCallKind::Other;
+        if (!desc.empty()) cfg.description = desc;
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
         card.set_status(tc_status(tc.status));
@@ -559,7 +577,9 @@ Element render_tool_call_uncached(const ToolUse& tc) {
         maya::ToolCall::Config cfg;
         cfg.tool_name = "git_log";
         cfg.kind = ToolCallKind::Other;
-        cfg.description = safe_arg(tc.args, "ref");
+        auto ref = safe_arg(tc.args, "ref");
+        cfg.description = desc.empty() ? ref
+                                       : (ref.empty() ? desc : desc + "  \u00B7  " + ref);
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
         card.set_status(tc_status(tc.status));
@@ -602,14 +622,17 @@ Element render_tool_call_uncached(const ToolUse& tc) {
     if (tc.name == "git_diff") {
         auto ref = safe_arg(tc.args, "ref");
         auto diff_path = safe_arg(tc.args, "path");
-        std::string desc;
-        if (!ref.empty()) desc += ref;
-        if (!diff_path.empty()) { if (!desc.empty()) desc += " "; desc += diff_path; }
+        std::string body;
+        if (!ref.empty()) body += ref;
+        if (!diff_path.empty()) { if (!body.empty()) body += " "; body += diff_path; }
 
         maya::ToolCall::Config cfg;
         cfg.tool_name = "git_diff";
         cfg.kind = ToolCallKind::Other;
-        cfg.description = desc.empty() ? "working tree" : desc;
+        if (!desc.empty())
+            cfg.description = body.empty() ? desc : desc + "  \u00B7  " + body;
+        else
+            cfg.description = body.empty() ? std::string{"working tree"} : body;
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
         card.set_status(tc_status(tc.status));
@@ -624,14 +647,15 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
     // ── git_commit (ToolCall card) ──────────────────────────────────
     if (tc.name == "git_commit") {
+        auto msg = safe_arg(tc.args, "message");
         return tool_card("git_commit", ToolCallKind::Execute,
-            safe_arg(tc.args, "message"), tc.status, tc.expanded, tc.output, elapsed);
+            with_desc(msg, desc), tc.status, tc.expanded, tc.output, elapsed);
     }
 
     // ── todo (ToolCall card) ────────────────────────────────────────
     if (tc.name == "todo") {
         return tool_card("todo", ToolCallKind::Other,
-            "", tc.status, tc.expanded, tc.output, elapsed);
+            desc, tc.status, tc.expanded, tc.output, elapsed);
     }
 
     return tool_card(tc.name.value, ToolCallKind::Other,

@@ -23,6 +23,7 @@ struct TodoItem {
 
 struct TodoArgs {
     std::vector<TodoItem> todos;
+    std::string display_description;
 };
 
 TodoStatus parse_status(std::string_view s) {
@@ -34,6 +35,7 @@ TodoStatus parse_status(std::string_view s) {
 std::expected<TodoArgs, ToolError> parse_todo_args(const json& j) {
     util::ArgReader ar(j);
     TodoArgs out;
+    out.display_description = ar.str("display_description", "");
     const json* raw = ar.raw("todos");
     if (!raw || !raw->is_array()) return out;  // tolerate missing/invalid
     out.todos.reserve(raw->size());
@@ -50,6 +52,8 @@ std::expected<TodoArgs, ToolError> parse_todo_args(const json& j) {
 
 ExecResult run_todo(const TodoArgs& a) {
     std::ostringstream out;
+    if (!a.display_description.empty())
+        out << a.display_description << "\n\n";
     for (const auto& td : a.todos) {
         char mark = td.status == TodoStatus::Completed   ? 'x'
                   : td.status == TodoStatus::InProgress  ? '-'
@@ -69,6 +73,8 @@ ToolDef tool_todo() {
         {"type","object"},
         {"required", {"todos"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"todos", {{"type","array"},
                 {"items", {{"type","object"},
                     {"properties", {

@@ -22,6 +22,7 @@ namespace {
 struct FindDefinitionArgs {
     std::string symbol;
     std::string root;
+    std::string display_description;
 };
 
 std::expected<FindDefinitionArgs, ToolError> parse_find_definition_args(const json& j) {
@@ -29,7 +30,11 @@ std::expected<FindDefinitionArgs, ToolError> parse_find_definition_args(const js
     auto sym_opt = ar.require_str("symbol");
     if (!sym_opt)
         return std::unexpected(ToolError::invalid_args("symbol required"));
-    return FindDefinitionArgs{*std::move(sym_opt), ar.str("path", ".")};
+    return FindDefinitionArgs{
+        *std::move(sym_opt),
+        ar.str("path", "."),
+        ar.str("display_description", ""),
+    };
 }
 
 ExecResult run_find_definition(const FindDefinitionArgs& a) {
@@ -115,7 +120,10 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
     done:
     if (matches == 0) return ToolOutput{"no definitions found for '" + a.symbol + "'", std::nullopt};
     if (matches > 50) out << "[>50 definitions, truncated]\n";
-    return ToolOutput{out.str(), std::nullopt};
+    std::string body = out.str();
+    if (!a.display_description.empty())
+        body = a.display_description + "\n\n" + body;
+    return ToolOutput{std::move(body), std::nullopt};
 }
 
 } // namespace
@@ -130,6 +138,8 @@ ToolDef tool_find_definition() {
         {"type","object"},
         {"required", {"symbol"}},
         {"properties", {
+            {"display_description", {{"type","string"},
+                {"description","One-line summary shown in the UI. Optional."}}},
             {"symbol", {{"type","string"}, {"description","The symbol name to find"}}},
             {"path",   {{"type","string"}, {"description","Directory to search (default: cwd)"}}},
         }},

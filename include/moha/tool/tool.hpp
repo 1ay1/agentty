@@ -36,7 +36,11 @@ struct DynamicDispatch {
                                             const nlohmann::json& args) noexcept {
         const auto* td = tools::find(name);
         if (!td) return std::unexpected(ToolError::not_found("unknown tool: " + std::string{name}));
-        auto safe_args = args.is_object() ? args : nlohmann::json::object();
+        // Avoid copying `args` on the hot path: tools receive an empty object
+        // only when the model emitted a non-object (rare). Use a process-
+        // lifetime empty json so the reference stays valid either way.
+        static const nlohmann::json kEmpty = nlohmann::json::object();
+        const nlohmann::json& safe_args = args.is_object() ? args : kEmpty;
         try {
             return td->execute(safe_args);
         } catch (const std::exception& e) {
