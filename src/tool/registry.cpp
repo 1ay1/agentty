@@ -80,6 +80,104 @@ std::string write_file(const fs::path& p, const std::string& content) {
     return {};
 }
 
+// RFC 3629 UTF-8 validity scan. Returns true if every byte sequence in `s`
+// is a well-formed code point (no overlong, no surrogates, no > U+10FFFF).
+bool is_valid_utf8(std::string_view s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { ++i; continue; }
+        int extra; unsigned char mask; uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else return false;
+        if (i + (size_t)extra >= s.size()) return false;
+        uint32_t cp = c & mask;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = (unsigned char)s[i + (size_t)k];
+            if ((d & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+        i += (size_t)extra + 1;
+    }
+    return true;
+}
+
+// Replace invalid UTF-8 byte sequences with U+FFFD. nlohmann::json throws
+// type_error.316 on any non-UTF-8 byte in a string, so every string we hand
+// the API (tool output in particular) must pass this. Subprocess output on
+// Windows is usually OEM/CP1252 — see to_valid_utf8 below for the decode
+// pass that runs before the scrub.
+std::string sanitize_utf8(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    auto repl = [&]{ out.append("\xEF\xBF\xBD"); };
+    size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = (unsigned char)in[i];
+        if (c < 0x80) { out.push_back((char)c); ++i; continue; }
+        int extra; unsigned char mask; uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else { repl(); ++i; continue; }
+        if (i + (size_t)extra >= in.size()) { repl(); ++i; continue; }
+        uint32_t cp = c & mask;
+        bool ok = true;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = (unsigned char)in[i + (size_t)k];
+            if ((d & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (!ok || cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            repl(); ++i; continue;
+        }
+        out.append(in.data() + i, (size_t)(extra + 1));
+        i += (size_t)extra + 1;
+    }
+    return out;
+}
+
+#ifdef _WIN32
+// Transcode from a Windows code page (OEM console output / CP1252 / etc.) to
+// UTF-8 via the wide-char pivot. Returns empty on any API failure so callers
+// can fall back to the raw bytes + scrub path.
+std::string windows_cp_to_utf8(std::string_view s, UINT cp) {
+    if (s.empty()) return {};
+    int wlen = ::MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), nullptr, 0);
+    if (wlen <= 0) return {};
+    std::wstring w((size_t)wlen, L'\0');
+    ::MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), w.data(), wlen);
+    int u8 = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, nullptr, 0, nullptr, nullptr);
+    if (u8 <= 0) return {};
+    std::string out((size_t)u8, '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), wlen, out.data(), u8, nullptr, nullptr);
+    return out;
+}
+#endif
+
+// Guarantees the returned string is valid UTF-8. On Windows, subprocess
+// output is whatever code page cmd.exe / PowerShell chose for the console —
+// usually OEM (CP437/CP850) or CP1252, rarely UTF-8. We try: accept raw if
+// already valid UTF-8, else transcode from GetConsoleOutputCP(), else from
+// CP_ACP, else scrub invalid bytes to U+FFFD.
+std::string to_valid_utf8(std::string s) {
+    if (is_valid_utf8(s)) return s;
+#ifdef _WIN32
+    if (UINT cp = ::GetConsoleOutputCP(); cp != 0 && cp != CP_UTF8) {
+        auto converted = windows_cp_to_utf8(s, cp);
+        if (!converted.empty() && is_valid_utf8(converted)) return converted;
+    }
+    {
+        auto converted = windows_cp_to_utf8(s, CP_ACP);
+        if (!converted.empty() && is_valid_utf8(converted)) return converted;
+    }
+#endif
+    return sanitize_utf8(s);
+}
+
 // Structured subprocess result. Callers that want human-formatted output
 // (bash tool) build a message per-state (success/fail/timeout/truncated)
 // following Zed's terminal_tool conventions. Callers that just want the
@@ -187,7 +285,7 @@ CmdResult run_win32_cmdline_s(const std::string& cmdline, int max_chars,
     }
     ::CloseHandle(pi.hProcess);
     ::CloseHandle(pi.hThread);
-    r.output = out.str();
+    r.output = to_valid_utf8(out.str());
     return r;
 }
 
@@ -263,7 +361,7 @@ CmdResult run_command_s(const std::string& cmd, int max_chars = 30000,
         }
     }
     int rc = pclose(pipe);
-    r.output = out.str();
+    r.output = to_valid_utf8(out.str());
     // GNU `timeout` exits 124 on timeout, 137 on KILL after grace.
     if (rc == 124 * 256 || rc == 137 * 256) r.timed_out = true;
     else r.exit_code = (rc >> 8) & 0xff;
@@ -318,6 +416,194 @@ std::string run_argv(const std::vector<std::string>& argv,
     return legacy_format(run_argv_s(argv, max_chars, timeout_secs), timeout_secs);
 }
 
+// fnmatch-style glob matcher. Supports `*` (any sequence, incl. empty),
+// `?` (any single char), and `[abc]`/`[a-z]` character classes. Matching is
+// case-insensitive on Windows (cmd.exe semantics — `*.CPP` should find .cpp)
+// and case-sensitive elsewhere. `**` is treated as `*` (no path-spanning);
+// paths are matched against just the filename, not the full path.
+bool glob_match(std::string_view pattern, std::string_view name) {
+    size_t pi = 0, ni = 0, star = std::string_view::npos, match = 0;
+#ifdef _WIN32
+    auto eq = [](char a, char b) {
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        return a == b;
+    };
+#else
+    auto eq = [](char a, char b) { return a == b; };
+#endif
+    while (ni < name.size()) {
+        if (pi < pattern.size() && pattern[pi] == '*') {
+            star = pi++;
+            match = ni;
+            while (pi < pattern.size() && pattern[pi] == '*') pi++;  // collapse **
+        } else if (pi < pattern.size() && pattern[pi] == '?') {
+            pi++; ni++;
+        } else if (pi < pattern.size() && pattern[pi] == '[') {
+            // Character class: [abc] or [a-z], optional leading `!` to negate.
+            size_t close = pattern.find(']', pi + 1);
+            if (close == std::string_view::npos) {
+                if (eq(pattern[pi], name[ni])) { pi++; ni++; }
+                else if (star != std::string_view::npos) { pi = star + 1; ni = ++match; }
+                else return false;
+                continue;
+            }
+            bool neg = pi + 1 < close && pattern[pi + 1] == '!';
+            bool hit = false;
+            size_t j = pi + 1 + (neg ? 1 : 0);
+            while (j < close) {
+                if (j + 2 < close && pattern[j + 1] == '-') {
+                    if (name[ni] >= pattern[j] && name[ni] <= pattern[j + 2]) hit = true;
+                    j += 3;
+                } else {
+                    if (eq(pattern[j], name[ni])) hit = true;
+                    j++;
+                }
+            }
+            if (hit != neg) { pi = close + 1; ni++; }
+            else if (star != std::string_view::npos) { pi = star + 1; ni = ++match; }
+            else return false;
+        } else if (pi < pattern.size() && eq(pattern[pi], name[ni])) {
+            pi++; ni++;
+        } else if (star != std::string_view::npos) {
+            pi = star + 1;
+            ni = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pattern.size() && pattern[pi] == '*') pi++;
+    return pi == pattern.size();
+}
+
+// Zed-style bash guards. The model occasionally tries an interactive command
+// and the TUI ends up stuck on the spinner until timeout — users notice the
+// wait, not the recovery. Fail fast with an explicit hint so the model
+// retries with a non-interactive form (e.g. `git commit -m ...` instead of
+// the interactive editor).
+std::string_view first_token(std::string_view cmd) {
+    size_t i = 0;
+    while (i < cmd.size() && (cmd[i] == ' ' || cmd[i] == '\t')) i++;
+    size_t start = i;
+    while (i < cmd.size() && cmd[i] != ' ' && cmd[i] != '\t'
+           && cmd[i] != '|' && cmd[i] != '&' && cmd[i] != ';') i++;
+    // Strip leading path components so `/usr/bin/vim` is recognized as `vim`.
+    auto tok = cmd.substr(start, i - start);
+    size_t slash = tok.find_last_of("/\\");
+    if (slash != std::string_view::npos) tok.remove_prefix(slash + 1);
+    // Strip .exe on Windows.
+    if (tok.size() > 4
+        && (tok.ends_with(".exe") || tok.ends_with(".EXE")
+            || tok.ends_with(".cmd") || tok.ends_with(".bat")))
+        tok.remove_suffix(4);
+    return tok;
+}
+
+// Returns a non-empty message if the command should be rejected before run.
+std::string validate_bash_command(const std::string& cmd) {
+    auto tok = first_token(cmd);
+    // REPLs & editors that block waiting on stdin or take over the terminal.
+    // Some (python/node) are only interactive when invoked with no args —
+    // accept `python foo.py` but reject `python` alone.
+    static const std::vector<std::string_view> always_interactive = {
+        "vim", "vi", "nvim", "nano", "emacs", "pico", "ed", "joe", "mcedit",
+        "less", "more", "man", "top", "htop", "btop", "tmux", "screen",
+        "mysql", "psql", "sqlite3", "redis-cli", "mongo",
+        "ghci", "ocaml", "irb", "pry", "lua", "tclsh", "gdb", "lldb",
+        "fzf", "dialog", "whiptail",
+    };
+    for (auto name : always_interactive) {
+        if (tok == name)
+            return "refusing to run interactive command '" + std::string{name}
+                 + "' — it would block waiting for stdin. Use a non-interactive "
+                   "alternative (e.g. for editors: use the write/edit tools).";
+    }
+    static const std::vector<std::string_view> interactive_if_bare = {
+        "python", "python3", "node", "deno", "ruby", "php", "iex", "bash",
+        "sh", "zsh", "fish", "pwsh", "powershell", "cmd",
+    };
+    for (auto name : interactive_if_bare) {
+        if (tok != name) continue;
+        // Accept if there is a second token (a script/command after it).
+        auto rest = cmd.substr(cmd.find(tok) + tok.size());
+        bool has_more = false;
+        for (char c : rest) if (c != ' ' && c != '\t' && c != '\n') { has_more = true; break; }
+        if (!has_more)
+            return "refusing to start interactive " + std::string{name}
+                 + " REPL — it would block waiting for stdin. Provide a script "
+                   "path or use `-c \"…\"` to run a snippet.";
+    }
+    // Git sub-commands that open an editor unless given -m/-F/-i-less flags.
+    auto contains_word = [&](std::string_view needle) {
+        size_t p = 0;
+        while ((p = cmd.find(needle, p)) != std::string::npos) {
+            bool left_ok  = p == 0 || cmd[p - 1] == ' ' || cmd[p - 1] == '\t';
+            bool right_ok = p + needle.size() == cmd.size()
+                         || cmd[p + needle.size()] == ' '
+                         || cmd[p + needle.size()] == '\t';
+            if (left_ok && right_ok) return true;
+            p += needle.size();
+        }
+        return false;
+    };
+    if (tok == "git") {
+        if (contains_word("rebase") && contains_word("-i"))
+            return "refusing to run interactive rebase (`git rebase -i`) — the editor "
+                   "would block the agent. Use non-interactive rebase options instead.";
+        if (contains_word("add") && (contains_word("-i") || contains_word("-p")
+                                     || contains_word("--interactive")
+                                     || contains_word("--patch")))
+            return "refusing to run interactive git add — use explicit file paths.";
+        if (contains_word("commit")
+            && !contains_word("-m") && !contains_word("-F")
+            && !contains_word("--message") && !contains_word("--file")
+            && !contains_word("--amend") && !contains_word("-C")
+            && !contains_word("--no-edit"))
+            return "refusing `git commit` without -m/-F — it would open an editor. "
+                   "Pass -m \"<message>\" to commit non-interactively, or use the "
+                   "git_commit tool.";
+    }
+    // Highly destructive patterns. We don't try to be clever about whether
+    // the target is "safe"; we reject and require the user/model to phrase
+    // it more narrowly (e.g. `rm -rf ./build` is fine, `rm -rf /` is not).
+    static const std::vector<std::pair<std::string_view, std::string_view>> danger = {
+        {"rm -rf /",               "refusing wide rm that could wipe the filesystem root"},
+        {"rm -rf /*",              "refusing wide rm that could wipe the filesystem root"},
+        {"rm -rf ~",               "refusing to recursively delete the home directory"},
+        {":(){ :|:& };:",          "fork-bomb pattern refused"},
+        {"mkfs",                   "refusing mkfs — would reformat a filesystem"},
+        {"dd if=",                 "refusing raw `dd` write — can corrupt disks if misdirected"},
+        {"shutdown",               "refusing shutdown"},
+        {"reboot",                 "refusing reboot"},
+        {"git push --force",       "refusing `git push --force`; use --force-with-lease and ask the user first"},
+        {"git push -f",            "refusing `git push -f`; use --force-with-lease and ask the user first"},
+    };
+    for (const auto& [needle, msg] : danger) {
+        if (cmd.find(needle) != std::string::npos) return std::string{msg};
+    }
+    // `curl ... | sh` / `wget ... | sh` — piping an arbitrary script from the
+    // internet into a shell is a common malware vector; reject by default.
+    auto piped_to_shell = [&](std::string_view prog) {
+        size_t p = cmd.find(prog);
+        while (p != std::string::npos) {
+            size_t pipe = cmd.find('|', p);
+            if (pipe == std::string::npos) break;
+            auto rest = cmd.substr(pipe + 1);
+            size_t i = 0;
+            while (i < rest.size() && (rest[i] == ' ' || rest[i] == '|')) i++;
+            auto next = first_token(rest.substr(i));
+            if (next == "sh" || next == "bash" || next == "zsh"
+                || next == "dash" || next == "ksh")
+                return true;
+            p = cmd.find(prog, pipe);
+        }
+        return false;
+    };
+    if (piped_to_shell("curl") || piped_to_shell("wget"))
+        return "refusing `curl|sh` / `wget|sh` — download the script, inspect it, then run explicitly.";
+    return {};
+}
+
 bool should_skip_dir(const std::string& name) {
     static const std::vector<std::string> skip = {
         ".git", "node_modules", "build", "target", "__pycache__",
@@ -365,7 +651,8 @@ ToolDef tool_read() {
         auto p = normalize_path(raw);
         std::error_code ec;
         if (!fs::exists(p, ec))
-            return std::unexpected(ToolError{"file not found: " + p.string()});
+            return std::unexpected(ToolError{"file not found: " + p.string()
+                + ". Run `list_dir` on the parent directory or `glob` by name to verify."});
         if (!fs::is_regular_file(p, ec))
             return std::unexpected(ToolError{"not a regular file: " + p.string()});
         if (is_binary_file(p)) {
@@ -377,7 +664,23 @@ ToolDef tool_read() {
                 << "if you need to inspect it.";
             return std::unexpected(ToolError{msg.str()});
         }
+        // Size cap: reading a huge file blows the model's context and rarely
+        // helps. Ask the model to page via offset/limit instead.
+        constexpr uintmax_t kMaxBytes = 1024u * 1024u;   // 1 MiB
+        uintmax_t sz = fs::file_size(p, ec);
+        if (!ec && sz > kMaxBytes && offset == 1) {
+            std::ostringstream msg;
+            msg << "file is " << (sz / 1024) << " KiB (> 1 MiB cap). "
+                << "Pass offset/limit to page through it — e.g. "
+                << "{\"path\":\"" << p.string() << "\",\"offset\":1,\"limit\":500}, "
+                << "then offset=501, etc. For a structural overview, run "
+                << "`grep` for the symbols you need.";
+            return std::unexpected(ToolError{msg.str()});
+        }
         auto content = read_file(p);
+        int total_lines = 0;
+        for (char c : content) if (c == '\n') ++total_lines;
+        if (!content.empty() && content.back() != '\n') ++total_lines;
         std::istringstream iss(content);
         std::ostringstream out;
         std::string line;
@@ -389,6 +692,19 @@ ToolDef tool_read() {
                 shown++;
             }
             n++;
+        }
+        // Partial-read hint: when the window doesn't cover the whole file, tell
+        // the model what's missing so it can decide to page.
+        if (offset > 1 || shown < total_lines) {
+            std::ostringstream hint;
+            hint << "\n[showing lines " << offset << "-" << (offset + shown - 1)
+                 << " of " << total_lines;
+            int remaining = total_lines - (offset + shown - 1);
+            if (remaining > 0)
+                hint << "; " << remaining << " more — pass offset="
+                     << (offset + shown) << " for the next chunk";
+            hint << "]";
+            return ToolOutput{out.str() + hint.str(), std::nullopt};
         }
         return ToolOutput{out.str(), std::nullopt};
     };
@@ -486,7 +802,8 @@ ToolDef tool_edit() {
         auto p = normalize_path(raw);
         std::error_code ec;
         if (!fs::exists(p, ec))
-            return std::unexpected(ToolError{"file not found: " + p.string()});
+            return std::unexpected(ToolError{"file not found: " + p.string()
+                + ". Run `list_dir` on the parent directory or `glob` by name to verify."});
         if (!fs::is_regular_file(p, ec))
             return std::unexpected(ToolError{"not a regular file: " + p.string()});
         std::string original = read_file(p);
@@ -514,9 +831,31 @@ ToolDef tool_edit() {
                     hint = " (the text exists but whitespace differs — match the exact indentation)";
                 return std::unexpected(ToolError{"old_string not found in " + p.string() + hint});
             }
-            if (updated.find(old_s, pos + 1) != std::string::npos)
-                return std::unexpected(ToolError{"old_string is not unique in " + p.string()
-                    + "; add surrounding context or pass replace_all=true"});
+            if (auto pos2 = updated.find(old_s, pos + 1); pos2 != std::string::npos) {
+                // Ambiguous match — instead of a generic error, name each
+                // occurrence with its line number so the model can pick a
+                // unique surrounding context on the retry.
+                auto line_of = [&](size_t off) {
+                    int n = 1;
+                    for (size_t i = 0; i < off && i < updated.size(); ++i)
+                        if (updated[i] == '\n') n++;
+                    return n;
+                };
+                std::ostringstream msg;
+                msg << "old_string appears multiple times in " << p.string()
+                    << ". Matches at lines: " << line_of(pos);
+                size_t cursor = pos2;
+                int count = 2;
+                while (cursor != std::string::npos && count <= 5) {
+                    msg << ", " << line_of(cursor);
+                    cursor = updated.find(old_s, cursor + 1);
+                    count++;
+                }
+                if (cursor != std::string::npos) msg << ", ...";
+                msg << ". Add surrounding context to make old_string unique, "
+                       "or pass replace_all=true to replace every occurrence.";
+                return std::unexpected(ToolError{msg.str()});
+            }
             updated.replace(pos, old_s.size(), new_s);
         }
         if (original == updated)
@@ -572,9 +911,14 @@ ToolDef tool_bash() {
         std::string cmd = args.value("command", "");
         if (cmd.empty())
             return std::unexpected(ToolError{"command required"});
+        if (auto why = validate_bash_command(cmd); !why.empty())
+            return std::unexpected(ToolError{std::move(why)});
         int timeout = args.value("timeout", 120);
         if (timeout <= 0 || timeout > 600) timeout = 120;
+        auto t0 = std::chrono::steady_clock::now();
         auto r = run_command_s(cmd, 30000, timeout);
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
 
         // Zed-style per-state output. Keeping each state textually distinct
         // helps the model interpret results: success+empty is affirmative
@@ -614,6 +958,16 @@ ToolDef tool_bash() {
         }
         if (r.truncated)
             out << "\n\n[output truncated at 30000 bytes]";
+        // Elapsed time is helpful for the model when planning follow-ups
+        // (e.g. deciding whether to rerun with a narrower filter). Omit for
+        // anything under 500 ms to keep output tidy.
+        if (elapsed_ms >= 500)
+            out << "\n\n[elapsed: "
+                << (elapsed_ms < 10000
+                    ? (std::to_string(elapsed_ms) + " ms")
+                    : (std::to_string(elapsed_ms / 1000) + "."
+                       + std::to_string((elapsed_ms % 1000) / 100) + " s"))
+                << "]";
 
         return ToolOutput{out.str(), std::nullopt};
     };
@@ -679,12 +1033,7 @@ ToolDef tool_grep() {
             if (!it->is_regular_file(ec)) continue;
             if (fn.starts_with(".")) continue;
             auto p = it->path();
-            if (!file_glob.empty()) {
-                auto dot = file_glob.find_last_of('.');
-                if (dot != std::string::npos) {
-                    if (p.extension() != file_glob.substr(dot)) continue;
-                }
-            }
+            if (!file_glob.empty() && !glob_match(file_glob, fn)) continue;
             if (is_binary_file(p)) continue;
             std::ifstream ifs(p);
             if (!ifs) continue;
@@ -703,12 +1052,21 @@ ToolDef tool_grep() {
             if (total_matches >= kMaxScanned) break;
         }
 
-        if (total_matches == 0) return ToolOutput{"No matches found.", std::nullopt};
+        if (total_matches == 0)
+            return ToolOutput{
+                "No matches found. Check the pattern syntax (this is ECMAScript regex, "
+                "not PCRE — no look-behind, no named groups), try a broader pattern, "
+                "or use `glob` first to narrow the file set.", std::nullopt};
 
         // Page = matches [offset, offset+kPerPage). Walk files, emit markdown.
         int shown = 0;
         int skipped = 0;
         std::ostringstream out;
+        out << "Found " << total_matches << " match"
+            << (total_matches == 1 ? "" : "es")
+            << (total_matches == kMaxScanned ? "+" : "")
+            << " across " << files.size()
+            << " file" << (files.size() == 1 ? "" : "s") << ".\n\n";
         for (const auto& [p, fh] : files) {
             // Merge near-adjacent matches so their context windows collapse
             // into a single fenced block (avoids duplicating lines when two
@@ -765,13 +1123,14 @@ ToolDef tool_grep() {
 ToolDef tool_glob() {
     ToolDef t;
     t.name = ToolName{std::string{"glob"}};
-    t.description = "Find files matching a pattern (substring or glob). "
-                    "Returns matching file paths.";
+    t.description = "Find files by glob pattern. Supports `*` (any run), `?` (one char), "
+                    "`[abc]` classes, and bare substrings. Matches against filename "
+                    "(not full path). Case-insensitive on Windows.";
     t.input_schema = json{
         {"type","object"},
         {"required", {"pattern"}},
         {"properties", {
-            {"pattern", {{"type","string"}, {"description","File name pattern to match"}}},
+            {"pattern", {{"type","string"}, {"description","Glob pattern, e.g. *.cpp"}}},
             {"path",    {{"type","string"}, {"description","Root directory (default: cwd)"}}},
         }},
     };
@@ -779,6 +1138,12 @@ ToolDef tool_glob() {
     t.execute = [](const json& args) -> ExecResult {
         std::string pat = args.value("pattern", "");
         std::string root = args.value("path", ".");
+        if (pat.empty()) return std::unexpected(ToolError{"pattern required"});
+        // If the pattern has no glob metacharacters, fall back to substring
+        // matching. The model often types `foo.cpp` intending "find anything
+        // named that"; forcing it to write `*foo.cpp*` would be annoying.
+        bool has_glob = pat.find_first_of("*?[") != std::string::npos;
+
         std::ostringstream out;
         int n = 0;
         std::error_code ec;
@@ -792,14 +1157,18 @@ ToolDef tool_glob() {
                 continue;
             }
             if (!it->is_regular_file(ec)) continue;
-            auto s = it->path().string();
-            if (s.find(pat) != std::string::npos) {
-                out << s << "\n";
+            bool hit = has_glob ? glob_match(pat, fn) : fn.find(pat) != std::string::npos;
+            if (hit) {
+                out << it->path().string() << "\n";
                 if (++n > 500) { out << "[>500, truncated]\n"; break; }
             }
         }
-        if (n == 0) return ToolOutput{"no matches", std::nullopt};
-        return ToolOutput{out.str(), std::nullopt};
+        if (n == 0)
+            return ToolOutput{"no matches. Try a different pattern, or `list_dir` "
+                              "on parent directories to see what exists.",
+                              std::nullopt};
+        return ToolOutput{"Found " + std::to_string(n) + " file(s):\n" + out.str(),
+                          std::nullopt};
     };
     return t;
 }

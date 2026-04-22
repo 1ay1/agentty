@@ -227,6 +227,7 @@ void apply_tool_output(Model& m, const ToolCallId& id, std::string&& output, boo
             if (tc.id == id) {
                 tc.output = std::move(output);
                 tc.status = error ? ToolUse::Status::Error : ToolUse::Status::Done;
+                tc.finished_at = std::chrono::steady_clock::now();
             }
 }
 
@@ -431,10 +432,12 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 for (auto& tc : msg_.tool_calls)
                     if (tc.id == id) {
                         tc.status = ToolUse::Status::Running;
+                        tc.started_at = std::chrono::steady_clock::now();
                         cmds.push_back(cmd::run_tool(tc.id, tc.name, tc.args));
                     }
             m.pending_permission.reset();
             m.stream.phase = Phase::ExecutingTool;
+            m.stream.active = true;  // keep Tick alive for live elapsed counter
             return {std::move(m), Cmd<Msg>::batch(std::move(cmds))};
         },
         [&](PermissionReject) -> Step {

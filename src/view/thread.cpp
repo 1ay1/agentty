@@ -84,15 +84,94 @@ int count_lines(const std::string& s) {
     return n + (!s.empty() && s.back() != '\n' ? 1 : 0);
 }
 
+// Seconds spent on this tool call so far. For running tools, "now - started";
+// for finished tools, "finished - started". Returns 0 if started_at is unset
+// (tool still Pending). Called every Tick frame while a tool runs, so the
+// elapsed counter on the card updates live (~30 fps).
+float tool_elapsed(const ToolUse& tc) {
+    auto zero = std::chrono::steady_clock::time_point{};
+    if (tc.started_at == zero) return 0.0f;
+    auto end = tc.finished_at == zero
+        ? std::chrono::steady_clock::now()
+        : tc.finished_at;
+    auto dt = end - tc.started_at;
+    return std::chrono::duration<float>(dt).count();
+}
+
+// Tool output from `bash` wraps the captured stdout+stderr in a ```…``` fence
+// (so the raw bytes come back to the model inside a markdown code block, and
+// the model sees an unambiguous "this is the literal output" boundary). The
+// BashTool widget has its own monospace frame, so the fence chars would be
+// rendered verbatim ("```" floating at the top of every card). Strip them —
+// along with the elapsed/truncation trailers that follow — so the widget
+// shows just the inner payload. Keep the raw, fenced string in tc.output
+// for the model; only the view gets the stripped version.
+std::string strip_bash_output_fence(const std::string& s) {
+    std::string_view sv{s};
+    // Trailing metadata lines we emit after the closing fence — drop them
+    // first so the "```" we look for below actually ends the block.
+    auto drop_trailer = [&](std::string_view marker) {
+        auto pos = sv.rfind(marker);
+        if (pos != std::string_view::npos) sv = sv.substr(0, pos);
+        while (!sv.empty() && (sv.back() == '\n' || sv.back() == '\r'
+                               || sv.back() == ' '  || sv.back() == '\t'))
+            sv.remove_suffix(1);
+    };
+    drop_trailer("\n\n[elapsed:");
+    drop_trailer("\n\n[output truncated");
+
+    auto fence = sv.find("```");
+    if (fence == std::string_view::npos) return std::string{sv};
+    // Allow a leading "Command …\n\n" header before the fence — the failure
+    // and timeout branches put one there.
+    auto body_start = fence + 3;
+    // Skip a language tag (we don't emit one, but be forgiving) and the
+    // newline after the opening fence.
+    while (body_start < sv.size() && sv[body_start] != '\n') ++body_start;
+    if (body_start < sv.size() && sv[body_start] == '\n') ++body_start;
+
+    auto close = sv.rfind("```");
+    if (close == std::string_view::npos || close <= body_start)
+        return std::string{sv.substr(body_start)};
+
+    auto body_end = close;
+    while (body_end > body_start
+           && (sv[body_end - 1] == '\n' || sv[body_end - 1] == '\r'))
+        --body_end;
+
+    std::string header{sv.substr(0, fence)};
+    while (!header.empty() && (header.back() == '\n' || header.back() == '\r'
+                               || header.back() == ' '))
+        header.pop_back();
+    std::string body{sv.substr(body_start, body_end - body_start)};
+    if (header.empty()) return body;
+    if (body.empty()) return header;
+    return header + "\n\n" + body;
+}
+
 int parse_exit_code(const std::string& output) {
-    auto pos = output.rfind("[exit code ");
-    if (pos == std::string::npos) return 0;
-    try { return std::stoi(output.substr(pos + 11)); } catch(...) { return 1; }
+    // Recognize both formats: the "[exit code N]" suffix from legacy_format
+    // (used by diagnostics/git) and the "failed with exit code N" clause from
+    // the Zed-style bash formatter. Whichever appears, pull the integer.
+    struct Marker { const char* text; size_t skip; };
+    static constexpr Marker markers[] = {
+        {"failed with exit code ", 22},
+        {"[exit code ",            11},
+    };
+    for (const auto& m : markers) {
+        auto pos = output.rfind(m.text);
+        if (pos == std::string::npos) continue;
+        try { return std::stoi(output.substr(pos + m.skip)); }
+        catch (...) { return 1; }
+    }
+    if (output.find("timed out") != std::string::npos) return 124;
+    return 0;
 }
 
 Element tool_card(const std::string& name, ToolCallKind kind,
                   const std::string& desc, ToolUse::Status status,
-                  bool expanded, const std::string& output) {
+                  bool expanded, const std::string& output,
+                  float elapsed = 0.0f) {
     maya::ToolCall::Config cfg;
     cfg.tool_name = name;
     cfg.kind = kind;
@@ -100,6 +179,7 @@ Element tool_card(const std::string& name, ToolCallKind kind,
     maya::ToolCall card(cfg);
     card.set_expanded(expanded);
     card.set_status(tc_status(status));
+    card.set_elapsed(elapsed);
     if (!output.empty())
         card.set_content(text(output, fg_of(muted)));
     return card.build();
@@ -111,14 +191,65 @@ Element parse_grep_result(const ToolUse& tc, const std::string& pattern, bool co
     sr.set_max_matches_per_file(2);
     sr.set_status(map_status<SearchResult>(tc.status,
         SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
-    if (!tc.output.empty() && tc.status == ToolUse::Status::Done
-        && tc.output != "no matches") {
-        SearchFileGroup current_group;
-        std::istringstream iss(tc.output);
-        std::string line;
-        int total_groups = 0;
-        while (std::getline(iss, line)) {
-            if (line.starts_with("[>")) break;
+    sr.set_elapsed(tool_elapsed(tc));
+    if (tc.output.empty() || tc.status != ToolUse::Status::Done
+        || tc.output.starts_with("No matches")) {
+        return sr.build();
+    }
+
+    SearchFileGroup current_group;
+    int total_groups = 0;
+    auto flush = [&](SearchFileGroup& g) {
+        if (!g.file_path.empty()) {
+            sr.add_group(std::move(g));
+            total_groups++;
+            g = SearchFileGroup{};
+        }
+    };
+
+    // Markdown format (new):
+    //   ## Matches in {path}
+    //   ### L{s}-{e}
+    //   ```
+    //   {context lines}
+    //   ```
+    // Legacy format (from find_definition which still uses path:line:content):
+    //   {path}:{line}:{content}
+    std::istringstream iss(tc.output);
+    std::string line;
+    int range_start = 0, range_end = 0;
+    bool in_code = false;
+    int code_line_no = 0;
+    while (std::getline(iss, line)) {
+        if (line.starts_with("## Matches in ")) {
+            flush(current_group);
+            if (total_groups >= 10) break;
+            auto path = line.substr(14);
+            if (path.starts_with("./")) path = path.substr(2);
+            current_group = SearchFileGroup{std::move(path), {}};
+            in_code = false;
+            continue;
+        }
+        if (line.starts_with("### L")) {
+            auto dash = line.find('-', 5);
+            try {
+                range_start = std::stoi(line.substr(5, dash - 5));
+                range_end = dash != std::string::npos
+                    ? std::stoi(line.substr(dash + 1)) : range_start;
+            } catch (...) { range_start = range_end = 0; }
+            continue;
+        }
+        if (line == "```") {
+            if (!in_code) { in_code = true; code_line_no = range_start; }
+            else          { in_code = false; }
+            continue;
+        }
+        if (in_code && !current_group.file_path.empty()) {
+            current_group.matches.push_back({code_line_no++, line});
+            continue;
+        }
+        // Legacy fallback: path:line:content (find_definition still uses this).
+        if (!in_code) {
             auto c1 = line.find(':');
             if (c1 == std::string::npos) continue;
             auto c2 = line.find(':', c1 + 1);
@@ -131,17 +262,14 @@ Element parse_grep_result(const ToolUse& tc, const std::string& pattern, bool co
             while (!content.empty() && (content.front() == ' ' || content.front() == '\t'))
                 content.erase(content.begin());
             if (current_group.file_path != file) {
-                if (!current_group.file_path.empty()) {
-                    sr.add_group(std::move(current_group));
-                    if (++total_groups >= 10) break;
-                }
+                flush(current_group);
+                if (total_groups >= 10) break;
                 current_group = SearchFileGroup{file, {}};
             }
             current_group.matches.push_back({lineno, content});
         }
-        if (!current_group.file_path.empty())
-            sr.add_group(std::move(current_group));
     }
+    flush(current_group);
     return sr.build();
 }
 
@@ -159,6 +287,9 @@ Element render_tool_call(const ToolUse& tc) {
              || tc.status == ToolUse::Status::Error
              || tc.status == ToolUse::Status::Rejected;
 
+    // Live elapsed — grows each frame while Running, freezes on terminal status.
+    float elapsed = tool_elapsed(tc);
+
     // ── read ────────────────────────────────────────────────────────
     if (tc.name == "read") {
         ReadTool rt(path.empty() ? "read" : path);
@@ -166,6 +297,7 @@ Element render_tool_call(const ToolUse& tc) {
         rt.set_start_line(safe_int_arg(tc.args, "offset", 1));
         rt.set_status(map_status<ReadTool>(tc.status,
             ReadStatus::Reading, ReadStatus::Failed, ReadStatus::Success));
+        rt.set_elapsed(elapsed);
         if (done) {
             rt.set_content(tc.output);
             rt.set_total_lines(count_lines(tc.output));
@@ -183,6 +315,7 @@ Element render_tool_call(const ToolUse& tc) {
         rt.set_start_line(0);
         rt.set_status(map_status<ReadTool>(tc.status,
             ReadStatus::Reading, ReadStatus::Failed, ReadStatus::Success));
+        rt.set_elapsed(elapsed);
         if (!tc.output.empty()) {
             rt.set_content(tc.output);
             rt.set_total_lines(count_lines(tc.output));
@@ -198,7 +331,7 @@ Element render_tool_call(const ToolUse& tc) {
         // WriteTool has no error-text surface.
         if (tc.status == ToolUse::Status::Error || tc.status == ToolUse::Status::Rejected) {
             return tool_card("write", ToolCallKind::Edit,
-                path.empty() ? "write" : path, tc.status, tc.expanded, tc.output);
+                path.empty() ? "write" : path, tc.status, tc.expanded, tc.output, elapsed);
         }
         WriteTool wt(path.empty() ? "write" : path);
         wt.set_expanded(tc.expanded);
@@ -206,6 +339,7 @@ Element render_tool_call(const ToolUse& tc) {
         wt.set_max_preview_lines(4);
         wt.set_status(map_status<WriteTool>(tc.status,
             WriteStatus::Writing, WriteStatus::Failed, WriteStatus::Written));
+        wt.set_elapsed(elapsed);
         return wt.build();
     }
 
@@ -213,7 +347,7 @@ Element render_tool_call(const ToolUse& tc) {
     if (tc.name == "edit") {
         if (tc.status == ToolUse::Status::Error || tc.status == ToolUse::Status::Rejected) {
             return tool_card("edit", ToolCallKind::Edit,
-                path.empty() ? "edit" : path, tc.status, tc.expanded, tc.output);
+                path.empty() ? "edit" : path, tc.status, tc.expanded, tc.output, elapsed);
         }
         EditTool et(path.empty() ? "edit" : path);
         et.set_expanded(tc.expanded);
@@ -221,6 +355,7 @@ Element render_tool_call(const ToolUse& tc) {
         et.set_new_text(safe_arg(tc.args, "new_string"));
         et.set_status(map_status<EditTool>(tc.status,
             EditStatus::Applying, EditStatus::Failed, EditStatus::Applied));
+        et.set_elapsed(elapsed);
         return et.build();
     }
 
@@ -231,11 +366,12 @@ Element render_tool_call(const ToolUse& tc) {
         bt.set_max_output_lines(5);
         bt.set_status(map_status<BashTool>(tc.status,
             BashStatus::Running, BashStatus::Failed, BashStatus::Success));
+        bt.set_elapsed(elapsed);
         if (done) {
             int rc = parse_exit_code(tc.output);
             bt.set_exit_code(rc);
             if (rc != 0) bt.set_status(BashStatus::Failed);
-            bt.set_output(tc.output);
+            bt.set_output(strip_bash_output_fence(tc.output));
         }
         return bt.build();
     }
@@ -246,11 +382,12 @@ Element render_tool_call(const ToolUse& tc) {
         BashTool bt(diag_cmd.empty() ? "diagnostics" : diag_cmd);
         bt.set_expanded(tc.expanded);
         bt.set_max_output_lines(8);
+        bt.set_elapsed(elapsed);
         if (done) {
             int rc = parse_exit_code(tc.output);
             bt.set_exit_code(rc);
             bt.set_status(rc == 0 ? BashStatus::Success : BashStatus::Failed);
-            bt.set_output(tc.output);
+            bt.set_output(strip_bash_output_fence(tc.output));
         } else {
             bt.set_status(map_status<BashTool>(tc.status,
                 BashStatus::Running, BashStatus::Failed, BashStatus::Success));
@@ -274,6 +411,7 @@ Element render_tool_call(const ToolUse& tc) {
         sr.set_expanded(tc.expanded);
         sr.set_status(map_status<SearchResult>(tc.status,
             SearchStatus::Searching, SearchStatus::Failed, SearchStatus::Done));
+        sr.set_elapsed(elapsed);
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done
             && tc.output != "no matches") {
             SearchFileGroup group{"", {}};
@@ -296,6 +434,7 @@ Element render_tool_call(const ToolUse& tc) {
         ft.set_max_body_lines(6);
         ft.set_status(map_status<FetchTool>(tc.status,
             FetchStatus::Fetching, FetchStatus::Failed, FetchStatus::Done));
+        ft.set_elapsed(elapsed);
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
             auto first_nl = tc.output.find('\n');
             if (first_nl != std::string::npos) {
@@ -328,6 +467,7 @@ Element render_tool_call(const ToolUse& tc) {
         ft.set_max_body_lines(8);
         ft.set_status(map_status<FetchTool>(tc.status,
             FetchStatus::Fetching, FetchStatus::Failed, FetchStatus::Done));
+        ft.set_elapsed(elapsed);
         if (!tc.output.empty()) {
             ft.set_status_code(200);
             ft.set_body(tc.output);
@@ -343,6 +483,7 @@ Element render_tool_call(const ToolUse& tc) {
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
         card.set_status(tc_status(tc.status));
+        card.set_elapsed(elapsed);
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
             GitStatusWidget gs;
             gs.set_compact(false);
@@ -385,6 +526,7 @@ Element render_tool_call(const ToolUse& tc) {
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
         card.set_status(tc_status(tc.status));
+        card.set_elapsed(elapsed);
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done) {
             GitGraph gg;
             gg.set_show_hash(true);
@@ -434,6 +576,7 @@ Element render_tool_call(const ToolUse& tc) {
         maya::ToolCall card(cfg);
         card.set_expanded(tc.expanded);
         card.set_status(tc_status(tc.status));
+        card.set_elapsed(elapsed);
         if (!tc.output.empty() && tc.status == ToolUse::Status::Done
             && tc.output != "no changes") {
             DiffView dv("", tc.output);
@@ -445,18 +588,18 @@ Element render_tool_call(const ToolUse& tc) {
     // ── git_commit (ToolCall card) ──────────────────────────────────
     if (tc.name == "git_commit") {
         return tool_card("git_commit", ToolCallKind::Execute,
-            safe_arg(tc.args, "message"), tc.status, tc.expanded, tc.output);
+            safe_arg(tc.args, "message"), tc.status, tc.expanded, tc.output, elapsed);
     }
 
     // ── todo (ToolCall card) ────────────────────────────────────────
     if (tc.name == "todo") {
         return tool_card("todo", ToolCallKind::Other,
-            "", tc.status, tc.expanded, tc.output);
+            "", tc.status, tc.expanded, tc.output, elapsed);
     }
 
     return tool_card(tc.name.value, ToolCallKind::Other,
         tc.args.is_object() && !tc.args.empty() ? tc.args_dump() : "",
-        tc.status, tc.expanded, tc.output);
+        tc.status, tc.expanded, tc.output, elapsed);
 }
 
 // ════════════════════════════════════════════════════════════════════════

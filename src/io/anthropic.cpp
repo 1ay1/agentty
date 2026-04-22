@@ -16,6 +16,46 @@
 namespace moha::anthropic {
 
 namespace {
+
+// Belt-and-suspenders UTF-8 scrubber. Registry already converts subprocess
+// output at the capture boundary (GetConsoleOutputCP / CP_ACP pivot), but
+// any string that reaches json::dump() must be valid UTF-8 or the API call
+// dies with `type_error.316`. Cheap to run on already-valid strings, and
+// guards future call sites that assemble tool output from multiple pieces
+// (e.g. error suffix + partial output) where a byte boundary could split a
+// UTF-8 sequence. Replaces invalid byte runs with U+FFFD.
+std::string scrub_utf8(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    auto repl = [&]{ out.append("\xEF\xBF\xBD"); };
+    size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = (unsigned char)in[i];
+        if (c < 0x80) { out.push_back((char)c); ++i; continue; }
+        int extra; unsigned char mask; uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else { repl(); ++i; continue; }
+        if (i + (size_t)extra >= in.size()) { repl(); ++i; continue; }
+        uint32_t cp = c & mask;
+        bool ok = true;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = (unsigned char)in[i + (size_t)k];
+            if ((d & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (!ok || cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            repl(); ++i; continue;
+        }
+        out.append(in.data() + i, (size_t)(extra + 1));
+        i += (size_t)extra + 1;
+    }
+    return out;
+}
+} // namespace
+
+namespace {
 // Env-var-gated request/SSE dump. Set MOHA_DEBUG_API=1 to write to
 // $MOHA_DEBUG_FILE (or ./moha-api.log). Appends, never truncates.
 FILE* debug_log() {
@@ -185,7 +225,7 @@ json build_messages(const Thread& t) {
         jm["role"] = (m.role == Role::User) ? "user" : "assistant";
         json content = json::array();
         if (!m.text.empty()) {
-            content.push_back({{"type", "text"}, {"text", m.text}});
+            content.push_back({{"type", "text"}, {"text", scrub_utf8(m.text)}});
         }
         for (const auto& tc : m.tool_calls) {
             if (m.role == Role::Assistant) {
@@ -215,7 +255,9 @@ json build_messages(const Thread& t) {
                     results.push_back({
                         {"type", "tool_result"},
                         {"tool_use_id", tc.id.value},
-                        {"content", tc.output.empty() ? "(no output)" : tc.output},
+                        {"content", tc.output.empty()
+                            ? std::string{"(no output)"}
+                            : scrub_utf8(tc.output)},
                         {"is_error", tc.status == ToolUse::Status::Error ||
                                      tc.status == ToolUse::Status::Rejected},
                     });

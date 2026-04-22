@@ -110,6 +110,13 @@ struct ToolUse {
     std::string    output;
     Status         status   = Status::Pending;
     bool           expanded = true;
+    // Wall-clock stamps for progress reporting. `started_at` is set when the
+    // tool transitions from Pending/Approved to Running so the view can show
+    // live "3.2s" elapsed on the card; `finished_at` is set when terminal.
+    // steady_clock (not system_clock) so a user changing the system clock
+    // mid-execution doesn't produce negative elapsed times.
+    std::chrono::steady_clock::time_point started_at {};
+    std::chrono::steady_clock::time_point finished_at {};
 
     // Lazy cache of args.dump() for the view. args.dump() is O(args) per call
     // and showed up in per-frame views (thread/permission cards) for tools

@@ -89,8 +89,14 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             }
             if (!needs_perm) {
                 tc.status = ToolUse::Status::Running;
+                tc.started_at = std::chrono::steady_clock::now();
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
                 m.stream.phase = Phase::ExecutingTool;
+                // Keep the Tick subscription alive during tool execution so
+                // the spinner advances and the view can show live elapsed
+                // time — without this the UI looks frozen on long-running
+                // bash commands, and users think moha has hung.
+                m.stream.active = true;
                 any_pending = true;
             }
         } else if (tc.status == ToolUse::Status::Running) {
@@ -117,6 +123,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             cmds.push_back(launch_stream(m));
         } else {
             m.stream.phase = Phase::Idle;
+            m.stream.active = false;  // stop the Tick subscription at rest
         }
     }
     return Cmd<Msg>::batch(std::move(cmds));
