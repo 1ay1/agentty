@@ -298,11 +298,17 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // stays armed, the user sees the countdown / can Esc.
                 m.s.phase = phase::Streaming{};
                 m.s.retry_pending = true;     // dedupes follow-up StreamErrors
-                // Drop the in-progress assistant message so the retry
-                // doesn't leave a half-formed turn (with an orphan
-                // Pending tool call) in the thread. The new stream will
-                // append a fresh placeholder and the model will re-emit.
+                // Replace the half-formed turn with a fresh placeholder.
+                // launch_stream's contract is "caller has appended an
+                // Assistant placeholder" — every stream-event handler
+                // checks `back().role == Assistant` and silently drops
+                // events otherwise. Without this swap, the retry stream
+                // fires into a User-tail thread, every event is dropped,
+                // and the user stares at a permanently-blank turn.
                 if (last) m.d.current.messages.pop_back();
+                Message placeholder;
+                placeholder.role = Role::Assistant;
+                m.d.current.messages.push_back(std::move(placeholder));
                 return {std::move(m),
                     Cmd<Msg>::after(std::chrono::milliseconds(delay),
                                     Msg{RetryStream{}})};
