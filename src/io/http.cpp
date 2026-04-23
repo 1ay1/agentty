@@ -898,44 +898,127 @@ acquire_or_dial(Pool& pool, const Endpoint& ep, Timeouts tos, CancelTokenPtr can
     return dial_new(ep, tos, std::move(cancel));
 }
 
+// -----------------------------------------------------------------------
+// Transparent retry policy.
+// -----------------------------------------------------------------------
+// The pool's three-stage liveness check (TTL, nghttp2, socket peek) catches
+// most stale entries at acquire time, but a connection can still die in the
+// window between "looked alive" and "first SSL_write" — proxies routinely
+// kill idle h2 conns at odd intervals, and a TCP FIN can arrive a few ms
+// after the peek. Surface that as `http: h2: socket hangup` in the UI is
+// user-hostile; the right behaviour is to quietly re-dial and try again.
+//
+// We only retry when the caller has observed *nothing*: no response :status,
+// no on_headers callback, no on_chunk bytes. Once any of those have fired,
+// the stream is semantically committed — retrying would duplicate SSE
+// events or give the reducer a second set of tool calls.
+//
+// 3 attempts × small linear backoff gives a hard ceiling of ~300 ms extra
+// latency on pathological cases. One attempt is enough for stale-pool; two
+// rides out a transient DNS/TLS blip; three is slack.
+constexpr int kMaxAttempts = 3;
+
+static bool is_cancelled(const CancelTokenPtr& c) {
+    return c && c->is_cancelled();
+}
+
+// Backoff between attempts. Attempt 0 → no wait (fastest path for the common
+// stale-pool case). Attempt N → 100*N ms. Cancellable: returns false if the
+// token trips during the wait so the caller bails without another attempt.
+static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
+    if (attempt <= 0) return true;
+    auto budget = std::chrono::milliseconds(100 * attempt);
+    auto end = clock_t_::now() + budget;
+    while (clock_t_::now() < end) {
+        if (is_cancelled(cancel)) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return true;
+}
+
 std::expected<Response, std::string>
 Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port };
-    auto conn_or = acquire_or_dial(impl_->pool, ep, tos, cancel);
-    if (!conn_or) return std::unexpected(conn_or.error());
-    auto conn = std::move(*conn_or);
+    std::string last_err = "send: no attempts made";
 
-    StreamCtx sctx{};
-    auto ok = conn->run(req, sctx, tos, std::move(cancel));
-    if (ok) impl_->pool.release(std::move(conn));
-    if (!ok) return std::unexpected(ok.error());
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (is_cancelled(cancel)) return std::unexpected("cancelled");
+        if (!backoff_sleep(attempt, cancel))
+            return std::unexpected("cancelled");
 
-    return Response{ sctx.status, std::move(sctx.headers),
-                     std::move(sctx.buffered_body) };
+        // First attempt pulls from the pool; subsequent attempts dial fresh —
+        // if the pool handed us a corpse once, it'll probably hand us another.
+        auto conn_or = (attempt == 0)
+            ? acquire_or_dial(impl_->pool, ep, tos, cancel)
+            : dial_new(ep, tos, cancel);
+        if (!conn_or) { last_err = conn_or.error(); continue; }
+        auto conn = std::move(*conn_or);
+
+        StreamCtx sctx{};
+        auto ok = conn->run(req, sctx, tos, cancel);
+        if (ok) {
+            impl_->pool.release(std::move(conn));
+            return Response{ sctx.status, std::move(sctx.headers),
+                             std::move(sctx.buffered_body) };
+        }
+        last_err = ok.error();
+
+        // If the server actually produced a :status, the request reached
+        // application level — the failure is semantic (500, timeout mid-body),
+        // not transport, and retrying the POST would duplicate side effects.
+        if (sctx.status != 0) break;
+        if (is_cancelled(cancel)) break;
+    }
+
+    return std::unexpected(last_err);
 }
 
 std::expected<void, std::string>
 Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
                CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port };
-    auto conn_or = acquire_or_dial(impl_->pool, ep, tos, cancel);
-    if (!conn_or) return std::unexpected(conn_or.error());
-    auto conn = std::move(*conn_or);
+    std::string last_err = "stream: no attempts made";
+    // Persist across attempts so the synthesised on_headers (if we never got
+    // a real one) carries whatever metadata the *last* attempt did collect.
+    int     last_status  = 0;
+    Headers last_headers;
+    bool    any_bytes    = false;   // true once a chunk / header reaches caller
 
-    StreamCtx sctx{};
-    sctx.handler = &handler;
-    auto ok = conn->run(req, sctx, tos, std::move(cancel));
-    if (ok) impl_->pool.release(std::move(conn));
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (is_cancelled(cancel)) { last_err = "cancelled"; break; }
+        if (!backoff_sleep(attempt, cancel)) { last_err = "cancelled"; break; }
 
-    // If the caller never got a headers callback (e.g. stream failed before
-    // the status line arrived), synthesise one so the caller isn't left
-    // waiting for a signal that won't come.
-    if (!sctx.headers_delivered && handler.on_headers) {
-        handler.on_headers(sctx.status, sctx.headers);
+        auto conn_or = (attempt == 0)
+            ? acquire_or_dial(impl_->pool, ep, tos, cancel)
+            : dial_new(ep, tos, cancel);
+        if (!conn_or) { last_err = conn_or.error(); continue; }
+        auto conn = std::move(*conn_or);
+
+        StreamCtx sctx{};
+        sctx.handler = &handler;
+        auto ok = conn->run(req, sctx, tos, cancel);
+        if (sctx.headers_delivered) any_bytes = true;
+        last_status  = sctx.status;
+        last_headers = std::move(sctx.headers);
+        if (ok) {
+            impl_->pool.release(std::move(conn));
+            return {};
+        }
+        last_err = ok.error();
+
+        // Once we've started delivering data to the caller, the stream is
+        // committed — retrying would produce duplicate SSE events and a
+        // second pass at the reducer's tool_use state machine.
+        if (any_bytes) break;
+        if (is_cancelled(cancel)) break;
     }
 
-    if (!ok) return std::unexpected(ok.error());
-    return {};
+    // If we never got headers, synthesise one so the caller's on_headers
+    // contract ("fires at least once") still holds.
+    if (!any_bytes && handler.on_headers) {
+        handler.on_headers(last_status, last_headers);
+    }
+    return std::unexpected(last_err);
 }
 
 void Client::prewarm(std::string host, uint16_t port) {

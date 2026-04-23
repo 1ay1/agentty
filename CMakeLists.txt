@@ -148,6 +148,25 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(nlohmann_json simdjson)
 
+# Mark third-party headers SYSTEM so their warnings don't pollute our build.
+# nlohmann_json v3.11.3's binary_writer.hpp uses std::is_trivial which GCC 15
+# deprecates under C++26 — the upstream fix is on master but unreleased, and we
+# don't want every TU that includes <nlohmann/json.hpp> to re-emit the warning.
+if(TARGET nlohmann_json)
+    get_target_property(_nj_iface nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+    if(_nj_iface)
+        set_target_properties(nlohmann_json PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_nj_iface}")
+    endif()
+endif()
+if(TARGET simdjson)
+    get_target_property(_sj_iface simdjson INTERFACE_INCLUDE_DIRECTORIES)
+    if(_sj_iface)
+        set_target_properties(simdjson PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_sj_iface}")
+    endif()
+endif()
+
 if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
 endif()
