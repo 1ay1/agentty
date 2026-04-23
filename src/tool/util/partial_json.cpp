@@ -185,12 +185,19 @@ sniff_string(std::string_view raw, std::string_view key) {
     return std::nullopt;
 }
 
-std::optional<std::string>
-sniff_string_progressive(std::string_view raw, std::string_view key) {
+std::optional<std::size_t>
+locate_string_value(std::string_view raw, std::string_view key) {
     std::size_t p = sniff_prefix(raw, key);
     if (p == std::string_view::npos) return std::nullopt;
+    return p;
+}
+
+std::string
+decode_string_from(std::string_view raw, std::size_t offset) {
     std::string out;
-    out.reserve(256);
+    if (offset >= raw.size()) return out;
+    out.reserve(raw.size() - offset);
+    std::size_t p = offset;
     while (p < raw.size()) {
         char c = raw[p];
         if (c == '\\') {
@@ -205,6 +212,13 @@ sniff_string_progressive(std::string_view raw, std::string_view key) {
         }
     }
     return out;
+}
+
+std::optional<std::string>
+sniff_string_progressive(std::string_view raw, std::string_view key) {
+    auto off = locate_string_value(raw, key);
+    if (!off) return std::nullopt;
+    return decode_string_from(raw, *off);
 }
 
 } // namespace moha::tools::util

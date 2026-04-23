@@ -83,6 +83,21 @@ struct ToolUse {
     // as the UI "hanging" while the wire is healthy. Reducer skips the
     // preview re-parse if less than ~250 ms has passed since the last one.
     std::chrono::steady_clock::time_point last_preview_at{};
+    // Byte offset into `args_streaming` where the opening `"` of the
+    // streaming long-string field's *value* begins — i.e. just past
+    // `"content":"` for write / `"command":"` for bash. Once we've
+    // located it, subsequent preview ticks resume decoding from here
+    // instead of re-scanning the full buffer from byte 0 every time.
+    // Append-only growth of args_streaming keeps the offset valid.
+    // 0 means "not located yet"; the offset is always > 0 when set
+    // because the field name + `":"` is at least 4 bytes.
+    std::size_t    stream_sniff_offset = 0;
+    // Cached end-of-buffer size at the last preview pass. If the buffer
+    // hasn't grown since then, there is nothing new to show — skip the
+    // sniff + set_arg pair entirely. Cheap "am I still the same?" check
+    // that eliminates the bulk of tail-identical re-renders when the
+    // model pauses mid-stream.
+    std::size_t    stream_sniff_size   = 0;
     Status         status   = Pending{};
     bool           expanded = true;
 
