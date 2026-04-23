@@ -23,14 +23,18 @@ namespace {
 
 constexpr int kCtxBarCells = 10;    // width of the mini context bar, in cells
 
+// Token counts print in fixed-width fields so the right-hand status group
+// doesn't dance left/right as numbers tick up during streaming. 5 chars is
+// enough for "999.9" / "99.9k" / "9.9M"; shorter values are space-padded
+// on the left so successive snapshots line up visually.
 std::string format_tokens(int n) {
     char buf[16];
     if (n >= 1'000'000) {
-        std::snprintf(buf, sizeof(buf), "%.1fM", static_cast<double>(n) / 1'000'000.0);
+        std::snprintf(buf, sizeof(buf), "%5.1fM", static_cast<double>(n) / 1'000'000.0);
     } else if (n >= 1000) {
-        std::snprintf(buf, sizeof(buf), "%.1fk", static_cast<double>(n) / 1000.0);
+        std::snprintf(buf, sizeof(buf), "%5.1fk", static_cast<double>(n) / 1000.0);
     } else {
-        std::snprintf(buf, sizeof(buf), "%d", n);
+        std::snprintf(buf, sizeof(buf), "%5d", n);
     }
     return buf;
 }
@@ -206,13 +210,24 @@ Element status_bar(const Model& m) {
     bool has_breadcrumb = !m.d.current.title.empty();
 
     // ── Responsive activity row ─────────────────────────────────────────
-    // Sections are dropped progressively as width shrinks so the row never
-    // wraps to a second line. Priority (kept longest → dropped first):
-    //   phase_pill, model_badge, ctx (always)
-    //   profile, ctx_bar + absolute count (>= 60)
-    //   ↑↓ token counts (>= 90)
-    //   breadcrumb (>= 100)
-    //   live TokenStream sparkline (>= 120)
+    // Sections drop progressively as width shrinks so the row never wraps.
+    // Priority (kept longest → dropped first):
+    //   phase_pill, model_badge, ctx % (always)
+    //   ctx bar + absolute count       (>= 55)
+    //   profile                        (>= 70)
+    //   ↑↓ token counts                (>= 90)
+    //   live TokenStream sparkline     (>= 130)
+    //   breadcrumb                     (idle: >= 130, streaming: >= 160)
+    //
+    // The breadcrumb is the first thing to drop because the title is the
+    // only piece of information that's also visible elsewhere (the thread
+    // view header, the picker). Everything else in the bar is unique data.
+    // When streaming we push its threshold higher so the live sparkline +
+    // tok/s readout has room to breathe without elbowing the title.
+    //
+    // Numbers render in fixed-width fields (format_tokens → 5 chars, pct → 3
+    // digits) so the right group doesn't visibly slide left/right as counts
+    // tick upward during streaming.
     auto activity_row = Element{ComponentElement{
         .render = [=, &m](int w, int /*h*/) -> Element {
             if (w <= 0) return text("", {});
@@ -222,12 +237,13 @@ Element status_bar(const Model& m) {
             // ── Left group ─────────────────────────────────────────────
             std::vector<Element> lparts;
             lparts.push_back(text(" ", {}));
-            if (has_breadcrumb && w >= 100) {
+            const int breadcrumb_min = is_streaming ? 160 : 130;
+            if (has_breadcrumb && w >= breadcrumb_min) {
                 // Title budget scales with width so we don't elbow out the
                 // right group on medium terminals.
-                std::size_t title_budget = (w >= 140) ? 28
-                                         : (w >= 120) ? 20
-                                                      : 12;
+                std::size_t title_budget = (w >= 170) ? 28
+                                         : (w >= 150) ? 20
+                                                      : 14;
                 lparts.push_back(h(
                     edge_mark(pcolor),
                     text(" " + truncate_middle(m.d.current.title, title_budget),
@@ -236,7 +252,7 @@ Element status_bar(const Model& m) {
                 ).build());
             }
             lparts.push_back(phase_pill);
-            if (w >= 60) {
+            if (w >= 70) {
                 lparts.push_back(sep_thin());
                 lparts.push_back(profile_tag(m.d.profile));
             }
@@ -247,7 +263,7 @@ Element status_bar(const Model& m) {
 
             // Live tok/s + sparkline — most expensive section visually, so
             // gate it on wide terminals only.
-            if (is_streaming && w >= 120
+            if (is_streaming && w >= 130
                 && m.s.first_delta_at.time_since_epoch().count() != 0) {
                 auto now = std::chrono::steady_clock::now();
                 auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -288,13 +304,13 @@ Element status_bar(const Model& m) {
             }
 
             // Context indicator — always when we have a usage event; the
-            // visual bar + absolute count drop away below 60 cols,
-            // leaving just "ctx 32%".
+            // visual bar + absolute count drop away below 55 cols,
+            // leaving just "ctx  32%".
             if (m.s.context_max > 0 && has_tokens) {
                 Color c = ctx_color(pct);
                 right_parts.push_back(sep_thin());
                 right_parts.push_back(text("ctx ", fg_dim(muted)));
-                if (w >= 60) {
+                if (w >= 55) {
                     std::string used_str = format_tokens(ctx_used) + "/"
                                          + format_tokens(m.s.context_max) + " ";
                     right_parts.push_back(text(used_str, fg_dim(muted)));
@@ -302,7 +318,7 @@ Element status_bar(const Model& m) {
                         text(ctx_bar_glyphs(pct, kCtxBarCells), fg_of(c)));
                 }
                 char pbuf[8];
-                std::snprintf(pbuf, sizeof(pbuf), " %d%%", pct);
+                std::snprintf(pbuf, sizeof(pbuf), " %3d%%", pct);
                 right_parts.push_back(text(pbuf, fg_of(c).with_bold()));
             }
 

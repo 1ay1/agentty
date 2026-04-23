@@ -58,6 +58,24 @@ option(MOHA_STATIC_RUNTIME "Link the MSVC runtime statically (/MT)" OFF)
 option(MOHA_STANDALONE     "Produce a standalone binary with no third-party shared-library deps" OFF)
 option(MOHA_FULLY_STATIC   "Fully static link (Linux only, requires musl toolchain)" OFF)
 
+# mimalloc override — Microsoft's fast allocator. MSVCRT's malloc is notably
+# slow on the small-string churn pattern (std::string everywhere in RenderOp,
+# SSE parsing, JSON). Linking mimalloc-static and including mimalloc-new-delete
+# in main.cpp routes global operator new/delete through mimalloc; measured
+# 15–25% wins on allocator-heavy Windows workloads. Default ON when the
+# package is installed; harmless on POSIX (mimalloc works there too but the
+# delta vs. glibc/jemalloc is smaller).
+option(MOHA_USE_MIMALLOC   "Route operator new/delete through mimalloc (big Win32 win)" ON)
+
+# CPU ISA baseline. Default avx2 (Haswell+/Zen1+, ~2013), which covers ~every
+# desktop/laptop in use. Drop to "avx" for Sandy/Ivy Bridge (2011–2012) or
+# older VM hosts, "sse2" for truly ancient, "native" to let the compiler pick
+# based on the build machine. MSVC only exposes a handful of /arch values;
+# GCC/Clang understand -march= directly.
+set(MOHA_ARCH "avx2" CACHE STRING
+    "CPU baseline: native, avx2 (default), avx, or sse2.")
+set_property(CACHE MOHA_ARCH PROPERTY STRINGS native avx2 avx sse2)
+
 if(MOHA_STANDALONE AND MSVC)
     # On Windows, standalone implies static MSVC runtime — there's no
     # other way to ship a "drop it on any machine" .exe.
@@ -179,6 +197,21 @@ if(NOT TARGET nghttp2::nghttp2)
         endif()
     endif()
 endif()
+# mimalloc — optional, but default-on when available. find_package(mimalloc)
+# comes from the upstream CMake export (vcpkg / brew / apt). If missing, we
+# silently continue without it rather than failing — it's a perf knob, not a
+# correctness requirement.
+set(MOHA_HAS_MIMALLOC FALSE)
+if(MOHA_USE_MIMALLOC)
+    find_package(mimalloc CONFIG QUIET)
+    if(TARGET mimalloc-static OR TARGET mimalloc)
+        set(MOHA_HAS_MIMALLOC TRUE)
+    else()
+        message(STATUS "moha: MOHA_USE_MIMALLOC=ON but mimalloc package not "
+                       "found — building against system allocator.")
+    endif()
+endif()
+
 if(NOT TARGET nghttp2::nghttp2)
     find_path(NGHTTP2_INCLUDE_DIR nghttp2/nghttp2.h)
     # Standalone builds prefer the static archive (libnghttp2.a /
@@ -331,6 +364,17 @@ target_link_libraries(moha PRIVATE
     OpenSSL::Crypto
     Threads::Threads
 )
+if(MOHA_HAS_MIMALLOC)
+    # Prefer static target so operator new/delete routing is linked in the
+    # exe without an accompanying DLL / dylib.
+    if(TARGET mimalloc-static)
+        target_link_libraries(moha PRIVATE mimalloc-static)
+    else()
+        target_link_libraries(moha PRIVATE mimalloc)
+    endif()
+    target_compile_definitions(moha PRIVATE MOHA_USE_MIMALLOC=1)
+    message(STATUS "moha: mimalloc allocator override enabled.")
+endif()
 if(WIN32)
     # ws2_32   — Winsock2 (sockets, WSAPoll)
     # crypt32  — CertOpenSystemStoreW for the Windows root cert loader
@@ -425,7 +469,11 @@ if(MSVC)
             /GS-               #  no stack-buffer cookies — TUI, not a daemon
             /GR                #  keep RTTI (context.hpp uses typeid)
             /fp:fast           #  relax FP strictness — no errno / reassociation
-            /arch:AVX2         #  baseline AVX2/BMI2/FMA — Haswell+ / Zen1+
+            $<$<STREQUAL:${MOHA_ARCH},avx2>:/arch:AVX2>    # Haswell+ / Zen1+
+            $<$<STREQUAL:${MOHA_ARCH},avx>:/arch:AVX>      # Sandy/Ivy Bridge
+            # MSVC has no /arch:SSE2 (it's the default on x64) or /arch:native;
+            # both map to "no flag" — the default x64 codegen already assumes
+            # SSE2. `native` on MSVC degrades to the default baseline.
             /Qpar              #  enable auto-parallelizer for hot loops
         >
     )

@@ -7,6 +7,14 @@
 //   4. install the Deps so update/cmd_factory can reach them
 //   5. hand MohaApp to maya's runtime
 
+// Route global operator new/delete through mimalloc. Must live in exactly
+// one TU of the final executable — main.cpp is the natural home. Enabled
+// by -DMOHA_USE_MIMALLOC=ON at configure time (default ON, silently off if
+// the package isn't available).
+#if defined(MOHA_USE_MIMALLOC)
+#  include <mimalloc-new-delete.h>
+#endif
+
 #include <cstdio>
 #include <string>
 #include <utility>
