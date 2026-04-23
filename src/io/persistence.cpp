@@ -1,9 +1,16 @@
 #include "moha/io/persistence.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <random>
 #include <sstream>
+
+#ifdef _WIN32
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -11,6 +18,45 @@ namespace moha::persistence {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+
+namespace {
+// Atomic + durable write: write to <target>.tmp, fsync, rename. A crash
+// or ctrl-C mid-write leaves the previous version intact — the loader
+// never sees a truncated file that its `catch (...)` would silently drop.
+// Binary mode avoids CRLF translation so the on-disk bytes match dump(2).
+bool write_json_atomic(const fs::path& target, const std::string& content) {
+    fs::path tmp = target;
+    tmp += ".tmp";
+#ifdef _WIN32
+    FILE* fp = ::_wfopen(tmp.wstring().c_str(), L"wb");
+#else
+    FILE* fp = std::fopen(tmp.c_str(), "wb");
+#endif
+    if (!fp) return false;
+    if (std::fwrite(content.data(), 1, content.size(), fp) != content.size()) {
+        std::fclose(fp);
+        std::error_code ec; fs::remove(tmp, ec);
+        return false;
+    }
+    std::fflush(fp);
+#ifdef _WIN32
+    (void)::_commit(::_fileno(fp));
+#else
+    (void)::fsync(::fileno(fp));
+#endif
+    if (std::fclose(fp) != 0) {
+        std::error_code ec; fs::remove(tmp, ec);
+        return false;
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) {
+        std::error_code ec2; fs::remove(tmp, ec2);
+        return false;
+    }
+    return true;
+}
+} // namespace
 
 fs::path data_dir() {
     const char* home = std::getenv("USERPROFILE");
@@ -160,8 +206,7 @@ void save_thread(const Thread& t) {
     json msgs = json::array();
     for (const auto& m : t.messages) msgs.push_back(message_to_json(m));
     j["messages"] = std::move(msgs);
-    std::ofstream ofs(threads_dir() / (t.id.value + ".json"));
-    ofs << j.dump(2);
+    (void)write_json_atomic(threads_dir() / (t.id.value + ".json"), j.dump(2));
 }
 
 void delete_thread(const ThreadId& id) {
@@ -190,8 +235,7 @@ void save_settings(const store::Settings& s) {
     json favs = json::array();
     for (const auto& mid : s.favorite_models) favs.push_back(mid);
     j["favorite_models"] = std::move(favs);
-    std::ofstream ofs(data_dir() / "settings.json");
-    ofs << j.dump(2);
+    (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }
 
 ThreadId new_id() {

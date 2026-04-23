@@ -26,7 +26,9 @@
 #  endif
 #  include <windows.h>
 #  include <wincrypt.h>
-#  pragma comment(lib, "crypt32.lib")
+#  ifdef _MSC_VER
+#    pragma comment(lib, "crypt32.lib")
+#  endif
 #endif
 
 namespace moha::tls {
@@ -173,6 +175,27 @@ SSL_CTX* build_ctx(bool insecure) {
     // alone is enough — OpenSSL stores tickets per SSL_CTX automatically,
     // and we share one SSL_CTX process-wide so all reconnects benefit.
     SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT);
+    // I/O mode flags, essential for our pump-send loop:
+    //   ENABLE_PARTIAL_WRITE    — SSL_write may return a positive value less
+    //                             than the request; callers handle partial
+    //                             progress (we already do via `off += put`).
+    //   ACCEPT_MOVING_WRITE_BUF — after WANT_READ/WANT_WRITE, caller may
+    //                             retry with a *different* buffer pointer and
+    //                             length. Required because nghttp2's
+    //                             `mem_send` returns a fresh pointer/len on
+    //                             every call — without this flag OpenSSL
+    //                             raises SSL_R_BAD_LENGTH (0x0A00010F) on
+    //                             the retry, which is exactly the failure
+    //                             the Windows build hit at SSL_write on the
+    //                             first POST after a TLS resume.
+    //   AUTO_RETRY              — transparent handling of peer-initiated
+    //                             renegotiation / post-handshake tickets;
+    //                             on by default in OpenSSL 1.1.1+, set
+    //                             explicitly for clarity and portability.
+    SSL_CTX_set_mode(ctx,
+                     SSL_MODE_ENABLE_PARTIAL_WRITE
+                     | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER
+                     | SSL_MODE_AUTO_RETRY);
     // Advertise ALPN so the server negotiates h2 on our behalf.
     SSL_CTX_set_alpn_protos(ctx, kAlpn, sizeof(kAlpn));
 

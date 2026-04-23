@@ -183,156 +183,136 @@ std::string_view running_tool_name(const Model& m) {
 Element status_bar(const Model& m) {
     bool is_streaming = m.stream.is_streaming() && m.stream.active;
 
-    // ── Left group: breadcrumb + phase chip + profile chip ───────────────
+    // Phase chip colors + glyph resolved up front; used inside the
+    // width-aware builder below.
     Color pcolor = phase_color(m.stream.phase);
-
-    // Animate the phase glyph with the shared spinner while streaming OR
-    // executing a tool, so the user sees that *something is happening* in
-    // both phases. Other phases keep their semantic glyph
-    // (⚠ for permission, ● for idle).
     bool spin = is_streaming || m.stream.is_executing_tool();
     std::string phase_icon = spin
         ? std::string{m.stream.spinner.current_frame()}
         : std::string{phase_glyph(m.stream.phase)};
-
-    // When executing a tool, show the running tool's name in the chip
-    // ("⠋ bash" instead of generic "Running") so the user can tell what
-    // they're waiting on at a glance.
     std::string phase_label{phase_verb(m.stream.phase)};
     if (m.stream.is_executing_tool()) {
         if (auto tn = running_tool_name(m); !tn.empty())
             phase_label = std::string{tn};
     }
-    auto phase_pill = phase_chip(phase_icon, phase_label, pcolor);
 
-    // Thread breadcrumb — truncated so it never pushes the resources off
-    // the right edge. Omitted entirely for unnamed threads. Leading edge
-    // mark in the phase color quietly ties the breadcrumb to the current
-    // session state (idle = dim, streaming = highlight, etc).
-    Element breadcrumb = text("", {});
-    bool has_breadcrumb = !m.current.title.empty();
-    if (has_breadcrumb) {
-        breadcrumb = h(
-            edge_mark(pcolor),
-            text(" " + truncate_middle(m.current.title, 28), fg_of(fg).with_bold()),
-            sep_dot()
-        ).build();
-    }
-
-    auto left = h(
-        text(" ", {}),
-        breadcrumb,
-        phase_pill,
-        sep_thin(),
-        profile_tag(m.profile)
-    ).build();
-
-    // ── Right group: live rate + model + tokens + ctx bar ────────────────
-    // Context fullness uses `tokens_in` (which now correctly includes
-    // cache_read + cache_creation thanks to the StreamUsage fix). That
-    // value is the cumulative prefix size from the most recent request,
-    // i.e. exactly "what's currently in the model's context". Adding
-    // `tokens_out` was double-counting because the next turn's
-    // `input_tokens` already includes the previous assistant response.
+    // Context fullness uses `tokens_in` (includes cache_read + creation).
+    // Value is the cumulative prefix size from the most recent request.
     int ctx_used = m.stream.tokens_in;
     bool has_tokens = ctx_used > 0;
     int pct = (m.stream.context_max > 0)
                   ? std::min(100, ctx_used * 100 / m.stream.context_max)
                   : 0;
+    bool has_breadcrumb = !m.current.title.empty();
 
-    std::vector<Element> right_parts;
+    // ── Responsive activity row ─────────────────────────────────────────
+    // Sections are dropped progressively as width shrinks so the row never
+    // wraps to a second line. Priority (kept longest → dropped first):
+    //   phase_pill, model_badge, ctx (always)
+    //   profile, ctx_bar + absolute count (>= 60)
+    //   ↑↓ token counts (>= 90)
+    //   breadcrumb (>= 100)
+    //   live TokenStream sparkline (>= 120)
+    auto activity_row = Element{ComponentElement{
+        .render = [=, &m](int w, int /*h*/) -> Element {
+            if (w <= 0) return text("", {});
 
-    // Live tok/s + sparkline + elapsed via maya's purpose-built TokenStream
-    // widget (compact mode). Same data source as before — `live_delta_bytes`
-    // since the first delta — but the widget owns the formatting (⚡ icon,
-    // colored sparkline auto-normalized to its in-window peak, threshold-
-    // colored rate number) and stays maintained alongside maya's other
-    // visualization widgets. Saves ~50 lines of bespoke layout code here
-    // and gives us a consistent look with the rest of the maya widget set.
-    if (is_streaming && m.stream.first_delta_at.time_since_epoch().count() != 0) {
-        auto now = std::chrono::steady_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now - m.stream.first_delta_at).count();
-        if (ms >= 250) {
-            double sec = static_cast<double>(ms) / 1000.0;
-            double approx_tok = static_cast<double>(m.stream.live_delta_bytes) / 4.0;
-            float  rate       = static_cast<float>(approx_tok / sec);
+            auto phase_pill = phase_chip(phase_icon, phase_label, pcolor);
 
-            TokenStream ts;
-            ts.set_compact(true);
-            ts.set_tokens_per_sec(rate);
-            ts.set_total_tokens(static_cast<int>(approx_tok));
-            ts.set_elapsed(static_cast<float>(sec));
-            // The widget renders a sparkline from whatever rate samples we
-            // hand it; use our existing ring-buffer history so the bar
-            // reflects real measured rate over the last ~6 s rather than a
-            // single-point snapshot.
-            ts.set_rate_history(ordered_rate_history(m.stream));
-            ts.set_color(highlight);
-            right_parts.push_back(ts.build());
-            right_parts.push_back(sep_dot());
-        }
-    }
+            // ── Left group ─────────────────────────────────────────────
+            std::vector<Element> lparts;
+            lparts.push_back(text(" ", {}));
+            if (has_breadcrumb && w >= 100) {
+                // Title budget scales with width so we don't elbow out the
+                // right group on medium terminals.
+                std::size_t title_budget = (w >= 140) ? 28
+                                         : (w >= 120) ? 20
+                                                      : 12;
+                lparts.push_back(h(
+                    edge_mark(pcolor),
+                    text(" " + truncate_middle(m.current.title, title_budget),
+                         fg_of(fg).with_bold()),
+                    sep_dot()
+                ).build());
+            }
+            lparts.push_back(phase_pill);
+            if (w >= 60) {
+                lparts.push_back(sep_thin());
+                lparts.push_back(profile_tag(m.profile));
+            }
+            auto left = hstack()(std::move(lparts));
 
-    // Model badge: maya's ModelBadge auto-recognizes Claude families
-    // (Opus = magenta, Sonnet = blue, Haiku = green) and parses the version
-    // out of the model id, so "claude-opus-4-7" renders as "● Opus 4.7" in
-    // brand color. Cleaner than dumping the raw model id in a chip rim.
-    {
-        ModelBadge mb;
-        mb.set_model(m.model_id.value);
-        mb.set_compact(true);
-        right_parts.push_back(mb.build());
-    }
+            // ── Right group ────────────────────────────────────────────
+            std::vector<Element> right_parts;
 
-    // Per-direction token counts. Useful sanity-check on top of the ctx
-    // bar — tells you whether you're heavy on input (long history) or
-    // output (long generation).
-    if (has_tokens) {
-        right_parts.push_back(sep_thin());
-        std::string tok_str = "\xe2\x86\x91" + format_tokens(m.stream.tokens_in)
-                            + " \xe2\x86\x93" + format_tokens(m.stream.tokens_out);
-        right_parts.push_back(text(tok_str, fg_dim(muted)));
-    }
+            // Live tok/s + sparkline — most expensive section visually, so
+            // gate it on wide terminals only.
+            if (is_streaming && w >= 120
+                && m.stream.first_delta_at.time_since_epoch().count() != 0) {
+                auto now = std::chrono::steady_clock::now();
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              now - m.stream.first_delta_at).count();
+                if (ms >= 250) {
+                    double sec = static_cast<double>(ms) / 1000.0;
+                    double approx_tok = static_cast<double>(
+                        m.stream.live_delta_bytes) / 4.0;
+                    float  rate = static_cast<float>(approx_tok / sec);
 
-    // ── Mini context bar ──────────────────────────────────────────────
-    // Smooth 1/8-gradation blocks, threshold-colored. We only render it
-    // once we have an authoritative usage event from the API — showing a
-    // 0% bar before that is misleading (it implies "you've used 0/200k"
-    // when the real answer is "we don't know yet"). After the first turn
-    // the bar persists across phases since `tokens_in` is replaced (not
-    // accumulated) on each new usage event.
-    //
-    // Format: "ctx 64.2k/200k ❘▆▆▅▃░░░░░░❘ 32%". Showing the absolute
-    // count alongside the % gives the user a real anchor — "32%" of an
-    // unknown denominator is meaningless when models have 200K vs 1M
-    // windows.
-    if (m.stream.context_max > 0 && has_tokens) {
-        Color c = ctx_color(pct);
-        right_parts.push_back(sep_thin());
-        right_parts.push_back(text("ctx ", fg_dim(muted)));
-        // Absolute used/max anchors the %; bar is a thin sub-character
-        // gradient with no decorative brackets — the gap on either side
-        // (delivered by sep_thin) is enough visual separation.
-        std::string used_str = format_tokens(ctx_used) + "/"
-                             + format_tokens(m.stream.context_max) + " ";
-        right_parts.push_back(text(used_str, fg_dim(muted)));
-        right_parts.push_back(text(ctx_bar_glyphs(pct, kCtxBarCells), fg_of(c)));
-        char pbuf[8];
-        std::snprintf(pbuf, sizeof(pbuf), " %d%%", pct);
-        right_parts.push_back(text(pbuf, fg_of(c).with_bold()));
-    }
+                    TokenStream ts;
+                    ts.set_compact(true);
+                    ts.set_tokens_per_sec(rate);
+                    ts.set_total_tokens(static_cast<int>(approx_tok));
+                    ts.set_elapsed(static_cast<float>(sec));
+                    ts.set_rate_history(ordered_rate_history(m.stream));
+                    ts.set_color(highlight);
+                    right_parts.push_back(ts.build());
+                    right_parts.push_back(sep_dot());
+                }
+            }
 
-    right_parts.push_back(text(" ", {}));
+            // Model badge — always shown.
+            {
+                ModelBadge mb;
+                mb.set_model(m.model_id.value);
+                mb.set_compact(true);
+                right_parts.push_back(mb.build());
+            }
 
-    auto right = hstack()(std::move(right_parts));
+            // Per-direction tokens.
+            if (has_tokens && w >= 90) {
+                right_parts.push_back(sep_thin());
+                std::string tok_str = "\xe2\x86\x91"
+                    + format_tokens(m.stream.tokens_in) + " \xe2\x86\x93"
+                    + format_tokens(m.stream.tokens_out);
+                right_parts.push_back(text(tok_str, fg_dim(muted)));
+            }
 
-    // Activity row stays transparent — pro TUIs (helix, lazygit, k9s)
-    // skip the bg color and rely on horizontal rules for separation.
-    // `bright_black` renders unpredictably across terminal themes
-    // (teal on Catppuccin, beige on Solarized, etc.), so any bg color
-    // we pick fights with someone's color scheme.
-    auto activity_row = h(left, spacer(), right).build();
+            // Context indicator — always when we have a usage event; the
+            // visual bar + absolute count drop away below 60 cols,
+            // leaving just "ctx 32%".
+            if (m.stream.context_max > 0 && has_tokens) {
+                Color c = ctx_color(pct);
+                right_parts.push_back(sep_thin());
+                right_parts.push_back(text("ctx ", fg_dim(muted)));
+                if (w >= 60) {
+                    std::string used_str = format_tokens(ctx_used) + "/"
+                                         + format_tokens(m.stream.context_max) + " ";
+                    right_parts.push_back(text(used_str, fg_dim(muted)));
+                    right_parts.push_back(
+                        text(ctx_bar_glyphs(pct, kCtxBarCells), fg_of(c)));
+                }
+                char pbuf[8];
+                std::snprintf(pbuf, sizeof(pbuf), " %d%%", pct);
+                right_parts.push_back(text(pbuf, fg_of(c).with_bold()));
+            }
+
+            right_parts.push_back(text(" ", {}));
+            auto right = hstack()(std::move(right_parts));
+
+            return h(left, spacer(), right).build();
+        },
+        .layout = {},
+    }};
 
     // ── Error / transient status banner ──────────────────────────────────
     Element status_row;

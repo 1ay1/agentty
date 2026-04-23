@@ -31,6 +31,19 @@ constexpr std::chrono::milliseconds kEmitGap{80};
 
 #ifdef _WIN32
 
+// UTF-8 → UTF-16. Win32 process APIs are UTF-16 natively; anything narrower
+// routes through the ANSI code page and silently corrupts non-ASCII bytes.
+std::wstring utf8_to_wide(std::string_view s) {
+    if (s.empty()) return {};
+    int n = ::MultiByteToWideChar(CP_UTF8, 0, s.data(),
+                                  static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                          out.data(), n);
+    return out;
+}
+
 // CommandLineToArgvW-compatible quoting (see MSDN "Parsing C++ Command-Line
 // Arguments"). Run of backslashes doubles if followed by `"`, literal `"`
 // gets prefixed with `\`. Quoting only wraps the arg when it contains
@@ -59,6 +72,38 @@ std::string win_quote_arg(const std::string& arg) {
     return out;
 }
 
+// Return true when the argv path resolves to a .bat / .cmd file on PATH.
+// CreateProcess cannot natively spawn batch files — they require cmd.exe —
+// but tools like npx / npm / yarn ship as .cmd on Windows, and the model
+// will reach for them. SearchPathW honors PATHEXT so .cmd is found even
+// when the caller wrote just "npx".
+bool resolves_to_batch(const std::string& exe) {
+    auto we = utf8_to_wide(exe);
+    wchar_t out[MAX_PATH * 2]{};
+    DWORD n = ::SearchPathW(nullptr, we.c_str(), L".exe",
+                            (DWORD)std::size(out), out, nullptr);
+    if (n == 0 || n >= std::size(out)) {
+        // .exe miss — try default PATHEXT order (batch files second).
+        n = ::SearchPathW(nullptr, we.c_str(), nullptr,
+                          (DWORD)std::size(out), out, nullptr);
+        if (n == 0 || n >= std::size(out)) return false;
+    }
+    std::wstring_view resolved{out, n};
+    auto dot = resolved.find_last_of(L'.');
+    if (dot == std::wstring_view::npos) return false;
+    auto ext = resolved.substr(dot);
+    auto ieq = [](wchar_t a, wchar_t b) {
+        return (a >= L'A' && a <= L'Z' ? a - L'A' + L'a' : a)
+            == (b >= L'A' && b <= L'Z' ? b - L'A' + L'a' : b);
+    };
+    auto equal_i = [&](std::wstring_view s, std::wstring_view t) {
+        if (s.size() != t.size()) return false;
+        for (size_t i = 0; i < s.size(); ++i) if (!ieq(s[i], t[i])) return false;
+        return true;
+    };
+    return equal_i(ext, L".cmd") || equal_i(ext, L".bat");
+}
+
 // CreateProcess-based runner. Redirects the child's stdin to NUL so it
 // can't steal keystrokes from the TUI or disturb the console mode. Saves +
 // restores the stdin console mode as a belt-and-suspenders guard: a child
@@ -85,7 +130,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     }
     ::SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
 
-    HANDLE nul = ::CreateFileA("NUL", GENERIC_READ,
+    HANDLE nul = ::CreateFileW(L"NUL", GENERIC_READ,
                                FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                                OPEN_EXISTING, 0, nullptr);
     if (nul == INVALID_HANDLE_VALUE) {
@@ -93,19 +138,25 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
         r.started = false; r.start_error = "CreateFile(NUL) failed"; return r;
     }
 
-    STARTUPINFOA si{};
+    STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput  = nul;
     si.hStdOutput = wr;
     si.hStdError  = wr;
 
-    std::vector<char> mutable_cmdline(cmdline.begin(), cmdline.end());
-    mutable_cmdline.push_back('\0');
+    // CreateProcessW takes a mutable LPWSTR — widen the UTF-8 cmdline and
+    // give it a writable buffer.
+    std::wstring wcmd = utf8_to_wide(cmdline);
+    std::vector<wchar_t> mutable_cmdline(wcmd.begin(), wcmd.end());
+    mutable_cmdline.push_back(L'\0');
 
     PROCESS_INFORMATION pi{};
-    BOOL ok = ::CreateProcessA(nullptr, mutable_cmdline.data(), nullptr, nullptr,
-                               TRUE, CREATE_NO_WINDOW, nullptr, nullptr,
+    BOOL ok = ::CreateProcessW(nullptr, mutable_cmdline.data(),
+                               nullptr, nullptr,
+                               TRUE,
+                               CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                               nullptr, nullptr,
                                &si, &pi);
     ::CloseHandle(wr);
     ::CloseHandle(nul);
@@ -252,10 +303,16 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
         if (opts.argv->empty()) {
             r.started = false; r.start_error = "empty command"; return r;
         }
+        // If argv[0] is a .cmd / .bat on PATH, wrap through cmd.exe — raw
+        // CreateProcess refuses batch files (they need the interpreter).
+        // Checked once up-front so we don't quote twice on the happy path.
+        const bool needs_cmd_shell = resolves_to_batch((*opts.argv)[0]);
         for (size_t i = 0; i < opts.argv->size(); ++i) {
             if (i) cmdline.push_back(' ');
             cmdline += win_quote_arg((*opts.argv)[i]);
         }
+        if (needs_cmd_shell)
+            cmdline = "cmd.exe /S /C \"" + cmdline + "\"";
     } else {
         r.started = false; r.start_error = "no command specified"; return r;
     }

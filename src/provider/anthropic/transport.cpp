@@ -740,23 +740,25 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         return;
     }
 
-    auto emit_terminal = [&](StreamCtx& ctx, std::optional<std::string> err) {
+    // emit_terminal runs on error paths after `sink` has been moved into
+    // `ctx.sink` below — dispatching via `ctx.sink` is the only live handle.
+    // The previous version captured `sink` by reference and invoked a
+    // moved-from std::function on every non-happy-path termination, which
+    // surfaced in the UI as "stream backend: bad_function_call".
+    auto emit_terminal = [](StreamCtx& ctx, std::optional<std::string> err) {
         if (ctx.terminated) return;
         // If the stream is dying mid-tool-use (peer closed before the SSE
         // event sequence reached `content_block_stop`), synthesize a
         // StreamToolUseEnd so the reducer's salvage path runs on whatever
-        // partial JSON we've buffered. Without this, args_streaming
-        // accumulates with no terminal handler; the next StreamToolUseStart
-        // (after a retry) may overwrite it before it's parsed, dropping the
-        // diagnostic raw input we'd want to surface.
+        // partial JSON we've buffered.
         if (ctx.in_tool_use) {
-            sink(StreamToolUseEnd{});
+            ctx.sink(StreamToolUseEnd{});
             ctx.in_tool_use = false;
             ctx.current_tool_id.clear();
             ctx.current_tool_name.clear();
         }
-        if (err) sink(StreamError{*err});
-        else     sink(StreamFinished{ctx.stop_reason});
+        if (err) ctx.sink(StreamError{*err});
+        else     ctx.sink(StreamFinished{ctx.stop_reason});
         ctx.terminated = true;
     };
 

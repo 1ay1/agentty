@@ -37,7 +37,9 @@
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  include <windows.h>
-#  pragma comment(lib, "ws2_32.lib")
+#  ifdef _MSC_VER
+#    pragma comment(lib, "ws2_32.lib")
+#  endif
 using socket_t = SOCKET;
 constexpr socket_t kBadSocket = INVALID_SOCKET;
 static int sock_last_err() { return WSAGetLastError(); }
@@ -205,6 +207,15 @@ private:
     tls::SSL*        ssl_     = nullptr;
     nghttp2_session* session_ = nullptr;
     Endpoint         endpoint_;
+    // Pending outbound bytes from a previous `nghttp2_session_mem_send` that
+    // SSL_write couldn't fully flush (WANT_WRITE, partial return). We *must*
+    // drain these before pulling the next chunk — nghttp2 invalidates the
+    // prior pointer on the next mem_send call, and OpenSSL raises
+    // SSL_R_BAD_LENGTH on a retry whose length shrinks vs. the pending
+    // write. Kept as (ptr into nghttp2-owned buffer, offset, size).
+    const uint8_t*   pend_buf_ = nullptr;
+    size_t           pend_off_ = 0;
+    size_t           pend_len_ = 0;
 };
 
 // -----------------------------------------------------------------------
@@ -424,10 +435,41 @@ tls_handshake(socket_t fd, tls::SSL* ssl, Timeouts tos, CancelToken* cancel) {
 
 // Pump outgoing frames: pull bytes off nghttp2 and write through TLS.
 // Returns WANT_* if TLS couldn't write the whole mem_send() chunk.
-// `wrote_any` reports whether progress was made this call.
+//
+// Invariant: `pend_*` on the Connection holds any bytes that the previous
+// call left unflushed. We must drain those *before* pulling a new chunk
+// from nghttp2 — mem_send invalidates its prior pointer on the next call
+// and advances internal state, so a partially-written frame would be lost
+// (and OpenSSL would reject the retry with SSL_R_BAD_LENGTH once the
+// pending-write length changed under it).
 enum class PumpOut { Idle, WantRead, WantWrite, Error };
-static PumpOut pump_send(tls::SSL* ssl, nghttp2_session* session,
-                         std::string* err) {
+static PumpOut pump_send_impl(tls::SSL* ssl, nghttp2_session* session,
+                              const uint8_t*& pend_buf, size_t& pend_off,
+                              size_t& pend_len, std::string* err) {
+    auto drain_pending = [&]() -> PumpOut {
+        while (pend_off < pend_len) {
+            int chunk = static_cast<int>(pend_len - pend_off);
+            int r = SSL_write(ssl, pend_buf + pend_off, chunk);
+            if (r > 0) { pend_off += static_cast<size_t>(r); continue; }
+            int e = SSL_get_error(ssl, r);
+            if (e == SSL_ERROR_WANT_WRITE) return PumpOut::WantWrite;
+            if (e == SSL_ERROR_WANT_READ)  return PumpOut::WantRead;
+            if (err) *err = "SSL_write: " + tls::last_error(ssl);
+            return PumpOut::Error;
+        }
+        pend_buf = nullptr;
+        pend_off = 0;
+        pend_len = 0;
+        return PumpOut::Idle;
+    };
+
+    // First, flush whatever nghttp2 handed us last time.
+    if (pend_buf && pend_off < pend_len) {
+        auto s = drain_pending();
+        if (s != PumpOut::Idle) return s;
+    }
+
+    // Pull & flush successive chunks until nghttp2 has no more or TLS blocks.
     while (true) {
         const uint8_t* data = nullptr;
         ssize_t n = nghttp2_session_mem_send(session, &data);
@@ -437,17 +479,11 @@ static PumpOut pump_send(tls::SSL* ssl, nghttp2_session* session,
             return PumpOut::Error;
         }
         if (n == 0) return PumpOut::Idle;
-        size_t off = 0;
-        while (off < static_cast<size_t>(n)) {
-            size_t put = 0;
-            int r = SSL_write(ssl, data + off, static_cast<int>(n - off));
-            if (r > 0) { put = static_cast<size_t>(r); off += put; continue; }
-            int e = SSL_get_error(ssl, r);
-            if (e == SSL_ERROR_WANT_WRITE) return PumpOut::WantWrite;
-            if (e == SSL_ERROR_WANT_READ)  return PumpOut::WantRead;
-            if (err) *err = "SSL_write: " + tls::last_error(ssl);
-            return PumpOut::Error;
-        }
+        pend_buf = data;
+        pend_off = 0;
+        pend_len = static_cast<size_t>(n);
+        auto s = drain_pending();
+        if (s != PumpOut::Idle) return s;
     }
 }
 
@@ -485,7 +521,8 @@ Connection::pump_initial(Timeouts tos) {
     auto deadline = clock_t_::now() + tos.connect;
     std::string err;
     while (nghttp2_session_want_write(session_)) {
-        auto s = pump_send(ssl_, session_, &err);
+        auto s = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
+                                pend_len_, &err);
         if (s == PumpOut::Error) return std::unexpected(err);
         if (s == PumpOut::Idle) break;
         int rem = remaining_ms(deadline, 200);
@@ -554,7 +591,8 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
                                       NGHTTP2_CANCEL);
             sctx.error = "cancelled";
         }
-        auto out = pump_send(ssl_, session_, &err);
+        auto out = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
+                                  pend_len_, &err);
         if (out == PumpOut::Error) return std::unexpected(err);
         auto in = pump_recv(ssl_, session_, &err);
         if (in == PumpIn::Error)   return std::unexpected(err);

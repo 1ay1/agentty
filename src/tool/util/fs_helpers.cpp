@@ -11,6 +11,7 @@
 #ifdef _WIN32
 #  include <io.h>
 #  include <fcntl.h>
+#  include <share.h>
 #  include <sys/stat.h>
 #else
 #  include <fcntl.h>
@@ -82,10 +83,15 @@ std::string write_file(const fs::path& p, std::string_view content) {
     // and network filesystems the data isn't readable by the next open until
     // fsync completes. Tools report "wrote N bytes" *after* the data is safe.
 #ifdef _WIN32
+    // Use the wide-char variant so Unicode paths (e.g. under a non-ASCII
+    // %USERPROFILE%) round-trip correctly. `_sopen_s` takes an ANSI/MBCS
+    // path which silently corrupts multi-byte sequences on some MinGW
+    // ucrt configurations.
     int fd = -1;
-    auto s = p.string();
-    if (_sopen_s(&fd, s.c_str(), _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY,
-                 _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0 || fd < 0)
+    auto ws = p.wstring();
+    if (::_wsopen_s(&fd, ws.c_str(),
+                    _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY,
+                    _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0 || fd < 0)
         return "cannot open '" + p.string() + "' for writing";
 #else
     int fd = ::open(p.c_str(),

@@ -57,16 +57,27 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
 
 ExecResult run_bash(const BashArgs& a) {
     auto t0 = std::chrono::steady_clock::now();
-    // When `cd` is set, prefix `cd <dir> && …`. Shell handles quoting via
-    // single quotes (literal); we escape only embedded single quotes.
+    // When `cd` is set, prefix `cd <dir> && …`. Quoting differs per shell:
+    // POSIX sh uses single quotes (literal, '\'' for embedded quotes);
+    // Windows cmd.exe does not understand single quotes — it requires
+    // double-quoted paths, and `cd /d` is needed to cross drive letters.
+    // cmd.exe has no general escape for `"` inside `"..."`; bail on such
+    // paths rather than emit a broken command.
     std::string effective = a.command;
     if (!a.cd.empty()) {
+#ifdef _WIN32
+        if (a.cd.find('"') != std::string::npos)
+            return std::unexpected(ToolError::invalid_args(
+                "cd path contains '\"', which cmd.exe cannot quote"));
+        effective = "cd /d \"" + a.cd + "\" && " + a.command;
+#else
         std::string q;
         q.reserve(a.cd.size() + 4);
         q.push_back('\'');
         for (char c : a.cd) { if (c == '\'') q += "'\\''"; else q.push_back(c); }
         q.push_back('\'');
         effective = "cd " + q + " && " + a.command;
+#endif
     }
     auto r = util::run_command_s(effective, 30000, a.timeout);
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
