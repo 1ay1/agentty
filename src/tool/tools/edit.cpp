@@ -124,36 +124,92 @@ std::expected<EditArgs, ToolError> parse_edit_args(const json& j) {
 int apply_one(std::string& buf, const OneEdit& e,
               const std::string& path_str, std::string& err) {
     if (e.replace_all) {
-        // Exact match, build fresh buffer.
-        std::string out;
-        out.reserve(buf.size());
-        std::size_t cursor = 0;
-        int n = 0;
-        for (;;) {
-            auto pos = buf.find(e.old_text, cursor);
-            if (pos == std::string::npos) break;
-            out.append(buf, cursor, pos - cursor);
-            out.append(e.new_text);
-            cursor = pos + e.old_text.size();
-            ++n;
+        // Try exact first.
+        auto replace_exact = [&](std::string_view needle,
+                                 std::string_view replacement) -> int {
+            std::string out;
+            out.reserve(buf.size());
+            std::size_t cursor = 0;
+            int n = 0;
+            for (;;) {
+                auto pos = buf.find(needle, cursor);
+                if (pos == std::string::npos) break;
+                out.append(buf, cursor, pos - cursor);
+                out.append(replacement);
+                cursor = pos + needle.size();
+                ++n;
+            }
+            if (n == 0) return 0;
+            out.append(buf, cursor, std::string::npos);
+            buf = std::move(out);
+            return n;
+        };
+
+        int n = replace_exact(e.old_text, e.new_text);
+        if (n > 0) return n;
+
+        // Fallback: CRLF drift. If the buffer contains \r\n and the
+        // needle doesn't (or vice versa), exact misses. Try the match
+        // with both sides \r-stripped, and synthesize a replacement that
+        // re-emits the original line ending style of each hit. We do
+        // this by locating hits in the stripped view and projecting
+        // the splice range back via the src_of[] mapping — keeping the
+        // surrounding bytes (including any \r) identical.
+        if (buf.find('\r') != std::string::npos
+            || e.old_text.find('\r') != std::string::npos) {
+            // Cheap re-normalize inline to avoid pulling more of the
+            // fuzzy_match internals into a public API. Strip \r from the
+            // needle, replace \r\n→\n in the buffer temporarily, do the
+            // exact replace, and finally un-normalize is not safe. Simpler:
+            // do two exact passes — with \r\n needle variant, then with
+            // plain \n needle variant — and apply whichever hits.
+            auto with_crlf = [](std::string_view s) {
+                std::string out;
+                out.reserve(s.size() + s.size() / 40);
+                for (std::size_t i = 0; i < s.size(); ++i) {
+                    char c = s[i];
+                    if (c == '\n' && (i == 0 || s[i-1] != '\r'))
+                        out.push_back('\r');
+                    out.push_back(c);
+                }
+                return out;
+            };
+            auto without_cr = [](std::string_view s) {
+                std::string out;
+                out.reserve(s.size());
+                for (char c : s) if (c != '\r') out.push_back(c);
+                return out;
+            };
+
+            std::string alt_needle = with_crlf(without_cr(e.old_text));
+            std::string alt_new    = with_crlf(without_cr(e.new_text));
+            if (alt_needle != e.old_text) {
+                n = replace_exact(alt_needle, alt_new);
+                if (n > 0) return n;
+            }
+            std::string plain_needle = without_cr(e.old_text);
+            std::string plain_new    = without_cr(e.new_text);
+            if (plain_needle != e.old_text) {
+                n = replace_exact(plain_needle, plain_new);
+                if (n > 0) return n;
+            }
         }
-        if (n == 0) {
-            err = "old_text not found in " + path_str;
-            return 0;
-        }
-        out.append(buf, cursor, std::string::npos);
-        buf = std::move(out);
-        return n;
+
+        err = "old_text not found in " + path_str;
+        return 0;
     }
 
-    auto m = util::fuzzy_find(buf, e.old_text);
+    auto m = util::fuzzy_find(buf, e.old_text, e.new_text);
     if (!m.ok) {
         if (m.count >= 2) {
             err = std::format(
                 "old_text appears {} times in {}. Add surrounding context to "
                 "make it unique, or pass replace_all=true.", m.count, path_str);
         } else {
-            // Hint: indentation mismatch is the common cause.
+            // Hint: indentation mismatch is the common cause. fuzzy_find
+            // already tried both-sides-trim and whitespace-squash, so if
+            // we still missed, the content likely isn't in the file at
+            // all — but surface a hint anyway for the borderline cases.
             std::string hint;
             std::string squashed_old, squashed_buf;
             for (char c : e.old_text)
@@ -164,17 +220,24 @@ int apply_one(std::string& buf, const OneEdit& e,
                     squashed_buf += c;
             if (!squashed_old.empty()
                 && squashed_buf.find(squashed_old) != std::string::npos)
-                hint = " (the text exists but whitespace differs — match the "
-                       "exact indentation)";
+                hint = " (the text exists but differs in a way fuzzy "
+                       "matching couldn't reconcile — re-read the file "
+                       "and copy the snippet verbatim)";
             err = "old_text not found in " + path_str + hint;
         }
         return 0;
     }
-    // Splice.
+    // Splice. Use the re-indented replacement when strategy 4 adjusted it
+    // to match the file's indentation convention; otherwise the caller's
+    // original new_text.
+    std::string_view repl =
+        m.adjusted_new_text.empty()
+            ? std::string_view{e.new_text}
+            : std::string_view{m.adjusted_new_text};
     std::string out;
-    out.reserve(buf.size() - m.len + e.new_text.size());
+    out.reserve(buf.size() - m.len + repl.size());
     out.append(buf, 0, m.pos);
-    out.append(e.new_text);
+    out.append(repl);
     out.append(buf, m.pos + m.len, std::string::npos);
     buf = std::move(out);
     return 1;
