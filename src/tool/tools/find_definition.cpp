@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/tool_args.hpp"
@@ -130,7 +131,8 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
 
 ToolDef tool_find_definition() {
     ToolDef t;
-    t.name = ToolName{std::string{"find_definition"}};
+    constexpr const auto& kSpec = spec::require<"find_definition">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Find the definition of a symbol (function, class, struct, enum, type) "
                     "across the codebase. Searches for common definition patterns in C/C++, "
                     "Python, JavaScript/TypeScript, Go, and Rust.";
@@ -144,7 +146,8 @@ ToolDef tool_find_definition() {
             {"path",   {{"type","string"}, {"description","Directory to search (default: cwd)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<FindDefinitionArgs>(parse_find_definition_args, run_find_definition);
     return t;
 }

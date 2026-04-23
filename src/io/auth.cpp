@@ -8,10 +8,10 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <concepts>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <expected>
 #include <fstream>
 #include <iostream>
 #include <random>
@@ -19,6 +19,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -45,23 +47,68 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 // ---------------------------------------------------------------------------
-// Credentials methods
+// Credentials accessors — derived views over the variant.
+// std::visit + a generic lambda gives exhaustive matching: adding a new
+// alternative will fail to compile here until handled.
 // ---------------------------------------------------------------------------
 
-static int64_t now_ms() {
+static std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-bool Credentials::is_expired() const {
-    if (method != Method::OAuth) return false;
-    if (expires_at_ms == 0) return false;
-    return now_ms() >= expires_at_ms;
+bool is_valid(const Credentials& c) noexcept {
+    return std::visit([](const auto& v) noexcept -> bool {
+        using T = std::decay_t<decltype(v)>;
+        if      constexpr (std::same_as<T, cred::None>)   return false;
+        else if constexpr (std::same_as<T, cred::ApiKey>) return !v.key.empty();
+        else /* cred::OAuth */                            return !v.access_token.empty();
+    }, c);
 }
 
-std::string Credentials::header_value() const {
-    if (method == Method::OAuth) return std::string("Bearer ") + access_token;
-    return access_token;
+bool is_expired(const Credentials& c) noexcept {
+    return std::visit([](const auto& v) noexcept -> bool {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::same_as<T, cred::OAuth>) {
+            if (v.expires_at_ms == 0) return false;
+            return now_ms() >= v.expires_at_ms;
+        } else {
+            return false;   // None / ApiKey never expire
+        }
+    }, c);
+}
+
+std::string header_value(const Credentials& c) {
+    return std::visit([](const auto& v) -> std::string {
+        using T = std::decay_t<decltype(v)>;
+        if      constexpr (std::same_as<T, cred::None>)   return {};
+        else if constexpr (std::same_as<T, cred::ApiKey>) return v.key;
+        else /* cred::OAuth */ return std::string{"Bearer "} + v.access_token;
+    }, c);
+}
+
+Style style(const Credentials& c) noexcept {
+    return std::holds_alternative<cred::OAuth>(c) ? Style::Bearer : Style::ApiKey;
+}
+
+std::string_view persist_tag(const Credentials& c) noexcept {
+    return std::visit([](const auto& v) noexcept -> std::string_view {
+        using T = std::decay_t<decltype(v)>;
+        if      constexpr (std::same_as<T, cred::None>)   return "none";
+        else if constexpr (std::same_as<T, cred::ApiKey>) return "api_key";
+        else /* cred::OAuth */                            return "oauth";
+    }, c);
+}
+
+std::string OAuthError::render() const {
+    std::string_view kind_str;
+    switch (kind) {
+        case OAuthErrorKind::Network:      kind_str = "network";      break;
+        case OAuthErrorKind::BadResponse:  kind_str = "bad response"; break;
+        case OAuthErrorKind::ApiError:     kind_str = "api error";    break;
+        case OAuthErrorKind::MissingToken: kind_str = "missing token";break;
+    }
+    return "[" + std::string{kind_str} + "] " + detail;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,16 +192,22 @@ std::optional<Credentials> load_credentials() {
     if (!ifs) return std::nullopt;
     try {
         json j; ifs >> j;
-        Credentials c;
-        auto m = j.value("method", "api_key");
-        if (m == "oauth")   c.method = Method::OAuth;
-        else if (m == "api_key") c.method = Method::ApiKey;
-        else return std::nullopt;
-        c.access_token  = j.value("access_token", "");
-        c.refresh_token = j.value("refresh_token", "");
-        c.expires_at_ms = j.value("expires_at", int64_t{0});
-        if (!c.is_valid()) return std::nullopt;
-        return c;
+        auto m = j.value("method", "");
+        if (m == "oauth") {
+            cred::OAuth o;
+            o.access_token  = j.value("access_token", "");
+            o.refresh_token = j.value("refresh_token", "");
+            o.expires_at_ms = j.value("expires_at", std::int64_t{0});
+            if (o.access_token.empty()) return std::nullopt;
+            return Credentials{std::move(o)};
+        }
+        if (m == "api_key") {
+            cred::ApiKey k;
+            k.key = j.value("access_token", "");    // legacy field name
+            if (k.key.empty()) return std::nullopt;
+            return Credentials{std::move(k)};
+        }
+        return std::nullopt;
     } catch (...) {
         return std::nullopt;
     }
@@ -162,10 +215,23 @@ std::optional<Credentials> load_credentials() {
 
 bool save_credentials(const Credentials& c) {
     json j;
-    j["method"] = (c.method == Method::OAuth) ? "oauth" : "api_key";
-    j["access_token"] = c.access_token;
-    j["refresh_token"] = c.refresh_token;
-    j["expires_at"] = c.expires_at_ms;
+    j["method"] = std::string{persist_tag(c)};
+    std::visit([&](const auto& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::same_as<T, cred::ApiKey>) {
+            j["access_token"]  = v.key;
+            j["refresh_token"] = "";
+            j["expires_at"]    = std::int64_t{0};
+        } else if constexpr (std::same_as<T, cred::OAuth>) {
+            j["access_token"]  = v.access_token;
+            j["refresh_token"] = v.refresh_token;
+            j["expires_at"]    = v.expires_at_ms;
+        } else {
+            j["access_token"]  = "";
+            j["refresh_token"] = "";
+            j["expires_at"]    = std::int64_t{0};
+        }
+    }, c);
     fs::path p = credentials_path();
     if (!write_private(p, j.dump(2))) return false;
     restrict_perms(p);
@@ -304,13 +370,23 @@ std::expected<ParsedUrl, std::string> parse_https_url(std::string_view url) {
     return p;
 }
 
-struct HttpResult { int status = 0; std::string body; std::string error; };
+// Internal HTTP form-POST result. Distinct from the public TokenResult so
+// the typed mapping (HTTP error → OAuthError) happens in exactly one place
+// (parse_token_json below).
+struct FormPostResult {
+    int         status = 0;
+    std::string body;
+    std::string transport_error;   // non-empty iff request never reached server
+};
 
-HttpResult http_post_form(const std::string& url,
+FormPostResult http_post_form(const std::string& url,
     const std::vector<std::pair<std::string,std::string>>& fields) {
-    HttpResult r;
+    FormPostResult r;
     auto parsed = parse_https_url(url);
-    if (!parsed) { r.error = "bad url: " + url + " (" + parsed.error() + ")"; return r; }
+    if (!parsed) {
+        r.transport_error = "bad url: " + url + " (" + parsed.error() + ")";
+        return r;
+    }
 
     http::Request hreq;
     hreq.method = "POST";
@@ -329,7 +405,7 @@ HttpResult http_post_form(const std::string& url,
     tos.total   = std::chrono::milliseconds(30'000);
 
     auto resp = http::default_client().send(hreq, tos);
-    if (!resp) { r.error = resp.error(); return r; }
+    if (!resp) { r.transport_error = resp.error().render(); return r; }
     r.status = resp->status;
     r.body   = std::move(resp->body);
     return r;
@@ -338,32 +414,42 @@ HttpResult http_post_form(const std::string& url,
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Token exchange / refresh
+// Token exchange / refresh — the only place HTTP/JSON failure shapes get
+// mapped to the typed OAuthErrorKind. Downstream callers see only
+// TokenResult and dispatch on `kind`.
 // ---------------------------------------------------------------------------
 
-static TokenResponse parse_token_json(const std::string& body, int http) {
-    TokenResponse r;
+static TokenResult parse_token_json(const std::string& body, int http_status) {
+    json j;
     try {
-        auto j = json::parse(body);
-        if (http >= 400) {
-            r.error = j.value("error_description",
-                       j.value("error", std::string("HTTP ") + std::to_string(http)));
-            return r;
-        }
-        r.access_token  = j.value("access_token", "");
-        r.refresh_token = j.value("refresh_token", "");
-        r.expires_in_s  = j.value("expires_in", int64_t{0});
-        r.ok = !r.access_token.empty();
-        if (!r.ok) r.error = "no access_token in response";
+        j = json::parse(body);
     } catch (const std::exception& e) {
-        r.error = std::string("parse failed: ") + e.what();
+        return std::unexpected(OAuthError{
+            OAuthErrorKind::BadResponse,
+            std::string{"json parse failed: "} + e.what()});
     }
-    return r;
+    if (http_status >= 400) {
+        return std::unexpected(OAuthError{
+            OAuthErrorKind::ApiError,
+            j.value("error_description",
+                j.value("error",
+                    std::string{"HTTP "} + std::to_string(http_status)))});
+    }
+    OAuthToken tok;
+    tok.access_token  = j.value("access_token", "");
+    tok.refresh_token = j.value("refresh_token", "");
+    tok.expires_in_s  = j.value("expires_in", std::int64_t{0});
+    if (tok.access_token.empty()) {
+        return std::unexpected(OAuthError{
+            OAuthErrorKind::MissingToken,
+            "200 OK but no access_token in response"});
+    }
+    return tok;
 }
 
-TokenResponse exchange_code(const OAuthCode& code,
-                            const PkceVerifier& verifier,
-                            const OAuthState& state) {
+TokenResult exchange_code(const OAuthCode& code,
+                          const PkceVerifier& verifier,
+                          const OAuthState& state) {
     // Claude's callback often returns "<code>#<state>" joined. Split if present.
     std::string actual_code = code.value;
     auto hash = actual_code.find('#');
@@ -377,21 +463,21 @@ TokenResponse exchange_code(const OAuthCode& code,
         {"code_verifier", verifier.value},
         {"state",         state.value},
     });
-    if (!r.error.empty()) {
-        TokenResponse t; t.error = r.error; return t;
-    }
+    if (!r.transport_error.empty())
+        return std::unexpected(OAuthError{
+            OAuthErrorKind::Network, r.transport_error});
     return parse_token_json(r.body, r.status);
 }
 
-TokenResponse refresh_access_token(const RefreshToken& refresh_token) {
+TokenResult refresh_access_token(const RefreshToken& refresh_token) {
     auto r = http_post_form(OAuthConfig::token_url, {
         {"grant_type",    "refresh_token"},
         {"client_id",     OAuthConfig::client_id},
         {"refresh_token", refresh_token.value},
     });
-    if (!r.error.empty()) {
-        TokenResponse t; t.error = r.error; return t;
-    }
+    if (!r.transport_error.empty())
+        return std::unexpected(OAuthError{
+            OAuthErrorKind::Network, r.transport_error});
     return parse_token_json(r.body, r.status);
 }
 
@@ -400,42 +486,53 @@ TokenResponse refresh_access_token(const RefreshToken& refresh_token) {
 // ---------------------------------------------------------------------------
 
 Credentials resolve(const std::string& cli_api_key) {
-    if (!cli_api_key.empty()) {
-        return {Method::ApiKey, cli_api_key, "", 0};
-    }
-    if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k) {
-        return {Method::ApiKey, k, "", 0};
-    }
-    if (const char* t = std::getenv("CLAUDE_CODE_OAUTH_TOKEN"); t && *t) {
-        return {Method::OAuth, t, "", 0};
-    }
+    if (!cli_api_key.empty())
+        return Credentials{cred::ApiKey{cli_api_key}};
+    if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k)
+        return Credentials{cred::ApiKey{std::string{k}}};
+    if (const char* t = std::getenv("CLAUDE_CODE_OAUTH_TOKEN"); t && *t)
+        return Credentials{cred::OAuth{std::string{t}, "", 0}};
+
     auto loaded = load_credentials();
-    if (!loaded) return {};
-    Credentials c = *loaded;
-    if (c.method == Method::OAuth && c.is_expired() && !c.refresh_token.empty()) {
-        std::fprintf(stderr, "moha: refreshing OAuth token... ");
-        auto tr = refresh_access_token(RefreshToken{c.refresh_token});
-        if (tr.ok) {
-            c.access_token  = tr.access_token;
-            if (!tr.refresh_token.empty()) c.refresh_token = tr.refresh_token;
-            c.expires_at_ms = tr.expires_in_s
-                ? now_ms() + tr.expires_in_s * 1000 : 0;
-            save_credentials(c);
-            std::fprintf(stderr, "ok\n");
+    if (!loaded) return Credentials{cred::None{}};
+
+    // Refresh path is only meaningful for the OAuth alternative; the
+    // visit ensures we never read OAuth fields off an ApiKey by mistake.
+    return std::visit([&](auto v) -> Credentials {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (!std::same_as<T, cred::OAuth>) {
+            return Credentials{std::move(v)};
         } else {
-            std::fprintf(stderr, "FAILED: %s\n", tr.error.c_str());
+            const bool expired = v.expires_at_ms != 0
+                              && now_ms() >= v.expires_at_ms;
+            if (!expired) return Credentials{std::move(v)};
+            if (v.refresh_token.empty()) {
+                std::fprintf(stderr,
+                    "moha: stored OAuth token is expired and no refresh token.\n"
+                    "      run 'moha login'.\n");
+                return Credentials{cred::None{}};
+            }
+            std::fprintf(stderr, "moha: refreshing OAuth token... ");
+            auto tr = refresh_access_token(RefreshToken{v.refresh_token});
+            if (tr) {
+                v.access_token = std::move(tr->access_token);
+                if (!tr->refresh_token.empty())
+                    v.refresh_token = std::move(tr->refresh_token);
+                v.expires_at_ms = tr->expires_in_s
+                    ? now_ms() + tr->expires_in_s * 1000 : 0;
+                Credentials out{std::move(v)};
+                save_credentials(out);
+                std::fprintf(stderr, "ok\n");
+                return out;
+            }
+            std::fprintf(stderr, "FAILED: %s\n",
+                         tr.error().render().c_str());
             std::fprintf(stderr,
                 "moha: stored OAuth token is expired and refresh failed.\n"
                 "      run 'moha login' to re-authenticate.\n");
-            return {};
+            return Credentials{cred::None{}};
         }
-    } else if (c.method == Method::OAuth && c.is_expired()) {
-        std::fprintf(stderr,
-            "moha: stored OAuth token is expired and no refresh token.\n"
-            "      run 'moha login'.\n");
-        return {};
-    }
-    return c;
+    }, *loaded);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +571,7 @@ int cmd_login() {
         while (!key.empty() && (key.back() == '\r' || key.back() == '\n'
                                 || key.back() == ' ')) key.pop_back();
         if (key.empty()) { std::cerr << "No key entered.\n"; return 1; }
-        Credentials c{Method::ApiKey, key, "", 0};
+        Credentials c{cred::ApiKey{std::move(key)}};
         if (!save_credentials(c)) {
             std::cerr << "Failed to save credentials.\n"; return 1;
         }
@@ -512,16 +609,15 @@ int cmd_login() {
     if (code_raw.empty()) { std::cerr << "No code entered.\n"; return 1; }
 
     auto tr = exchange_code(OAuthCode{std::move(code_raw)}, verifier, state);
-    if (!tr.ok) {
-        std::cerr << "Token exchange failed: " << tr.error << "\n";
+    if (!tr) {
+        std::cerr << "Token exchange failed: " << tr.error().render() << "\n";
         return 1;
     }
-    Credentials c;
-    c.method = Method::OAuth;
-    c.access_token  = tr.access_token;
-    c.refresh_token = tr.refresh_token;
-    c.expires_at_ms = tr.expires_in_s
-        ? now_ms() + tr.expires_in_s * 1000 : 0;
+    Credentials c{cred::OAuth{
+        std::move(tr->access_token),
+        std::move(tr->refresh_token),
+        tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0
+    }};
     if (!save_credentials(c)) {
         std::cerr << "Failed to save credentials.\n"; return 1;
     }
@@ -550,20 +646,19 @@ int cmd_status() {
     if (const char* t = std::getenv("CLAUDE_CODE_OAUTH_TOKEN"); t && *t) {
         std::cout << "CLAUDE_CODE_OAUTH_TOKEN: set (OAuth via env)\n";
     }
-    auto c = load_credentials();
-    if (!c) { std::cout << "Saved credentials: (none)\n"; return 0; }
-    std::cout << "Saved method: "
-              << (c->method == Method::OAuth ? "oauth" : "api_key") << "\n";
-    if (c->method == Method::OAuth) {
-        if (c->expires_at_ms) {
-            auto remaining_s = (c->expires_at_ms - now_ms()) / 1000;
+    auto loaded = load_credentials();
+    if (!loaded) { std::cout << "Saved credentials: (none)\n"; return 0; }
+    std::cout << "Saved method: " << persist_tag(*loaded) << "\n";
+    if (auto* o = std::get_if<cred::OAuth>(&*loaded)) {
+        if (o->expires_at_ms) {
+            auto remaining_s = (o->expires_at_ms - now_ms()) / 1000;
             if (remaining_s <= 0) std::cout << "Token: expired\n";
             else std::cout << "Token expires in " << remaining_s << "s\n";
         } else {
             std::cout << "Token: no expiration info\n";
         }
         std::cout << "Refresh token: "
-                  << (c->refresh_token.empty() ? "(none)" : "present") << "\n";
+                  << (o->refresh_token.empty() ? "(none)" : "present") << "\n";
     }
     return 0;
 }

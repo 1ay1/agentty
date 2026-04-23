@@ -86,7 +86,6 @@ Step submit_message(Model m) {
 
     m.d.current.updated_at = std::chrono::system_clock::now();
     m.s.phase = phase::Streaming{};
-    m.s.active = true;
     m.s.truncation_retries = 0;
     m.s.transient_retries  = 0;
     auto virt = maybe_virtualize(m);

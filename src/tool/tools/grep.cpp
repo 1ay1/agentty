@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -577,7 +578,8 @@ ExecResult run_grep(const GrepArgs& a) {
 
 ToolDef tool_grep() {
     ToolDef t;
-    t.name = ToolName{std::string{"grep"}};
+    constexpr const auto& kSpec = spec::require<"grep">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Search for a regex pattern across files. Returns matches grouped by "
                     "file with 2 lines of context, paginated 20 results per page. "
                     "Case-insensitive by default; pass case_sensitive=true for exact case. "
@@ -595,7 +597,8 @@ ToolDef tool_grep() {
             {"offset",         {{"type","integer"}, {"description","Skip this many matches (for pagination)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<GrepArgs>(parse_grep_args, run_grep);
     return t;
 }

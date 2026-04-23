@@ -34,8 +34,9 @@ maya::Color hunk_status_color(Hunk::Status s) {
 } // namespace
 
 Element diff_review(const Model& m) {
-    if (!m.ui.diff_review.open || m.d.pending_changes.empty()) return text("");
-    const auto idx = std::min<int>(m.ui.diff_review.file_index,
+    auto* cursor = pick::opened(m.ui.diff_review);
+    if (!cursor || m.d.pending_changes.empty()) return text("");
+    const auto idx = std::min<int>(cursor->file_index,
                                    static_cast<int>(m.d.pending_changes.size()) - 1);
     const auto& fc = m.d.pending_changes[idx];
 
@@ -47,14 +48,14 @@ Element diff_review(const Model& m) {
         text(" "),
         text(std::format("-{}", fc.removed), fg_of(danger)),
         text("  "),
-        text(std::format("file {}/{}", m.ui.diff_review.file_index + 1,
+        text(std::format("file {}/{}", cursor->file_index + 1,
                          m.d.pending_changes.size()), fg_dim(muted))
     ).build());
     rows.push_back(sep);
 
     int hi = 0;
     for (const auto& h_ : fc.hunks) {
-        bool sel = hi == m.ui.diff_review.hunk_index;
+        bool sel = hi == cursor->hunk_index;
         rows.push_back(h(
             sel ? text("\u203A ", fg_bold(accent)) : text("  "),
             text(std::format("@@ -{},{} +{},{}", h_.old_start, h_.old_len,

@@ -65,6 +65,78 @@ struct Response {
     std::string body;
 };
 
+// ---------------------------------------------------------------------------
+// HttpError — the typed failure value returned by Client::send / stream.
+// ---------------------------------------------------------------------------
+// Replaces `std::expected<T, std::string>` so downstream callers (notably
+// `provider::error_class::classify`) can dispatch on `kind` instead of
+// substring-matching free-form messages. Adding a new failure mode is one
+// new enum entry + one new switch arm in `to_string` / `is_transient` —
+// the compiler tells you everywhere that needs to change.
+//
+// `http_status` is meaningful only when kind == Status; otherwise 0.
+// `detail` is for human reading (logs, error banners) — never for
+// programmatic dispatch.
+enum class HttpErrorKind : std::uint8_t {
+    Cancelled,    // CancelToken tripped — user-initiated (Esc) or watchdog
+    Resolve,      // DNS / getaddrinfo failure
+    Connect,      // TCP connect refused / network unreachable
+    Tls,          // TLS handshake failure (cert, ALPN, etc.)
+    Protocol,     // HTTP/2 protocol error (nghttp2 frame violation)
+    SocketHangup, // POLLHUP / POLLERR / EPIPE mid-request
+    Timeout,      // connect, total, or idle deadline expired
+    PeerClosed,   // peer half-closed before completing the response
+    Status,       // response received with status >= 400
+    Body,         // body parse failure or size limit exceeded
+    Unknown,      // unexpected — should never happen
+};
+
+struct HttpError {
+    HttpErrorKind kind        = HttpErrorKind::Unknown;
+    int           http_status = 0;       // valid iff kind == Status
+    std::string   detail;                // human-readable
+
+    // "[h2 timeout] no bytes for 45s" — the UI's default stringification
+    // when it doesn't care to branch on kind. Layered errors call this
+    // when wrapping into their own typed errors.
+    [[nodiscard]] std::string render() const;
+
+    // Factories for one-line return-site idioms.
+    [[nodiscard]] static HttpError cancelled(std::string d = "cancelled")
+        noexcept { return {HttpErrorKind::Cancelled, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError resolve(std::string d)
+        noexcept { return {HttpErrorKind::Resolve, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError connect(std::string d)
+        noexcept { return {HttpErrorKind::Connect, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError tls(std::string d)
+        noexcept { return {HttpErrorKind::Tls, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError protocol(std::string d)
+        noexcept { return {HttpErrorKind::Protocol, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError socket_hangup(std::string d)
+        noexcept { return {HttpErrorKind::SocketHangup, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError timeout(std::string d)
+        noexcept { return {HttpErrorKind::Timeout, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError peer_closed(std::string d)
+        noexcept { return {HttpErrorKind::PeerClosed, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError status(int s, std::string d)
+        noexcept { return {HttpErrorKind::Status, s, std::move(d)}; }
+    [[nodiscard]] static HttpError body(std::string d)
+        noexcept { return {HttpErrorKind::Body, 0, std::move(d)}; }
+    [[nodiscard]] static HttpError unknown(std::string d)
+        noexcept { return {HttpErrorKind::Unknown, 0, std::move(d)}; }
+
+    // True if a retry might succeed (transient transport conditions). Used
+    // by callers' retry policies. Cancellation, status 4xx (except 408,
+    // 429), and Body errors are considered terminal.
+    [[nodiscard]] bool is_transient() const noexcept;
+};
+
+[[nodiscard]] std::string_view to_string(HttpErrorKind k) noexcept;
+
+// Public typed result aliases — these are what callers pattern-match on.
+using HttpResult       = std::expected<Response, HttpError>;
+using HttpStreamResult = std::expected<void,     HttpError>;
+
 // Callbacks for a streaming request. on_headers fires once when the :status
 // frame arrives; on_chunk fires for every DATA frame slab. Returning false
 // from on_chunk aborts the stream (equivalent to cancelling the token).
@@ -121,8 +193,9 @@ public:
 
     // Blocking unary request. The response body is fully buffered.
     // `cancel` may be null; non-null tokens are polled between I/O waits and
-    // while frames are in-flight.
-    [[nodiscard]] std::expected<Response, std::string>
+    // while frames are in-flight. Returns a typed `HttpError` on failure —
+    // callers dispatch on `kind` rather than substring-matching the detail.
+    [[nodiscard]] HttpResult
     send(const Request& req,
          Timeouts timeouts = {},
          CancelTokenPtr cancel = {});
@@ -131,7 +204,7 @@ public:
     // cancel is tripped, or on_chunk returns false. Body chunks arrive on
     // the calling thread (no internal threads — this is meant to run inside
     // a worker that owns the turn lifetime).
-    [[nodiscard]] std::expected<void, std::string>
+    [[nodiscard]] HttpStreamResult
     stream(const Request& req,
            StreamHandler handler,
            Timeouts timeouts = {},

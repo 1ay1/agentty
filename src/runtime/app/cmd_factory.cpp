@@ -1,6 +1,7 @@
 #include "moha/runtime/app/cmd_factory.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <ranges>
 #include <utility>
 
@@ -73,19 +74,21 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
             try {
                 auto result = tool::DynamicDispatch::execute(name.value, args);
                 if (result) {
-                    dispatch(ToolExecOutput{id, std::move(result->text), false});
+                    dispatch(ToolExecOutput{id, std::move(result->text)});
                 } else {
-                    // UI doesn't branch on error kind yet — render as
-                    // "[kind] detail" so the category is visible in history.
-                    dispatch(ToolExecOutput{id, result.error().render(), true});
+                    dispatch(ToolExecOutput{id,
+                        std::unexpected(std::move(result).error())});
                 }
             } catch (const std::exception& e) {
                 // DynamicDispatch already catches tool exceptions, but guard
                 // against anything in the dispatch infrastructure itself so
                 // the tool never gets stuck in Running with no terminal Msg.
-                dispatch(ToolExecOutput{id, std::string{"dispatch error: "} + e.what(), true});
+                dispatch(ToolExecOutput{id, std::unexpected(
+                    tools::ToolError::unknown(
+                        std::string{"dispatch error: "} + e.what()))});
             } catch (...) {
-                dispatch(ToolExecOutput{id, "dispatch error: unknown exception", true});
+                dispatch(ToolExecOutput{id, std::unexpected(
+                    tools::ToolError::unknown("dispatch error: unknown exception"))});
             }
         });
 }
@@ -115,12 +118,30 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // execution). Preserve it as we move into Running.
                 tc.status = ToolUse::Running{tc.started_at(), {}};
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
+
+                // Wall-clock watchdog. The worker thread can't be
+                // pre-empted from here (no portable thread cancellation),
+                // but we CAN move the UI on if the worker is wedged in
+                // a blocking syscall (slow NFS, dead FUSE mount, hung
+                // network FS). After the timeout fires, the tool's
+                // Running state is force-flipped to Failed; the late
+                // ToolExecOutput from the eventual unwind is discarded
+                // by apply_tool_output's idempotent guard. bash and
+                // diagnostics have their own subprocess-level timeout
+                // (default 120 s) — applying our 60 s on top would
+                // truncate legitimate long commands.
+                if (tc.name.value != "bash"
+                 && tc.name.value != "diagnostics") {
+                    cmds.push_back(Cmd<Msg>::after(
+                        std::chrono::seconds(60),
+                        Msg{ToolTimeoutCheck{tc.id}}));
+                }
+
+                // ExecutingTool is non-Idle, so active() flips on automatically:
+                // the Tick subscription stays armed, the spinner advances, the
+                // view's live elapsed timer keeps ticking. Without that the
+                // UI looks frozen on long-running bash commands.
                 m.s.phase = phase::ExecutingTool{};
-                // Keep the Tick subscription alive during tool execution so
-                // the spinner advances and the view can show live elapsed
-                // time — without this the UI looks frozen on long-running
-                // bash commands, and users think moha has hung.
-                m.s.active = true;
                 any_pending = true;
             }
         } else if (tc.is_running()) {
@@ -134,14 +155,13 @@ Cmd<Msg> kick_pending_tools(Model& m) {
         });
         if (has_results) {
             m.s.phase = phase::Streaming{};
-            m.s.active = true;
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
             cmds.push_back(launch_stream(m));
         } else {
+            // Idle drops active() to false, stopping the Tick subscription.
             m.s.phase = phase::Idle{};
-            m.s.active = false;  // stop the Tick subscription at rest
         }
     }
     return Cmd<Msg>::batch(std::move(cmds));

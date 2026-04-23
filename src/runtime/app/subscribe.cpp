@@ -4,12 +4,15 @@
 #include <optional>
 #include <variant>
 
+#include "moha/runtime/picker.hpp"
+
 namespace moha::app {
 
 using maya::Sub;
 using maya::KeyEvent;
 using maya::CharKey;
 using maya::SpecialKey;
+namespace pick = moha::ui::pick;
 
 namespace {
 
@@ -166,12 +169,12 @@ std::optional<Msg> on_composer(const KeyEvent& ev) {
 
 Sub<Msg> subscribe(const Model& m) {
     const bool in_perm    = m.d.pending_permission.has_value();
-    const bool in_cmd     = m.ui.command_palette.open;
-    const bool in_models  = m.ui.model_picker.open;
-    const bool in_threads = m.ui.thread_list.open;
-    const bool in_diff    = m.ui.diff_review.open;
-    const bool in_todo    = m.ui.todo.open;
-    const bool streaming  = m.s.active
+    const bool in_cmd     = is_open(m.ui.command_palette);
+    const bool in_models  = pick::is_open(m.ui.model_picker);
+    const bool in_threads = pick::is_open(m.ui.thread_list);
+    const bool in_diff    = pick::is_open(m.ui.diff_review);
+    const bool in_todo    = pick::is_open(m.ui.todo.open);
+    const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
 
     auto key_sub = Sub<Msg>::on_key(
@@ -200,7 +203,7 @@ Sub<Msg> subscribe(const Model& m) {
     // Only subscribe to Tick while the spinner is visible. With fps=0 the
     // maya loop is purely event-driven; an unconditional 16ms tick would
     // force a render 60× per second even when nothing is changing.
-    if (m.s.active) {
+    if (m.s.active()) {
         auto tick = Sub<Msg>::every(std::chrono::milliseconds(33), Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
     }

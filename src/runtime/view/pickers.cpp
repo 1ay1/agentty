@@ -13,14 +13,15 @@ using namespace maya;
 using namespace maya::dsl;
 
 Element model_picker(const Model& m) {
-    if (!m.ui.model_picker.open) return text("");
+    auto* picker = pick::opened(m.ui.model_picker);
+    if (!picker) return text("");
     std::vector<Element> rows;
     if (m.d.available_models.empty()) {
         rows.push_back(text("  Loading models\u2026", fg_italic(muted)));
     }
     int i = 0;
     for (const auto& mi : m.d.available_models) {
-        bool sel    = i == m.ui.model_picker.index;
+        bool sel    = i == picker->index;
         bool active = mi.id == m.d.model_id;
         auto prefix = sel ? text("\u203A ", fg_bold(accent)) : text("  ");
         auto star   = mi.favorite ? text("\u2605 ", fg_of(warn)) : text("  ");
@@ -46,14 +47,15 @@ Element model_picker(const Model& m) {
 }
 
 Element thread_list(const Model& m) {
-    if (!m.ui.thread_list.open) return text("");
+    auto* picker = pick::opened(m.ui.thread_list);
+    if (!picker) return text("");
     std::vector<Element> rows;
     if (m.d.threads.empty()) {
         rows.push_back(text("  No threads yet.", fg_italic(muted)));
     }
     int i = 0;
     for (const auto& t : m.d.threads) {
-        bool sel = i == m.ui.thread_list.index;
+        bool sel = i == picker->index;
         auto prefix = sel ? text("\u203A ", fg_bold(info)) : text("  ");
         rows.push_back(h(prefix,
             text(t.title.empty() ? "(untitled)" : t.title,
@@ -78,13 +80,13 @@ Element thread_list(const Model& m) {
 }
 
 Element command_palette(const Model& m) {
-    if (!m.ui.command_palette.open) return text("");
+    auto* o = opened(m.ui.command_palette);
+    if (!o) return text("");
 
     std::vector<Element> rows;
     rows.push_back(h(text("\u203A ", fg_bold(highlight)),
-        text(m.ui.command_palette.query.empty() ? "type to filter\u2026"
-                                              : m.ui.command_palette.query,
-             m.ui.command_palette.query.empty() ? fg_italic(muted) : fg_of(fg))
+        text(o->query.empty() ? "type to filter\u2026" : o->query,
+             o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
     rows.push_back(sep);
 
@@ -92,10 +94,10 @@ Element command_palette(const Model& m) {
     for (const auto& cmd : kCommands) {
         std::string_view name{cmd.label};
         std::string_view desc{cmd.description};
-        if (!m.ui.command_palette.query.empty()
-            && name.find(m.ui.command_palette.query) == std::string_view::npos)
+        if (!o->query.empty()
+            && name.find(o->query) == std::string_view::npos)
             continue;
-        bool sel = i == m.ui.command_palette.index;
+        bool sel = i == o->index;
         auto prefix = sel ? text("\u203A ", fg_bold(highlight)) : text("  ");
         rows.push_back(h(prefix,
             text(std::string{name}, sel ? fg_bold(fg) : fg_of(muted)),
@@ -115,7 +117,7 @@ Element command_palette(const Model& m) {
 }
 
 Element todo_modal(const Model& m) {
-    if (!m.ui.todo.open) return text("");
+    if (!pick::is_open(m.ui.todo.open)) return text("");
 
     std::vector<Element> rows;
 

@@ -87,6 +87,66 @@ namespace moha::http {
 using clock_t_ = std::chrono::steady_clock;
 using ms_t     = std::chrono::milliseconds;
 
+// ---------------------------------------------------------------------------
+// HttpError implementations. The static factories are inline in the header;
+// these are the rendering + retry-policy helpers that need switch arms.
+// ---------------------------------------------------------------------------
+
+std::string_view to_string(HttpErrorKind k) noexcept {
+    switch (k) {
+        case HttpErrorKind::Cancelled:    return "cancelled";
+        case HttpErrorKind::Resolve:      return "resolve";
+        case HttpErrorKind::Connect:      return "connect";
+        case HttpErrorKind::Tls:          return "tls";
+        case HttpErrorKind::Protocol:     return "h2";
+        case HttpErrorKind::SocketHangup: return "hangup";
+        case HttpErrorKind::Timeout:      return "timeout";
+        case HttpErrorKind::PeerClosed:   return "peer_closed";
+        case HttpErrorKind::Status:       return "status";
+        case HttpErrorKind::Body:         return "body";
+        case HttpErrorKind::Unknown:      return "unknown";
+    }
+    return "unknown";
+}
+
+std::string HttpError::render() const {
+    std::string out = "[";
+    out += to_string(kind);
+    out += "] ";
+    out += detail;
+    if (kind == HttpErrorKind::Status && http_status > 0) {
+        out += " (HTTP ";
+        out += std::to_string(http_status);
+        out += ")";
+    }
+    return out;
+}
+
+bool HttpError::is_transient() const noexcept {
+    switch (kind) {
+        // Re-issue-safe transport hiccups.
+        case HttpErrorKind::Resolve:
+        case HttpErrorKind::Connect:
+        case HttpErrorKind::Tls:
+        case HttpErrorKind::Protocol:
+        case HttpErrorKind::SocketHangup:
+        case HttpErrorKind::Timeout:
+        case HttpErrorKind::PeerClosed:
+            return true;
+        // Server-side load shedding / rate limit / one-shot transients.
+        case HttpErrorKind::Status:
+            return http_status == 408 || http_status == 429
+                || http_status == 502 || http_status == 503
+                || http_status == 504 || http_status == 529;
+        // User-driven or shape errors — never re-issue.
+        case HttpErrorKind::Cancelled:
+        case HttpErrorKind::Body:
+        case HttpErrorKind::Unknown:
+            return false;
+    }
+    return false;
+}
+
 namespace {
 
 // -----------------------------------------------------------------------
@@ -199,7 +259,7 @@ public:
 
     // Execute a single request/stream on this connection.  The connection
     // must be idle on entry; it's usable again on clean return.
-    std::expected<void, std::string> run(
+    std::expected<void, HttpError> run(
         const Request& req,
         StreamCtx& sctx,
         Timeouts tos,
@@ -207,7 +267,7 @@ public:
 
     // Drive the session until an event flushes all pending frames in one
     // direction, used by the ctor to complete SETTINGS exchange.
-    std::expected<void, std::string> pump_initial(Timeouts tos);
+    std::expected<void, HttpError> pump_initial(Timeouts tos);
 
 private:
     socket_t         fd_      = kBadSocket;
@@ -322,7 +382,7 @@ static ssize_t data_read_cb(nghttp2_session* /*s*/, int32_t /*stream_id*/,
 // DNS + connect.  Non-blocking connect so we can honor the connect timeout;
 // poll()s until writable or deadline.
 // -----------------------------------------------------------------------
-std::expected<socket_t, std::string>
+std::expected<socket_t, HttpError>
 dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
     ensure_net_init();
     addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
@@ -330,9 +390,8 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
     char port_buf[12]; std::snprintf(port_buf, sizeof(port_buf), "%u", ep.port);
     int gai = ::getaddrinfo(ep.host.c_str(), port_buf, &hints, &res);
     if (gai != 0 || !res) {
-        std::string err = "getaddrinfo: ";
-        err += gai_strerror(gai);
-        return std::unexpected(std::move(err));
+        return std::unexpected(HttpError::resolve(
+            std::string{"getaddrinfo: "} + gai_strerror(gai)));
     }
 
     auto deadline = clock_t_::now() + tos.connect;
@@ -366,7 +425,7 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
         while (true) {
             if (cancel && cancel->is_cancelled()) {
                 sock_close(fd); ::freeaddrinfo(res);
-                return std::unexpected("cancelled during connect");
+                return std::unexpected(HttpError::cancelled("during connect"));
             }
             int rem = remaining_ms(deadline, 200);
             if (rem <= 0) {
@@ -407,7 +466,8 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
         }
     }
     ::freeaddrinfo(res);
-    return std::unexpected(last_err.empty() ? "connect: no address worked" : last_err);
+    return std::unexpected(HttpError::connect(
+        last_err.empty() ? std::string{"no address worked"} : last_err));
 }
 
 // -----------------------------------------------------------------------
@@ -415,28 +475,28 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
 // and translate WANT_READ/WANT_WRITE into poll() waits, honoring the same
 // connect deadline.
 // -----------------------------------------------------------------------
-std::expected<void, std::string>
+std::expected<void, HttpError>
 tls_handshake(socket_t fd, tls::SSL* ssl, Timeouts tos, CancelToken* cancel) {
     auto deadline = clock_t_::now() + tos.connect;
     while (true) {
         int r = SSL_connect(ssl);
         if (r == 1) return {};
         int e = SSL_get_error(ssl, r);
-        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
-            return std::unexpected("tls: " + tls::last_error(ssl));
-        }
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE)
+            return std::unexpected(HttpError::tls(tls::last_error(ssl)));
         if (cancel && cancel->is_cancelled())
-            return std::unexpected("cancelled during tls handshake");
+            return std::unexpected(HttpError::cancelled("during tls handshake"));
         int rem = remaining_ms(deadline, 200);
-        if (rem <= 0) return std::unexpected("tls: handshake timed out");
+        if (rem <= 0) return std::unexpected(HttpError::timeout("tls handshake timed out"));
         pollfd pfd{ fd, (e == SSL_ERROR_WANT_READ) ? (short)POLLIN : (short)POLLOUT, 0 };
         int pr = sock_poll(&pfd, 1, rem);
         if (pr < 0) {
             if (sock_intr(sock_last_err())) continue;
-            return std::unexpected("tls: poll errno=" + std::to_string(sock_last_err()));
+            return std::unexpected(HttpError::tls(
+                "poll errno=" + std::to_string(sock_last_err())));
         }
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
-            return std::unexpected("tls: poll hangup");
+            return std::unexpected(HttpError::tls("poll hangup"));
     }
 }
 
@@ -524,7 +584,7 @@ static PumpIn pump_recv(tls::SSL* ssl, nghttp2_session* session,
     }
 }
 
-std::expected<void, std::string>
+std::expected<void, HttpError>
 Connection::pump_initial(Timeouts tos) {
     // Drive the first SETTINGS / window-update exchange so the connection
     // is fully usable before we return it from dial_*.  Bounded by the
@@ -534,19 +594,20 @@ Connection::pump_initial(Timeouts tos) {
     while (nghttp2_session_want_write(session_)) {
         auto s = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
                                 pend_len_, &err);
-        if (s == PumpOut::Error) return std::unexpected(err);
+        if (s == PumpOut::Error) return std::unexpected(HttpError::protocol(err));
         if (s == PumpOut::Idle) break;
         int rem = remaining_ms(deadline, 200);
-        if (rem <= 0) return std::unexpected("h2: initial send timed out");
+        if (rem <= 0) return std::unexpected(HttpError::timeout("h2 initial send timed out"));
         pollfd pfd{ fd_, (s == PumpOut::WantRead) ? (short)POLLIN : (short)POLLOUT, 0 };
         int pr = sock_poll(&pfd, 1, rem);
         if (pr < 0 && !sock_intr(sock_last_err()))
-            return std::unexpected("h2: poll errno=" + std::to_string(sock_last_err()));
+            return std::unexpected(HttpError::protocol(
+                "h2 poll errno=" + std::to_string(sock_last_err())));
     }
     return {};
 }
 
-std::expected<void, std::string>
+std::expected<void, HttpError>
 Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
                 CancelTokenPtr cancel) {
     // --- build headers list.  All names must be lowercase in HTTP/2. ---
@@ -587,8 +648,8 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     int32_t sid = nghttp2_submit_request(session_, nullptr,
                                          nvs.data(), nvs.size(), dpp, &sctx);
     if (sid < 0)
-        return std::unexpected(std::string{"nghttp2_submit_request: "}
-                             + nghttp2_strerror(sid));
+        return std::unexpected(HttpError::protocol(
+            std::string{"nghttp2_submit_request: "} + nghttp2_strerror(sid)));
     sctx.stream_id = sid;
 
     // --- I/O loop ---
@@ -625,16 +686,17 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
 
         auto out = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
                                   pend_len_, &err);
-        if (out == PumpOut::Error) return std::unexpected(err);
+        if (out == PumpOut::Error) return std::unexpected(HttpError::protocol(err));
         size_t bytes_in = 0;
         auto in = pump_recv(ssl_, session_, &err, &bytes_in);
-        if (in == PumpIn::Error)   return std::unexpected(err);
+        if (in == PumpIn::Error)   return std::unexpected(HttpError::protocol(err));
         if (bytes_in > 0) last_rx = clock_t_::now();
         if (in == PumpIn::Closed) {
             // Peer closed the TLS session.  If the stream also closed,
             // we're done; otherwise surface as an error.
             if (sctx.completed) break;
-            return std::unexpected("connection closed by peer mid-stream");
+            return std::unexpected(HttpError::peer_closed(
+                "connection closed by peer mid-stream"));
         }
 
         if (sctx.completed) break;
@@ -648,8 +710,9 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
                 nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE, sid,
                                           NGHTTP2_CANCEL);
                 auto secs = std::chrono::duration_cast<std::chrono::seconds>(since_rx).count();
-                return std::unexpected("h2: idle timeout (no bytes for "
-                                       + std::to_string(secs) + "s)");
+                return std::unexpected(HttpError::timeout(
+                    "h2 idle timeout (no bytes for "
+                    + std::to_string(secs) + "s)"));
             }
         }
 
@@ -672,7 +735,7 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
         if (rem == 0 && deadline) {
             nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE, sid,
                                       NGHTTP2_CANCEL);
-            return std::unexpected("request timed out");
+            return std::unexpected(HttpError::timeout("request timed out"));
         }
         auto clamp_to = [&](std::chrono::milliseconds budget,
                             clock_t_::time_point marker) {
@@ -690,10 +753,11 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
         int pr = sock_poll(&pfd, 1, rem);
         if (pr < 0) {
             if (sock_intr(sock_last_err())) continue;
-            return std::unexpected("h2: poll errno=" + std::to_string(sock_last_err()));
+            return std::unexpected(HttpError::protocol(
+                "h2 poll errno=" + std::to_string(sock_last_err())));
         }
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-            return std::unexpected("h2: socket hangup");
+            return std::unexpected(HttpError::socket_hangup("h2 socket hangup"));
         }
     }
 
@@ -701,14 +765,18 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     // after the stream closes don't touch a dead StreamCtx.
     nghttp2_session_set_user_data(session_, nullptr);
 
-    if (sctx.handler_aborted)
-        return std::unexpected(sctx.error.empty()
-                               ? std::string{"stream aborted by caller"}
-                               : sctx.error);
-    if (sctx.reset)
-        return std::unexpected(sctx.error.empty()
-                               ? std::string{"stream reset"}
-                               : sctx.error);
+    if (sctx.handler_aborted) {
+        if (sctx.error == "cancelled")
+            return std::unexpected(HttpError::cancelled("stream aborted by caller"));
+        return std::unexpected(HttpError::cancelled(
+            sctx.error.empty() ? std::string{"stream aborted by caller"} : sctx.error));
+    }
+    if (sctx.reset) {
+        if (sctx.error == "cancelled")
+            return std::unexpected(HttpError::cancelled("stream reset"));
+        return std::unexpected(HttpError::protocol(
+            sctx.error.empty() ? std::string{"stream reset"} : sctx.error));
+    }
     return {};
 }
 
@@ -716,21 +784,21 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
 // Dial a fresh connection: TCP, TLS, nghttp2 preamble + SETTINGS.  Returns
 // a ready-to-go Connection.
 // -----------------------------------------------------------------------
-std::expected<std::unique_ptr<Connection>, std::string>
+std::expected<std::unique_ptr<Connection>, HttpError>
 dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     auto fd_or = dial_tcp(ep, tos, cancel.get());
-    if (!fd_or) return std::unexpected(fd_or.error());
+    if (!fd_or) return std::unexpected(std::move(fd_or).error());
     socket_t fd = *fd_or;
 
     // SOCKET is a 64-bit handle on Win64, but OpenSSL's BIO_new_socket takes
     // int. The kernel only ever hands out small values (well under 2^31), so
     // the truncation is safe — make it explicit to silence C4244.
     tls::SSL* ssl = tls::wrap_client(static_cast<int>(fd), ep.host);
-    if (!ssl) { sock_close(fd); return std::unexpected("tls: SSL_new failed"); }
+    if (!ssl) { sock_close(fd); return std::unexpected(HttpError::tls("SSL_new failed")); }
 
     if (auto r = tls_handshake(fd, ssl, tos, cancel.get()); !r) {
         tls::free_ssl(ssl); sock_close(fd);
-        return std::unexpected(r.error());
+        return std::unexpected(std::move(r).error());
     }
 
     // Require the peer to have negotiated h2 via ALPN.  Anthropic's edge does;
@@ -740,7 +808,7 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     SSL_get0_alpn_selected(ssl, &alpn, &alpn_len);
     if (alpn_len != 2 || !alpn || alpn[0] != 'h' || alpn[1] != '2') {
         tls::free_ssl(ssl); sock_close(fd);
-        return std::unexpected("tls: peer did not negotiate h2 (ALPN)");
+        return std::unexpected(HttpError::tls("peer did not negotiate h2 (ALPN)"));
     }
 
     // --- nghttp2 session ---
@@ -756,8 +824,8 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     nghttp2_session_callbacks_del(cbs);
     if (rc != 0 || !session) {
         tls::free_ssl(ssl); sock_close(fd);
-        return std::unexpected(std::string{"nghttp2_session_client_new: "}
-                             + nghttp2_strerror(rc));
+        return std::unexpected(HttpError::protocol(
+            std::string{"nghttp2_session_client_new: "} + nghttp2_strerror(rc)));
     }
 
     // Client preface + SETTINGS.  We bump INITIAL_WINDOW_SIZE to 8 MiB on
@@ -778,7 +846,7 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
                                           kConnectionWindow);
 
     auto conn = std::make_unique<Connection>(fd, ssl, session, ep);
-    if (auto r = conn->pump_initial(tos); !r) return std::unexpected(r.error());
+    if (auto r = conn->pump_initial(tos); !r) return std::unexpected(std::move(r).error());
     return conn;
 }
 
@@ -892,7 +960,7 @@ Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
 Client::~Client() = default;
 
 // Helper: grab a connection from the pool or dial fresh.
-static std::expected<std::unique_ptr<Connection>, std::string>
+static std::expected<std::unique_ptr<Connection>, HttpError>
 acquire_or_dial(Pool& pool, const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     if (auto c = pool.acquire(ep)) return c;
     return dial_new(ep, tos, std::move(cancel));
@@ -936,22 +1004,22 @@ static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
     return true;
 }
 
-std::expected<Response, std::string>
+HttpResult
 Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port };
-    std::string last_err = "send: no attempts made";
+    HttpError last_err = HttpError::unknown("send: no attempts made");
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        if (is_cancelled(cancel)) return std::unexpected("cancelled");
+        if (is_cancelled(cancel)) return std::unexpected(HttpError::cancelled());
         if (!backoff_sleep(attempt, cancel))
-            return std::unexpected("cancelled");
+            return std::unexpected(HttpError::cancelled());
 
         // First attempt pulls from the pool; subsequent attempts dial fresh —
         // if the pool handed us a corpse once, it'll probably hand us another.
         auto conn_or = (attempt == 0)
             ? acquire_or_dial(impl_->pool, ep, tos, cancel)
             : dial_new(ep, tos, cancel);
-        if (!conn_or) { last_err = conn_or.error(); continue; }
+        if (!conn_or) { last_err = std::move(conn_or).error(); continue; }
         auto conn = std::move(*conn_or);
 
         StreamCtx sctx{};
@@ -961,7 +1029,7 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
             return Response{ sctx.status, std::move(sctx.headers),
                              std::move(sctx.buffered_body) };
         }
-        last_err = ok.error();
+        last_err = std::move(ok).error();
 
         // If the server actually produced a :status, the request reached
         // application level — the failure is semantic (500, timeout mid-body),
@@ -970,14 +1038,14 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         if (is_cancelled(cancel)) break;
     }
 
-    return std::unexpected(last_err);
+    return std::unexpected(std::move(last_err));
 }
 
-std::expected<void, std::string>
+HttpStreamResult
 Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
                CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port };
-    std::string last_err = "stream: no attempts made";
+    HttpError last_err = HttpError::unknown("stream: no attempts made");
     // Persist across attempts so the synthesised on_headers (if we never got
     // a real one) carries whatever metadata the *last* attempt did collect.
     int     last_status  = 0;
@@ -985,13 +1053,13 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
     bool    any_bytes    = false;   // true once a chunk / header reaches caller
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-        if (is_cancelled(cancel)) { last_err = "cancelled"; break; }
-        if (!backoff_sleep(attempt, cancel)) { last_err = "cancelled"; break; }
+        if (is_cancelled(cancel)) { last_err = HttpError::cancelled(); break; }
+        if (!backoff_sleep(attempt, cancel)) { last_err = HttpError::cancelled(); break; }
 
         auto conn_or = (attempt == 0)
             ? acquire_or_dial(impl_->pool, ep, tos, cancel)
             : dial_new(ep, tos, cancel);
-        if (!conn_or) { last_err = conn_or.error(); continue; }
+        if (!conn_or) { last_err = std::move(conn_or).error(); continue; }
         auto conn = std::move(*conn_or);
 
         StreamCtx sctx{};
@@ -1004,7 +1072,7 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
             impl_->pool.release(std::move(conn));
             return {};
         }
-        last_err = ok.error();
+        last_err = std::move(ok).error();
 
         // Once we've started delivering data to the caller, the stream is
         // committed — retrying would produce duplicate SSE events and a
@@ -1018,7 +1086,7 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
     if (!any_bytes && handler.on_headers) {
         handler.on_headers(last_status, last_headers);
     }
-    return std::unexpected(last_err);
+    return std::unexpected(std::move(last_err));
 }
 
 void Client::prewarm(std::string host, uint16_t port) {

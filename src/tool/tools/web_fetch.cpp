@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/tool_args.hpp"
@@ -112,7 +113,7 @@ ExecResult run_web_fetch(const WebFetchArgs& a) {
         .total   = std::chrono::milliseconds(30'000),
     };
     auto r = http::default_client().send(req, tos);
-    if (!r) return std::unexpected(ToolError::network("fetch failed: " + r.error()));
+    if (!r) return std::unexpected(ToolError::network("fetch failed: " + r.error().render()));
 
     std::string content_type;
     for (const auto& h : r->headers)
@@ -140,7 +141,8 @@ ExecResult run_web_fetch(const WebFetchArgs& a) {
 
 ToolDef tool_web_fetch() {
     ToolDef t;
-    t.name = ToolName{std::string{"web_fetch"}};
+    constexpr const auto& kSpec = spec::require<"web_fetch">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Fetch the contents of a URL. Supports HTTPS. Returns the response "
                     "body, status code, and content type. Use for documentation, APIs, etc.";
     t.input_schema = json{
@@ -154,7 +156,8 @@ ToolDef tool_web_fetch() {
             {"headers", {{"type","object"}, {"description","Additional headers as key-value pairs"}}},
         }},
     };
-    t.needs_permission = [](Profile p){ return p != Profile::Write; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<WebFetchArgs>(parse_web_fetch_args, run_web_fetch);
     return t;
 }

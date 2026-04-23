@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "moha/runtime/model.hpp"
+#include "moha/tool/effects.hpp"
 
 namespace moha::tools {
 
@@ -89,7 +90,13 @@ struct ToolDef {
     // sets it per-tool that opts in via `supports_input_streaming()`.
     bool eager_input_streaming = false;
 
-    std::function<bool(Profile)> needs_permission;
+    // Capability tags describing the tool's observable impact on the
+    // world. The permission policy reads these and these alone — there
+    // is no per-tool override. Set this when constructing the ToolDef
+    // (e.g. `t.effects = {Effect::ReadFs};`); leaving it default
+    // (empty) means "this tool is pure and never needs permission".
+    EffectSet effects;
+
     std::function<ExecResult(const nlohmann::json& args)> execute;
 };
 

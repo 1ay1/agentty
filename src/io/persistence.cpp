@@ -121,18 +121,71 @@ static json message_to_json(const Message& m) {
     return j;
 }
 
-static Message message_from_json(const json& j) {
+// ── Typed deserializers ──────────────────────────────────────────────────
+// One source of truth for "what does a valid Thread JSON look like."
+// Required fields fail with `MissingField`; wrong-type fields fail with
+// `InvalidValue`; unrecognised discriminators fail with `InvalidVariantTag`.
+// Optional fields fall back to defaults silently (timestamps, error strings)
+// — those are recoverable; missing them shouldn't kill the whole thread.
+
+std::string DeserializeError::render() const {
+    static constexpr std::string_view kind_str[] = {
+        "json_parse", "missing_field", "invalid_value",
+        "invalid_variant_tag", "io",
+    };
+    std::string out = "[";
+    out += kind_str[static_cast<std::size_t>(kind)];
+    out += "] ";
+    if (!field.empty()) { out += field; out += ": "; }
+    out += detail;
+    return out;
+}
+
+static std::expected<ToolUse::Status, DeserializeError>
+parse_tool_status(std::string_view status_tag, std::string&& output) {
+    // Reconstruct the variant. Persisted threads only ever land in
+    // terminal states (in-flight tools are never serialized), so the
+    // intermediate states reset to a no-arg-time-stamp default.
+    if (status_tag == "done")
+        return ToolUse::Status{ToolUse::Done{{}, {}, std::move(output)}};
+    if (status_tag == "failed" || status_tag == "error")
+        return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(output)}};
+    if (status_tag == "rejected") return ToolUse::Status{ToolUse::Rejected{{}}};
+    if (status_tag == "running")  return ToolUse::Status{ToolUse::Running{{}, {}}};
+    if (status_tag == "approved") return ToolUse::Status{ToolUse::Approved{{}}};
+    if (status_tag == "pending")  return ToolUse::Status{ToolUse::Pending{{}}};
+    return std::unexpected(DeserializeError{
+        DeserializeErrorKind::InvalidVariantTag, "tool_calls[*].status",
+        std::string{"unknown status tag: "} + std::string{status_tag}});
+}
+
+static std::expected<Message, DeserializeError> parse_message(const json& j) {
+    if (!j.is_object())
+        return std::unexpected(DeserializeError{
+            DeserializeErrorKind::InvalidValue, "messages[*]",
+            "expected object"});
     Message m;
     m.role = role_from_string(j.value("role", "user"));
     m.text = j.value("text", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
         && !it->get<std::string>().empty())
         m.error = it->get<std::string>();
-    if (j.contains("timestamp"))
+    if (j.contains("timestamp")) {
+        const auto& ts = j["timestamp"];
+        if (!ts.is_number_integer())
+            return std::unexpected(DeserializeError{
+                DeserializeErrorKind::InvalidValue, "messages[*].timestamp",
+                "expected integer seconds-since-epoch"});
         m.timestamp = std::chrono::system_clock::time_point{
-            std::chrono::seconds{j["timestamp"].get<long long>()}};
+            std::chrono::seconds{ts.get<long long>()}};
+    }
     if (j.contains("tool_calls")) {
-        for (const auto& t : j["tool_calls"]) {
+        const auto& arr = j["tool_calls"];
+        if (!arr.is_array())
+            return std::unexpected(DeserializeError{
+                DeserializeErrorKind::InvalidValue, "messages[*].tool_calls",
+                "expected array"});
+        for (const auto& t : arr) {
             ToolUse tc;
             tc.id = ToolCallId{t.value("id", "")};
             tc.name = ToolName{t.value("name", "")};
@@ -140,40 +193,75 @@ static Message message_from_json(const json& j) {
             // Old persisted threads stored status as an int enum; new ones
             // use the string tag returned by ToolUse::status_name(). Accept
             // both so existing on-disk threads keep loading.
-            std::string status_tag;
+            std::string status_tag = "pending";
             std::string output = t.value("output", "");
             if (auto it = t.find("status"); it != t.end()) {
-                if (it->is_string())          status_tag = it->get<std::string>();
-                else if (it->is_number()) {
+                if (it->is_string()) {
+                    status_tag = it->get<std::string>();
+                } else if (it->is_number()) {
                     static constexpr std::string_view legacy[] = {
                         "pending","approved","running","done","failed","rejected"};
                     int idx = it->get<int>();
-                    status_tag = std::string{
-                        idx >= 0 && idx < (int)std::size(legacy)
-                            ? legacy[idx] : std::string_view{"pending"}};
+                    status_tag = idx >= 0 && idx < static_cast<int>(std::size(legacy))
+                        ? std::string{legacy[idx]} : std::string{"pending"};
                 }
             }
-            // Reconstruct the variant. Persisted threads only ever land in
-            // terminal states (in-flight tools are never serialized), so the
-            // intermediate states reset to a no-args-time-stamp default.
-            if (status_tag == "done")
-                tc.status = ToolUse::Done{{}, {}, std::move(output)};
-            else if (status_tag == "failed" || status_tag == "error")
-                tc.status = ToolUse::Failed{{}, {}, std::move(output)};
-            else if (status_tag == "rejected")
-                tc.status = ToolUse::Rejected{{}};
-            else if (status_tag == "running")
-                tc.status = ToolUse::Running{{}, {}};
-            else if (status_tag == "approved")
-                tc.status = ToolUse::Approved{{}};
-            else
-                tc.status = ToolUse::Pending{{}};
+            auto status = parse_tool_status(status_tag, std::move(output));
+            if (!status) return std::unexpected(std::move(status).error());
+            tc.status = std::move(*status);
             m.tool_calls.push_back(std::move(tc));
         }
     }
-    if (j.contains("checkpoint_id"))
-        m.checkpoint_id = CheckpointId{j["checkpoint_id"].get<std::string>()};
+    if (j.contains("checkpoint_id")) {
+        const auto& cp = j["checkpoint_id"];
+        if (!cp.is_string())
+            return std::unexpected(DeserializeError{
+                DeserializeErrorKind::InvalidValue, "messages[*].checkpoint_id",
+                "expected string"});
+        m.checkpoint_id = CheckpointId{cp.get<std::string>()};
+    }
     return m;
+}
+
+static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
+    if (!j.is_object())
+        return std::unexpected(DeserializeError{
+            DeserializeErrorKind::InvalidValue, "", "expected top-level object"});
+    Thread t;
+    auto id_str = j.value("id", "");
+    if (id_str.empty())
+        return std::unexpected(DeserializeError{
+            DeserializeErrorKind::MissingField, "id",
+            "thread JSON has no `id` field"});
+    t.id = ThreadId{std::move(id_str)};
+    t.title = j.value("title", "");
+    if (j.contains("created_at"))
+        t.created_at = std::chrono::system_clock::time_point{
+            std::chrono::seconds{j["created_at"].get<long long>()}};
+    if (j.contains("updated_at"))
+        t.updated_at = std::chrono::system_clock::time_point{
+            std::chrono::seconds{j["updated_at"].get<long long>()}};
+    for (const auto& mj : j.value("messages", json::array())) {
+        auto msg = parse_message(mj);
+        if (!msg) return std::unexpected(std::move(msg).error());
+        t.messages.push_back(std::move(*msg));
+    }
+    return t;
+}
+
+std::expected<Thread, DeserializeError>
+load_thread_file(const std::filesystem::path& p) {
+    std::ifstream ifs(p);
+    if (!ifs) return std::unexpected(DeserializeError{
+        DeserializeErrorKind::Io, "", "open failed: " + p.string()});
+    json j;
+    try { ifs >> j; }
+    catch (const std::exception& e) {
+        return std::unexpected(DeserializeError{
+            DeserializeErrorKind::JsonParse, "",
+            std::string{"json parse failed: "} + e.what()});
+    }
+    return parse_thread(j);
 }
 
 std::vector<Thread> load_all_threads() {
@@ -182,24 +270,18 @@ std::vector<Thread> load_all_threads() {
     if (!fs::exists(threads_dir(), ec)) return out;
     for (const auto& e : fs::directory_iterator(threads_dir(), ec)) {
         if (e.path().extension() != ".json") continue;
-        std::ifstream ifs(e.path());
-        if (!ifs) continue;
-        try {
-            json j; ifs >> j;
-            Thread t;
-            t.id = ThreadId{j.value("id", "")};
-            t.title = j.value("title", "");
-            if (j.contains("created_at"))
-                t.created_at = std::chrono::system_clock::time_point{
-                    std::chrono::seconds{j["created_at"].get<long long>()}};
-            if (j.contains("updated_at"))
-                t.updated_at = std::chrono::system_clock::time_point{
-                    std::chrono::seconds{j["updated_at"].get<long long>()}};
-            for (const auto& mj : j.value("messages", json::array()))
-                t.messages.push_back(message_from_json(mj));
-            out.push_back(std::move(t));
-        } catch (...) {
-            continue;
+        auto loaded = load_thread_file(e.path());
+        if (loaded) {
+            out.push_back(std::move(*loaded));
+        } else {
+            // Log and skip — corrupt or schema-incompatible files don't
+            // kill the rest of the directory walk. The typed kind is
+            // visible to anyone watching stderr; programmatic callers
+            // who want a strict load can use load_thread_file directly.
+            std::fprintf(stderr,
+                "moha: skipping %s — %s\n",
+                e.path().string().c_str(),
+                loaded.error().render().c_str());
         }
     }
     std::sort(out.begin(), out.end(), [](const Thread& a, const Thread& b){

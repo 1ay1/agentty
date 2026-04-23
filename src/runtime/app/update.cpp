@@ -18,6 +18,7 @@
 #include "moha/runtime/app/cmd_factory.hpp"
 #include "moha/runtime/app/deps.hpp"
 #include "moha/runtime/app/update/internal.hpp"
+#include "moha/runtime/picker.hpp"
 #include "moha/runtime/view/helpers.hpp"
 
 namespace moha::app {
@@ -25,6 +26,7 @@ namespace moha::app {
 using maya::Cmd;
 using maya::overload;
 using json = nlohmann::json;
+namespace pick = moha::ui::pick;
 
 std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
     return std::visit(overload{
@@ -80,7 +82,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Stream events ───────────────────────────────────────────────
         [&](StreamStarted) -> Step {
-            m.s.active = true;
             m.s.started = std::chrono::steady_clock::now();
             // Reset the live-rate accumulator so each sub-turn (post-tool)
             // measures its own generation speed instead of polluting the
@@ -253,9 +254,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 int secs = (delay + 999) / 1000;
                 m.s.status = std::string{provider::to_string(klass)}
                            + " — retrying in " + std::to_string(secs) + "s…";
-                // Stay "active" so the spinner keeps ticking and the
-                // user sees the countdown / can Esc to cancel.
-                m.s.active = true;
+                // Phase=Streaming keeps active() true → Tick subscription
+                // stays armed, the user sees the countdown / can Esc.
                 m.s.phase = phase::Streaming{};
                 // Drop the empty placeholder we just wrote (if any) so
                 // the re-launch lands cleanly.
@@ -266,8 +266,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                                     Msg{RetryStream{}})};
             }
 
-            // Terminal path — surface and stop.
-            m.s.active = false;
+            // Terminal path — phase=Idle drops active() to false.
             m.s.phase = phase::Idle{};
             // Cancellation gets a clean "cancelled" status, no "error:".
             if (klass == provider::ErrorClass::Cancelled) {
@@ -298,10 +297,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         },
         [&](RetryStream) -> Step {
             // Scheduled retry fired. If the user cancelled during the
-            // wait (Esc → CancelStream tripped active=false / phase=Idle),
-            // do nothing.
-            if (!m.s.active || m.s.is_idle())
-                return done(std::move(m));
+            // wait (Esc → CancelStream dropped phase to Idle), do nothing.
+            if (m.s.is_idle()) return done(std::move(m));
             // Re-launch on the same context. launch_stream will mint a
             // new cancel token, append a placeholder assistant message,
             // and re-issue the request.
@@ -317,7 +314,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // while we're sleeping for a scheduled retry, this clears
             // active so the RetryStream Msg becomes a no-op when it fires.
             if (m.s.cancel) m.s.cancel->cancel();
-            m.s.active = false;
             m.s.phase = phase::Idle{};
             m.s.status = "cancelled";
             return done(std::move(m));
@@ -339,24 +335,63 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
 
+        // ── Per-tool wall-clock watchdog ────────────────────────────────
+        // Scheduled by kick_pending_tools when a non-subprocess tool
+        // transitions to Running. Force-fails the tool if it's still
+        // Running 60 s later — the worker thread keeps going (we can't
+        // safely cancel a blocking syscall from here), but the UI
+        // moves on. apply_tool_output's idempotent guard discards
+        // the late result if the worker eventually unwinds.
+        [&](ToolTimeoutCheck& e) -> Step {
+            bool flipped = false;
+            for (auto& msg_ : m.d.current.messages) {
+                for (auto& tc : msg_.tool_calls) {
+                    if (tc.id == e.id && tc.is_running()) {
+                        auto now = std::chrono::steady_clock::now();
+                        tc.status = ToolUse::Failed{
+                            tc.started_at(), now,
+                            "tool execution exceeded 60 s wall-clock — likely "
+                            "hung on a blocking syscall (slow/dead filesystem "
+                            "mount, network freeze, or worker deadlock). The "
+                            "tool's worker thread may continue in the "
+                            "background; its result will be discarded if it "
+                            "ever returns."};
+                        flipped = true;
+                    }
+                }
+            }
+            if (!flipped) return done(std::move(m));
+            // Force-failure means kick_pending_tools needs to pick up
+            // the next pending tool, send results back to the model,
+            // or settle to idle. Same path ToolExecOutput uses.
+            auto cmd = cmd::kick_pending_tools(m);
+            return {std::move(m), std::move(cmd)};
+        },
+
         // ── Tool execution result ───────────────────────────────────────
         [&](ToolExecOutput& e) -> Step {
-            for (const auto& msg_ : m.d.current.messages)
-                for (const auto& tc : msg_.tool_calls)
-                    if (tc.id == e.id && tc.name == "todo" && !e.error) {
-                        auto todos = tc.args.value("todos", json::array());
-                        m.ui.todo.items.clear();
-                        for (const auto& td : todos) {
-                            TodoItem item;
-                            item.content = td.value("content", "");
-                            auto st = td.value("status", "pending");
-                            item.status = st == "completed"   ? TodoStatus::Completed
-                                        : st == "in_progress" ? TodoStatus::InProgress
-                                                              : TodoStatus::Pending;
-                            m.ui.todo.items.push_back(std::move(item));
+            // todo's side effect on the UI's todo modal — runs only when
+            // the call actually succeeded; failures don't synthesise a
+            // todo list. The expected<> shape makes that one `if` cover
+            // both the discriminator and the success-value extraction.
+            if (e.result) {
+                for (const auto& msg_ : m.d.current.messages)
+                    for (const auto& tc : msg_.tool_calls)
+                        if (tc.id == e.id && tc.name == "todo") {
+                            auto todos = tc.args.value("todos", json::array());
+                            m.ui.todo.items.clear();
+                            for (const auto& td : todos) {
+                                TodoItem item;
+                                item.content = td.value("content", "");
+                                auto st = td.value("status", "pending");
+                                item.status = st == "completed"   ? TodoStatus::Completed
+                                            : st == "in_progress" ? TodoStatus::InProgress
+                                                                  : TodoStatus::Pending;
+                                m.ui.todo.items.push_back(std::move(item));
+                            }
                         }
-                    }
-            detail::apply_tool_output(m, e.id, std::move(e.output), e.error);
+            }
+            detail::apply_tool_output(m, e.id, std::move(e.result));
             auto cmd = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(cmd)};
         },
@@ -376,8 +411,9 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                         cmds.push_back(cmd::run_tool(tc.id, tc.name, tc.args));
                     }
             m.d.pending_permission.reset();
+            // ExecutingTool is non-Idle, so active() flips on automatically
+            // and the Tick subscription stays armed for the live timer.
             m.s.phase = phase::ExecutingTool{};
-            m.s.active = true;  // keep Tick alive for live elapsed counter
             return {std::move(m), Cmd<Msg>::batch(std::move(cmds))};
         },
         [&](PermissionReject) -> Step {
@@ -395,9 +431,10 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Model picker ────────────────────────────────────────────────
         [&](OpenModelPicker) -> Step {
-            m.ui.model_picker.open = true;
+            int idx = 0;
             for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
-                if (m.d.available_models[i].id == m.d.model_id) m.ui.model_picker.index = i;
+                if (m.d.available_models[i].id == m.d.model_id) idx = i;
+            m.ui.model_picker = pick::OpenAt{idx};
             return {std::move(m), cmd::fetch_models()};
         },
         [&](ModelsLoaded& e) -> Step {
@@ -409,36 +446,42 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                     if (mi.id == fav) mi.favorite = true;
                 m.d.available_models.push_back(std::move(mi));
             }
-            m.ui.model_picker.index = 0;
-            for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
-                if (m.d.available_models[i].id == m.d.model_id) m.ui.model_picker.index = i;
+            if (auto* p = pick::opened(m.ui.model_picker)) {
+                p->index = 0;
+                for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
+                    if (m.d.available_models[i].id == m.d.model_id) p->index = i;
+            }
             return done(std::move(m));
         },
         [&](CloseModelPicker) -> Step {
-            m.ui.model_picker.open = false;
+            m.ui.model_picker = pick::Closed{};
             return done(std::move(m));
         },
         [&](ModelPickerMove& e) -> Step {
             if (m.d.available_models.empty()) return done(std::move(m));
+            auto* p = pick::opened(m.ui.model_picker);
+            if (!p) return done(std::move(m));
             int sz = static_cast<int>(m.d.available_models.size());
-            m.ui.model_picker.index = (m.ui.model_picker.index + e.delta + sz) % sz;
+            p->index = (p->index + e.delta + sz) % sz;
             return done(std::move(m));
         },
         [&](ModelPickerSelect) -> Step {
-            if (!m.d.available_models.empty()) {
-                m.d.model_id = m.d.available_models[m.ui.model_picker.index].id;
+            auto* p = pick::opened(m.ui.model_picker);
+            if (p && !m.d.available_models.empty()) {
+                m.d.model_id = m.d.available_models[p->index].id;
                 // Update the per-model context cap so the status-bar ctx
                 // % bar reflects the right denominator for the new model
                 // (1 M for `[1m]` variants, 200 K otherwise).
                 m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
                 detail::persist_settings(m);
             }
-            m.ui.model_picker.open = false;
+            m.ui.model_picker = pick::Closed{};
             return done(std::move(m));
         },
         [&](ModelPickerToggleFavorite) -> Step {
-            if (!m.d.available_models.empty()) {
-                auto& mi = m.d.available_models[m.ui.model_picker.index];
+            auto* p = pick::opened(m.ui.model_picker);
+            if (p && !m.d.available_models.empty()) {
+                auto& mi = m.d.available_models[p->index];
                 mi.favorite = !mi.favorite;
             }
             return done(std::move(m));
@@ -446,24 +489,27 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Thread list ─────────────────────────────────────────────────
         [&](OpenThreadList) -> Step {
-            m.ui.thread_list.open = true;
             m.d.threads = deps().load_threads();
-            m.ui.thread_list.index = 0;
+            m.ui.thread_list = pick::OpenAt{0};
             return done(std::move(m));
         },
         [&](CloseThreadList) -> Step {
-            m.ui.thread_list.open = false;
+            m.ui.thread_list = pick::Closed{};
             return done(std::move(m));
         },
         [&](ThreadListMove& e) -> Step {
             if (m.d.threads.empty()) return done(std::move(m));
+            auto* p = pick::opened(m.ui.thread_list);
+            if (!p) return done(std::move(m));
             int sz = static_cast<int>(m.d.threads.size());
-            m.ui.thread_list.index = (m.ui.thread_list.index + e.delta + sz) % sz;
+            p->index = (p->index + e.delta + sz) % sz;
             return done(std::move(m));
         },
         [&](ThreadListSelect) -> Step {
-            if (!m.d.threads.empty()) m.d.current = m.d.threads[m.ui.thread_list.index];
-            m.ui.thread_list.open = false;
+            auto* p = pick::opened(m.ui.thread_list);
+            if (p && !m.d.threads.empty())
+                m.d.current = m.d.threads[p->index];
+            m.ui.thread_list = pick::Closed{};
             // A freshly-loaded thread has no prev-frame correspondence in
             // the inline buffer — render everything that fits in the window.
             int total = static_cast<int>(m.d.current.messages.size());
@@ -475,8 +521,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             m.d.current = Thread{};
             m.d.current.id = deps().new_thread_id();
             m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
-            m.ui.thread_list.open = false;
-            m.ui.command_palette.open = false;
+            m.ui.thread_list = pick::Closed{};
+            m.ui.command_palette = palette::Closed{};
             m.ui.composer.text.clear();
             m.ui.composer.cursor = 0;
             m.s.phase = phase::Idle{};
@@ -486,31 +532,34 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Command palette ─────────────────────────────────────────────
         [&](OpenCommandPalette) -> Step {
-            m.ui.command_palette.open = true;
-            m.ui.command_palette.query.clear();
-            m.ui.command_palette.index = 0;
+            m.ui.command_palette = palette::Open{};
             return done(std::move(m));
         },
         [&](CloseCommandPalette) -> Step {
-            m.ui.command_palette.open = false;
+            m.ui.command_palette = palette::Closed{};
             return done(std::move(m));
         },
         [&](CommandPaletteInput& e) -> Step {
-            if (static_cast<uint32_t>(e.ch) < 0x80)
-                m.ui.command_palette.query.push_back(static_cast<char>(e.ch));
+            auto* o = opened(m.ui.command_palette);
+            if (o && static_cast<uint32_t>(e.ch) < 0x80)
+                o->query.push_back(static_cast<char>(e.ch));
             return done(std::move(m));
         },
         [&](CommandPaletteBackspace) -> Step {
-            if (!m.ui.command_palette.query.empty()) m.ui.command_palette.query.pop_back();
+            auto* o = opened(m.ui.command_palette);
+            if (o && !o->query.empty()) o->query.pop_back();
             return done(std::move(m));
         },
         [&](CommandPaletteMove& e) -> Step {
-            m.ui.command_palette.index = std::max(0, m.ui.command_palette.index + e.delta);
+            auto* o = opened(m.ui.command_palette);
+            if (o) o->index = std::max(0, o->index + e.delta);
             return done(std::move(m));
         },
         [&](CommandPaletteSelect) -> Step {
-            m.ui.command_palette.open = false;
-            switch (m.ui.command_palette.index) {
+            auto* o = opened(m.ui.command_palette);
+            int chosen = o ? o->index : -1;
+            m.ui.command_palette = palette::Closed{};
+            switch (chosen) {
                 case 0: return update(std::move(m), NewThread{});
                 case 1: return update(std::move(m), OpenDiffReview{});
                 case 2: return update(std::move(m), AcceptAllChanges{});
@@ -526,11 +575,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Todo modal ──────────────────────────────────────────────────
         [&](OpenTodoModal) -> Step {
-            m.ui.todo.open = true;
+            m.ui.todo.open = pick::OpenModal{};
             return done(std::move(m));
         },
         [&](CloseTodoModal) -> Step {
-            m.ui.todo.open = false;
+            m.ui.todo.open = pick::Closed{};
             return done(std::move(m));
         },
         [&](UpdateTodos& e) -> Step {
@@ -549,50 +598,55 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Diff review ─────────────────────────────────────────────────
         [&](OpenDiffReview) -> Step {
-            m.ui.diff_review.open = !m.d.pending_changes.empty();
-            m.ui.diff_review.file_index = 0;
-            m.ui.diff_review.hunk_index = 0;
+            m.ui.diff_review = m.d.pending_changes.empty()
+                ? ui::pick::TwoAxis{pick::Closed{}}
+                : ui::pick::TwoAxis{pick::OpenAtCell{0, 0}};
             return done(std::move(m));
         },
         [&](CloseDiffReview) -> Step {
-            m.ui.diff_review.open = false;
+            m.ui.diff_review = pick::Closed{};
             return done(std::move(m));
         },
         [&](DiffReviewMove& e) -> Step {
-            if (m.d.pending_changes.empty()) return done(std::move(m));
-            auto& fc = m.d.pending_changes[m.ui.diff_review.file_index];
+            auto* c = pick::opened(m.ui.diff_review);
+            if (!c || m.d.pending_changes.empty()) return done(std::move(m));
+            auto& fc = m.d.pending_changes[c->file_index];
             int sz = static_cast<int>(fc.hunks.size());
             if (sz == 0) return done(std::move(m));
-            m.ui.diff_review.hunk_index = (m.ui.diff_review.hunk_index + e.delta + sz) % sz;
+            c->hunk_index = (c->hunk_index + e.delta + sz) % sz;
             return done(std::move(m));
         },
         [&](DiffReviewNextFile) -> Step {
-            if (m.d.pending_changes.empty()) return done(std::move(m));
+            auto* c = pick::opened(m.ui.diff_review);
+            if (!c || m.d.pending_changes.empty()) return done(std::move(m));
             int sz = static_cast<int>(m.d.pending_changes.size());
-            m.ui.diff_review.file_index = (m.ui.diff_review.file_index + 1) % sz;
-            m.ui.diff_review.hunk_index = 0;
+            c->file_index = (c->file_index + 1) % sz;
+            c->hunk_index = 0;
             return done(std::move(m));
         },
         [&](DiffReviewPrevFile) -> Step {
-            if (m.d.pending_changes.empty()) return done(std::move(m));
+            auto* c = pick::opened(m.ui.diff_review);
+            if (!c || m.d.pending_changes.empty()) return done(std::move(m));
             int sz = static_cast<int>(m.d.pending_changes.size());
-            m.ui.diff_review.file_index = (m.ui.diff_review.file_index - 1 + sz) % sz;
-            m.ui.diff_review.hunk_index = 0;
+            c->file_index = (c->file_index - 1 + sz) % sz;
+            c->hunk_index = 0;
             return done(std::move(m));
         },
         [&](AcceptHunk) -> Step {
-            if (!m.d.pending_changes.empty()) {
-                auto& fc = m.d.pending_changes[m.ui.diff_review.file_index];
+            auto* c = pick::opened(m.ui.diff_review);
+            if (c && !m.d.pending_changes.empty()) {
+                auto& fc = m.d.pending_changes[c->file_index];
                 if (!fc.hunks.empty())
-                    fc.hunks[m.ui.diff_review.hunk_index].status = Hunk::Status::Accepted;
+                    fc.hunks[c->hunk_index].status = Hunk::Status::Accepted;
             }
             return done(std::move(m));
         },
         [&](RejectHunk) -> Step {
-            if (!m.d.pending_changes.empty()) {
-                auto& fc = m.d.pending_changes[m.ui.diff_review.file_index];
+            auto* c = pick::opened(m.ui.diff_review);
+            if (c && !m.d.pending_changes.empty()) {
+                auto& fc = m.d.pending_changes[c->file_index];
                 if (!fc.hunks.empty())
-                    fc.hunks[m.ui.diff_review.hunk_index].status = Hunk::Status::Rejected;
+                    fc.hunks[c->hunk_index].status = Hunk::Status::Rejected;
             }
             return done(std::move(m));
         },
@@ -605,7 +659,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             for (auto& fc : m.d.pending_changes)
                 for (auto& h : fc.hunks) h.status = Hunk::Status::Rejected;
             m.d.pending_changes.clear();
-            m.ui.diff_review.open = false;
+            m.ui.diff_review = pick::Closed{};
             return done(std::move(m));
         },
 
@@ -629,7 +683,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             if (m.s.last_tick.time_since_epoch().count() == 0) m.s.last_tick = now;
             float dt = std::chrono::duration<float>(now - m.s.last_tick).count();
             m.s.last_tick = now;
-            if (m.s.active) m.s.spinner.advance(dt);
+            if (m.s.active()) m.s.spinner.advance(dt);
 
             // Sample tok/s into the sparkline ring every ~500 ms while the
             // stream is actively producing bytes. Sampling slower than the
@@ -637,7 +691,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // "noise"; sampling faster would show every transient
             // edge-batching artifact. Skip until the first delta arrives so
             // the leading bar isn't an artificial zero-stretch.
-            if (m.s.is_streaming() && m.s.active
+            if (m.s.is_streaming() && m.s.active()
                 && m.s.first_delta_at.time_since_epoch().count() != 0) {
                 constexpr auto kSampleInterval = std::chrono::milliseconds{500};
                 if (m.s.rate_last_sample_at.time_since_epoch().count() == 0) {

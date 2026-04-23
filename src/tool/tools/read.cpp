@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -130,7 +131,8 @@ ExecResult run_read(const ReadArgs& a) {
 
 ToolDef tool_read() {
     ToolDef t;
-    t.name = ToolName{std::string{"read"}};
+    constexpr const auto& kSpec = spec::require<"read">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Read a file from the filesystem. Returns up to 2000 lines "
                     "starting at an optional offset. For large files, page via "
                     "offset/limit (or start_line/end_line) rather than reading "
@@ -149,7 +151,8 @@ ToolDef tool_read() {
             {"end_line",   {{"type","integer"}, {"description","Inclusive last line (Zed-style)"}}},
         }},
     };
-    t.needs_permission = [](Profile p){ return p == Profile::Minimal; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<ReadArgs>(parse_read_args, run_read);
     return t;
 }

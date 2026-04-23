@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/tool_args.hpp"
@@ -69,7 +70,7 @@ ExecResult run_web_search(const WebSearchArgs& a) {
         .total   = std::chrono::milliseconds(15'000),
     };
     auto r = http::default_client().send(req, tos);
-    if (!r) return std::unexpected(ToolError::network("search failed: " + r.error()));
+    if (!r) return std::unexpected(ToolError::network("search failed: " + r.error().render()));
     const std::string& body = r->body;
 
     std::ostringstream out;
@@ -161,7 +162,8 @@ ExecResult run_web_search(const WebSearchArgs& a) {
 
 ToolDef tool_web_search() {
     ToolDef t;
-    t.name = ToolName{std::string{"web_search"}};
+    constexpr const auto& kSpec = spec::require<"web_search">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Search the web using DuckDuckGo. Returns search result snippets. "
                     "Use for looking up documentation, error messages, API references.";
     t.input_schema = json{
@@ -174,7 +176,8 @@ ToolDef tool_web_search() {
             {"count", {{"type","integer"}, {"description","Max results (default: 10)"}}},
         }},
     };
-    t.needs_permission = [](Profile p){ return p != Profile::Write; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<WebSearchArgs>(parse_web_search_args, run_web_search);
     return t;
 }

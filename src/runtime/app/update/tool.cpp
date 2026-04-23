@@ -12,14 +12,38 @@
 namespace moha::app::detail {
 
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::string&& output, bool error) {
+                       std::expected<std::string, tools::ToolError>&& result) {
     for (auto& msg : m.d.current.messages)
         for (auto& tc : msg.tool_calls)
             if (tc.id == id) {
+                // Idempotent: a tool already in a terminal state
+                // (Done / Failed / Rejected) keeps that state. Realistic
+                // ways a late ToolExecOutput can land here:
+                //   (a) Wall-clock watchdog force-failed the tool at
+                //       60 s; the worker thread eventually unwound
+                //       seconds/minutes later. The original failure
+                //       reason ("hung") is more useful to the user
+                //       than the late output would be — and overwriting
+                //       could re-arm a turn that's already advanced
+                //       past this tool.
+                //   (b) A duplicate dispatch on the same id (shouldn't
+                //       happen but cheap to defend against).
+                // Either way, dropping the late result keeps history
+                // stable.
+                if (tc.is_terminal()) return;
                 auto now = std::chrono::steady_clock::now();
                 auto started = tc.started_at();
-                if (error) tc.status = ToolUse::Failed{started, now, std::move(output)};
-                else       tc.status = ToolUse::Done  {started, now, std::move(output)};
+                if (result) {
+                    tc.status = ToolUse::Done{started, now, std::move(*result)};
+                } else {
+                    // Render typed error as "[kind] detail" so the category
+                    // is visible in tool-card / history without losing the
+                    // human-readable detail. The model needs only the
+                    // string back; the kind is preserved structurally for
+                    // the future, when the view branches on category.
+                    tc.status = ToolUse::Failed{started, now,
+                        result.error().render()};
+                }
             }
 }
 

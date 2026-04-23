@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/subprocess.hpp"
@@ -77,7 +78,8 @@ ExecResult run_diagnostics(const DiagnosticsArgs& a) {
 
 ToolDef tool_diagnostics() {
     ToolDef t;
-    t.name = ToolName{std::string{"diagnostics"}};
+    constexpr const auto& kSpec = spec::require<"diagnostics">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Run the project's build or lint command and return errors/warnings. "
                     "Auto-detects build system (CMake, cargo, go, npm, make).";
     t.input_schema = json{
@@ -89,7 +91,8 @@ ToolDef tool_diagnostics() {
                 "Custom build command. If omitted, auto-detects."}}},
         }},
     };
-    t.needs_permission = [](Profile p){ return p != Profile::Write; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<DiagnosticsArgs>(parse_diagnostics_args, run_diagnostics);
     return t;
 }

@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -103,7 +104,8 @@ ExecResult run_list_dir(const ListDirArgs& a) {
 
 ToolDef tool_list_dir() {
     ToolDef t;
-    t.name = ToolName{std::string{"list_dir"}};
+    constexpr const auto& kSpec = spec::require<"list_dir">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "List the contents of a directory. Shows file type, size, and name. "
                     "Use this to explore project structure before reading files.";
     t.input_schema = json{
@@ -116,7 +118,8 @@ ToolDef tool_list_dir() {
             {"max_depth", {{"type","integer"}, {"description","Max depth for recursive listing (default: 3)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<ListDirArgs>(parse_list_dir_args, run_list_dir);
     return t;
 }

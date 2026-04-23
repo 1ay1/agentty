@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/tool_args.hpp"
@@ -67,7 +68,8 @@ ExecResult run_todo(const TodoArgs& a) {
 
 ToolDef tool_todo() {
     ToolDef t;
-    t.name = ToolName{std::string{"todo"}};
+    constexpr const auto& kSpec = spec::require<"todo">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Maintain the session todo list. Overwrites with the provided list.";
     t.input_schema = json{
         {"type","object"},
@@ -92,8 +94,8 @@ ToolDef tool_todo() {
     // multi-line `content` strings is multi-KB; the card looks frozen
     // ("stuck") for 10–30 s while the wire trickles. Same fix as write/edit
     // — see write.cpp for the full story.
-    t.eager_input_streaming = true;
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<TodoArgs>(parse_todo_args, run_todo);
     return t;
 }

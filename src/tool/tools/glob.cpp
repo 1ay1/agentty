@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -76,7 +77,8 @@ ExecResult run_glob(const GlobArgs& a) {
 
 ToolDef tool_glob() {
     ToolDef t;
-    t.name = ToolName{std::string{"glob"}};
+    constexpr const auto& kSpec = spec::require<"glob">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Find files by glob pattern. Supports `*` (any run), `?` (one char), "
                     "`[abc]` classes, and bare substrings. Matches against filename "
                     "(not full path). Case-insensitive on Windows.";
@@ -90,7 +92,8 @@ ToolDef tool_glob() {
             {"path",    {{"type","string"}, {"description","Root directory (default: cwd)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<GlobArgs>(parse_glob_args, run_glob);
     return t;
 }

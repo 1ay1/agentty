@@ -18,6 +18,7 @@
 #include "moha/domain/session.hpp"
 #include "moha/domain/todo.hpp"
 #include "moha/runtime/command_palette.hpp"
+#include "moha/runtime/picker.hpp"
 
 namespace moha {
 
@@ -32,24 +33,10 @@ struct ComposerState {
     std::vector<std::string> queued;
 };
 
-struct ModelPickerState {
-    bool open  = false;
-    int  index = 0;
-};
-
-struct ThreadListState {
-    bool open  = false;
-    int  index = 0;
-};
-
-struct DiffReviewState {
-    bool open       = false;
-    int  file_index = 0;
-    int  hunk_index = 0;
-};
-
+// Todo picker carries its own item list — separate concern from the
+// open/closed state, which now lives in `open` as a typed variant.
 struct TodoState {
-    bool open = false;
+    ui::pick::Modal       open;     // Closed | OpenModal
     std::vector<TodoItem> items;
 };
 
@@ -79,10 +66,10 @@ struct Model {
 
     struct UI {
         ComposerState       composer;
-        ModelPickerState    model_picker;
-        ThreadListState     thread_list;
+        ui::pick::OneAxis   model_picker;     // Closed | OpenAt{index}
+        ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
         CommandPaletteState command_palette;
-        DiffReviewState     diff_review;
+        ui::pick::TwoAxis   diff_review;      // Closed | OpenAtCell{file_index,hunk_index}
         TodoState           todo;
         int                 thread_scroll = 0;
         // Index of the first message the view should render.  Messages

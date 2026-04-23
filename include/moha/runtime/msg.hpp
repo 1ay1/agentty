@@ -1,10 +1,12 @@
 #pragma once
 // moha::Msg — every event the runtime can process, as a closed variant.
 
+#include <expected>
 #include <string>
 #include <variant>
 
 #include "moha/runtime/model.hpp"
+#include "moha/tool/registry.hpp"
 
 namespace moha {
 
@@ -36,12 +38,45 @@ struct StreamUsage {
     int cache_creation_input_tokens = 0;
     int cache_read_input_tokens    = 0;
 };
-// `stop_reason` mirrors Anthropic's message_delta.delta.stop_reason
-// ("end_turn", "tool_use", "max_tokens", "stop_sequence", or empty when the
-// stream ended without one). The reducer uses this to distinguish a clean
-// turn end from a token-cap cutoff that left tool args truncated — the
-// latter shouldn't be silently retried.
-struct StreamFinished { std::string stop_reason; };
+// Why the stream ended. Maps Anthropic's wire string
+// (`message_delta.delta.stop_reason`: "end_turn" | "tool_use" |
+// "max_tokens" | "stop_sequence" | absent) into a closed enum so the
+// reducer can `switch` on it without string compare. Anything the wire
+// doesn't recognise (forward-compat: a future Anthropic stop reason)
+// becomes `Unspecified` — handled identically to a missing field, which
+// means "treat as a clean stream end."
+enum class StopReason : std::uint8_t {
+    EndTurn,        // model finished naturally
+    ToolUse,        // model wants tool results before continuing
+    MaxTokens,      // hit the output token cap mid-stream
+    StopSequence,   // matched a configured stop_sequence
+    Unspecified,    // wire absent, empty, or unknown
+};
+
+[[nodiscard]] constexpr std::string_view to_string(StopReason r) noexcept {
+    switch (r) {
+        case StopReason::EndTurn:      return "end_turn";
+        case StopReason::ToolUse:      return "tool_use";
+        case StopReason::MaxTokens:    return "max_tokens";
+        case StopReason::StopSequence: return "stop_sequence";
+        case StopReason::Unspecified:  return "";
+    }
+    return "";
+}
+
+// Inverse: parse a wire string into the typed enum. Used at the
+// dynamism boundary in `provider/anthropic/transport.cpp`. Unrecognised
+// values become `Unspecified` so a future Anthropic addition doesn't
+// crash the reducer.
+[[nodiscard]] constexpr StopReason parse_stop_reason(std::string_view s) noexcept {
+    if (s == "end_turn")      return StopReason::EndTurn;
+    if (s == "tool_use")      return StopReason::ToolUse;
+    if (s == "max_tokens")    return StopReason::MaxTokens;
+    if (s == "stop_sequence") return StopReason::StopSequence;
+    return StopReason::Unspecified;
+}
+
+struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
 struct StreamError { std::string message; };
 // User-driven cancel of the in-flight stream (Esc while streaming). The
 // reducer trips the StreamState cancel token; the http layer notices within
@@ -55,13 +90,29 @@ struct CancelStream {};
 struct RetryStream {};
 
 // ── Tool execution (local) ───────────────────────────────────────────────
-struct ToolExecOutput { ToolCallId id; std::string output; bool error; };
+// Tool finished executing. `result` is `expected<output_text, ToolError>`
+// — the success/failure distinction is the type, not a parallel `bool error`
+// flag. Reducer dispatches via `std::visit` (or the `if (e.result)` short
+// form for the common case); the typed `ToolError::kind` flows all the way
+// to the view, where it could drive different rendering per category.
+struct ToolExecOutput {
+    ToolCallId id;
+    std::expected<std::string, tools::ToolError> result;
+};
 // Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can
 // assign unconditionally without maintaining append state. Coalesced at the
 // subprocess boundary (~100 ms) so a chatty command doesn't flood the event
 // queue with micro-updates.
 struct ToolExecProgress { ToolCallId id; std::string snapshot; };
+// Wall-clock watchdog for tool execution. Scheduled by kick_pending_tools
+// via Cmd::after when a non-subprocess tool transitions to Running. If the
+// tool has reached a terminal state by the time the check fires, this is
+// a no-op; otherwise the tool is force-failed so the UI doesn't sit on a
+// hung filesystem call / blocked syscall forever. The worker thread that
+// owns the tool may keep running — its eventual ToolExecOutput is silently
+// discarded by apply_tool_output's idempotent guard.
+struct ToolTimeoutCheck { ToolCallId id; };
 
 // ── Permission ───────────────────────────────────────────────────────────
 struct PermissionApprove {};
@@ -128,7 +179,7 @@ using Msg = std::variant<
     StreamStarted, StreamTextDelta,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
     StreamUsage, StreamFinished, StreamError, CancelStream, RetryStream,
-    ToolExecOutput, ToolExecProgress,
+    ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
     PermissionApprove, PermissionReject, PermissionApproveAlways,
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerSelect, ModelPickerToggleFavorite, ModelsLoaded,
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListSelect, NewThread,

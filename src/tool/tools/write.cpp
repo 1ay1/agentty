@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -157,7 +158,8 @@ ExecResult run_write(const WriteArgs& a) {
 
 ToolDef tool_write() {
     ToolDef t;
-    t.name = ToolName{std::string{"write"}};
+    constexpr const auto& kSpec = spec::require<"write">();
+    t.name = ToolName{std::string{kSpec.name}};
     // CC's exact Write tool description (verbatim from the v2.1.113 binary).
     // Matching byte-for-byte keeps the model on the same well-trained path
     // it uses for Claude Code — off-spec descriptions and extra fields
@@ -190,8 +192,8 @@ ToolDef tool_write() {
     // `content` field token-by-token via `input_json_delta` instead of
     // buffering+trickling. Without this, multi-KB write bodies arrive at
     // 0–1 tok/s on a stream that's otherwise hitting 60 tok/s for prose.
-    t.eager_input_streaming = true;
-    t.needs_permission = [](Profile p){ return p != Profile::Write; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<WriteArgs>(parse_write_args, run_write);
     return t;
 }

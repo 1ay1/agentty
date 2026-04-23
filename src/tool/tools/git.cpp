@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/subprocess.hpp"
@@ -42,7 +43,8 @@ ExecResult run_git_status(const GitStatusArgs& a) {
 
 ToolDef tool_git_status() {
     ToolDef t;
-    t.name = ToolName{std::string{"git_status"}};
+    constexpr const auto& kSpec = spec::require<"git_status">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Show the current git status: branch, staged/unstaged changes, "
                     "untracked files, ahead/behind counts.";
     t.input_schema = json{
@@ -53,7 +55,8 @@ ToolDef tool_git_status() {
             {"path", {{"type","string"}, {"description","Repository path (default: cwd)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<GitStatusArgs>(parse_git_status_args, run_git_status);
     return t;
 }
@@ -95,7 +98,8 @@ ExecResult run_git_diff(const GitDiffArgs& a) {
 
 ToolDef tool_git_diff() {
     ToolDef t;
-    t.name = ToolName{std::string{"git_diff"}};
+    constexpr const auto& kSpec = spec::require<"git_diff">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Show git diff. By default shows unstaged changes. Use staged=true "
                     "for staged changes, or specify a ref/range.";
     t.input_schema = json{
@@ -108,7 +112,8 @@ ToolDef tool_git_diff() {
             {"ref",     {{"type","string"}, {"description","Git ref or range (e.g. HEAD~3, main..HEAD)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<GitDiffArgs>(parse_git_diff_args, run_git_diff);
     return t;
 }
@@ -158,7 +163,8 @@ ExecResult run_git_log(const GitLogArgs& a) {
 
 ToolDef tool_git_log() {
     ToolDef t;
-    t.name = ToolName{std::string{"git_log"}};
+    constexpr const auto& kSpec = spec::require<"git_log">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Show git commit history. Returns commit hash, author, date, and message.";
     t.input_schema = json{
         {"type","object"},
@@ -171,7 +177,8 @@ ToolDef tool_git_log() {
             {"oneline", {{"type","boolean"}, {"description","One-line format (default: false)"}}},
         }},
     };
-    t.needs_permission = [](Profile){ return false; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<GitLogArgs>(parse_git_log_args, run_git_log);
     return t;
 }
@@ -230,7 +237,8 @@ ExecResult run_git_commit(const GitCommitArgs& a) {
 
 ToolDef tool_git_commit() {
     ToolDef t;
-    t.name = ToolName{std::string{"git_commit"}};
+    constexpr const auto& kSpec = spec::require<"git_commit">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description = "Stage files and create a git commit. Specify files to stage, "
                     "or use stage_all to stage everything.";
     t.input_schema = json{
@@ -245,10 +253,8 @@ ToolDef tool_git_commit() {
             {"stage_all", {{"type","boolean"}, {"description","Stage all changes (default: false)"}}},
         }},
     };
-    // Multi-paragraph commit messages can be multi-KB (especially the
-    // PR-description style). Same eager-streaming rationale as todo/bash.
-    t.eager_input_streaming = true;
-    t.needs_permission = [](Profile){ return true; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<GitCommitArgs>(parse_git_commit_args, run_git_commit);
     return t;
 }

@@ -1,18 +1,32 @@
 #pragma once
-// moha::provider::error_class — classify a stream-level error message
-// from the wire so the reducer knows whether to retry, prompt for
-// re-auth, or surface as a terminal failure.
+// moha::provider::error_class — classify a stream-level failure into
+// one of {Transient, RateLimit, Auth, Cancelled, Terminal}. The reducer
+// reads the result to decide between auto-retry, re-auth, and surface-
+// to-the-user.
 //
-// Anthropic surfaces errors via SSE `event: error` carrying JSON like:
-//   {"type":"error","error":{"type":"overloaded_error","message":"…"}}
-// Our transport extracts `error.message` (plus a status-code prefix
-// like "http: 429: …" for HTTP-layer failures). This module pattern-
-// matches against both shapes by simple substring sniffing — no JSON
-// re-parse, no schema dependency. False negatives stay terminal
-// (safe); false positives just retry once and then settle.
+// Two entry points, by source:
+//
+//   classify(HttpError)        — typed dispatch on `kind`/`http_status`.
+//                                Use this when the source is an HTTP-layer
+//                                failure (no SSE event). Zero string
+//                                inspection, exhaustive on the enum.
+//
+//   classify(std::string_view) — substring sniff. Use for SSE
+//                                `event: error` payloads where the wire
+//                                gives us only Anthropic's `message` text
+//                                (e.g. "Overloaded", "rate_limit_error").
+//                                The HTTP path is the typed one;
+//                                this string path exists for the
+//                                wire-only error shape.
+//
+// Adding a new failure kind is one new enum entry plus one switch arm
+// in classify(HttpError); the string-sniff list grows only when
+// Anthropic ships a new error_type.
 
 #include <string>
 #include <string_view>
+
+#include "moha/io/http.hpp"
 
 namespace moha::provider {
 
@@ -35,11 +49,46 @@ enum class ErrorClass {
     Terminal,
 };
 
-// Lower-case substring sniff. `msg` is the error message as surfaced by
-// the transport — it may be wrapped ("http: 503: …", "request build
-// failed: …") or be the raw `error.message` from an SSE error event
-// ("Overloaded", "rate_limit_error", etc.). Uses byte-wise compare
-// against ASCII tokens, so locale doesn't matter.
+// Typed dispatch — the preferred path. Reads HttpError::kind directly,
+// no string inspection. Use this whenever the failure originates from
+// the HTTP layer (Client::send / Client::stream returned `unexpected`).
+[[nodiscard]] constexpr ErrorClass classify(const moha::http::HttpError& e) noexcept {
+    using K = moha::http::HttpErrorKind;
+    switch (e.kind) {
+        case K::Cancelled:    return ErrorClass::Cancelled;
+        case K::Resolve:
+        case K::Connect:
+        case K::Tls:
+        case K::Protocol:
+        case K::SocketHangup:
+        case K::Timeout:
+        case K::PeerClosed:
+            return ErrorClass::Transient;
+        case K::Status:
+            // Map HTTP-status semantics to ErrorClass. 401/403 are auth;
+            // 429 is rate limit; 408/5xx (502/503/504/529) are transient;
+            // everything else (4xx) is terminal.
+            if (e.http_status == 401 || e.http_status == 403)
+                return ErrorClass::Auth;
+            if (e.http_status == 429) return ErrorClass::RateLimit;
+            if (e.http_status == 408 || e.http_status == 502
+             || e.http_status == 503 || e.http_status == 504
+             || e.http_status == 529)
+                return ErrorClass::Transient;
+            return ErrorClass::Terminal;
+        case K::Body:
+        case K::Unknown:
+            return ErrorClass::Terminal;
+    }
+    return ErrorClass::Terminal;
+}
+
+// String-sniff fallback. Used for SSE `event: error` payloads where the
+// wire gives us only Anthropic's `error.message` text — there's no
+// HttpError to dispatch on at that boundary. Also covers the legacy
+// path where pre-typed errors flowed through `StreamError{string}` for
+// historical reasons. Keep this list aligned with Anthropic's error
+// taxonomy; one entry per shape we want to surface specifically.
 [[nodiscard]] inline ErrorClass classify(std::string_view msg) noexcept {
     auto contains = [&](std::string_view needle) noexcept -> bool {
         if (needle.size() > msg.size()) return false;
@@ -118,5 +167,53 @@ inline constexpr int kMaxRetries = 4;
     }
     return "unknown";
 }
+
+// ── Compile-time proofs of the HTTP→ErrorClass mapping ──────────────────
+// Every kind/status that the HTTP layer can return is checked against
+// the classifier here. If the table drifts (someone reorders the switch,
+// adds a new HttpErrorKind without updating this overload, or changes
+// the auth/rate-limit status mapping), the build breaks before any
+// runtime path can take a wrong branch.
+namespace proofs {
+using moha::http::HttpError;
+using moha::http::HttpErrorKind;
+
+// Cancelled is always Cancelled — never re-issued, never reclassified.
+static_assert(classify(HttpError{HttpErrorKind::Cancelled, 0, ""}) == ErrorClass::Cancelled);
+
+// All transport-layer kinds map to Transient.
+static_assert(classify(HttpError{HttpErrorKind::Resolve,      0, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Connect,      0, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Tls,          0, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Protocol,     0, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::SocketHangup, 0, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Timeout,      0, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::PeerClosed,   0, ""}) == ErrorClass::Transient);
+
+// Body / Unknown are terminal — re-issuing won't change a malformed
+// response or a programmer bug.
+static_assert(classify(HttpError{HttpErrorKind::Body,    0, ""}) == ErrorClass::Terminal);
+static_assert(classify(HttpError{HttpErrorKind::Unknown, 0, ""}) == ErrorClass::Terminal);
+
+// Status mapping — the HTTP-status sub-table.
+static_assert(classify(HttpError{HttpErrorKind::Status, 401, ""}) == ErrorClass::Auth);
+static_assert(classify(HttpError{HttpErrorKind::Status, 403, ""}) == ErrorClass::Auth);
+static_assert(classify(HttpError{HttpErrorKind::Status, 429, ""}) == ErrorClass::RateLimit);
+static_assert(classify(HttpError{HttpErrorKind::Status, 408, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Status, 502, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Status, 503, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Status, 504, ""}) == ErrorClass::Transient);
+static_assert(classify(HttpError{HttpErrorKind::Status, 529, ""}) == ErrorClass::Transient);
+// Anything else 4xx is terminal — model said no, retrying won't change
+// its mind.
+static_assert(classify(HttpError{HttpErrorKind::Status, 400, ""}) == ErrorClass::Terminal);
+static_assert(classify(HttpError{HttpErrorKind::Status, 404, ""}) == ErrorClass::Terminal);
+static_assert(classify(HttpError{HttpErrorKind::Status, 422, ""}) == ErrorClass::Terminal);
+// 200 OK reaching the classifier means application-level disagreement
+// (caller surfaced it as Status with 200 — only happens via Body kind
+// in practice; kept for completeness).
+static_assert(classify(HttpError{HttpErrorKind::Status, 200, ""}) == ErrorClass::Terminal);
+
+} // namespace proofs
 
 } // namespace moha::provider

@@ -37,8 +37,7 @@ using Phase = std::variant<phase::Idle, phase::Streaming,
 }
 
 struct StreamState {
-    Phase phase  = phase::Idle{};
-    bool  active = false;
+    Phase phase = phase::Idle{};
     std::chrono::steady_clock::time_point started{};
     std::chrono::steady_clock::time_point last_tick{};
     int tokens_in   = 0;
@@ -72,6 +71,16 @@ struct StreamState {
     [[nodiscard]] bool is_streaming()           const noexcept { return std::holds_alternative<phase::Streaming>(phase); }
     [[nodiscard]] bool is_awaiting_permission() const noexcept { return std::holds_alternative<phase::AwaitingPermission>(phase); }
     [[nodiscard]] bool is_executing_tool()      const noexcept { return std::holds_alternative<phase::ExecutingTool>(phase); }
+
+    // Derived: "is anything actively in flight?" — true whenever the
+    // session is in any non-Idle phase. This used to be a parallel
+    // `bool active` field that callers had to keep in lock-step with
+    // `phase`; deriving it eliminates the invariant ("active is true
+    // iff phase != Idle") that the type system couldn't enforce.
+    // Spinner ticks, watchdogs, and the live-elapsed indicators all
+    // gate on this — there is no longer any case where one wants
+    // `active == true && phase == Idle` or vice versa.
+    [[nodiscard]] bool active() const noexcept { return !is_idle(); }
 };
 
 } // namespace moha

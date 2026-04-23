@@ -34,6 +34,31 @@ std::string ToolError::render() const {
     return std::format("[{}] {}", to_string(kind), detail);
 }
 
+std::string_view to_string(Effect e) noexcept {
+    switch (e) {
+        case Effect::ReadFs:  return "ReadFs";
+        case Effect::WriteFs: return "WriteFs";
+        case Effect::Net:     return "Net";
+        case Effect::Exec:    return "Exec";
+    }
+    return "?";
+}
+
+std::string to_string(EffectSet e) {
+    if (e.empty()) return "Pure";
+    std::string out;
+    auto add = [&](Effect bit) {
+        if (!e.has(bit)) return;
+        if (!out.empty()) out += ", ";
+        out += to_string(bit);
+    };
+    add(Effect::Exec);
+    add(Effect::WriteFs);
+    add(Effect::Net);
+    add(Effect::ReadFs);
+    return out;
+}
+
 // ── Live progress sink (thread-local implementation) ────────────────────
 //
 // thread_local so the cmd runner's dispatch lambda can be captured without

@@ -992,7 +992,7 @@ Element thread_panel(const Model& m) {
         rows.push_back(render_message(msg, i, turn, m));
         if (msg.role == Role::Assistant) ++turn;
     }
-    if (m.s.active && !m.d.current.messages.empty()
+    if (m.s.active() && !m.d.current.messages.empty()
         && m.d.current.messages.back().role == Role::Assistant) {
         // Suppress this bottom indicator when the active assistant turn
         // is already showing its Timeline card — the timeline's own

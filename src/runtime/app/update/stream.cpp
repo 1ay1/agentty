@@ -346,14 +346,14 @@ json salvage_args(const ToolUse& tc) {
     return out;
 }
 
-maya::Cmd<Msg> finalize_turn(Model& m, std::string_view stop_reason) {
+maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     using maya::Cmd;
-    m.s.active = false;
-    // Stream is over — drop the cancel handle so a stale Esc can't trip the
-    // next turn's stream the moment it launches.
+    // Stream is over — drop the cancel handle so a stale Esc can't trip
+    // the next turn's stream the moment it launches. Phase transitions
+    // below (or in kick_pending_tools) drive whether active() flips off.
     m.s.cancel.reset();
     bool any_truncated = false;
-    const bool max_tokens_hit = (stop_reason == "max_tokens");
+    const bool max_tokens_hit = (stop_reason == StopReason::MaxTokens);
     if (!m.d.current.messages.empty()) {
         auto& last = m.d.current.messages.back();
         if (last.role == Role::Assistant && !last.streaming_text.empty()) {
@@ -429,7 +429,6 @@ maya::Cmd<Msg> finalize_turn(Model& m, std::string_view stop_reason) {
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
             m.s.phase = phase::Streaming{};
-            m.s.active = true;
             m.s.status = "retrying (upstream cut off)…";
             return cmd::launch_stream(m);
         }

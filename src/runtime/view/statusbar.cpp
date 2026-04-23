@@ -444,7 +444,7 @@ std::string_view running_tool_name(const Model& m) {
 } // namespace
 
 Element status_bar(const Model& m) {
-    bool is_streaming = m.s.is_streaming() && m.s.active;
+    bool is_streaming = m.s.is_streaming() && m.s.active();
 
     // Phase chip colors + glyph resolved up front; used inside the
     // width-aware builder below.
@@ -561,7 +561,7 @@ Element status_bar(const Model& m) {
             // put). No more horizontal dance.
             bool ever_streamed =
                 m.s.first_delta_at.time_since_epoch().count() != 0;
-            if (ever_streamed && m.s.active && w >= 130) {
+            if (ever_streamed && m.s.active() && w >= 130) {
                 auto now = std::chrono::steady_clock::now();
                 auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                               now - m.s.first_delta_at).count();

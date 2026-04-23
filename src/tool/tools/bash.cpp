@@ -1,3 +1,5 @@
+#include "moha/domain/refined.hpp"
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/bash_validate.hpp"
@@ -18,10 +20,20 @@ using json = nlohmann::json;
 
 namespace {
 
+// Bash command bounds, encoded in the type so the runner doesn't
+// re-validate. `timeout` is `Bounded<int, 1, 600>` — 1 s minimum (a 0 s
+// timeout fires before the subprocess can fork), 600 s ceiling matches
+// the wire description. `command` is `NonEmpty<string>` — the
+// subprocess runner can dereference without checking. The parser is
+// the *only* place that can fail-construct these; once a `BashArgs`
+// exists, all of its invariants have been proven.
+using Command = domain::NonEmpty<std::string>;
+using TimeoutSecs = domain::Bounded<int, 1, 600>;
+
 struct BashArgs {
-    std::string command;
-    int timeout;
-    std::string cd;
+    Command     command;
+    TimeoutSecs timeout;
+    std::string cd;        // optional; empty = inherit cwd
     std::string display_description;
 };
 
@@ -33,13 +45,26 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
     std::string cmd = *std::move(cmd_opt);
     if (auto why = util::validate_bash_command(cmd); !why.empty())
         return std::unexpected(ToolError::invalid_args(std::move(why)));
-    int timeout = ar.integer("timeout", 120);
+    auto cmd_refined = Command::try_make(std::move(cmd));
+    if (!cmd_refined)
+        return std::unexpected(ToolError::invalid_args(
+            std::string{cmd_refined.error().what}));
+
+    int timeout_int = ar.integer("timeout", 120);
     // Also accept `timeout_ms` (Zed's convention). Convert to seconds.
     if (ar.has("timeout_ms")) {
         int ms = ar.integer("timeout_ms", 0);
-        if (ms > 0) timeout = (ms + 999) / 1000;
+        if (ms > 0) timeout_int = (ms + 999) / 1000;
     }
-    if (timeout <= 0 || timeout > 600) timeout = 120;
+    // Coerce out-of-range values to the documented default — anything we
+    // could meaningfully reject we silently fix instead, since the
+    // primary cause is the model passing nonsense (e.g. -1 to disable).
+    if (timeout_int <= 0 || timeout_int > 600) timeout_int = 120;
+    auto timeout = TimeoutSecs::try_make(timeout_int);
+    if (!timeout)
+        return std::unexpected(ToolError::invalid_args(
+            "timeout must be in [1, 600]"));
+
     std::string cd = ar.str("cd", "");
     if (!cd.empty()) {
         std::error_code ec;
@@ -48,8 +73,8 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
                 "cd '" + cd + "' is not a directory"));
     }
     return BashArgs{
-        std::move(cmd),
-        timeout,
+        std::move(*cmd_refined),
+        std::move(*timeout),
         std::move(cd),
         ar.str("display_description", ""),
     };
@@ -63,23 +88,29 @@ ExecResult run_bash(const BashArgs& a) {
     // double-quoted paths, and `cd /d` is needed to cross drive letters.
     // cmd.exe has no general escape for `"` inside `"..."`; bail on such
     // paths rather than emit a broken command.
-    std::string effective = a.command;
+    // Pull the raw command + timeout out of their refinement wrappers
+    // once, here at the use site — downstream string concatenation and
+    // the subprocess runner take primitive types.
+    const std::string& cmd_str = a.command.value();
+    const int           tmo_s   = a.timeout.value();
+
+    std::string effective = cmd_str;
     if (!a.cd.empty()) {
 #ifdef _WIN32
         if (a.cd.find('"') != std::string::npos)
             return std::unexpected(ToolError::invalid_args(
                 "cd path contains '\"', which cmd.exe cannot quote"));
-        effective = "cd /d \"" + a.cd + "\" && " + a.command;
+        effective = "cd /d \"" + a.cd + "\" && " + cmd_str;
 #else
         std::string q;
         q.reserve(a.cd.size() + 4);
         q.push_back('\'');
         for (char c : a.cd) { if (c == '\'') q += "'\\''"; else q.push_back(c); }
         q.push_back('\'');
-        effective = "cd " + q + " && " + a.command;
+        effective = "cd " + q + " && " + cmd_str;
 #endif
     }
-    auto r = util::run_command_s(effective, 30000, a.timeout);
+    auto r = util::run_command_s(effective, 30000, tmo_s);
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
 
@@ -138,8 +169,12 @@ ExecResult run_bash(const BashArgs& a) {
 } // namespace
 
 ToolDef tool_bash() {
+    // Compile-time bind to the spec catalog. A typo here ("bsh") fails
+    // to compile via the static_assert inside spec::require — there is
+    // no way to register a tool whose name isn't in the catalog.
+    constexpr const auto& kSpec = spec::require<"bash">();
     ToolDef t;
-    t.name = ToolName{std::string{"bash"}};
+    t.name        = ToolName{std::string{kSpec.name}};
     t.description =
 #ifdef _WIN32
         "Run a shell command via Windows cmd.exe and return its output. "
@@ -172,12 +207,12 @@ ToolDef tool_bash() {
                 "Alternative timeout in milliseconds (rounded up to seconds)."}}},
         }},
     };
-    // Eager input streaming — multi-line shell scripts and long pipelines
-    // (heredocs, awk one-liners, sed scripts) regularly cross the threshold
-    // where the edge buffers tool input. Cheap to enable; saves the spinner
-    // freeze on any non-trivial command.
-    t.eager_input_streaming = true;
-    t.needs_permission = [](Profile p){ return p != Profile::Write; };
+    // Both effects + eager-streaming come from the spec catalog, which
+    // is also where the static_asserts live that prove `bash` is the
+    // only Exec tool besides `diagnostics`. Editing the catalog is
+    // the only way to change either; this factory just consumes it.
+    t.effects               = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<BashArgs>(parse_bash_args, run_bash);
     return t;
 }

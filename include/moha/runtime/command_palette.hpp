@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <variant>
 
 namespace moha {
 
@@ -40,10 +41,25 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::Quit,          "Quit",               "Exit moha"},
 };
 
-struct CommandPaletteState {
-    bool        open  = false;
+// Sum-type state, same shape as the other picker variants in
+// `runtime/picker.hpp`. The query buffer + selected index live ONLY
+// inside the Open alternative — they cannot exist while the palette
+// is closed (used to be a bool + two fields where the bool gated their
+// validity by convention; now the type system enforces it).
+namespace palette {
+struct Closed {};
+struct Open {
     std::string query;
     int         index = 0;
 };
+} // namespace palette
+
+using CommandPaletteState = std::variant<palette::Closed, palette::Open>;
+
+[[nodiscard]] inline bool is_open(const CommandPaletteState& s) noexcept {
+    return std::holds_alternative<palette::Open>(s);
+}
+[[nodiscard]] inline       palette::Open* opened(CommandPaletteState& s)       noexcept { return std::get_if<palette::Open>(&s); }
+[[nodiscard]] inline const palette::Open* opened(const CommandPaletteState& s) noexcept { return std::get_if<palette::Open>(&s); }
 
 } // namespace moha

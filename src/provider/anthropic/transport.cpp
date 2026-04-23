@@ -209,8 +209,10 @@ struct StreamCtx {
     bool terminated = false;
     // Stashed from message_delta so we can hand it to StreamFinished. Lets
     // the reducer tell "natural end" / "tool_use" apart from "max_tokens"
-    // (which leaves the in-flight tool_use block truncated).
-    std::string stop_reason;
+    // (which leaves the in-flight tool_use block truncated). Parsed at
+    // the wire boundary into the typed enum — string-compare lives only
+    // here, not in the reducer.
+    StopReason stop_reason = StopReason::Unspecified;
     // simdjson parser is stateful and caches its scratch buffer across
     // iterate() calls — reusing one per stream avoids a malloc per SSE frame.
     simdjson::ondemand::parser simd_parser;
@@ -349,7 +351,8 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, const std::string& da
         }
         if (j.contains("delta") && j["delta"].contains("stop_reason")
             && j["delta"]["stop_reason"].is_string()) {
-            ctx.stop_reason = j["delta"]["stop_reason"].get<std::string>();
+            ctx.stop_reason = parse_stop_reason(
+                j["delta"]["stop_reason"].get<std::string_view>());
         }
     } else if (name == "message_stop") {
         if (ctx.in_tool_use) {
@@ -837,7 +840,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         body_str = body.dump();
     } catch (const nlohmann::json::exception& e) {
         sink(StreamError{std::string{"request build failed (invalid UTF-8 in conversation): "} + e.what()});
-        sink(StreamFinished{""});
+        sink(StreamFinished{StopReason::Unspecified});
         return;
     }
 
@@ -892,24 +895,29 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::milliseconds(0);  // streaming phase unbounded
     // A healthy Anthropic stream emits SSE heartbeats / data every few seconds
-    // even during long thinking blocks. 30 s without a single byte means the
-    // transport is dead (silent peer, proxy stall, half-open TCP). 90 s is a
-    // generous hard floor that still fails fast enough for the UI to retry
-    // within a user's patience budget.
-    tos.ping    = std::chrono::milliseconds(30'000);
-    tos.idle    = std::chrono::milliseconds(90'000);
+    // even during long thinking blocks. 45 s without a single byte means the
+    // transport is dead (silent peer, proxy stall, half-open TCP). The error
+    // surfaces as "h2: idle timeout (no bytes for Ns)" and is classified as
+    // Transient by provider::error_class — auto-retried with backoff. 15 s
+    // PING probe interval keeps a half-open TCP from going undetected for
+    // long; the PING ACK bumps last_rx, so a healthy peer never trips idle.
+    tos.ping    = std::chrono::milliseconds(15'000);
+    tos.idle    = std::chrono::milliseconds(45'000);
 
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     dbg("==== http status=%d transport=%s thinking_deltas=%d ====\n",
-        http_status, result ? "ok" : result.error().c_str(),
+        http_status, result ? "ok" : result.error().render().c_str(),
         ctx.thinking_deltas);
 
     if (!result) {
         // Network / TLS / nghttp2-level error — never produced a complete SSE
-        // stream. Surface verbatim.
-        emit_terminal(ctx, std::string{"http: "} + result.error());
+        // stream. The typed HttpError carries a `kind` that the downstream
+        // classifier reads structurally; we ALSO embed `render()` in the
+        // detail string so the error_class fallback path (substring sniff)
+        // still works for messages that haven't been routed yet.
+        emit_terminal(ctx, std::string{"http: "} + result.error().render());
         return;
     }
 

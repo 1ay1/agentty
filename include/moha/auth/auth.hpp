@@ -1,26 +1,37 @@
 #pragma once
-// moha::auth — credential domain.  `Credentials`, `Method`, `Style` are
-// pure values; the adapter that loads them from disk lives in
-// `moha/io/auth_store.hpp`, and the provider-specific OAuth wiring
+// moha::auth — credential domain. `Credentials` is a sum type
+// (None | ApiKey | OAuth); each alternative owns the data that's
+// only meaningful in that state. Token-flow operations return
+// `std::expected<OAuthToken, OAuthError>` — no parallel `bool ok`
+// flag, no string error fields.
+//
+// The adapter that loads credentials from disk lives in
+// `src/io/auth.cpp`, and the provider-specific OAuth wiring
 // (client_id, token URLs, PKCE exchange) lives in
 // `moha/provider/anthropic/oauth.hpp`.
 //
-// `resolve()` is the one orchestration point — it picks the best-available
-// credential (CLI key > env > OAuth-from-disk) and refreshes expired OAuth
-// tokens in place.  It has to live somewhere that can pull the adapter
-// layers together, so it's declared here and defined in `src/io/auth.cpp`.
+// `resolve()` is the one orchestration point — it picks the
+// best-available credential (CLI key > env > OAuth-from-disk) and
+// refreshes expired OAuth tokens in place. It has to live somewhere
+// that can pull the adapter layers together, so it's declared here
+// and defined in `src/io/auth.cpp`.
 
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <variant>
 
 #include "moha/domain/id.hpp"
 
 namespace moha::auth {
 
-enum class Method { None, ApiKey, OAuth };
-enum class Style  { ApiKey, Bearer };
+// Wire-format auth header style. Bearer for OAuth, raw key for API.
+// Picked by callers (e.g. `provider::anthropic::transport`) to pick
+// the correct header name (`x-api-key` vs `authorization`).
+enum class Style : std::uint8_t { ApiKey, Bearer };
 
 // Strong newtypes over the raw secret strings shuttled through the OAuth
 // dance. All four are "some opaque hex" at runtime and the function signature
@@ -35,19 +46,35 @@ using PkceVerifier = Id<PkceVerifierTag>;
 using OAuthState   = Id<OAuthStateTag>;
 using RefreshToken = Id<RefreshTokenTag>;
 
-struct Credentials {
-    Method method = Method::None;
+// ── Credentials: sum type, not enum-with-fields ──────────────────────────
+// Each alternative owns exactly the data valid in that state. Code that
+// reads credentials uses `std::visit` (or the helpers below) instead of
+// switching on a Method enum and remembering which fields are populated.
+namespace cred {
+struct None {};
+struct ApiKey {
+    std::string key;
+};
+struct OAuth {
     std::string access_token;
     std::string refresh_token;
-    int64_t expires_at_ms = 0; // 0 = no expiration info (api_key)
-
-    [[nodiscard]] bool is_valid()   const noexcept { return !access_token.empty(); }
-    [[nodiscard]] bool is_expired() const;                // only meaningful for OAuth
-    [[nodiscard]] std::string header_value() const;       // "Bearer <t>" or raw key
-    [[nodiscard]] Style style() const noexcept {
-        return method == Method::OAuth ? Style::Bearer : Style::ApiKey;
-    }
+    // Unix epoch milliseconds. 0 means "no expiration info"; refresh
+    // is skipped when the upstream didn't include `expires_in`.
+    std::int64_t expires_at_ms = 0;
 };
+} // namespace cred
+
+using Credentials = std::variant<cred::None, cred::ApiKey, cred::OAuth>;
+
+// Free helpers — the variant is the truth, these are derived views.
+[[nodiscard]] bool        is_valid(const Credentials& c) noexcept;
+[[nodiscard]] bool        is_expired(const Credentials& c) noexcept;
+[[nodiscard]] std::string header_value(const Credentials& c);
+[[nodiscard]] Style       style(const Credentials& c) noexcept;
+
+// Disk serialization tag. "oauth" / "api_key" / "none" — used by
+// load_credentials/save_credentials and by `cmd_status`.
+[[nodiscard]] std::string_view persist_tag(const Credentials& c) noexcept;
 
 // ── Paths ────────────────────────────────────────────────────────────────
 [[nodiscard]] std::filesystem::path config_dir();              // ~/.config/moha on Unix
@@ -72,17 +99,31 @@ bool clear_credentials();
 [[nodiscard]] std::string code_challenge_s256(const std::string& verifier);
 
 // ── Token operations ─────────────────────────────────────────────────────
-struct TokenResponse {
-    bool ok = false;
-    std::string error;
-    std::string access_token;
-    std::string refresh_token;
-    int64_t expires_in_s = 0;
+struct OAuthToken {
+    std::string  access_token;
+    std::string  refresh_token;
+    std::int64_t expires_in_s = 0;   // server-reported lifetime, 0 = no info
 };
-[[nodiscard]] TokenResponse exchange_code(const OAuthCode& code,
-                                          const PkceVerifier& verifier,
-                                          const OAuthState& state);
-[[nodiscard]] TokenResponse refresh_access_token(const RefreshToken& refresh_token);
+
+enum class OAuthErrorKind : std::uint8_t {
+    Network,        // HTTP transport failure — no response from server
+    BadResponse,    // server replied but body wasn't valid JSON
+    ApiError,       // server returned an OAuth error_description
+    MissingToken,   // 200 OK but no access_token field
+};
+
+struct OAuthError {
+    OAuthErrorKind kind = OAuthErrorKind::ApiError;
+    std::string    detail;
+    [[nodiscard]] std::string render() const;
+};
+
+using TokenResult = std::expected<OAuthToken, OAuthError>;
+
+[[nodiscard]] TokenResult exchange_code(const OAuthCode& code,
+                                        const PkceVerifier& verifier,
+                                        const OAuthState& state);
+[[nodiscard]] TokenResult refresh_access_token(const RefreshToken& refresh_token);
 
 // Resolve credentials following the documented priority order.
 // `cli_api_key` (from `-k`) takes top priority if non-empty. Auto-refresh

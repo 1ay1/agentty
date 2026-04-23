@@ -39,7 +39,7 @@ inline constexpr int kSliceChunk = 20;
 void update_stream_preview(ToolUse& tc);
 bool guard_truncated_tool_args(ToolUse& tc);
 nlohmann::json salvage_args(const ToolUse& tc);
-maya::Cmd<Msg> finalize_turn(Model& m, std::string_view stop_reason = {});
+maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 
 // ── update_modal.cpp ─────────────────────────────────────────────────────
 Step           submit_message(Model m);
@@ -48,7 +48,7 @@ void           persist_settings(const Model& m);
 
 // ── update_tool.cpp ──────────────────────────────────────────────────────
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::string&& output, bool error);
+                       std::expected<std::string, tools::ToolError>&& result);
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 

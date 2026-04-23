@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "status") return auth::cmd_status();
 
     auto creds = auth::resolve(args.cli_key);
-    if (!creds.is_valid()) {
+    if (!auth::is_valid(creds)) {
         std::fprintf(stderr,
             "moha: not authenticated.\n"
             "  run:  moha login\n"
@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
     // ── Wire the Provider + Store seams ─────────────────────────────────
     provider::anthropic::AnthropicProvider provider;
     io::FsStore                            store;
-    app::install(provider, store, creds.header_value(), creds.style());
+    app::install(provider, store, auth::header_value(creds), auth::style(creds));
 
     // Pre-warm TLS to api.anthropic.com on a detached background thread.
     // The first prompt the user types will reuse the SSL session + DNS +

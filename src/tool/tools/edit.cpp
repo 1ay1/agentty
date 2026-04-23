@@ -1,3 +1,4 @@
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -238,7 +239,8 @@ ExecResult run_edit(const EditArgs& a) {
 
 ToolDef tool_edit() {
     ToolDef t;
-    t.name = ToolName{std::string{"edit"}};
+    constexpr const auto& kSpec = spec::require<"edit">();
+    t.name = ToolName{std::string{kSpec.name}};
     t.description =
         "Modify an EXISTING file by applying one or more targeted text "
         "substitutions. PREFER this tool over `write` whenever you are "
@@ -291,8 +293,8 @@ ToolDef tool_edit() {
     // See write.cpp for the full rationale. Edit's `edits[].new_text` can
     // also be multi-KB on big refactors; eager streaming keeps the
     // input_json_delta cadence matched to the model's emission rate.
-    t.eager_input_streaming = true;
-    t.needs_permission = [](Profile p){ return p != Profile::Write; };
+    t.effects = kSpec.effects;
+    t.eager_input_streaming = kSpec.eager_input_streaming;
     t.execute = util::adapt<EditArgs>(parse_edit_args, run_edit);
     return t;
 }
