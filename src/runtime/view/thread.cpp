@@ -772,67 +772,56 @@ Element render_tool_call_uncached(const ToolUse& tc) {
 
 // ════════════════════════════════════════════════════════════════════════
 
-// Turn header: thin colored edge bar + role badge on the left, dim
-// metadata trailing right. Replaces the generic `─── ❯ You #3 ───`
-// TurnDivider with something quieter and more useful — the eye finds
-// turn boundaries via the colored ▎ bar, not via heavy hr lines.
-//
-// Layout:
-//   ▎ ✦ Opus 4.7                          09:42 · turn 3
-//   ▎ ❯ You                               09:42 · turn 3
-//
-// Color of the bar + role glyph encodes the speaker; the trailing
-// metadata stays dim so it doesn't compete for attention with the
-// content below.
-Element turn_header(Role role, int turn_num, const Message& msg,
-                    const Model& m, std::optional<float> elapsed_secs) {
-    Color edge_color;
+// Per-speaker visual identity: brand color + glyph + display name.
+// Centralized so the rail color, the header glyph, and the bottom
+// streaming indicator stay in lockstep.
+struct SpeakerStyle {
+    Color       color;
     std::string glyph;
     std::string label;
+};
 
+SpeakerStyle speaker_style_for(Role role, const Model& m) {
     if (role == Role::User) {
-        // Cyan — chosen because it doesn't collide with any model
-        // brand color (Opus magenta, Sonnet blue, Haiku green) and
-        // reads cleanly as the "you" voice across light + dark themes.
-        // Using `accent` here was clashing with Opus's edge color.
-        edge_color = highlight;
-        glyph      = "\xe2\x9d\xaf";                            // ❯
-        label      = "You";
-    } else {
-        // Assistant: pick the model's brand color so the bar visually
-        // ties to the ModelBadge in the activity bar — Opus magenta,
-        // Sonnet blue, Haiku green. We resolve via ModelBadge's logic
-        // by sniffing the model id.
-        const auto& id = m.model_id.value;
-        if      (id.find("opus")   != std::string::npos) edge_color = accent;       // magenta
-        else if (id.find("sonnet") != std::string::npos) edge_color = info;         // blue
-        else if (id.find("haiku")  != std::string::npos) edge_color = success;      // green
-        else                                              edge_color = highlight;
-        glyph = "\xe2\x9c\xa6";                                 // ✦
-        // Pretty model name: "Opus 4.7", not the raw id.
-        if      (id.find("opus")   != std::string::npos) label = "Opus";
-        else if (id.find("sonnet") != std::string::npos) label = "Sonnet";
-        else if (id.find("haiku")  != std::string::npos) label = "Haiku";
-        else                                              label = id;
-        // Append a version like "4.7" if present.
-        for (std::size_t i = 0; i + 2 < id.size(); ++i) {
-            char c = id[i];
-            if (c >= '0' && c <= '9') {
-                char sep = id[i + 1];
-                if ((sep == '-' || sep == '.') && id[i + 2] >= '0' && id[i + 2] <= '9') {
-                    std::size_t end = i + 3;
-                    while (end < id.size() && id[end] >= '0' && id[end] <= '9') ++end;
-                    auto ver = id.substr(i, end - i);
-                    for (auto& ch : ver) if (ch == '-') ch = '.';
-                    label += " " + ver;
-                    break;
-                }
+        // Cyan — distinct from every model brand color so user vs
+        // assistant turns always read as different voices.
+        return {highlight, "\xe2\x9d\xaf", "You"};                   // ❯
+    }
+    const auto& id = m.model_id.value;
+    Color c;
+    std::string label;
+    if      (id.find("opus")   != std::string::npos) { c = accent;    label = "Opus";   }
+    else if (id.find("sonnet") != std::string::npos) { c = info;      label = "Sonnet"; }
+    else if (id.find("haiku")  != std::string::npos) { c = success;   label = "Haiku";  }
+    else                                              { c = highlight; label = id;       }
+    // Append a version like "4.7" if present in the id.
+    for (std::size_t i = 0; i + 2 < id.size(); ++i) {
+        char ch = id[i];
+        if (ch >= '0' && ch <= '9') {
+            char sep = id[i + 1];
+            if ((sep == '-' || sep == '.') && id[i + 2] >= '0' && id[i + 2] <= '9') {
+                std::size_t end = i + 3;
+                while (end < id.size() && id[end] >= '0' && id[end] <= '9') ++end;
+                auto ver = id.substr(i, end - i);
+                for (auto& v : ver) if (v == '-') v = '.';
+                label += " " + ver;
+                break;
             }
         }
     }
+    return {c, "\xe2\x9c\xa6", std::move(label)};                    // ✦
+}
 
-    // Trailing metadata: timestamp · elapsed · turn N (in that order so
-    // the most-frequently-glanced datum — when — is leftmost).
+// Turn header: speaker glyph + name on the left (in the speaker color),
+// dim metadata trailing right (timestamp · elapsed · turn N). The
+// leading ▎ edge mark is gone — the continuous left rail (added at the
+// turn-block level in render_message) already does that work and a
+// double-bar would feel cluttered.
+Element turn_header(Role role, int turn_num, const Message& msg,
+                    const Model& m, std::optional<float> elapsed_secs) {
+    auto style = speaker_style_for(role, m);
+
+    // Trailing metadata: timestamp · elapsed · turn N
     std::string meta = timestamp_hh_mm(msg.timestamp);
     if (elapsed_secs && *elapsed_secs > 0.0f) {
         char buf[24];
@@ -850,25 +839,61 @@ Element turn_header(Role role, int turn_num, const Message& msg,
     }
 
     return h(
-        text("\xe2\x96\x8e", fg_of(edge_color)),                // ▎
+        text(style.glyph, fg_of(style.color)),
         text(" ", {}),
-        text(glyph, fg_of(edge_color)),
-        text(" ", {}),
-        text(std::move(label), Style{}.with_fg(edge_color).with_bold()),
+        text(std::move(style.label), Style{}.with_fg(style.color).with_bold()),
         spacer(),
         text(std::move(meta), fg_dim(muted)),
         text(" ", {})
     ).build();
 }
 
-// User message body: just the text indented under the header. We do
-// NOT use a bordered box anymore — the colored edge mark in the header
-// already says "this is the user", and a border around plain text
-// makes it look like a chip when it's actually the dominant content.
-// Indenting by 3 cells aligns the text under the role label, so the
-// "▎ ❯ You" header reads as the prefix of the content.
+// Wrap a turn's full content (header + body + tools) in a left-only
+// border colored by the speaker. The border becomes a continuous
+// vertical rail running the entire height of the turn — the visual
+// signature of polished chat UIs (Claude Code, Zed, Cursor, Linear).
+// Color groups everything under one speaker; padding pushes content
+// off the rail with breathing room. Bold border style → ┃ heavier
+// vertical so the rail reads as a real divider, not a thin line.
+Element with_turn_rail(Element content, Color rail_color) {
+    return maya::detail::box()
+        .direction(FlexDirection::Row)
+        .border(BorderStyle::Bold, rail_color)
+        .border_sides({.top = false, .right = false,
+                       .bottom = false, .left = true})
+        .padding(0, 0, 0, 2)
+        .grow(1.0f)
+      (std::move(content));
+}
+
+// Inter-turn divider: a thin dim horizontal rule across the gap.
+// Replaces a bare blank line — the rule gives the eye a real handhold
+// for "new turn starts here" without being heavy. Skipped for the very
+// first turn since there's nothing above to divide from.
+Element inter_turn_divider() {
+    return Element{ComponentElement{
+        .render = [](int w, int /*h*/) -> Element {
+            std::string line;
+            // Faded thin rule: dim · runs across with some breathing
+            // space at the indent column so it doesn't crash into the
+            // turn rail above. Reads as a quiet timeline tick.
+            int indent = 3;
+            for (int i = 0; i < indent; ++i) line += ' ';
+            for (int i = indent; i < w; ++i) line += "\xe2\x94\x80";  // ─
+            return Element{TextElement{
+                .content = std::move(line),
+                .style = Style{}.with_fg(Color::bright_black()).with_dim(),
+            }};
+        },
+        .layout = {},
+    }};
+}
+
+// User message body: plain text. Indent removed since the turn rail's
+// padding already handles offset; this keeps the single-source-of-truth
+// for "how far in" content sits.
 Element user_message_body(const std::string& body) {
-    return (v(text(body, fg_of(fg))) | padding(0, 1, 0, 3)).build();
+    return text(body, fg_of(fg));
 }
 
 Element render_message(const Message& msg, int turn_num, const Model& m) {
@@ -891,33 +916,44 @@ Element render_message(const Message& msg, int turn_num, const Model& m) {
         }
     }
 
+    // Build the turn body (header + content) without the rail; the
+    // rail is applied as a left border to the entire stack so it runs
+    // continuously top-to-bottom regardless of how many sub-rows the
+    // turn produces.
+    std::vector<Element> body;
+    Color rail_color;
+
     if (msg.role == Role::User) {
         if (msg.checkpoint_id) rows.push_back(render_checkpoint_divider());
-        rows.push_back(turn_header(Role::User, turn_num, msg, m, std::nullopt));
-        rows.push_back(text(""));
-        rows.push_back(user_message_body(msg.text));
-        rows.push_back(text(""));
+        rail_color = speaker_style_for(Role::User, m).color;
+        body.push_back(turn_header(Role::User, turn_num, msg, m, std::nullopt));
+        body.push_back(text(""));
+        body.push_back(user_message_body(msg.text));
     } else if (msg.role == Role::Assistant) {
-        rows.push_back(turn_header(Role::Assistant, turn_num, msg, m,
+        rail_color = speaker_style_for(Role::Assistant, m).color;
+        body.push_back(turn_header(Role::Assistant, turn_num, msg, m,
                                    assistant_elapsed));
-        rows.push_back(text(""));
+        body.push_back(text(""));
         bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
         if (has_body) {
-            // Same 3-cell indent as the user body so headers and content
-            // live on the same vertical column. Reads as a coherent
-            // turn block instead of zigzagging between roles.
-            rows.push_back((v(cached_markdown_for(msg)) | padding(0, 1, 0, 3)).build());
-            rows.push_back(text(""));
+            body.push_back(cached_markdown_for(msg));
+            if (!msg.tool_calls.empty()) body.push_back(text(""));
         }
-        for (const auto& tc : msg.tool_calls) {
-            // Tool cards keep a slightly smaller indent (2) so their
-            // bordered chrome doesn't disappear into the message indent.
-            rows.push_back((v(render_tool_call(tc)) | padding(0, 1, 0, 2) | grow(1.0f)).build());
+        for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
+            const auto& tc = msg.tool_calls[i];
+            body.push_back((v(render_tool_call(tc)) | grow(1.0f)).build());
             if (m.pending_permission && m.pending_permission->id == tc.id)
-                rows.push_back(render_inline_permission(*m.pending_permission, tc));
-            rows.push_back(text(""));
+                body.push_back(render_inline_permission(*m.pending_permission, tc));
+            // Inter-tool spacing only between cards, not after the last
+            // (the inter-turn divider already provides bottom breathing).
+            if (i + 1 < msg.tool_calls.size()) body.push_back(text(""));
         }
     }
+
+    rows.push_back(with_turn_rail((v(std::move(body)) | grow(1.0f)).build(),
+                                  rail_color));
+    // Bottom breathing — a short blank then the next turn's divider.
+    rows.push_back(text(""));
     return v(std::move(rows)).build();
 }
 
@@ -936,6 +972,10 @@ Element thread_panel(const Model& m) {
         if (m.current.messages[i].role == Role::Assistant) ++turn;
     for (std::size_t i = start; i < total; ++i) {
         const auto& msg = m.current.messages[i];
+        // Inter-turn divider: thin dim rule between consecutive
+        // user/assistant messages. Skip before the first message in
+        // the visible window (no prior turn to divide from).
+        if (i > start) rows.push_back(inter_turn_divider());
         rows.push_back(render_message(msg, turn, m));
         if (msg.role == Role::Assistant) ++turn;
     }
