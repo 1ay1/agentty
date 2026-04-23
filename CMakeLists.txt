@@ -36,12 +36,47 @@ if(MSVC)
     endforeach()
 endif()
 
-# ── Static CRT + whole-program optimization plumbing ───────────────────
-# Opt in with -DMOHA_STATIC_RUNTIME=ON (paired with x64-windows-static
-# vcpkg triplet) for a single-file exe with no CRT DLL dependency.
+# ── Standalone binary plumbing ─────────────────────────────────────────
+# MOHA_STANDALONE=ON produces a binary with no third-party shared-library
+# dependencies — drop it on any compatible machine (matching libc
+# version) and it runs. On every platform it forces the right static-
+# linking knobs:
+#
+#   Linux      OpenSSL + nghttp2 statically linked. libstdc++ and libgcc
+#              folded in via -static-libstdc++ / -static-libgcc. libc
+#              stays dynamic (fully-static glibc breaks the NSS resolver
+#              and DNS lookups; if you need a 100% static binary, build
+#              against musl with -DMOHA_FULLY_STATIC=ON).
+#   macOS      OpenSSL + nghttp2 statically linked. libSystem stays
+#              dynamic (the only ABI Apple supports for distribution).
+#   Windows    Forces MOHA_STATIC_RUNTIME=ON (/MT) so the MSVC CRT is
+#              statically embedded; nghttp2 + OpenSSL come from the
+#              x64-windows-static vcpkg triplet.
+#
+# Build with `cmake -B build-rel -DCMAKE_BUILD_TYPE=Release -DMOHA_STANDALONE=ON`.
 option(MOHA_STATIC_RUNTIME "Link the MSVC runtime statically (/MT)" OFF)
+option(MOHA_STANDALONE     "Produce a standalone binary with no third-party shared-library deps" OFF)
+option(MOHA_FULLY_STATIC   "Fully static link (Linux only, requires musl toolchain)" OFF)
+
+if(MOHA_STANDALONE AND MSVC)
+    # On Windows, standalone implies static MSVC runtime — there's no
+    # other way to ship a "drop it on any machine" .exe.
+    set(MOHA_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
+endif()
 if(MOHA_STATIC_RUNTIME AND MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+# Tell find_package(OpenSSL) to prefer .a over .so/.dylib when standalone
+# is requested. We try static first (QUIET so a missing .a doesn't error
+# out); if that fails we silently fall back to the dynamic variant later
+# and warn the user that one runtime dep slipped through. Most distros
+# (Arch, Debian default, Fedora) only package OpenSSL as .so; users on
+# Alpine, vcpkg-static, or who installed openssl-static get the full
+# standalone build.
+set(MOHA_STANDALONE_OPENSSL_FALLBACK FALSE)
+if(MOHA_STANDALONE)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
 endif()
 
 # Link-time optimization — enabled by default in Release/RelWithDebInfo, off
@@ -113,7 +148,23 @@ if(TARGET simdjson_static)
 endif()
 
 find_package(Threads REQUIRED)
-find_package(OpenSSL REQUIRED)
+
+# OpenSSL: if MOHA_STANDALONE asked for static and the static archive is
+# missing, retry with shared libs and flag the fallback so the user sees
+# a clear note at the end of configure.
+if(MOHA_STANDALONE)
+    find_package(OpenSSL QUIET)
+    if(NOT OpenSSL_FOUND)
+        unset(OPENSSL_USE_STATIC_LIBS)
+        unset(OPENSSL_LIBRARIES CACHE)
+        unset(OPENSSL_CRYPTO_LIBRARY CACHE)
+        unset(OPENSSL_SSL_LIBRARY CACHE)
+        find_package(OpenSSL REQUIRED)
+        set(MOHA_STANDALONE_OPENSSL_FALLBACK TRUE)
+    endif()
+else()
+    find_package(OpenSSL REQUIRED)
+endif()
 
 # nghttp2 — HTTP/2 protocol engine for the in-house http client. Prefer the
 # upstream CMake config (vcpkg / Homebrew / nghttp2's own export); fall back
@@ -130,7 +181,18 @@ if(NOT TARGET nghttp2::nghttp2)
 endif()
 if(NOT TARGET nghttp2::nghttp2)
     find_path(NGHTTP2_INCLUDE_DIR nghttp2/nghttp2.h)
-    find_library(NGHTTP2_LIBRARY NAMES nghttp2 nghttp2_static)
+    # Standalone builds prefer the static archive (libnghttp2.a /
+    # nghttp2_static.lib); regular builds prefer the shared library so
+    # devs don't need a static archive installed.
+    if(MOHA_STANDALONE)
+        if(MSVC)
+            find_library(NGHTTP2_LIBRARY NAMES nghttp2_static nghttp2)
+        else()
+            find_library(NGHTTP2_LIBRARY NAMES libnghttp2.a nghttp2_static nghttp2)
+        endif()
+    else()
+        find_library(NGHTTP2_LIBRARY NAMES nghttp2 nghttp2_static)
+    endif()
     if(NGHTTP2_INCLUDE_DIR AND NGHTTP2_LIBRARY)
         add_library(nghttp2::nghttp2 UNKNOWN IMPORTED)
         set_target_properties(nghttp2::nghttp2 PROPERTIES
@@ -235,12 +297,63 @@ if(WIN32)
     # crypt32  — CertOpenSystemStoreW for the Windows root cert loader
     # shell32  — already needed by existing code paths
     target_link_libraries(moha PRIVATE ws2_32 crypt32 shell32)
+    # Static OpenSSL on Windows additionally pulls in these system libs
+    # (used by libcrypto's CSP / certificate APIs). Innocuous in dynamic
+    # builds — the linker dedupes — but required when MOHA_STANDALONE=ON.
+    if(MOHA_STANDALONE)
+        target_link_libraries(moha PRIVATE bcrypt secur32 advapi32 user32)
+    endif()
 endif()
 if(APPLE)
     # macOS root cert loader uses the Security and CoreFoundation frameworks.
     target_link_libraries(moha PRIVATE
         "-framework Security"
         "-framework CoreFoundation")
+endif()
+
+# ── Standalone link knobs (per-platform) ───────────────────────────────
+if(MOHA_STANDALONE AND NOT MSVC)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Fold libstdc++ and libgcc into the binary so it runs on machines
+        # with a different distro / ABI version. libc stays dynamic — a
+        # fully-static glibc binary breaks the NSS resolver (DNS, /etc/
+        # nsswitch) and getpwuid_r at runtime. For 100%-static, opt into
+        # MOHA_FULLY_STATIC and build with a musl toolchain.
+        target_link_options(moha PRIVATE
+            -static-libstdc++ -static-libgcc)
+        if(MOHA_FULLY_STATIC)
+            target_link_options(moha PRIVATE -static)
+        endif()
+        # Static OpenSSL pulls in libdl and libpthread (both already
+        # implicit) plus libz (compression) for some builds. Add libz
+        # defensively; harmless when not needed.
+        find_library(ZLIB_STATIC NAMES libz.a z)
+        if(ZLIB_STATIC)
+            target_link_libraries(moha PRIVATE ${ZLIB_STATIC})
+        endif()
+    elseif(APPLE)
+        # macOS doesn't allow truly-static system frameworks (libSystem
+        # is required to be dynamic), but third-party libs can be static.
+        # OPENSSL_USE_STATIC_LIBS already handled OpenSSL above. Nothing
+        # else to add here — the resulting binary depends only on
+        # /usr/lib/libSystem.B.dylib which is on every macOS.
+    endif()
+endif()
+
+# Diagnostic: print a one-liner at configure time so contributors know
+# what they're building. Helps catch the "I forgot the flag" case.
+if(MOHA_STANDALONE)
+    message(STATUS "moha: STANDALONE build — third-party deps statically linked.")
+    if(MOHA_STANDALONE_OPENSSL_FALLBACK)
+        message(WARNING
+            "moha: STANDALONE requested OpenSSL static libs (.a) but only the "
+            "shared library was found — the binary will still depend on libssl/"
+            "libcrypto at runtime. To get a fully standalone exe, install the "
+            "static OpenSSL package (Alpine: openssl-libs-static; Arch AUR: "
+            "openssl-static; Fedora: openssl-static; or build from source).")
+    endif()
+elseif(MOHA_STATIC_RUNTIME AND MSVC)
+    message(STATUS "moha: static MSVC runtime (/MT).")
 endif()
 
 if(MSVC)
@@ -293,7 +406,15 @@ if(MSVC)
         $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:NDEBUG>
     )
 else()
-    target_compile_options(moha PRIVATE -Wall -Wextra -Wpedantic -Wno-deprecated-declarations)
+    target_compile_options(moha PRIVATE
+        -Wall -Wextra -Wpedantic
+        -Wno-deprecated-declarations
+        # Designated init like `TextElement{.content=…, .style=…}` is the
+        # intentional pattern across the view layer — leaving cache fields
+        # default-initialized is correct, not a bug. -Wmissing-field-
+        # initializers (a -Wextra default) doesn't model that.
+        -Wno-missing-field-initializers
+    )
     # GCC -Wmaybe-uninitialized produces false positives on std::variant moves
     # of designated-initialized aggregates (maya's Element{TextElement{...}} pattern).
     # The warnings escape -isystem because they fire during late optimization.

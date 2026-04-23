@@ -1334,7 +1334,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // so the leading bar isn't an artificial zero-stretch.
             if (m.stream.is_streaming() && m.stream.active
                 && m.stream.first_delta_at.time_since_epoch().count() != 0) {
-                using clock = std::chrono::steady_clock;
                 constexpr auto kSampleInterval = std::chrono::milliseconds{500};
                 if (m.stream.rate_last_sample_at.time_since_epoch().count() == 0) {
                     m.stream.rate_last_sample_at    = now;

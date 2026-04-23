@@ -124,7 +124,11 @@ Element composer(const Model& m) {
     auto hint = h(
         kbd("\xe2\x86\xb5"),         lbl(" send"),                    // ↵
         sep,
-        kbd("\xe2\x87\xa7\xe2\x86\xb5"), lbl(" newline"),             // ⇧↵
+        // Show Shift+Enter as the primary; Alt+Enter as the fallback so
+        // users on terminals that don't disambiguate Shift+Enter still
+        // discover a working binding without having to read docs.
+        kbd("\xe2\x87\xa7\xe2\x86\xb5 / \xe2\x8c\xa5\xe2\x86\xb5"),    // ⇧↵ / ⌥↵
+                                       lbl(" newline"),
         sep,
         kbd("^E"),                   lbl(" expand"),
         spacer(),
