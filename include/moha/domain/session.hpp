@@ -66,6 +66,24 @@ struct StreamState {
 
     std::shared_ptr<moha::http::CancelToken> cancel;
 
+    // ── Stream-stall watchdog ───────────────────────────────────────────
+    // Bumped on every SSE event the reducer processes (StreamStarted,
+    // TextDelta, ToolUseStart/Delta/End, Usage). The Tick handler reads
+    // it and force-fires a Transient error if no event has arrived for
+    // longer than the stall threshold. Catches the case the http idle
+    // timeout misses: server keeps the TCP/h2 connection alive (PING
+    // ACKs reset `last_rx`) but stops sending application-level
+    // events. Without this we'd wait the full 45 s http idle, even
+    // though the model has clearly stalled within a few seconds.
+    std::chrono::steady_clock::time_point last_event_at{};
+
+    // True between "watchdog fired the synthetic error" and "retry
+    // launched a fresh stream." Kept so the late StreamError("cancelled")
+    // from the worker thread (which unwinds when we trip the cancel
+    // token) doesn't get classified as user cancellation and short-
+    // circuit the retry. Reset to false in StreamStarted.
+    bool stall_dispatched = false;
+
     // ── Phase predicates ─────────────────────────────────────────────────
     [[nodiscard]] bool is_idle()                const noexcept { return std::holds_alternative<phase::Idle>(phase); }
     [[nodiscard]] bool is_streaming()           const noexcept { return std::holds_alternative<phase::Streaming>(phase); }

@@ -133,7 +133,8 @@ enum class ErrorClass {
      || contains("timeout")
      || contains("eof")
      || contains("broken pipe")
-     || contains("network"))
+     || contains("network")
+     || contains("stall"))           // synthetic from the runtime stall watchdog
         return ErrorClass::Transient;
 
     return ErrorClass::Terminal;

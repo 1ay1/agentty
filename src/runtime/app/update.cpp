@@ -82,8 +82,14 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         },
 
         // ── Stream events ───────────────────────────────────────────────
+        // Every event handler bumps `last_event_at` so the Tick-based
+        // stall watchdog can tell "stream is alive but quiet" from
+        // "stream is stalled." A small helper keeps the bump uniform.
         [&](StreamStarted) -> Step {
-            m.s.started = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            m.s.started          = now;
+            m.s.last_event_at    = now;
+            m.s.stall_dispatched = false;       // fresh stream → re-arm watchdog
             // Reset the live-rate accumulator so each sub-turn (post-tool)
             // measures its own generation speed instead of polluting the
             // average with the previous turn's bytes.
@@ -99,6 +105,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamTextDelta& e) -> Step {
+            m.s.last_event_at = std::chrono::steady_clock::now();
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& st = m.d.current.messages.back().streaming_text;
@@ -110,12 +117,13 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             }
             if (!e.text.empty()) {
                 if (m.s.first_delta_at.time_since_epoch().count() == 0)
-                    m.s.first_delta_at = std::chrono::steady_clock::now();
+                    m.s.first_delta_at = m.s.last_event_at;
                 m.s.live_delta_bytes += e.text.size();
             }
             return done(std::move(m));
         },
         [&](StreamToolUseStart& e) -> Step {
+            m.s.last_event_at = std::chrono::steady_clock::now();
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 ToolUse tc;
@@ -125,15 +133,16 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // Stamp start now so the card shows a live timer during the
                 // args-streaming phase too — lets the user tell "model hasn't
                 // started emitting" from "execution is slow" at a glance.
-                tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+                tc.status = ToolUse::Pending{m.s.last_event_at};
                 m.d.current.messages.back().tool_calls.push_back(std::move(tc));
             }
             return done(std::move(m));
         },
         [&](StreamToolUseDelta& e) -> Step {
+            m.s.last_event_at = std::chrono::steady_clock::now();
             if (!e.partial_json.empty()) {
                 if (m.s.first_delta_at.time_since_epoch().count() == 0)
-                    m.s.first_delta_at = std::chrono::steady_clock::now();
+                    m.s.first_delta_at = m.s.last_event_at;
                 m.s.live_delta_bytes += e.partial_json.size();
             }
             if (!m.d.current.messages.empty()
@@ -164,6 +173,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamToolUseEnd) -> Step {
+            m.s.last_event_at = std::chrono::steady_clock::now();
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant
                 && !m.d.current.messages.back().tool_calls.empty()) {
@@ -201,6 +211,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamUsage& e) -> Step {
+            m.s.last_event_at = std::chrono::steady_clock::now();
             // `input_tokens` from Anthropic is the FULL prefix for this
             // request, NOT the delta. Accumulating across turns triple-counted
             // by turn 5. Replace, don't add. Cache fields are excluded from
@@ -240,6 +251,15 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
             // Classify and decide retry vs terminal.
             auto klass = provider::classify(e.message);
+            // If the stall watchdog fired this turn, the worker thread
+            // will eventually unwind and emit StreamError("cancelled")
+            // — that's our doing, not the user's. Force-classify it as
+            // Transient so the retry machinery treats it as a recoverable
+            // upstream stall, not a user cancel.
+            if (m.s.stall_dispatched
+                && klass == provider::ErrorClass::Cancelled) {
+                klass = provider::ErrorClass::Transient;
+            }
             bool can_retry = (klass == provider::ErrorClass::Transient
                            || klass == provider::ErrorClass::RateLimit)
                           && m.s.transient_retries < provider::kMaxRetries
@@ -690,6 +710,39 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             float dt = std::chrono::duration<float>(now - m.s.last_tick).count();
             m.s.last_tick = now;
             if (m.s.active()) m.s.spinner.advance(dt);
+
+            // ── Stream-stall watchdog ──────────────────────────────────
+            // If we've been streaming for kStallSecs without a single
+            // SSE event, the upstream is wedged. The HTTP idle timer
+            // doesn't catch this because PING ACKs reset its byte
+            // counter — the wire is alive, the model isn't. Trip the
+            // cancel token (worker unwinds within ~200 ms) and dispatch
+            // a synthetic StreamError that the classifier sees as
+            // Transient → automatic retry with backoff.
+            //
+            // Threshold is conservative: Anthropic emits something
+            // every 1-2 s during active output, including thinking
+            // deltas. 25 s of total silence is well outside any
+            // legitimate model behaviour.
+            constexpr auto kStallSecs = std::chrono::seconds(25);
+            if (m.s.is_streaming() && m.s.active()
+                && !m.s.stall_dispatched
+                && m.s.last_event_at.time_since_epoch().count() != 0
+                && now - m.s.last_event_at >= kStallSecs) {
+                m.s.stall_dispatched = true;
+                if (m.s.cancel) m.s.cancel->cancel();
+                auto since = std::chrono::duration_cast<std::chrono::seconds>(
+                                 now - m.s.last_event_at).count();
+                std::string msg = "stream stalled — no events for "
+                                + std::to_string(since) + "s";
+                // Schedule via Cmd::after(0) so the StreamError flows
+                // through the same reducer arm as a real wire error,
+                // including the typed retry path. Direct invocation of
+                // the handler from here would skip the classifier.
+                return {std::move(m), Cmd<Msg>::after(
+                    std::chrono::milliseconds(0),
+                    Msg{StreamError{std::move(msg)}})};
+            }
 
             // Sample tok/s into the sparkline ring every ~500 ms while the
             // stream is actively producing bytes. Sampling slower than the
