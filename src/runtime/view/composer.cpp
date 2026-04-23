@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "moha/runtime/view/helpers.hpp"
 #include "moha/runtime/view/palette.hpp"
 
 namespace moha::ui {
@@ -42,21 +43,44 @@ int word_count(std::string_view s) {
     return n;
 }
 
+// Approximate token count using Claude's ~4-bytes-per-token heuristic.
+// Good enough for the input box's "how big is this prompt" indicator —
+// no need to round-trip through a real tokenizer for live counter UI.
+int approx_tokens(std::string_view s) {
+    return static_cast<int>((s.size() + 3) / 4);
+}
+
 } // namespace
 
 Element composer(const Model& m) {
     const std::string& display = m.ui.composer.text;
+    const bool has_text       = !display.empty();
+    const bool is_awaiting    = m.s.is_awaiting_permission();
+    const bool is_streaming   = m.s.is_streaming();
+    const bool is_executing   = m.s.is_executing_tool();
+    const bool active         = is_streaming || is_executing;
+    const std::size_t queued  = m.ui.composer.queued.size();
 
     // ── State-driven colors ───────────────────────────────────────────
-    // Pro TUIs (Helix / k9s / Lazygit) use restrained color: a single
-    // dim/muted border by default, escalating ONLY on real states that
-    // demand attention (permission wait → danger). Streaming and
-    // "has text" don't change the border — that signal lives elsewhere
-    // (activity row, send affordance) and adding more chrome here just
-    // makes the input feel toyish and over-styled.
-    bool has_text = !display.empty();
-    Color prompt_color = m.s.is_awaiting_permission() ? danger : accent;
-    Color border_color = m.s.is_awaiting_permission() ? danger : muted;
+    // The border + prompt color *is* the input box's state indicator —
+    // no extra chrome needed. Same palette the status bar uses, so
+    // reading either one tells you what's happening:
+    //
+    //   awaiting permission → warn  (user must act before more input lands)
+    //   streaming/executing → phase color (highlight / success)
+    //   idle, has text      → accent (primed; this will fire on Enter)
+    //   idle, empty         → muted dim (quiet, waiting)
+    //
+    // The "ready" treatment when idle+text uses the brand accent — same
+    // signal you see on a ❯ prompt that's about to do something. It's
+    // the visual analogue of an iOS button lighting up when its action
+    // becomes available.
+    Color box_color =
+        is_awaiting ? warn :
+        active      ? phase_color(m.s.phase) :
+        has_text    ? accent :
+                      muted;
+    Color prompt_color = box_color;
 
     // ── Cursor injection ──────────────────────────────────────────────
     // Insert a thin vertical bar at the byte cursor position; this lives
@@ -67,27 +91,30 @@ Element composer(const Model& m) {
     with_cursor.insert(cur, "\u258E");                                // ▎
 
     // ── Body: one row per visual line ────────────────────────────────
-    // Empty buffer → italic placeholder. Otherwise, split on \n and
-    // render each line. The first line gets a plain bold ❯ prompt
-    // (no inverse video — that's what made it look like a sticker);
-    // continuation lines get a dim ┊ so wrapped input visually attaches
-    // to the prompt without screaming.
-    auto prompt_chip  = text("\u276F ", fg_bold(prompt_color));       // ❯
+    // ❯ prompt for the first line; dim ┊ for continuation rows so
+    // wrapped input visually attaches without screaming. The prompt's
+    // boldness reflects state: bright on "ready" / "active", dim on
+    // empty-idle so the box feels relaxed at rest.
+    Style prompt_style = (active || has_text || is_awaiting)
+        ? Style{}.with_fg(prompt_color).with_bold()
+        : Style{}.with_fg(prompt_color).with_dim();
+    auto prompt_chip  = text("\u276F ", prompt_style);                // ❯
     auto continuation = text("\u250a ", fg_dim(muted));               // ┊
     auto blank_pre    = text("  ", {});
 
     std::vector<Element> body_rows;
     if (!has_text) {
-        std::string placeholder = m.s.is_streaming()
-            ? "streaming \u2014 type to queue\u2026"
-            : m.s.is_awaiting_permission()
-              ? "awaiting permission \u2014 respond above\u2026"
-              : "type a message\u2026";
-        // Cursor inline before the placeholder so the user sees their
-        // caret even on an empty buffer. Dim cursor to match placeholder.
+        // Placeholder text reflects the precise state — and the
+        // streaming case nudges the user toward the queueing affordance
+        // rather than just stating the obvious.
+        std::string placeholder =
+            is_awaiting  ? "awaiting permission \u2014 respond above\u2026" :
+            is_executing ? "running tool \u2014 type to queue\u2026"        :
+            is_streaming ? "streaming \u2014 type to queue\u2026"           :
+                           "type a message\u2026";
         body_rows.push_back(h(
             prompt_chip,
-            text("\u258E", fg_dim(muted)),
+            text("\u258E", fg_dim(muted)),                            // dim cursor
             text(placeholder, fg_italic(muted))
         ).build());
     } else {
@@ -116,44 +143,93 @@ Element composer(const Model& m) {
     // ── Hint row ──────────────────────────────────────────────────────
     // Helix / Lazygit / k9s style: bold key in default fg, dim label,
     // dim · separators. No inverse video, no per-key color category —
-    // that's what made the row read as stickers. Restraint is the look.
+    // that's what made the row read as stickers.
+    //
+    // The hint row is also the one place we surface ambient info that
+    // the user wants to glance at without looking elsewhere: the
+    // current profile (so they know their permission tier), the queued-
+    // message count when streaming with input pending, and a quick
+    // counter (words / tokens) for long prompts.
     auto kbd = [](const char* k) { return text(k, fg_bold(fg)); };
     auto lbl = [](const char* l) { return text(l, fg_dim(muted)); };
     auto dot = text("  \xc2\xb7  ", fg_dim(muted));                   // ·
 
+    std::vector<Element> hint_left;
+    hint_left.push_back(kbd("\xe2\x86\xb5"));         hint_left.push_back(lbl(" send"));
+    hint_left.push_back(dot);
+    // Show Shift+Enter as the primary; Alt+Enter as the fallback so
+    // users on terminals that don't disambiguate Shift+Enter still
+    // discover a working binding without having to read docs.
+    hint_left.push_back(kbd("\xe2\x87\xa7\xe2\x86\xb5 / \xe2\x8c\xa5\xe2\x86\xb5"));
+    hint_left.push_back(lbl(" newline"));
+    hint_left.push_back(dot);
+    hint_left.push_back(kbd("^E"));                   hint_left.push_back(lbl(" expand"));
+
+    // ── Right-side ambient indicators ────────────────────────────────
+    // Order: queue (only if non-zero), counters (only if has_text),
+    // profile (always). Each is dim so it doesn't compete with the
+    // input itself; the profile chip uses its color for the leading
+    // ▎ rail so the eye lands on the tier at a glance.
+    std::vector<Element> hint_right;
+
+    // Queue depth — when streaming and the user has queued messages,
+    // show "+N queued" so they know their typing is going somewhere
+    // useful, not into the void. Bold to draw the eye when present.
+    if (queued > 0) {
+        hint_right.push_back(text("\xe2\x9d\x9a ", fg_of(highlight)));     // ❚
+        hint_right.push_back(text(
+            std::to_string(queued) + (queued == 1 ? " queued" : " queued"),
+            Style{}.with_fg(highlight).with_bold()));
+        hint_right.push_back(dot);
+    }
+
+    // Live counters — words + tokens. Words for "how long is this
+    // prompt" intuition; tokens for "how much budget will this cost"
+    // intuition. Skip when empty so the row reads cleanly at rest.
+    if (has_text) {
+        int words = word_count(display);
+        int toks  = approx_tokens(display);
+        hint_right.push_back(text(
+            std::to_string(words) + (words == 1 ? " word" : " words"),
+            fg_dim(muted)));
+        hint_right.push_back(text("  \xc2\xb7  ", fg_dim(muted)));
+        hint_right.push_back(text(
+            "~" + std::to_string(toks) + " tok",
+            fg_dim(muted)));
+        hint_right.push_back(dot);
+    }
+
+    // Profile chip — always-on so the user always knows their
+    // permission tier. Leading ▎ rail in profile color matches the
+    // status bar's design language; the label is small-caps so it
+    // reads as a quiet identifier, not free text.
+    Color prof_c = profile_color(m.d.profile);
+    hint_right.push_back(text("\xe2\x96\x8e", fg_of(prof_c)));            // ▎
+    hint_right.push_back(text(" ", {}));
+    hint_right.push_back(text(small_caps(profile_label(m.d.profile)),
+                              Style{}.with_fg(prof_c).with_bold()));
+
     auto hint = h(
-        kbd("\xe2\x86\xb5"),         lbl(" send"),                    // ↵
-        dot,
-        // Show Shift+Enter as the primary; Alt+Enter as the fallback so
-        // users on terminals that don't disambiguate Shift+Enter still
-        // discover a working binding without having to read docs.
-        kbd("\xe2\x87\xa7\xe2\x86\xb5 / \xe2\x8c\xa5\xe2\x86\xb5"),    // ⇧↵ / ⌥↵
-                                       lbl(" newline"),
-        dot,
-        kbd("^E"),                   lbl(" expand"),
+        h(std::move(hint_left)),
         spacer(),
-        // Live counters — words / lines / chars. Helps the user keep
-        // a feel for long prompts without scrolling. All dim so they
-        // don't compete with the input itself.
-        text(has_text
-                 ? std::to_string(word_count(display)) + " words  \xc2\xb7  "
-                   + std::to_string(static_cast<int>(split_lines(display).size())) + " lines  \xc2\xb7  "
-                   + std::to_string(display.size()) + " chars"
-                 : "",
-             fg_dim(muted))
+        h(std::move(hint_right)),
+        text(" ", {})
     );
 
-    // ── Title strip ──────────────────────────────────────────────────
-    // A small "▎ Compose" leading mark gives the box a labelled feel
-    // No "Compose" title chip — pro TUIs trust the layout; the ❯
-    // prompt is the affordance. For long buffers we surface the line
-    // count as a quiet border-text caption (bottom-right of the box)
-    // so the info stays available without becoming a sticker.
+    // ── Box composition ──────────────────────────────────────────────
+    // Round border in state color. Bottom-right caption surfaces line
+    // count when multi-line (no need to scroll the buffer to see how
+    // much you've written). When there's a "Send" affordance, the
+    // border title carries it on the bottom edge so the eye picks it
+    // up without scanning the hint row.
     int line_count = static_cast<int>(split_lines(display).size());
 
     auto box = v(inner, hint.build())
                | border(BorderStyle::Round)
-               | bcolor(border_color);
+               | bcolor(box_color);
+
+    // Bottom-right caption: line count when wrapped, with a leading
+    // glyph for visual rhythm. Stays subtle (it's chrome on chrome).
     if (line_count > 1) {
         box = std::move(box) | btext(
             " " + std::to_string(line_count) + " lines ",
