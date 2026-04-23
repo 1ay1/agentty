@@ -20,6 +20,7 @@
 #include "moha/runtime/app/update/internal.hpp"
 #include "moha/runtime/picker.hpp"
 #include "moha/runtime/view/helpers.hpp"
+#include "moha/tool/spec.hpp"
 
 namespace moha::app {
 
@@ -336,26 +337,31 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         },
 
         // ── Per-tool wall-clock watchdog ────────────────────────────────
-        // Scheduled by kick_pending_tools when a non-subprocess tool
-        // transitions to Running. Force-fails the tool if it's still
-        // Running 60 s later — the worker thread keeps going (we can't
-        // safely cancel a blocking syscall from here), but the UI
-        // moves on. apply_tool_output's idempotent guard discards
-        // the late result if the worker eventually unwinds.
+        // Scheduled by kick_pending_tools when a tool transitions to
+        // Running, with the deadline pulled from the spec catalog
+        // (`spec::lookup(name)->max_seconds`). Force-fails the tool
+        // if it's still Running when this fires — the worker thread
+        // keeps going (we can't safely cancel a blocking syscall from
+        // here), but the UI moves on. apply_tool_output's idempotent
+        // guard discards the late result if the worker eventually
+        // unwinds. The error message names the actual deadline so the
+        // user knows whether to expect a quick recovery or to retry.
         [&](ToolTimeoutCheck& e) -> Step {
             bool flipped = false;
             for (auto& msg_ : m.d.current.messages) {
                 for (auto& tc : msg_.tool_calls) {
                     if (tc.id == e.id && tc.is_running()) {
                         auto now = std::chrono::steady_clock::now();
+                        const auto* sp = tools::spec::lookup(tc.name.value);
+                        int secs = sp ? sp->max_seconds : 0;
                         tc.status = ToolUse::Failed{
                             tc.started_at(), now,
-                            "tool execution exceeded 60 s wall-clock — likely "
-                            "hung on a blocking syscall (slow/dead filesystem "
-                            "mount, network freeze, or worker deadlock). The "
-                            "tool's worker thread may continue in the "
-                            "background; its result will be discarded if it "
-                            "ever returns."};
+                            "tool execution exceeded " + std::to_string(secs)
+                            + " s wall-clock — likely hung on a blocking "
+                            "syscall (slow/dead filesystem mount, network "
+                            "freeze, or worker deadlock). The tool's worker "
+                            "thread may continue in the background; its "
+                            "result will be discarded if it ever returns."};
                         flipped = true;
                     }
                 }

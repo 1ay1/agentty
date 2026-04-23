@@ -9,6 +9,7 @@
 #include "moha/io/http.hpp"
 #include "moha/provider/anthropic/transport.hpp"
 #include "moha/tool/registry.hpp"
+#include "moha/tool/spec.hpp"
 #include "moha/tool/tool.hpp"
 #include "moha/runtime/view/helpers.hpp"
 
@@ -119,21 +120,25 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 tc.status = ToolUse::Running{tc.started_at(), {}};
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
 
-                // Wall-clock watchdog. The worker thread can't be
-                // pre-empted from here (no portable thread cancellation),
-                // but we CAN move the UI on if the worker is wedged in
-                // a blocking syscall (slow NFS, dead FUSE mount, hung
-                // network FS). After the timeout fires, the tool's
-                // Running state is force-flipped to Failed; the late
-                // ToolExecOutput from the eventual unwind is discarded
-                // by apply_tool_output's idempotent guard. bash and
-                // diagnostics have their own subprocess-level timeout
-                // (default 120 s) — applying our 60 s on top would
-                // truncate legitimate long commands.
-                if (tc.name.value != "bash"
-                 && tc.name.value != "diagnostics") {
+                // Wall-clock watchdog, configured per-tool from the spec
+                // catalog (`spec::lookup(name)->max_seconds`). The worker
+                // thread can't be pre-empted from here (no portable
+                // thread cancellation), but we CAN move the UI on if the
+                // worker is wedged in a blocking syscall (slow NFS, dead
+                // FUSE mount, hung network FS). After the timeout fires,
+                // the tool's Running state is force-flipped to Failed;
+                // the late ToolExecOutput from the eventual unwind is
+                // discarded by apply_tool_output's idempotent guard.
+                //
+                // max_seconds == 0 means "no overlay timeout" — bash /
+                // diagnostics run via subprocess.cpp which has its own
+                // strict timeout, and stacking ours on top would
+                // truncate legitimate long commands. The spec catalog's
+                // static_assert guarantees only those two have 0.
+                if (const auto* sp = tools::spec::lookup(tc.name.value);
+                    sp && sp->max_seconds > 0) {
                     cmds.push_back(Cmd<Msg>::after(
-                        std::chrono::seconds(60),
+                        std::chrono::seconds(sp->max_seconds),
                         Msg{ToolTimeoutCheck{tc.id}}));
                 }
 
