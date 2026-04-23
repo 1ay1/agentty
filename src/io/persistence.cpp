@@ -115,6 +115,9 @@ static json message_to_json(const Message& m) {
     }
     j["tool_calls"] = std::move(tcs);
     if (m.checkpoint_id) j["checkpoint_id"] = *m.checkpoint_id;
+    // Persist the per-message error so reopening a thread shows which
+    // turn died and why. UTF-8 scrubbed for the same reason as `text`.
+    if (m.error) j["error"] = tools::util::to_valid_utf8(*m.error);
     return j;
 }
 
@@ -122,6 +125,9 @@ static Message message_from_json(const json& j) {
     Message m;
     m.role = role_from_string(j.value("role", "user"));
     m.text = j.value("text", "");
+    if (auto it = j.find("error"); it != j.end() && it->is_string()
+        && !it->get<std::string>().empty())
+        m.error = it->get<std::string>();
     if (j.contains("timestamp"))
         m.timestamp = std::chrono::system_clock::time_point{
             std::chrono::seconds{j["timestamp"].get<long long>()}};

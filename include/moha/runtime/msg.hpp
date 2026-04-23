@@ -47,6 +47,12 @@ struct StreamError { std::string message; };
 // reducer trips the StreamState cancel token; the http layer notices within
 // ~200 ms and the worker thread eventually emits a StreamError("cancelled").
 struct CancelStream {};
+// Scheduled re-launch of the in-flight stream after a transient-error
+// backoff (Overloaded / 429 / 5xx / network blip). The reducer issues
+// `Cmd::after(delay, RetryStream{})` from the StreamError handler;
+// when this Msg fires, the stream is re-launched on the same context.
+// The user can intercept with Esc → CancelStream during the wait.
+struct RetryStream {};
 
 // ── Tool execution (local) ───────────────────────────────────────────────
 struct ToolExecOutput { ToolCallId id; std::string output; bool error; };
@@ -121,7 +127,7 @@ using Msg = std::variant<
     ComposerPaste,
     StreamStarted, StreamTextDelta,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
-    StreamUsage, StreamFinished, StreamError, CancelStream,
+    StreamUsage, StreamFinished, StreamError, CancelStream, RetryStream,
     ToolExecOutput, ToolExecProgress,
     PermissionApprove, PermissionReject, PermissionApproveAlways,
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerSelect, ModelPickerToggleFavorite, ModelsLoaded,

@@ -49,6 +49,37 @@ maya::Color phase_color(const Phase& p) noexcept {
     }, p);
 }
 
+std::string small_caps(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() * 2);
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        out.push_back(static_cast<char>(
+            (c >= 'a' && c <= 'z') ? (c - 32) : c));
+        if (i + 1 < s.size()) out.push_back(' ');
+    }
+    return out;
+}
+
+std::string tabular_int(int n, int width) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%*d", width, n);
+    return buf;
+}
+
+std::string format_elapsed_5(float secs) {
+    char buf[16];
+    if (secs < 0.0f) secs = 0.0f;
+    if      (secs <   10.0f)  std::snprintf(buf, sizeof(buf), " %.1fs", static_cast<double>(secs));
+    else if (secs <  100.0f)  std::snprintf(buf, sizeof(buf), "%.1fs", static_cast<double>(secs));
+    else if (secs <  600.0f)  std::snprintf(buf, sizeof(buf), "%4ds", static_cast<int>(secs));
+    else if (secs < 3600.0f)  std::snprintf(buf, sizeof(buf), "%dm%02ds",
+                                            static_cast<int>(secs) / 60,
+                                            static_cast<int>(secs) % 60);
+    else                      std::snprintf(buf, sizeof(buf), " >1hr");
+    return buf;
+}
+
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {
     auto tt = std::chrono::system_clock::to_time_t(tp);
     std::tm tm{};

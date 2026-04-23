@@ -88,6 +88,7 @@ Step submit_message(Model m) {
     m.s.phase = phase::Streaming{};
     m.s.active = true;
     m.s.truncation_retries = 0;
+    m.s.transient_retries  = 0;
     auto virt = maybe_virtualize(m);
     auto launch = cmd::launch_stream(m);
     auto cmd = virt.is_none()

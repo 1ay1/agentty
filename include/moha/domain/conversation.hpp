@@ -178,6 +178,14 @@ struct Message {
     std::vector<ToolUse> tool_calls;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     std::optional<CheckpointId> checkpoint_id;
+    // Set when the turn ended in a stream-level error (overloaded, 5xx,
+    // network drop, mid-stream parse failure, etc.). Carries just the
+    // user-facing message — no "⚠" prefix or formatting; the view adds
+    // those. Kept SEPARATE from `text` so the assistant's actual
+    // partial output (preserved into `text` on error) and the failure
+    // reason render distinctly. Status-bar banner reads
+    // `m.s.status`; this field is the per-message inline copy.
+    std::optional<std::string> error;
 };
 
 struct Thread {

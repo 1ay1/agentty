@@ -14,6 +14,7 @@
 
 #include <maya/core/overload.hpp>
 
+#include "moha/provider/error_class.hpp"
 #include "moha/runtime/app/cmd_factory.hpp"
 #include "moha/runtime/app/deps.hpp"
 #include "moha/runtime/app/update/internal.hpp"
@@ -217,30 +218,73 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {
-            m.s.active = false;
-            m.s.phase = phase::Idle{};
-            m.s.status = "error: " + e.message;
             // Worker thread is unwinding; drop the token so the next turn
-            // mints a fresh one.
+            // (or scheduled retry) mints a fresh one.
             m.s.cancel.reset();
+
+            // Move any partial streaming_text into the message body so
+            // the assistant's in-flight output isn't lost regardless of
+            // what we do next (retry or terminal).
+            Message* last = nullptr;
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
-                auto& last = m.d.current.messages.back();
-                if (!last.streaming_text.empty()) {
-                    if (last.text.empty()) last.text = std::move(last.streaming_text);
-                    else                   last.text += std::move(last.streaming_text);
-                    std::string{}.swap(last.streaming_text);
+                last = &m.d.current.messages.back();
+                if (!last->streaming_text.empty()) {
+                    if (last->text.empty()) last->text = std::move(last->streaming_text);
+                    else                    last->text += std::move(last->streaming_text);
+                    std::string{}.swap(last->streaming_text);
                 }
-                if (last.text.empty() && last.tool_calls.empty()) {
-                    last.text = "\u26A0 " + e.message;
-                } else {
-                    if (!last.text.empty() && last.text.back() != '\n') last.text += '\n';
-                    last.text += "\u26A0 " + e.message;
-                }
-                // Any tool_call still Pending at stream-error time will never
-                // dispatch — mark them Failed so the UI doesn't spin forever.
-                // Running tools are in-flight on a worker thread; leave them.
-                for (auto& tc : last.tool_calls) {
+            }
+
+            // Classify and decide retry vs terminal.
+            auto klass = provider::classify(e.message);
+            bool can_retry = (klass == provider::ErrorClass::Transient
+                           || klass == provider::ErrorClass::RateLimit)
+                          && m.s.transient_retries < provider::kMaxRetries
+                          // Only retry if we haven't committed any work
+                          // for this turn — re-running with text/tool
+                          // calls already landed would re-execute them.
+                          && (!last
+                              || (last->text.empty() && last->tool_calls.empty()));
+
+            if (can_retry) {
+                int attempt = m.s.transient_retries++;
+                int delay = provider::backoff_ms(klass, attempt);
+                int secs = (delay + 999) / 1000;
+                m.s.status = std::string{provider::to_string(klass)}
+                           + " — retrying in " + std::to_string(secs) + "s…";
+                // Stay "active" so the spinner keeps ticking and the
+                // user sees the countdown / can Esc to cancel.
+                m.s.active = true;
+                m.s.phase = phase::Streaming{};
+                // Drop the empty placeholder we just wrote (if any) so
+                // the re-launch lands cleanly.
+                if (last && last->text.empty() && last->tool_calls.empty())
+                    m.d.current.messages.pop_back();
+                return {std::move(m),
+                    Cmd<Msg>::after(std::chrono::milliseconds(delay),
+                                    Msg{RetryStream{}})};
+            }
+
+            // Terminal path — surface and stop.
+            m.s.active = false;
+            m.s.phase = phase::Idle{};
+            // Cancellation gets a clean "cancelled" status, no "error:".
+            if (klass == provider::ErrorClass::Cancelled) {
+                m.s.status = "cancelled";
+            } else {
+                m.s.status = "error: " + e.message;
+            }
+            if (last) {
+                // Record the failure as the message's error field, NOT
+                // appended to text — keeps the partial body and the
+                // failure reason rendering distinctly. Cancellation
+                // doesn't mark the message as errored (the user's own
+                // intent isn't a failure).
+                if (klass != provider::ErrorClass::Cancelled)
+                    last->error = e.message;
+                // Pending tool calls will never dispatch; mark Failed.
+                for (auto& tc : last->tool_calls) {
                     if (tc.is_pending()) {
                         auto now = std::chrono::steady_clock::now();
                         tc.status = ToolUse::Failed{
@@ -252,13 +296,30 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             }
             return done(std::move(m));
         },
+        [&](RetryStream) -> Step {
+            // Scheduled retry fired. If the user cancelled during the
+            // wait (Esc → CancelStream tripped active=false / phase=Idle),
+            // do nothing.
+            if (!m.s.active || m.s.is_idle())
+                return done(std::move(m));
+            // Re-launch on the same context. launch_stream will mint a
+            // new cancel token, append a placeholder assistant message,
+            // and re-issue the request.
+            return {std::move(m), cmd::launch_stream(m)};
+        },
         [&](CancelStream) -> Step {
             // Trip the token; the http worker notices within ~200 ms and
             // unwinds, eventually dispatching StreamError("cancelled") which
             // does the actual phase/state cleanup. Don't touch phase here —
             // doing so would race the in-flight stream's last few events.
+            //
+            // ALSO covers the retry-backoff window: if the user hits Esc
+            // while we're sleeping for a scheduled retry, this clears
+            // active so the RetryStream Msg becomes a no-op when it fires.
             if (m.s.cancel) m.s.cancel->cancel();
-            m.s.status = "cancelling…";
+            m.s.active = false;
+            m.s.phase = phase::Idle{};
+            m.s.status = "cancelled";
             return done(std::move(m));
         },
 

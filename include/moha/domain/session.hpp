@@ -47,6 +47,10 @@ struct StreamState {
     std::string status;
     maya::Spinner<maya::SpinnerStyle::Dots> spinner{};
     int truncation_retries = 0;
+    // Transient-error retry counter (overloaded / 429 / 5xx / network
+    // drop). Reset at the start of each user turn. Independent of
+    // truncation_retries so a turn that hits both retries fairly.
+    int transient_retries = 0;
 
     // Live tok/s speedometer — bytes of text/json delta, not the rare
     // usage field. first_delta_at excludes TTFT from the rate divisor.

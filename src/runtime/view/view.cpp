@@ -1,7 +1,5 @@
 #include "moha/runtime/view/view.hpp"
 
-#include <vector>
-
 #include "moha/runtime/view/changes.hpp"
 #include "moha/runtime/view/composer.hpp"
 #include "moha/runtime/view/diff_review.hpp"

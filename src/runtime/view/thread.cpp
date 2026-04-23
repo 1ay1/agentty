@@ -666,10 +666,10 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
     }
 
     // ── Stats header ───────────────────────────────────────────────
-    // Quick TL;DR of the turn: small badges showing the category mix
-    // (e.g. "inspect 3  ·  mutate 2  ·  execute 1"). Shown once at
-    // the top of the panel so the eye can read "what kind of work
-    // happened here" without scanning the events.
+    // Quick TL;DR of the turn: small-caps category badges showing the
+    // mix (e.g. "I N S P E C T 3 · M U T A T E 2 · E X E C U T E 1").
+    // Small-caps treatment marks these as section labels — typography
+    // does the work that a chip background would, without the toy feel.
     if (total > 1) {
         std::vector<Element> stats;
         bool first = true;
@@ -684,20 +684,31 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
                      : (cat == "plan")    ? warn
                      : (cat == "vcs")     ? highlight
                                           : info;
-            stats.push_back(text(cat, Style{}.with_fg(cc).with_bold()));
+            stats.push_back(text(small_caps(cat),
+                                 Style{}.with_fg(cc).with_bold()));
             stats.push_back(text(" " + std::to_string(n), fg_dim(muted)));
         }
         rows.push_back((h(std::move(stats)) | grow(1.0f)).build());
         rows.push_back(text(""));
     }
 
-    // Two-digit zero-padded gutter numbers for ≤99 events, plain for
-    // larger. Same convention code editors use.
-    auto gutter = [&](std::size_t idx) {
-        char buf[8];
-        if (total <= 99) std::snprintf(buf, sizeof(buf), "%02zu", idx + 1);
-        else             std::snprintf(buf, sizeof(buf), "%zu",   idx + 1);
-        return std::string{buf};
+    // Tree-style sequence glyph in place of the old gutter numbers:
+    //   ┏━ first event
+    //   ┣━ middle events
+    //   ┗━ last event
+    //   ━━ singleton (rare)
+    // Drawn in the per-event category color so the leading edge of
+    // each row reads as both a sequence position AND a work-category
+    // marker. Compared to the old "01 02 03" numbers this gives a
+    // real pipeline / git-graph feel for the same horizontal cost,
+    // and the tree shape itself is the strongest "this is one
+    // continuous list" signal a TUI can draw.
+    auto tree_glyph = [&](std::size_t idx) -> std::string {
+        if (total == 1)              return "\xe2\x94\x81\xe2\x94\x81";  // ━━
+        if (idx == 0)                return "\xe2\x94\x8f\xe2\x94\x81";  // ┏━
+        if (idx + 1 == static_cast<std::size_t>(total))
+                                     return "\xe2\x94\x97\xe2\x94\x81";  // ┗━
+        return                              "\xe2\x94\xa3\xe2\x94\x81";  // ┣━
     };
 
     for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
@@ -736,11 +747,15 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
         else                        name_style = Style{}.with_fg(cat).with_dim();
 
         std::vector<Element> hdr;
-        // Gutter takes the category color (dimmed) so the leading
-        // column reads as a vertical color stripe matching the work
-        // category at each step.
-        hdr.push_back(text(gutter(i), Style{}.with_fg(cat).with_dim()));
-        hdr.push_back(text("  ", {}));
+        // Tree-glyph in category color — the leading 2 cells of each
+        // event row form a continuous ┏━┣━┗━ pipeline that runs down
+        // the panel. Active events bold; settled dim. The category
+        // color makes the pipeline itself a colored timeline.
+        Style tree_style = is_active
+            ? Style{}.with_fg(cat).with_bold()
+            : Style{}.with_fg(cat).with_dim();
+        hdr.push_back(text(tree_glyph(i), tree_style));
+        hdr.push_back(text(" ", {}));
         hdr.push_back(marker);
         hdr.push_back(text(" ", {}));
         hdr.push_back(icon);
@@ -756,16 +771,23 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
         }
         rows.push_back((h(std::move(hdr)) | grow(1.0f)).build());
 
-        // ── Body content under a status-colored ┊ connector ────────
-        // Body sits aligned beneath the tool name (column = gutter
-        // width 2 + 4 spaces). The connector is colored by the event's
-        // status — green ┊ under a done tool, blue ┊ under a running
-        // one, red under a failed one. Reinforces the status icon
-        // without adding more text labels.
+        // ── Body content under a status-colored ┃ stripe ───────────
+        // Body sits aligned beneath the tool name. The stripe is a
+        // *bold* ┃ in the event's status color — green under a done
+        // tool, blue under a running one, red under a failed one.
+        // Heavier than the previous ┊ so each event reads as a real
+        // card with a left status edge, not a thin guide line. Active
+        // events get full color; settled events stay dim so the
+        // running step pops. The 3-space lead aligns the stripe with
+        // the icon column directly above (after `┏━ ▸`).
         Color cc = event_connector_color(tc);
+        bool is_active_body = tc.is_running() || tc.is_approved();
+        Style stripe_style = is_active_body
+            ? Style{}.with_fg(cc).with_bold()
+            : Style{}.with_fg(cc).with_dim();
         auto body_rule = h(
-            text("    ", {}),                                        // gutter alignment
-            text("\xe2\x94\x8a  ", Style{}.with_fg(cc).with_dim())   // ┊
+            text("   ", {}),                                         // tree+space alignment (3 cols)
+            text("\xe2\x94\x83  ", stripe_style)                     // ┃ (bold)
         ).build();
 
         Element body_el = compact_tool_body(tc);
@@ -784,13 +806,15 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
 
         // ── Continuation between events ────────────────────────────
         // A short colored connector below the body keeps the visual
-        // thread running into the next event. Cleaner than a blank
-        // row + much cleaner than the previous full-width ┈ rule.
+        // thread running into the next event. Bold ┃ matches the body
+        // stripe, so each event's lane reads as a continuous left
+        // edge from header through body into the next event's header.
+        // 3-space lead aligns with the body stripe + tree glyph col.
         if (!is_last) {
             Color next_cc = event_connector_color(msg.tool_calls[i + 1]);
             rows.push_back(h(
-                text("    ", {}),
-                text("\xe2\x94\x8a", Style{}.with_fg(next_cc).with_dim())  // ┊
+                text("   ", {}),
+                text("\xe2\x94\x83", Style{}.with_fg(next_cc).with_dim())  // ┃
             ).build());
         }
         (void)body_has_content;
@@ -798,10 +822,12 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
 
     // ── Footer summary when settled ────────────────────────────────
     // Once all tools are terminal, append a one-line footer with
-    // aggregate stats: "✓ done · 5 actions · 1.8s elapsed". Pinned
-    // bottom so it reads as the closing summary of the panel.
+    // aggregate stats: "D O N E · 5 actions · 1.8s elapsed". Small-caps
+    // verb signals "this is the closing label" — typographic weight
+    // pinning the panel from below.
     if (done == total && total > 0) {
-        std::string verb = "\xe2\x9c\x93 done";    // ✓ done
+        std::string verb_text = "done";
+        const char* verb_glyph = "\xe2\x9c\x93";   // ✓
         // If anything failed, lead with that count instead.
         int failed = 0, rejected = 0;
         for (const auto& tc : msg.tool_calls) {
@@ -810,17 +836,22 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
         }
         Color verb_color = success;
         if (failed > 0) {
-            verb = "\xe2\x9c\x97 " + std::to_string(failed) + " failed";
+            verb_text = std::to_string(failed) + " failed";
+            verb_glyph = "\xe2\x9c\x97";           // ✗
             verb_color = danger;
         } else if (rejected > 0) {
-            verb = "\xe2\x8a\x98 " + std::to_string(rejected) + " rejected";
+            verb_text = std::to_string(rejected) + " rejected";
+            verb_glyph = "\xe2\x8a\x98";           // ⊘
             verb_color = warn;
         }
 
         rows.push_back(text(""));
         rows.push_back(h(
-            text("    ", {}),
-            text(verb, Style{}.with_fg(verb_color).with_bold()),
+            text("   ", {}),
+            text(std::string{verb_glyph} + " ",
+                 Style{}.with_fg(verb_color).with_bold()),
+            text(small_caps(verb_text),
+                 Style{}.with_fg(verb_color).with_bold()),
             text("  \xc2\xb7  ", fg_dim(muted)),
             text(std::to_string(total) + " actions", fg_dim(muted)),
             text("  \xc2\xb7  ", fg_dim(muted)),
@@ -828,8 +859,11 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
         ).build());
     }
 
-    // ── Card title: progress + active step name + elapsed ─────────
-    std::string title = " Actions  \xc2\xb7  "
+    // ── Card title: small-caps "ACTIONS" + progress + active step ─
+    // The title sits inline on the top border. Small-caps treatment
+    // signals "section header" — pairs the panel visually with the
+    // small-caps category badges in the stats row above.
+    std::string title = " " + small_caps("Actions") + "  \xc2\xb7  "
                       + std::to_string(done) + "/"
                       + std::to_string(total);
     if (running_idx >= 0) {
@@ -911,6 +945,21 @@ Element render_message(const Message& msg, std::size_t msg_idx,
                     body.push_back(render_inline_permission(*m.d.pending_permission, tc));
                 }
             }
+        }
+
+        // Per-message error banner — set when the turn ended in a
+        // stream-level error (overloaded, 5xx, network drop, etc.). Kept
+        // SEPARATE from the message body so a partial assistant
+        // response (preserved into `text` on error) and the failure
+        // reason render distinctly. The status bar carries the live
+        // signal; this is the historical marker so scrolling back shows
+        // the user *which* turn died and why.
+        if (msg.error) {
+            body.push_back(text(""));
+            body.push_back(h(
+                text("\xe2\x9a\xa0  ", fg_bold(danger)),     // ⚠
+                text(*msg.error, fg_dim(danger).with_italic())
+            ).build());
         }
     }
 
@@ -1040,7 +1089,7 @@ Element thread_panel(const Model& m) {
             ).build();
         };
         auto starters_card = (v(
-            text(" Try ", fg_bold(muted)),
+            text(" " + small_caps("Try") + " ", fg_bold(muted)),
             text("", {}),
             starter("Implement a small feature"),
             starter("Refactor or clean up this file"),
