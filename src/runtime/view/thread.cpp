@@ -380,15 +380,28 @@ std::string format_duration(float secs) {
 
 // Status icon for a tool event in the rich timeline. Spinner advances
 // in sync with the activity-bar spinner via the shared frame index.
+//
+// Pending (= model is still streaming this tool's args — "thinking")
+// also gets a spinner, otherwise a long write/edit args stream looked
+// frozen next to an identical static ○ for every not-yet-approved
+// call. Pending uses the muted color so it still reads as a quieter
+// stage than the bright-info running spinner.
 Element rich_status_icon(const ToolUse& tc, int frame) {
+    // Same braille spinner pattern as maya::Timeline / Spinner<Dots>.
+    static constexpr const char* frames[] = {
+        "\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
+        "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
+        "\xe2\xa0\x87", "\xe2\xa0\x8f",
+    };
     if (tc.is_running() || tc.is_approved()) {
-        // Same braille spinner pattern as maya::Timeline / Spinner<Dots>.
-        static constexpr const char* frames[] = {
-            "\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
-            "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
-            "\xe2\xa0\x87", "\xe2\xa0\x8f",
-        };
         return text(frames[frame % 10], Style{}.with_fg(info).with_bold());
+    }
+    if (tc.is_pending()) {
+        // Dim muted spinner — visually lighter than the bright-info
+        // running spinner, so the user can still tell pending from
+        // running at a glance, but no row stays fully static while
+        // the model is emitting its args.
+        return text(frames[frame % 10], Style{}.with_fg(muted).with_dim());
     }
     if (tc.is_done())     return text("\xe2\x9c\x93", fg_bold(success));   // ✓
     if (tc.is_failed())   return text("\xe2\x9c\x97", fg_bold(danger));    // ✗
