@@ -1,6 +1,9 @@
 #include "moha/runtime/view/thread.hpp"
 
+#include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <maya/widget/bash_tool.hpp>
@@ -13,6 +16,7 @@
 #include <maya/widget/markdown.hpp>
 #include <maya/widget/message.hpp>
 #include <maya/widget/model_badge.hpp>
+#include <maya/widget/timeline.hpp>
 #include <maya/widget/read_tool.hpp>
 #include <maya/widget/search_result.hpp>
 #include <maya/widget/todo_list.hpp>
@@ -838,14 +842,19 @@ Element turn_header(Role role, int turn_num, const Message& msg,
         meta += " \xc2\xb7 turn " + std::to_string(turn_num);
     }
 
-    return h(
+    // `grow(1.0f)` on the header row is load-bearing: without it the row
+    // shrinks to content width when a sibling element (like the active
+    // turn's Timeline card) has its own intrinsic width, and the
+    // `spacer()` inside collapses to 0 so the timestamp snaps left
+    // against the speaker label instead of pinning the right edge.
+    return (h(
         text(style.glyph, fg_of(style.color)),
         text(" ", {}),
         text(std::move(style.label), Style{}.with_fg(style.color).with_bold()),
         spacer(),
         text(std::move(meta), fg_dim(muted)),
         text(" ", {})
-    ).build();
+    ) | grow(1.0f)).build();
 }
 
 // Wrap a turn's full content (header + body + tools) in a left-only
@@ -896,6 +905,671 @@ Element user_message_body(const std::string& body) {
     return text(body, fg_of(fg));
 }
 
+// Brief "what this tool is doing" line for the Timeline view. Tool-
+// specific so the user can read the sequence at a glance: paths for fs
+// ops, the actual command for bash, the pattern for grep, etc. When
+// the tool has settled (terminal status), the detail also folds in
+// post-completion stats — line count for read/write, hunk + Δ for
+// edit, match count for grep, exit code for bash, etc. — so the
+// Timeline doubles as a compact result log without the user needing
+// to expand individual cards.
+std::string tool_timeline_detail(const ToolUse& tc) {
+    auto safe = [&](const char* k) -> std::string { return safe_arg(tc.args, k); };
+    auto path = pick_arg(tc.args, {"path", "file_path", "filepath", "filename"});
+    const auto& n = tc.name.value;
+
+    // Pretty-print "src/foo/bar.cpp" rather than the absolute path when
+    // the path lives under cwd. Uses the same trick the existing tool
+    // cards do — strip a known-prefix.
+    auto pretty_path = [&](std::string p) -> std::string {
+        if (p.empty()) return p;
+        std::error_code ec;
+        auto cwd = std::filesystem::current_path(ec).string();
+        if (!ec && !cwd.empty()
+            && p.size() > cwd.size()
+            && p.compare(0, cwd.size(), cwd) == 0
+            && p[cwd.size()] == '/') {
+            return p.substr(cwd.size() + 1);
+        }
+        // Drop the user's home prefix as `~/…`.
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            std::string h{home};
+            if (p.size() > h.size() && p.compare(0, h.size(), h) == 0
+                && p[h.size()] == '/')
+                return std::string{"~/"} + p.substr(h.size() + 1);
+        }
+        return p;
+    };
+
+    auto path_pp = pretty_path(path);
+
+    if (n == "read") {
+        auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        if (auto off = safe_int_arg(tc.args, "offset", 0); off > 0)
+            detail += " @" + std::to_string(off);
+        if (tc.is_done()) {
+            // Output starts with the directory listing or "Read N lines..."
+            // header. Just count newlines for a rough size hint.
+            int lines = count_lines(tc.output());
+            if (lines > 1) detail += "  \xc2\xb7  " + std::to_string(lines) + " lines";
+        }
+        return detail;
+    }
+    if (n == "write") {
+        auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        if (tc.is_done()) {
+            // Output line "Wrote/Overwrote N (+X -Y)" — just include +/− if
+            // we can find them; otherwise fall back to char count of args.
+            const auto& out = tc.output();
+            if (auto plus = out.find('+'); plus != std::string::npos) {
+                if (auto end = out.find(')', plus); end != std::string::npos) {
+                    auto from = out.rfind('(', plus);
+                    if (from != std::string::npos)
+                        detail += "  " + out.substr(from, end - from + 1);
+                }
+            }
+        }
+        return detail;
+    }
+    if (n == "edit") {
+        if (path_pp.empty()) return "\xe2\x80\xa6";
+        std::string detail = path_pp;
+        // Surface hunk count if the args carry an edits[] array.
+        if (tc.args.is_object()) {
+            auto it = tc.args.find("edits");
+            if (it != tc.args.end() && it->is_array() && !it->empty())
+                detail += "  \xc2\xb7  " + std::to_string(it->size()) + " edits";
+        }
+        if (tc.is_done()) {
+            // Pull "(+X -Y)" out of the tool output if present.
+            const auto& out = tc.output();
+            if (auto from = out.find('('); from != std::string::npos) {
+                if (auto end = out.find(')', from); end != std::string::npos
+                    && (out.find('+', from) < end || out.find('-', from) < end))
+                    detail += "  " + out.substr(from, end - from + 1);
+            }
+        }
+        return detail;
+    }
+    if (n == "bash" || n == "diagnostics") {
+        auto cmd = safe("command");
+        if (cmd.empty()) return "\xe2\x80\xa6";
+        if (auto nl = cmd.find('\n'); nl != std::string::npos)
+            cmd = cmd.substr(0, nl) + " \xe2\x80\xa6";
+        if (tc.is_done()) {
+            int rc = parse_exit_code(tc.output());
+            if (rc != 0) cmd += "  \xc2\xb7  exit " + std::to_string(rc);
+        }
+        return cmd;
+    }
+    if (n == "grep") {
+        auto pat = safe("pattern");
+        if (pat.empty()) return "\xe2\x80\xa6";
+        std::string detail = path_pp.empty() ? pat : pat + "  in  " + path_pp;
+        if (tc.is_done()) {
+            int matches = count_lines(tc.output());
+            if (matches > 0) detail += "  \xc2\xb7  " + std::to_string(matches) + " matches";
+        }
+        return detail;
+    }
+    if (n == "glob") {
+        auto pat = safe("pattern");
+        if (pat.empty()) return "\xe2\x80\xa6";
+        std::string detail = pat;
+        if (tc.is_done()) {
+            int hits = count_lines(tc.output());
+            if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits) + " hits";
+        }
+        return detail;
+    }
+    if (n == "list_dir") {
+        std::string detail = path_pp.empty() ? std::string{"."} : path_pp;
+        if (tc.is_done()) {
+            int entries = count_lines(tc.output());
+            if (entries > 0) detail += "  \xc2\xb7  " + std::to_string(entries) + " entries";
+        }
+        return detail;
+    }
+    if (n == "find_definition") return safe("symbol");
+    if (n == "web_fetch")       return safe("url");
+    if (n == "web_search")      return safe("query");
+    if (n == "git_commit") {
+        auto msg = safe("message");
+        if (auto nl = msg.find('\n'); nl != std::string::npos)
+            msg = msg.substr(0, nl);
+        return msg;
+    }
+    if (n == "git_diff" || n == "git_log" || n == "git_status")
+        return path_pp.empty() ? std::string{"."} : path_pp;
+    if (n == "todo") {
+        if (tc.args.is_object()) {
+            auto it = tc.args.find("todos");
+            if (it != tc.args.end() && it->is_array())
+                return std::to_string(it->size()) + " items";
+        }
+        return "\xe2\x80\xa6";
+    }
+    return safe_arg(tc.args, "display_description");
+}
+
+// Map a ToolUse status to maya's TaskStatus. Failed/Rejected fold into
+// Completed (it IS terminal); the failure is surfaced via the detail
+// line so the timeline still reads as a clean sequence.
+TaskStatus tool_task_status(const ToolUse& tc) {
+    if (tc.is_pending() || tc.is_approved()) return TaskStatus::Pending;
+    if (tc.is_running())                     return TaskStatus::InProgress;
+    return TaskStatus::Completed; // Done / Failed / Rejected
+}
+
+// Pretty title-case for the tool name shown as the timeline event label.
+// Maps moha's lowercase canonical names to the brand TitleCase forms
+// (matches the names users see in CC / Zed agent panel).
+std::string tool_display_name(const std::string& n) {
+    if (n == "read")            return "Read";
+    if (n == "write")           return "Write";
+    if (n == "edit")            return "Edit";
+    if (n == "bash")            return "Bash";
+    if (n == "grep")            return "Grep";
+    if (n == "glob")            return "Glob";
+    if (n == "list_dir")        return "List";
+    if (n == "todo")            return "Todo";
+    if (n == "web_fetch")       return "Fetch";
+    if (n == "web_search")      return "Search";
+    if (n == "find_definition") return "Definition";
+    if (n == "diagnostics")     return "Diag";
+    if (n == "git_status")      return "Git Status";
+    if (n == "git_diff")        return "Git Diff";
+    if (n == "git_log")         return "Git Log";
+    if (n == "git_commit")      return "Git Commit";
+    return n;
+}
+
+// Format a duration as ms/s/m+s — short, glanceable, no surprising
+// precision changes across magnitudes.
+std::string format_duration(float secs) {
+    char buf[24];
+    if      (secs < 1.0f)  std::snprintf(buf, sizeof(buf), "%.0fms", secs * 1000.0);
+    else if (secs < 60.0f) std::snprintf(buf, sizeof(buf), "%.1fs", static_cast<double>(secs));
+    else {
+        int mins = static_cast<int>(secs) / 60;
+        float s = secs - static_cast<float>(mins * 60);
+        std::snprintf(buf, sizeof(buf), "%dm%.0fs", mins, static_cast<double>(s));
+    }
+    return buf;
+}
+
+// Status icon for a tool event in the rich timeline. Spinner advances
+// in sync with the activity-bar spinner via the shared frame index.
+Element rich_status_icon(const ToolUse& tc, int frame) {
+    if (tc.is_running() || tc.is_approved()) {
+        // Same braille spinner pattern as maya::Timeline / Spinner<Dots>.
+        static constexpr const char* frames[] = {
+            "\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
+            "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
+            "\xe2\xa0\x87", "\xe2\xa0\x8f",
+        };
+        return text(frames[frame % 10], Style{}.with_fg(info).with_bold());
+    }
+    if (tc.is_done())     return text("\xe2\x9c\x93", fg_bold(success));   // ✓
+    if (tc.is_failed())   return text("\xe2\x9c\x97", fg_bold(danger));    // ✗
+    if (tc.is_rejected()) return text("\xe2\x8a\x98", fg_bold(warn));      // ⊘
+    return text("\xe2\x97\x8b", fg_dim(muted));                            // ○
+}
+
+// Split a string into lines (without owning them). Used by the head+
+// tail truncator so we can pick lines from front and back of the body.
+std::vector<std::string_view> split_lines_view(const std::string& s) {
+    std::vector<std::string_view> out;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\n') {
+            out.emplace_back(s.data() + start, i - start);
+            start = i + 1;
+        }
+    }
+    if (start < s.size()) out.emplace_back(s.data() + start, s.size() - start);
+    return out;
+}
+
+// First N lines of `s` joined back, with a `… N more lines` footer when
+// there were more. Used for tool body previews so a 1000-line bash output
+// doesn't blow up the timeline card.
+std::pair<std::string,int> head_lines(const std::string& s, int max_lines) {
+    int kept = 0;
+    int total = 0;
+    std::size_t cut = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\n') {
+            ++total;
+            if (kept < max_lines) { ++kept; cut = i + 1; }
+        }
+    }
+    if (!s.empty() && s.back() != '\n') {
+        ++total;
+        if (kept < max_lines) { ++kept; cut = s.size(); }
+    }
+    return {s.substr(0, cut), std::max(0, total - kept)};
+}
+
+// Smart head+tail elision: for content longer than `cap_lines`, show
+// `head` lines from the start, an elision marker, and `tail` lines from
+// the end. Reads like a `git diff` smart-context block — far more
+// useful than just showing the first N and dropping the conclusion.
+// Returns the stitched preview and the count of elided lines (0 when
+// nothing was elided).
+struct ElidedPreview {
+    std::vector<std::string> lines;
+    int elided = 0;
+};
+
+ElidedPreview head_tail_lines(const std::string& s, int head, int tail) {
+    auto all = split_lines_view(s);
+    int total = static_cast<int>(all.size());
+    ElidedPreview out;
+    int cap = head + tail;
+    if (total <= cap) {
+        out.lines.reserve(static_cast<std::size_t>(total));
+        for (auto v : all) out.lines.emplace_back(v);
+        return out;
+    }
+    out.lines.reserve(static_cast<std::size_t>(cap));
+    for (int i = 0; i < head; ++i) out.lines.emplace_back(all[static_cast<std::size_t>(i)]);
+    out.elided = total - head - tail;
+    for (int i = total - tail; i < total; ++i)
+        out.lines.emplace_back(all[static_cast<std::size_t>(i)]);
+    return out;
+}
+
+// Render compact body content for a single tool event — placed under the
+// timeline event's `│` connector. Tool-specific so each row carries
+// real, glanceable information: a few lines of read content, the diff
+// hunks for an edit, the head of bash output, etc. Empty Element when
+// nothing useful exists yet (still streaming) — caller handles spacing.
+Element compact_tool_body(const ToolUse& tc) {
+    const auto& n = tc.name.value;
+    constexpr int kMaxLines = 6;
+
+    auto code_line = [](std::string_view ln, Style st) {
+        return text(std::string{ln}, st);
+    };
+
+    // ── Edit: compact diff (one - / + pair per hunk, capped) ───────
+    if (n == "edit" && tc.args.is_object()) {
+        std::vector<Element> rows;
+        auto rem = Style{}.with_fg(danger);
+        auto add = Style{}.with_fg(success);
+        auto rem_pre = Style{}.with_fg(danger).with_dim();
+        auto add_pre = Style{}.with_fg(success).with_dim();
+
+        auto push_hunk = [&](std::string_view old_text, std::string_view new_text) {
+            // Show first line of each side; "…" suffix when multi-line.
+            auto first_line = [](std::string_view s) {
+                auto nl = s.find('\n');
+                bool more = (nl != std::string_view::npos);
+                std::string ln = std::string{nl == std::string_view::npos ? s : s.substr(0, nl)};
+                if (more) ln += "  \xe2\x80\xa6";   // …
+                return ln;
+            };
+            if (!old_text.empty()) rows.push_back(h(
+                text("- ", rem_pre), code_line(first_line(old_text), rem)
+            ).build());
+            if (!new_text.empty()) rows.push_back(h(
+                text("+ ", add_pre), code_line(first_line(new_text), add)
+            ).build());
+        };
+
+        if (auto it = tc.args.find("edits");
+            it != tc.args.end() && it->is_array() && !it->empty())
+        {
+            int shown = 0;
+            for (const auto& e : *it) {
+                if (shown >= 3) {
+                    rows.push_back(text("\xe2\x80\xa6 " + std::to_string(static_cast<int>(it->size()) - shown)
+                                        + " more edits", fg_dim(muted)));
+                    break;
+                }
+                if (!e.is_object()) continue;
+                auto ot = e.value("old_text", e.value("old_string", std::string{}));
+                auto nt = e.value("new_text", e.value("new_string", std::string{}));
+                push_hunk(ot, nt);
+                ++shown;
+            }
+        } else {
+            // Top-level legacy single-edit shape.
+            auto ot = safe_arg(tc.args, "old_text"); if (ot.empty()) ot = safe_arg(tc.args, "old_string");
+            auto nt = safe_arg(tc.args, "new_text"); if (nt.empty()) nt = safe_arg(tc.args, "new_string");
+            if (!ot.empty() || !nt.empty()) push_hunk(ot, nt);
+        }
+        if (rows.empty()) return text("");
+        return v(std::move(rows)).build();
+    }
+
+    // Render an elided head+tail preview as a vertical stack with a
+    // dim "··· N hidden ···" centered marker. Reads like `git diff`'s
+    // smart context: top of file, gap, bottom of file — far more
+    // informative than only the first N lines.
+    auto preview_block = [&](const std::string& body, Style line_style) -> Element {
+        constexpr int kHead = 4;
+        constexpr int kTail = 3;
+        auto p = head_tail_lines(body, kHead, kTail);
+        std::vector<Element> rows;
+        for (int i = 0; i < static_cast<int>(p.lines.size()); ++i) {
+            if (p.elided > 0 && i == kHead) {
+                rows.push_back(text("\xc2\xb7 \xc2\xb7 \xc2\xb7  "
+                                    + std::to_string(p.elided) + " hidden  \xc2\xb7 \xc2\xb7 \xc2\xb7",
+                                    fg_dim(muted)));
+            }
+            rows.push_back(text(p.lines[static_cast<std::size_t>(i)], line_style));
+        }
+        return v(std::move(rows)).build();
+    };
+
+    // ── Write: head+tail of the streaming/written content ──────────
+    if (n == "write") {
+        std::string content = safe_arg(tc.args, "content");
+        if (content.empty()) return text("");
+        return preview_block(content, fg_dim(fg));
+    }
+
+    // ── Bash / diagnostics: head+tail of output ────────────────────
+    if ((n == "bash" || n == "diagnostics") && tc.is_terminal()) {
+        auto out = strip_bash_output_fence(tc.output());
+        if (out.empty()) return text("");
+        return preview_block(out, fg_dim(fg));
+    }
+    // Live bash progress (running stdout snapshot).
+    if (n == "bash" && tc.is_running() && !tc.progress_text().empty()) {
+        return preview_block(tc.progress_text(), fg_dim(fg));
+    }
+
+    // ── Read / list_dir / grep / glob: head+tail of output ─────────
+    if ((n == "read" || n == "list_dir" || n == "grep" || n == "glob")
+        && tc.is_done())
+    {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        return preview_block(out, fg_dim(fg));
+    }
+
+    // ── Failure: surface the error message inline so it isn't hidden
+    if (tc.is_failed() && !tc.output().empty()) {
+        // Failures use the danger color so the error stands out, but
+        // still through the elided preview path so a 200-line stderr
+        // dump doesn't take over the panel.
+        return preview_block(tc.output(),
+                             Style{}.with_fg(danger));
+    }
+
+    (void)kMaxLines;
+    return text("");
+}
+
+// Color-code a tool's wall-clock duration so the eye finds slow steps
+// without parsing numbers. Green = snappy (<250ms), dim = normal, warn
+// = slow (>2s), danger = stalling (>15s).
+Color duration_color(float secs) {
+    if (secs < 0.25f) return success;
+    if (secs < 2.0f)  return Color::bright_black();
+    if (secs < 15.0f) return warn;
+    return danger;
+}
+
+// Pick the body-connector color for an event based on its status. The
+// connector is the visual "thread" running down each event's body —
+// coloring it by status reinforces the icon at the head of the event
+// without adding more chrome.
+Color event_connector_color(const ToolUse& tc) {
+    if (tc.is_failed())                                return danger;
+    if (tc.is_rejected())                              return warn;
+    if (tc.is_running() || tc.is_approved())           return info;
+    if (tc.is_done())                                  return Color::bright_black();
+    return Color::bright_black();   // pending
+}
+
+// Tool category color — semantic grouping so the eye can scan a
+// timeline and instantly see "this turn was mostly inspect + one
+// modify". Five buckets, each with a distinct hue:
+//
+//   inspect (read, grep, glob, list, find, diag, web)  → info (blue)
+//   mutate  (edit, write)                              → accent (magenta)
+//   execute (bash)                                     → success (green)
+//   plan    (todo)                                     → warn (yellow)
+//   vcs     (git_*)                                    → highlight (cyan)
+//
+// Used for the gutter number and the tool name so a glance at the
+// timeline shows the *kind* of work happening, not just the order.
+Color tool_category_color(const std::string& n) {
+    if (n == "edit" || n == "write")        return accent;
+    if (n == "bash")                        return success;
+    if (n == "todo")                        return warn;
+    if (n.rfind("git_", 0) == 0)            return highlight;
+    return info;  // read, grep, glob, list_dir, find_definition,
+                  // diagnostics, web_fetch, web_search
+}
+
+// Short category label for the stats header.
+std::string_view tool_category_label(const std::string& n) {
+    if (n == "edit" || n == "write")        return "mutate";
+    if (n == "bash")                        return "execute";
+    if (n == "todo")                        return "plan";
+    if (n.rfind("git_", 0) == 0)            return "vcs";
+    return "inspect";
+}
+
+// Build the assistant turn's "Actions" panel: one bordered card whose
+// body is a continuous timeline of tool events. Each event has a
+// gutter-numbered header (like code line numbers), a status icon, the
+// tool name + brief detail + duration, and an indented body where the
+// rich tool-specific content sits under a status-colored connector.
+// Overview + detail in one cohesive, scannable view.
+Element assistant_timeline(const Message& msg, int spinner_frame,
+                           Color rail_color) {
+    std::vector<Element> rows;
+    int total = static_cast<int>(msg.tool_calls.size());
+    int done  = 0;
+    float total_elapsed = 0.0f;
+    int running_idx = -1;
+    // Per-category counts for the stats header. Order kept stable so
+    // the badges always appear in the same relative position.
+    std::vector<std::pair<std::string, int>> cat_counts;
+    auto bump_cat = [&](const std::string& cat) {
+        for (auto& [k, n] : cat_counts) if (k == cat) { ++n; return; }
+        cat_counts.emplace_back(cat, 1);
+    };
+    for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
+        const auto& tc = msg.tool_calls[i];
+        if (tc.is_terminal()) {
+            ++done;
+            total_elapsed += tool_elapsed(tc);
+        }
+        if (running_idx < 0 && (tc.is_running() || tc.is_approved()))
+            running_idx = static_cast<int>(i);
+        bump_cat(std::string{tool_category_label(tc.name.value)});
+    }
+
+    // ── Stats header ───────────────────────────────────────────────
+    // Quick TL;DR of the turn: small badges showing the category mix
+    // (e.g. "inspect 3  ·  mutate 2  ·  execute 1"). Shown once at
+    // the top of the panel so the eye can read "what kind of work
+    // happened here" without scanning the events.
+    if (total > 1) {
+        std::vector<Element> stats;
+        bool first = true;
+        for (const auto& [cat, n] : cat_counts) {
+            if (!first) stats.push_back(text("  \xc2\xb7  ", fg_dim(muted)));
+            first = false;
+            // Pick a color from a representative tool name in this
+            // category — same map as tool_category_color so the badge
+            // and the per-event gutter agree.
+            Color cc = (cat == "mutate")  ? accent
+                     : (cat == "execute") ? success
+                     : (cat == "plan")    ? warn
+                     : (cat == "vcs")     ? highlight
+                                          : info;
+            stats.push_back(text(cat, Style{}.with_fg(cc).with_bold()));
+            stats.push_back(text(" " + std::to_string(n), fg_dim(muted)));
+        }
+        rows.push_back((h(std::move(stats)) | grow(1.0f)).build());
+        rows.push_back(text(""));
+    }
+
+    // Two-digit zero-padded gutter numbers for ≤99 events, plain for
+    // larger. Same convention code editors use.
+    auto gutter = [&](std::size_t idx) {
+        char buf[8];
+        if (total <= 99) std::snprintf(buf, sizeof(buf), "%02zu", idx + 1);
+        else             std::snprintf(buf, sizeof(buf), "%zu",   idx + 1);
+        return std::string{buf};
+    };
+
+    for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
+        const auto& tc = msg.tool_calls[i];
+        bool is_last   = (i + 1 == msg.tool_calls.size());
+        bool is_active = tc.is_running() || tc.is_approved();
+
+        // ── Header row ──────────────────────────────────────────────
+        // Layout: `01  ▸ ✓ Read   src/auth.ts · 234 lines        879ms`
+        //          ^^^ ^ ^^^ ^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        //          gut  m icon name + detail              spacer  dur
+        Element marker = is_active
+            ? text("\xe2\x96\xb8", Style{}.with_fg(info).with_bold())   // ▸
+            : text(" ", {});
+
+        Element icon = rich_status_icon(tc, spinner_frame);
+        std::string name = tool_display_name(tc.name.value);
+        std::string detail = tool_timeline_detail(tc);
+        if (detail.empty())
+            detail = tc.is_running()  ? std::string{"running\xe2\x80\xa6"}
+                   : tc.is_pending()  ? std::string{"queued\xe2\x80\xa6"}
+                   : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
+                                      : std::string{"\xe2\x80\xa6"};
+
+        Color cat = tool_category_color(tc.name.value);
+        // Name styling: failed/rejected stay in their status colors so
+        // the eye catches them. Otherwise color by tool *category* so
+        // a glance at the timeline reads "inspect inspect mutate
+        // execute" by hue. Active tools get bold + bright; settled
+        // tools stay dim so the running step pops.
+        Style name_style;
+        if      (tc.is_failed())   name_style = Style{}.with_fg(danger).with_bold();
+        else if (tc.is_rejected()) name_style = Style{}.with_fg(warn).with_bold();
+        else if (is_active)        name_style = Style{}.with_fg(cat).with_bold();
+        else if (tc.is_done())     name_style = Style{}.with_fg(cat).with_dim();
+        else                        name_style = Style{}.with_fg(cat).with_dim();
+
+        std::vector<Element> hdr;
+        // Gutter takes the category color (dimmed) so the leading
+        // column reads as a vertical color stripe matching the work
+        // category at each step.
+        hdr.push_back(text(gutter(i), Style{}.with_fg(cat).with_dim()));
+        hdr.push_back(text("  ", {}));
+        hdr.push_back(marker);
+        hdr.push_back(text(" ", {}));
+        hdr.push_back(icon);
+        hdr.push_back(text("  ", {}));
+        hdr.push_back(text(std::move(name), name_style));
+        hdr.push_back(text("  ", {}));
+        hdr.push_back(text(std::move(detail), fg_dim(muted)));
+        hdr.push_back(spacer());
+        if (tc.is_terminal()) {
+            float secs = tool_elapsed(tc);
+            hdr.push_back(text(format_duration(secs),
+                               Style{}.with_fg(duration_color(secs))));
+        }
+        rows.push_back((h(std::move(hdr)) | grow(1.0f)).build());
+
+        // ── Body content under a status-colored ┊ connector ────────
+        // Body sits aligned beneath the tool name (column = gutter
+        // width 2 + 4 spaces). The connector is colored by the event's
+        // status — green ┊ under a done tool, blue ┊ under a running
+        // one, red under a failed one. Reinforces the status icon
+        // without adding more text labels.
+        Color cc = event_connector_color(tc);
+        auto body_rule = h(
+            text("    ", {}),                                        // gutter alignment
+            text("\xe2\x94\x8a  ", Style{}.with_fg(cc).with_dim())   // ┊
+        ).build();
+
+        Element body_el = compact_tool_body(tc);
+        bool body_has_content = false;
+        if (auto* bx = maya::as_box(body_el)) {
+            for (const auto& child : bx->children) {
+                rows.push_back(h(body_rule, child).build());
+                body_has_content = true;
+            }
+        } else if (auto* t = maya::as_text(body_el)) {
+            if (!t->content.empty()) {
+                rows.push_back(h(body_rule, body_el).build());
+                body_has_content = true;
+            }
+        }
+
+        // ── Continuation between events ────────────────────────────
+        // A short colored connector below the body keeps the visual
+        // thread running into the next event. Cleaner than a blank
+        // row + much cleaner than the previous full-width ┈ rule.
+        if (!is_last) {
+            Color next_cc = event_connector_color(msg.tool_calls[i + 1]);
+            rows.push_back(h(
+                text("    ", {}),
+                text("\xe2\x94\x8a", Style{}.with_fg(next_cc).with_dim())  // ┊
+            ).build());
+        }
+        (void)body_has_content;
+    }
+
+    // ── Footer summary when settled ────────────────────────────────
+    // Once all tools are terminal, append a one-line footer with
+    // aggregate stats: "✓ done · 5 actions · 1.8s elapsed". Pinned
+    // bottom so it reads as the closing summary of the panel.
+    if (done == total && total > 0) {
+        std::string verb = "\xe2\x9c\x93 done";    // ✓ done
+        // If anything failed, lead with that count instead.
+        int failed = 0, rejected = 0;
+        for (const auto& tc : msg.tool_calls) {
+            if (tc.is_failed())   ++failed;
+            if (tc.is_rejected()) ++rejected;
+        }
+        Color verb_color = success;
+        if (failed > 0) {
+            verb = "\xe2\x9c\x97 " + std::to_string(failed) + " failed";
+            verb_color = danger;
+        } else if (rejected > 0) {
+            verb = "\xe2\x8a\x98 " + std::to_string(rejected) + " rejected";
+            verb_color = warn;
+        }
+
+        rows.push_back(text(""));
+        rows.push_back(h(
+            text("    ", {}),
+            text(verb, Style{}.with_fg(verb_color).with_bold()),
+            text("  \xc2\xb7  ", fg_dim(muted)),
+            text(std::to_string(total) + " actions", fg_dim(muted)),
+            text("  \xc2\xb7  ", fg_dim(muted)),
+            text(format_duration(total_elapsed) + " elapsed", fg_dim(muted))
+        ).build());
+    }
+
+    // ── Card title: progress + active step name + elapsed ─────────
+    std::string title = " Actions  \xc2\xb7  "
+                      + std::to_string(done) + "/"
+                      + std::to_string(total);
+    if (running_idx >= 0) {
+        title += "  \xc2\xb7  " + tool_display_name(
+            msg.tool_calls[static_cast<std::size_t>(running_idx)].name.value);
+    } else if (done == total && total > 0) {
+        title += "  \xc2\xb7  " + format_duration(total_elapsed);
+    }
+    title += " ";
+
+    return (v(std::move(rows))
+            | border(BorderStyle::Round)
+            | bcolor(rail_color)
+            | btext(std::move(title), BorderTextPos::Top, BorderTextAlign::Start)
+            | padding(0, 1, 0, 1)
+           ).build();
+}
+
 Element render_message(const Message& msg, int turn_num, const Model& m) {
     std::vector<Element> rows;
 
@@ -939,14 +1613,25 @@ Element render_message(const Message& msg, int turn_num, const Model& m) {
             body.push_back(cached_markdown_for(msg));
             if (!msg.tool_calls.empty()) body.push_back(text(""));
         }
-        for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
-            const auto& tc = msg.tool_calls[i];
-            body.push_back((v(render_tool_call(tc)) | grow(1.0f)).build());
-            if (m.pending_permission && m.pending_permission->id == tc.id)
-                body.push_back(render_inline_permission(*m.pending_permission, tc));
-            // Inter-tool spacing only between cards, not after the last
-            // (the inter-turn divider already provides bottom breathing).
-            if (i + 1 < msg.tool_calls.size()) body.push_back(text(""));
+
+        // Timeline view ALWAYS — both during the response and after it
+        // settles. The Timeline is the higher-level "Actions" view: a
+        // clean CI-pipeline-style log of what the assistant did, with
+        // post-completion stats folded into each event's detail line
+        // (line counts, hunk Δ, exit codes, match counts). Avoids the
+        // wall of giant detailed cards that buried the conversation
+        // every time the assistant ran a few tools.
+        if (!msg.tool_calls.empty()) {
+            int frame = m.stream.spinner.frame_index();
+            body.push_back(assistant_timeline(msg, frame, rail_color));
+            // Render any in-flight permission inline so the user can
+            // approve without losing the timeline context above.
+            for (const auto& tc : msg.tool_calls) {
+                if (m.pending_permission && m.pending_permission->id == tc.id) {
+                    body.push_back(text(""));
+                    body.push_back(render_inline_permission(*m.pending_permission, tc));
+                }
+            }
         }
     }
 
@@ -981,23 +1666,35 @@ Element thread_panel(const Model& m) {
     }
     if (m.stream.active && !m.current.messages.empty()
         && m.current.messages.back().role == Role::Assistant) {
-        // Match the assistant turn header's left-edge bar so the
-        // spinner reads as "still typing" inline with the message
-        // above, not as a detached notification floating at the bottom.
-        const auto& mid = m.model_id.value;
-        Color edge_color = (mid.find("opus")   != std::string::npos) ? accent
-                         : (mid.find("sonnet") != std::string::npos) ? info
-                         : (mid.find("haiku")  != std::string::npos) ? success
-                                                                     : highlight;
-        auto spin = m.stream.spinner;
-        spin.set_style(Style{}.with_fg(edge_color).with_bold());
-        std::string verb{phase_verb(m.stream.phase)};
-        rows.push_back((h(
-            text("\xe2\x96\x8e", fg_of(edge_color)),                // ▎
-            text(" ", {}),
-            spin.build(),
-            text(" " + verb + "\u2026", fg_italic(muted))
-        ) | padding(0, 0, 0, 1)).build());
+        // Suppress this bottom indicator when the active assistant turn
+        // is already showing its Timeline card — the timeline's own
+        // in-progress spinner + status bar's spinner together carry the
+        // "still working" signal; an extra spinner here was duplicate
+        // chrome stacked under the card.
+        const auto& last = m.current.messages.back();
+        bool tl_visible_above =
+            !last.tool_calls.empty()
+            && std::any_of(last.tool_calls.begin(), last.tool_calls.end(),
+                           [](const auto& tc){ return !tc.is_terminal(); });
+        if (!tl_visible_above) {
+            // Match the assistant turn header's left-edge bar so the
+            // spinner reads as "still typing" inline with the message
+            // above, not as a detached notification floating at the bottom.
+            const auto& mid = m.model_id.value;
+            Color edge_color = (mid.find("opus")   != std::string::npos) ? accent
+                             : (mid.find("sonnet") != std::string::npos) ? info
+                             : (mid.find("haiku")  != std::string::npos) ? success
+                                                                         : highlight;
+            auto spin = m.stream.spinner;
+            spin.set_style(Style{}.with_fg(edge_color).with_bold());
+            std::string verb{phase_verb(m.stream.phase)};
+            rows.push_back((h(
+                text("\xe2\x96\x8e", fg_of(edge_color)),                // ▎
+                text(" ", {}),
+                spin.build(),
+                text(" " + verb + "\u2026", fg_italic(muted))
+            ) | padding(0, 0, 0, 1)).build());
+        }
     }
     if (rows.empty()) {
         // Wordmark-style welcome — quiet brand presence + the details that

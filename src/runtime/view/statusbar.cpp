@@ -327,6 +327,11 @@ Element status_bar(const Model& m) {
 
     auto right = hstack()(std::move(right_parts));
 
+    // Activity row stays transparent — pro TUIs (helix, lazygit, k9s)
+    // skip the bg color and rely on horizontal rules for separation.
+    // `bright_black` renders unpredictably across terminal themes
+    // (teal on Catppuccin, beige on Solarized, etc.), so any bg color
+    // we pick fights with someone's color scheme.
     auto activity_row = h(left, spacer(), right).build();
 
     // ── Error / transient status banner ──────────────────────────────────
@@ -335,9 +340,8 @@ Element status_bar(const Model& m) {
     if (has_status) {
         bool is_err = m.stream.status.rfind("error:", 0) == 0;
         Color bc = is_err ? danger : muted;
-        // Error banner gets the same chip-ish edge treatment as the left
-        // breadcrumb: leading bar + colored text. Aligns visually with the
-        // activity row above so the eye doesn't have to jump.
+        // Error banner: leading edge mark + italic text, no bg — same
+        // reasoning as the activity row above.
         status_row = h(
             text(" ", {}),
             edge_mark(bc),
@@ -345,6 +349,13 @@ Element status_bar(const Model& m) {
             text(m.stream.status, fg_of(bc).with_italic())
         ).build();
     }
+
+    // Bottom divider — twins the top one so the activity row sits
+    // bracketed between two thin rules, reading as a discrete panel
+    // without bg color trickery. The shortcut row below is then
+    // visually clear it's a *separate* hint strip, not part of the
+    // status panel.
+    auto bottom_divider = divider_line();
 
     // ── Shortcut row ─────────────────────────────────────────────────────
     // Single-color caps (highlight) for everything except quit, which is
@@ -362,9 +373,11 @@ Element status_bar(const Model& m) {
     ).build();
 
     if (has_status) {
-        return v(divider_line(), activity_row, status_row, shortcuts).build();
+        return v(divider_line(), activity_row, status_row,
+                 std::move(bottom_divider), shortcuts).build();
     }
-    return v(divider_line(), activity_row, shortcuts).build();
+    return v(divider_line(), activity_row,
+             std::move(bottom_divider), shortcuts).build();
 }
 
 } // namespace moha::ui
