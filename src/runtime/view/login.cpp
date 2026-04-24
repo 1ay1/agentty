@@ -17,7 +17,9 @@ namespace moha::ui {
 
 using namespace maya;
 using namespace maya::dsl;
-namespace login = moha::ui::login;
+// `login::` resolves to `moha::ui::login::` from this scope without an
+// alias — and MSVC rejects an alias whose name shadows the existing
+// nested namespace, so don't write one.
 
 namespace {
 
