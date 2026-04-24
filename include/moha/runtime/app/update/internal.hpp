@@ -52,6 +52,15 @@ Step           submit_message(Model m);
 maya::Cmd<Msg> maybe_virtualize(Model& m);
 void           persist_settings(const Model& m);
 
+// Set a transient status toast that auto-clears after `ttl`. Returns a
+// Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer
+// status overwrites without being wiped). Use for "no-op" feedback like
+// "no pending changes" / "nothing to copy" — anywhere the alternative
+// is silent failure that leaves the user wondering if their keystroke
+// even registered.
+maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
+                                std::chrono::seconds ttl = std::chrono::seconds{3});
+
 // ── update_tool.cpp ──────────────────────────────────────────────────────
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result);

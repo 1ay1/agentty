@@ -90,23 +90,24 @@ Element command_palette(const Model& m) {
     ).build());
     rows.push_back(sep);
 
-    int i = 0;
-    for (const auto& cmd : kCommands) {
-        std::string_view name{cmd.label};
-        std::string_view desc{cmd.description};
-        if (!o->query.empty()
-            && name.find(o->query) == std::string_view::npos)
-            continue;
-        bool sel = i == o->index;
-        auto prefix = sel ? text("\u203A ", fg_bold(highlight)) : text("  ");
-        rows.push_back(h(prefix,
-            text(std::string{name}, sel ? fg_bold(fg) : fg_of(muted)),
-            spacer(),
-            text(std::string{desc}, fg_dim(muted))).build());
-        ++i;
-    }
-    if (i == 0) {
+    // Same filter the dispatcher uses (case-insensitive substring) — see
+    // command_palette.hpp. Sharing one helper means the row at visible
+    // index N here is *exactly* the row CommandPaletteSelect resolves;
+    // we used to filter independently and the dispatcher fired the wrong
+    // command whenever any query was active.
+    auto matches = filtered_commands(o->query);
+    if (matches.empty()) {
         rows.push_back(text("  no matches", fg_italic(muted)));
+    } else {
+        for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
+            const auto& cmd = *matches[static_cast<std::size_t>(i)];
+            bool sel = i == o->index;
+            auto prefix = sel ? text("\u203A ", fg_bold(highlight)) : text("  ");
+            rows.push_back(h(prefix,
+                text(std::string{cmd.label}, sel ? fg_bold(fg) : fg_of(muted)),
+                spacer(),
+                text(std::string{cmd.description}, fg_dim(muted))).build());
+        }
     }
 
     auto content = (v(std::move(rows)) | padding(1, 2) | width(70));

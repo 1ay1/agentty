@@ -105,4 +105,17 @@ void persist_settings(const Model& m) {
     deps().save_settings(s);
 }
 
+maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
+                                std::chrono::seconds ttl) {
+    using maya::Cmd;
+    m.s.status = std::move(text);
+    auto now = std::chrono::steady_clock::now();
+    m.s.status_until = now + ttl;
+    auto stamp = m.s.status_until;
+    return Cmd<Msg>::after(
+        std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
+            + std::chrono::milliseconds{50},
+        Msg{ClearStatus{stamp}});
+}
+
 } // namespace moha::app::detail

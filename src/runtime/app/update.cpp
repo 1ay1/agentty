@@ -646,34 +646,56 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         },
         [&](CommandPaletteInput& e) -> Step {
             auto* o = opened(m.ui.command_palette);
-            if (o && static_cast<uint32_t>(e.ch) < 0x80)
+            if (o && static_cast<uint32_t>(e.ch) < 0x80) {
                 o->query.push_back(static_cast<char>(e.ch));
+                // Reset cursor to the top of the (newly filtered) list so
+                // the previous index doesn't point at a now-hidden row.
+                o->index = 0;
+            }
             return done(std::move(m));
         },
         [&](CommandPaletteBackspace) -> Step {
             auto* o = opened(m.ui.command_palette);
-            if (o && !o->query.empty()) o->query.pop_back();
+            if (o && !o->query.empty()) {
+                o->query.pop_back();
+                o->index = 0;
+            }
             return done(std::move(m));
         },
         [&](CommandPaletteMove& e) -> Step {
             auto* o = opened(m.ui.command_palette);
-            if (o) o->index = std::max(0, o->index + e.delta);
+            if (!o) return done(std::move(m));
+            // Clamp against the *visible* row count, not kCommands.size().
+            // Without the upper bound the cursor used to walk off-screen
+            // and Enter would silently fall through to the no-match path.
+            int sz = static_cast<int>(filtered_commands(o->query).size());
+            if (sz <= 0) { o->index = 0; return done(std::move(m)); }
+            o->index = std::clamp(o->index + e.delta, 0, sz - 1);
             return done(std::move(m));
         },
         [&](CommandPaletteSelect) -> Step {
             auto* o = opened(m.ui.command_palette);
-            int chosen = o ? o->index : -1;
+            if (!o) return done(std::move(m));
+            // Resolve cursor → typed Command via the SAME filtered list
+            // the view rendered. The previous design switched on the raw
+            // o->index against the unfiltered enum, which silently fired
+            // the wrong command whenever any query was active.
+            auto matches = filtered_commands(o->query);
             m.ui.command_palette = palette::Closed{};
-            switch (chosen) {
-                case 0: return update(std::move(m), NewThread{});
-                case 1: return update(std::move(m), OpenDiffReview{});
-                case 2: return update(std::move(m), AcceptAllChanges{});
-                case 3: return update(std::move(m), RejectAllChanges{});
-                case 4: return update(std::move(m), CycleProfile{});
-                case 5: return update(std::move(m), OpenModelPicker{});
-                case 6: return update(std::move(m), OpenThreadList{});
-                case 7: return update(std::move(m), OpenTodoModal{});
-                case 8: return update(std::move(m), Quit{});
+            if (matches.empty()
+                || o->index < 0
+                || o->index >= static_cast<int>(matches.size()))
+                return done(std::move(m));
+            switch (matches[static_cast<std::size_t>(o->index)]->id) {
+                case Command::NewThread:     return update(std::move(m), NewThread{});
+                case Command::ReviewChanges: return update(std::move(m), OpenDiffReview{});
+                case Command::AcceptAll:     return update(std::move(m), AcceptAllChanges{});
+                case Command::RejectAll:     return update(std::move(m), RejectAllChanges{});
+                case Command::CycleProfile:  return update(std::move(m), CycleProfile{});
+                case Command::OpenModels:    return update(std::move(m), OpenModelPicker{});
+                case Command::OpenThreads:   return update(std::move(m), OpenThreadList{});
+                case Command::OpenPlan:      return update(std::move(m), OpenTodoModal{});
+                case Command::Quit:          return update(std::move(m), Quit{});
             }
             return done(std::move(m));
         },
@@ -715,9 +737,15 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Diff review ─────────────────────────────────────────────────
         [&](OpenDiffReview) -> Step {
-            m.ui.diff_review = m.d.pending_changes.empty()
-                ? ui::pick::TwoAxis{pick::Closed{}}
-                : ui::pick::TwoAxis{pick::OpenAtCell{0, 0}};
+            // Tell the user when there's nothing to review instead of
+            // silently doing nothing — opening an empty pane would just
+            // flicker the screen and leave them confused about whether
+            // their keystroke registered.
+            if (m.d.pending_changes.empty()) {
+                auto cmd = detail::set_status_toast(m, "no pending changes to review");
+                return {std::move(m), std::move(cmd)};
+            }
+            m.ui.diff_review = ui::pick::TwoAxis{pick::OpenAtCell{0, 0}};
             return done(std::move(m));
         },
         [&](CloseDiffReview) -> Step {
@@ -768,16 +796,38 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](AcceptAllChanges) -> Step {
+            if (m.d.pending_changes.empty()) {
+                auto cmd = detail::set_status_toast(m, "no pending changes to accept");
+                return {std::move(m), std::move(cmd)};
+            }
+            int hunks = 0;
             for (auto& fc : m.d.pending_changes)
-                for (auto& h : fc.hunks) h.status = Hunk::Status::Accepted;
-            return done(std::move(m));
+                for (auto& h : fc.hunks) {
+                    h.status = Hunk::Status::Accepted;
+                    ++hunks;
+                }
+            auto cmd = detail::set_status_toast(m,
+                "accepted " + std::to_string(hunks)
+                + (hunks == 1 ? " hunk" : " hunks"));
+            return {std::move(m), std::move(cmd)};
         },
         [&](RejectAllChanges) -> Step {
+            if (m.d.pending_changes.empty()) {
+                auto cmd = detail::set_status_toast(m, "no pending changes to reject");
+                return {std::move(m), std::move(cmd)};
+            }
+            int hunks = 0;
             for (auto& fc : m.d.pending_changes)
-                for (auto& h : fc.hunks) h.status = Hunk::Status::Rejected;
+                for (auto& h : fc.hunks) {
+                    h.status = Hunk::Status::Rejected;
+                    ++hunks;
+                }
             m.d.pending_changes.clear();
             m.ui.diff_review = pick::Closed{};
-            return done(std::move(m));
+            auto cmd = detail::set_status_toast(m,
+                "rejected " + std::to_string(hunks)
+                + (hunks == 1 ? " hunk" : " hunks"));
+            return {std::move(m), std::move(cmd)};
         },
 
         // ── Misc ────────────────────────────────────────────────────────
