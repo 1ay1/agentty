@@ -25,23 +25,24 @@ Cmd<Msg> launch_stream(Model& m) {
     req.system_prompt = provider::anthropic::default_system_prompt();
     req.messages      = m.d.current.messages;
 
-    if (m.d.profile != Profile::Minimal) {
-        for (const auto& t : tools::registry()) {
-            // Ask profile hides the mutating/executing trio from the wire
-            // so the model can't even request them — it must ask the user
-            // to switch profile first. Closed-set Kind dispatch: adding
-            // another gated tool is an enum-arm change, not a new string
-            // compare to add here.
-            if (m.d.profile == Profile::Ask) {
-                auto k = tools::spec::kind_of(t.name.value);
-                if (k && (*k == tools::spec::Kind::Write
-                       || *k == tools::spec::Kind::Edit
-                       || *k == tools::spec::Kind::Bash))
-                    continue;
-            }
-            req.tools.push_back({t.name.value, t.description, t.input_schema,
-                                 t.eager_input_streaming});
-        }
+    // All tools, every profile. Gating is the policy layer's job
+    // (`tool::DynamicDispatch::needs_permission`, called from
+    // `kick_pending_tools`) — it inspects the tool's effects against
+    // the active profile and decides Allow vs Prompt:
+    //   Write   → all Allow  (autonomous)
+    //   Ask     → ReadFs/Pure Allow; WriteFs/Exec/Net Prompt
+    //   Minimal → only Pure Allow; everything else Prompt
+    // Hiding tools from the wire here used to be the gate, but it
+    // conflicted with what users expect from "Ask": that the model
+    // can attempt anything, the *user* approves per-call. With the
+    // filter in place, Ask just made write/edit/bash invisible (no
+    // prompt could ever fire because the model never called them) and
+    // Minimal sent zero tools at all (model became chat-only). The
+    // policy layer is exhaustively static_asserted in policy.hpp; let
+    // it own the decision so the three profiles read as users expect.
+    for (const auto& t : tools::registry()) {
+        req.tools.push_back({t.name.value, t.description, t.input_schema,
+                             t.eager_input_streaming});
     }
     req.auth_header = deps().auth_header;
     req.auth_style  = deps().auth_style;
