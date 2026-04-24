@@ -33,7 +33,25 @@ inline maya::Style italic() { return maya::Style{}.with_italic(); }
 
 inline maya::Style fg_of(maya::Color c)         { return maya::Style{}.with_fg(c); }
 inline maya::Style fg_bold(maya::Color c)       { return maya::Style{}.with_fg(c).with_bold(); }
-inline maya::Style fg_dim(maya::Color c)        { return maya::Style{}.with_fg(c).with_dim(); }
+
+// `fg_dim` returns "dim color" — but `with_dim()` on an already-muted
+// color (bright_black / gray) collapses below the readable floor on
+// dark / low-contrast themes (true-black backgrounds, OLED palettes,
+// some Solarized variants). The intent of `fg_dim(muted)` is "subdued
+// secondary text," and bright_black ALONE already carries that role
+// on every reasonable theme — stacking the SGR `dim` attribute on top
+// just trades readability for nothing. So suppress the `with_dim()`
+// when the color is bright_black; keep it for everything else, where
+// dimming a bright color is exactly the meaningful signal we want
+// (a muted form of the brand color, etc.).
+inline maya::Style fg_dim(maya::Color c) {
+    const bool is_already_muted =
+        c.kind() == maya::Color::Kind::Named
+        && c.index() == static_cast<uint8_t>(maya::AnsiColor::BrightBlack);
+    return is_already_muted
+        ? maya::Style{}.with_fg(c)
+        : maya::Style{}.with_fg(c).with_dim();
+}
 inline maya::Style fg_italic(maya::Color c)     { return maya::Style{}.with_fg(c).with_italic(); }
 
 } // namespace moha::ui
