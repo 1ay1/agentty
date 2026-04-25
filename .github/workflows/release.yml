@@ -161,28 +161,46 @@ jobs:
       # ── Package — portable archive (always) ──────────────────────────
       # Plain tarball / zip alongside the native installer. Some users
       # prefer the no-install drop-in (sysadmins, CI, sandboxed envs).
+      # Filename includes the version (matches CPack's installer naming
+      # AND what the Arch PKGBUILD's source URL references), and the
+      # contained directory mirrors the filename so `tar xf foo.tar.gz`
+      # produces `foo/` cleanly.
+      - name: Resolve PROJECT_VERSION (Unix)
+        if: "!startsWith(matrix.os, 'windows-')"
+        run: |
+          v=$(awk -F'[ )]+' '/^project\(moha VERSION/ { print $3; exit }' CMakeLists.txt)
+          echo "PROJECT_VERSION=$v" >> "$GITHUB_ENV"
+          echo "PKG_BASE=moha-$v-${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: Resolve PROJECT_VERSION (Windows)
+        if: startsWith(matrix.os, 'windows-')
+        shell: pwsh
+        run: |
+          $line = Select-String -Path CMakeLists.txt -Pattern '^project\(moha VERSION (\S+)' | Select-Object -First 1
+          $v = $line.Matches.Groups[1].Value
+          echo "PROJECT_VERSION=$v" >> $env:GITHUB_ENV
+          echo "PKG_BASE=moha-$v-${{ matrix.target }}" >> $env:GITHUB_ENV
+
       - name: Package portable archive (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
-          STAGE="moha-${{ matrix.target }}"
-          mkdir -p "$STAGE"
-          cp build/moha "$STAGE/"
-          cp README.md "$STAGE/"
-          [ -f LICENSE ] && cp LICENSE "$STAGE/" || true
-          tar czf "${STAGE}.tar.gz" "$STAGE"
-          ls -lh "${STAGE}.tar.gz"
+          mkdir -p "$PKG_BASE"
+          cp build/moha "$PKG_BASE/"
+          cp README.md "$PKG_BASE/"
+          [ -f LICENSE ] && cp LICENSE "$PKG_BASE/" || true
+          tar czf "${PKG_BASE}.tar.gz" "$PKG_BASE"
+          ls -lh "${PKG_BASE}.tar.gz"
 
       - name: Package portable archive (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $stage = "moha-${{ matrix.target }}"
-          New-Item -ItemType Directory -Path $stage | Out-Null
-          Copy-Item build/Release/moha.exe $stage/
-          Copy-Item README.md $stage/
-          if (Test-Path LICENSE) { Copy-Item LICENSE $stage/ }
-          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip"
-          Get-ChildItem "$stage.zip"
+          New-Item -ItemType Directory -Path $env:PKG_BASE | Out-Null
+          Copy-Item build/Release/moha.exe "$env:PKG_BASE/"
+          Copy-Item README.md "$env:PKG_BASE/"
+          if (Test-Path LICENSE) { Copy-Item LICENSE "$env:PKG_BASE/" }
+          Compress-Archive -Path "$env:PKG_BASE/*" -DestinationPath "$env:PKG_BASE.zip"
+          Get-ChildItem "$env:PKG_BASE.zip"
 
       # ── Package — native installer (per platform) ────────────────────
       # CPack wraps the same install rules into the right format per
@@ -222,7 +240,7 @@ jobs:
         if: "!startsWith(matrix.os, 'windows-')"
         run: |
           mkdir -p artifacts
-          mv "moha-${{ matrix.target }}.tar.gz" artifacts/
+          mv "${PKG_BASE}.tar.gz" artifacts/
           # Move every installer file CPack wrote, regardless of the
           # generator-specific subdirectory layout. _CPack_Packages
           # (CPack's scratch dir) is excluded.
@@ -237,7 +255,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts | Out-Null
-          Move-Item "moha-${{ matrix.target }}.zip" artifacts/
+          Move-Item "$env:PKG_BASE.zip" artifacts/
           Get-ChildItem -Recurse build\cpack-out -Filter 'moha-*.exe' | `
             Where-Object { $_.FullName -notmatch '_CPack_Packages' } | `
             ForEach-Object { Move-Item $_.FullName artifacts/ }
@@ -295,10 +313,11 @@ jobs:
           grep -E '^(pkgname|pkgver|pkgrel)=' build/packaging/arch/PKGBUILD
 
       - name: Stage tarball + generated PKGBUILD where makepkg expects them
-        # makepkg dedupes by filename: any `source=()` entry that already
-        # exists in $startdir is reused instead of fetched. This lets the
-        # CI build reference the just-uploaded artifact instead of trying
-        # to download from a release that doesn't exist yet at this point.
+        # makepkg dedupes by filename: any `source=()` entry whose
+        # basename already exists in $startdir is reused instead of
+        # fetched. The tarball name has to match the PKGBUILD's source
+        # URL (moha-<ver>-linux-x86_64.tar.gz) — which it does because
+        # both come from PROJECT_VERSION via the same configure_file.
         run: |
           mkdir -p arch-build
           cp build/packaging/arch/PKGBUILD arch-build/

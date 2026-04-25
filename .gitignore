@@ -11,3 +11,4 @@ compile_commands.json
 .DS_Store
 .env
 credentials.json
+dist/

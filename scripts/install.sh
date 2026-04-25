@@ -67,7 +67,12 @@ else
     info "→ latest release: $tag"
 fi
 
-asset="moha-${target}.tar.gz"
+# Asset filename includes the resolved version (sans the leading 'v')
+# so it matches what the build pipeline produces — same naming the
+# Arch PKGBUILD's source URL uses, so a single asset serves both
+# `curl | sh` installs and AUR makepkg consumers.
+ver="${tag#v}"
+asset="moha-${ver}-${target}.tar.gz"
 url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
 
 # ── 3. Download + verify checksum (best-effort) ───────────────────────
@@ -103,7 +108,9 @@ fi
 
 # ── 4. Extract ────────────────────────────────────────────────────────
 tar xzf "$tmp/$asset" -C "$tmp"
-extracted="$tmp/moha-${target}/moha"
+# Contained directory mirrors the archive basename: extracting
+# `moha-X.Y.Z-T.tar.gz` produces `moha-X.Y.Z-T/moha`.
+extracted="$tmp/moha-${ver}-${target}/moha"
 if [ ! -x "$extracted" ]; then
     err "expected binary not in archive: $extracted"
     exit 1

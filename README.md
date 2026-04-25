@@ -63,6 +63,26 @@ cmake -B build && cmake --build build
 
 Build needs GCC 14+ or Clang 18+ (`std::expected`, `std::format`, designated init through templates) and CMake 3.28+. Auth happens in-app on first launch.
 
+### Cut a release locally (no CI)
+
+For maintainers, when you can't (or don't want to) run GitHub Actions:
+
+```bash
+scripts/release.sh                       # build only — assets in dist/
+scripts/release.sh --tag v0.1.0          # build + create GH release + upload
+scripts/release.sh --tag v0.1.0 --upload # upload to an existing release
+```
+
+Per host, the script produces:
+
+| Host | Artifacts |
+|---|---|
+| Linux x86_64 / ARM64 | `.tar.gz`, `.deb`, `.rpm` (if `rpmbuild` present), `.pkg.tar.zst` (if `makepkg` present, x86_64 only) |
+| macOS Intel / Apple Silicon | `.tar.gz`, `.dmg` |
+| Windows x86_64 | `.zip`, `.exe` (NSIS — needs `makensis` on PATH) |
+
+To produce the **full** five-platform set, run the same script on a Linux box, a Mac, and a Windows machine, then have whichever ran last `--upload` to the release (or copy artifacts into one machine's `dist/` and run `--upload` once). `gh release upload --clobber` is idempotent. Code signing for `.dmg` / `.exe` is a separate decision (paid certs).
+
 ## What ships
 
 - **Live streaming** with mid-stream input queuing — type while the model is answering, your message submits when it lands.
