@@ -147,8 +147,13 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"signatures",      Kind::Signatures,     {Effect::ReadFs},                     false,   detail::sec{30}},
     // ── Tier-3 sub-agent. `Net` because it dials the model API; the
     // read-only tool subset it may invoke is enforced inside
-    // investigate.cpp, not at the spec layer.
-    ToolSpec{"investigate",     Kind::Investigate,    {Effect::Net},                        true,    detail::sec{300}},
+    // investigate.cpp, not at the spec layer. `SubAgent` makes the
+    // scheduler serialize concurrent investigates (one at a time) so
+    // the timeline stays reviewable and the Anthropic per-minute rate
+    // limit doesn't get hammered by a turn that fans out into 3+
+    // simultaneous sub-agents — each itself dispatching ~8 parallel
+    // tools.
+    ToolSpec{"investigate",     Kind::Investigate,    {Effect::Net, Effect::SubAgent},      true,    detail::sec{300}},
     // ── Persistent workspace-memory tools (in-process, no I/O cost) ────
     // `remember` writes to <workspace>/.moha/memos.json — local FS; we
     // tag it WriteFs so the policy gates on it under stricter profiles
@@ -351,6 +356,22 @@ consteval bool only_known_net_tools() {
 }
 static_assert(only_known_net_tools(),
               "Only web_fetch / web_search / investigate / mine_adrs may carry Effect::Net");
+
+// SubAgent: today only `investigate` qualifies. mine_adrs spawns Haiku
+// calls too but is a linear walk over commits, not a recursive agent —
+// it doesn't fan out N parallel children, so it doesn't need the
+// SubAgent serialization gate. Adding any future tool that recursively
+// dispatches a moha-style agent loop requires updating this check.
+consteval bool only_known_subagent_tools() {
+    for (const auto& s : kCatalog) {
+        if (!s.effects.has(Effect::SubAgent)) continue;
+        if (s.name != "investigate") return false;
+    }
+    return true;
+}
+static_assert(only_known_subagent_tools(),
+              "Only `investigate` may carry Effect::SubAgent today — adding "
+              "another sub-agent tool requires explicit review");
 
 // ── Per-tool timeout proofs ─────────────────────────────────────────────
 // Pin the wall-clock-watchdog values so a careless edit (set 0 on the

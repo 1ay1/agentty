@@ -30,6 +30,14 @@ namespace moha::tools {
 //            `diagnostics`). Strictly more dangerous than `WriteFs`
 //            because the model controls *what* runs, not just what
 //            files change.
+// SubAgent — spawns a recursive moha-style sub-agent that itself
+//            dispatches tools (today: `investigate`). Parallel-safe
+//            with reads/nets — sub-agent execution doesn't conflict
+//            with disk or network IO at our level — but **exclusive
+//            against ITSELF**. Three concurrent investigates triple
+//            the model API rate, blow the user's context budget, and
+//            produce an unreviewable timeline; serialize them so each
+//            sub-agent reports its synthesis before the next starts.
 // Pure     — no observable effect (no IO of any kind). Today only
 //            `todo` qualifies; reserve the tag so the policy can
 //            short-circuit it cleanly.
@@ -38,6 +46,7 @@ enum class Effect : std::uint8_t {
     WriteFs  = 1u << 1,
     Net      = 1u << 2,
     Exec     = 1u << 3,
+    SubAgent = 1u << 4,
 };
 
 // A set of effects, packed into a uint8_t. Trivially copyable, all
@@ -90,6 +99,12 @@ inline constexpr EffectSet pure_effects{};
 //   touches neither FS nor process state; in-memory Pure tools (todo)
 //   operate on data the model cannot observe concurrently.
 //
+//   SubAgent is exclusive AGAINST ITSELF only. Two investigates running
+//   in parallel multiply API cost + token spend, blow up the timeline,
+//   and saturate Anthropic's per-minute rate limit — they queue. But a
+//   running investigate doesn't conflict with a sibling read/grep/edit;
+//   those keep their normal scheduling.
+//
 // Reflected in the tool spec as a compile-time invariant (see
 // moha::tools::spec::proofs::parallel_rule_is_well_founded).
 [[nodiscard]] constexpr bool is_parallel_safe(EffectSet active, EffectSet want) noexcept {
@@ -100,6 +115,12 @@ inline constexpr EffectSet pure_effects{};
         // One side needs exclusive access; only safe if the other side is
         // empty. `active == {}` covers "nothing is running yet".
         return active.empty();
+    }
+    // SubAgent: exclusive against itself only — two sub-agents must
+    // not overlap, but reads/nets/writes alongside a running sub-agent
+    // are fine.
+    if (active.has(Effect::SubAgent) && want.has(Effect::SubAgent)) {
+        return false;
     }
     return true;
 }
@@ -118,6 +139,19 @@ static_assert(!is_parallel_safe(EffectSet{{Effect::ReadFs}},  EffectSet{{Effect:
 static_assert(!is_parallel_safe(EffectSet{{Effect::Exec}},    EffectSet{{Effect::ReadFs}}));
 static_assert(!is_parallel_safe(EffectSet{{Effect::WriteFs}}, EffectSet{{Effect::WriteFs}}));
 static_assert(!is_parallel_safe(EffectSet{{Effect::Exec}},    EffectSet{{Effect::Exec}}));
+// SubAgent is exclusive against itself only.
+static_assert(!is_parallel_safe(EffectSet{{Effect::SubAgent}},
+                                EffectSet{{Effect::SubAgent}}));
+static_assert( is_parallel_safe(EffectSet{{Effect::SubAgent}},
+                                EffectSet{{Effect::ReadFs}}));
+static_assert( is_parallel_safe(EffectSet{{Effect::SubAgent}},
+                                EffectSet{{Effect::Net}}));
+static_assert( is_parallel_safe(EffectSet{{Effect::ReadFs}},
+                                EffectSet{{Effect::SubAgent}}));
+// SubAgent + Net (the actual combo investigate carries) defers a second
+// SubAgent regardless of the Net presence.
+static_assert(!is_parallel_safe(EffectSet{{Effect::SubAgent, Effect::Net}},
+                                EffectSet{{Effect::SubAgent, Effect::Net}}));
 } // namespace proofs
 
 // "ReadFs, Net" — sorted-by-bit, comma-separated. For permission UI

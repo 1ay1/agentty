@@ -2944,6 +2944,209 @@ Element render_tool_compact(const ToolUse& tc) {
         return v(std::move(rows)).build();
     }
 
+    // ── Codebase memory & semantic tools ──────────────────────────────
+    // recall / memos / remember / forget / find_usages / mine_adrs /
+    // navigate. The rich card path (render_tool_call_uncached) shows
+    // the full structured output; the compact path here surfaces just
+    // a header + a few key rows so the timeline stays glanceable.
+    // Inside investigate sub-agent timelines especially, these tools
+    // fire frequently — a blank row would leave the user guessing what
+    // the sub-agent actually did.
+
+    // recall(topic|id) — the memo's first body line(s).
+    if (n == "recall" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto topic = safe_arg(tc.args, "topic");
+        if (topic.empty()) topic = safe_arg(tc.args, "id");
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, topic, ""));
+        // Body: skip the leading "# query" line, show the first few
+        // body lines so the user sees what was banked.
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        constexpr int kCap = 4;
+        bool past_header = false;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (!past_header) {
+                if (line.starts_with("# ")) { past_header = true; continue; }
+                continue;
+            }
+            if (line.empty()) continue;
+            if (line.starts_with("[")) {
+                rows.push_back(text("  " + line, fg_dim(muted)));
+            } else {
+                rows.push_back(text("  " + line, fg_dim(fg)));
+            }
+            ++row_count;
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // memos(filter?) — list the first few memo headers (✓/⚠).
+    if (n == "memos" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto filter = safe_arg(tc.args, "filter");
+        std::string title = filter.empty() ? std::string{"memos"}
+                                           : "memos · " + filter;
+        // Pull "N/M shown" tail line if present for the header stats.
+        std::string stats;
+        if (auto p = out.rfind(" shown."); p != std::string::npos) {
+            auto start = out.rfind('\n', p);
+            if (start == std::string::npos) start = 0;
+            else ++start;
+            stats = out.substr(start, p + 7 - start);
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, title, stats));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        constexpr int kCap = 6;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.starts_with("\xe2\x9c\x93 ")) {       // ✓ fresh memo
+                rows.push_back(text("  " + line,
+                    Style{}.with_fg(success).with_bold()));
+                ++row_count;
+            } else if (line.starts_with("\xe2\x9a\xa0 ")) {  // ⚠ stale memo
+                rows.push_back(text("  " + line,
+                    Style{}.with_fg(warn).with_bold()));
+                ++row_count;
+            }
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // remember(topic, content) — short success confirmation.
+    if (n == "remember" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto topic = safe_arg(tc.args, "topic");
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x9c\x93", success, topic.empty()
+                                                          ? std::string{"remember"}
+                                                          : topic, ""));
+        // Output's metadata line is "  ·  N file refs  ·  M memos in workspace".
+        std::istringstream iss(out);
+        std::string line;
+        while (std::getline(iss, line)) {
+            if (line.starts_with("  \xc2\xb7  ")) {
+                rows.push_back(text("  " + line, fg_dim(muted)));
+                break;   // one summary line is enough for the compact view
+            }
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // forget(target) — single-line outcome.
+    if (n == "forget" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        // First non-empty line is the outcome.
+        std::istringstream iss(out);
+        std::string line;
+        while (std::getline(iss, line) && line.empty()) {}
+        if (line.empty()) return text("");
+        Style st = line.starts_with("\xe2\x9c\x97 ")
+            ? Style{}.with_fg(danger).with_bold()
+            : fg_dim(muted);
+        return text(line, st);
+    }
+
+    // find_usages(symbol) — file list with reference counts.
+    if (n == "find_usages" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto sym = safe_arg(tc.args, "symbol");
+        // Output starts: "Symbol 'X' is referenced in N files:"
+        std::string stats;
+        if (auto p = out.find("referenced in "); p != std::string::npos) {
+            auto end = out.find(':', p);
+            if (end != std::string::npos)
+                stats = out.substr(p + 14, end - (p + 14));
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, sym, stats));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        constexpr int kCap = 6;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.starts_with("Symbol ") || line.starts_with("(Use ")
+             || line.empty())
+                continue;
+            // "  path  (N refs)" rows.
+            rows.push_back(text(line, fg_dim(fg)));
+            ++row_count;
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // mine_adrs(since?) — list the mined ADR titles.
+    if (n == "mine_adrs" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto since = safe_arg(tc.args, "since");
+        std::string title = since.empty() ? std::string{"mine_adrs"}
+                                          : "mine_adrs · since " + since;
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, title, ""));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        constexpr int kCap = 5;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.starts_with("# ")) {
+                rows.push_back(text("  " + line.substr(2),
+                    Style{}.with_fg(highlight).with_bold()));
+                ++row_count;
+            } else if (line.starts_with("\xe2\x9c\x93 ")) {
+                rows.push_back(text("  " + line,
+                    Style{}.with_fg(success).with_bold()));
+                ++row_count;
+            }
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // navigate(question) — ranked candidates.
+    if (n == "navigate" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto q = safe_arg(tc.args, "question");
+        std::string head = q.size() > 60 ? q.substr(0, 57) + "..." : q;
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, head, ""));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        constexpr int kCap = 6;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.starts_with("Navigation results")) continue;
+            if (line.starts_with("## ")) {
+                rows.push_back(text("  " + line.substr(3),
+                    Style{}.with_fg(accent).with_bold()));
+                ++row_count;
+            } else if (line.starts_with("  [")) {
+                // "  [score] body" — score in highlight, body in fg.
+                auto rb = line.find(']');
+                if (rb != std::string::npos) {
+                    rows.push_back(h(
+                        text("    " + line.substr(2, rb - 1),
+                             Style{}.with_fg(highlight).with_bold()),
+                        text(line.substr(rb + 1), fg_dim(fg))
+                    ).build());
+                } else {
+                    rows.push_back(text("  " + line, fg_dim(fg)));
+                }
+                ++row_count;
+            }
+        }
+        return v(std::move(rows)).build();
+    }
+
     // ── Failure: surface the error message inline so it isn't hidden
     if (tc.is_failed() && !tc.output().empty()) {
         // Failures use the danger color so the error stands out, but

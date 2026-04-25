@@ -39,10 +39,11 @@ std::string ToolError::render() const {
 
 std::string_view to_string(Effect e) noexcept {
     switch (e) {
-        case Effect::ReadFs:  return "ReadFs";
-        case Effect::WriteFs: return "WriteFs";
-        case Effect::Net:     return "Net";
-        case Effect::Exec:    return "Exec";
+        case Effect::ReadFs:   return "ReadFs";
+        case Effect::WriteFs:  return "WriteFs";
+        case Effect::Net:      return "Net";
+        case Effect::Exec:     return "Exec";
+        case Effect::SubAgent: return "SubAgent";
     }
     return "?";
 }
@@ -58,6 +59,7 @@ std::string to_string(EffectSet e) {
     add(Effect::Exec);
     add(Effect::WriteFs);
     add(Effect::Net);
+    add(Effect::SubAgent);
     add(Effect::ReadFs);
     return out;
 }
