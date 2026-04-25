@@ -14,6 +14,32 @@ For people who'd rather have a single binary they can read end-to-end than a 200
 
 ## Install
 
+### One-liner (Linux & macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/1ay1/moha/master/scripts/install.sh | sh
+```
+
+Detects your OS+arch, downloads the latest pre-built binary, verifies the SHA256, drops it in `~/.local/bin/moha`. Then run `moha`.
+
+Pin a version with `MOHA_VERSION=v0.1.0`, change the install dir with `MOHA_PREFIX=/usr/local/bin`.
+
+### Pre-built binaries (every release)
+
+Grab the right tarball / zip from the [Releases page](https://github.com/1ay1/moha/releases):
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `moha-linux-x86_64.tar.gz` |
+| Linux ARM64 | `moha-linux-arm64.tar.gz` |
+| macOS Intel | `moha-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | `moha-macos-arm64.tar.gz` |
+| Windows x86_64 | `moha-windows-x86_64.zip` |
+
+`SHA256SUMS` is published alongside. macOS and Windows binaries are unsigned right now — Gatekeeper / SmartScreen will warn on first launch (right-click → Open on macOS, "More info → Run anyway" on Windows).
+
+### Build from source
+
 ```bash
 git clone --recursive git@github.com:1ay1/moha.git
 cd moha
