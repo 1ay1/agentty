@@ -117,6 +117,10 @@ enum class Kind : std::uint8_t {
     Remember,
     Forget,
     Memos,
+    Recall,
+    FindUsages,
+    MineAdrs,
+    Navigate,
 };
 
 inline constexpr std::array kCatalog = {
@@ -154,6 +158,15 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"remember",        Kind::Remember,       {Effect::WriteFs},                    true,    detail::sec{5}},
     ToolSpec{"forget",          Kind::Forget,         {Effect::WriteFs},                    false,   detail::sec{5}},
     ToolSpec{"memos",           Kind::Memos,          {Effect::ReadFs},                     false,   detail::sec{5}},
+    // `recall` is read-only over the in-memory memo cache.
+    ToolSpec{"recall",          Kind::Recall,         {Effect::ReadFs},                     false,   detail::sec{5}},
+    // `find_usages` reads the in-memory symbol graph.
+    ToolSpec{"find_usages",     Kind::FindUsages,     {Effect::ReadFs},                     false,   detail::sec{5}},
+    // `mine_adrs` calls git + Haiku → Net effect (model API) and may
+    // write memos; long-running because it can scan up to 200 commits.
+    ToolSpec{"mine_adrs",       Kind::MineAdrs,       {Effect::Net, Effect::WriteFs},       false,   detail::sec{120}},
+    // Pure-cpp semantic finder over the in-memory index. Cheap.
+    ToolSpec{"navigate",        Kind::Navigate,       {Effect::ReadFs},                     false,   detail::sec{10}},
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
@@ -235,6 +248,8 @@ consteval bool kinds_bijective() {
         Kind::Outline, Kind::RepoMap, Kind::Signatures,
         Kind::Investigate,
         Kind::Remember, Kind::Forget, Kind::Memos,
+        Kind::Recall, Kind::FindUsages, Kind::MineAdrs,
+        Kind::Navigate,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto k : kAll) {
@@ -303,7 +318,8 @@ consteval bool readonly_invariants() {
     constexpr std::string_view kReadOnly[] = {
         "read","grep","glob","list_dir","find_definition",
         "git_status","git_diff","git_log",
-        "outline","repo_map","signatures","memos",
+        "outline","repo_map","signatures","memos","recall","find_usages",
+        "navigate",
     };
     for (auto n : kReadOnly) {
         auto* s = lookup(n);
@@ -317,18 +333,19 @@ consteval bool readonly_invariants() {
 static_assert(readonly_invariants(),
               "a tool listed as read-only carries a write/exec/net capability");
 
-// Network tools: the two web ones plus the sub-agent (which dials the
-// model API). Anything else carrying Net needs an explicit review.
+// Network tools: the two web ones, the sub-agent (dials the model API),
+// and the ADR miner (also dials Haiku). Anything else carrying Net
+// needs explicit review.
 consteval bool only_known_net_tools() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Net)) continue;
         if (s.name != "web_fetch" && s.name != "web_search"
-         && s.name != "investigate") return false;
+         && s.name != "investigate" && s.name != "mine_adrs") return false;
     }
     return true;
 }
 static_assert(only_known_net_tools(),
-              "Only web_fetch / web_search / investigate may carry Effect::Net");
+              "Only web_fetch / web_search / investigate / mine_adrs may carry Effect::Net");
 
 // ── Per-tool timeout proofs ─────────────────────────────────────────────
 // Pin the wall-clock-watchdog values so a careless edit (set 0 on the

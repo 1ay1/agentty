@@ -36,6 +36,20 @@ struct Memo {
     std::chrono::system_clock::time_point created_at{};        // wall-clock
     std::string git_head;                                      // SHA at creation
     std::vector<std::string> file_refs;                        // workspace-relative
+
+    // Provenance — used to compute the runtime confidence score the
+    // composer applies to decide between "show full body" vs "show
+    // topic only." Set by the writer (investigate fills `model`;
+    // remember tool can override).
+    std::string  model      = "";        // "haiku" | "sonnet" | "opus" (free-form)
+    std::string  source     = "auto";    // "auto" (investigate) | "manual" (remember) | "adr" | "long_term"
+    int          base_score = 50;        // 0-100, set at write time
+
+    // Runtime confidence: combines base_score, freshness against
+    // current file mtimes, and age decay. Computed on demand —
+    // cheaper than persisting and more accurate (mtimes drift).
+    [[nodiscard]] int effective_confidence(
+        const std::filesystem::path& workspace) const;
 };
 
 class MemoStore {

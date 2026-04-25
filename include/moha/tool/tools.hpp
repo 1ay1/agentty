@@ -36,5 +36,9 @@ namespace moha::tools {
 [[nodiscard]] ToolDef tool_remember();
 [[nodiscard]] ToolDef tool_forget();
 [[nodiscard]] ToolDef tool_memos();
+[[nodiscard]] ToolDef tool_recall();
+[[nodiscard]] ToolDef tool_find_usages();
+[[nodiscard]] ToolDef tool_mine_adrs();
+[[nodiscard]] ToolDef tool_navigate();
 
 } // namespace moha::tools

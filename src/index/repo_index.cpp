@@ -531,17 +531,15 @@ void RepoIndex::rebuild_importance_() {
     }
 
     // ── Pass 2: tokenise each file's content, count cross-file mentions ─
-    // O(total bytes) tokenisation × O(1) hash lookup per identifier.
-    // For a 5k-file repo at ~5 KB avg = 25 MB of bytes, this finishes
-    // in ~80 ms on a modern CPU and dominates the second-or-so refresh.
+    // ALSO builds the reference graph (symbol_to_users_, path_to_
+    // symbols_used_) — same tokenisation pass, no extra big-O cost.
+    // For a 5k-file repo at ~5 KB avg = 25 MB of bytes, finishes in
+    // ~100 ms on a modern CPU.
     symbol_score_.clear();
     symbol_score_.reserve(universe.size());
+    symbol_to_users_.clear();
+    path_to_symbols_used_.clear();
     for (const auto& [path, fi] : by_path_) {
-        // Re-read content. We could cache it from refresh() but the
-        // cost is one mmap-backed read per file and the saved working
-        // set is significant (typical repo content can be > 50 MB
-        // total, dwarfing the index itself). Trade RAM for one extra
-        // sequential file scan.
         auto content = tools::util::read_file(fi.path);
         if (content.empty()) continue;
 
@@ -549,24 +547,30 @@ void RepoIndex::rebuild_importance_() {
         // symbol mentioned 50× in one file only contributes 1 to its
         // inbound count — keeps a documentation-heavy file from
         // pumping up `Foo` just because the user wrote `Foo` 50 times
-        // in comments.
-        std::unordered_set<std::string_view> seen_here;
+        // in comments. Also feeds the reference graph (one user-edge
+        // per file, regardless of mention count).
+        std::unordered_set<std::string> seen_here;
         std::size_t i = 0, n = content.size();
         while (i < n) {
-            // Skip non-identifier-start bytes — including digits, which
-            // can never *start* an identifier. The is_ident_cont check
-            // below admits digits inside identifiers correctly.
             while (i < n && !is_ident_start(content[i])) ++i;
             std::size_t start = i;
             while (i < n && is_ident_cont(content[i])) ++i;
             if (i == start) continue;
             std::string_view tok{content.data() + start, i - start};
-            if (tok.size() < 3) continue;        // skip 1-2 char locals
-            if (universe.find(std::string{tok}) == universe.end()) continue;
-            if (auto def = defined_in.find(std::string{tok});
-                def != defined_in.end() && def->second == path) continue;  // self-mention
-            if (!seen_here.insert(tok).second) continue;                    // dup in this file
-            ++symbol_score_[std::string{tok}];
+            if (tok.size() < 3) continue;
+            std::string tok_s{tok};
+            if (universe.find(tok_s) == universe.end()) continue;
+            if (auto def = defined_in.find(tok_s);
+                def != defined_in.end() && def->second == path) continue;
+            if (!seen_here.insert(tok_s).second) continue;
+            ++symbol_score_[tok_s];
+            // Record the edge in BOTH directions for O(1) lookup
+            // either way. Vector pushed in walk order; small set sizes
+            // (most symbols are referenced by ≤ 20 files) make linear
+            // dedupe-on-insert unnecessary — we already deduped via
+            // seen_here above.
+            symbol_to_users_[tok_s].push_back(path);
+            path_to_symbols_used_[path].push_back(tok_s);
         }
     }
 
@@ -602,6 +606,262 @@ void RepoIndex::rebuild_importance_() {
 const std::unordered_map<std::string, int>&
 RepoIndex::symbol_scores() const noexcept {
     return symbol_score_;
+}
+
+std::vector<fs::path>
+RepoIndex::files_using(std::string_view symbol_name) const {
+    std::lock_guard lk(mu_);
+    auto it = symbol_to_users_.find(std::string{symbol_name});
+    if (it == symbol_to_users_.end()) return {};
+    std::vector<fs::path> out;
+    out.reserve(it->second.size());
+    for (const auto& s : it->second) out.emplace_back(s);
+    return out;
+}
+
+std::vector<std::string>
+RepoIndex::symbols_used_by(const fs::path& path) const {
+    std::lock_guard lk(mu_);
+    auto it = path_to_symbols_used_.find(path.string());
+    if (it == path_to_symbols_used_.end()) return {};
+    return it->second;
+}
+
+int RepoIndex::reference_count(std::string_view symbol_name) const {
+    std::lock_guard lk(mu_);
+    auto it = symbol_score_.find(std::string{symbol_name});
+    return it == symbol_score_.end() ? 0 : it->second;
+}
+
+// ── Module detection ─────────────────────────────────────────────
+// At big-codebase scale (10k+ files) the file is the wrong unit for
+// the system-prompt repo map — directories ARE. Group every indexed
+// file by its parent path truncated to `max_depth` components from
+// the workspace root. Sum scores per group. Keep only groups with
+// ≥ `min_files` to avoid noise from one-file directories.
+std::vector<Module>
+RepoIndex::detect_modules(int max_depth, int min_files) const {
+    std::lock_guard lk(mu_);
+    if (by_path_.empty() || root_.empty()) return {};
+
+    // Pick the truncated parent path for a file: rel-to-root parent
+    // truncated to at most `max_depth` components. Files at depth
+    // less than max_depth use their full parent path.
+    auto module_dir = [&](const fs::path& abs) -> fs::path {
+        std::error_code ec;
+        auto rel = fs::relative(abs, root_, ec);
+        if (ec) return {};
+        auto parent = rel.parent_path();
+        if (parent.empty()) return root_;     // root-level files
+        // Truncate to max_depth components.
+        fs::path truncated;
+        int d = 0;
+        for (const auto& comp : parent) {
+            if (d >= max_depth) break;
+            truncated /= comp;
+            ++d;
+        }
+        return root_ / truncated;
+    };
+
+    std::unordered_map<std::string, Module> by_dir;
+    for (const auto& [_, fi] : by_path_) {
+        auto md = module_dir(fi.path);
+        if (md.empty()) continue;
+        auto& m = by_dir[md.string()];
+        if (m.dir.empty()) {
+            m.dir  = md;
+            m.name = md.filename().string();
+            if (m.name.empty()) m.name = ".";
+        }
+        m.files.push_back(fi.path);
+        m.score += fi.score;
+        ++m.file_count;
+    }
+
+    // Top symbols per module: sort the module's files by individual
+    // score, take the top symbols from those files (skipping noise/
+    // private), cap at 6.
+    for (auto& [_, m] : by_dir) {
+        // Collect all symbols from this module's files, scored.
+        std::vector<std::pair<std::string, int>> sym_pool;
+        for (const auto& fp : m.files) {
+            auto it = by_path_.find(fp.string());
+            if (it == by_path_.end()) continue;
+            for (const auto& s : it->second.symbols) {
+                if (s.name.size() < 3) continue;
+                if (is_noise_symbol(s.name)) continue;
+                if (is_private_symbol(s.name)) continue;
+                if (s.kind == SymbolKind::Macro) continue;
+                int sc = 0;
+                if (auto sit = symbol_score_.find(s.name); sit != symbol_score_.end())
+                    sc = sit->second;
+                sym_pool.emplace_back(s.name, sc);
+            }
+        }
+        std::ranges::sort(sym_pool, [](const auto& a, const auto& b) {
+            return a.second > b.second;
+        });
+        std::unordered_set<std::string> seen;
+        for (const auto& [nm, _2] : sym_pool) {
+            if (seen.contains(nm)) continue;
+            seen.insert(nm);
+            m.top_symbols.push_back(nm);
+            if (m.top_symbols.size() >= 6) break;
+        }
+    }
+
+    // Filter + sort.
+    std::vector<Module> out;
+    out.reserve(by_dir.size());
+    for (auto& [_, m] : by_dir) {
+        if (m.file_count < min_files) continue;
+        out.push_back(std::move(m));
+    }
+    std::ranges::sort(out, [](const Module& a, const Module& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.dir < b.dir;
+    });
+    return out;
+}
+
+std::string
+RepoIndex::subtree_map(const fs::path& subtree, std::size_t max_bytes) const {
+    auto files = all_files();
+    if (files.empty()) return "";
+    fs::path root;
+    {
+        std::lock_guard lk(mu_);
+        root = root_;
+    }
+    fs::path filter = subtree.is_absolute() ? subtree : (root / subtree);
+    std::error_code ec;
+    fs::path canon = fs::weakly_canonical(filter, ec);
+    if (ec) canon = filter;
+
+    std::ostringstream out;
+    out << "# Subtree: " << fs::relative(canon, root, ec).generic_string()
+        << "\n";
+    std::size_t budget = max_bytes;
+
+    // Filter files under the subtree, sort by score desc.
+    std::vector<FileIndex> in_subtree;
+    in_subtree.reserve(files.size());
+    for (auto& fi : files) {
+        auto rel = fs::relative(fi.path, canon, ec);
+        if (ec || rel.empty()) continue;
+        if (rel.generic_string().starts_with("..")) continue;
+        in_subtree.push_back(std::move(fi));
+    }
+    if (in_subtree.empty()) {
+        out << "[no indexed files under this subtree]\n";
+        return out.str();
+    }
+    std::ranges::sort(in_subtree, [](const FileIndex& a, const FileIndex& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.path < b.path;
+    });
+
+    out << "## " << in_subtree.size()
+        << (in_subtree.size() == 1 ? " file" : " files") << " indexed\n\n";
+    int shown = 0;
+    for (const auto& fi : in_subtree) {
+        if (budget < 80) {
+            out << "[... " << (in_subtree.size() - shown)
+                << " more files truncated]\n";
+            break;
+        }
+        std::string row = "  ";
+        row += fs::relative(fi.path, root, ec).generic_string();
+        if (!fi.symbols.empty()) {
+            std::string syms;
+            std::size_t emitted = 0;
+            for (const auto& s : fi.symbols) {
+                if (s.kind == SymbolKind::Macro) continue;
+                if (is_noise_symbol(s.name)) continue;
+                if (is_private_symbol(s.name)) continue;
+                if (!syms.empty()) syms += ", ";
+                syms += s.name;
+                if (++emitted >= 6) { syms += ", …"; break; }
+            }
+            if (!syms.empty()) row += "  [" + syms + "]";
+        }
+        // Card if available.
+        if (auto card = memory::shared_cards().get(fi.path);
+            card && !card->summary.empty()) {
+            row += "\n        // " + card->summary;
+        }
+        row += "\n";
+        if (row.size() > budget) {
+            out << "[... truncated to fit budget]\n";
+            break;
+        }
+        out << row;
+        budget -= row.size();
+        ++shown;
+    }
+    return out.str();
+}
+
+std::string
+RepoIndex::hierarchical_map(std::size_t max_bytes) const {
+    auto modules = detect_modules();
+    if (modules.empty()) return compact_map(max_bytes);   // fallback
+
+    fs::path root;
+    {
+        std::lock_guard lk(mu_);
+        root = root_;
+    }
+
+    std::ostringstream out;
+    std::size_t budget = max_bytes;
+
+    out << "# Module overview — top areas of this codebase by importance.\n"
+        << "# Call `repo_map(path=\"<dir>\")` to drill into any module's\n"
+        << "# files; call `navigate(question)` for semantic search.\n\n";
+    if (out.tellp() < static_cast<std::streampos>(budget))
+        budget -= static_cast<std::size_t>(out.tellp());
+
+    // Top modules section — pad budget heavy here.
+    constexpr std::size_t kPerModuleBudget = 360;
+    constexpr std::size_t kMaxModulesShown = 16;
+    std::size_t shown = 0;
+    for (const auto& m : modules) {
+        if (shown >= kMaxModulesShown) break;
+        if (budget < 100) break;
+        std::error_code ec;
+        std::string rel = fs::relative(m.dir, root, ec).generic_string();
+        std::ostringstream blk;
+        blk << "[" << m.score << "] " << rel
+            << "/   (" << m.file_count
+            << (m.file_count == 1 ? " file" : " files");
+        if (!m.top_symbols.empty()) {
+            blk << "; top: ";
+            for (std::size_t i = 0; i < m.top_symbols.size(); ++i) {
+                if (i) blk << ", ";
+                blk << m.top_symbols[i];
+            }
+        }
+        blk << ")\n";
+        std::string row = blk.str();
+        if (row.size() > kPerModuleBudget)
+            row.resize(kPerModuleBudget - 1), row += "\n";
+        if (row.size() > budget) break;
+        out << row;
+        budget -= row.size();
+        ++shown;
+    }
+    if (shown < modules.size()) {
+        std::string footer = "[... +" + std::to_string(modules.size() - shown)
+                           + " smaller modules; call `repo_map(path=...)` "
+                           + "to drill in]\n";
+        if (footer.size() < budget) {
+            out << footer;
+            budget -= footer.size();
+        }
+    }
+    return out.str();
 }
 
 std::vector<Symbol> RepoIndex::outline(const fs::path& path) {

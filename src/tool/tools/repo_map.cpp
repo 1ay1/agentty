@@ -43,28 +43,46 @@ std::expected<RepoMapArgs, ToolError> parse_repo_map_args(const json& j) {
 }
 
 ExecResult run_repo_map(const RepoMapArgs& a) {
-    // Refresh against the workspace (or the requested subtree) — picks
-    // up file-system changes since the last call without forcing the
-    // user to restart moha. Cached entries with unchanged mtime aren't
-    // re-parsed, so the steady-state cost is one stat() per file.
-    fs::path root = a.root.empty() ? fs::current_path() : fs::path{a.root};
-    auto wp = util::make_workspace_path(root.string(), "repo_map");
-    if (!wp) return std::unexpected(std::move(wp.error()));
-    index::shared().refresh(wp->path());
+    // Refresh against the workspace — picks up file-system changes
+    // since the last call without forcing the user to restart moha.
+    // Cached entries with unchanged mtime aren't re-parsed, so the
+    // steady-state cost is one stat() per file.
+    fs::path root = fs::current_path();
+    auto wp_root = util::make_workspace_path(root.string(), "repo_map");
+    if (!wp_root) return std::unexpected(std::move(wp_root.error()));
+    index::shared().refresh(wp_root->path());
 
-    auto map = index::shared().compact_map(static_cast<std::size_t>(a.max_kb) * 1024);
+    // Two modes:
+    //   path arg empty → hierarchical module overview (good for big
+    //                    codebases, see the wood not the trees)
+    //   path arg set   → zoom into that subtree's files (drill-down)
+    std::string map;
+    std::string mode_hint;
+    if (a.root.empty()) {
+        map = index::shared().hierarchical_map(
+            static_cast<std::size_t>(a.max_kb) * 1024);
+        mode_hint = "module overview";
+    } else {
+        auto wp_sub = util::make_workspace_path(a.root, "repo_map");
+        if (!wp_sub) return std::unexpected(std::move(wp_sub.error()));
+        map = index::shared().subtree_map(wp_sub->path(),
+            static_cast<std::size_t>(a.max_kb) * 1024);
+        mode_hint = "subtree view: " + a.root;
+    }
     if (map.empty())
         return ToolOutput{
-            "Empty repo map — no recognised source files under " + wp->string()
+            "Empty repo map — no recognised source files under "
+            + wp_root->string()
             + ". Supported: C/C++, Python, JS/TS, Go, Rust.",
             std::nullopt};
 
     std::string body =
-        "# Repo map — " + wp->string() + "\n"
-        "# Each line: `<file>  [<symbol>, <symbol>, ...]`.\n"
-        "# Use `outline(path)` for one file's full outline; "
-        "`signatures(name)` to grep symbol names; `read(path, offset, limit)` "
-        "for actual content.\n\n" + std::move(map);
+        "# Repo map (" + mode_hint + ")\n"
+        "# Workspace: " + wp_root->string() + "\n"
+        "# Use `repo_map(path=\"<dir>\")` to drill into a module;\n"
+        "# `navigate(question)` for semantic search;\n"
+        "# `outline(path)` / `signatures(name)` / `read(path)` for detail.\n\n"
+        + std::move(map);
     if (!a.display_description.empty())
         body = a.display_description + "\n\n" + body;
     return ToolOutput{std::move(body), std::nullopt};

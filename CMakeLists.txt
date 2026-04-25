@@ -322,6 +322,8 @@ set(MOHA_TOOL_SOURCES
     src/tool/tools/investigate.cpp
     # Persistent workspace memory — explicit-curation tools.
     src/tool/tools/memos.cpp
+    # Semantic finder for big codebases.
+    src/tool/tools/navigate.cpp
 )
 
 # Repo-symbol index — read at session start, queried by outline /
@@ -337,6 +339,7 @@ set(MOHA_INDEX_SOURCES
 set(MOHA_MEMORY_SOURCES
     src/memory/memo_store.cpp
     src/memory/file_card_store.cpp
+    src/memory/hot_files.cpp
 )
 
 # Everything except the entry point — so tests can link the same runtime

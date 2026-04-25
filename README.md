@@ -29,11 +29,65 @@ Build needs GCC 14+ or Clang 18+ (`std::expected`, `std::format`, designated ini
 - **Threads on disk** under `~/.moha/`. Browse / fork / delete from `^J`.
 - **Markdown** with syntax-highlighted code blocks in the assistant pane.
 - **Tools**: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`, `diagnostics`, and the `git_*` family. Each tool gets a purpose-built widget — diffs render as diffs, search results group by file with line numbers, bash shows exit codes, todo lists become checklists.
+- **Codebase intelligence tools**: `outline`, `repo_map`, `signatures`, `find_usages`, `navigate` — backed by an in-process symbol index with PageRank-flavoured centrality and a bidirectional cross-file reference graph. `navigate("where do we handle webhook delivery?")` returns ranked candidate files / symbols / modules in milliseconds, no grep, no sub-agent. Scales cleanly to 100k-file repos.
+- **Sub-agent**: `investigate(query)` spawns an isolated 8-way parallel sub-agent over the read-only toolkit, streams its progress live, and returns one compact synthesis to the parent. The parent's context grows by ~500 tokens for "explain how X works" instead of 30k.
 - **Permission profiles** — `Write` (autonomous), `Ask` (prompt before any Exec/WriteFs/Net call), `Minimal` (prompt for everything except Pure). Cycle with `S-Tab`. The trust matrix is a `constexpr` function with `static_assert`s proving every (Effect × Profile) cell — refactoring the policy fails the build, not a test that nobody ran.
 - **Workspace boundary** — every filesystem tool refuses paths outside the directory you launched from. `--workspace <dir>` widens it; `--workspace /` disables the gate for users who explicitly want unrestricted access.
 - **Bash sandbox** — `bash` and `diagnostics` calls run inside an OS-native sandbox: `bwrap` (bubblewrap) on Linux, `sandbox-exec` on macOS. Workspace + system libs + network are reachable; `/etc`, `/home/<other-projects>`, `~/.ssh`, `/opt`, `/usr` are read-only. So even an approved bash call can't `rm -rf ~` or `cat ~/.ssh/id_rsa`. Auto-detected at startup; `--sandbox on` requires it (fail loud if missing), `--sandbox off` opts out (e.g. you're already in Docker).
 - **Auth, in-app**. First launch opens a modal with two paths: paste an API key (`sk-ant-…`), or run OAuth against your Claude Pro/Max subscription. Credentials live in `~/.config/moha/` with `0600` perms (POSIX) / restrictive ACLs (Windows). Env-var overrides (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`) and `-k` flag still work.
 - **Inline render mode** — moha lives at the bottom of your terminal, preserves scrollback, doesn't take over the screen.
+
+## Persistent codebase memory
+
+The defining feature. moha doesn't just *use* the model — it **accumulates a persistent, multi-layered understanding of your codebase** that travels with the workspace and gets cheaper to use the more you use it. Anthropic's prompt cache pays once per turn; everything cached beyond that turn is essentially free.
+
+Five layers, each independent, each automatically maintained:
+
+| Layer | What it knows | Where it lives | Refreshed by |
+|---|---|---|---|
+| **Symbol index** | Every function/class/struct/enum across C/C++ · Python · JS/TS · Go · Rust, with PageRank-style centrality | in-memory, lazy-built | mtime change |
+| **Reference graph** | Bidirectional file ↔ symbol edges → "who uses Foo?" in microseconds | in-memory, same scan | mtime change |
+| **File knowledge cards** | One-paragraph LLM-distilled "what does this file do?" per file, generated async by a Haiku worker | `.moha/cards/*.json` on disk | mtime change |
+| **Memos** | Q-A pairs from past `investigate` runs + manual `remember` calls, with provenance + freshness scoring | `.moha/memos.json` on disk | git HEAD or file mtime |
+| **ADRs** | Architectural decisions auto-mined from `git log` — every "switched from X to Y because…" commit becomes a memo | `.moha/memos.json` (`source: "adr"`) | new commits |
+
+All five travel inside the **cached system prefix** of every request. Each turn pays the new-tokens cost (small) and reads the rest from the prompt cache (free). After a week of working on a codebase the system prompt is a *living document* the model never has to rebuild.
+
+### Memory tools the agent can use
+
+```
+investigate(query)         spawn isolated sub-agent, save synthesis as a memo
+remember(topic, content)   bank a fact you want to keep across sessions
+forget(target)             drop a memo by id or topic substring
+memos(filter?)             list every stored memo with confidence + freshness
+recall(topic)              fetch the FULL text of a memo (bypasses prompt budget)
+mine_adrs(since?)          walk git log, distill decisions into ADR memos
+```
+
+### Confidence + freshness scoring
+
+Every memo carries provenance — model that wrote it (`opus`/`sonnet`/`haiku`), source (`auto`/`manual`/`adr`), base score. At render time we compute an effective confidence:
+
+- **× model multiplier** (Opus 1.0 / Sonnet 0.85 / Haiku 0.7)
+- **× 0.5** if any `file_refs` mtime moved past `created_at` (stale)
+- **linear decay over 30 days** (floored at 30%)
+
+The system prompt then renders memos by tier: `≥70%` full body, `40–69%` first paragraph + verify hint, `<40%` topic only with a `recall` hint. Stale knowledge gets out of the way; fresh knowledge gets the full real estate.
+
+### Built for huge codebases
+
+At 100k-file scale the file is the wrong unit — directories ARE. moha auto-detects modules and the system-prompt repo map shows a hierarchical overview:
+
+```
+[12847] src/runtime/         (28 files; top: Model, update, Cmd, view, subscribe)
+[ 9233] include/moha/tool/   (14 files; top: ToolDef, ToolError, EffectSet)
+[ 8104] src/io/              (6 files; top: Client, Request, HttpError, send)
+[ 6920] include/moha/memory/ (5 files; top: MemoStore, FileCardStore, HotFiles)
+```
+
+`repo_map(path="src/runtime")` zooms into a subtree; `navigate(question)` does ranked semantic search over the symbol graph + memos + cards in pure C++ in milliseconds; `find_usages(symbol)` answers "what's the blast radius if I change this?" without `grep`.
+
+Plus a `<recent-activity>` block in the system prompt that lists files touched in the last 60 min / 24 hr / 7 days (via `git log` + filesystem mtime), so the agent automatically focuses on what *you're* working on this week.
 
 ## Keys
 

@@ -38,6 +38,7 @@
 #include "moha/auth/auth.hpp"
 #include "moha/io/persistence.hpp"
 #include "moha/memory/file_card_store.hpp"
+#include "moha/memory/hot_files.hpp"
 #include "moha/memory/memo_store.hpp"
 #include "moha/provider/anthropic/provider.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
@@ -188,6 +189,9 @@ int main(int argc, char** argv) {
     // to distill new files. We bind the auth right after the
     // provider is wired below.
     moha::memory::shared_cards().set_workspace(tools::util::workspace_root());
+    // Hot-files index — recent-activity tracking via git log + mtime
+    // for the `<recent-activity>` block in the system prompt.
+    moha::memory::shared_hot_files().set_workspace(tools::util::workspace_root());
 
     // ── Bash / diagnostics sandbox ──────────────────────────────────────
     // Wraps shell commands in bwrap (Linux) or sandbox-exec (macOS) so an

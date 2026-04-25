@@ -20,6 +20,7 @@
 
 #include "moha/index/repo_index.hpp"
 #include "moha/io/http.hpp"
+#include "moha/memory/hot_files.hpp"
 #include "moha/memory/memo_store.hpp"
 #include "moha/tool/registry.hpp"
 
@@ -833,14 +834,20 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
             auto cwd = std::filesystem::current_path(ec);
             if (!ec) index::shared().refresh(cwd);
         }
-        if (auto map = index::shared().compact_map(/*max_bytes=*/4096); !map.empty()) {
+        // Hierarchical module overview — top areas of this codebase
+        // ranked by importance, not a flat file list. Crucial at
+        // huge-codebase scale (10k+ files) because the file is the
+        // wrong unit; a directory cluster IS the natural unit and
+        // fits in the same byte budget at much higher signal density.
+        if (auto map = index::shared().hierarchical_map(/*max_bytes=*/4096);
+            !map.empty()) {
             sys_text += "\n\n<repo-map>\n"
-                        "# Auto-generated table of contents for the workspace.\n"
-                        "# Lists every code file (C/C++, Py, JS/TS, Go, Rust) and the\n"
-                        "# top-level symbols it declares. Snapshot at session start —\n"
-                        "# call `repo_map` (refreshes), `outline(path)` (one file's\n"
-                        "# detail), or `signatures(name)` (cross-file symbol grep)\n"
-                        "# instead of running `read`/`grep` blind.\n";
+                        "# Module overview of the workspace. Auto-generated.\n"
+                        "# Each row is a top-level module: [score] dir/  (N files; top symbols).\n"
+                        "# Drill in: `repo_map(path=\"<dir>\")`.\n"
+                        "# Semantic search: `navigate(question)`.\n"
+                        "# Per-symbol: `find_usages(name)` / `signatures(pat)`.\n"
+                        "# Per-file: `outline(path)` / `read(path, offset, limit)`.\n";
             sys_text += map;
             sys_text += "</repo-map>";
         }
@@ -853,6 +860,18 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         // free on every turn afterwards. The instructions inside the
         // block tell the model to ANSWER FROM MEMORY when a memo
         // covers the question, instead of re-running investigate.
+        // Recent activity awareness — files the user has been
+        // touching in the last hour / 24 hr / 7 days. Cached for 60 s
+        // so we don't fork git on every turn. Lives in the cached
+        // system prefix; updates are infrequent enough that the
+        // cache invalidation cost amortises.
+        if (auto hot = memory::shared_hot_files().compose_block(/*max_bytes=*/2048);
+            !hot.empty()) {
+            sys_text += "\n\n<recent-activity>\n";
+            sys_text += hot;
+            sys_text += "</recent-activity>";
+        }
+
         if (auto memos = memory::shared().compose_prompt_block(/*max_bytes=*/8192);
             !memos.empty()) {
             sys_text +=

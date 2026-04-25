@@ -57,6 +57,20 @@ struct Symbol {
                                    // function bodies — avoid bloat)
 };
 
+// A logical "module" — a directory grouping that the agent can think
+// about as a unit instead of as a list of files. Auto-detected by
+// `detect_modules()` from the existing file index. At huge scale
+// (100k+ files) modules become the natural granularity for the
+// system-prompt repo map.
+struct Module {
+    std::filesystem::path                  dir;        // workspace-relative
+    std::string                            name;       // basename of dir
+    std::vector<std::filesystem::path>     files;      // direct + nested
+    int                                    score = 0;  // sum of file scores
+    int                                    file_count = 0;
+    std::vector<std::string>               top_symbols; // 3-6 highest-centrality
+};
+
 struct FileIndex {
     std::filesystem::path                 path;       // workspace-relative
     std::filesystem::file_time_type       mtime{};
@@ -115,11 +129,67 @@ public:
     [[nodiscard]] const std::unordered_map<std::string, int>&
     symbol_scores() const noexcept;
 
+    // ── Reference graph ─────────────────────────────────────────
+    // Bidirectional cross-file usage map populated by the same
+    // tokenisation pass that builds importance scores. Lets
+    // `find_usages(symbol)` answer in zero tool calls.
+
+    // Files that mention `symbol_name` (excluding the file that
+    // *defines* it). Returns empty vector when the symbol isn't in
+    // the universe or has no cross-file references.
+    [[nodiscard]] std::vector<std::filesystem::path>
+    files_using(std::string_view symbol_name) const;
+
+    // Symbols that `path` references (defined elsewhere in the
+    // workspace). Useful for "what does this file depend on?"
+    // queries.
+    [[nodiscard]] std::vector<std::string>
+    symbols_used_by(const std::filesystem::path& path) const;
+
+    // Number of distinct cross-file references for a given symbol.
+    // O(1) lookup. Returns 0 when symbol isn't in the index.
+    [[nodiscard]] int reference_count(std::string_view symbol_name) const;
+
+    // Group files into modules by directory (cap depth so a deeply
+    // nested workspace doesn't produce one-file-per-module noise).
+    // Returns modules sorted by score (sum of contained file scores)
+    // descending. Filters to modules with ≥ `min_files` direct
+    // children — singleton "modules" aren't useful.
+    //
+    // Cap-by-depth lets the agent think at the right abstraction:
+    //   - `src/runtime/view/`         (depth 3) → one module
+    //   - `src/runtime/view/widget/`  (depth 4) → its own module
+    //   - …deeper than that gets folded into its ancestor.
+    [[nodiscard]] std::vector<Module>
+    detect_modules(int max_depth = 4, int min_files = 2) const;
+
+    // The whole-repo "compact map" but ZOOMED to a subdirectory.
+    // Used by `repo_map(path=...)` to drill from the module overview
+    // into a focused per-subtree view.
+    [[nodiscard]] std::string
+    subtree_map(const std::filesystem::path& subtree,
+                std::size_t max_bytes = 4096) const;
+
+    // Hierarchical map: module overview block first, then a tree of
+    // remaining files. Used as the default repo_map output for huge
+    // codebases — fits in the same byte budget as compact_map but
+    // the per-byte information density is way higher because the
+    // unit is "module" not "file".
+    [[nodiscard]] std::string
+    hierarchical_map(std::size_t max_bytes = 4096) const;
+
 private:
     mutable std::mutex                                            mu_;
     std::filesystem::path                                          root_;
     std::unordered_map<std::string, FileIndex>                     by_path_;  // key = path.string()
     std::unordered_map<std::string, int>                           symbol_score_;  // name → cross-file mentions
+    // Reference graph (Tier-1 intelligence multiplier):
+    //   symbol_to_users_[name] = set of file paths that mention it
+    //   path_to_symbols_used_[path] = set of symbol names referenced
+    // Both populated in rebuild_importance_'s tokenisation pass —
+    // adds zero asymptotic cost (we already walk every byte).
+    std::unordered_map<std::string, std::vector<std::string>>      symbol_to_users_;
+    std::unordered_map<std::string, std::vector<std::string>>      path_to_symbols_used_;
     std::chrono::steady_clock::time_point                          last_refresh_{};
 
     // Compute every symbol's cross-file mention count and per-file

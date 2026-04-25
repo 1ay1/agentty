@@ -1621,28 +1621,54 @@ Element investigate_body(const ToolUse& tc, float elapsed) {
                 icon_st = Style{}.with_fg(danger).with_bold();
             }
 
-            // Hard cap on the combined arg + " · " + res text so a
-            // long path + verbose result hint can't blow the row
-            // width and force yoga to wrap mid-word. The producer
-            // (investigate.cpp:tool_arg_summary / _result_summary)
-            // already truncates each piece to ~50 chars, but this
-            // belt-and-suspenders cap protects against future tools
-            // emitting long summaries we forgot about.
+            // Per-row width discipline. The row carries (in order):
+            //   icon · name · arg · [res|err] · ms
+            // Two failure modes broke the layout before:
+            //   (a) success rows with a verbose `res` blew past
+            //       terminal width when paired with a longish path.
+            //   (b) failed rows shoved arg+res+err onto one row;
+            //       the err alone is often >50 chars (model error
+            //       messages reference absolute paths). Width cap
+            //       only saw arg+res so err overflowed.
+            //
+            // Fix:
+            //   * Failed rows suppress `res` entirely (it's
+            //     meaningless when the call errored — and worse,
+            //     the parser sometimes mis-attributes a sibling's
+            //     `res` to a same-named failure, putting "L1-100 of
+            //     403" on a "file not found" row).
+            //   * Combined cap counts (arg + secondary) where
+            //     secondary = err on failure, res on success.
+            //   * Failure secondary uses tighter cap (40 chars) so
+            //     the error stays scannable.
             std::string arg_disp = tr.arg_summary;
-            std::string res_disp = tr.res_summary;
+            std::string sec_disp;          // either res or err
+            bool        sec_is_err = false;
+            if (!tr.ok && !tr.running) {
+                sec_disp   = tr.err;
+                sec_is_err = true;
+            } else if (tr.ok) {
+                sec_disp = tr.res_summary;
+            }
+            // Per-piece tighter cap for the secondary field.
+            const std::size_t kSecCap = sec_is_err ? 40u : 50u;
+            if (sec_disp.size() > kSecCap) {
+                sec_disp.resize(kSecCap - 1);
+                sec_disp += "\xe2\x80\xa6";
+            }
+            // Combined ceiling: arg + " · " + sec ≤ 90 chars.
             constexpr std::size_t kCombinedCap = 90;
-            std::size_t want = arg_disp.size() + res_disp.size()
-                             + (res_disp.empty() ? 0 : 4);   // "  · "
+            std::size_t want = arg_disp.size() + sec_disp.size()
+                             + (sec_disp.empty() ? 0 : 4);
             if (want > kCombinedCap) {
-                // Drop res first (it's secondary); then truncate arg.
                 std::size_t over = want - kCombinedCap;
-                if (!res_disp.empty()) {
-                    if (over >= res_disp.size() + 4) {
-                        over -= res_disp.size() + 4;
-                        res_disp.clear();
+                if (!sec_disp.empty()) {
+                    if (over >= sec_disp.size() + 4) {
+                        over -= sec_disp.size() + 4;
+                        sec_disp.clear();
                     } else {
-                        res_disp.resize(res_disp.size() - over - 1);
-                        res_disp += "\xe2\x80\xa6";          // …
+                        sec_disp.resize(sec_disp.size() - over - 1);
+                        sec_disp += "\xe2\x80\xa6";
                         over = 0;
                     }
                 }
@@ -1664,18 +1690,14 @@ Element investigate_body(const ToolUse& tc, float elapsed) {
                 tcells.push_back(text("  " + arg_disp,
                                       Style{}.with_fg(fg)));
             }
-            // Result summary — what came back (match count, line count,
-            // branch name, etc.). Dim cyan so it's distinguishable from
-            // the arg without competing with it.
-            if (!res_disp.empty()) {
-                tcells.push_back(text("  \xc2\xb7  " + res_disp,
-                                      Style{}.with_fg(highlight).with_dim()));
-            }
-            if (!tr.ok && !tr.running && !tr.err.empty()) {
-                std::string e = tr.err;
-                if (e.size() > 40) { e.resize(37); e += "..."; }
-                tcells.push_back(text("  " + e,
-                    Style{}.with_fg(danger).with_dim()));
+            // Secondary cell: result summary on success (dim cyan),
+            // error message on failure (dim danger). Same column,
+            // styled by which it is.
+            if (!sec_disp.empty()) {
+                Style sec_st = sec_is_err
+                    ? Style{}.with_fg(danger).with_dim()
+                    : Style{}.with_fg(highlight).with_dim();
+                tcells.push_back(text("  \xc2\xb7  " + sec_disp, sec_st));
             }
             tcells.push_back(spacer());
             if (!tr.running)

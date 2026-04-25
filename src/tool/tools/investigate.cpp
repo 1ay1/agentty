@@ -721,6 +721,12 @@ ExecResult run_investigate(const InvestigateArgs& a) {
         memo.query     = a.query;
         memo.synthesis = final_text;
         memo.created_at = std::chrono::system_clock::now();
+        // Provenance — drives the confidence scoring in compose.
+        memo.model      = model_id;
+        memo.source     = "auto";
+        // Base score scaled by model + turn count: more turns =
+        // more thorough investigation = higher base confidence.
+        memo.base_score = std::min(85, 50 + total_tools * 2 + turns_used);
 
         // Extract file_refs from BOTH the sub-agent's tool args AND
         // the tool OUTPUTS — this is the richer signal. A grep

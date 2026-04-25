@@ -119,6 +119,10 @@ std::vector<ToolDef> build_registry() {
     r.push_back(tool_remember());
     r.push_back(tool_forget());
     r.push_back(tool_memos());
+    r.push_back(tool_recall());
+    r.push_back(tool_find_usages());
+    r.push_back(tool_mine_adrs());
+    r.push_back(tool_navigate());
     return r;
 }
 

@@ -169,6 +169,58 @@ std::string current_git_head(const fs::path& workspace) {
     return cached_head;
 }
 
+// ── Memo::effective_confidence ────────────────────────────────────
+int Memo::effective_confidence(const fs::path& workspace) const {
+    // 1. Base from explicit base_score (set by writer; defaults to 50).
+    double conf = static_cast<double>(base_score);
+
+    // 2. Multiplier by model that authored the memo. The bigger the
+    // model, the more we trust the synthesis. Free-form model id so
+    // future renames (claude-opus-4-8) don't break us — substring match.
+    auto find = [&](std::string_view needle) {
+        return model.find(needle) != std::string::npos;
+    };
+    if      (find("opus"))   conf *= 1.0;
+    else if (find("sonnet")) conf *= 0.85;
+    else if (find("haiku"))  conf *= 0.70;
+    else if (!model.empty()) conf *= 0.80;
+    // explicit `remember` (manual) gets full trust — the user/agent
+    // chose to bank this fact deliberately.
+    if (source == "manual") conf = std::max(conf, 80.0);
+    if (source == "adr")    conf = std::max(conf, 75.0);
+
+    // 3. Freshness — how stale are the file_refs? Any modified
+    // since memo creation halves the score.
+    if (!workspace.empty() && !file_refs.empty()) {
+        std::error_code ec;
+        auto memo_secs = std::chrono::duration_cast<std::chrono::seconds>(
+            created_at.time_since_epoch()).count();
+        for (const auto& rel : file_refs) {
+            auto p = workspace / rel;
+            auto mt = fs::last_write_time(p, ec);
+            if (ec) { ec.clear(); continue; }
+            auto file_secs = std::chrono::duration_cast<std::chrono::seconds>(
+                mt.time_since_epoch()).count();
+            if (file_secs > memo_secs) {
+                conf *= 0.5;
+                break;
+            }
+        }
+    }
+
+    // 4. Age decay — linear over 30 days, floored at 30%.
+    auto age = std::chrono::system_clock::now() - created_at;
+    auto days = std::chrono::duration_cast<std::chrono::hours>(age).count() / 24;
+    if (days > 30) days = 30;
+    if (days > 0)
+        conf *= 1.0 - 0.7 * (static_cast<double>(days) / 30.0);
+
+    int out = static_cast<int>(conf);
+    if (out < 0)   out = 0;
+    if (out > 100) out = 100;
+    return out;
+}
+
 // ── MemoStore ─────────────────────────────────────────────────────
 
 void MemoStore::set_workspace(const fs::path& workspace) {
@@ -206,6 +258,9 @@ void MemoStore::load_locked_() {
         m.synthesis = mj.value("synthesis", "");
         m.git_head  = mj.value("git_head", "");
         m.created_at = parse_iso_8601(mj.value("created_at", ""));
+        m.model     = mj.value("model", "");
+        m.source    = mj.value("source", "auto");
+        m.base_score = mj.value("base_score", 50);
         if (auto rf = mj.find("file_refs"); rf != mj.end() && rf->is_array()) {
             for (const auto& s : *rf) {
                 if (s.is_string()) m.file_refs.push_back(s.get<std::string>());
@@ -228,7 +283,7 @@ void MemoStore::persist_locked_() const {
         return;
     }
     json j;
-    j["version"]   = 1;
+    j["version"]   = 2;     // bumped: provenance fields added
     j["workspace"] = workspace_.generic_string();
     j["memos"]     = json::array();
     for (const auto& m : memos_) {
@@ -239,6 +294,9 @@ void MemoStore::persist_locked_() const {
         mj["created_at"] = iso_8601(m.created_at);
         mj["git_head"]   = m.git_head;
         mj["file_refs"]  = m.file_refs;
+        mj["model"]      = m.model;
+        mj["source"]     = m.source;
+        mj["base_score"] = m.base_score;
         j["memos"].push_back(std::move(mj));
     }
     // Atomic rename via tmp file so a partial write doesn't corrupt
@@ -311,7 +369,12 @@ void MemoStore::add(Memo m) {
         memos_.push_back(std::move(m));
     }
 
-    // Cap: drop oldest if over.
+    // Cap: drop oldest if over. (Auto-distillation lives in
+    // MemoStore but the LLM call itself can't run from inside this
+    // lock — investigate.cpp's worker would deadlock waiting to
+    // re-enter the store. Distillation is therefore a maintenance
+    // job triggered separately, e.g. by a future `compact_memory`
+    // tool. For now FIFO eviction at the hard cap is the back-stop.)
     while (memos_.size() > kMaxMemos)
         memos_.erase(memos_.begin());
 
@@ -339,29 +402,52 @@ std::string MemoStore::compose_prompt_block(std::size_t max_bytes) const {
     if (out.tellp() >= 0 && static_cast<std::size_t>(out.tellp()) >= budget)
         return {};
 
+    // Compute effective confidence per memo and decide rendering
+    // strategy: high-confidence (≥70) → full body; medium (40-69) →
+    // first paragraph + "[verify before acting]"; low (<40) → just
+    // topic + "[stale, may be wrong — re-investigate]".
     for (const auto& m : by_recency) {
-        // Cap each memo's contribution. Older ones get distilled
-        // (truncated to the first ~600 chars + "..."). Newest one
-        // gets a generous slice.
+        int conf = m.effective_confidence(workspace_);
         std::ostringstream block;
-        block << "## " << m.query << "\n";
-        std::string body = m.synthesis;
-        // Truncate per-memo to keep one verbose memo from eating the
-        // whole budget. Snap to a line boundary for readability.
+        // Header includes confidence + provenance so the model can
+        // weigh how much to trust this memo.
+        block << "## " << m.query;
+        if (conf < 70) {
+            block << "  [conf " << conf << "%";
+            if (conf < 40) block << " — verify";
+            block << "]";
+        }
+        block << "\n";
+        std::string body;
+        if (conf >= 70) {
+            body = m.synthesis;
+        } else if (conf >= 40) {
+            // First paragraph only.
+            body = m.synthesis;
+            if (auto bb = body.find("\n\n"); bb != std::string::npos)
+                body.resize(bb);
+            body += "\n[…confidence " + std::to_string(conf)
+                  + "%, verify before acting]";
+        } else {
+            // Stale — just the topic, no body. Saves budget.
+            body = "[stale memo — call `recall(\""
+                 + m.query.substr(0, 40)
+                 + "\")` for full text or re-investigate]";
+        }
+        // Hard per-memo cap so one verbose memo can't eat the budget.
         constexpr std::size_t kPerMemoCap = 1500;
         if (body.size() > kPerMemoCap) {
             auto cut = body.rfind('\n', kPerMemoCap);
             if (cut == std::string::npos) cut = kPerMemoCap;
             body = body.substr(0, cut) + "\n[…distilled, "
                  + std::to_string(m.synthesis.size() - cut)
-                 + " chars elided]";
+                 + " chars elided; call `recall` for the rest]";
         }
         block << body << "\n\n";
         std::string s = block.str();
         if (s.size() > budget) {
-            // Don't half-emit a memo. Stop here, leave a hint.
             out << "<!-- " << by_recency.size() - 1
-                << " older memo(s) elided to fit budget -->\n";
+                << " older memo(s) elided to fit budget; call `memos()` to list -->\n";
             break;
         }
         out << s;
