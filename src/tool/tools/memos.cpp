@@ -49,33 +49,72 @@ using json = nlohmann::json;
 namespace {
 
 // ── remember ───────────────────────────────────────────────────────
-struct RememberArgs {
+// Accepts either:
+//   {topic, content, files?}                          — single memo
+//   {memos: [{topic, content, files?}, ...]}          — batch
+//
+// Batch mode collapses N intended remembers into one tool dispatch:
+// one queue slot, one disk write, one render row instead of N. Cuts
+// turn latency dramatically when the model wants to bank multiple
+// facts at once (the common case after an investigate run).
+struct RememberItem {
     std::string topic;
     std::string content;
     std::vector<std::string> files;
+};
+struct RememberArgs {
+    std::vector<RememberItem> items;       // always >= 1 after parse
     std::string display_description;
 };
 
-[[nodiscard]] std::expected<RememberArgs, ToolError>
-parse_remember_args(const json& j) {
+[[nodiscard]] std::expected<RememberItem, ToolError>
+parse_remember_item(const json& j, std::string_view ctx) {
+    if (!j.is_object())
+        return std::unexpected(ToolError::invalid_args(
+            std::string{ctx} + ": expected object with {topic, content}"));
     util::ArgReader ar(j);
     auto t = ar.require_str("topic");
     if (!t) return std::unexpected(ToolError::invalid_args(
-        "topic required: a one-line description of what this memo is about"));
+        std::string{ctx} + ".topic required"));
     auto c = ar.require_str("content");
     if (!c) return std::unexpected(ToolError::invalid_args(
-        "content required: the body of the fact to remember"));
+        std::string{ctx} + ".content required"));
     std::vector<std::string> files;
     if (const json* fs = ar.raw("files"); fs && fs->is_array()) {
         for (const auto& v : *fs) {
             if (v.is_string()) files.push_back(v.get<std::string>());
         }
     }
-    return RememberArgs{
-        *std::move(t), *std::move(c),
-        std::move(files),
-        ar.str("display_description", ""),
-    };
+    return RememberItem{*std::move(t), *std::move(c), std::move(files)};
+}
+
+[[nodiscard]] std::expected<RememberArgs, ToolError>
+parse_remember_args(const json& j) {
+    util::ArgReader ar(j);
+    RememberArgs out;
+    out.display_description = ar.str("display_description", "");
+
+    // Batch shape: {memos: [...]} takes precedence when present.
+    if (const json* arr = ar.raw("memos"); arr && arr->is_array()) {
+        if (arr->empty())
+            return std::unexpected(ToolError::invalid_args(
+                "memos: array is empty — pass at least one {topic, content}"));
+        out.items.reserve(arr->size());
+        std::size_t i = 0;
+        for (const auto& m : *arr) {
+            std::string ctx = "memos[" + std::to_string(i++) + "]";
+            auto item = parse_remember_item(m, ctx);
+            if (!item) return std::unexpected(std::move(item).error());
+            out.items.push_back(*std::move(item));
+        }
+        return out;
+    }
+
+    // Single shape: top-level {topic, content, files?}.
+    auto item = parse_remember_item(j, "(args)");
+    if (!item) return std::unexpected(std::move(item).error());
+    out.items.push_back(*std::move(item));
+    return out;
 }
 
 ExecResult run_remember(const RememberArgs& a) {
@@ -83,25 +122,43 @@ ExecResult run_remember(const RememberArgs& a) {
     if (!store.ready())
         return std::unexpected(ToolError::io(
             "memo store not bound to a workspace"));
-    memory::Memo m;
-    m.query     = a.topic;
-    m.synthesis = a.content;
-    m.created_at = std::chrono::system_clock::now();
-    m.file_refs  = a.files;
-    m.source     = "manual";
-    m.base_score = 80;     // explicit save = high trust
-    store.add(std::move(m));
-    std::ostringstream out;
-    out << "\xe2\x9c\x93 remembered: \"" << a.topic << "\"\n"
-        << "  " << a.content.size() << " chars";
-    if (!a.files.empty()) {
-        out << "  ·  " << a.files.size() << " file ref"
-            << (a.files.size() == 1 ? "" : "s");
+
+    // Build all Memos up front so the store sees a single batch.
+    std::vector<memory::Memo> memos;
+    memos.reserve(a.items.size());
+    for (const auto& it : a.items) {
+        memory::Memo m;
+        m.query      = it.topic;
+        m.synthesis  = it.content;
+        m.created_at = std::chrono::system_clock::now();
+        m.file_refs  = it.files;
+        m.source     = "manual";
+        m.base_score = 80;     // explicit save = high trust
+        memos.push_back(std::move(m));
     }
-    out << "  ·  " << store.size() << " memo"
-        << (store.size() == 1 ? "" : "s") << " total\n";
-    out << "This memo will be in the system prompt for every future turn "
-           "in this workspace until forgotten.";
+    store.add_batch(std::move(memos));
+
+    std::ostringstream out;
+    if (a.items.size() == 1) {
+        const auto& it = a.items.front();
+        out << "\xe2\x9c\x93 remembered: \"" << it.topic << "\"\n"
+            << "  " << it.content.size() << " chars";
+        if (!it.files.empty()) {
+            out << "  ·  " << it.files.size() << " file ref"
+                << (it.files.size() == 1 ? "" : "s");
+        }
+        out << "  ·  " << store.size() << " memo"
+            << (store.size() == 1 ? "" : "s") << " total\n";
+    } else {
+        out << "\xe2\x9c\x93 remembered " << a.items.size()
+            << " memos in one batch\n";
+        for (const auto& it : a.items)
+            out << "  \xe2\x80\xa2 " << it.topic << "\n";
+        out << "  ·  " << store.size() << " memo"
+            << (store.size() == 1 ? "" : "s") << " total\n";
+    }
+    out << "These memos will be in the system prompt for every future "
+           "turn in this workspace until forgotten.";
     std::string body = out.str();
     if (!a.display_description.empty())
         body = a.display_description + "\n\n" + body;
@@ -113,7 +170,7 @@ ToolDef tool_remember_impl() {
     constexpr const auto& kSpec = spec::require<"remember">();
     t.name = ToolName{std::string{kSpec.name}};
     t.description =
-        "Save a fact about this codebase to long-term memory. Persisted "
+        "Save fact(s) about this codebase to long-term memory. Persisted "
         "to <workspace>/.moha/memos.json and INJECTED INTO THE SYSTEM "
         "PROMPT for every subsequent turn (cached on Anthropic's side, "
         "so the cost amortises after the first turn). Use when you've "
@@ -121,19 +178,41 @@ ToolDef tool_remember_impl() {
         "rediscover next session — architecture decisions, where things "
         "live, gotchas, contracts between modules. NOT for transient "
         "in-conversation context. Format the `content` as concise "
-        "markdown; you can include code spans, paths, line numbers.";
+        "markdown; you can include code spans, paths, line numbers.\n\n"
+        "BATCH MODE — STRONGLY PREFERRED when you have more than one fact "
+        "to bank in a single turn. Pass `memos: [{topic, content, files?}, "
+        "...]` instead of firing N separate `remember` calls. Each "
+        "individual call is a serialized disk write (memos are mutually "
+        "exclusive at the scheduler level); a turn that banks 5 facts "
+        "takes ~5x longer as 5 calls than as one batch.";
     t.input_schema = json{
         {"type","object"},
-        {"required", {"topic","content"}},
+        // Schema permits either {topic, content} OR {memos:[...]} — the
+        // tool's `parse` accepts both shapes. We don't list `topic`/
+        // `content` as required at the top level here so the schema
+        // validator doesn't reject the batch shape.
         {"properties", {
             {"display_description", {{"type","string"},
                 {"description","One-line summary shown in the UI. Optional."}}},
             {"topic", {{"type","string"},
-                {"description","One-line topic — the question this memo answers, e.g. \"how does the OAuth refresh flow work?\"."}}},
+                {"description","Single-memo shape: one-line topic — the question this memo answers."}}},
             {"content", {{"type","string"},
-                {"description","Markdown body. Names, line numbers, key relationships, gotchas."}}},
+                {"description","Single-memo shape: markdown body. Names, line numbers, key relationships, gotchas."}}},
             {"files", {{"type","array"}, {"items", {{"type","string"}}},
-                {"description","Optional: workspace-relative paths whose mtime governs whether this memo is still fresh."}}},
+                {"description","Single-memo shape: workspace-relative paths whose mtime governs freshness."}}},
+            {"memos", {
+                {"type","array"},
+                {"description","Batch shape — preferred when banking multiple facts in one turn. One disk write, one queue slot. Each item is {topic, content, files?}."},
+                {"items", {
+                    {"type","object"},
+                    {"required", {"topic","content"}},
+                    {"properties", {
+                        {"topic",   {{"type","string"}}},
+                        {"content", {{"type","string"}}},
+                        {"files",   {{"type","array"}, {"items", {{"type","string"}}}}},
+                    }},
+                }},
+            }},
         }},
     };
     t.effects = kSpec.effects;

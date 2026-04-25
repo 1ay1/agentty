@@ -351,12 +351,38 @@ std::string MemoStore::git_head_locked_() {
     return cached_git_head_;
 }
 
+// Single-add path: lock + insert one + persist. Fine for the common
+// case (investigate writes one memo). For multi-add bursts (the
+// remember tool's batch shape), use add_batch to amortize the persist.
 void MemoStore::add(Memo m) {
     if (m.id.empty()) m.id = short_id();
     if (m.created_at.time_since_epoch().count() == 0)
         m.created_at = std::chrono::system_clock::now();
     std::lock_guard lk(mu_);
     if (workspace_.empty()) return;     // not bound to a workspace
+    insert_locked_(std::move(m));
+    persist_locked_();
+}
+
+void MemoStore::add_batch(std::vector<Memo> memos) {
+    if (memos.empty()) return;
+    std::lock_guard lk(mu_);
+    if (workspace_.empty()) return;
+    // Insert all under one lock acquisition — no persist between adds,
+    // so the file is rewritten exactly once for the whole batch.
+    for (auto& m : memos) {
+        if (m.id.empty()) m.id = short_id();
+        if (m.created_at.time_since_epoch().count() == 0)
+            m.created_at = std::chrono::system_clock::now();
+        insert_locked_(std::move(m));
+    }
+    persist_locked_();
+}
+
+// Common insert path used by add() / add_batch(). Caller must hold mu_.
+// Factored out so the dedupe + cap-eviction logic doesn't drift between
+// the two entry points.
+void MemoStore::insert_locked_(Memo m) {
     if (m.git_head.empty()) m.git_head = git_head_locked_();
 
     // Dedupe: if a memo with the same exact query already exists,
@@ -377,8 +403,6 @@ void MemoStore::add(Memo m) {
     // tool. For now FIFO eviction at the hard cap is the back-stop.)
     while (memos_.size() > kMaxMemos)
         memos_.erase(memos_.begin());
-
-    persist_locked_();
 }
 
 std::string MemoStore::compose_prompt_block(std::size_t max_bytes) const {

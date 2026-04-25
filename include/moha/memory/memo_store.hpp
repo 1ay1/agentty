@@ -64,6 +64,14 @@ public:
     // the soft cap (oldest evicted). Thread-safe.
     void add(Memo m);
 
+    // Batch append: same semantics as N back-to-back add() calls but
+    // takes the lock + persists exactly ONCE. The remember tool calls
+    // this when the model passes a `memos: [...]` array — a turn that
+    // banks 5 memos becomes 1 disk write instead of 5, and 1 queued
+    // tool slot instead of 5 (each remember is WriteFs-exclusive, so
+    // they can't run in parallel anyway). No-op if the input is empty.
+    void add_batch(std::vector<Memo> memos);
+
     // Render the "what we know" block for system-prompt injection.
     // Format: short markdown bullet list of (Q, A-summary) pairs,
     // most-recent first, capped at `max_bytes`. Returns empty when
@@ -120,6 +128,7 @@ private:
     static constexpr std::size_t kMaxMemos = 64;
 
     void load_locked_();
+    void insert_locked_(Memo m);
     void persist_locked_() const;
     [[nodiscard]] std::string git_head_locked_();
 };
