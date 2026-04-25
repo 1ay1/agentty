@@ -3,7 +3,7 @@
 A native terminal client for Claude — written in modern C++26, rendered on a custom TUI engine, no Electron / Node / Python runtime in the loop.
 
 <p align="center">
-  <img src="maya.png" alt="moha" />
+  <img src="moha.png" alt="moha" />
 </p>
 
 ```
