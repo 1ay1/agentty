@@ -32,6 +32,7 @@ Every release also ships a proper installer for each platform — pick the one t
 |---|---|---|
 | **Debian / Ubuntu** (x86_64, ARM64) | `.deb` | `sudo apt install ./moha-<ver>-linux-<arch>.deb` |
 | **Fedora / RHEL / openSUSE** (x86_64, ARM64) | `.rpm` | `sudo dnf install ./moha-<ver>-linux-<arch>.rpm` |
+| **Arch Linux** (x86_64) | `.pkg.tar.zst` | `sudo pacman -U moha-bin-<ver>-1-x86_64.pkg.tar.zst` |
 | **macOS** (Intel + Apple Silicon) | `.dmg` | mount, drag `moha` to `/Applications` (or `~/bin`) |
 | **Windows** (x86_64) | `.exe` (NSIS) | double-click; installer offers to add `moha` to PATH |
 

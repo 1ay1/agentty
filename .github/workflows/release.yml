@@ -251,9 +251,76 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # ── Arch package ────────────────────────────────────────────────────
+  # Reuses the linux-x86_64 tarball — the PKGBUILD is `moha-bin`, no
+  # local compilation. Runs in archlinux:latest so makepkg + base-devel
+  # are first-party, no need to bootstrap them on Ubuntu. Output is the
+  # standard moha-bin-<ver>-1-x86_64.pkg.tar.zst, attached to the
+  # release alongside .deb / .rpm.
+  package-arch:
+    name: package (arch x86_64)
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install Arch packaging deps (base-devel + git)
+        run: |
+          # Refresh keys + install build group. --noconfirm + Override
+          # NOPROGRESSBAR so output stays grep-able in CI logs.
+          pacman-key --init
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm --needed base-devel git
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull linux-x86_64 build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moha-linux-x86_64
+          path: artifacts-linux-x64
+
+      - name: Stage tarball where makepkg expects it
+        # makepkg dedupes by filename: any `source=()` entry that already
+        # exists in $startdir is reused instead of fetched. This lets the
+        # CI build reference the just-uploaded artifact instead of trying
+        # to download from a release that doesn't exist yet at this point.
+        run: |
+          ls -lh artifacts-linux-x64/
+          cp artifacts-linux-x64/moha-*-linux-x86_64.tar.gz \
+             packaging/arch/
+
+      - name: Build .pkg.tar.zst (makepkg as nobody)
+        # makepkg refuses to run as root; the Arch image's default user
+        # is root inside CI, so we drop to `nobody` for the actual build
+        # step and chown the working tree first.
+        working-directory: packaging/arch
+        run: |
+          chown -R nobody:nobody .
+          su nobody -s /bin/bash -c '
+            export HOME=/tmp
+            makepkg --skipchecksums --nodeps --noconfirm
+            ls -lh *.pkg.tar.zst
+          '
+
+      - name: Stage Arch package as artifact
+        run: |
+          mkdir -p artifacts
+          mv packaging/arch/*.pkg.tar.zst artifacts/
+          ls -lh artifacts/
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moha-linux-arch-x86_64
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
   release:
     name: publish release
-    needs: build
+    needs: [build, package-arch]
     runs-on: ubuntu-latest
     # Only publish when invoked by a tag push, not on workflow_dispatch.
     if: startsWith(github.ref, 'refs/tags/v')
@@ -277,7 +344,8 @@ jobs:
           find . -maxdepth 1 -type f \
                \( -name 'moha-*.tar.gz' -o -name 'moha-*.zip' \
                   -o -name 'moha-*.deb' -o -name 'moha-*.rpm' \
-                  -o -name 'moha-*.dmg' -o -name 'moha-*.exe' \) \
+                  -o -name 'moha-*.dmg' -o -name 'moha-*.exe' \
+                  -o -name 'moha-*.pkg.tar.zst' \) \
                -printf '%f\n' | sort | xargs -r sha256sum > SHA256SUMS
           cat SHA256SUMS
 
@@ -295,4 +363,5 @@ jobs:
             dist/moha-*.rpm
             dist/moha-*.dmg
             dist/moha-*.exe
+            dist/moha-*.pkg.tar.zst
             dist/SHA256SUMS
