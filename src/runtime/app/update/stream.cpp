@@ -151,7 +151,9 @@ std::string_view missing_required_field(std::string_view tool_name,
         // (list_dir/glob default to cwd; read without path is already
         // a tool error — surfacing it from the tool itself preserves
         // the typed ToolError chain instead of converting to a stream-
-        // level salvage failure here).
+        // level salvage failure here). Index/memory/sub-agent tools
+        // follow the same rule: empty args produce a typed ToolError
+        // from the tool layer, not silently-wrong output.
         case K::Read:
         case K::ListDir:
         case K::Glob:
@@ -160,6 +162,17 @@ std::string_view missing_required_field(std::string_view tool_name,
         case K::GitStatus:
         case K::WebSearch:
         case K::Todo:
+        case K::Outline:
+        case K::RepoMap:
+        case K::Signatures:
+        case K::Investigate:
+        case K::Remember:
+        case K::Forget:
+        case K::Memos:
+        case K::Recall:
+        case K::FindUsages:
+        case K::MineAdrs:
+        case K::Navigate:
             return {};
     }
     return {};   // unreachable: switch is exhaustive over Kind
