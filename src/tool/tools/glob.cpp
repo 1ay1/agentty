@@ -38,6 +38,12 @@ std::expected<GlobArgs, ToolError> parse_glob_args(const json& j) {
 }
 
 ExecResult run_glob(const GlobArgs& a) {
+    // Workspace boundary check — even with default ".", canonicalising
+    // it ensures glob can't be tricked into walking up via "../.."
+    // tricks the model might try.
+    auto wp = util::make_workspace_path(a.root, "glob");
+    if (!wp) return std::unexpected(std::move(wp.error()));
+
     // If the pattern has no glob metacharacters, fall back to substring
     // matching. The model often types `foo.cpp` intending "find anything
     // named that"; forcing it to write `*foo.cpp*` would be annoying.
@@ -46,7 +52,7 @@ ExecResult run_glob(const GlobArgs& a) {
     std::ostringstream out;
     int n = 0;
     std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(a.root,
+    for (auto it = fs::recursive_directory_iterator(wp->path(),
                 fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (ec) { ec.clear(); continue; }

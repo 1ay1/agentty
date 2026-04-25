@@ -3,6 +3,7 @@
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/bash_validate.hpp"
+#include "moha/tool/util/fs_helpers.hpp"
 #include "moha/tool/util/subprocess.hpp"
 #include "moha/tool/util/tool_args.hpp"
 
@@ -71,6 +72,14 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
         if (!std::filesystem::is_directory(cd, ec))
             return std::unexpected(ToolError::invalid_args(
                 "cd '" + cd + "' is not a directory"));
+        // Workspace boundary applies to the `cd` arg too — otherwise the
+        // model could route around the gate by `cd /etc && cat passwd`.
+        // The body of the command can still escape via its own `cd` /
+        // absolute paths; that's why bash has Exec effects and prompts
+        // under Ask. The cd arg is the explicit, declared one we *can*
+        // gate cleanly.
+        if (auto wp = util::make_workspace_path(cd, "bash"); !wp)
+            return std::unexpected(std::move(wp.error()));
     }
     return BashArgs{
         std::move(*cmd_refined),

@@ -270,6 +270,70 @@ fs::path normalize_path(std::string_view s) {
     return p;
 }
 
+namespace {
+
+// Function-local static so the default value is the cwd at first call,
+// regardless of static-initialisation order. Tests that don't call
+// set_workspace_root() still get a sensible default.
+fs::path& mutable_workspace_root() {
+    static fs::path root = [] {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        return ec ? fs::path{"/"} : cwd;
+    }();
+    return root;
+}
+
+} // namespace
+
+void set_workspace_root(fs::path root) {
+    std::error_code ec;
+    auto canon = fs::weakly_canonical(root, ec);
+    mutable_workspace_root() = ec ? std::move(root) : std::move(canon);
+}
+
+const fs::path& workspace_root() {
+    return mutable_workspace_root();
+}
+
+bool is_within_workspace(const fs::path& target) {
+    if (target.empty()) return false;
+    std::error_code ec;
+    // weakly_canonical resolves what exists and leaves the rest as-is —
+    // perfect for write targets where the file doesn't exist yet but the
+    // parent directory does. Falls back to absolute() on either failure
+    // so a missing/permission-denied parent doesn't auto-allow the call.
+    auto canon_target = fs::weakly_canonical(target, ec);
+    if (ec) { canon_target = fs::absolute(target, ec); if (ec) return false; }
+    auto canon_root = workspace_root();   // already canonicalised on set
+    // Component-wise prefix check. Plain string startsWith would let
+    // /home/user/project-other through when root is /home/user/project.
+    auto rt = canon_root.begin();
+    auto tt = canon_target.begin();
+    for (; rt != canon_root.end() && tt != canon_target.end(); ++rt, ++tt) {
+        if (*rt != *tt) return false;
+    }
+    return rt == canon_root.end();
+}
+
+std::expected<NormalizedPath, ToolError>
+make_workspace_path(std::string_view raw, std::string_view tool_name) {
+    NormalizedPath p{raw};
+    if (!is_within_workspace(p.path())) {
+        // Helpful, actionable message: name the offending path, the
+        // active root, and the two ways out (restart in a wider dir or
+        // pass --workspace). The model can read this and either ask the
+        // user to widen the scope or pick a different path.
+        return std::unexpected(ToolError::out_of_workspace(
+            "tool '" + std::string{tool_name} + "' refused: '"
+            + p.string() + "' is outside the workspace root '"
+            + workspace_root().string() + "'. "
+            "Restart moha in a parent directory or pass "
+            "--workspace <dir> to widen the scope."));
+    }
+    return p;
+}
+
 bool should_skip_dir(std::string_view name) noexcept {
     static const std::vector<std::string_view> skip = {
         ".git", "node_modules", "build", "target", "__pycache__",

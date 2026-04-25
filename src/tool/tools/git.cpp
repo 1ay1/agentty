@@ -1,6 +1,7 @@
 #include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
+#include "moha/tool/util/fs_helpers.hpp"
 #include "moha/tool/util/subprocess.hpp"
 #include "moha/tool/util/tool_args.hpp"
 
@@ -32,7 +33,9 @@ std::expected<GitStatusArgs, ToolError> parse_git_status_args(const json& j) {
 }
 
 ExecResult run_git_status(const GitStatusArgs& a) {
-    auto output = util::run_argv({"git", "-C", a.root, "status",
+    auto wp = util::make_workspace_path(a.root, "git_status");
+    if (!wp) return std::unexpected(std::move(wp.error()));
+    auto output = util::run_argv({"git", "-C", wp->string(), "status",
                                   "--porcelain=v2", "--branch"});
     if (!a.display_description.empty())
         output = a.display_description + "\n\n" + output;
@@ -86,7 +89,12 @@ ExecResult run_git_diff(const GitDiffArgs& a) {
     std::vector<std::string> argv = {"git", "diff", "--stat", "-p"};
     if (a.staged) argv.push_back("--cached");
     if (!a.ref.empty()) argv.push_back(a.ref);
-    if (!a.path.empty()) { argv.push_back("--"); argv.push_back(a.path); }
+    if (!a.path.empty()) {
+        auto wp = util::make_workspace_path(a.path, "git_diff");
+        if (!wp) return std::unexpected(std::move(wp.error()));
+        argv.push_back("--");
+        argv.push_back(wp->string());
+    }
     auto output = util::run_argv(argv, 50000);
     if (output.empty()) return ToolOutput{"no changes", std::nullopt};
     if (!a.display_description.empty())
@@ -151,7 +159,12 @@ ExecResult run_git_log(const GitLogArgs& a) {
     }
     argv.push_back("-" + std::to_string(a.count));
     argv.push_back(a.ref);
-    if (!a.path.empty()) { argv.push_back("--"); argv.push_back(a.path); }
+    if (!a.path.empty()) {
+        auto wp = util::make_workspace_path(a.path, "git_log");
+        if (!wp) return std::unexpected(std::move(wp.error()));
+        argv.push_back("--");
+        argv.push_back(wp->string());
+    }
     auto output = util::run_argv(argv);
     if (output.empty()) return ToolOutput{"no commits", std::nullopt};
     if (!a.display_description.empty())
@@ -222,7 +235,9 @@ ExecResult run_git_commit(const GitCommitArgs& a) {
             return std::unexpected(ToolError::subprocess("git add failed: " + out));
     } else {
         for (const auto& f : a.files) {
-            auto out = util::run_argv({"git", "add", f});
+            auto wp = util::make_workspace_path(f, "git_commit");
+            if (!wp) return std::unexpected(std::move(wp.error()));
+            auto out = util::run_argv({"git", "add", wp->string()});
             if (out.find("[exit code") != std::string::npos)
                 return std::unexpected(ToolError::subprocess("git add failed: " + out));
         }

@@ -38,6 +38,7 @@
 #include "moha/auth/auth.hpp"
 #include "moha/io/persistence.hpp"
 #include "moha/provider/anthropic/provider.hpp"
+#include "moha/tool/util/fs_helpers.hpp"
 
 namespace {
 
@@ -52,8 +53,10 @@ void print_usage() {
         "  help              Show this message\n"
         "\n"
         "options:\n"
-        "  -k, --key KEY     API-key override for this session\n"
-        "  -m, --model ID    Model id (e.g. claude-opus-4-5)\n"
+        "  -k, --key KEY       API-key override for this session\n"
+        "  -m, --model ID      Model id (e.g. claude-opus-4-5)\n"
+        "  -w, --workspace DIR Sandbox filesystem tools to this directory\n"
+        "                      (default: cwd). Tools refuse paths outside it.\n"
         "\n");
 }
 
@@ -61,6 +64,7 @@ struct Args {
     std::string subcommand;
     std::string cli_key;
     std::string cli_model;
+    std::string cli_workspace;
     bool        bad = false;
 };
 
@@ -74,6 +78,8 @@ Args parse_args(int argc, char** argv) {
             out.cli_key = argv[++i];
         } else if ((a == "-m" || a == "--model") && i + 1 < argc) {
             out.cli_model = argv[++i];
+        } else if ((a == "-w" || a == "--workspace") && i + 1 < argc) {
+            out.cli_workspace = argv[++i];
         } else if (a == "-h" || a == "--help") {
             out.subcommand = "help";
         } else {
@@ -136,6 +142,28 @@ int main(int argc, char** argv) {
         auto s = persistence::load_settings();
         s.model_id = ModelId{args.cli_model};
         persistence::save_settings(s);
+    }
+
+    // ── Filesystem sandbox boundary ─────────────────────────────────────
+    // Default workspace = process cwd. Tools that touch the filesystem
+    // (read/write/edit/list_dir/grep/glob/find_definition/git_*/bash's
+    // `cd`) refuse paths outside this root with a clear error. Pass
+    // `--workspace <dir>` to widen — `--workspace /` disables the gate
+    // entirely for users who explicitly want unrestricted access.
+    if (!args.cli_workspace.empty()) {
+        std::filesystem::path req{args.cli_workspace};
+        std::error_code ec;
+        if (!std::filesystem::is_directory(req, ec)) {
+            std::fprintf(stderr,
+                "moha: --workspace path is not a directory: %s\n",
+                args.cli_workspace.c_str());
+            return 2;
+        }
+        tools::util::set_workspace_root(std::move(req));
+    } else {
+        std::error_code ec;
+        auto cwd = std::filesystem::current_path(ec);
+        if (!ec) tools::util::set_workspace_root(std::move(cwd));
     }
 
     // ── Wire the Provider + Store seams ─────────────────────────────────

@@ -49,6 +49,8 @@ std::expected<EditArgs, ToolError> parse_edit_args(const json& j) {
     auto path_opt = ar.require_str("path");
     if (!path_opt)
         return std::unexpected(ToolError::invalid_args("path required"));
+    auto wp = util::make_workspace_path(*path_opt, "edit");
+    if (!wp) return std::unexpected(std::move(wp.error()));
 
     std::string desc = ar.str("display_description", "");
     std::vector<OneEdit> edits;
@@ -113,7 +115,7 @@ std::expected<EditArgs, ToolError> parse_edit_args(const json& j) {
     }
 
     return EditArgs{
-        util::NormalizedPath{std::move(*path_opt)},
+        std::move(*wp),
         std::move(edits),
         std::move(desc),
     };

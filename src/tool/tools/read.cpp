@@ -31,6 +31,8 @@ std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
     auto path_opt = ar.require_str("path");
     if (!path_opt)
         return std::unexpected(ToolError::invalid_args("path required"));
+    auto wp = util::make_workspace_path(*path_opt, "read");
+    if (!wp) return std::unexpected(std::move(wp.error()));
     int offset = ar.integer("offset", 1);
     if (offset < 1) offset = 1;
     // Zed-style `end_line` is inclusive (last line shown). Translate into our
@@ -43,7 +45,7 @@ std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
     }
     if (limit <= 0) limit = 2000;
     return ReadArgs{
-        util::NormalizedPath{std::move(*path_opt)},
+        std::move(*wp),
         offset,
         limit,
         ar.str("display_description", ""),

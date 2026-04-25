@@ -4,9 +4,12 @@
 // traversal" list — centralised here so the rules are consistent across
 // grep / glob / list_dir / find_definition.
 
+#include <expected>
 #include <filesystem>
 #include <string>
 #include <string_view>
+
+#include "moha/tool/registry.hpp"   // ToolError + factories
 
 namespace moha::tools::util {
 
@@ -40,6 +43,37 @@ struct NormalizedPath {
     [[nodiscard]] std::string string() const { return value.string(); }
     [[nodiscard]] bool empty() const noexcept { return value.empty(); }
 };
+
+// ── Workspace boundary ──────────────────────────────────────────────────
+// Every filesystem-touching tool refuses paths outside this root. Set
+// once at startup (main.cpp from cwd, or from the --workspace CLI flag);
+// query freely from tool implementations. The default before
+// `set_workspace_root` is called is the process's cwd at first call —
+// safe for tests and standalone helper use.
+//
+// The boundary is the simplest sandbox layer: it doesn't stop a model
+// from running shell commands that walk anywhere, but it does stop the
+// fast path of "model casually `read`s ~/.ssh/id_rsa or `write`s to
+// /etc/hosts". Pair with bash gating + a future OS-native sandbox
+// (sandbox-exec / bwrap / firejail) for a defense-in-depth story.
+void set_workspace_root(fs::path root);
+
+[[nodiscard]] const fs::path& workspace_root();
+
+// True if `target` is at-or-under the workspace root after canonicalising
+// both sides. Symlink escape is blocked: a link inside the workspace that
+// points to /etc would resolve to /etc and fail the prefix check. Uses
+// weakly_canonical so a not-yet-existing path (e.g. write target) is
+// still checked correctly against its existing parent components.
+[[nodiscard]] bool is_within_workspace(const fs::path& target);
+
+// Construct a NormalizedPath that's been workspace-checked in one shot.
+// Tools call:
+//     auto p = util::make_workspace_path(*raw, "read");
+//     if (!p) return std::unexpected(p.error());
+// `tool_name` only appears in the error message and is purely cosmetic.
+[[nodiscard]] std::expected<struct NormalizedPath, ToolError>
+make_workspace_path(std::string_view raw, std::string_view tool_name);
 
 // True for directory names we want recursive traversals (grep / glob /
 // list_dir) to skip by default. Keeps the skip list in one place so tools

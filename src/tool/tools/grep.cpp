@@ -568,8 +568,17 @@ ExecResult run_builtin(const GrepArgs& a) {
 // non-UTF-8 byte (type_error.316), so leaving it for the request builder
 // to scrub races with persistence and crashes the process.
 ExecResult run_grep(const GrepArgs& a) {
-    auto r = (detect_backend() == Backend::Ripgrep) ? run_ripgrep(a)
-                                                    : run_builtin(a);
+    // Workspace boundary check: substitute a canonicalised in-workspace
+    // path before either backend (ripgrep CLI / builtin walker) consumes
+    // the root. Both branches use `a.root` directly so we hand them an
+    // updated copy rather than threading a separate argument through.
+    auto wp = util::make_workspace_path(a.root, "grep");
+    if (!wp) return std::unexpected(std::move(wp.error()));
+    GrepArgs gated = a;
+    gated.root = wp->string();
+
+    auto r = (detect_backend() == Backend::Ripgrep) ? run_ripgrep(gated)
+                                                    : run_builtin(gated);
     if (r.has_value()) r->text = util::to_valid_utf8(std::move(r->text));
     return r;
 }

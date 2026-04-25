@@ -40,10 +40,16 @@ std::expected<ListDirArgs, ToolError> parse_list_dir_args(const json& j) {
 }
 
 ExecResult run_list_dir(const ListDirArgs& a) {
+    // Workspace boundary check at execute-time (not parse-time) so the
+    // default "." root canonicalises against the active cwd at the
+    // moment of the call, not at args-construction. Same behaviour
+    // applies to grep/glob/find_definition.
+    auto wp = util::make_workspace_path(a.root, "list_dir");
+    if (!wp) return std::unexpected(std::move(wp.error()));
     std::error_code ec;
-    if (!fs::exists(a.root, ec))
+    if (!fs::exists(wp->path(), ec))
         return std::unexpected(ToolError::not_found("directory not found: " + a.root));
-    if (!fs::is_directory(a.root, ec))
+    if (!fs::is_directory(wp->path(), ec))
         return std::unexpected(ToolError::not_a_directory("not a directory: " + a.root));
 
     std::ostringstream out;
@@ -88,7 +94,7 @@ ExecResult run_list_dir(const ListDirArgs& a) {
     };
 
     if (a.recursive) {
-        for (auto it = fs::recursive_directory_iterator(a.root,
+        for (auto it = fs::recursive_directory_iterator(wp->path(),
                     fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
@@ -98,7 +104,7 @@ ExecResult run_list_dir(const ListDirArgs& a) {
         }
     } else {
         std::vector<fs::directory_entry> entries;
-        for (auto& e : fs::directory_iterator(a.root, ec))
+        for (auto& e : fs::directory_iterator(wp->path(), ec))
             entries.push_back(e);
         std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
             bool da = a.is_directory(), db = b.is_directory();

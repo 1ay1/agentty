@@ -1,6 +1,7 @@
 #include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
+#include "moha/tool/util/fs_helpers.hpp"
 #include "moha/tool/util/tool_args.hpp"
 
 #include <filesystem>
@@ -77,10 +78,13 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
         ".cache", "vendor", "dist", "out", ".next"
     };
 
+    auto wp = util::make_workspace_path(a.root, "find_definition");
+    if (!wp) return std::unexpected(std::move(wp.error()));
+
     std::ostringstream out;
     int matches = 0;
     std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(a.root,
+    for (auto it = fs::recursive_directory_iterator(wp->path(),
                 fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (ec) { ec.clear(); continue; }

@@ -90,6 +90,8 @@ std::expected<WriteArgs, ToolError> parse_write_args(const json& j) {
     if (!raw)
         return std::unexpected(ToolError::invalid_args(
             std::format("path required (received keys: {})", describe_keys(j))));
+    auto wp = util::make_workspace_path(*raw, "write");
+    if (!wp) return std::unexpected(std::move(wp.error()));
 
     std::string note;
     std::string content;
@@ -117,7 +119,7 @@ std::expected<WriteArgs, ToolError> parse_write_args(const json& j) {
                            picked_key);
     }
     return WriteArgs{
-        util::NormalizedPath{std::move(*raw)},
+        std::move(*wp),
         std::move(content),
         ar.str("display_description", ""),
         std::move(note),
