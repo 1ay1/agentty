@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <string>
 
+#include <maya/element/element.hpp>
 #include <nlohmann/json.hpp>
 
 #include "moha/domain/conversation.hpp"
@@ -43,5 +44,14 @@ namespace moha::ui {
 // both "failed with exit code N" (Zed-style) and "[exit code N]" (legacy).
 // Returns 124 for a timeout marker, 0 when none of those patterns match.
 [[nodiscard]] int parse_exit_code(const std::string& output);
+
+// Rich body renderer for the `investigate` sub-agent tool. Parses the
+// structured progress transcript (Q/M/T<n> vocabulary emitted by
+// src/tool/tools/investigate.cpp) into a styled per-turn timeline +
+// synthesis block. Used by BOTH the standalone tool card AND the
+// in-Actions-panel inline body so the experience is consistent
+// regardless of where the card is rendered. `elapsed` drives the
+// animated spinner — pass `tool_elapsed(tc)` from the call site.
+[[nodiscard]] maya::Element investigate_body(const ToolUse& tc, float elapsed);
 
 } // namespace moha::ui

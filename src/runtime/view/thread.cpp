@@ -758,45 +758,418 @@ Element compact_tool_body(const ToolUse& tc) {
         return preview_block(tc.progress_text(), fg_dim(fg));
     }
 
-    // ── Read / list_dir / grep / glob / find_definition / web /
-    //    git_log / git_status / git_commit: head+tail preview of
-    //    the textual output. Each tool produces structured-but-
-    //    line-oriented text that the head+tail helper handles
-    //    well; specialising each one to a custom widget here
-    //    would be over-design for what the timeline is — a
-    //    glanceable summary, not a viewer.
-    if ((n == "read" || n == "list_dir" || n == "grep" || n == "glob"
-         || n == "find_definition"
-         || n == "web_fetch" || n == "web_search"
-         || n == "git_status" || n == "git_log" || n == "git_commit"
-         || n == "outline" || n == "repo_map" || n == "signatures")
+    // ── Per-tool structured bodies (Actions-panel inline) ─────────
+    // Each branch produces a header row (primary noun + counts) plus a
+    // body matched to the tool's output shape — coloured kind tags,
+    // file-grouped matches, iconified directory entries, etc. The
+    // Actions panel is moha's primary tool surface; treating each tool
+    // as a glance-card here is much higher leverage than the standalone
+    // tool-card path (which fires only when the assistant's turn has a
+    // single tool call).
+    //
+    // Local helpers — keep them inside the function so each tool branch
+    // can compose its rows without per-tool boilerplate.
+    auto meta_row = [&](std::string_view glyph, Color glyph_c,
+                        std::string_view primary,
+                        std::string_view stats) {
+        std::vector<Element> cells;
+        cells.push_back(text(std::string{glyph} + " ",
+                             Style{}.with_fg(glyph_c).with_bold()));
+        if (!primary.empty()) {
+            cells.push_back(text(std::string{primary},
+                                 Style{}.with_fg(fg).with_bold()));
+        }
+        if (!stats.empty()) {
+            cells.push_back(text("  \xc2\xb7  " + std::string{stats},
+                                 fg_dim(muted)));
+        }
+        return (h(std::move(cells)) | grow(1.0f)).build();
+    };
+
+    // ── read ─────────────────────────────────────────────────────
+    // Header: "▸ <path> · L<a>-<b> of <total>" + a tighter preview
+    // of the file body with subtle line numbering coloured cyan so
+    // the eye can scan to the relevant line at a glance.
+    if (n == "read" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto path = pick_arg(tc.args, {"path","file_path","filepath","filename"});
+        // Detect the "[showing lines A-B of T]" footer the read tool
+        // emits when paged.
+        std::string range;
+        if (auto p = out.find("[showing lines "); p != std::string::npos) {
+            auto end = out.find(']', p);
+            if (end != std::string::npos)
+                range = out.substr(p + 15, end - (p + 15));
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info,
+                                path, range.empty() ? "" : "L" + range));
+        // Body: head+tail. Existing preview_block is fine here — the
+        // file body's own `cat -n` numbering is already styled by the
+        // read tool itself.
+        rows.push_back(preview_block(out, fg_dim(fg)));
+        return v(std::move(rows)).build();
+    }
+
+    // ── grep / find_definition ──────────────────────────────────
+    // Header: "▸ <pattern> · N matches in K files".
+    // Body:   per-file groups, file path in info-bold, then up to 2
+    //         match rows per group with `Lnnn` line numbers in cyan.
+    if ((n == "grep" || n == "find_definition") && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        std::string_view kind = (n == "grep" ? "pattern" : "symbol");
+        auto needle = safe_arg(tc.args, kind.data());
+        // Pull "Found N matches across K files" if present (grep emits it).
+        std::string stats;
+        if (auto p = out.find("Found "); p != std::string::npos) {
+            auto end = out.find('.', p);
+            if (end != std::string::npos)
+                stats = out.substr(p + 6, end - (p + 6));
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, needle, stats));
+
+        // Walk the markdown-ish output and emit colour-tagged rows.
+        // Format produced by grep.cpp:
+        //   ## Matches in <path>
+        //   ### L<s>-<e>
+        //   ```
+        //   <line>
+        //   <line>
+        //   ```
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        const int kCap = 14;
+        bool in_code = false;
+        int code_no = 0;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.starts_with("Found ") || line.starts_with("Showing ")
+             || line.empty()) continue;
+            if (line.starts_with("## Matches in ")) {
+                rows.push_back(text("  " + line.substr(14),
+                    Style{}.with_fg(info).with_bold()));
+                ++row_count;
+                in_code = false;
+                continue;
+            }
+            if (line.starts_with("### L")) {
+                try { code_no = std::stoi(line.substr(5)); } catch (...) { code_no = 0; }
+                continue;
+            }
+            if (line == "```") { in_code = !in_code; continue; }
+            if (in_code && code_no > 0) {
+                std::ostringstream lr;
+                lr << "    L" << code_no << "  " << line;
+                rows.push_back(text(lr.str(), fg_dim(fg)));
+                ++code_no;
+                ++row_count;
+                continue;
+            }
+            // Legacy `path:line:content` (find_definition).
+            if (auto c1 = line.find(':'); c1 != std::string::npos) {
+                if (auto c2 = line.find(':', c1 + 1); c2 != std::string::npos) {
+                    rows.push_back(h(
+                        text("  " + line.substr(0, c1),
+                             Style{}.with_fg(info).with_bold()),
+                        text(":" + line.substr(c1 + 1, c2 - c1 - 1),
+                             Style{}.with_fg(highlight)),
+                        text("  " + line.substr(c2 + 1), fg_dim(fg))
+                    ).build());
+                    ++row_count;
+                    continue;
+                }
+            }
+            // Anything else.
+            rows.push_back(text(line, fg_dim(muted)));
+            ++row_count;
+        }
+        if (row_count >= kCap)
+            rows.push_back(text("  \xe2\x80\xa6 more (use offset)",
+                                fg_dim(muted)));
+        return v(std::move(rows)).build();
+    }
+
+    // ── glob ────────────────────────────────────────────────────
+    // Header: "▸ <pattern> · N files".
+    // Body:   numbered file rows.
+    if (n == "glob" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto pat = safe_arg(tc.args, "pattern");
+        // Count non-empty lines as a rough match count (the glob tool
+        // doesn't emit a Found-N preamble).
+        int total = 0;
+        for (char c : out) if (c == '\n') ++total;
+        if (!out.empty() && out.back() != '\n') ++total;
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, pat,
+            std::to_string(total) + (total == 1 ? " file" : " files")));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        const int kCap = 8;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.empty()) continue;
+            if (line.starts_with("./")) line = line.substr(2);
+            rows.push_back(h(
+                text("  \xe2\x97\x8b ", fg_dim(muted)),     // ○
+                text(line, fg_of(fg))
+            ).build());
+            ++row_count;
+        }
+        if (total > row_count)
+            rows.push_back(text("  \xe2\x80\xa6 +"
+                                + std::to_string(total - row_count)
+                                + " more", fg_dim(muted)));
+        return v(std::move(rows)).build();
+    }
+
+    // ── list_dir ────────────────────────────────────────────────
+    // Header: "▸ <path> · M dirs / N files".
+    // Body:   iconified rows — folders in info-bold, files in fg.
+    if (n == "list_dir" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto path = safe_arg(tc.args, "path");
+        if (path.empty()) path = ".";
+        int dirs = 0, files = 0;
+        std::istringstream count_iss(out);
+        std::string s;
+        while (std::getline(count_iss, s)) {
+            // Trim leading spaces so nested entries are counted too.
+            std::size_t pos = 0;
+            while (pos < s.size() && s[pos] == ' ') ++pos;
+            if (pos >= s.size()) continue;
+            auto trimmed = std::string_view{s}.substr(pos);
+            // Heuristic: line ending in "/" is a directory; line with
+            // "  <size>" suffix is a file.
+            if (!trimmed.empty() && trimmed.back() == '/') ++dirs;
+            else if (trimmed.find("  ") != std::string_view::npos) ++files;
+        }
+        std::ostringstream stat;
+        stat << dirs << (dirs == 1 ? " dir" : " dirs")
+             << " / " << files << (files == 1 ? " file" : " files");
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, path, stat.str()));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        const int kCap = tc.expanded ? 20 : 10;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.empty()) continue;
+            // Preserve indent.
+            std::size_t pos = 0;
+            while (pos < line.size() && line[pos] == ' ') ++pos;
+            std::string indent = line.substr(0, pos);
+            std::string body = line.substr(pos);
+            if (!body.empty() && body.back() == '/') {
+                rows.push_back(h(
+                    text("  " + indent + "\xe2\x96\xb6 ",  // ▶
+                         Style{}.with_fg(info)),
+                    text(body, Style{}.with_fg(info).with_bold())
+                ).build());
+            } else {
+                // Split off the trailing size for dim styling.
+                auto sz = body.rfind("  ");
+                if (sz != std::string::npos) {
+                    rows.push_back(h(
+                        text("  " + indent + "  ", {}),
+                        text(body.substr(0, sz), fg_of(fg)),
+                        text(body.substr(sz), fg_dim(muted))
+                    ).build());
+                } else {
+                    rows.push_back(text("  " + indent + "  " + body,
+                                        fg_of(fg)));
+                }
+            }
+            ++row_count;
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // ── outline ─────────────────────────────────────────────────
+    // Header: "▸ <path> · N symbols".
+    // Body:   kind-grouped rows with "L<n>" cyan.
+    if (n == "outline" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto path = safe_arg(tc.args, "path");
+        // First line is "<path>  (N symbols)" — pull the count.
+        std::string stats;
+        if (auto p = out.find("("); p != std::string::npos) {
+            auto end = out.find(')', p);
+            if (end != std::string::npos) stats = out.substr(p + 1, end - p - 1);
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, path, stats));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        const int kCap = tc.expanded ? 20 : 10;
+        bool past_header = false;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (!past_header) {
+                if (line.find("symbols)") != std::string::npos) {
+                    past_header = true; continue;
+                }
+                continue;
+            }
+            if (line.empty()) continue;
+            if (line.starts_with("[") && line.find(']') != std::string::npos) {
+                rows.push_back(text("  " + line,
+                    Style{}.with_fg(highlight).with_bold()));
+            } else {
+                rows.push_back(text("  " + line, fg_dim(fg)));
+            }
+            ++row_count;
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // ── signatures ──────────────────────────────────────────────
+    if (n == "signatures" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto pat = safe_arg(tc.args, "pattern");
+        // "Symbols matching '<pat>' (N hits, ...)"
+        std::string stats;
+        if (auto p = out.find("("); p != std::string::npos) {
+            auto end = out.find(',', p);
+            if (end != std::string::npos) stats = out.substr(p + 1, end - p - 1);
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, pat, stats));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        const int kCap = tc.expanded ? 20 : 10;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.empty() || line.starts_with("Symbols matching")) continue;
+            if (line.starts_with("## ")) {
+                rows.push_back(text("  " + line.substr(3),
+                    Style{}.with_fg(info).with_bold()));
+                ++row_count;
+            } else if (line.starts_with("  L")) {
+                rows.push_back(text("  " + line, fg_dim(fg)));
+                ++row_count;
+            }
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // ── repo_map ────────────────────────────────────────────────
+    if (n == "repo_map" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto path = safe_arg(tc.args, "path");
+        if (path.empty()) path = "workspace";
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, path, ""));
+        std::istringstream iss(out);
+        std::string line;
+        int row_count = 0;
+        const int kCap = tc.expanded ? 30 : 12;
+        while (std::getline(iss, line) && row_count < kCap) {
+            if (line.empty()) continue;
+            if (line.starts_with("# Repo map")) continue;
+            if (line.starts_with("# ")) {
+                rows.push_back(text("  " + line, fg_dim(muted)));
+            } else if (line.starts_with("## ")) {
+                rows.push_back(text("  " + line,
+                    Style{}.with_fg(accent).with_bold()));
+            } else if (line.starts_with("[") && line.find(']') != std::string::npos
+                    && line.find('/') != std::string::npos) {
+                auto rb = line.find(']');
+                rows.push_back(h(
+                    text("  " + line.substr(0, rb + 1),
+                         Style{}.with_fg(highlight).with_bold()),
+                    text(line.substr(rb + 1), fg_of(fg))
+                ).build());
+            } else if (line.ends_with("/")) {
+                rows.push_back(text("  " + line,
+                    Style{}.with_fg(info).with_bold()));
+            } else {
+                rows.push_back(text("  " + line, fg_dim(fg)));
+            }
+            ++row_count;
+        }
+        return v(std::move(rows)).build();
+    }
+
+    // ── web_fetch ───────────────────────────────────────────────
+    // Header: "▸ <url> · status · type".
+    // Body:   first lines of the body block (after the HTTP status line).
+    if (n == "web_fetch" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto url = safe_arg(tc.args, "url");
+        // First line is "HTTP <status> (content-type)".
+        std::string status_line;
+        std::string body;
+        if (auto nl = out.find('\n'); nl != std::string::npos) {
+            status_line = out.substr(0, nl);
+            auto bs = out.find("\n\n");
+            body = bs != std::string::npos ? out.substr(bs + 2) : out.substr(nl + 1);
+        } else {
+            body = out;
+        }
+        // Trim the URL display (full URL too long for the row).
+        std::string short_url = url;
+        if (short_url.size() > 60) short_url = short_url.substr(0, 57) + "...";
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, short_url, status_line));
+        if (!body.empty()) rows.push_back(preview_block(body, fg_dim(fg)));
+        return v(std::move(rows)).build();
+    }
+
+    // ── web_search ──────────────────────────────────────────────
+    if (n == "web_search" && tc.is_done()) {
+        const auto& out = tc.output();
+        if (out.empty()) return text("");
+        auto q = safe_arg(tc.args, "query");
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", info, q, ""));
+        rows.push_back(preview_block(out, fg_dim(fg)));
+        return v(std::move(rows)).build();
+    }
+
+    // ── git_status / git_log / git_commit ───────────────────────
+    if ((n == "git_status" || n == "git_log" || n == "git_commit")
         && tc.is_done())
     {
         const auto& out = tc.output();
         if (out.empty()) return text("");
-        return preview_block(out, fg_dim(fg));
+        std::string title;
+        if (n == "git_status")  title = "git status";
+        else if (n == "git_log") {
+            title = "git log";
+            if (auto r = safe_arg(tc.args, "ref"); !r.empty())
+                title += "  \xc2\xb7  " + r;
+        } else {
+            title = "git commit";
+            if (auto m = safe_arg(tc.args, "message"); !m.empty()) {
+                if (m.size() > 60) m = m.substr(0, 57) + "...";
+                title += "  \xc2\xb7  " + m;
+            }
+        }
+        std::vector<Element> rows;
+        rows.push_back(meta_row("\xe2\x96\xb8", highlight, title, ""));
+        rows.push_back(preview_block(out, fg_dim(fg)));
+        return v(std::move(rows)).build();
     }
 
-    // ── investigate: live progress while running, synthesis when done ─
-    // Sub-agent runs can take 10-30 s; without a body the timeline
-    // event is just a header that says "investigating…" with nothing
-    // visible. Surface the streamed progress (turn boundaries, fan-
-    // out, synthesis text) so the user can follow along.
-    if (n == "investigate") {
-        if (tc.is_running() && !tc.progress_text().empty())
-            return preview_block(tc.progress_text(), fg_dim(fg));
-        if (tc.is_done() && !tc.output().empty()) {
-            // Strip the framing line if present so the timeline body
-            // shows the actual synthesis, not the metadata.
-            std::string body = tc.output();
-            if (body.starts_with("[investigate")) {
-                if (auto end = body.find("]\n\n"); end != std::string::npos)
-                    body = body.substr(end + 3);
-            }
-            return preview_block(body, fg_dim(fg));
-        }
-        return text("");
-    }
+    // ── investigate: rich per-turn timeline + synthesis ──────────────
+    // Delegates to the same renderer the standalone tool card uses, so
+    // the in-Actions-panel body and the dedicated card show identical
+    // structure — pull-quote question, animated stats row, vertical
+    // rail with per-turn cells, and the synthesis banner. Without this
+    // delegation the panel body fell back to a head/tail preview of
+    // the raw transcript text and looked like a debug log dump.
+    if (n == "investigate")
+        return investigate_body(tc, tool_elapsed(tc));
 
     // ── git_diff: per-line diff coloring (+ / - / @@) ──────────────
     // preview_block uses a single style; a real diff wants green

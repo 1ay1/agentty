@@ -148,23 +148,43 @@ const std::vector<provider::anthropic::ToolSpec>& observation_tools() {
 // We keep an in-memory transcript and re-emit it whenever we cross the
 // throttle window — chatty token-by-token streaming becomes one paint
 // per ~120 ms instead of per delta.
+//
+// The transcript uses a structured line vocabulary that the view-side
+// renderer (tool_card.cpp:investigate branch) parses into a beautiful
+// per-turn card. Line prefixes are stable contracts; if you change one
+// here, update the parser there in lockstep.
+//
+// Vocabulary:
+//   Q: <query text>                          — once at start
+//   T<n> thinking                            — turn N is calling the model
+//   T<n> dispatch <count>: a, b, c           — fan-out of N tools begins
+//   T<n> ok <toolname> <ms>ms                — per-tool success
+//   T<n> err <toolname> <ms>ms <reason>      — per-tool failure
+//   T<n> done <ok>/<n>                       — turn summary
+//   T<n> synthesis                           — synthesis section starts
+//   <free text>                              — synthesis body (multi-line)
 struct Progress {
     std::string                              transcript;
     std::chrono::steady_clock::time_point    last_emit{};
+    bool                                     in_synthesis = false;
 
-    void push_line(std::string line) {
-        if (!transcript.empty()) transcript += '\n';
-        transcript += std::move(line);
+    void line(std::string s) {
+        if (!transcript.empty() && transcript.back() != '\n')
+            transcript += '\n';
+        transcript += std::move(s);
+        transcript += '\n';
         flush(/*force=*/true);
     }
-    void update_synthesis(std::string_view delta) {
-        // Append to the in-progress synthesis section. We rebuild the
-        // last "## synthesis" block each time so the model's text shows
-        // live in the parent's tool card.
-        constexpr std::string_view kHdr = "\n## synthesis\n";
-        if (transcript.find(kHdr) == std::string::npos) {
-            transcript += kHdr;
-        }
+    // Append synthesis text deltas verbatim (no per-line marker — the
+    // model's output is already paragraphed). The first delta opens the
+    // synthesis section; subsequent ones extend it.
+    void synthesis_open(int turn) {
+        if (in_synthesis) return;
+        in_synthesis = true;
+        line("T" + std::to_string(turn) + " synthesis");
+    }
+    void synthesis_delta(std::string_view delta) {
+        if (!in_synthesis) return;
         transcript += delta;
         flush(/*force=*/false);
     }
@@ -191,21 +211,29 @@ run_one_turn(provider::anthropic::Request req,
              Message& assistant_out,
              http::CancelTokenPtr cancel,
              Progress* progress = nullptr,
-             bool stream_text_to_progress = false) {
+             int turn_number = 0) {
     TurnResult tr;
 
     std::string current_tool_id;
     std::string current_tool_name;
     std::string current_tool_args;
     bool got_finished = false;
+    // Track whether we've opened the synthesis section yet for this
+    // turn — first non-empty text delta in a tool-less turn opens it.
+    bool synthesis_opened = false;
 
     provider::anthropic::run_stream_sync(std::move(req), [&](Msg m) {
         std::visit([&](auto&& e) {
             using T = std::decay_t<decltype(e)>;
             if constexpr (std::same_as<T, StreamTextDelta>) {
                 assistant_out.text += e.text;
-                if (stream_text_to_progress && progress)
-                    progress->update_synthesis(e.text);
+                if (progress) {
+                    if (!synthesis_opened) {
+                        progress->synthesis_open(turn_number);
+                        synthesis_opened = true;
+                    }
+                    progress->synthesis_delta(e.text);
+                }
             } else if constexpr (std::same_as<T, StreamToolUseStart>) {
                 current_tool_id   = e.id.value;
                 current_tool_name = e.name.value;
@@ -296,22 +324,37 @@ void execute_calls_parallel(std::vector<ToolUse>& tcs) {
     // jthread destructors auto-join here — barrier is the scope exit.
 }
 
-// Format a one-line "what's happening now" snapshot for the parent UI.
+// Build a "T<n> dispatch <count>: tool, tool, tool" line.
 [[nodiscard]] std::string
-turn_summary(int turn, const std::vector<ToolUse>& tcs,
-             const std::string& model_id) {
+dispatch_line(int turn, const std::vector<ToolUse>& tcs) {
     std::ostringstream o;
-    o << "[investigate · " << model_id << " · turn " << turn << "] ";
-    if (tcs.empty()) {
-        o << "synthesising answer…";
-    } else {
-        o << (tcs.size() == 1 ? "calling " : "fan-out: ");
-        bool first = true;
-        for (const auto& tc : tcs) {
-            if (!first) o << ", ";
-            o << tc.name.value;
-            first = false;
-        }
+    o << "T" << turn << " dispatch " << tcs.size() << ":";
+    bool first = true;
+    for (const auto& tc : tcs) {
+        o << (first ? " " : ", ");
+        o << tc.name.value;
+        first = false;
+    }
+    return o.str();
+}
+
+// Format a per-tool result line in the structured vocabulary.
+//   T3 ok outline 120ms
+//   T3 err grep 0ms no match
+[[nodiscard]] std::string
+result_line(int turn, const ToolUse& tc) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        tc.finished_at() - tc.started_at()).count();
+    std::ostringstream o;
+    o << "T" << turn << " "
+      << (tc.is_done() ? "ok " : "err ")
+      << tc.name.value << " " << ms << "ms";
+    if (tc.is_failed()) {
+        std::string_view first_line = tc.output();
+        if (auto nl = first_line.find('\n'); nl != std::string_view::npos)
+            first_line = first_line.substr(0, nl);
+        if (first_line.size() > 80) first_line = first_line.substr(0, 80);
+        if (!first_line.empty()) o << " " << first_line;
     }
     return o.str();
 }
@@ -324,10 +367,8 @@ ExecResult run_investigate(const InvestigateArgs& a) {
 
     const std::string model_id = resolve_model(a.model);
     Progress progress;
-    progress.push_line("[investigate] query: \""
-                       + (a.query.size() > 80
-                          ? a.query.substr(0, 77) + "..."
-                          : a.query) + "\"");
+    progress.line("Q: " + a.query);
+    progress.line("M: " + model_id);
 
     // Conversation accumulates over the loop. First entry: the parent's
     // question framed as a user message. Subsequent assistant messages
@@ -362,24 +403,22 @@ ExecResult run_investigate(const InvestigateArgs& a) {
                           std::chrono::system_clock::now(),
                           std::nullopt, std::nullopt};
 
-        // Stream text deltas to the parent's tool card on the LAST
-        // turn (final synthesis) — but we don't know it's the last turn
-        // until the model decides not to emit any tool calls. Easiest
-        // proxy: stream every turn's text. Most non-final turns emit
-        // very little text (just "I'll grep for X then read Y" type
-        // chatter) so the noise is minimal and the synthesis still
-        // dominates the live preview.
-        progress.push_line("[turn " + std::to_string(turn + 1)
-                           + "] thinking…");
+        // Each turn opens with a "thinking" line. Subsequent text deltas
+        // (from run_one_turn) lazily open a "synthesis" section if any.
+        // Reset the per-turn synthesis flag so the next turn can open
+        // a fresh section if it streams text.
+        progress.in_synthesis = false;
+        progress.line("T" + std::to_string(turn + 1) + " thinking");
         auto tr = run_one_turn(std::move(req), assistant, /*cancel=*/{},
-                               &progress, /*stream_text_to_progress=*/true);
+                               &progress, /*turn_number=*/turn + 1);
 
         if (!tr.error.empty()) {
             return std::unexpected(ToolError::network(
                 "investigate sub-agent failed mid-stream: " + tr.error));
         }
 
-        // No tool calls → terminal answer. Capture and return.
+        // No tool calls → terminal answer. The synthesis_delta calls
+        // already streamed the body; just record the final and exit.
         if (assistant.tool_calls.empty()) {
             final_text = assistant.text;
             last_stop  = tr.stop;
@@ -387,13 +426,23 @@ ExecResult run_investigate(const InvestigateArgs& a) {
         }
 
         total_tools += static_cast<int>(assistant.tool_calls.size());
-        progress.push_line(turn_summary(turn + 1, assistant.tool_calls, model_id));
+        progress.line(dispatch_line(turn + 1, assistant.tool_calls));
 
         // Concurrent dispatch — read-only by construction, no permission
         // gate or cross-effect serialisation needed inside the sub-agent.
         // The parent's effect-aware scheduler still handles the parent-
         // level interaction (the investigate Cmd itself).
         execute_calls_parallel(assistant.tool_calls);
+
+        // Per-tool result lines — gives the view per-tool ✓/✗ + ms.
+        int ok_count = 0, err_count = 0;
+        for (const auto& tc : assistant.tool_calls) {
+            progress.line(result_line(turn + 1, tc));
+            if (tc.is_done()) ++ok_count; else ++err_count;
+        }
+        progress.line("T" + std::to_string(turn + 1) + " done "
+                      + std::to_string(ok_count) + "/"
+                      + std::to_string(assistant.tool_calls.size()));
 
         messages.push_back(std::move(assistant));
         last_stop = tr.stop;
