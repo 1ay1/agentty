@@ -39,9 +39,10 @@ Build needs GCC 14+ or Clang 18+ (`std::expected`, `std::format`, designated ini
 ```
 Enter      send                   ^K     command palette
 Alt+Enter  newline                ^J     thread list
-Ctrl+E     expand composer        ^/     model picker
-Esc        cancel / reject        ^N     new thread
-S-Tab      cycle profile          ^C     quit
+Ctrl+E     expand composer        ^T     todo / plan
+Esc        cancel / reject        ^/     model picker
+S-Tab      cycle profile          ^N     new thread
+                                  ^C     quit
 ```
 
 ## Architecture

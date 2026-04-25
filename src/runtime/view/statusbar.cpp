@@ -579,35 +579,38 @@ Element status_bar(const Model& m) {
     }
 
     // ── Responsive shortcut row ─────────────────────────────────────────
-    // At wide widths we show key+label pairs for all 6 bindings. As space
-    // shrinks we drop progressively:
-    //   ≥ 95 cols: full set with labels
-    //   ≥ 70 cols: full set, key-only (no labels)
-    //   ≥ 55 cols: drop S-Tab + ^/, key-only
+    // Width-based progressive disclosure. Quit (^C) always stays in
+    // danger red and always last. Shortcut ordering kept stable so
+    // muscle memory doesn't shift between widths.
+    //   ≥ 110 cols: full set with labels
+    //   ≥  85 cols: full set, key-only (no labels)
+    //   ≥  55 cols: drop S-Tab + ^/, key-only
     //   <  55 cols: only ^K · ^J · ^N · ^C, key-only
-    // Quit (^C) always stays in danger red and always last. Shortcut
-    // ordering kept stable so muscle memory doesn't shift between widths.
     auto shortcuts = Element{ComponentElement{
         .render = [](int w, int /*h*/) -> Element {
             struct Bind { const char* key; const char* label; Color c; };
             static constexpr Bind kAll[] = {
                 {"^K",    "palette", maya::Color::cyan()},
                 {"^J",    "threads", maya::Color::cyan()},
+                {"^T",    "todo",    maya::Color::cyan()},
                 {"S-Tab", "profile", maya::Color::cyan()},
                 {"^/",    "models",  maya::Color::cyan()},
                 {"^N",    "new",     maya::Color::cyan()},
                 {"^C",    "quit",    maya::Color::red()},
             };
-            bool show_label = (w >= 95);
-            // Drop indices for narrow widths. We always keep ^K, ^J, ^N, ^C.
-            // S-Tab (idx 2) and ^/ (idx 3) drop first.
+            bool show_label = (w >= 110);
+            // Drop indices for narrow widths. We always keep ^K, ^J,
+            // ^T, ^N, ^C — the bindings users hit reflexively. S-Tab
+            // (idx 3) and ^/ (idx 4) drop first because they're for
+            // less frequent context-switches.
             std::vector<int> keep;
-            keep.reserve(6);
+            keep.reserve(7);
             keep.push_back(0);          // ^K
             keep.push_back(1);          // ^J
-            if (w >= 55) { keep.push_back(2); keep.push_back(3); }
-            keep.push_back(4);          // ^N
-            keep.push_back(5);          // ^C
+            keep.push_back(2);          // ^T
+            if (w >= 55) { keep.push_back(3); keep.push_back(4); }
+            keep.push_back(5);          // ^N
+            keep.push_back(6);          // ^C
             std::vector<Element> row;
             row.reserve(keep.size() * 3 + 1);
             row.push_back(text(" ", {}));
