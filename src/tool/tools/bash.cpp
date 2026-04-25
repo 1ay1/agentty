@@ -4,6 +4,7 @@
 #include "moha/tool/util/arg_reader.hpp"
 #include "moha/tool/util/bash_validate.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
+#include "moha/tool/util/sandbox.hpp"
 #include "moha/tool/util/subprocess.hpp"
 #include "moha/tool/util/tool_args.hpp"
 
@@ -119,7 +120,13 @@ ExecResult run_bash(const BashArgs& a) {
         effective = "cd " + q + " && " + cmd_str;
 #endif
     }
-    auto r = util::run_command_s(effective, 30000, std::chrono::seconds{tmo_s});
+    // sandbox::run_shell_command is a drop-in for run_command_s when
+    // sandbox is off; when active (bwrap on Linux / sandbox-exec on
+    // macOS) it wraps the shell call so the model can't escape the
+    // workspace via `cd` / absolute paths / shell tricks. The user's
+    // declared `cd` arg is already workspace-checked above; this is
+    // the runtime layer that catches what the body does.
+    auto r = util::sandbox::run_shell_command(effective, 30000, std::chrono::seconds{tmo_s});
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
 

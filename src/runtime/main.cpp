@@ -39,6 +39,7 @@
 #include "moha/io/persistence.hpp"
 #include "moha/provider/anthropic/provider.hpp"
 #include "moha/tool/util/fs_helpers.hpp"
+#include "moha/tool/util/sandbox.hpp"
 
 namespace {
 
@@ -57,6 +58,11 @@ void print_usage() {
         "  -m, --model ID      Model id (e.g. claude-opus-4-5)\n"
         "  -w, --workspace DIR Sandbox filesystem tools to this directory\n"
         "                      (default: cwd). Tools refuse paths outside it.\n"
+        "      --sandbox MODE  Wrap bash/diagnostics in an OS-native sandbox\n"
+        "                      (Linux: bwrap, macOS: sandbox-exec).\n"
+        "                      MODE = auto (default: use if available),\n"
+        "                             on  (require backend; fail otherwise),\n"
+        "                             off (disable wrapping).\n"
         "\n");
 }
 
@@ -65,6 +71,7 @@ struct Args {
     std::string cli_key;
     std::string cli_model;
     std::string cli_workspace;
+    std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
     bool        bad = false;
 };
 
@@ -80,6 +87,8 @@ Args parse_args(int argc, char** argv) {
             out.cli_model = argv[++i];
         } else if ((a == "-w" || a == "--workspace") && i + 1 < argc) {
             out.cli_workspace = argv[++i];
+        } else if (a == "--sandbox" && i + 1 < argc) {
+            out.cli_sandbox = argv[++i];
         } else if (a == "-h" || a == "--help") {
             out.subcommand = "help";
         } else {
@@ -164,6 +173,38 @@ int main(int argc, char** argv) {
         std::error_code ec;
         auto cwd = std::filesystem::current_path(ec);
         if (!ec) tools::util::set_workspace_root(std::move(cwd));
+    }
+
+    // ── Bash / diagnostics sandbox ──────────────────────────────────────
+    // Wraps shell commands in bwrap (Linux) or sandbox-exec (macOS) so an
+    // approved bash call can't read ~/.ssh, write /etc, or `rm -rf ~`.
+    // `auto` (default): use if available, log warning otherwise. `on`:
+    // fail loud if the backend is missing — for users who'd rather not
+    // run unsandboxed at all. `off`: explicit opt-out for environments
+    // where the user has external isolation (Docker, VM, whatever).
+    {
+        auto mode = tools::util::sandbox::Mode::Auto;
+        if (args.cli_sandbox == "off")       mode = tools::util::sandbox::Mode::Off;
+        else if (args.cli_sandbox == "on")   mode = tools::util::sandbox::Mode::On;
+        else if (args.cli_sandbox == "auto"
+              || args.cli_sandbox.empty())   mode = tools::util::sandbox::Mode::Auto;
+        else {
+            std::fprintf(stderr,
+                "moha: --sandbox must be auto, on, or off (got '%s')\n",
+                args.cli_sandbox.c_str());
+            return 2;
+        }
+        bool ok = tools::util::sandbox::init(mode);
+        if (!ok) {
+            std::fprintf(stderr,
+                "moha: --sandbox=on but no backend available. %s\n",
+                tools::util::sandbox::describe_state().c_str());
+            return 2;
+        }
+        // Status line so the user knows what they got. Stdout is fine —
+        // maya runs after this returns, no clobbering.
+        std::fprintf(stderr, "moha: %s\n",
+                     tools::util::sandbox::describe_state().c_str());
     }
 
     // ── Wire the Provider + Store seams ─────────────────────────────────

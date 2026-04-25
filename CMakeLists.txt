@@ -287,6 +287,7 @@ set(MOHA_TOOL_SOURCES
     src/tool/util/fs_helpers.cpp
     src/tool/util/glob_match.cpp
     src/tool/util/subprocess.cpp
+    src/tool/util/sandbox.cpp
     src/tool/util/bash_validate.cpp
     src/tool/util/arg_reader.cpp
     src/tool/util/partial_json.cpp

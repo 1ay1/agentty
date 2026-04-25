@@ -1,6 +1,7 @@
 #include "moha/tool/spec.hpp"
 #include "moha/tool/tools.hpp"
 #include "moha/tool/util/arg_reader.hpp"
+#include "moha/tool/util/sandbox.hpp"
 #include "moha/tool/util/subprocess.hpp"
 #include "moha/tool/util/tool_args.hpp"
 
@@ -66,8 +67,17 @@ ExecResult run_diagnostics(const DiagnosticsArgs& a) {
         if (auto_argv.empty())
             return std::unexpected(ToolError::not_found("no build system detected; pass a command"));
     }
-    auto output = auto_argv.empty() ? util::run_command(a.command)
-                                    : util::run_argv(auto_argv);
+    // Both branches go through the sandbox layer: user-supplied
+    // command via shell form (worst case is `bash`-equivalent, so
+    // wrap), auto-detected via argv form (cmake/cargo/go/npm/make
+    // are well-known but still write to disk; sandbox lets them write
+    // inside the workspace and nowhere else).
+    auto sub = auto_argv.empty()
+        ? util::sandbox::run_shell_command(a.command, /*max_bytes*/30'000,
+                                           std::chrono::seconds{120})
+        : util::sandbox::run_argv(auto_argv, /*max_bytes*/30'000,
+                                  std::chrono::seconds{120});
+    auto output = util::legacy_format(sub, std::chrono::seconds{120});
     if (output.empty()) return ToolOutput{"no diagnostics (clean build)", std::nullopt};
     if (!a.display_description.empty())
         output = a.display_description + "\n\n" + output;
