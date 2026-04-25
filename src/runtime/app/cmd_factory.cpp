@@ -54,6 +54,17 @@ Cmd<Msg> launch_stream(Model& m) {
     req.cancel = std::make_shared<http::CancelToken>();
     m.s.cancel = req.cancel;
 
+    // Reset the stall watchdog baseline at *launch* time (not StreamStarted
+    // time) so the threshold counts time since *this* request was issued,
+    // not time since some prior stream's last delta. Without this the
+    // watchdog inherits a stale `last_event_at` from a long preceding
+    // tool-execution phase and trips on the first ~20s of legitimate TTFT
+    // when the new stream begins. The Tick handler also rebases while
+    // non-streaming, so this is belt-and-suspenders for the brief window
+    // between phase=Streaming and the first SSE byte.
+    m.s.last_event_at = std::chrono::steady_clock::now();
+    m.s.retry_state   = retry::Fresh{};
+
     return Cmd<Msg>::task([req = std::move(req)](std::function<void(Msg)> dispatch) mutable {
         try {
             deps().stream(std::move(req), [dispatch](Msg m) {

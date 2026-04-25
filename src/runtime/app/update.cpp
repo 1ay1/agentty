@@ -896,7 +896,33 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 && m.s.last_event_at.time_since_epoch().count() != 0) {
                 m.s.last_event_at += tick_gap;
             }
-            constexpr auto kStallSecs = std::chrono::seconds(120);
+
+            // Non-streaming phases (ExecutingTool, AwaitingPermission,
+            // Idle) emit zero SSE events by construction, so without an
+            // explicit rebase here `last_event_at` would freeze for the
+            // duration of the phase. When we then transition BACK to
+            // Streaming for the post-tool turn, the watchdog would see
+            // `now - last_event_at` already in the tens of seconds and
+            // trip on the next ~20 s of legitimate TTFT — exactly the
+            // false-positive the user reported as "stream stalled — no
+            // events for 214s" appearing right after a 100 s+
+            // investigate run. Treating "stream is not actively
+            // running" as continuous freshness lets the post-tool
+            // stream start its own clock.
+            if (!m.s.is_streaming()
+                && m.s.last_event_at.time_since_epoch().count() != 0) {
+                m.s.last_event_at = now;
+            }
+
+            // 180 s was 120 s. Bumped because the post-tool resume on a
+            // big-context thread (200 k tokens after an investigate that
+            // pulled in a chunk of repo) can legitimately take 60-90 s of
+            // Anthropic-side TTFT before the first SSE byte. The HTTP
+            // layer's 90 s idle + 15 s PING probe still catches dead
+            // sockets at the lower-level — the reducer watchdog only
+            // owns the "PING ACKs alive but app layer never advanced"
+            // case, which we want to give comfortable headroom.
+            constexpr auto kStallSecs = std::chrono::seconds(180);
             if (m.s.is_streaming() && m.s.active()
                 && m.s.in_fresh()
                 && m.s.last_event_at.time_since_epoch().count() != 0

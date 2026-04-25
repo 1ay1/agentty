@@ -201,10 +201,30 @@ int main(int argc, char** argv) {
                 tools::util::sandbox::describe_state().c_str());
             return 2;
         }
-        // Status line so the user knows what they got. Stdout is fine —
-        // maya runs after this returns, no clobbering.
-        std::fprintf(stderr, "moha: %s\n",
-                     tools::util::sandbox::describe_state().c_str());
+        // Print the status line ONLY when it carries actionable signal:
+        //   * Sandbox actively engaged (the user wants to know).
+        //   * User explicitly passed --sandbox=on or =off (confirm intent).
+        // On Windows in the default `auto` mode with no backend this is
+        // ALWAYS "unavailable, no backend on this platform" — printing it
+        // every launch is noise the user can't act on, and the stderr
+        // line above maya's inline frame can confuse the very first
+        // render's cursor positioning. Silent unsandboxed-fallback is
+        // the right default; users who care can `--sandbox=on`.
+        const bool noisy_state = tools::util::sandbox::is_active()
+                              || !args.cli_sandbox.empty();
+        if (noisy_state) {
+            std::fprintf(stderr, "moha: %s\n",
+                         tools::util::sandbox::describe_state().c_str());
+        }
+        // Drain any stdio buffer to the console BEFORE maya enters raw
+        // mode. fprintf goes through C runtime buffers; maya's writes
+        // go through WriteFile. Mixing them with no flush in between
+        // can leave the console cursor at an inconsistent position
+        // when maya paints the first inline frame, which in turn made
+        // the initial UI invisible until the first keystroke forced a
+        // re-paint. Belt-and-suspenders for the silent path too.
+        std::fflush(stderr);
+        std::fflush(stdout);
     }
 
     // ── Wire the Provider + Store seams ─────────────────────────────────
