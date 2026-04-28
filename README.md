@@ -23,6 +23,47 @@ cmake -B build && cmake --build build
 
 GCC 14+ / Clang 18+, CMake 3.28+. Auth happens in-app on first launch.
 
+## Getting started
+
+```bash
+cd path/to/your/project   # cwd is the workspace root
+./build/moha              # or `moha` if it's on PATH
+```
+
+### Auth
+
+First launch opens an auth modal with two paths:
+
+- **API key.** Paste an Anthropic-issued `sk-ant-…` token. Saved to `~/.config/moha/credentials.json` (POSIX, `0600` perms) or `%USERPROFILE%\.config\moha\credentials.json` (Windows, restrictive ACL).
+- **OAuth (Claude Pro/Max).** Opens your browser to the Anthropic consent screen; the callback returns a token stored in the same `credentials.json`. The file records which auth kind it holds, so on relaunch moha picks the right header automatically (`x-api-key:` vs `Authorization: Bearer`).
+
+Override order, highest priority first — useful for ephemeral sessions, CI, or testing alternate accounts without touching the saved creds:
+
+1. `-k <key>` / `--key <key>` — single-session API key, never written to disk.
+2. `ANTHROPIC_API_KEY` env var — API-key flow.
+3. `CLAUDE_CODE_OAUTH_TOKEN` env var — OAuth flow.
+4. The on-disk `credentials.json` from the modal.
+
+CLI subcommands cover the rest:
+
+- `moha status` — prints the resolved auth state: which env vars are set, whether the on-disk creds are present, which one will actually be used.
+- `moha login` — runs the auth flow non-interactively (useful for first-time setup over SSH or in scripts).
+- `moha logout` — clears `credentials.json`. Next launch returns to the modal.
+
+Then you're in a thread. Type, hit `Enter`. The model has the full tool catalog (read/write/edit/bash/grep/git/web — see below); mid-stream typing queues your next message and lands it when the current turn finishes. `Esc` cancels a streaming response or rejects a permission prompt.
+
+You start in the `Ask` profile — writes, shell calls, and network calls each prompt before running. `S-Tab` cycles to `Write` (autonomous, no prompts) or `Minimal` (prompts for everything but pure reads). Profile choice persists across restarts.
+
+Threads live at `~/.moha/threads/<workspace-hash>/`, one JSON file per thread; safe to inspect, back up, or delete. `^J` opens the thread list — pick an old one, fork it, or hit `^N` for a new thread in the same workspace.
+
+To run against a different workspace without `cd`-ing:
+
+```bash
+./build/moha --workspace ~/code/other-project
+```
+
+Filesystem tools refuse paths outside the workspace. Pass `--workspace /` to opt out.
+
 ## What ships
 
 - **Streaming** with mid-stream input queuing — type while the model answers, your message lands when it's done.
