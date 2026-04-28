@@ -323,10 +323,24 @@ set(MOHA_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/cache.cpp
     src/runtime/view/helpers.cpp
     src/runtime/view/tool_args.cpp
+    src/runtime/view/tool_helpers.cpp
+    src/runtime/view/tool_body_preview.cpp
+    src/runtime/view/welcome_screen.cpp
+    src/runtime/view/activity_indicator.cpp
+    src/runtime/view/agent_timeline.cpp
+    src/runtime/view/turn.cpp
+    src/runtime/view/conversation.cpp
     src/runtime/view/thread.cpp
     src/runtime/view/composer.cpp
-    src/runtime/view/statusbar.cpp
-    src/runtime/view/changes.cpp
+    src/runtime/view/status_bar.cpp
+    src/runtime/view/title_chip.cpp
+    src/runtime/view/phase_chip.cpp
+    src/runtime/view/token_stream_sparkline.cpp
+    src/runtime/view/context_gauge.cpp
+    src/runtime/view/status_banner.cpp
+    src/runtime/view/shortcut_row.cpp
+    src/runtime/view/model_badge.cpp
+    src/runtime/view/changes_strip.cpp
     src/runtime/view/pickers.cpp
     src/runtime/view/diff_review.cpp
     src/runtime/view/permission.cpp

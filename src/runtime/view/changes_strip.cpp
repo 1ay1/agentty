@@ -1,4 +1,4 @@
-#include "moha/runtime/view/changes.hpp"
+#include "moha/runtime/view/changes_strip.hpp"
 
 #include "moha/runtime/view/palette.hpp"
 

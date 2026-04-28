@@ -49,6 +49,15 @@ namespace moha::ui {
 // will not shift as the value ticks.
 [[nodiscard]] std::string format_elapsed_5(float secs);
 
+// Variable-width compact elapsed-time formatter for non-fixed-width
+// surfaces (turn meta, timeline title/footer):
+//   < 1 s  → "234ms"
+//   < 60 s → "4.2s"
+//   else   → "1m20s"
+// Use this in any non-status-bar surface where exact width isn't
+// required and "234ms" / "4.2s" reads better than padded forms.
+[[nodiscard]] std::string format_duration_compact(float secs);
+
 // Context window size for a given model id. Defaults to 200 K but bumps
 // to 1 M when the model id carries the moha-internal `[1m]` tag (which
 // triggers the `context-1m-2025-08-07` beta on the wire). Used by the

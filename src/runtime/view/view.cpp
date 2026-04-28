@@ -5,12 +5,12 @@
 #include <maya/widget/app_layout.hpp>
 
 #include "moha/runtime/login.hpp"
-#include "moha/runtime/view/changes.hpp"
+#include "moha/runtime/view/changes_strip.hpp"
 #include "moha/runtime/view/composer.hpp"
 #include "moha/runtime/view/diff_review.hpp"
 #include "moha/runtime/view/login.hpp"
 #include "moha/runtime/view/pickers.hpp"
-#include "moha/runtime/view/statusbar.hpp"
+#include "moha/runtime/view/status_bar.hpp"
 #include "moha/runtime/view/thread.hpp"
 
 namespace moha::ui {

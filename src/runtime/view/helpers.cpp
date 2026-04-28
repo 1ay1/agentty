@@ -98,6 +98,20 @@ std::string format_elapsed_5(float secs) {
     return buf;
 }
 
+std::string format_duration_compact(float secs) {
+    char buf[24];
+    if      (secs < 1.0f)
+        std::snprintf(buf, sizeof(buf), "%.0fms", static_cast<double>(secs) * 1000.0);
+    else if (secs < 60.0f)
+        std::snprintf(buf, sizeof(buf), "%.1fs",  static_cast<double>(secs));
+    else {
+        int   mins = static_cast<int>(secs) / 60;
+        float rest = secs - static_cast<float>(mins * 60);
+        std::snprintf(buf, sizeof(buf), "%dm%.0fs", mins, static_cast<double>(rest));
+    }
+    return buf;
+}
+
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {
     auto tt = std::chrono::system_clock::to_time_t(tp);
     std::tm tm{};
