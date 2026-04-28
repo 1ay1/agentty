@@ -2,6 +2,8 @@
 
 How the moha terminal UI is built, primitive by primitive. Every example here is copied from the moha source — file:line citations point you at the real call site.
 
+For the full conversation rendering pipeline (how a `Thread` becomes terminal cells, function by function), see [`RENDERING.md`](RENDERING.md). This file is the maya-primitive catalog the pipeline is built on.
+
 The whole UI lives under `src/runtime/view/`. Every file in that directory pulls in `maya::dsl` via:
 
 ```cpp
@@ -208,7 +210,18 @@ Element with_turn_rail(Element content, Color rail_color) {
 `border_sides({…})` lets you turn individual edges on/off — only the left bar is drawn, in the speaker's color, running the full height of the turn.
 
 ### Downcasts
-Moha doesn't currently use `as_text` / `as_box` / `as_list` in this commit's tree, but they exist in `maya::` for consumers that want to walk the element tree.
+`maya::as_text(e)`, `maya::as_box(e)`, `maya::as_list(e)` return a typed pointer when the variant matches, otherwise `nullptr`. Moha uses them in the assistant-timeline body cascade ([`thread.cpp:1102-1112`](../src/runtime/view/thread.cpp#L1102)) to flatten a per-tool body element into individual rows so each line gets its own `│` stripe:
+
+```cpp
+Element body_el = compact_tool_body(tc);
+if (auto* bx = maya::as_box(body_el)) {
+    for (const auto& child : bx->children)
+        rows.push_back((h(body_rule, child) | grow(1.0f)).build());
+} else if (auto* t = maya::as_text(body_el)) {
+    if (!t->content.empty())
+        rows.push_back((h(body_rule, body_el) | grow(1.0f)).build());
+}
+```
 
 ---
 
@@ -293,8 +306,12 @@ Used by the composer's border, the status bar's leading rail, and the bottom edg
 
 Each widget is a stateful builder you instantiate, configure, then `.build()` into an `Element`. Inclusion lives in the cpp that uses it.
 
-### Markdown — `markdown.hpp`
-Two flavors:
+> **Important:** the per-tool execution widgets (`ReadTool`, `WriteTool`, `EditTool`, `BashTool`, `FetchTool`, `SearchResult`, `GitStatusWidget`, `GitGraph`, `GitCommitTool`, `TodoListTool`, `ToolCall`) are wrapped by `render_tool_call` in [`tool_card.cpp`](../src/runtime/view/tool_card.cpp) but **`render_tool_call` has no call sites at this commit**. The conversation pipeline (described in [`RENDERING.md`](RENDERING.md)) renders tools through `compact_tool_body` in `thread.cpp` using only `dsl::text` / `dsl::v` / `dsl::h`. The widgets below marked **dormant** are compiled in but unreachable from the live UI; they are listed here as the maya surface area moha is *built to use* and would re-engage if a future render path called `render_tool_call`.
+
+### Live in the conversation surface
+
+#### Markdown — `markdown.hpp`
+Two flavors, both live:
 
 - `maya::markdown(text)` — one-shot. Used for finalized assistant messages because the text is immutable; cached forever via `MessageMdCache::finalized`.
 - `maya::StreamingMarkdown` — incremental. `set_content()` accepts the growing buffer; internal block-boundary cache makes each delta `O(new_chars)` rather than re-parsing the whole transcript.
@@ -317,50 +334,37 @@ Element cached_markdown_for(const Message& msg, const ThreadId& tid, std::size_t
 }
 ```
 
-### `ToolCall` — `tool_call.hpp`
-Generic tool card chrome (border + title + icon + expanded body). Used as the fallback when no specialized widget exists ([`tool_card.cpp:70-85`](../src/runtime/view/tool_card.cpp)):
+#### `Permission` — `permission.hpp` *(live)*
+Inline approval card rendered under the timeline when a tool needs user authorization. `Permission::Config` carries `tool_name` + `description` + `show_always_allow`:
 
 ```cpp
-maya::ToolCall::Config cfg;
-cfg.tool_name = name;
-cfg.kind = kind;
-cfg.description = desc;
-maya::ToolCall card(cfg);
-card.set_expanded(expanded);
-card.set_status(tc_status(status));
-card.set_elapsed(elapsed);
-if (!output.empty())
-    card.set_content(text(output, fg_of(muted)));
-return card.build();
+// src/runtime/view/permission.cpp:35-40
+Permission::Config cfg;
+cfg.tool_name = tc.name.value;
+cfg.description = desc.empty() ? pp.reason : desc;
+cfg.show_always_allow = true;
+Permission perm(std::move(cfg));
+return perm.build();
 ```
 
-`ToolCallStatus` enum: `Running / Completed / Failed`. `ToolCallKind` is a hint for the icon family (Edit / Read / Other / etc.).
+### Live outside the conversation surface (chrome / modals / status)
 
-### Per-tool widgets — `read_tool.hpp`, `write_tool.hpp`, `edit_tool.hpp`, `bash_tool.hpp`, `fetch_tool.hpp`, `search_result.hpp`, `git_commit_tool.hpp`, `git_status.hpp`, `git_graph.hpp`, `todo_list.hpp`
-Each models its tool's specific affordances:
-
-- **`ReadTool`** — `set_start_line`, `set_total_lines`, `set_max_lines`, status enum `ReadStatus::{Reading, Failed, Success}`. Used for both `read` and `list_dir` ([`tool_card.cpp:185-215`](../src/runtime/view/tool_card.cpp)).
-- **`WriteTool`** — `set_content`, `set_max_preview_lines`. Status `WriteStatus::{Writing, Failed, Written}`. Falls back to a "(streaming…)" header while args are still arriving ([`tool_card.cpp:217-243`](../src/runtime/view/tool_card.cpp)).
-- **`EditTool`** — `set_old_text` / `set_new_text` for legacy single-edit shape; `set_edits(vector<EditPair>)` for the canonical `edits[]` array. Always expanded — the diff IS the point ([`tool_card.cpp:245-317`](../src/runtime/view/tool_card.cpp)).
-- **`BashTool`** — `set_output`, `set_exit_code`, `set_max_output_lines`. While running, the output field is fed `tc.progress_text()` (live stdout snapshot); on completion it gets the final fenced output ([`tool_card.cpp:319-338`](../src/runtime/view/tool_card.cpp)).
-- **`SearchResult`** — `add_group(SearchFileGroup)`, `set_max_matches_per_file`. Two `SearchKind` modes (`Grep` / `Glob`); the parser handles both moha's markdown grep output and the legacy `path:line:content` shape ([`tool_card.cpp:87-173`](../src/runtime/view/tool_card.cpp)).
-- **`FetchTool`** — `set_url`, `set_status_code`, `set_content_type`, `set_body`. Used for both `web_fetch` and `web_search` (the search results body is rendered as the fetch body) ([`tool_card.cpp:390-436`](../src/runtime/view/tool_card.cpp)).
-- **`GitStatusWidget`** — `set_branch`, `set_ahead/behind`, `set_dirty(M, S, U)`. Parser walks `--porcelain=v2` output ([`tool_card.cpp:438-478`](../src/runtime/view/tool_card.cpp)).
-- **`GitGraph`** + **`GitCommit`** — Each commit added with `add_commit()`. Renders an ASCII commit graph ([`tool_card.cpp:480-523`](../src/runtime/view/tool_card.cpp)).
-- **`GitCommitTool`** — Specialized commit card with subject, body, output. ([`tool_card.cpp:551-560`](../src/runtime/view/tool_card.cpp)).
-- **`TodoListTool`** + **`TodoListItem`** — `add(TodoListItem)` per todo; status enum `TodoItemStatus::{Pending, InProgress, Completed}` ([`tool_card.cpp:562-587`](../src/runtime/view/tool_card.cpp)).
-
-### `DiffView` — `diff_view.hpp`
-Renders a unified-diff string into colored hunks. Used inside `git_diff` cards and in the diff review modal:
+#### `ModelBadge` — `model_badge.hpp` *(live)*
+Brand chip for the current model. `set_model(id)` parses the model id; `set_compact(true)` shrinks for the status bar:
 
 ```cpp
-// src/runtime/view/diff_review.cpp:66-67
-DiffView dv(fc.path, h_.patch);
-rows.push_back((v(dv.build()) | padding(0, 0, 0, 2)).build());
+// src/runtime/view/statusbar.cpp:489-494
+ModelBadge mb;
+mb.set_model(m.d.model_id.value);
+mb.set_compact(true);
+right_parts.push_back(mb.build());
 ```
 
-### `FileChanges` — `file_changes.hpp`
-Compact summary of pending file changes — the strip below the thread when there are uncommitted edits to review:
+#### `compact_token_stream` — `token_stream.hpp` *(live)*
+Live tok/s number + sparkline. Free function returning an Element directly. Used in the status bar for the streaming rate display.
+
+#### `FileChanges` — `file_changes.hpp` *(live)*
+Compact summary of pending file changes — the strip below the thread when there are uncommitted edits:
 
 ```cpp
 // src/runtime/view/changes.cpp:16-22
@@ -373,61 +377,40 @@ for (const auto& c : m.d.pending_changes) {
 }
 ```
 
-### `Permission` — `permission.hpp`
-Inline approval card. `Permission::Config` carries `tool_name` + `description` + `show_always_allow`:
+#### `DiffView` — `diff_view.hpp` *(live in the diff-review modal)*
+Renders a unified-diff string into colored hunks. Used per-hunk in the review modal:
 
 ```cpp
-// src/runtime/view/permission.cpp:35-40
-Permission::Config cfg;
-cfg.tool_name = tc.name.value;
-cfg.description = desc.empty() ? pp.reason : desc;
-cfg.show_always_allow = true;
-Permission perm(std::move(cfg));
-return perm.build();
+// src/runtime/view/diff_review.cpp:66-67
+DiffView dv(fc.path, h_.patch);
+rows.push_back((v(dv.build()) | padding(0, 0, 0, 2)).build());
 ```
 
-### `ModelBadge` — `model_badge.hpp`
-Brand chip for the current model. `set_model(id)` parses the model id; `set_compact(true)` shrinks for the status bar:
+#### `PlanView` + `TaskStatus` — `plan_view.hpp` *(live in the `/plan` modal)*
+Renders the agent's todo list. `TaskStatus::{Pending, InProgress, Completed}`.
 
-```cpp
-// src/runtime/view/statusbar.cpp:489-494
-ModelBadge mb;
-mb.set_model(m.d.model_id.value);
-mb.set_compact(true);
-right_parts.push_back(mb.build());
-```
+#### `Spinner<SpinnerStyle::Dots>` *(live)*
+Lives on `StreamState::spinner`. Tick handler advances frames; status bar / composer pull `frame_index()`.
 
-### `compact_token_stream` — `token_stream.hpp`
-Live tok/s number + sparkline. Returns an Element directly (free function, not a builder class):
+### Dormant — wrapped by the unreachable `render_tool_call` path
 
-```cpp
-// src/runtime/view/statusbar.cpp:480-485
-right_parts.push_back(compact_token_stream(
-    disp_rate, static_cast<int>(approx_tok),
-    std::span<const float>{hist.data(), hist.size()},
-    highlight, /*live=*/is_streaming));
-```
+Each of these is fully implemented in `render_tool_call_uncached` ([`tool_card.cpp:175-592`](../src/runtime/view/tool_card.cpp#L175)). At this commit, `render_tool_call` is declared in `thread.hpp` but never called.
 
-### `PlanView` + `TaskStatus` — `plan_view.hpp`
-Used by the `/plan` modal to render the agent's todo list. `TaskStatus::{Pending, InProgress, Completed}`:
+#### `ToolCall` — `tool_call.hpp` *(dormant)*
+Generic tool card chrome (border + title + icon + expanded body). The fallback when no specialized widget matches ([`tool_card.cpp:70-85`](../src/runtime/view/tool_card.cpp#L70)). `ToolCallStatus` enum: `Running / Completed / Failed`. `ToolCallKind` is a hint for the icon family (Edit / Read / Other / etc.).
 
-```cpp
-// src/runtime/view/pickers.cpp:129-139
-maya::PlanView plan;
-for (const auto& item : m.ui.todo.items) {
-    maya::TaskStatus ts;
-    switch (item.status) {
-        case TodoStatus::Pending:    ts = maya::TaskStatus::Pending;    break;
-        case TodoStatus::InProgress: ts = maya::TaskStatus::InProgress; break;
-        case TodoStatus::Completed:  ts = maya::TaskStatus::Completed;  break;
-    }
-    plan.add(item.content, ts);
-}
-rows.push_back(plan.build());
-```
+#### Per-tool widgets — `read_tool.hpp`, `write_tool.hpp`, `edit_tool.hpp`, `bash_tool.hpp`, `fetch_tool.hpp`, `search_result.hpp`, `git_commit_tool.hpp`, `git_status.hpp`, `git_graph.hpp`, `todo_list.hpp` *(all dormant)*
 
-### `Spinner<SpinnerStyle::Dots>`
-Lives on `StreamState::spinner` ([`include/moha/domain/session.hpp`](../include/moha/domain/session.hpp)). The reducer's Tick handler calls `m.s.spinner.advance(dt)` to step the frame; the view calls `.build()` (or pulls the frame index for use in a custom row).
+- **`ReadTool`** — `set_start_line`, `set_total_lines`, `set_max_lines`, status enum `ReadStatus::{Reading, Failed, Success}`. Wired for `read` and `list_dir` ([`tool_card.cpp:185-215`](../src/runtime/view/tool_card.cpp#L185)).
+- **`WriteTool`** — `set_content`, `set_max_preview_lines`. Status `WriteStatus::{Writing, Failed, Written}`. Falls back to a "(streaming…)" header while args are still arriving ([`tool_card.cpp:217-243`](../src/runtime/view/tool_card.cpp#L217)).
+- **`EditTool`** — `set_old_text` / `set_new_text` for legacy single-edit shape; `set_edits(vector<EditPair>)` for the canonical `edits[]` array. Always expanded — the diff IS the point ([`tool_card.cpp:245-317`](../src/runtime/view/tool_card.cpp#L245)).
+- **`BashTool`** — `set_output`, `set_exit_code`, `set_max_output_lines`. While running, the output field is fed `tc.progress_text()` (live stdout snapshot); on completion it gets the final fenced output ([`tool_card.cpp:319-338`](../src/runtime/view/tool_card.cpp#L319)).
+- **`SearchResult`** — `add_group(SearchFileGroup)`, `set_max_matches_per_file`. Two `SearchKind` modes (`Grep` / `Glob`); the parser handles both moha's markdown grep output and the legacy `path:line:content` shape ([`tool_card.cpp:87-173`](../src/runtime/view/tool_card.cpp#L87)).
+- **`FetchTool`** — `set_url`, `set_status_code`, `set_content_type`, `set_body`. Wired for both `web_fetch` and `web_search` ([`tool_card.cpp:390-436`](../src/runtime/view/tool_card.cpp#L390)).
+- **`GitStatusWidget`** — `set_branch`, `set_ahead/behind`, `set_dirty(M, S, U)`. Parser walks `--porcelain=v2` output ([`tool_card.cpp:438-478`](../src/runtime/view/tool_card.cpp#L438)).
+- **`GitGraph`** + **`GitCommit`** — Each commit added with `add_commit()`. Renders an ASCII commit graph ([`tool_card.cpp:480-523`](../src/runtime/view/tool_card.cpp#L480)).
+- **`GitCommitTool`** — Specialized commit card with subject, body, output ([`tool_card.cpp:551-560`](../src/runtime/view/tool_card.cpp#L551)).
+- **`TodoListTool`** + **`TodoListItem`** — `add(TodoListItem)` per todo; status enum `TodoItemStatus::{Pending, InProgress, Completed}` ([`tool_card.cpp:562-587`](../src/runtime/view/tool_card.cpp#L562)).
 
 ---
 
@@ -435,9 +418,9 @@ Lives on `StreamState::spinner` ([`include/moha/domain/session.hpp`](../include/
 
 Three caches in [`include/moha/runtime/view/cache.hpp`](../include/moha/runtime/view/cache.hpp):
 
-- **`tool_card_cache(ToolCallId)`** — keyed cache of rendered tool-card Elements, only populated for terminal-state tools. Re-rendered if `compute_render_key()` (FNV over output size + status + expanded) doesn't match. Purpose: a chat with 40 finished tool calls otherwise rebuilds 40 borders + Yoga layouts every frame ([`tool_card.cpp:601-612`](../src/runtime/view/tool_card.cpp)).
-- **`message_md_cache(ThreadId, msg_idx)`** — finalized markdown built once and reused; streaming markdown reuses the same `StreamingMarkdown` instance across deltas so block-boundary caching kicks in ([`thread.cpp:34-48`](../src/runtime/view/thread.cpp)).
-- **(in this commit, no whole-turn cache)** — render_message rebuilds the turn shell every frame; later commits added a `TurnElementCache` for inline-mode scrollback stability.
+- **`tool_card_cache(ToolCallId)`** — keyed cache of rendered tool-card Elements, only populated for terminal-state tools. Re-rendered if `compute_render_key()` (FNV over output size + status + expanded) doesn't match. **Only called by the dormant `render_tool_call` path** ([`tool_card.cpp:601-612`](../src/runtime/view/tool_card.cpp#L601)) — unused at this commit.
+- **`message_md_cache(ThreadId, msg_idx)`** — finalized markdown built once and reused; streaming markdown reuses the same `StreamingMarkdown` instance across deltas so block-boundary caching kicks in ([`thread.cpp:34-48`](../src/runtime/view/thread.cpp)). **This is the only cache the live conversation pipeline exercises.**
+- **(in this commit, no whole-turn cache)** — `render_message` rebuilds the turn shell every frame; later commits added a `TurnElementCache` for inline-mode scrollback stability.
 
 ---
 
