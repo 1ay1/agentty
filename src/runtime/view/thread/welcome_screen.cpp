@@ -1,4 +1,4 @@
-#include "moha/runtime/view/welcome_screen.hpp"
+#include "moha/runtime/view/thread/welcome_screen.hpp"
 
 #include <maya/widget/model_badge.hpp>
 

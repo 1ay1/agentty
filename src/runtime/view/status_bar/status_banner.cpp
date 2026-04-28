@@ -1,4 +1,4 @@
-#include "moha/runtime/view/status_banner.hpp"
+#include "moha/runtime/view/status_bar/status_banner.hpp"
 
 #include <chrono>
 

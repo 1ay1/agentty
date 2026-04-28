@@ -98,14 +98,13 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             m.s.status_until = {};
             // Reset the live-rate accumulator so each sub-turn (post-tool)
             // measures its own generation speed instead of polluting the
-            // average with the previous turn's bytes.
+            // CURRENT-rate display with the previous turn's bytes. The
+            // sparkline ring (rate_history) is NOT wiped — it carries
+            // across sub-turns / tool gaps so the user sees a continuous
+            // trace of generation rate over the whole session, not a fresh
+            // empty bar after every tool call.
             m.s.live_delta_bytes = 0;
             m.s.first_delta_at = {};
-            // Wipe the sparkline ring so each fresh stream starts with an
-            // empty bar. The Tick handler refills it as bytes arrive.
-            m.s.rate_history.fill(0.0f);
-            m.s.rate_history_pos = 0;
-            m.s.rate_history_full = false;
             m.s.rate_last_sample_at = {};
             m.s.rate_last_sample_bytes = 0;
             return done(std::move(m));

@@ -1,4 +1,4 @@
-#include "moha/runtime/view/model_badge.hpp"
+#include "moha/runtime/view/status_bar/model_badge.hpp"
 
 namespace moha::ui {
 

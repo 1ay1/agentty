@@ -1,4 +1,4 @@
-#include "moha/runtime/view/context_gauge.hpp"
+#include "moha/runtime/view/status_bar/context_gauge.hpp"
 
 namespace moha::ui {
 

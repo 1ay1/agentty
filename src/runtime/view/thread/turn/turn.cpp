@@ -1,4 +1,4 @@
-#include "moha/runtime/view/turn.hpp"
+#include "moha/runtime/view/thread/turn/turn.hpp"
 
 #include <chrono>
 #include <memory>
@@ -8,11 +8,11 @@
 
 #include <maya/widget/markdown.hpp>
 
-#include "moha/runtime/view/agent_timeline.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 #include "moha/runtime/view/cache.hpp"
 #include "moha/runtime/view/helpers.hpp"
 #include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/permission.hpp"
+#include "moha/runtime/view/thread/turn/permission.hpp"
 
 namespace moha::ui {
 

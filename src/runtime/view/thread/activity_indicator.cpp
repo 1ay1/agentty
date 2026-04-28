@@ -1,4 +1,4 @@
-#include "moha/runtime/view/activity_indicator.hpp"
+#include "moha/runtime/view/thread/activity_indicator.hpp"
 
 #include <algorithm>
 #include <string>

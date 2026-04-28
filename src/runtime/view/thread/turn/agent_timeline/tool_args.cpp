@@ -3,7 +3,7 @@
 // shaping — so both thread.cpp (timeline compact-body) and tool_card.cpp
 // (widget render) can link against it without dragging widget headers.
 
-#include "moha/runtime/view/tool_args.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 #include <chrono>
 

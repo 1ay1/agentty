@@ -1,4 +1,4 @@
-#include "moha/runtime/view/shortcut_row.hpp"
+#include "moha/runtime/view/status_bar/shortcut_row.hpp"
 
 #include "moha/runtime/view/palette.hpp"
 

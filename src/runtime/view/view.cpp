@@ -10,8 +10,8 @@
 #include "moha/runtime/view/diff_review.hpp"
 #include "moha/runtime/view/login.hpp"
 #include "moha/runtime/view/pickers.hpp"
-#include "moha/runtime/view/status_bar.hpp"
-#include "moha/runtime/view/thread.hpp"
+#include "moha/runtime/view/status_bar/status_bar.hpp"
+#include "moha/runtime/view/thread/thread.hpp"
 
 namespace moha::ui {
 

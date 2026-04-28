@@ -1,4 +1,4 @@
-#include "moha/runtime/view/token_stream_sparkline.hpp"
+#include "moha/runtime/view/status_bar/token_stream_sparkline.hpp"
 
 #include <algorithm>
 #include <chrono>

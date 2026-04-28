@@ -1,10 +1,10 @@
-#include "moha/runtime/view/conversation.hpp"
+#include "moha/runtime/view/thread/conversation.hpp"
 
 #include <algorithm>
 #include <cstddef>
 
-#include "moha/runtime/view/activity_indicator.hpp"
-#include "moha/runtime/view/turn.hpp"
+#include "moha/runtime/view/thread/activity_indicator.hpp"
+#include "moha/runtime/view/thread/turn/turn.hpp"
 
 namespace moha::ui {
 

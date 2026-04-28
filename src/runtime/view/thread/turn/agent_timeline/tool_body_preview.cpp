@@ -1,10 +1,10 @@
-#include "moha/runtime/view/tool_body_preview.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
 #include <string>
 #include <utility>
 
 #include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/tool_args.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 namespace moha::ui {
 

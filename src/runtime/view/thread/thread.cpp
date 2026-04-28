@@ -1,7 +1,7 @@
-#include "moha/runtime/view/thread.hpp"
+#include "moha/runtime/view/thread/thread.hpp"
 
-#include "moha/runtime/view/conversation.hpp"
-#include "moha/runtime/view/welcome_screen.hpp"
+#include "moha/runtime/view/thread/conversation.hpp"
+#include "moha/runtime/view/thread/welcome_screen.hpp"
 
 namespace moha::ui {
 

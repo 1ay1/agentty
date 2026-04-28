@@ -1,13 +1,13 @@
-#include "moha/runtime/view/status_bar.hpp"
+#include "moha/runtime/view/status_bar/status_bar.hpp"
 
-#include "moha/runtime/view/context_gauge.hpp"
+#include "moha/runtime/view/status_bar/context_gauge.hpp"
 #include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/model_badge.hpp"
-#include "moha/runtime/view/phase_chip.hpp"
-#include "moha/runtime/view/shortcut_row.hpp"
-#include "moha/runtime/view/status_banner.hpp"
-#include "moha/runtime/view/title_chip.hpp"
-#include "moha/runtime/view/token_stream_sparkline.hpp"
+#include "moha/runtime/view/status_bar/model_badge.hpp"
+#include "moha/runtime/view/status_bar/phase_chip.hpp"
+#include "moha/runtime/view/status_bar/shortcut_row.hpp"
+#include "moha/runtime/view/status_bar/status_banner.hpp"
+#include "moha/runtime/view/status_bar/title_chip.hpp"
+#include "moha/runtime/view/status_bar/token_stream_sparkline.hpp"
 
 namespace moha::ui {
 

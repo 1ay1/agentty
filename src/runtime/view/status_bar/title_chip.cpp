@@ -1,4 +1,4 @@
-#include "moha/runtime/view/title_chip.hpp"
+#include "moha/runtime/view/status_bar/title_chip.hpp"
 
 #include "moha/runtime/view/helpers.hpp"
 #include "moha/runtime/view/palette.hpp"

@@ -1,4 +1,4 @@
-#include "moha/runtime/view/agent_timeline.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 
 #include <string>
 #include <utility>
@@ -6,9 +6,9 @@
 
 #include "moha/runtime/view/helpers.hpp"
 #include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/tool_args.hpp"
-#include "moha/runtime/view/tool_body_preview.hpp"
-#include "moha/runtime/view/tool_helpers.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
+#include "moha/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
 namespace moha::ui {
 
