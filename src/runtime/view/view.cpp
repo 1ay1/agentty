@@ -1,5 +1,7 @@
 #include "moha/runtime/view/view.hpp"
 
+#include <maya/widget/app_layout.hpp>
+
 #include "moha/runtime/login.hpp"
 #include "moha/runtime/view/changes.hpp"
 #include "moha/runtime/view/composer.hpp"
@@ -11,35 +13,37 @@
 
 namespace moha::ui {
 
-using namespace maya;
-using namespace maya::dsl;
+namespace {
 
-Element view(const Model& m) {
-    auto base = (v(
-        v(thread_panel(m)) | grow(1.0f),
-        changes_strip(m),
-        composer(m),
-        status_bar(m)
-    ) | pad<1> | grow(1.0f)).build();
+// Pick the active overlay, if any. Login modal has highest priority —
+// auth is the gating step, no other UI should appear over it.
+struct OverlayPick {
+    maya::Element element{maya::TextElement{}};
+    bool          present = false;
+};
 
-    Element overlay;
-    bool has_overlay = false;
+OverlayPick pick_overlay(const Model& m) {
+    if (login::is_open(m.ui.login))        return {login_modal(m),     true};
+    if (pick::is_open(m.ui.model_picker))  return {model_picker(m),    true};
+    if (pick::is_open(m.ui.thread_list))   return {thread_list(m),     true};
+    if (is_open(m.ui.command_palette))     return {command_palette(m), true};
+    if (pick::is_open(m.ui.diff_review))   return {diff_review(m),     true};
+    if (pick::is_open(m.ui.todo.open))     return {todo_modal(m),      true};
+    return {};
+}
 
-    // Login modal precedes the others — auth is the gating step, no
-    // other UI should appear over it.
-    if      (login::is_open(m.ui.login))       { overlay = login_modal(m);  has_overlay = true; }
-    else if (pick::is_open(m.ui.model_picker)) { overlay = model_picker(m);  has_overlay = true; }
-    else if (pick::is_open(m.ui.thread_list))  { overlay = thread_list(m);   has_overlay = true; }
-    else if (is_open(m.ui.command_palette))    { overlay = command_palette(m);has_overlay = true; }
-    else if (pick::is_open(m.ui.diff_review))  { overlay = diff_review(m);   has_overlay = true; }
-    else if (pick::is_open(m.ui.todo.open))    { overlay = todo_modal(m);    has_overlay = true; }
+} // namespace
 
-    if (has_overlay)
-        return zstack({std::move(base),
-            vstack().align_items(Align::Center).justify(Justify::End)(
-                vstack().bg(Color::default_color())(std::move(overlay)))});
-
-    return base;
+maya::Element view(const Model& m) {
+    auto ov = pick_overlay(m);
+    return maya::AppLayout{{
+        .thread_panel    = thread_panel(m),
+        .changes_strip   = changes_strip(m),
+        .composer        = composer(m),
+        .status_bar      = status_bar(m),
+        .overlay         = std::move(ov.element),
+        .overlay_present = ov.present,
+    }}.build();
 }
 
 } // namespace moha::ui

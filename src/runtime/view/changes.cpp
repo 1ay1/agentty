@@ -1,36 +1,36 @@
 #include "moha/runtime/view/changes.hpp"
 
-#include <format>
-
-#include <maya/widget/file_changes.hpp>
+#include <maya/widget/changes_strip.hpp>
 
 #include "moha/runtime/view/palette.hpp"
 
 namespace moha::ui {
 
 using namespace maya;
-using namespace maya::dsl;
 
 Element changes_strip(const Model& m) {
-    if (m.d.pending_changes.empty()) return text("");
-    FileChanges fc;
+    if (m.d.pending_changes.empty()) return Element{TextElement{}};
+
+    std::vector<maya::FileChange> changes;
+    changes.reserve(m.d.pending_changes.size());
     for (const auto& c : m.d.pending_changes) {
-        auto kind = c.original_contents.empty()
-            ? FileChangeKind::Created
-            : FileChangeKind::Modified;
-        fc.add(c.path, kind, c.added, c.removed);
+        changes.push_back({
+            .path          = c.path,
+            .kind          = c.original_contents.empty()
+                               ? maya::FileChangeKind::Created
+                               : maya::FileChangeKind::Modified,
+            .lines_added   = c.added,
+            .lines_removed = c.removed,
+        });
     }
-    auto summary = (v(
-        h(text("Changes ", fg_bold(warn)),
-          text(std::format("({} files)", m.d.pending_changes.size()), fg_of(muted)),
-          spacer(),
-          text("Ctrl+R", fg_of(fg)), text(" review  ", fg_dim(muted)),
-          text("A", fg_of(success)), text(" accept  ", fg_dim(muted)),
-          text("X", fg_of(danger)), text(" reject", fg_dim(muted))
-        ).build(),
-        fc.build()
-    ) | border(BorderStyle::Round) | bcolor(warn) | padding(0, 1));
-    return summary.build();
+
+    return maya::ChangesStrip{{
+        .changes      = std::move(changes),
+        .border_color = warn,
+        .text_color   = fg,
+        .accept_color = success,
+        .reject_color = danger,
+    }}.build();
 }
 
 } // namespace moha::ui

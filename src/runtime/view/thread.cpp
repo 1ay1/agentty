@@ -6,10 +6,14 @@
 #include <system_error>
 #include <vector>
 
+#include <maya/widget/activity_indicator.hpp>
 #include <maya/widget/agent_timeline.hpp>
+#include <maya/widget/conversation.hpp>
 #include <maya/widget/markdown.hpp>
 #include <maya/widget/model_badge.hpp>
 #include <maya/widget/timeline.hpp>
+#include <maya/widget/turn.hpp>
+#include <maya/widget/welcome_screen.hpp>
 
 #include "moha/runtime/view/cache.hpp"
 #include "moha/runtime/view/helpers.hpp"
@@ -95,95 +99,32 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
     return {c, "\xe2\x9c\xa6", std::move(label)};                    // ✦
 }
 
-// Turn header: speaker glyph + name on the left (in the speaker color),
-// dim metadata trailing right (timestamp · elapsed · turn N). The
-// leading ▎ edge mark is gone — the continuous left rail (added at the
-// turn-block level in render_message) already does that work and a
-// double-bar would feel cluttered.
-Element turn_header(Role role, int turn_num, const Message& msg,
-                    const Model& m, std::optional<float> elapsed_secs) {
-    auto style = speaker_style_for(role, m);
-
-    // Trailing metadata: timestamp · elapsed · turn N — rendered with
-    // generous spacing so the eye reads it as a quiet trailing strip,
-    // not a comma-list.
+// Format the trailing meta strip for a turn header — timestamp · elapsed
+// · turn N. Pure string assembly; the rendering itself lives in
+// maya::Turn (which the caller wraps the body inside).
+std::string format_turn_meta(const Message& msg, int turn_num,
+                             std::optional<float> elapsed_secs) {
     std::string meta = timestamp_hh_mm(msg.timestamp);
     if (elapsed_secs && *elapsed_secs > 0.0f) {
         char buf[24];
-        if      (*elapsed_secs < 1.0f)  std::snprintf(buf, sizeof(buf), "  \xc2\xb7  %.0fms", *elapsed_secs * 1000.0);
-        else if (*elapsed_secs < 60.0f) std::snprintf(buf, sizeof(buf), "  \xc2\xb7  %.1fs", static_cast<double>(*elapsed_secs));
+        if      (*elapsed_secs < 1.0f)
+            std::snprintf(buf, sizeof(buf), "  \xc2\xb7  %.0fms",
+                          static_cast<double>(*elapsed_secs) * 1000.0);
+        else if (*elapsed_secs < 60.0f)
+            std::snprintf(buf, sizeof(buf), "  \xc2\xb7  %.1fs",
+                          static_cast<double>(*elapsed_secs));
         else {
             int mins = static_cast<int>(*elapsed_secs) / 60;
             float secs = *elapsed_secs - static_cast<float>(mins * 60);
-            std::snprintf(buf, sizeof(buf), "  \xc2\xb7  %dm%.0fs", mins, static_cast<double>(secs));
+            std::snprintf(buf, sizeof(buf), "  \xc2\xb7  %dm%.0fs",
+                          mins, static_cast<double>(secs));
         }
         meta += buf;
     }
     if (turn_num > 0) {
         meta += "  \xc2\xb7  turn " + std::to_string(turn_num);
     }
-
-    // `grow(1.0f)` on the header row is load-bearing: without it the row
-    // shrinks to content width when a sibling element (like the active
-    // turn's Timeline card) has its own intrinsic width, and the
-    // `spacer()` inside collapses to 0 so the timestamp snaps left
-    // against the speaker label instead of pinning the right edge.
-    return (h(
-        text(style.glyph, fg_of(style.color)),
-        text(" ", {}),
-        text(std::move(style.label), Style{}.with_fg(style.color).with_bold()),
-        spacer(),
-        text(std::move(meta), fg_dim(muted)),
-        text(" ", {})
-    ) | grow(1.0f)).build();
-}
-
-// Wrap a turn's full content (header + body + tools) in a left-only
-// border colored by the speaker. The border becomes a continuous
-// vertical rail running the entire height of the turn — the visual
-// signature of polished chat UIs (Claude Code, Zed, Cursor, Linear).
-// Color groups everything under one speaker; padding pushes content
-// off the rail with breathing room. Bold border style → ┃ heavier
-// vertical so the rail reads as a real divider, not a thin line.
-Element with_turn_rail(Element content, Color rail_color) {
-    return maya::detail::box()
-        .direction(FlexDirection::Row)
-        .border(BorderStyle::Bold, rail_color)
-        .border_sides({.top = false, .right = false,
-                       .bottom = false, .left = true})
-        .padding(0, 0, 0, 2)
-        .grow(1.0f)
-      (std::move(content));
-}
-
-// Inter-turn divider: a thin dim horizontal rule across the gap.
-// Replaces a bare blank line — the rule gives the eye a real handhold
-// for "new turn starts here" without being heavy. Skipped for the very
-// first turn since there's nothing above to divide from.
-Element inter_turn_divider() {
-    return Element{ComponentElement{
-        .render = [](int w, int /*h*/) -> Element {
-            std::string line;
-            // Faded thin rule: dim · runs across with some breathing
-            // space at the indent column so it doesn't crash into the
-            // turn rail above. Reads as a quiet timeline tick.
-            int indent = 3;
-            for (int i = 0; i < indent; ++i) line += ' ';
-            for (int i = indent; i < w; ++i) line += "\xe2\x94\x80";  // ─
-            return Element{TextElement{
-                .content = std::move(line),
-                .style = Style{}.with_fg(Color::bright_black()).with_dim(),
-            }};
-        },
-        .layout = {},
-    }};
-}
-
-// User message body: plain text. Indent removed since the turn rail's
-// padding already handles offset; this keeps the single-source-of-truth
-// for "how far in" content sits.
-Element user_message_body(const std::string& body) {
-    return text(body, fg_of(fg));
+    return meta;
 }
 
 // Brief "what this tool is doing" line for the Timeline view. Tool-
@@ -886,23 +827,22 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
         bump_cat(std::string{tool_category_label(tc.name.value)});
     }
 
-    maya::AgentTimeline tl;
-    tl.set_frame(spinner_frame);
+    maya::AgentTimeline::Config cfg;
+    cfg.frame = spinner_frame;
 
     // ── Stats. Pick a representative color per category so the badge
     //    matches the per-event tree glyph color downstream.
-    std::vector<maya::AgentTimelineStat> stats;
     for (const auto& [cat, n] : cat_counts) {
         Color cc = (cat == "mutate")  ? accent
                  : (cat == "execute") ? success
                  : (cat == "plan")    ? warn
                  : (cat == "vcs")     ? highlight
                                       : info;
-        stats.push_back({cat, n, cc});
+        cfg.stats.push_back({cat, n, cc});
     }
-    tl.set_stats(std::move(stats));
 
     // ── Events.
+    cfg.events.reserve(msg.tool_calls.size());
     for (const auto& tc : msg.tool_calls) {
         std::string detail = tool_timeline_detail(tc);
         if (detail.empty()) {
@@ -911,7 +851,7 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
                    : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
                                       : std::string{"\xe2\x80\xa6"};
         }
-        tl.add({
+        cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
             .detail          = std::move(detail),
             .elapsed_seconds = tc.is_terminal() ? tool_elapsed(tc) : 0.0f,
@@ -928,17 +868,18 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
             if (tc.is_failed())   ++failed;
             if (tc.is_rejected()) ++rejected;
         }
-        std::string verb_glyph = "\xe2\x9c\x93";   // ✓
-        std::string verb_text  = "done";
-        Color       verb_color = success;
+        maya::AgentTimelineFooter f;
+        f.glyph = "\xe2\x9c\x93";   // ✓
+        f.text  = "done";
+        f.color = success;
         if (failed > 0) {
-            verb_glyph = "\xe2\x9c\x97";           // ✗
-            verb_text  = std::to_string(failed) + " failed";
-            verb_color = danger;
+            f.glyph = "\xe2\x9c\x97";           // ✗
+            f.text  = std::to_string(failed) + " failed";
+            f.color = danger;
         } else if (rejected > 0) {
-            verb_glyph = "\xe2\x8a\x98";           // ⊘
-            verb_text  = std::to_string(rejected) + " rejected";
-            verb_color = warn;
+            f.glyph = "\xe2\x8a\x98";           // ⊘
+            f.text  = std::to_string(rejected) + " rejected";
+            f.color = warn;
         }
         char dur_buf[24];
         if (total_elapsed < 1.0f)
@@ -953,11 +894,10 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
             std::snprintf(dur_buf, sizeof(dur_buf), "%dm%.0fs",
                           mins, static_cast<double>(rest));
         }
-        std::string summary = std::to_string(total)
-                            + (total == 1 ? " action   " : " actions   ")
-                            + dur_buf;
-        tl.set_footer(std::move(verb_glyph), std::move(verb_text),
-                      verb_color, std::move(summary));
+        f.summary = std::to_string(total)
+                  + (total == 1 ? " action   " : " actions   ")
+                  + dur_buf;
+        cfg.footer = std::move(f);
     }
 
     // ── Title and border. Title gets the running tool name (or final
@@ -988,21 +928,18 @@ Element assistant_timeline(const Message& msg, int spinner_frame,
     title += " ";
 
     bool all_done = (done == total && total > 0);
-    tl.set_title(std::move(title));
-    tl.set_border_color(all_done ? muted : rail_color);
-    return tl.build();
+    cfg.title        = std::move(title);
+    cfg.border_color = all_done ? muted : rail_color;
+    return maya::AgentTimeline{std::move(cfg)}.build();
 }
 
 Element render_message(const Message& msg, std::size_t msg_idx,
                        int turn_num, const Model& m) {
-    std::vector<Element> rows;
-
     // Compute elapsed wall-clock for assistant turns: from the previous
     // user message's timestamp to this one. Skipped for the first turn
     // (nothing to compare against).
     std::optional<float> assistant_elapsed;
     if (msg.role == Role::Assistant) {
-        // Walk back to the most recent user message timestamp.
         for (std::size_t i = m.d.current.messages.size(); i-- > 0;) {
             if (&m.d.current.messages[i] == &msg) continue;
             if (m.d.current.messages[i].role == Role::User) {
@@ -1014,230 +951,154 @@ Element render_message(const Message& msg, std::size_t msg_idx,
         }
     }
 
-    // Build the turn body (header + content) without the rail; the
-    // rail is applied as a left border to the entire stack so it runs
-    // continuously top-to-bottom regardless of how many sub-rows the
-    // turn produces.
-    std::vector<Element> body;
-    Color rail_color;
+    auto style = speaker_style_for(msg.role, m);
+
+    // Build the Turn config. Body slots are pre-built Elements coming
+    // from other widgets (markdown, agent timeline, permission card) —
+    // moha just routes them through. No dsl::* calls here.
+    maya::Turn::Config turn_cfg{
+        .glyph      = style.glyph,
+        .label      = style.label,
+        .rail_color = style.color,
+        .meta       = format_turn_meta(msg, turn_num,
+                          msg.role == Role::Assistant ? assistant_elapsed
+                                                       : std::nullopt),
+    };
 
     if (msg.role == Role::User) {
-        if (msg.checkpoint_id) rows.push_back(render_checkpoint_divider());
-        rail_color = speaker_style_for(Role::User, m).color;
-        body.push_back(turn_header(Role::User, turn_num, msg, m, std::nullopt));
-        body.push_back(text(""));
-        body.push_back(user_message_body(msg.text));
+        // Plain text — no markdown processing for user input. We use
+        // maya::markdown's plain-text path by routing through a small
+        // maya widget; for now a single TextElement is fine since user
+        // text is always plain.
+        turn_cfg.body.push_back(Element{TextElement{
+            .content = msg.text,
+            .style   = Style{}.with_fg(fg),
+        }});
     } else if (msg.role == Role::Assistant) {
-        rail_color = speaker_style_for(Role::Assistant, m).color;
-        body.push_back(turn_header(Role::Assistant, turn_num, msg, m,
-                                   assistant_elapsed));
-        body.push_back(text(""));
         bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
-        if (has_body) {
-            body.push_back(cached_markdown_for(msg, m.d.current.id, msg_idx));
-            if (!msg.tool_calls.empty()) body.push_back(text(""));
-        }
+        if (has_body)
+            turn_cfg.body.push_back(cached_markdown_for(msg, m.d.current.id, msg_idx));
 
-        // Timeline view ALWAYS — both during the response and after it
-        // settles. The Timeline is the higher-level "Actions" view: a
-        // clean CI-pipeline-style log of what the assistant did, with
-        // post-completion stats folded into each event's detail line
-        // (line counts, hunk Δ, exit codes, match counts). Avoids the
-        // wall of giant detailed cards that buried the conversation
-        // every time the assistant ran a few tools.
+        // Timeline ALWAYS — both during streaming and after settling.
+        // The assistant_timeline call produces a maya::AgentTimeline
+        // Element; we just slot it (with a blank line above when there
+        // was a markdown body, for breathing) into the turn body.
         if (!msg.tool_calls.empty()) {
             int frame = m.s.spinner.frame_index();
-            body.push_back(assistant_timeline(msg, frame, rail_color));
-            // Render any in-flight permission inline so the user can
-            // approve without losing the timeline context above.
+            if (has_body) {
+                turn_cfg.body.push_back(Element{TextElement{.content = ""}});
+            }
+            turn_cfg.body.push_back(assistant_timeline(msg, frame, style.color));
+            // In-flight permission card under the timeline so the user
+            // can approve without losing context.
             for (const auto& tc : msg.tool_calls) {
                 if (m.d.pending_permission && m.d.pending_permission->id == tc.id) {
-                    body.push_back(text(""));
-                    body.push_back(render_inline_permission(*m.d.pending_permission, tc));
+                    turn_cfg.body.push_back(Element{TextElement{.content = ""}});
+                    turn_cfg.body.push_back(render_inline_permission(
+                        *m.d.pending_permission, tc));
                 }
             }
         }
 
-        // Per-message error banner — set when the turn ended in a
-        // stream-level error (overloaded, 5xx, network drop, etc.). Kept
-        // SEPARATE from the message body so a partial assistant
-        // response (preserved into `text` on error) and the failure
-        // reason render distinctly. The status bar carries the live
-        // signal; this is the historical marker so scrolling back shows
-        // the user *which* turn died and why.
-        if (msg.error) {
-            body.push_back(text(""));
-            body.push_back(h(
-                text("\xe2\x9a\xa0  ", fg_bold(danger)),     // ⚠
-                text(*msg.error, fg_dim(danger).with_italic())
-            ).build());
-        }
+        if (msg.error) turn_cfg.error = *msg.error;
     }
 
-    rows.push_back(with_turn_rail((v(std::move(body)) | grow(1.0f)).build(),
-                                  rail_color));
-    // Bottom breathing — a short blank then the next turn's divider.
-    rows.push_back(text(""));
-    return v(std::move(rows)).build();
+    Element turn_el = maya::Turn{std::move(turn_cfg)}.build();
+
+    // Optional checkpoint divider above a user turn. Outside the rail
+    // because it spans the full width.
+    if (msg.role == Role::User && msg.checkpoint_id) {
+        return Element{ElementList{{
+            render_checkpoint_divider(),
+            std::move(turn_el),
+            Element{TextElement{.content = ""}},
+        }}};
+    }
+    return Element{ElementList{{
+        std::move(turn_el),
+        Element{TextElement{.content = ""}},
+    }}};
+}
+
+// Empty-thread brand splash. moha owns the brand content (wordmark
+// glyphs, tagline, starter prompts, hint keys); maya::WelcomeScreen
+// owns the layout / rendering.
+Element welcome_screen(const Model& m) {
+    ModelBadge mb{m.d.model_id.value};
+    mb.set_compact(true);
+    return maya::WelcomeScreen{{
+        .wordmark       = {"┌┬┐┌─┐┬ ┬┌─┐",
+                           "││││ │├─┤├─┤",
+                           "┴ ┴└─┘┴ ┴┴ ┴"},
+        .wordmark_color = accent,
+        .tagline        = "a calm middleware between you and the model",
+        .model_badge    = mb.build(),
+        .profile_label  = std::string{profile_label(m.d.profile)},
+        .profile_color  = profile_color(m.d.profile),
+        .starters_title = "Try",
+        .starters       = {"Implement a small feature",
+                           "Refactor or clean up this file",
+                           "Explain what this code does",
+                           "Write tests for ..."},
+        .hint_intro     = "type to begin",
+        .hints          = {{"^K", " palette", highlight},
+                           {"^J", " threads", highlight},
+                           {"^N", " new",     success}},
+        .accent_color   = accent,
+        .text_color     = fg,
+    }}.build();
 }
 
 Element thread_panel(const Model& m) {
-    std::vector<Element> rows;
+    // Empty thread → welcome screen. Branched out so Conversation
+    // doesn't have to know about empty-state content.
+    if (m.d.current.messages.empty()) return welcome_screen(m);
+
     // Virtualize: older messages live in the terminal's native scrollback
-    // (their rows were committed via maya::Cmd::commit_scrollback).  We
-    // preserve absolute turn numbering by counting finalized assistant
-    // messages *before* the view window too, so a user seeing "Turn 42"
-    // after scrolling back stays consistent.
+    // (committed via maya::Cmd::commit_scrollback). Preserve absolute
+    // turn numbering by counting finalized assistant messages BEFORE the
+    // view window too — "turn 42" stays consistent after scrolling back.
     const std::size_t total = m.d.current.messages.size();
     const std::size_t start = static_cast<std::size_t>(
         std::clamp(m.ui.thread_view_start, 0, static_cast<int>(total)));
     int turn = 1;
     for (std::size_t i = 0; i < start; ++i)
         if (m.d.current.messages[i].role == Role::Assistant) ++turn;
+
+    maya::Conversation::Config conv_cfg;
     for (std::size_t i = start; i < total; ++i) {
         const auto& msg = m.d.current.messages[i];
-        // Inter-turn divider: thin dim rule between consecutive
-        // user/assistant messages. Skip before the first message in
-        // the visible window (no prior turn to divide from).
-        if (i > start) rows.push_back(inter_turn_divider());
-        rows.push_back(render_message(msg, i, turn, m));
+        conv_cfg.turns.push_back(render_message(msg, i, turn, m));
         if (msg.role == Role::Assistant) ++turn;
     }
-    if (m.s.active() && !m.d.current.messages.empty()
-        && m.d.current.messages.back().role == Role::Assistant) {
-        // Suppress this bottom indicator when the active assistant turn
-        // is already showing its Timeline card — the timeline's own
-        // in-progress spinner + status bar's spinner together carry the
-        // "still working" signal; an extra spinner here was duplicate
-        // chrome stacked under the card.
+
+    // Optional in-flight indicator. Suppressed when the active assistant
+    // turn already has a Timeline card showing — its own in-progress
+    // spinner + the status bar's spinner together carry the "still
+    // working" signal, so a second one stacked under the card was just
+    // duplicate chrome.
+    if (m.s.active() && m.d.current.messages.back().role == Role::Assistant) {
         const auto& last = m.d.current.messages.back();
-        bool tl_visible_above =
+        bool tl_visible =
             !last.tool_calls.empty()
             && std::any_of(last.tool_calls.begin(), last.tool_calls.end(),
                            [](const auto& tc){ return !tc.is_terminal(); });
-        if (!tl_visible_above) {
-            // Match the assistant turn header's left-edge bar so the
-            // spinner reads as "still typing" inline with the message
-            // above, not as a detached notification floating at the bottom.
+        if (!tl_visible) {
             const auto& mid = m.d.model_id.value;
             Color edge_color = (mid.find("opus")   != std::string::npos) ? accent
                              : (mid.find("sonnet") != std::string::npos) ? info
                              : (mid.find("haiku")  != std::string::npos) ? success
                                                                          : highlight;
-            auto spin = m.s.spinner;
-            spin.set_style(Style{}.with_fg(edge_color).with_bold());
-            std::string verb{phase_verb(m.s.phase)};
-            rows.push_back((h(
-                text("\xe2\x96\x8e", fg_of(edge_color)),                // ▎
-                text(" ", {}),
-                spin.build(),
-                text(" " + verb + "\u2026", fg_italic(muted))
-            ) | padding(0, 0, 0, 1)).build());
+            conv_cfg.in_flight = maya::ActivityIndicator{{
+                .edge_color    = edge_color,
+                .spinner_glyph = std::string{m.s.spinner.current_frame()},
+                .label         = std::string{phase_verb(m.s.phase)},
+            }}.build();
+            conv_cfg.has_in_flight = true;
         }
     }
-    if (rows.empty()) {
-        // Wordmark-style welcome — quiet brand presence + the details that
-        // orient the user (which model, which profile, what to do next).
-        // A blank thread is the loneliest screen in the app; give it a
-        // focal point with real visual weight.
-        //
-        // The wordmark is built from box-drawing characters so it scales
-        // with the user's font and renders in any UTF-8 terminal — no
-        // image bitmap, no font dependency, no broken glyph fallbacks.
 
-        auto centered_text = [](std::string s, Style st) {
-            return h(spacer(), text(std::move(s), st), spacer()).build();
-        };
-
-        // ── Wordmark: m o h a ────────────────────────────────────────
-        // 3 rows × ~26 cells. Spacing between letters chosen so each glyph
-        // reads as a discrete shape; using outline (┌┐└┘) instead of solid
-        // blocks keeps it elegant rather than chunky.
-        auto mark_style = fg_bold(accent);
-        std::vector<Element> mark_rows;
-        mark_rows.push_back(centered_text(
-            "\u250c\u252c\u2510\u250c\u2500\u2510\u252c\u0020\u252c\u250c\u2500\u2510",
-            mark_style));  // ┌┬┐┌─┐┬ ┬┌─┐
-        mark_rows.push_back(centered_text(
-            "\u2502\u2502\u2502\u2502\u0020\u2502\u251c\u2500\u2524\u251c\u2500\u2524",
-            mark_style));  // │││││ │├─┤├─┤
-        mark_rows.push_back(centered_text(
-            "\u2534\u0020\u2534\u2514\u2500\u2518\u2534\u0020\u2534\u2534\u0020\u2534",
-            fg_dim(accent)));  // ┴ ┴└─┘┴ ┴┴ ┴
-
-        // ── Tagline ──────────────────────────────────────────────────
-        auto tagline = centered_text(
-            "a calm middleware between you and the model",
-            fg_italic(muted));
-
-        // ── Model + profile chip row ─────────────────────────────────
-        ModelBadge mb;
-        mb.set_model(m.d.model_id.value);
-        mb.set_compact(true);
-        auto profile_color_v = profile_color(m.d.profile);
-        auto profile_chip = h(
-            text("\u258c", fg_of(profile_color_v)),                  // ▌
-            text(" " + std::string{profile_label(m.d.profile)} + " ",
-                 Style{}.with_fg(profile_color_v).with_inverse().with_bold()),
-            text("\u2590", fg_of(profile_color_v))                   // ▐
-        ).build();
-        auto chips_row = h(
-            spacer(),
-            mb.build(),
-            text("    ", {}),
-            std::move(profile_chip),
-            spacer()
-        ).build();
-
-        // ── Starter prompts ──────────────────────────────────────────
-        // Three example asks framed as a quiet bordered card so the user
-        // sees concrete affordances, not "type something". Each is dim so
-        // the eye doesn't read them as already-typed input.
-        auto starter = [](std::string text_) {
-            return h(
-                text("\u2022 ", fg_dim(accent)),                      // •
-                text(std::move(text_), fg_dim(fg))
-            ).build();
-        };
-        auto starters_card = (v(
-            text(" " + small_caps("Try") + " ", fg_bold(muted)),
-            text("", {}),
-            starter("Implement a small feature"),
-            starter("Refactor or clean up this file"),
-            starter("Explain what this code does"),
-            starter("Write tests for ...")
-        ) | padding(0, 2, 0, 2)
-          | border(BorderStyle::Round)
-          | bcolor(muted)
-        ).build();
-
-        auto starters_row = h(spacer(), starters_card, spacer()).build();
-
-        // ── Bottom hint row ──────────────────────────────────────────
-        auto hint = h(spacer(),
-            text("type to begin  \u00B7  ", fg_dim(muted)),
-            text("^K", fg_bold(highlight)),
-            text(" palette  \u00B7  ", fg_dim(muted)),
-            text("^J", fg_bold(highlight)),
-            text(" threads  \u00B7  ", fg_dim(muted)),
-            text("^N", fg_bold(success)),
-            text(" new", fg_dim(muted)),
-            spacer()).build();
-
-        rows.push_back((v(
-            text(""), text(""),
-            mark_rows[0], mark_rows[1], mark_rows[2],
-            text(""),
-            tagline,
-            text(""), text(""),
-            chips_row,
-            text(""), text(""),
-            starters_row,
-            text(""), text(""),
-            hint
-        )).build());
-    }
-    return (v(std::move(rows)) | padding(0, 1) | grow(1.0f)).build();
+    return maya::Conversation{std::move(conv_cfg)}.build();
 }
 
 } // namespace moha::ui
