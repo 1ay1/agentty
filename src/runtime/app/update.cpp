@@ -130,6 +130,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         },
         [&](StreamToolUseStart& e) -> Step {
             m.s.last_event_at = std::chrono::steady_clock::now();
+            ToolCallId scheduled_watchdog_id;
+            std::chrono::seconds watchdog_secs{0};
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 ToolUse tc;
@@ -141,6 +143,26 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // started emitting" from "execution is slow" at a glance.
                 tc.status = ToolUse::Pending{m.s.last_event_at};
                 m.d.current.messages.back().tool_calls.push_back(std::move(tc));
+                // Args-stream watchdog. Schedule a ToolTimeoutCheck now so
+                // a tool that gets stuck in Pending (because the stream
+                // errored mid-tool_use_start, or the upstream silently
+                // dropped without firing StreamError) eventually fails.
+                // Generous budget (max_seconds + 90 s margin for slow
+                // arg streams). The Pending → Running transition in
+                // kick_pending_tools also schedules its own watchdog
+                // with the tighter exec deadline; the handler is
+                // idempotent on terminal tools so the duplicate fire
+                // is harmless.
+                if (const auto* sp = tools::spec::lookup(e.name.value);
+                    sp && sp->max_seconds > std::chrono::seconds{0}) {
+                    scheduled_watchdog_id = e.id;
+                    watchdog_secs = sp->max_seconds + std::chrono::seconds{90};
+                }
+            }
+            if (!scheduled_watchdog_id.value.empty()) {
+                return {std::move(m),
+                    Cmd<Msg>::after(watchdog_secs,
+                                    Msg{ToolTimeoutCheck{scheduled_watchdog_id}})};
             }
             return done(std::move(m));
         },
@@ -450,20 +472,38 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             bool flipped = false;
             for (auto& msg_ : m.d.current.messages) {
                 for (auto& tc : msg_.tool_calls) {
-                    if (tc.id == e.id && tc.is_running()) {
-                        auto now = std::chrono::steady_clock::now();
-                        const auto* sp = tools::spec::lookup(tc.name.value);
-                        auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
-                        tc.status = ToolUse::Failed{
-                            tc.started_at(), now,
-                            "tool execution exceeded " + std::to_string(secs.count())
+                    // Catch any non-terminal state, not just Running. A tool
+                    // stuck in Pending past its budget means args never closed
+                    // (stream errored mid-tool_use_start without a clean
+                    // StreamError, or the args watchdog itself is the only
+                    // thing holding the lifecycle accountable). Approved is
+                    // the same case post-permission. Without this the
+                    // watchdog only catches dispatched-but-hung tools and
+                    // the orphaned Pending zombies sit forever.
+                    if (tc.id != e.id) continue;
+                    if (tc.is_terminal())                  continue;
+                    auto now = std::chrono::steady_clock::now();
+                    const auto* sp = tools::spec::lookup(tc.name.value);
+                    auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
+                    std::string reason;
+                    if (tc.is_pending() || tc.is_approved()) {
+                        reason = "tool stayed " + std::string{tc.status_name()}
+                            + " for " + std::to_string(secs.count())
+                            + " s — args probably never finished streaming "
+                            "(transient API error mid-tool_use, or the "
+                            "stream silently exited without a terminal event).";
+                    } else {
+                        reason = "tool execution exceeded "
+                            + std::to_string(secs.count())
                             + " s wall-clock — likely hung on a blocking "
                             "syscall (slow/dead filesystem mount, network "
                             "freeze, or worker deadlock). The tool's worker "
                             "thread may continue in the background; its "
-                            "result will be discarded if it ever returns."};
-                        flipped = true;
+                            "result will be discarded if it ever returns.";
                     }
+                    tc.status = ToolUse::Failed{
+                        tc.started_at(), now, std::move(reason)};
+                    flipped = true;
                 }
             }
             if (!flipped) return done(std::move(m));

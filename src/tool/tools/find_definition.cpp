@@ -73,31 +73,45 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
         return std::unexpected(ToolError::invalid_regex("invalid symbol name for regex"));
     }
 
-    static const std::vector<std::string> skip_dirs = {
-        ".git", "node_modules", "build", "target", "__pycache__",
-        ".cache", "vendor", "dist", "out", ".next"
-    };
-
     auto wp = util::make_workspace_path(a.root, "find_definition");
     if (!wp) return std::unexpected(std::move(wp.error()));
 
     std::ostringstream out;
     int matches = 0;
     std::error_code ec;
+    // File size cap. Catches generated bundles (minified JS, single-header
+    // libraries dumped as one giant .h) that would otherwise pin a worker
+    // running 7 regex passes over a multi-MB body.
+    constexpr uintmax_t kMaxFileBytes = 512u * 1024u;   // 512 KiB
     for (auto it = fs::recursive_directory_iterator(wp->path(),
                 fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (ec) { ec.clear(); continue; }
-        auto fn = it->path().filename().string();
-        if (fn.starts_with(".")) { it.disable_recursion_pending(); continue; }
-        if (it->is_directory(ec)) {
-            for (const auto& skip : skip_dirs) {
-                if (fn == skip) { it.disable_recursion_pending(); break; }
-            }
+        const auto& entry = *it;
+        auto fn = entry.path().filename().string();
+        const bool is_dir = entry.is_directory(ec);
+
+        // Stop descending into known-noisy directories at every depth.
+        // The previous local skip_dirs list missed `_deps`, `.venv`,
+        // `cmake-build-debug/release`, `third_party`, etc. — running
+        // find_definition from a cmake build/ directory walked into
+        // _deps/{nlohmann,simdjson,gtest,...} and chewed through tens
+        // of thousands of vendored source files before the watchdog
+        // fired. Use the canonical fs_helpers list so this stays in
+        // sync with grep / list_dir.
+        if (is_dir && util::should_skip_dir(fn)) {
+            it.disable_recursion_pending();
             continue;
         }
-        if (!it->is_regular_file(ec)) continue;
-        auto ext = it->path().extension().string();
+        // Hidden entries: hidden DIRs are skipped (no descent, no scan);
+        // hidden FILEs (e.g. .clang-format) we don't index either.
+        if (fn.starts_with(".")) {
+            if (is_dir) it.disable_recursion_pending();
+            continue;
+        }
+        if (is_dir) continue;
+        if (!entry.is_regular_file(ec)) continue;
+        auto ext = entry.path().extension().string();
         static const std::vector<std::string> code_exts = {
             ".cpp", ".hpp", ".c", ".h", ".cc", ".hh", ".cxx", ".hxx",
             ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs",
@@ -106,15 +120,20 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
         bool is_code = false;
         for (const auto& e : code_exts) { if (ext == e) { is_code = true; break; } }
         if (!is_code) continue;
+        // Size cap. One stat per candidate; cheap vs the per-line regex
+        // scan we'd otherwise do.
+        std::error_code sec;
+        auto sz = entry.file_size(sec);
+        if (!sec && (sz == 0 || sz > kMaxFileBytes)) continue;
 
-        std::ifstream ifs(it->path());
+        std::ifstream ifs(entry.path());
         if (!ifs) continue;
         std::string line;
         int n = 1;
         while (std::getline(ifs, line)) {
             for (const auto& re : patterns) {
                 if (std::regex_search(line, re)) {
-                    out << it->path().string() << ":" << n << ": " << line << "\n";
+                    out << entry.path().string() << ":" << n << ": " << line << "\n";
                     if (++matches > 50) goto done;
                     break;
                 }

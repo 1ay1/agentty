@@ -60,21 +60,34 @@ ExecResult run_read(const ReadArgs& a) {
             + ". Run `list_dir` on the parent directory or `glob` by name to verify."));
     if (!fs::is_regular_file(p, ec))
         return std::unexpected(ToolError::not_a_file("not a regular file: " + a.path.string()));
-    // Size cap: reading a huge file blows the model's context and rarely
-    // helps. Ask the model to page via offset/limit instead.
+    // Size cap, enforced UNCONDITIONALLY — the previous gate was
+    // `&& a.offset == 1`, which let any offset>1 read load a 10 GB file
+    // into memory and scan it linearly to count lines. The cap is the
+    // primary guard against accidentally feeding multi-GB files into the
+    // model's context, and a wedged tool runs out the wall-clock watchdog.
     constexpr uintmax_t kMaxBytes = 1024u * 1024u;   // 1 MiB
     uintmax_t sz = fs::file_size(p, ec);
-    if (!ec && sz > kMaxBytes && a.offset == 1) {
+    if (!ec && sz > kMaxBytes) {
         return std::unexpected(ToolError::too_large(std::format(
             "file is {} KiB (> 1 MiB cap). "
-            "Pass offset/limit to page through it — e.g. "
-            "{{\"path\":\"{}\",\"offset\":1,\"limit\":500}}, "
-            "then offset=501, etc. For a structural overview, run "
-            "`grep` for the symbols you need.",
+            "Read in chunks via offset/limit (or start_line/end_line) — "
+            "e.g. {{\"path\":\"{}\",\"offset\":1,\"limit\":500}}. "
+            "For a structural overview, run `grep` for the symbols you need.",
             sz / 1024, a.path.string())));
     }
-    // Single open, single read. Then one linear scan builds the slice AND
-    // detects binary content (NUL byte) AND counts lines in one pass.
+    // Bail on binary up-front — `is_binary_file` only opens and scans the
+    // first 512 bytes for a NUL. The previous code detected binary inside
+    // the line-counting loop AFTER reading the whole file, which on a
+    // 1 MiB binary that's mostly valid bytes meant scanning 99% of it
+    // before failing.
+    if (util::is_binary_file(p)) {
+        return std::unexpected(ToolError::binary(std::format(
+            "cannot read binary file: {} ({} bytes). "
+            "Use the bash tool with `file`, `hexdump`, or similar.",
+            a.path.string(), static_cast<uintmax_t>(ec ? 0 : sz))));
+    }
+    // Single open, single read. Then one linear scan builds the slice
+    // AND counts lines in one pass.
     auto content = util::read_file(p);
     std::string out;
     // Reserve the full content size on small files (one big alloc, no

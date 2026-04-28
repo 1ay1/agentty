@@ -128,21 +128,52 @@ std::expected<WriteArgs, ToolError> parse_write_args(const json& j) {
 
 ExecResult run_write(const WriteArgs& a) {
     const auto& p = a.path.path();
+    // Reject pathological payloads up front. A model gone wild can
+    // emit multi-MB content blobs; without a cap we'd read the existing
+    // file, allocate the diff, and fsync several MB of disk — all of
+    // which races the wall-clock watchdog on slow disks. 5 MiB covers
+    // every legitimate single-write use case (full-file rewrites of
+    // source files, generated configs); larger payloads should be
+    // split into multiple writes or staged through bash + heredoc.
+    constexpr std::size_t kMaxWriteBytes = 5u * 1024u * 1024u;   // 5 MiB
+    if (a.content.size() > kMaxWriteBytes) {
+        return std::unexpected(ToolError::too_large(std::format(
+            "write body is {} KiB (> 5 MiB cap). Split into multiple writes "
+            "or stage the file via bash (cat > file <<EOF). The size cap "
+            "exists because diffing multi-MB strings is slow and the result "
+            "tends to blow the model's context anyway.",
+            a.content.size() / 1024)));
+    }
+
     std::string original;
     std::error_code ec;
     bool exists = fs::exists(p, ec);
+    uintmax_t original_size = 0;
     if (exists) {
         if (!fs::is_regular_file(p, ec))
             return std::unexpected(ToolError::not_a_file("not a regular file: " + a.path.string()));
-        original = util::read_file(p);
+        original_size = fs::file_size(p, ec);
+        if (ec) original_size = 0;
+        // Mirror the cap on the existing-file side. A user can have a 1 GB
+        // log on disk; we'd otherwise read and diff the whole thing just
+        // to overwrite it. Treat oversized targets as "no diff available".
+        if (original_size <= kMaxWriteBytes)
+            original = util::read_file(p);
     }
     // No-op short-circuit: an identical rewrite is often the model
     // "confirming" a file state it already reached. Skipping the fs
     // touch avoids spurious mtime bumps that break incremental builds.
-    if (exists && original == a.content)
+    if (exists && !original.empty() && original == a.content)
         return ToolOutput{"File already matches content — no changes written.",
                           std::nullopt};
-    auto change = diff::compute(a.path.string(), original, a.content);
+    // Skip the diff when the original was too big to read. Myers diff is
+    // ~quadratic in the worst case; we'd rather emit a "(diff omitted)"
+    // note than burn the watchdog on a 1 MiB × 1 MiB diff.
+    FileChange change;
+    if (!exists || (!original.empty() && original_size <= kMaxWriteBytes))
+        change = diff::compute(a.path.string(), original, a.content);
+    else
+        change.path = a.path.string();
     if (auto err = util::write_file(p, a.content); !err.empty())
         return std::unexpected(ToolError::io(err));
     std::string prefix;

@@ -31,10 +31,13 @@ struct ListDirArgs {
 
 std::expected<ListDirArgs, ToolError> parse_list_dir_args(const json& j) {
     util::ArgReader ar(j);
+    // Clamp max_depth so a runaway value (model passes 999) can't drag the
+    // walker through the entire filesystem before the watchdog fires.
+    int max_depth = std::clamp(ar.integer("max_depth", 3), 1, 16);
     return ListDirArgs{
         ar.str("path", "."),
         ar.boolean("recursive", false),
-        ar.integer("max_depth", 3),
+        max_depth,
         ar.str("display_description", ""),
     };
 }
@@ -67,7 +70,6 @@ ExecResult run_list_dir(const ListDirArgs& a) {
         if (count > 1000) return;
         std::string indent(depth * 2, ' ');
         auto fn = entry.path().filename().string();
-        if ((fn.starts_with(".") || util::should_skip_dir(fn)) && depth > 0) return;
         if (entry.is_directory(ec)) {
             out << indent << fn << "/\n";
         } else if (entry.is_regular_file(ec)) {
@@ -99,6 +101,33 @@ ExecResult run_list_dir(const ListDirArgs& a) {
              it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
             if (it.depth() > a.max_depth) { it.disable_recursion_pending(); continue; }
+
+            const auto& entry = *it;
+            auto fn = entry.path().filename().string();
+            const bool is_dir = entry.is_directory(ec);
+
+            // Stop descending into known-noisy directories at EVERY depth,
+            // including depth 0 (the user's root may itself contain
+            // `node_modules`, `build`, `target`, `.git`, etc.). The earlier
+            // `it.depth() > 0` gate let those slip through when they sat at
+            // the top level — exactly the case `list_dir(recursive=true)`
+            // on a project root hits. We still render the directory once
+            // so the model sees it exists; we just don't iterate the
+            // hundreds of thousands of files inside.
+            if (is_dir && util::should_skip_dir(fn)) {
+                list_entry(entry, it.depth());
+                it.disable_recursion_pending();
+                if (count > 1000) { out << "[>1000 entries, truncated]\n"; break; }
+                continue;
+            }
+            // Hidden dirs (`.config`, `.cache`, etc.) below the root are
+            // suppressed — keeps recursive listings of a project clean.
+            // At depth 0 we surface them so `list_dir(~)` still works.
+            if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
+                it.disable_recursion_pending();
+                continue;
+            }
+
             list_entry(*it, it.depth());
             if (count > 1000) { out << "[>1000 entries, truncated]\n"; break; }
         }

@@ -6,6 +6,134 @@ This describes the pipeline at commit `7ef8062`. Everything documented here live
 
 ---
 
+## 0. What the thread panel actually looks like
+
+The thread panel is the upper region of moha's screen — everything above the composer + status bar. It's a vertical stack of turns, each one a "speaker rail + content block." Annotated layout, top to bottom:
+
+```
+┌──────────────────────────────────── terminal viewport ─────────────────────────────────────┐
+│                                                                                            │
+│ ┃ ❯ You                                                          12:34  ·  turn 1          │ ← user turn header
+│ ┃                                                                                          │   (bold rail in cyan)
+│ ┃ refactor the login flow to use the new auth provider                                     │
+│                                                                                            │
+│ ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ─── ── │ ← inter_turn_divider
+│                                                                                            │
+│ ┃ ✦ Opus 4.7                                          12:34  ·  4.2s  ·  turn 1            │ ← assistant turn header
+│ ┃                                                                                          │   (bold rail in accent
+│ ┃ I'll start by exploring the current auth structure.                                      │   color, ✦ glyph)
+│ ┃                                                                                          │
+│ ┃ ╭─ ACTIONS  ·  3/3  ·  1.8s ──────────────────────────────────────────────╮              │ ← Round-bordered
+│ ┃ │ I N S P E C T  2  ·  M U T A T E  1                                     │              │   Actions panel
+│ ┃ │                                                                         │              │   (assistant_timeline)
+│ ┃ │ ╭─ ✓ Read         src/auth/login.ts  ·  87 lines              42ms      │              │
+│ ┃ │ │  import { Session } from './session';                                  │              │
+│ ┃ │ │  ··· 80 hidden ···                                                    │              │
+│ ┃ │ │  export default login;                                                │              │
+│ ┃ │ │                                                                       │              │
+│ ┃ │ ├─ ✓ Grep         provider  in  src/auth  ·  12 matches       190ms     │              │
+│ ┃ │ │  src/auth/login.ts:14:  const provider = …                            │              │
+│ ┃ │ │  ··· 9 hidden ···                                                     │              │
+│ ┃ │ │  src/auth/session.ts:88:  return provider.refresh()                   │              │
+│ ┃ │ │                                                                       │              │
+│ ┃ │ ╰─ ✓ Edit         src/auth/login.ts  ·  2 edits  ·  (+5 -2)   1.6s      │              │
+│ ┃ │    edit 1/2  ·  −1 / +3                                                 │              │
+│ ┃ │    - const provider = legacyAuth();                                     │              │
+│ ┃ │    + const provider = await NewAuth.create({                            │              │
+│ ┃ │    +   tenant: env.AUTH_TENANT,                                         │              │
+│ ┃ │    + });                                                                 │              │
+│ ┃ │                                                                          │              │
+│ ┃ │ ✓ DONE   3 actions   1.8s                                                │              │
+│ ┃ ╰────────────────────────────────────────────────────────────────────────╯              │
+│                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                                              ↓ composer + status_bar below
+```
+
+Pieces, by function:
+
+| Glyph / region | Element | Function |
+|---|---|---|
+| `┃` left bar (full turn height) | `with_turn_rail` | Speaker brand color: cyan for user, model brand (Opus = magenta, Sonnet = blue, Haiku = green) for assistant. |
+| `❯` / `✦` | `turn_header` glyph | User uses `❯`, assistant uses `✦`. |
+| `Opus 4.7`, `You` | `turn_header` label | Speaker label, bold + colored. |
+| `12:34 · 4.2s · turn 1` | `turn_header` meta | Timestamp · elapsed · absolute turn number. Right-pinned. |
+| `─── ─── …` rule | `inter_turn_divider` | Thin dim rule between consecutive turns. Width-aware ComponentElement. |
+| Markdown body | `cached_markdown_for` | Either finalized `maya::markdown(text)` or live `maya::StreamingMarkdown`. |
+| `╭ ╮ ╰ ╯ ─ │` outer card | `assistant_timeline` outer chrome | Round border, title in `btext`, color tracks turn state (rail color while in-flight, dim grey when settled). |
+| `ACTIONS · 3/3 · 1.8s` | `assistant_timeline` title | Small-caps "ACTIONS", done/total, then either active tool name (in flight) or total duration (settled). |
+| `I N S P E C T  2  · …` | stats row | Small-caps category badges with counts. Only when total > 1 events. |
+| `╭─ ├─ ╰─ ──` | tree glyph per event | First / middle / last / singleton. Drawn in the per-event category color. |
+| `⠋ ⠙ ⠹ … / ✓ ✗ ⊘ / ○` | `rich_status_icon` | Braille spinner for active, `✓ ✗ ⊘` for terminal, `○` for pending-no-icon (unused at runtime). |
+| `Bash`, `Read`, `Grep`, `Edit` | `tool_display_name` | TitleCase per tool. Color = category (inspect=blue, mutate=magenta, execute=green, plan=yellow, vcs=cyan). Bold while active, dim when settled, danger/warn for failed/rejected. |
+| `npm test  ·  exit 0` | `tool_timeline_detail` | Per-tool one-line summary; settled tools fold in stats (`· N lines`, `(+X -Y)`, `· exit N`, etc.). Italic + muted. |
+| `42ms / 1.6s / 1m20s` | `format_duration` | Right-pinned, color-coded: green <250ms, dim <2s, warn <15s, danger above. |
+| `│` body stripe (under each event) | body_rule | Light `│` indented 3 cols. Color = event_connector_color (status-driven), brighter while active. |
+| Body content rows | `compact_tool_body` | Per-tool preview: head+tail elision for read/bash/etc., per-side diff coloring for edit/git_diff, ✓/◍/○ glyph list for todo. |
+| Short `│` between events | inter-event connector | One-line connector colored by the *next* event's status. |
+| `✓ DONE   3 actions   1.8s` | footer | Only when all events are terminal. Verb glyph + small-caps verb in success/danger/warn (depending on outcome) + count + total elapsed. |
+
+### A turn that's still in flight
+
+```
+┃ ✦ Opus 4.7                                          12:34  ·  …  ·  turn 2
+
+┃ Investigating the auth layer. I'll start by reading the relev
+
+┃ ╭─ ACTIONS  ·  1/2  ·  Bash ──────────────────────────────────────────────╮
+┃ │ ╭─ ✓ Read         src/auth/login.ts  ·  87 lines              42ms     │
+┃ │ │  …                                                                    │
+┃ │ │                                                                       │
+┃ │ ╰─ ⠋ Bash         npm test                                              │  ← spinner ticks (cyan)
+┃ │    PASS test/login.test.ts                                              │
+┃ │    PASS test/session.test.ts                                            │  ← live progress_text
+┃ │    Test Suites: 2 passed, 5 total                                       │     under │ stripe
+┃ ╰────────────────────────────────────────────────────────────────────────╯  ← border still rail-color
+                                                                              (no footer until settled)
+```
+
+Differences from the settled view:
+
+- The streaming markdown body grows by line each text-delta — `StreamingMarkdown::set_content(streaming_text)` is called every frame.
+- The active event's tree glyph and name render bold-bright; settled events above stay dim.
+- The status icon is a braille spinner rotating with `m.s.spinner.frame_index()`.
+- The detail line shows live state: `running…` / `queued…` / `approved…` if no per-tool detail is available yet.
+- `format_duration` is omitted on the right for non-terminal events.
+- The Actions panel border uses the speaker rail color (not muted) until every event settles.
+- The footer is suppressed until `done == total`.
+- `tool_card_cache` is populated only for terminal-state tool cards — but at this commit nothing calls `render_tool_call`, so the cache is dormant; the timeline renders live each frame from `compact_tool_body`.
+
+### Empty thread
+
+When `m.d.current.messages` is empty, `thread_panel` short-circuits to the welcome screen (the `m o h a` wordmark + tagline + version + model/profile chips + key hints, all centered). See [`thread.cpp:1351+`](../src/runtime/view/thread.cpp#L1351).
+
+### Below the thread panel
+
+Outside the thread panel itself, the screen continues with:
+
+```
+…
+┃ ✦ Opus 4.7 …
+┃ ╰────────────╯  (Actions panel)
+
+╭─ ⠋ — type to queue… ──────────────────────────────────╮       ← composer (Round border)
+│ ❯ ▎                                                    │           border + prompt color
+│                                                        │           switches with phase
+│                                                        │
+│ ↵ send  ·  ⇧↵ / ⌥↵ newline  ·  ^E expand    ▎ Write   │       ← hint row (responsive)
+╰────────────────────────────────────────────────────────╯
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔  ← phase accent strip (top)
+ ▌ ⠋ Streaming     · 0:08  ·  ✦ Opus 4.7  ·  CTX  ███▆░░░░░░  18%   ← activity row
+                                                                       (left: phase chip
+ …status banner if any…                                                 right: model + ctx)
+ ^K palette  ·  ^J threads  ·  ^T todo  ·  ^N new  ·  ^C quit       ← shortcut row
+▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁  ← phase accent strip (bottom)
+```
+
+The `composer`, `changes_strip`, and `status_bar` are siblings of `thread_panel` inside `view.cpp`'s top-level `v(...)` stack. They're rendered by `composer.cpp`, `changes.cpp`, and `statusbar.cpp` respectively — covered in [`UI.md`](UI.md).
+
+---
+
 ## 1. Entry chain at a glance
 
 ```

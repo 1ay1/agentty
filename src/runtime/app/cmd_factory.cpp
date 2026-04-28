@@ -70,7 +70,16 @@ Cmd<Msg> launch_stream(Model& m) {
 }
 
 Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
-    return Cmd<Msg>::task(
+    // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
+    // mount, bash on a process that won't unblock) must not consume a slot
+    // in the shared BG worker pool. With Cmd::task the pool's max workers
+    // — std::max(4, hw_concurrency) — get permanently filled by zombie
+    // threads stuck in syscalls, and subsequent tools queue forever even
+    // though the UI watchdog has long since flipped them to Failed. This
+    // surfaced as "tools randomly get stuck" once enough wedged calls
+    // accumulated. Per-call detached thread costs ~100-300 µs of
+    // construction; tools run seconds apart so it's noise.
+    return Cmd<Msg>::task_isolated(
         [id = std::move(id),
          name = std::move(tool_name),
          args = std::move(args)]

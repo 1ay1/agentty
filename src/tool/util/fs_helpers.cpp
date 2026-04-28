@@ -264,6 +264,22 @@ fs::path normalize_path(std::string_view s) {
         s.remove_prefix(1);
         s.remove_suffix(1);
     }
+    // Tilde expansion. The model writes paths the way a shell would
+    // (`~/projects/foo`); without expansion they round-trip into
+    // `<cwd>/~/projects/foo`, which doesn't exist, and the tool either
+    // returns NotFound or — on filesystems that handle the bizarre
+    // prefix slowly — sits on stat() long enough to hit the watchdog.
+    // The shell convention: bare `~` or `~/...` expands to $HOME.
+    // (`~user/...` per-user expansion isn't supported here; we'd need
+    // getpwnam_r for that and the model's never seen it work.)
+    std::string expanded;
+    if (!s.empty() && s.front() == '~' && (s.size() == 1 || s[1] == '/')) {
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            expanded = home;
+            expanded.append(s.data() + 1, s.size() - 1);
+            s = expanded;
+        }
+    }
     fs::path p{s};
     std::error_code ec;
     if (!p.is_absolute()) p = fs::absolute(p, ec);
