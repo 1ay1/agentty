@@ -47,12 +47,15 @@ Cmd<Msg> launch_stream(Model& m) {
     req.auth_header = deps().auth_header;
     req.auth_style  = deps().auth_style;
 
-    // Mint a fresh cancel token per turn and stash it on the model so the
-    // Esc handler (Msg::CancelStream) can flip it. The worker thread holds
-    // its own shared_ptr via req.cancel; reassigning m.s.cancel on the
-    // UI thread is safe — both sides only ever load/store the atomic flag.
+    // Mint a fresh cancel token per turn and stash it on the active
+    // ctx so the Esc handler (Msg::CancelStream) can flip it. The
+    // worker thread holds its own shared_ptr via req.cancel; storing
+    // it inside the phase variant on the UI thread is safe — both
+    // sides only ever load/store the atomic flag. Caller has already
+    // transitioned us into an active phase by the time launch_stream
+    // runs, so active_ctx is non-null here.
     req.cancel = std::make_shared<http::CancelToken>();
-    m.s.cancel = req.cancel;
+    if (auto* a = active_ctx(m.s.phase)) a->cancel = req.cancel;
 
     return Cmd<Msg>::task([req = std::move(req)](std::function<void(Msg)> dispatch) mutable {
         try {
@@ -161,7 +164,12 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                     tc.id, tc.name,
                     "Tool " + tc.name.value + " needs permission under "
                         + std::string{ui::profile_label(m.d.profile)} + " profile"};
-                m.s.phase = phase::AwaitingPermission{};
+                // Streaming → AwaitingPermission. The active ctx
+                // (cancel token, retry state, started stamp) flows
+                // through unchanged; the phase tag is the only thing
+                // that moves.
+                auto ctx = take_active_ctx(std::move(m.s.phase));
+                m.s.phase = phase::AwaitingPermission{std::move(ctx).value()};
                 return Cmd<Msg>::none();
             }
             if (!needs_perm) {
@@ -206,11 +214,19 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                         Msg{ToolTimeoutCheck{tc.id}}));
                 }
 
-                // ExecutingTool is non-Idle, so active() flips on automatically:
-                // the Tick subscription stays armed, the spinner advances, the
-                // view's live elapsed timer keeps ticking. Without that the
-                // UI looks frozen on long-running bash commands.
-                m.s.phase = phase::ExecutingTool{};
+                // {Streaming, AwaitingPermission, ExecutingTool} →
+                // ExecutingTool. Source is whatever phase produced
+                // the now-running tool: Streaming for a tool the
+                // model just emitted, AwaitingPermission for one the
+                // user just granted, ExecutingTool for a sibling
+                // promotion within the same batch. Active ctx flows
+                // through unchanged. ExecutingTool is non-Idle so
+                // active() flips on automatically: the Tick subscrip-
+                // tion stays armed, the spinner advances, the view's
+                // live elapsed timer keeps ticking — without that
+                // the UI looks frozen on long-running bash commands.
+                auto ctx = take_active_ctx(std::move(m.s.phase));
+                m.s.phase = phase::ExecutingTool{std::move(ctx).value()};
                 any_pending = true;
             }
         } else if (tc.is_running()) {
@@ -231,14 +247,23 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // Slicing here keeps the live canvas bounded even inside a
             // single long multi-tool assistant turn.
             auto virt = detail::maybe_virtualize(m);
-            m.s.phase = phase::Streaming{};
+            // ExecutingTool → Streaming (post-tool sub-turn). Active
+            // ctx flows through: cancel token's still alive (the
+            // request is still open, sub-turn streams over the same
+            // SSE), retry counters preserved.
+            auto ctx = take_active_ctx(std::move(m.s.phase));
+            m.s.phase = phase::Streaming{std::move(ctx).value()};
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
             if (!virt.is_none()) cmds.push_back(std::move(virt));
             cmds.push_back(launch_stream(m));
         } else {
-            // Idle drops active() to false, stopping the Tick subscription.
+            // ExecutingTool → Idle (no continuation). Active ctx is
+            // discarded — the request is finished, the cancel token
+            // can drop, the retry counters reset on the next user
+            // turn. Idle drops active() to false, stopping the Tick
+            // subscription.
             m.s.phase = phase::Idle{};
         }
     }

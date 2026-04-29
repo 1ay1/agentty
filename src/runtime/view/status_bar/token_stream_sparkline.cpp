@@ -33,14 +33,18 @@ maya::TokenStreamSparkline::Config token_stream_sparkline_config(const Model& m)
 
     auto hist = ordered_rate_history(m.s);
     auto now  = std::chrono::steady_clock::now();
+    // Reach into the active ctx for the current sub-turn's live
+    // counters; nullptr means "no active stream" → we'll fall back
+    // to the historical sparkline.
+    const phase::Active* a = active_ctx(m.s.phase);
     bool ever_streamed =
-        m.s.first_delta_at.time_since_epoch().count() != 0;
+        a && a->first_delta_at.time_since_epoch().count() != 0;
     long long ts_ms = ever_streamed
         ? std::chrono::duration_cast<std::chrono::milliseconds>(
-              now - m.s.first_delta_at).count()
+              now - a->first_delta_at).count()
         : 0;
     double sec        = std::max(0.001, static_cast<double>(ts_ms) / 1000.0);
-    double approx_tok = static_cast<double>(m.s.live_delta_bytes) / 4.0;
+    double approx_tok = a ? static_cast<double>(a->live_delta_bytes) / 4.0 : 0.0;
 
     // Pick the displayed rate: live during streaming (after a 250 ms
     // warm-up so the first frame isn't a divide-by-tiny-time spike),

@@ -87,30 +87,44 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         // "stream is stalled." A small helper keeps the bump uniform.
         [&](StreamStarted) -> Step {
             auto now = std::chrono::steady_clock::now();
-            m.s.started          = now;
-            m.s.last_event_at    = now;
-            m.s.retry_state      = retry::Fresh{};       // fresh stream → re-arm watchdog
+            // The phase variant guarantees a non-null ctx when active;
+            // StreamStarted only fires after submit_message / retry has
+            // already moved us into Streaming.
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->started        = now;
+                a->last_event_at  = now;
+                a->retry          = retry::Fresh{};   // fresh stream → re-arm watchdog
+                // Reset the live-rate accumulator so each sub-turn
+                // (post-tool) measures its own generation speed instead
+                // of polluting the CURRENT-rate display with the previous
+                // turn's bytes. The sparkline ring (rate_history) lives
+                // on StreamState — it carries across sub-turns / tool
+                // gaps so the user sees a continuous trace of generation
+                // rate over the whole session, not a fresh empty bar
+                // after every tool call.
+                a->live_delta_bytes       = 0;
+                a->first_delta_at         = {};
+                a->rate_last_sample_at    = {};
+                a->rate_last_sample_bytes = 0;
+            }
             // Fresh stream is alive — wipe any leftover toast (retry
             // countdown, "error: …", "cancelled") from the previous
             // attempt so the status row doesn't show a stale message
             // on top of a healthy connection.
             m.s.status.clear();
             m.s.status_until = {};
-            // Reset the live-rate accumulator so each sub-turn (post-tool)
-            // measures its own generation speed instead of polluting the
-            // CURRENT-rate display with the previous turn's bytes. The
-            // sparkline ring (rate_history) is NOT wiped — it carries
-            // across sub-turns / tool gaps so the user sees a continuous
-            // trace of generation rate over the whole session, not a fresh
-            // empty bar after every tool call.
-            m.s.live_delta_bytes = 0;
-            m.s.first_delta_at = {};
-            m.s.rate_last_sample_at = {};
-            m.s.rate_last_sample_bytes = 0;
             return done(std::move(m));
         },
         [&](StreamTextDelta& e) -> Step {
-            m.s.last_event_at = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = now;
+                if (!e.text.empty()) {
+                    if (a->first_delta_at.time_since_epoch().count() == 0)
+                        a->first_delta_at = now;
+                    a->live_delta_bytes += e.text.size();
+                }
+            }
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& st = m.d.current.messages.back().streaming_text;
@@ -120,15 +134,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                     else                       st.append(e.text, 0, room);
                 }
             }
-            if (!e.text.empty()) {
-                if (m.s.first_delta_at.time_since_epoch().count() == 0)
-                    m.s.first_delta_at = m.s.last_event_at;
-                m.s.live_delta_bytes += e.text.size();
-            }
             return done(std::move(m));
         },
         [&](StreamToolUseStart& e) -> Step {
-            m.s.last_event_at = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) a->last_event_at = now;
             ToolCallId scheduled_watchdog_id;
             std::chrono::seconds watchdog_secs{0};
             if (!m.d.current.messages.empty()
@@ -140,7 +150,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // Stamp start now so the card shows a live timer during the
                 // args-streaming phase too — lets the user tell "model hasn't
                 // started emitting" from "execution is slow" at a glance.
-                tc.status = ToolUse::Pending{m.s.last_event_at};
+                tc.status = ToolUse::Pending{now};
                 m.d.current.messages.back().tool_calls.push_back(std::move(tc));
                 // Args-stream watchdog. Schedule a ToolTimeoutCheck now so
                 // a tool that gets stuck in Pending (because the stream
@@ -166,11 +176,14 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamToolUseDelta& e) -> Step {
-            m.s.last_event_at = std::chrono::steady_clock::now();
-            if (!e.partial_json.empty()) {
-                if (m.s.first_delta_at.time_since_epoch().count() == 0)
-                    m.s.first_delta_at = m.s.last_event_at;
-                m.s.live_delta_bytes += e.partial_json.size();
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = now;
+                if (!e.partial_json.empty()) {
+                    if (a->first_delta_at.time_since_epoch().count() == 0)
+                        a->first_delta_at = now;
+                    a->live_delta_bytes += e.partial_json.size();
+                }
             }
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant
@@ -200,7 +213,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamToolUseEnd) -> Step {
-            m.s.last_event_at = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant
                 && !m.d.current.messages.back().tool_calls.empty()) {
@@ -238,7 +252,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return done(std::move(m));
         },
         [&](StreamUsage& e) -> Step {
-            m.s.last_event_at = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
             // `input_tokens` from Anthropic is the FULL prefix for this
             // request, NOT the delta. Accumulating across turns triple-counted
             // by turn 5. Replace, don't add. Cache fields are excluded from
@@ -261,7 +276,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // passes where the model reasons silently for 60-120 s
             // between visible deltas; without this the watchdog would
             // fire on every non-trivial opus turn.
-            m.s.last_event_at = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
             return done(std::move(m));
         },
         [&](StreamFinished e) -> Step {
@@ -279,8 +295,10 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             if (m.s.in_scheduled()) return done(std::move(m));
 
             // Worker thread is unwinding; drop the token so the next turn
-            // (or scheduled retry) mints a fresh one.
-            m.s.cancel.reset();
+            // (or scheduled retry) mints a fresh one. Reaches into the
+            // ctx (rather than dropping the whole ctx) because we may
+            // still need the retry counters for the can_retry check.
+            if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
 
             // Move any partial streaming_text into the message body so
             // the assistant's in-flight output isn't lost regardless of
@@ -321,13 +339,16 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                         return tc.is_done() || tc.is_running();
                     });
             }
+            const phase::Active* err_ctx = active_ctx(m.s.phase);
+            int prior_transient = err_ctx ? err_ctx->transient_retries : 0;
             bool can_retry = (klass == provider::ErrorClass::Transient
                            || klass == provider::ErrorClass::RateLimit)
-                          && m.s.transient_retries < provider::kMaxRetries
-                          && !has_committed;
+                          && prior_transient < provider::kMaxRetries
+                          && !has_committed
+                          && err_ctx;   // can't retry from Idle (no ctx)
 
             if (can_retry) {
-                int attempt = m.s.transient_retries++;
+                int attempt = prior_transient;
                 auto delay = provider::backoff(klass, attempt);
                 // Round up to whole seconds for the user-visible countdown.
                 auto secs = std::chrono::duration_cast<std::chrono::seconds>(
@@ -341,10 +362,17 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // doesn't (e.g. the next stream also stalls).
                 m.s.status_until = std::chrono::steady_clock::now()
                                  + delay + std::chrono::milliseconds{1500};
-                // Phase=Streaming keeps active() true → Tick subscription
-                // stays armed, the user sees the countdown / can Esc.
-                m.s.phase = phase::Streaming{};
-                m.s.retry_state = retry::Scheduled{};  // dedupes follow-up StreamErrors
+                // {Streaming, AwaitingPermission, ExecutingTool} →
+                // Streaming. Take the source ctx, bump the transient
+                // counter, mark Scheduled (dedupes follow-up
+                // StreamErrors), then re-wrap in Streaming. Phase
+                // stays non-Idle so active() remains true → Tick
+                // subscription stays armed, the user sees the
+                // countdown / can Esc.
+                auto ctx = take_active_ctx(std::move(m.s.phase)).value();
+                ctx.transient_retries = attempt + 1;
+                ctx.retry             = retry::Scheduled{};
+                m.s.phase = phase::Streaming{std::move(ctx)};
                 // Replace the half-formed turn with a fresh placeholder.
                 // launch_stream's contract is "caller has appended an
                 // Assistant placeholder" — every stream-event handler
@@ -360,7 +388,9 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                     Cmd<Msg>::after(delay, Msg{RetryStream{}})};
             }
 
-            // Terminal path — phase=Idle drops active() to false.
+            // Terminal path — discard the source ctx and drop to
+            // Idle. active() flips to false; the next user turn will
+            // mint a fresh ctx via submit_message.
             m.s.phase = phase::Idle{};
             // Cancellation gets a clean "cancelled" status, no "error:".
             if (klass == provider::ErrorClass::Cancelled) {
@@ -405,15 +435,16 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             }
         },
         [&](RetryStream) -> Step {
-            // Scheduled retry fired. Transition back to Fresh so the
-            // freshly-launched stream's own errors flow through the
-            // normal classifier path. If the user cancelled during the
-            // wait (Esc → CancelStream dropped phase to Idle), do nothing.
-            m.s.retry_state = retry::Fresh{};
+            // Scheduled retry fired. If the user cancelled during the
+            // wait (Esc → CancelStream dropped phase to Idle), do
+            // nothing. Otherwise transition retry back to Fresh on
+            // the in-flight ctx so the freshly-launched stream's own
+            // errors flow through the normal classifier path.
+            if (auto* a = active_ctx(m.s.phase)) a->retry = retry::Fresh{};
             if (m.s.is_idle()) return done(std::move(m));
-            // Re-launch on the same context. launch_stream will mint a
-            // new cancel token, append a placeholder assistant message,
-            // and re-issue the request.
+            // Re-launch on the same context. launch_stream will mint
+            // a new cancel token, append a placeholder assistant
+            // message, and re-issue the request.
             return {std::move(m), cmd::launch_stream(m)};
         },
         [&](CancelStream) -> Step {
@@ -425,7 +456,11 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // ALSO covers the retry-backoff window: if the user hits Esc
             // while we're sleeping for a scheduled retry, this clears
             // active so the RetryStream Msg becomes a no-op when it fires.
-            if (m.s.cancel) m.s.cancel->cancel();
+            if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
+            // any → Idle. Discard the ctx (cancel token is already
+            // tripped on the worker thread; retry counters reset on
+            // the next turn). Drops Scheduled/StallFired retry states
+            // by virtue of the ctx going away.
             m.s.phase = phase::Idle{};
             m.s.status = "cancelled";
             {
@@ -433,7 +468,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 auto ttl = std::chrono::seconds{3};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;
-                m.s.retry_state = retry::Fresh{};   // drop any Scheduled/StallFired
                 return {std::move(m), Cmd<Msg>::after(
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
@@ -669,6 +703,10 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             m.ui.command_palette = palette::Closed{};
             m.ui.composer.text.clear();
             m.ui.composer.cursor = 0;
+            // any → Idle. Discards the active ctx if any was present
+            // (NewThread can fire mid-stream; the user-visible Esc
+            // wasn't pressed but the request is conceptually
+            // abandoned along with the thread).
             m.s.phase = phase::Idle{};
             m.ui.thread_view_start = 0;
             return done(std::move(m));
@@ -924,19 +962,21 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // a genuinely dead wire — this is strictly about not blaming
             // the network for our own render backpressure.
             constexpr auto kTickRebaseThreshold = std::chrono::seconds(2);
-            if (tick_gap >= kTickRebaseThreshold
-                && m.s.last_event_at.time_since_epoch().count() != 0) {
-                m.s.last_event_at += tick_gap;
+            if (auto* a = active_ctx(m.s.phase);
+                a && tick_gap >= kTickRebaseThreshold
+                && a->last_event_at.time_since_epoch().count() != 0) {
+                a->last_event_at += tick_gap;
             }
             constexpr auto kStallSecs = std::chrono::seconds(120);
-            if (m.s.is_streaming() && m.s.active()
-                && m.s.in_fresh()
-                && m.s.last_event_at.time_since_epoch().count() != 0
-                && now - m.s.last_event_at >= kStallSecs) {
-                m.s.retry_state = retry::StallFired{};
-                if (m.s.cancel) m.s.cancel->cancel();
+            if (auto* a = active_ctx(m.s.phase);
+                a && m.s.is_streaming()
+                && std::holds_alternative<retry::Fresh>(a->retry)
+                && a->last_event_at.time_since_epoch().count() != 0
+                && now - a->last_event_at >= kStallSecs) {
+                a->retry = retry::StallFired{};
+                if (a->cancel) a->cancel->cancel();
                 auto since = std::chrono::duration_cast<std::chrono::seconds>(
-                                 now - m.s.last_event_at).count();
+                                 now - a->last_event_at).count();
                 // User-facing message kept generic — they see a "retrying
                 // in Ns…" toast seconds later, which tells the useful
                 // story. Internal detail is in the StreamError payload
@@ -958,17 +998,18 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // "noise"; sampling faster would show every transient
             // edge-batching artifact. Skip until the first delta arrives so
             // the leading bar isn't an artificial zero-stretch.
-            if (m.s.is_streaming() && m.s.active()
-                && m.s.first_delta_at.time_since_epoch().count() != 0) {
+            if (auto* a = active_ctx(m.s.phase);
+                a && m.s.is_streaming()
+                && a->first_delta_at.time_since_epoch().count() != 0) {
                 constexpr auto kSampleInterval = std::chrono::milliseconds{500};
-                if (m.s.rate_last_sample_at.time_since_epoch().count() == 0) {
-                    m.s.rate_last_sample_at    = now;
-                    m.s.rate_last_sample_bytes = m.s.live_delta_bytes;
-                } else if (now - m.s.rate_last_sample_at >= kSampleInterval) {
+                if (a->rate_last_sample_at.time_since_epoch().count() == 0) {
+                    a->rate_last_sample_at    = now;
+                    a->rate_last_sample_bytes = a->live_delta_bytes;
+                } else if (now - a->rate_last_sample_at >= kSampleInterval) {
                     auto window_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                         now - m.s.rate_last_sample_at).count();
-                    auto bytes_delta = (m.s.live_delta_bytes >= m.s.rate_last_sample_bytes)
-                                       ? (m.s.live_delta_bytes - m.s.rate_last_sample_bytes)
+                                         now - a->rate_last_sample_at).count();
+                    auto bytes_delta = (a->live_delta_bytes >= a->rate_last_sample_bytes)
+                                       ? (a->live_delta_bytes - a->rate_last_sample_bytes)
                                        : 0;
                     // ~4 B/token (Claude tokenizer avg) and convert ms to s.
                     float rate = window_ms > 0
@@ -979,8 +1020,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                     m.s.rate_history_pos =
                         (m.s.rate_history_pos + 1) % StreamState::kRateSamples;
                     if (m.s.rate_history_pos == 0) m.s.rate_history_full = true;
-                    m.s.rate_last_sample_at    = now;
-                    m.s.rate_last_sample_bytes = m.s.live_delta_bytes;
+                    a->rate_last_sample_at    = now;
+                    a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
             return done(std::move(m));

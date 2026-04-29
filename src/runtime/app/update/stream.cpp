@@ -439,7 +439,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // Stream is over — drop the cancel handle so a stale Esc can't trip
     // the next turn's stream the moment it launches. Phase transitions
     // below (or in kick_pending_tools) drive whether active() flips off.
-    m.s.cancel.reset();
+    if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
     bool any_truncated = false;
     const bool max_tokens_hit = (stop_reason == StopReason::MaxTokens);
     if (!m.d.current.messages.empty()) {
@@ -499,9 +499,10 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // can't prevent an edge LB from closing an idle connection. When that
     // happens mid-tool-input we silently re-launch on the same context,
     // capped at kMaxTruncationRetries.
-    if (any_truncated
+    if (auto* a = active_ctx(m.s.phase);
+        a && any_truncated
         && !max_tokens_hit
-        && m.s.truncation_retries < kMaxTruncationRetries
+        && a->truncation_retries < kMaxTruncationRetries
         && !m.d.current.messages.empty()
         && m.d.current.messages.back().role == Role::Assistant) {
         auto& last = m.d.current.messages.back();
@@ -511,12 +512,17 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                 return tc.is_done() || tc.is_running();
             });
         if (!has_committed_work) {
-            ++m.s.truncation_retries;
+            ++a->truncation_retries;
             m.d.current.messages.pop_back();
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
-            m.s.phase = phase::Streaming{};
+            // Streaming → Streaming (truncation retry). Reuse the
+            // same ctx — the just-incremented truncation_retries
+            // counter persists so the kMaxTruncationRetries cap
+            // works across retries within the turn.
+            auto ctx = take_active_ctx(std::move(m.s.phase)).value();
+            m.s.phase = phase::Streaming{std::move(ctx)};
             m.s.status = "retrying (upstream cut off)…";
             return cmd::launch_stream(m);
         }

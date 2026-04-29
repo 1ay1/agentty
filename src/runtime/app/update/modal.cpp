@@ -89,32 +89,24 @@ Step submit_message(Model m) {
     m.d.current.messages.push_back(std::move(placeholder));
 
     m.d.current.updated_at = std::chrono::system_clock::now();
-    m.s.phase = phase::Streaming{};
-    m.s.truncation_retries = 0;
-    m.s.transient_retries  = 0;
 
-    // Mirror the fresh-stream reset that StreamStarted applies (see
-    // update.cpp:88-110) so the post-submit render is layout-identical to
-    // the post-StreamStarted render that lands milliseconds later.
-    // Without this, any leftover status toast from the prior turn (retry
-    // countdown / "Stream complete" / error banner) stays visible in
-    // frame 1 and disappears in frame 2 — a one-row status_bar height
-    // change that the user sees as the new turn briefly appearing too
-    // far down and then "realigning" when the banner clears.  The
-    // StreamStarted handler is still authoritative; this is just frame-
-    // 1 look-ahead so the two frames are visually identical.
-    {
-        auto now = std::chrono::steady_clock::now();
-        m.s.started               = now;
-        m.s.last_event_at         = now;
-        m.s.retry_state           = retry::Fresh{};
-        m.s.status.clear();
-        m.s.status_until          = {};
-        m.s.live_delta_bytes      = 0;
-        m.s.first_delta_at        = {};
-        m.s.rate_last_sample_at   = {};
-        m.s.rate_last_sample_bytes = 0;
-    }
+    // Idle → Streaming. The fresh phase::Active replaces the prior
+    // turn's context wholesale (Idle had none): zero retry counters,
+    // fresh started/last_event_at stamps, default RetryState. Mirrors
+    // the StreamStarted handler's reset so the post-submit render is
+    // layout-identical to the post-StreamStarted render that lands
+    // milliseconds later — without this, leftover status toast from
+    // the prior turn (retry countdown / "Stream complete" / error
+    // banner) would change status_bar height by one row when
+    // StreamStarted fires, producing a visible "new turn appears at
+    // viewport bottom and then realigns" two-frame flicker.
+    auto now = std::chrono::steady_clock::now();
+    phase::Active ctx;
+    ctx.started       = now;
+    ctx.last_event_at = now;
+    m.s.phase         = phase::Streaming{std::move(ctx)};
+    m.s.status.clear();
+    m.s.status_until  = {};
 
     auto virt = maybe_virtualize(m);
     auto launch = cmd::launch_stream(m);

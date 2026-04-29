@@ -41,10 +41,11 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
     }
 
     float elapsed = -1.0f;
-    if (active && m.s.started.time_since_epoch().count() != 0) {
+    if (const auto* a = active_ctx(m.s.phase);
+        a && active && a->started.time_since_epoch().count() != 0) {
         auto now = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now - m.s.started).count();
+                      now - a->started).count();
         elapsed = static_cast<float>(ms) / 1000.0f;
     }
 

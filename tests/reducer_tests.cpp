@@ -209,8 +209,13 @@ TEST(toggle_tool_expanded_flips_match) {
 
 TEST(stream_started_sets_active) {
     auto m = blank_model();
+    // StreamStarted only mutates the active ctx; it doesn't itself
+    // transition phase. Pre-load Streaming so the handler has an
+    // Active to write into (real flow: submit_message moves us into
+    // Streaming first, then StreamStarted lands).
+    m.s.phase = moha::phase::Streaming{};
     auto [m1, _] = moha::app::update(std::move(m), moha::StreamStarted{});
-    CHECK(m1.s.active);
+    CHECK(m1.s.active());
 }
 
 TEST(stream_text_delta_appends_to_assistant_streaming_text) {
@@ -225,11 +230,10 @@ TEST(stream_text_delta_appends_to_assistant_streaming_text) {
 
 TEST(stream_error_transitions_to_idle) {
     auto m = blank_model();
-    m.s.active = true;
-    m.s.phase  = moha::phase::Streaming{};
+    m.s.phase  = moha::phase::Streaming{};   // active() derives from phase
     auto [m1, _] = moha::app::update(std::move(m),
                                      moha::StreamError{"boom"});
-    CHECK(!m1.s.active);
+    CHECK(!m1.s.active());
     CHECK(m1.s.is_idle());
 }
 

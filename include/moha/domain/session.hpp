@@ -7,8 +7,11 @@
 #include <concepts>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <variant>
 
 #include <maya/widget/spinner.hpp>
@@ -16,15 +19,6 @@
 namespace moha::http { class CancelToken; }
 
 namespace moha {
-
-namespace phase {
-struct Idle               {};
-struct Streaming          {};
-struct AwaitingPermission {};
-struct ExecutingTool      {};
-} // namespace phase
-using Phase = std::variant<phase::Idle, phase::Streaming,
-                           phase::AwaitingPermission, phase::ExecutingTool>;
 
 // ── Retry / stall watchdog state machine ──────────────────────
 // Used to be two parallel bools (`stall_dispatched`, `retry_pending`)
@@ -54,6 +48,119 @@ struct Scheduled  {};
 } // namespace retry
 using RetryState = std::variant<retry::Fresh, retry::StallFired, retry::Scheduled>;
 
+namespace phase {
+
+// Per-turn streaming context: alive whenever the request lifecycle is
+// in flight (Streaming → AwaitingPermission → ExecutingTool → Streaming
+// → … → Idle). Embedded inside every non-Idle phase variant alternative
+// so the fields below DO NOT EXIST when the FSM is Idle. Reading them
+// from Idle is now a type error rather than a logic bug masked by
+// default-zero values.
+//
+// The context flows across legal transitions: Streaming → Awaiting-
+// Permission preserves the same `cancel` token, the same `started`
+// stamp, the same retry counters. The transition functions below take
+// the source by `&&` and re-wrap its `ctx` inside the destination
+// variant — there's no slot in C++ for "an optional Active that
+// follows whichever phase happens to be active right now," so the FSM
+// itself carries it.
+struct Active {
+    std::shared_ptr<moha::http::CancelToken> cancel;
+
+    // Turn start (set on Idle → Streaming) and event-time-of-last-
+    // observed-activity (bumped on every SSE event). Together they
+    // drive the elapsed-time chip and the 120-s stall watchdog.
+    std::chrono::steady_clock::time_point started{};
+    std::chrono::steady_clock::time_point last_event_at{};
+
+    // Per-turn retry counters. truncation_retries: silent re-launches
+    // when the stream EOFs mid-tool-args. transient_retries: 5xx /
+    // network / overloaded / 429. Independent budgets.
+    int truncation_retries = 0;
+    int transient_retries  = 0;
+
+    // Live tok/s speedometer — bytes of text/json delta, not the rare
+    // usage field. first_delta_at excludes TTFT from the rate divisor.
+    // Reset at every StreamStarted (sub-turn) but accumulated across
+    // a single sub-turn's deltas.
+    std::size_t live_delta_bytes = 0;
+    std::chrono::steady_clock::time_point first_delta_at{};
+    std::chrono::steady_clock::time_point rate_last_sample_at{};
+    std::size_t rate_last_sample_bytes = 0;
+
+    // Retry/stall machine state — see RetryState above.
+    RetryState retry = retry::Fresh{};
+};
+
+// ── Phase types ──────────────────────────────────────────────────────
+// Idle holds nothing — there's no in-flight request to carry context
+// for. Streaming / AwaitingPermission / ExecutingTool each carry one
+// Active block; the only difference between them is the tag.
+//
+// Why all three need the SAME context (rather than each peeling off
+// just the fields it cares about):
+//   • cancel       — Esc must work in every active phase. Even
+//                    AwaitingPermission needs the token live so a
+//                    user Esc cancels the underlying SSE stream
+//                    (the request is still open, waiting for the
+//                    next tool args).
+//   • last_event_at — the stall watchdog runs in every active phase;
+//                    a stream that goes silent during ExecutingTool
+//                    is still a stalled stream.
+//   • retry counters / retry_state — error retries can fire from any
+//                    active phase (StreamError can land while we're
+//                    in AwaitingPermission, e.g. server killed the
+//                    request while the user is reading a permission
+//                    prompt) and need to preserve attempt counts.
+struct Idle               {};
+struct Streaming          { Active ctx; };
+struct AwaitingPermission { Active ctx; };
+struct ExecutingTool      { Active ctx; };
+
+} // namespace phase
+
+using Phase = std::variant<phase::Idle, phase::Streaming,
+                           phase::AwaitingPermission, phase::ExecutingTool>;
+
+// ── Active-context accessors ─────────────────────────────────────────
+// The 60-odd reader sites that used to touch `m.s.cancel` /
+// `m.s.last_event_at` / etc. on a flat StreamState now go through
+// `active_ctx(m.s.phase)`. Returns nullptr when the phase is Idle —
+// readers that only run during active phases can dereference
+// unconditionally; readers that may run from Idle (the Tick watchdog,
+// status-bar widgets) check for null first. The single visit replaces
+// what would otherwise be ~60 hand-written `std::get_if` chains.
+[[nodiscard]] inline phase::Active* active_ctx(Phase& p) noexcept {
+    return std::visit([](auto& v) -> phase::Active* {
+        if constexpr (requires { v.ctx; }) return &v.ctx;
+        else                               return nullptr;
+    }, p);
+}
+[[nodiscard]] inline const phase::Active* active_ctx(const Phase& p) noexcept {
+    return std::visit([](const auto& v) -> const phase::Active* {
+        if constexpr (requires { v.ctx; }) return &v.ctx;
+        else                               return nullptr;
+    }, p);
+}
+
+// Consume the source phase's ctx; returns nullopt if Idle. Used by the
+// transition sites where ctx flows from old to new phase: instead of
+// hand-rolling a 4-arm visit at every site, callers do
+//
+//     auto ctx = take_active_ctx(std::move(m.s.phase));
+//     m.s.phase = phase::ExecutingTool{std::move(ctx).value()};
+//
+// The .value() asserts "we expected an active source here" — bugs
+// from Idle leaking into a Streaming-only transition site abort
+// rather than silently corrupt a default-constructed ctx.
+[[nodiscard]] inline std::optional<phase::Active> take_active_ctx(Phase&& p) noexcept {
+    return std::visit([](auto&& v) -> std::optional<phase::Active> {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::same_as<T, phase::Idle>) return std::nullopt;
+        else                                        return std::move(v.ctx);
+    }, std::move(p));
+}
+
 [[nodiscard]] constexpr std::string_view to_string(const Phase& p) noexcept {
     return std::visit([](const auto& v) -> std::string_view {
         using T = std::decay_t<decltype(v)>;
@@ -66,7 +173,6 @@ using RetryState = std::variant<retry::Fresh, retry::StallFired, retry::Schedule
 
 struct StreamState {
     Phase phase = phase::Idle{};
-    std::chrono::steady_clock::time_point started{};
     std::chrono::steady_clock::time_point last_tick{};
     int tokens_in   = 0;
     int tokens_out  = 0;
@@ -78,7 +184,9 @@ struct StreamState {
     // (retrying, cancelled, checkpoint-restore-not-implemented, …) so
     // they don't linger forever. A default-constructed time_point
     // (epoch=0) means "no expiry" — the status stays until something
-    // else writes over it.
+    // else writes over it. Lives on StreamState (not phase::Active)
+    // because terminal-error and cancellation handlers set it WHILE
+    // transitioning to Idle, so the toast must outlive the ctx.
     std::chrono::steady_clock::time_point status_until{};
 
     // True iff `status` is set AND either has no expiry or hasn't expired yet.
@@ -88,64 +196,45 @@ struct StreamState {
         return now < status_until;
     }
     maya::Spinner<maya::SpinnerStyle::Dots> spinner{};
-    int truncation_retries = 0;
-    // Transient-error retry counter (overloaded / 429 / 5xx / network
-    // drop). Reset at the start of each user turn. Independent of
-    // truncation_retries so a turn that hits both retries fairly.
-    int transient_retries = 0;
 
-    // Live tok/s speedometer — bytes of text/json delta, not the rare
-    // usage field. first_delta_at excludes TTFT from the rate divisor.
-    std::size_t live_delta_bytes = 0;
-    std::chrono::steady_clock::time_point first_delta_at{};
-
-    // Sparkline ring buffer for the status-bar trend glyphs.
+    // Sparkline ring buffer for the status-bar trend glyphs. NOT
+    // reset between sub-turns or across the active→Idle boundary —
+    // a user-visible trace of generation rate over the whole session.
     static constexpr std::size_t kRateSamples = 12;
     std::array<float, kRateSamples> rate_history{};
     std::size_t rate_history_pos = 0;
     bool rate_history_full = false;
-    std::chrono::steady_clock::time_point rate_last_sample_at{};
-    std::size_t rate_last_sample_bytes = 0;
 
-    std::shared_ptr<moha::http::CancelToken> cancel;
-
-    // ── Stream-stall watchdog ─────────────────────────────────────
-    // Bumped on every SSE event the reducer processes (StreamStarted,
-    // TextDelta, ToolUseStart/Delta/End, Usage). The Tick handler reads
-    // it and force-fires a Transient error if no event has arrived for
-    // longer than the stall threshold. Catches the case the http idle
-    // timeout misses: server keeps the TCP/h2 connection alive (PING
-    // ACKs reset `last_rx`) but stops sending application-level events.
-    std::chrono::steady_clock::time_point last_event_at{};
-
-    // Retry/stall machine state. See the RetryState definition above
-    // for the full transition diagram. Replaces the legacy bool pair
-    // (stall_dispatched + retry_pending) which encoded the same 3-state
-    // progression with no help from the type system.
-    RetryState retry_state = retry::Fresh{};
-
-    // Predicates — read sites stay terse and self-documenting:
-    //   if (m.s.in_stall_fired()) reclassify_cancel_as_transient();
-    //   if (m.s.in_scheduled())   skip_double_retry();
-    [[nodiscard]] bool in_fresh()       const noexcept { return std::holds_alternative<retry::Fresh>(retry_state); }
-    [[nodiscard]] bool in_stall_fired() const noexcept { return std::holds_alternative<retry::StallFired>(retry_state); }
-    [[nodiscard]] bool in_scheduled()   const noexcept { return std::holds_alternative<retry::Scheduled>(retry_state); }
-
-    // ── Phase predicates ─────────────────────────────────────────────────
+    // ── Phase predicates ─────────────────────────────────────────────
     [[nodiscard]] bool is_idle()                const noexcept { return std::holds_alternative<phase::Idle>(phase); }
     [[nodiscard]] bool is_streaming()           const noexcept { return std::holds_alternative<phase::Streaming>(phase); }
     [[nodiscard]] bool is_awaiting_permission() const noexcept { return std::holds_alternative<phase::AwaitingPermission>(phase); }
     [[nodiscard]] bool is_executing_tool()      const noexcept { return std::holds_alternative<phase::ExecutingTool>(phase); }
 
     // Derived: "is anything actively in flight?" — true whenever the
-    // session is in any non-Idle phase. This used to be a parallel
-    // `bool active` field that callers had to keep in lock-step with
-    // `phase`; deriving it eliminates the invariant ("active is true
-    // iff phase != Idle") that the type system couldn't enforce.
-    // Spinner ticks, watchdogs, and the live-elapsed indicators all
-    // gate on this — there is no longer any case where one wants
-    // `active == true && phase == Idle` or vice versa.
+    // session is in any non-Idle phase. Used to be a parallel `bool
+    // active` field that callers had to keep in lock-step with phase;
+    // deriving it eliminates the invariant ("active iff phase != Idle")
+    // that the type system couldn't enforce.
     [[nodiscard]] bool active() const noexcept { return !is_idle(); }
+
+    // Retry-state predicates — read through active_ctx() so they're
+    // safe to call from Idle (return values are equivalent to "no
+    // retry pending," which is what callers expect from Idle anyway:
+    // the watchdog gate `if (in_fresh()) check_for_stall()` correctly
+    // skips when there's no stream to stall).
+    [[nodiscard]] bool in_fresh() const noexcept {
+        auto* c = active_ctx(phase);
+        return !c || std::holds_alternative<retry::Fresh>(c->retry);
+    }
+    [[nodiscard]] bool in_stall_fired() const noexcept {
+        auto* c = active_ctx(phase);
+        return c && std::holds_alternative<retry::StallFired>(c->retry);
+    }
+    [[nodiscard]] bool in_scheduled() const noexcept {
+        auto* c = active_ctx(phase);
+        return c && std::holds_alternative<retry::Scheduled>(c->retry);
+    }
 };
 
 } // namespace moha
