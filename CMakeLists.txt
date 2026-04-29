@@ -207,7 +207,12 @@ endif()
 # upstream CMake config (vcpkg / Homebrew / nghttp2's own export); fall back
 # to pkg-config (Linux distros), then a manual find_path/find_library scan.
 find_package(nghttp2 CONFIG QUIET)
-if(NOT TARGET nghttp2::nghttp2)
+# Skip pkg-config for fully-static builds: pkg-config returns the dynamic
+# library path by default (libnghttp2.so), which the `-static` link below
+# can't accept ("attempted static link of dynamic object").  The manual
+# find_library path further down (gated on MOHA_STANDALONE) explicitly
+# prefers libnghttp2.a, so let it take over.
+if(NOT TARGET nghttp2::nghttp2 AND NOT MOHA_FULLY_STATIC)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(NGHTTP2 IMPORTED_TARGET libnghttp2)
