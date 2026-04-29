@@ -106,6 +106,19 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 
 maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m) {
+    // Settled-turn cache.  A message that has a successor in the messages
+    // vector is by construction fully resolved — moha only appends a new
+    // message once the current turn's text is final, all tools terminal,
+    // and any permission prompt resolved.  Reusing the prior frame's
+    // built Config skips per-frame rebuilding of the turn header, the
+    // entire agent_timeline (every tool card), and the permission /
+    // markdown wiring — which is the dominant cost as a session grows.
+    const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
+    if (can_cache) {
+        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        if (slot.cfg) return *slot.cfg;
+    }
+
     auto style = speaker_style_for(msg.role, m);
 
     maya::Turn::Config cfg;
@@ -143,6 +156,10 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         if (msg.error) cfg.error = *msg.error;
     }
 
+    if (can_cache) {
+        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
+    }
     return cfg;
 }
 

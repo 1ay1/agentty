@@ -8,7 +8,8 @@ namespace moha::ui {
 namespace {
 
 // thread_local because the view renders on a single thread.
-thread_local std::unordered_map<std::string, MessageMdCache> g_message_cache;
+thread_local std::unordered_map<std::string, MessageMdCache>  g_message_cache;
+thread_local std::unordered_map<std::string, TurnConfigCache> g_turn_config_cache;
 
 std::string message_key(const ThreadId& tid, std::size_t msg_idx) {
     std::string k;
@@ -23,6 +24,10 @@ std::string message_key(const ThreadId& tid, std::size_t msg_idx) {
 
 MessageMdCache& message_md_cache(const ThreadId& tid, std::size_t msg_idx) {
     return g_message_cache[message_key(tid, msg_idx)];
+}
+
+TurnConfigCache& turn_config_cache(const ThreadId& tid, std::size_t msg_idx) {
+    return g_turn_config_cache[message_key(tid, msg_idx)];
 }
 
 } // namespace moha::ui
