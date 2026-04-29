@@ -172,6 +172,20 @@ int copy_credentials(const std::string& remote) {
     return 0;
 }
 
+// Single-quote `v` so it survives the remote shell as one literal token.
+// Embedded `'` becomes `'\''` (close-quote, escaped quote, reopen-quote).
+std::string sh_squote(std::string_view v) {
+    std::string out;
+    out.reserve(v.size() + 2);
+    out.push_back('\'');
+    for (char c : v) {
+        if (c == '\'') out.append("'\\''");
+        else           out.push_back(c);
+    }
+    out.push_back('\'');
+    return out;
+}
+
 // Replace this process with `ssh -t -R 1080 user@host <remote-cmd>`.
 // Never returns on success.  argv constructed on the heap because execvp
 // modifies its argv slot.
@@ -180,9 +194,48 @@ int copy_credentials(const std::string& remote) {
     // Remote command: point moha at the tunnelled SOCKS5 proxy, exec it.
     // `exec` matters — without it the user's $SHELL stays around as a
     // parent process and signal forwarding gets one extra hop wrong.
-    std::string remote_cmd =
-        "MOHA_SOCKS_PROXY=localhost:1080 "
-        "exec " + remote_moha;
+    std::string remote_cmd = "MOHA_SOCKS_PROXY=localhost:1080";
+
+    // Forward terminal-identifying env vars from this laptop to the
+    // remote shell so the remote moha can tell whether the user's
+    // terminal supports DEC 2026 (synchronized output / "begin sync
+    // update").  Without sync, compose_inline_frame's per-cell rewrite
+    // is rendered byte-by-byte and the user sees flicker every time the
+    // composer's row gets repainted.  SSH doesn't propagate these vars
+    // by default — `SendEnv` requires the server's sshd_config to
+    // explicitly `AcceptEnv` each one — so we pass them on the command
+    // line where no sshd config change is needed.  If a var is unset
+    // locally, we skip it; an empty value would set the env var to ""
+    // on the remote, which env-detect treats as "absent" anyway.
+    static constexpr const char* kTerminalMarkers[] = {
+        // Identification by program name / version.
+        "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+        // Per-terminal unambiguous markers.
+        "KITTY_WINDOW_ID",
+        "ALACRITTY_LOG", "ALACRITTY_WINDOW_ID",
+        "GHOSTTY_RESOURCES_DIR",
+        "WEZTERM_EXECUTABLE",
+        "WT_SESSION",          // Windows Terminal
+        "KONSOLE_VERSION",
+        "VTE_VERSION",          // GNOME Terminal, Tilix, etc.
+        "ITERM_SESSION_ID",     // iTerm.app
+        // TERM is typically already propagated by SSH, but force it in
+        // case the user's sshd_config doesn't pass it through.
+        "TERM",
+        // COLORTERM signals truecolor support — useful for moha's
+        // colour rendering.
+        "COLORTERM",
+    };
+    for (const char* name : kTerminalMarkers) {
+        if (const char* v = std::getenv(name); v && *v) {
+            remote_cmd += ' ';
+            remote_cmd += name;
+            remote_cmd += '=';
+            remote_cmd += sh_squote(v);
+        }
+    }
+
+    remote_cmd += " exec " + remote_moha;
 
     std::vector<std::string> argv;
     argv.push_back("ssh");
