@@ -74,10 +74,10 @@ ExecResult run_diagnostics(const DiagnosticsArgs& a) {
     // inside the workspace and nowhere else).
     auto sub = auto_argv.empty()
         ? util::sandbox::run_shell_command(a.command, /*max_bytes*/30'000,
-                                           std::chrono::seconds{120})
+                                           std::chrono::seconds{60})
         : util::sandbox::run_argv(auto_argv, /*max_bytes*/30'000,
-                                  std::chrono::seconds{120});
-    auto output = util::legacy_format(sub, std::chrono::seconds{120});
+                                  std::chrono::seconds{60});
+    auto output = util::legacy_format(sub, std::chrono::seconds{60});
     if (output.empty()) return ToolOutput{"no diagnostics (clean build)", std::nullopt};
     if (!a.display_description.empty())
         output = a.display_description + "\n\n" + output;

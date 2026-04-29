@@ -112,21 +112,21 @@ enum class Kind : std::uint8_t {
 inline constexpr std::array kCatalog = {
     //         name              kind                  effects                              eager   timeout
     ToolSpec{"read",            Kind::Read,           {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"edit",            Kind::Edit,           {Effect::ReadFs, Effect::WriteFs},    true,    detail::sec{30}},
-    ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{30}},
-    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0}},   // subprocess-managed
-    ToolSpec{"grep",            Kind::Grep,           {Effect::ReadFs},                     false,   detail::sec{90}},  // tree walks can be deep
-    ToolSpec{"glob",            Kind::Glob,           {Effect::ReadFs},                     false,   detail::sec{60}},
+    ToolSpec{"edit",            Kind::Edit,           {Effect::ReadFs, Effect::WriteFs},    true,    detail::sec{20}},
+    ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{20}},
+    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0}},   // subprocess-managed (bash.cpp owns deadline)
+    ToolSpec{"grep",            Kind::Grep,           {Effect::ReadFs},                     false,   detail::sec{45}},  // big-repo walks; runaway pattern caps here
+    ToolSpec{"glob",            Kind::Glob,           {Effect::ReadFs},                     false,   detail::sec{30}},
     ToolSpec{"list_dir",        Kind::ListDir,        {Effect::ReadFs},                     false,   detail::sec{20}},
     ToolSpec{"todo",            Kind::Todo,           {} /* pure */,                        true,    detail::sec{5}},   // in-memory only
     ToolSpec{"web_fetch",       Kind::WebFetch,       {Effect::Net},                        false,   detail::sec{30}},  // matches http total-timeout
     ToolSpec{"web_search",      Kind::WebSearch,      {Effect::Net},                        false,   detail::sec{20}},
-    ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{60}},
-    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0}},   // subprocess-managed
+    ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{30}},
+    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0}},   // subprocess-managed (diagnostics.cpp owns deadline)
     ToolSpec{"git_status",      Kind::GitStatus,      {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{30}},
+    ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{20}},
     ToolSpec{"git_log",         Kind::GitLog,         {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30}},
+    ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30}},  // pre-commit hooks can be slow
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the

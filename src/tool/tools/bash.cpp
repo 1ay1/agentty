@@ -91,14 +91,19 @@ std::string strip_ansi_escapes(std::string_view in) {
 }
 
 // Bash command bounds, encoded in the type so the runner doesn't
-// re-validate. `timeout` is `Bounded<int, 1, 600>` — 1 s minimum (a 0 s
-// timeout fires before the subprocess can fork), 600 s ceiling matches
-// the wire description. `command` is `NonEmpty<string>` — the
-// subprocess runner can dereference without checking. The parser is
-// the *only* place that can fail-construct these; once a `BashArgs`
-// exists, all of its invariants have been proven.
+// re-validate. `timeout` is `Bounded<int, 1, 300>` — 1 s minimum (a 0 s
+// timeout fires before the subprocess can fork), 300 s (5 min) ceiling
+// is a sane cap on a single agent step (anything truly long-running
+// belongs in a backgrounded job, not a synchronous tool call).  Default
+// is 60 s — most shell commands the model invokes are fast (file
+// metadata, `git status`, small builds); the long tail of legitimate
+// 60-300s commands can opt in via the `timeout` arg.  `command` is
+// `NonEmpty<string>` — the subprocess runner can dereference without
+// checking. The parser is the *only* place that can fail-construct
+// these; once a `BashArgs` exists, all of its invariants have been
+// proven.
 using Command = domain::NonEmpty<std::string>;
-using TimeoutSecs = domain::Bounded<int, 1, 600>;
+using TimeoutSecs = domain::Bounded<int, 1, 300>;
 
 struct BashArgs {
     Command     command;
@@ -120,7 +125,7 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
         return std::unexpected(ToolError::invalid_args(
             std::string{cmd_refined.error().what}));
 
-    int timeout_int = ar.integer("timeout", 120);
+    int timeout_int = ar.integer("timeout", 60);
     // Also accept `timeout_ms` (Zed's convention). Convert to seconds.
     if (ar.has("timeout_ms")) {
         int ms = ar.integer("timeout_ms", 0);
@@ -129,11 +134,11 @@ std::expected<BashArgs, ToolError> parse_bash_args(const json& j) {
     // Coerce out-of-range values to the documented default — anything we
     // could meaningfully reject we silently fix instead, since the
     // primary cause is the model passing nonsense (e.g. -1 to disable).
-    if (timeout_int <= 0 || timeout_int > 600) timeout_int = 120;
+    if (timeout_int <= 0 || timeout_int > 300) timeout_int = 60;
     auto timeout = TimeoutSecs::try_make(timeout_int);
     if (!timeout)
         return std::unexpected(ToolError::invalid_args(
-            "timeout must be in [1, 600]"));
+            "timeout must be in [1, 300]"));
 
     std::string cd = ar.str("cd", "");
     if (!cd.empty()) {
@@ -292,7 +297,7 @@ ToolDef tool_bash() {
             {"command", {{"type","string"}, {"description","The shell command to execute"}}},
             {"cd",      {{"type","string"}, {"description",
                 "Working directory for the command. If set, runs as `cd <dir> && <command>`."}}},
-            {"timeout", {{"type","integer"}, {"description","Timeout in seconds (default 120, max 600)"}}},
+            {"timeout", {{"type","integer"}, {"description","Timeout in seconds (default 60, max 300)"}}},
             {"timeout_ms", {{"type","integer"}, {"description",
                 "Alternative timeout in milliseconds (rounded up to seconds)."}}},
         }},
