@@ -81,6 +81,16 @@ struct Model {
         // Cmd::commit_scrollback keeps the Yoga/paint cost bounded to the
         // visible window, not the full transcript.
         int                 thread_view_start = 0;
+        // Number of finalized assistant messages BEFORE thread_view_start.
+        // The view shows the running turn number ("turn 42") and previously
+        // recomputed it by walking m.d.current.messages from 0 to
+        // thread_view_start every frame — O(thread_view_start), which grows
+        // linearly with the conversation as virtualization advances.
+        // Caching it here makes the per-frame turn-numbering cost O(1)
+        // regardless of how long the session has run.  Mutated only in
+        // maybe_virtualize alongside thread_view_start; resets to 0 on
+        // thread switch (same lifecycle as thread_view_start).
+        int                 thread_view_start_turn = 0;
     };
 
     Domain      d;

@@ -56,9 +56,13 @@ maya::Cmd<Msg> maybe_virtualize(Model& m) {
     if (visible <= kViewWindow + kSliceChunk) return Cmd<Msg>::none();
 
     int committed_rows = 0;
-    for (int i = m.ui.thread_view_start; i < m.ui.thread_view_start + kSliceChunk; ++i)
+    int committed_turns = 0;
+    for (int i = m.ui.thread_view_start; i < m.ui.thread_view_start + kSliceChunk; ++i) {
         committed_rows += estimate_message_rows(m.d.current.messages[i]);
-    m.ui.thread_view_start += kSliceChunk;
+        if (m.d.current.messages[i].role == Role::Assistant) ++committed_turns;
+    }
+    m.ui.thread_view_start      += kSliceChunk;
+    m.ui.thread_view_start_turn += committed_turns;
     return Cmd<Msg>::commit_scrollback(committed_rows);
 }
 

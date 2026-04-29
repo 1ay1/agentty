@@ -13,14 +13,16 @@ maya::Conversation::Config conversation_config(const Model& m) {
 
     // Virtualize: older messages live in the terminal's native scrollback
     // (committed via maya::Cmd::commit_scrollback). Preserve absolute
-    // turn numbering by counting finalized assistant messages BEFORE the
-    // view window too — "turn 42" stays consistent after scrolling back.
+    // turn numbering by reading the running turn count that maybe_virtualize
+    // maintains alongside thread_view_start — O(1), regardless of how
+    // many turns the session has accumulated.  Previously we walked
+    // messages[0..start) here every frame, which was O(thread_view_start)
+    // and grew linearly with the conversation; on a long-running session
+    // that became the dominant per-frame view cost.
     const std::size_t total = m.d.current.messages.size();
     const std::size_t start = static_cast<std::size_t>(
         std::clamp(m.ui.thread_view_start, 0, static_cast<int>(total)));
-    int turn = 1;
-    for (std::size_t i = 0; i < start; ++i)
-        if (m.d.current.messages[i].role == Role::Assistant) ++turn;
+    int turn = 1 + m.ui.thread_view_start_turn;
 
     cfg.turns.reserve(total - start);
     for (std::size_t i = start; i < total; ++i) {
