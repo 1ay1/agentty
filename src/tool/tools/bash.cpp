@@ -22,6 +22,74 @@ using json = nlohmann::json;
 
 namespace {
 
+// Strip ANSI / OSC escape sequences from captured subprocess output.
+// Programs like `python3 crazy.py`, `ls --color`, `git log` etc. emit
+// CSI (`\x1b[...m`), OSC (`\x1b]...BEL`), and bare-ESC sequences when
+// stdout looks like a TTY — and a sandboxed subprocess can be tricked
+// into thinking it does.  Without stripping, two things break:
+//
+//   1. The ESC bytes get written to maya's canvas; canvas drops them
+//      (canvas.cpp:222 skips `< 0x20`) but the *parameter tail* of each
+//      sequence (`[?25l`, `[2J`, `[38;2;255;180;26m`, …) becomes giant
+//      blobs of literal text — a 10×80 RGB burst is ~12 KB *post*-strip.
+//   2. That blob lands in moha's tool body preview as a TextElement and
+//      blows up the canvas height in a single frame.  compose_inline_frame's
+//      partial-rewrite path can't handle frame-to-frame growth larger
+//      than `term_h - composer_height` cleanly — the symptom is whole
+//      rows of an earlier frame staying visible above the rewrite span,
+//      mixed in with the new content.
+//
+// Stripping at capture time keeps the body preview a faithful rendering
+// of what the user *meant* to see (the program's text content), and
+// keeps the canvas growth proportional to that text rather than to its
+// SGR-escape weight.  Cost: one linear pass over the output buffer.
+std::string strip_ansi_escapes(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    for (std::size_t i = 0; i < in.size(); ) {
+        unsigned char b = static_cast<unsigned char>(in[i]);
+        if (b != 0x1b) {              // not an escape — keep verbatim
+            out.push_back(in[i]);
+            ++i;
+            continue;
+        }
+        if (i + 1 >= in.size()) { ++i; continue; }   // dangling ESC
+        unsigned char next = static_cast<unsigned char>(in[i + 1]);
+        if (next == '[') {
+            // CSI: ESC [ params final.  Final byte is in 0x40..0x7e
+            // (`@A..Z[\]^_a..z{|}~`).  Params are any of `\x30..\x3f`
+            // (digits, `:;<=>?`).  Intermediate bytes `\x20..\x2f` rare
+            // in the wild but allowed; we just skip until a final byte.
+            i += 2;
+            while (i < in.size()) {
+                unsigned char c = static_cast<unsigned char>(in[i++]);
+                if (c >= 0x40 && c <= 0x7e) break;
+            }
+        } else if (next == ']') {
+            // OSC: ESC ] params terminator.  Terminator is BEL (0x07)
+            // or ST (`ESC \`).  Some malformed sources never terminate;
+            // cap the scan at a sane budget so a runaway OSC can't
+            // swallow the rest of the buffer.
+            i += 2;
+            std::size_t cap = std::min(in.size(), i + 4096);
+            while (i < cap) {
+                unsigned char c = static_cast<unsigned char>(in[i]);
+                if (c == 0x07) { ++i; break; }
+                if (c == 0x1b && i + 1 < in.size()
+                    && in[i + 1] == '\\') { i += 2; break; }
+                ++i;
+            }
+        } else {
+            // Other ESC sequences: ESC + one byte (charset selection,
+            // ESC P / X / ^ / _ … followed by ST, etc).  Conservative:
+            // just drop ESC + the next byte.  A misinterpreted DCS/SOS
+            // tail will print as harmless ASCII.
+            i += 2;
+        }
+    }
+    return out;
+}
+
 // Bash command bounds, encoded in the type so the runner doesn't
 // re-validate. `timeout` is `Bounded<int, 1, 600>` — 1 s minimum (a 0 s
 // timeout fires before the subprocess can fork), 600 s ceiling matches
@@ -127,6 +195,12 @@ ExecResult run_bash(const BashArgs& a) {
     // declared `cd` arg is already workspace-checked above; this is
     // the runtime layer that catches what the body does.
     auto r = util::sandbox::run_shell_command(effective, 30000, std::chrono::seconds{tmo_s});
+    // Sanitize before any of the formatting branches below see r.output —
+    // see strip_ansi_escapes' rationale.  We do this here (not deeper in
+    // the subprocess layer) because bash output is the only path that
+    // routinely carries TTY escapes; other tools that capture subprocess
+    // output produce structured data we wouldn't want to munge.
+    r.output = strip_ansi_escapes(r.output);
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
 
