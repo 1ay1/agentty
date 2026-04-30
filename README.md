@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+<p align="center"><em>a calm middleware between you and the model</em></p>
+
 A native terminal client for Claude. C++26, no Electron / Node / Python in the loop.
 
 <p align="center">
