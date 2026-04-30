@@ -133,18 +133,15 @@ Strictly preferable: install your proxy's CA into the system trust store (`/etc/
 
 ## How it compares
 
-|                            | moha                                  | claude-code                       | aider                               |
-|----------------------------|---------------------------------------|-----------------------------------|-------------------------------------|
-| Language / runtime         | C++26 — single static binary          | TypeScript / Node                 | Python                              |
-| Footprint                  | ~9 MB                                 | npm + Node runtime                | pip + Python runtime                |
-| Bash sandbox by default    | Yes (bwrap / sandbox-exec)            | No                                | No                                  |
-| Workspace boundary on FS   | Yes (`--workspace /` opts out)        | No                                | Per-file allow/deny                 |
-| Air-gapped mode            | Yes (`moha airgap`, SOCKS5 over SSH)  | No                                | No                                  |
-| Inline render (scrollback) | Yes — bottom-anchored, preserves it   | Takes over screen                 | Takes over screen                   |
-| Auth                       | OAuth (Pro/Max) + `ANTHROPIC_API_KEY` | OAuth + `ANTHROPIC_API_KEY`       | per-provider env vars               |
-| Models                     | Claude (Anthropic)                    | Claude (Anthropic)                | many (OpenAI / Anthropic / local …) |
+|                     | moha                                  | claude-code                       | aider                               |
+|---------------------|---------------------------------------|-----------------------------------|-------------------------------------|
+| Language / runtime  | C++26 — single static binary          | TypeScript / Node                 | Python                              |
+| Footprint           | ~9 MB                                 | npm + Node runtime                | pip + Python runtime                |
+| Air-gapped mode     | Yes (`moha airgap`, SOCKS5 over SSH)  | No                                | No                                  |
+| Auth                | OAuth (Pro/Max) + `ANTHROPIC_API_KEY` | OAuth + `ANTHROPIC_API_KEY`       | per-provider env vars               |
+| Models              | Claude (Anthropic)                    | Claude (Anthropic)                | many (OpenAI / Anthropic / local …) |
 
-If you want a multi-model agent across providers, aider is excellent. If you want Anthropic's first-party experience with their support behind it, claude-code. moha is the niche pick when you specifically want a sandboxed, single-binary, scrollback-preserving Claude client — or you need to run on an air-gapped host through an SSH tunnel.
+If you want a multi-model agent across providers, aider is excellent. If you want Anthropic's first-party experience with their support behind it, claude-code. moha is the niche pick when you specifically want a single-binary Claude client with no runtime dependency, or you need to run on an air-gapped host through an SSH tunnel.
 
 ## How it works
 
