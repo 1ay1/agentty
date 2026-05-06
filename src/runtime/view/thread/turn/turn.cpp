@@ -105,7 +105,8 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 } // namespace
 
 maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
-                               int turn_num, const Model& m) {
+                               int turn_num, const Model& m,
+                               bool continuation) {
     // Settled-turn cache.  A message that has a successor in the messages
     // vector is by construction fully resolved — moha only appends a new
     // message once the current turn's text is final, all tools terminal,
@@ -116,19 +117,20 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
     if (can_cache) {
         auto& slot = turn_config_cache(m.d.current.id, msg_idx);
-        if (slot.cfg) return *slot.cfg;
+        if (slot.cfg && slot.cfg->continuation == continuation) return *slot.cfg;
     }
 
     auto style = speaker_style_for(msg.role, m);
 
     maya::Turn::Config cfg;
-    cfg.glyph      = style.glyph;
-    cfg.label      = style.label;
-    cfg.rail_color = style.color;
-    cfg.meta       = format_turn_meta(msg, turn_num,
-                         msg.role == Role::Assistant
-                             ? assistant_elapsed(msg, m)
-                             : std::nullopt);
+    cfg.glyph        = style.glyph;
+    cfg.label        = style.label;
+    cfg.rail_color   = style.color;
+    cfg.continuation = continuation;
+    cfg.meta         = format_turn_meta(msg, turn_num,
+                          msg.role == Role::Assistant
+                              ? assistant_elapsed(msg, m)
+                              : std::nullopt);
     cfg.checkpoint_above = (msg.role == Role::User && msg.checkpoint_id.has_value());
     cfg.checkpoint_color = warn;
 

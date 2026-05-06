@@ -27,8 +27,25 @@ maya::Conversation::Config conversation_config(const Model& m) {
     cfg.turns.reserve(total - start);
     for (std::size_t i = start; i < total; ++i) {
         const auto& msg = m.d.current.messages[i];
-        cfg.turns.push_back(turn_config(msg, i, turn, m));
-        if (msg.role == Role::Assistant) ++turn;
+        // Continuation: a 2nd+ Assistant in a same-speaker run.  We pass
+        // the flag through to turn_config; the Turn widget suppresses its
+        // header on continuations and the Conversation widget skips the
+        // inter-turn divider, so the per-API-response message structure
+        // stays intact (Anthropic's protocol requires it) while three
+        // back-to-back agent rounds visually flow as one block under one
+        // "Sonnet 4.5" header.
+        const bool continuation =
+            (msg.role == Role::Assistant) &&
+            (i > 0) &&
+            (m.d.current.messages[i - 1].role == Role::Assistant);
+
+        cfg.turns.push_back(turn_config(msg, i, turn, m, continuation));
+
+        // Increment the user-visible turn number only on the FIRST
+        // assistant of a run.  Continuations share the run's number so
+        // the next user message gets the next sequential turn (otherwise
+        // a 5-round agent action would push the next user to turn N+5).
+        if (msg.role == Role::Assistant && !continuation) ++turn;
     }
 
     cfg.in_flight = activity_indicator_config(m);
