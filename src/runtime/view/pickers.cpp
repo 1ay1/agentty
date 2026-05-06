@@ -14,11 +14,7 @@ using namespace maya::dsl;
 
 Element model_picker(const Model& m) {
     auto* picker = pick::opened(m.ui.model_picker);
-    // Zero-row when not active.  The previous `text("")` left a 1-row
-    // blank in the parent's region — when the modal dismissed, that
-    // ghost row briefly held stale prior content until the next full
-    // layout pass.  `nothing()` is the canonical zero-height placeholder.
-    if (!picker) return nothing();
+    if (!picker) return text("");
     std::vector<Element> rows;
     if (m.d.available_models.empty()) {
         rows.push_back(text("  Loading models\u2026", fg_italic(muted)));
@@ -52,7 +48,7 @@ Element model_picker(const Model& m) {
 
 Element thread_list(const Model& m) {
     auto* picker = pick::opened(m.ui.thread_list);
-    if (!picker) return nothing();
+    if (!picker) return text("");
     std::vector<Element> rows;
     if (m.d.threads.empty()) {
         rows.push_back(text("  No threads yet.", fg_italic(muted)));
@@ -85,7 +81,7 @@ Element thread_list(const Model& m) {
 
 Element command_palette(const Model& m) {
     auto* o = opened(m.ui.command_palette);
-    if (!o) return nothing();
+    if (!o) return text("");
 
     std::vector<Element> rows;
     rows.push_back(h(text("\u203A ", fg_bold(highlight)),
@@ -122,7 +118,7 @@ Element command_palette(const Model& m) {
 }
 
 Element todo_modal(const Model& m) {
-    if (!pick::is_open(m.ui.todo.open)) return nothing();
+    if (!pick::is_open(m.ui.todo.open)) return text("");
 
     std::vector<Element> rows;
 
