@@ -146,8 +146,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](StreamToolUseStart& e) -> Step {
             auto now = std::chrono::steady_clock::now();
             if (auto* a = active_ctx(m.s.phase)) a->last_event_at = now;
-            ToolCallId scheduled_watchdog_id;
-            std::chrono::seconds watchdog_secs{0};
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 ToolUse tc;
@@ -159,26 +157,12 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 // started emitting" from "execution is slow" at a glance.
                 tc.status = ToolUse::Pending{now};
                 m.d.current.messages.back().tool_calls.push_back(std::move(tc));
-                // Args-stream watchdog. Schedule a ToolTimeoutCheck now so
-                // a tool that gets stuck in Pending (because the stream
-                // errored mid-tool_use_start, or the upstream silently
-                // dropped without firing StreamError) eventually fails.
-                // Generous budget (max_seconds + 90 s margin for slow
-                // arg streams). The Pending → Running transition in
-                // kick_pending_tools also schedules its own watchdog
-                // with the tighter exec deadline; the handler is
-                // idempotent on terminal tools so the duplicate fire
-                // is harmless.
-                if (const auto* sp = tools::spec::lookup(e.name.value);
-                    sp && sp->max_seconds > std::chrono::seconds{0}) {
-                    scheduled_watchdog_id = e.id;
-                    watchdog_secs = sp->max_seconds + std::chrono::seconds{90};
-                }
-            }
-            if (!scheduled_watchdog_id.value.empty()) {
-                return {std::move(m),
-                    Cmd<Msg>::after(watchdog_secs,
-                                    Msg{ToolTimeoutCheck{scheduled_watchdog_id}})};
+                // Args-stream watchdog removed at user request — no
+                // automatic Pending → Failed timeout. A tool whose
+                // tool_use_start streams in but never gets its End
+                // event will stay Pending until the user cancels via
+                // Esc.  Stream-level errors still surface via the
+                // StreamError handler, which clears the in-flight tools.
             }
             return done(std::move(m));
         },

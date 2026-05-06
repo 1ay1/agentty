@@ -192,27 +192,13 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 active_effects |= want;
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
 
-                // Wall-clock watchdog, configured per-tool from the spec
-                // catalog (`spec::lookup(name)->max_seconds`). The worker
-                // thread can't be pre-empted from here (no portable
-                // thread cancellation), but we CAN move the UI on if the
-                // worker is wedged in a blocking syscall (slow NFS, dead
-                // FUSE mount, hung network FS). After the timeout fires,
-                // the tool's Running state is force-flipped to Failed;
-                // the late ToolExecOutput from the eventual unwind is
-                // discarded by apply_tool_output's idempotent guard.
-                //
-                // max_seconds == 0 means "no overlay timeout" — bash /
-                // diagnostics run via subprocess.cpp which has its own
-                // strict timeout, and stacking ours on top would
-                // truncate legitimate long commands. The spec catalog's
-                // static_assert guarantees only those two have 0.
-                if (const auto* sp = tools::spec::lookup(tc.name.value);
-                    sp && sp->max_seconds > std::chrono::seconds{0}) {
-                    cmds.push_back(Cmd<Msg>::after(
-                        sp->max_seconds,
-                        Msg{ToolTimeoutCheck{tc.id}}));
-                }
+                // Tool wall-clock watchdog removed at user request.
+                // Tools now run for as long as their worker takes;
+                // user cancels via Esc.  bash / diagnostics still
+                // self-timeout via subprocess.cpp.  Tools that wedge
+                // in a blocking syscall (slow NFS, dead FUSE mount)
+                // will leave the card in Running until cancellation —
+                // accept this trade-off explicitly.
 
                 // {Streaming, AwaitingPermission, ExecutingTool} →
                 // ExecutingTool. Source is whatever phase produced
