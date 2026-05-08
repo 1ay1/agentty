@@ -62,6 +62,48 @@ struct ToolSpec {
     // feed this to a millisecond-expecting scheduler without an
     // explicit `duration_cast` — the unit is in the type.
     std::chrono::seconds max_seconds;
+
+    // Per-tool output character budget enforced at the dispatcher
+    // boundary (DynamicDispatch::execute, tool.hpp). 0 means "no
+    // cap" — the tool already produces bounded output by design
+    // (todo, git_commit). Anything else is a hard ceiling: text
+    // longer than this is truncated according to `trunc_strategy`
+    // with a one-line "[... N chars elided ...]" marker so the
+    // model knows the response was clipped and can request
+    // specifics. Inspired by Claude Code's per-tool output caps —
+    // moha's individual tools already chunk output (Read uses
+    // offset/limit, Bash uses tail-only, Grep caps matches), but
+    // this is the safety net that covers tools whose internal
+    // limiting fails on pathological input (a 10 MB single-line
+    // log file from `bash`, a Read on a file with 2000 long
+    // lines, a Grep on a runaway pattern). The cap on tools that
+    // already self-limit is generous so it almost never trips on
+    // healthy inputs.
+    //
+    // Picked by character count, not tokens, because moha doesn't
+    // run a tokenizer locally. ~4 chars/token rule of thumb so a
+    // 30k-char cap ≈ 7.5k tokens.
+    int max_output_chars;
+
+    // Strategy used when output exceeds max_output_chars. Each
+    // strategy preserves the part of the output the tool's
+    // typical caller cares about most:
+    //
+    //   Head     — keep the first N chars, drop the tail. Right
+    //              for Read / Edit / Write where the answer is
+    //              "the requested chunk, in order".
+    //   Tail     — keep the last N chars, drop the head. Right
+    //              for Bash / Diagnostics where the latest log
+    //              line / error message matters more than the
+    //              setup output.
+    //   HeadTail — keep the first ~70% + last ~30%, elide middle.
+    //              Right for Grep / Web / Git where both the
+    //              start (most-relevant matches, page header,
+    //              first commits) AND the end (summary / "N more
+    //              matches" hint, page footer, recent commits)
+    //              carry signal.
+    enum class TruncStrategy : std::uint8_t { Head, Tail, HeadTail };
+    TruncStrategy trunc_strategy;
 };
 
 // ── The full tool catalog, in the same display order as the runtime
@@ -110,23 +152,23 @@ enum class Kind : std::uint8_t {
 };
 
 inline constexpr std::array kCatalog = {
-    //         name              kind                  effects                              eager   timeout
-    ToolSpec{"read",            Kind::Read,           {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"edit",            Kind::Edit,           {Effect::ReadFs, Effect::WriteFs},    true,    detail::sec{20}},
-    ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{20}},
-    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0}},   // subprocess-managed (bash.cpp owns deadline)
-    ToolSpec{"grep",            Kind::Grep,           {Effect::ReadFs},                     false,   detail::sec{45}},  // big-repo walks; runaway pattern caps here
-    ToolSpec{"glob",            Kind::Glob,           {Effect::ReadFs},                     false,   detail::sec{30}},
-    ToolSpec{"list_dir",        Kind::ListDir,        {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"todo",            Kind::Todo,           {} /* pure */,                        true,    detail::sec{5}},   // in-memory only
-    ToolSpec{"web_fetch",       Kind::WebFetch,       {Effect::Net},                        false,   detail::sec{30}},  // matches http total-timeout
-    ToolSpec{"web_search",      Kind::WebSearch,      {Effect::Net},                        false,   detail::sec{20}},
-    ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{30}},
-    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0}},   // subprocess-managed (diagnostics.cpp owns deadline)
-    ToolSpec{"git_status",      Kind::GitStatus,      {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"git_log",         Kind::GitLog,         {Effect::ReadFs},                     false,   detail::sec{20}},
-    ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30}},  // pre-commit hooks can be slow
+    //         name              kind                  effects                              eager   timeout            chars   strategy
+    ToolSpec{"read",            Kind::Read,           {Effect::ReadFs},                     false,   detail::sec{20},   80000,  ToolSpec::TruncStrategy::Head},
+    ToolSpec{"edit",            Kind::Edit,           {Effect::ReadFs, Effect::WriteFs},    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
+    ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
+    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only matches log-stream usage
+    ToolSpec{"grep",            Kind::Grep,           {Effect::ReadFs},                     false,   detail::sec{45},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"glob",            Kind::Glob,           {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::Head},
+    ToolSpec{"list_dir",        Kind::ListDir,        {Effect::ReadFs},                     false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::Head},
+    ToolSpec{"todo",            Kind::Todo,           {} /* pure */,                        true,    detail::sec{5},    0,      ToolSpec::TruncStrategy::Head},   // in-memory; never large
+    ToolSpec{"web_fetch",       Kind::WebFetch,       {Effect::Net},                        false,   detail::sec{30},   30000,  ToolSpec::TruncStrategy::Head},
+    ToolSpec{"web_search",      Kind::WebSearch,      {Effect::Net},                        false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only
+    ToolSpec{"git_status",      Kind::GitStatus,      {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},  // diffs can be big; bigger budget
+    ToolSpec{"git_log",         Kind::GitLog,         {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30},   0,      ToolSpec::TruncStrategy::Head},   // pre-commit hooks can be slow; output stays small
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
