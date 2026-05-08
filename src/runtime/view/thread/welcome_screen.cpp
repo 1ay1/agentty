@@ -20,11 +20,15 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     cfg.model_badge    = mb.build();
     cfg.profile_label  = std::string{profile_label(m.d.profile)};
     cfg.profile_color  = profile_color(m.d.profile);
-    cfg.starters_title = "Try";
-    cfg.starters       = {"Implement a small feature",
-                          "Refactor or clean up this file",
-                          "Explain what this code does",
-                          "Write tests for ..."};
+    // Starters panel intentionally empty — maya skips the whole "Try
+    // • …" card (and its bracketing blank rows) when the list has no
+    // entries, so the welcome screen flows straight from the
+    // model/profile chip row into the bottom hint. The placeholder
+    // suggestions ("Implement a small feature", etc.) read as
+    // landing-page filler in a TUI; the wordmark + tagline + bottom
+    // hint already make the affordance ("type to begin") clear.
+    cfg.starters_title = {};
+    cfg.starters       = {};
     cfg.hint_intro     = "type to begin";
     cfg.hints          = {{"^K", " palette", highlight},
                           {"^J", " threads", highlight},
