@@ -18,31 +18,54 @@ namespace moha::app::detail {
 
 namespace {
 
-// Row-height estimate for a message — used only by the virtualization slice
-// to tell maya how many rows of prev-frame to commit to scrollback.
-// Conservative; an imperfect estimate costs at most one visible refresh of
-// the window on the slice frame.
-int estimate_message_rows(const Message& msg) {
-    constexpr int kEstWidth = 100;
-    int rows = 3;
-    if (!msg.text.empty()) {
-        const int w = std::max(1, kEstWidth - 4);
-        rows += static_cast<int>(msg.text.size()) / w + 1;
-        int nl = 0;
-        for (char c : msg.text) if (c == '\n') ++nl;
-        rows += nl;
-    }
-    for (const auto& tc : msg.tool_calls) {
-        rows += 4;
-        const auto& out = tc.output();
-        if (!out.empty()) {
-            int nl = 0;
-            for (char c : out) if (c == '\n') ++nl;
-            rows += std::min(nl, 10);
-        }
-    }
-    return rows;
-}
+// When advancing thread_view_start past kSliceChunk old messages, we tell
+// maya's inline renderer how many rows of prev_cells to commit to the
+// terminal's native scrollback (Cmd::commit_scrollback →
+// Runtime::commit_inline_prefix → InlineFrameState::commit_prefix).
+//
+// The discipline is asymmetric:
+//
+//   over-commit  — the renderer "forgets" rows still on screen as
+//                  immutable scrollback; the next frame's diff is
+//                  misaligned, the renderer extends the live region down
+//                  by emitting \r\n at terminal bottom, which scrolls
+//                  rows of NEW content into native scrollback at the top
+//                  → text ghosting in scrollback.
+//
+//   under-commit — prev_cells keeps a few extra rows that no longer
+//                  match the live frame; the next frame's shrink path
+//                  emits cleanly bounded EL erases for the abandoned
+//                  region. Bounded cost, no ghosting. (See agent_session.cpp
+//                  in the maya repo for the same discipline applied to a
+//                  pre-rendered `frozen` element list.)
+//
+// So the value passed to commit_scrollback MUST be a conservative LOWER
+// BOUND on the actual rendered rows of messages
+// [old_thread_view_start, new_thread_view_start). It must never exceed
+// the actual height.
+//
+// The previous implementation tried a content-aware estimate
+// (`estimate_message_rows`) using a hardcoded `kEstWidth = 100` and
+// per-byte arithmetic on `msg.text`. Two paths over-committed:
+//
+//   1. Terminal wider than 100 columns: text wraps to fewer rows than
+//      `bytes / 96 + 1` predicts.
+//   2. UTF-8 multi-byte content: byte-count overstates display width.
+//   3. Elided tool body previews: the maya::ToolBodyPreview kinds
+//      (BashOutput tail-only, FileRead head-only, GrepMatches grouped)
+//      render in 4-8 rows where the estimate's `min(nl, 10)` could
+//      easily reach 14.
+//
+// Replacing the estimate with a small constant per dropped message
+// guarantees safety regardless of terminal width, content composition,
+// or tool-body rendering choices. The exact rows-per-message-rendered
+// vary widely (1 row for a continuation with empty body up to dozens
+// for a tool-heavy turn), but the LOWER bound — header row plus one row
+// of body or inter-turn separator — is reliably ≥ 1.  A value of 2 here
+// matches the conservative `ROWS_PER_DROP_LOWER` used in
+// agent_session.cpp's frozen-elements trim, and stays at-or-below
+// almost any plausible real rendered height.
+constexpr int kRowsPerDroppedMessageLower = 2;
 
 } // namespace
 
@@ -55,14 +78,13 @@ maya::Cmd<Msg> maybe_virtualize(Model& m) {
     // every kSliceChunk turns.
     if (visible <= kViewWindow + kSliceChunk) return Cmd<Msg>::none();
 
-    int committed_rows = 0;
     int committed_turns = 0;
     for (int i = m.ui.thread_view_start; i < m.ui.thread_view_start + kSliceChunk; ++i) {
-        committed_rows += estimate_message_rows(m.d.current.messages[i]);
         if (m.d.current.messages[i].role == Role::Assistant) ++committed_turns;
     }
     m.ui.thread_view_start      += kSliceChunk;
     m.ui.thread_view_start_turn += committed_turns;
+    const int committed_rows = kSliceChunk * kRowsPerDroppedMessageLower;
     return Cmd<Msg>::commit_scrollback(committed_rows);
 }
 
