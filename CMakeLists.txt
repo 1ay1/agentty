@@ -120,7 +120,8 @@ else()
     FetchContent_Declare(
         maya
         GIT_REPOSITORY https://github.com/1ay1/maya.git
-        GIT_TAG        e03bcbb0dc1578dea1a222e42507c31212aec2fa  # composer: ↑-to-edit-queued hint
+        GIT_TAG        main
+        GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(maya)
 endif()
