@@ -44,6 +44,22 @@ struct MessageMdCache {
 
 struct TurnConfigCache {
     std::shared_ptr<maya::Turn::Config>       cfg;
+    // Pre-built Element for a settled turn. Storing the BUILT
+    // Element (not just the Config) is what keeps a long session's
+    // render time flat: maya::Conversation otherwise calls
+    // `Turn{cfg}.build()` on every visible Config every frame, which
+    // reconstructs the entire turn — header, agent_timeline + every
+    // tool card, markdown body, permission rows. Mirrors the
+    // agent_session example's `m.frozen` pattern (build once per
+    // turn lifetime, render-by-reference forever after).
+    //
+    // Populated lazily: the conversation_config first turn-Config
+    // miss builds the config, the Element-pointer miss then runs
+    // Turn::build() and stashes the result here. Continuation flag
+    // is mirrored alongside so the host can pass through to maya's
+    // built_turns path without re-deriving it.
+    std::shared_ptr<maya::Element>            element;
+    bool                                      element_continuation = false;
 };
 
 [[nodiscard]] MessageMdCache&  message_md_cache(const ThreadId& tid,

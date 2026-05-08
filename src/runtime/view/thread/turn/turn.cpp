@@ -113,7 +113,14 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     // and any permission prompt resolved.  Reusing the prior frame's
     // built Config skips per-frame rebuilding of the turn header, the
     // entire agent_timeline (every tool card), and the permission /
-    // markdown wiring — which is the dominant cost as a session grows.
+    // markdown wiring.
+    //
+    // Note: this only caches the CONFIG. Even with this cache, a callsite
+    // that does `Turn{cfg}.build()` per frame still pays the Element
+    // reconstruction cost (every tool card laid out into glyphs, every
+    // markdown block re-emitted). For the per-frame fast path, callers
+    // should use `turn_element()` below instead — that caches the BUILT
+    // Element and skips Turn::build() entirely on settled turns.
     const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
     if (can_cache) {
         auto& slot = turn_config_cache(m.d.current.id, msg_idx);
@@ -163,6 +170,40 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
     }
     return cfg;
+}
+
+maya::Conversation::PreBuilt turn_element(const Message& msg,
+                                          std::size_t msg_idx,
+                                          int turn_num, const Model& m,
+                                          bool continuation) {
+    // Settled-turn fast path: serve the BUILT Element from cache so a
+    // long session doesn't re-run Turn::build() for every visible turn
+    // every frame. The build itself laid out the agent_timeline + every
+    // tool card + markdown body + permission rows into the inline-frame
+    // glyph stream — that's the dominant cost on a long thread, NOT
+    // building the Config. Settled (`msg_idx + 1 < total`) means moha
+    // has appended a successor message, which by construction means the
+    // turn fully resolved (text final, all tools terminal, any
+    // permission prompt closed). The Element is therefore safe to
+    // memoize for the lifetime of the cache entry. Same agent_session
+    // pattern as `m.frozen + list_ref`: build once per turn lifetime,
+    // render-by-reference forever after.
+    const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
+    if (can_cache) {
+        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        if (slot.element && slot.element_continuation == continuation)
+            return {*slot.element, continuation};
+    }
+    // Miss (or live turn): build Config (this hits the Config cache for
+    // settled turns regardless), then run Turn::build() and stash.
+    auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation);
+    auto built = maya::Turn{std::move(cfg)}.build();
+    if (can_cache) {
+        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        slot.element = std::make_shared<maya::Element>(built);
+        slot.element_continuation = continuation;
+    }
+    return {std::move(built), continuation};
 }
 
 } // namespace moha::ui
