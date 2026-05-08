@@ -109,23 +109,29 @@ Step submit_message(Model m) {
         return done(std::move(m));
     }
 
-    // Auto-compaction trigger. Mirrors Claude Code 2.1.119's
-    // `BetaToolRunner.compactionControl` (binary near offset 134600,
-    // default `um8 = 1e5` = 100k tokens). Threshold is 100k or 80% of
-    // the model's context_max, whichever is lower — gives a safety
-    // margin before we'd otherwise blow the window. When tripped,
-    // queue the user's just-typed message and dispatch CompactContext;
-    // the post-compaction drain in finalize_turn submits the queued
-    // message against the now-shrunk history. tokens_in is the
-    // last-turn input token count; on a fresh thread it's 0 so this
-    // gate sleeps until the conversation has actually grown.
-    constexpr int kCompactThresholdAbs = 100'000;
-    int rel_threshold = (m.s.context_max > 0)
-        ? static_cast<int>(m.s.context_max * 0.80)
-        : kCompactThresholdAbs;
-    int threshold = (rel_threshold < kCompactThresholdAbs && rel_threshold > 0)
-                  ? rel_threshold : kCompactThresholdAbs;
-    if (m.s.tokens_in > threshold && !m.d.current.messages.empty()) {
+    // Auto-compaction trigger. Threshold is **80% of the active
+    // model's context window** — Sonnet's 200k → trips at 160k, the
+    // 1M-token Sonnet variants → trip at 800k, future models scale
+    // automatically. m.s.context_max is set on model selection from
+    // ui::context_max_for_model(); a 20% safety margin gives the
+    // compaction round + the user's queued message room to fit
+    // before the actual ceiling.
+    //
+    // Inspired by Claude Code 2.1.119's BetaToolRunner.compactionControl
+    // (binary near offset 134600), but its hardcoded 1e5 default was
+    // wrong-direction-pessimistic for Anthropic's bigger models — for
+    // a 200k context it would compact at 50%, throwing away half the
+    // window's worth of accumulated context for no reason. Scaling
+    // with the model fixes that.
+    //
+    // Falls back to no-trigger when context_max is unset / zero (a
+    // freshly-constructed Model before model selection has run).
+    int threshold = (m.s.context_max > 0)
+        ? static_cast<int>(static_cast<double>(m.s.context_max) * 0.80)
+        : 0;
+    if (threshold > 0
+        && m.s.tokens_in > threshold
+        && !m.d.current.messages.empty()) {
         m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
         m.ui.composer.cursor = 0;
         // Reuse the CompactContext reducer arm so the path is one
