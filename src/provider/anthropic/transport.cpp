@@ -386,8 +386,13 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, const std::string& da
         ctx.sink(StreamFinished{ctx.stop_reason});
         ctx.terminated = true;
     } else if (name == "error") {
+        // Mid-stream SSE error event. The wire payload is just `error.type`
+        // + `error.message` — Anthropic doesn't surface Retry-After here
+        // (it's an HTTP-header thing, and we already passed the headers
+        // phase to enter the SSE body). Leave retry_after unset and let
+        // the runtime fall back to its own schedule.
         auto err = j.value("error", json::object());
-        ctx.sink(StreamError{err.value("message", "unknown error")});
+        ctx.sink(StreamError{err.value("message", "unknown error"), std::nullopt});
         ctx.terminated = true;
     }
 }
@@ -782,7 +787,8 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // The previous version captured `sink` by reference and invoked a
     // moved-from std::function on every non-happy-path termination, which
     // surfaced in the UI as "stream backend: bad_function_call".
-    auto emit_terminal = [](StreamCtx& ctx, std::optional<std::string> err) {
+    auto emit_terminal = [](StreamCtx& ctx, std::optional<std::string> err,
+                             std::optional<std::chrono::seconds> retry_after = {}) {
         if (ctx.terminated) return;
         // If the stream is dying mid-tool-use (peer closed before the SSE
         // event sequence reached `content_block_stop`), synthesize a
@@ -794,7 +800,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
             ctx.current_tool_id.clear();
             ctx.current_tool_name.clear();
         }
-        if (err) ctx.sink(StreamError{*err});
+        if (err) ctx.sink(StreamError{*err, retry_after});
         else     ctx.sink(StreamFinished{ctx.stop_reason});
         ctx.terminated = true;
     };
@@ -908,11 +914,51 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     int  http_status = 0;
     bool is_success  = false;
     std::string error_body;
+    // Server-provided Retry-After hint, when present. Anthropic emits this
+    // on 429 (rate_limit_error) and 529 (overloaded_error) — always as an
+    // integer number of seconds (see Zed's parse_retry_after,
+    // anthropic.rs:574-580). The runtime prefers this over its hardcoded
+    // backoff schedule because the server knows better than we do how long
+    // the brown-out will last. Clamped at the use site so a buggy proxy
+    // can't pin us for an hour.
+    std::optional<std::chrono::seconds> retry_after_hint;
 
     http::StreamHandler handler;
-    handler.on_headers = [&](int status, const http::Headers& /*hh*/) {
+    handler.on_headers = [&](int status, const http::Headers& hh) {
         http_status = status;
         is_success  = (status >= 200 && status < 300);
+        if (is_success) return;
+        // ASCII case-fold compare for HTTP/2 (header names are already
+        // lowercase per protocol, but be defensive against proxies).
+        auto eq_ci = [](std::string_view a, std::string_view b) noexcept {
+            if (a.size() != b.size()) return false;
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                char x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z') x = static_cast<char>(x + 32);
+                if (y >= 'A' && y <= 'Z') y = static_cast<char>(y + 32);
+                if (x != y) return false;
+            }
+            return true;
+        };
+        for (const auto& h : hh) {
+            if (!eq_ci(h.name, "retry-after")) continue;
+            // Anthropic always emits whole seconds; reject anything else
+            // (the spec also allows HTTP-date, but Anthropic doesn't use
+            // it and we'd rather fall back to our schedule than parse it
+            // wrong). std::from_chars would be lighter; std::stoul is
+            // fine on a header value bounded at a few digits.
+            try {
+                size_t consumed = 0;
+                auto v = std::stoul(h.value, &consumed);
+                if (consumed == h.value.size() && v > 0) {
+                    retry_after_hint = std::chrono::seconds(v);
+                }
+            } catch (...) {
+                // ignored — leave hint unset, runtime falls back to its
+                // own schedule.
+            }
+            break;
+        }
     };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
         if (is_success) {
@@ -984,7 +1030,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         }
         if (http_status == 401 || http_status == 403)
             msg += "  (run 'moha login' to re-authenticate)";
-        emit_terminal(ctx, std::move(msg));
+        emit_terminal(ctx, std::move(msg), retry_after_hint);
         return;
     }
 

@@ -1,25 +1,17 @@
 #include "moha/runtime/view/status_bar/status_banner.hpp"
 
-#include <chrono>
-
 namespace moha::ui {
 
-maya::StatusBanner::Config status_banner_config(const Model& m) {
-    maya::StatusBanner::Config cfg;
-    auto now = std::chrono::steady_clock::now();
-
-    // Treat expired toasts as absent — the reducer's ClearStatus
-    // cleaner stops firing once Phase=Idle drops the Tick subscription,
-    // so checking expiry here keeps the banner from flickering back
-    // on a resize-driven repaint.
-    bool has_status = !m.s.status.empty()
-                      && m.s.status != "ready"
-                      && m.s.status_active(now);
-    if (!has_status) return cfg;       // empty text → blank slot
-
-    cfg.text     = m.s.status;
-    cfg.is_error = m.s.status.rfind("error:", 0) == 0;
-    return cfg;
+// Notifications now ride on the ShortcutRow (see shortcut_row.cpp): the
+// shortcut row swaps its keybindings for a banner-style notification
+// when m.s.status is active and reverts when the toast expires. The
+// StatusBanner row is left blank — maya's StatusBar still draws a
+// 1-cell empty strip there, which acts as a separator between the
+// activity row and the bottom shortcut row. Eliminating it would
+// require a maya-side change to StatusBar's row list; keeping it
+// blank here is non-invasive and preserves the existing panel height.
+maya::StatusBanner::Config status_banner_config(const Model& /*m*/) {
+    return {};
 }
 
 } // namespace moha::ui

@@ -178,7 +178,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
     return std::nullopt;
 }
 
-std::optional<Msg> on_composer(const KeyEvent& ev) {
+std::optional<Msg> on_composer(const Model& m, const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
         switch (sk) {
@@ -199,6 +199,22 @@ std::optional<Msg> on_composer(const KeyEvent& ev) {
             case SpecialKey::Right:     return ComposerCursorRight{};
             case SpecialKey::Home:      return ComposerCursorHome{};
             case SpecialKey::End:       return ComposerCursorEnd{};
+            case SpecialKey::Up:
+                // ↑ on an empty composer with at least one queued
+                // message recalls the whole editable queue back into
+                // the composer — Claude Code's "Press up to edit
+                // queued messages" affordance (binary offsets
+                // 84602515 + 76303220). The empty-input gate matches
+                // Claude Code's `H8.length > 1` check (don't hijack
+                // ↑ inside multi-line text editing). When there's
+                // nothing to recall this falls through as a no-op
+                // since moha doesn't yet have a sent-message-history
+                // recall path. (When there's text, ↑ is reserved for
+                // the future history-cycling path.)
+                if (m.ui.composer.text.empty()
+                    && !m.ui.composer.queued.empty())
+                    return Msg{ComposerRecallQueued{}};
+                return std::nullopt;
             case SpecialKey::Escape:    return Quit{};
             default: return std::nullopt;
         }
@@ -240,8 +256,8 @@ Sub<Msg> subscribe(const Model& m) {
                 && std::holds_alternative<SpecialKey>(ev.key)
                 && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
                 return CancelStream{};
-            if (auto m = on_global(ev))   return m;
-            return on_composer(ev);
+            if (auto msg = on_global(ev)) return msg;
+            return on_composer(m, ev);
         });
 
     auto paste_sub = Sub<Msg>::on_paste([in_login](std::string s) -> Msg {

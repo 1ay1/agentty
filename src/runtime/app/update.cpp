@@ -80,6 +80,53 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             if (e.text.find('\n') != std::string::npos) m.ui.composer.expanded = true;
             return done(std::move(m));
         },
+        [&](ComposerRecallQueued) -> Step {
+            // No-op when there's nothing to recall — the caller (the
+            // Up-arrow keymap) only emits this when the queue is
+            // non-empty, but the predicate is racy across frames so
+            // be defensive.
+            if (m.ui.composer.queued.empty()) return done(std::move(m));
+
+            // Drain the queue into the composer, joined by '\n', and
+            // append any pre-existing composer text after another
+            // '\n'. Mirrors Claude Code's `Lc_` (binary offset
+            // 76303220): a single ↑ press drains the WHOLE editable
+            // queue into one composer load — no per-item cycling.
+            // Multi-line queued items keep their newlines so a paste
+            // that became a queued message survives the recall
+            // round-trip.
+            std::string recalled;
+            for (std::size_t i = 0; i < m.ui.composer.queued.size(); ++i) {
+                if (i > 0) recalled.push_back('\n');
+                recalled += m.ui.composer.queued[i];
+            }
+            // Cursor lands at the boundary between recalled text and
+            // the user's pre-existing composer input — exactly where
+            // they'd want to start editing or appending. (Claude
+            // Code's seam is `O.join("\n").length + 1 + _`; we use
+            // the same idea: end-of-recalled + 1 if there's anything
+            // after, else end-of-recalled.)
+            int boundary = static_cast<int>(recalled.size());
+            if (!m.ui.composer.text.empty()) {
+                recalled.push_back('\n');
+                ++boundary;
+                recalled += m.ui.composer.text;
+            }
+            m.ui.composer.text   = std::move(recalled);
+            m.ui.composer.cursor = boundary;
+            // Multi-line content → flip expanded so the composer's
+            // `expanded` cap (16 rows) takes effect, not the 8-row
+            // unexpanded cap. Same trigger as ComposerPaste.
+            if (m.ui.composer.text.find('\n') != std::string::npos)
+                m.ui.composer.expanded = true;
+            // Destructive recall: queued items now live ONLY in the
+            // composer buffer. Re-submit re-queues at the tail (fresh
+            // tail position). Clearing the composer drops them. Same
+            // trade-off as Claude Code — keeps the data model simple
+            // (no "soft-deleted, recallable" intermediate state).
+            m.ui.composer.queued.clear();
+            return done(std::move(m));
+        },
 
         // ── Stream events ───────────────────────────────────────────────
         // Every event handler bumps `last_event_at` so the Tick-based
@@ -346,12 +393,29 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
             if (can_retry) {
                 int attempt = prior_transient;
-                auto delay = provider::backoff(klass, attempt);
+                // Prefer the server's Retry-After hint over our hardcoded
+                // schedule when present — Anthropic sets it on 429 / 529
+                // and knows better than we do how long the brown-out will
+                // last (mirrors Zed's anthropic.rs:574-580). Clamp to
+                // [1s, 120s] so a buggy proxy can't pin us for an hour
+                // and a zero/negative value can't busy-loop us. Falls
+                // back to our schedule (with jitter) when no hint.
+                std::chrono::milliseconds delay;
+                if (e.retry_after.has_value()) {
+                    auto s = e.retry_after->count();
+                    if (s < 1)   s = 1;
+                    if (s > 120) s = 120;
+                    delay = std::chrono::seconds(s);
+                } else {
+                    delay = provider::backoff_with_jitter(klass, attempt);
+                }
                 // Round up to whole seconds for the user-visible countdown.
                 auto secs = std::chrono::duration_cast<std::chrono::seconds>(
                     delay + std::chrono::milliseconds{999}).count();
                 m.s.status = std::string{provider::to_string(klass)}
-                           + " — retrying in " + std::to_string(secs) + "s…";
+                           + " — retrying in " + std::to_string(secs) + "s"
+                           + " (attempt " + std::to_string(attempt + 1)
+                           + "/" + std::to_string(provider::kMaxRetries) + ")…";
                 // Toast: auto-clear shortly after the retry fires so the
                 // banner doesn't linger once the new stream is healthy.
                 // The retry itself overwrites `status` on StreamStarted
@@ -445,15 +509,72 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             return {std::move(m), cmd::launch_stream(m)};
         },
         [&](CancelStream) -> Step {
-            // Trip the token; the http worker notices within ~200 ms and
-            // unwinds, eventually dispatching StreamError("cancelled") which
-            // does the actual phase/state cleanup. Don't touch phase here —
-            // doing so would race the in-flight stream's last few events.
+            // Esc — full synchronous teardown. The worker's trailing
+            // events (StreamError("cancelled"), late text deltas, late
+            // tool_use chunks) are suppressed at the dispatch boundary
+            // by launch_stream's `guarded` wrapper (see cmd_factory.cpp),
+            // so we do the cleanup here instead of relying on a
+            // StreamError handler that may race a freshly-submitted
+            // user turn. The race used to corrupt the new turn's
+            // cancel-token field via `a->cancel.reset()`, leaving Esc
+            // unable to cancel anything until process restart — that's
+            // the "moha gets stuck" failure mode.
             //
-            // ALSO covers the retry-backoff window: if the user hits Esc
-            // while we're sleeping for a scheduled retry, this clears
-            // active so the RetryStream Msg becomes a no-op when it fires.
+            // Also covers the retry-backoff window: if the user hits
+            // Esc while we're sleeping for a scheduled retry, the ctx
+            // going away here makes the pending RetryStream Msg a
+            // no-op when it fires.
             if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
+
+            // Salvage partial assistant work and finalise in-flight
+            // tool calls so the transcript reads cleanly: a Pending /
+            // Running tool that the user cut off should render as
+            // Failed("cancelled"), not as a perpetual spinner. Drop
+            // the assistant placeholder entirely if it produced
+            // nothing — an empty card after Esc is just visual noise.
+            auto now = std::chrono::steady_clock::now();
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& last = m.d.current.messages.back();
+                // Drain the smoothing buffer + commit streaming_text
+                // so a partial reply isn't lost.
+                if (!last.pending_stream.empty()) {
+                    last.streaming_text += last.pending_stream;
+                    last.pending_stream.clear();
+                }
+                if (!last.streaming_text.empty()) {
+                    if (last.text.empty()) last.text = std::move(last.streaming_text);
+                    else                   last.text += std::move(last.streaming_text);
+                    std::string{}.swap(last.streaming_text);
+                }
+                // Mark every non-terminal tool call Failed("cancelled").
+                // Running tools whose worker thread is still alive will
+                // produce a late ToolExecOutput; apply_tool_output is
+                // idempotent against terminal status so the late result
+                // is silently dropped (see tool.cpp).
+                for (auto& tc : last.tool_calls) {
+                    if (!tc.is_terminal()) {
+                        tc.status = ToolUse::Failed{
+                            tc.started_at(), now, "cancelled"};
+                    }
+                    std::string{}.swap(tc.args_streaming);
+                }
+                // Drop a placeholder that produced no content at all —
+                // happens when Esc lands before the first text/tool
+                // event arrives. The paired user message stays so the
+                // user can see what they asked.
+                if (last.text.empty() && last.tool_calls.empty()) {
+                    m.d.current.messages.pop_back();
+                }
+            }
+
+            // A pending permission prompt for a tool whose stream we
+            // just cancelled is dead state — the model won't be there
+            // to receive the answer. Closing it lets the user submit
+            // a new turn immediately without first dismissing a
+            // ghosted modal.
+            m.d.pending_permission.reset();
+
             // any → Idle. Discard the ctx (cancel token is already
             // tripped on the worker thread; retry counters reset on
             // the next turn). Drops Scheduled/StallFired retry states
@@ -461,7 +582,6 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             m.s.phase = phase::Idle{};
             m.s.status = "cancelled";
             {
-                auto now = std::chrono::steady_clock::now();
                 auto ttl = std::chrono::seconds{3};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;

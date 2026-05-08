@@ -1,7 +1,9 @@
 #pragma once
 // moha::Msg — every event the runtime can process, as a closed variant.
 
+#include <chrono>
 #include <expected>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -23,6 +25,16 @@ struct ComposerCursorRight {};
 struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
 struct ComposerPaste { std::string text; };
+// Recall queued messages back into the composer for editing. Bound to
+// Up-arrow when the composer is empty and queued messages exist.
+// Mirrors Claude Code's `Lc_` (binary offset 76303220): drains every
+// editable queued item into the composer in queue order joined by
+// "\n", with the cursor landing at the boundary between recalled text
+// and any pre-existing composer text. Destructive on the queue — the
+// items only exist in the composer buffer afterwards, so the user
+// must resubmit to re-queue. If the user clears the composer after
+// recall, the items are gone (same as Claude Code's behaviour).
+struct ComposerRecallQueued {};
 
 // ── Streaming from provider ──────────────────────────────────────────────
 struct StreamStarted {};
@@ -78,7 +90,19 @@ enum class StopReason : std::uint8_t {
 }
 
 struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
-struct StreamError { std::string message; };
+// Stream-level failure. `message` is human-readable (used for both the
+// status banner and `provider::classify(string)` fallback). `retry_after`
+// is the server's Retry-After hint when present — Anthropic sets it on
+// 429 (rate_limit_error) and 529 (overloaded_error); the runtime prefers
+// this over its hardcoded backoff schedule because the server knows
+// better than we do how long the brown-out will last (see Zed's
+// `parse_retry_after`, anthropic.rs:574-580). std::chrono::seconds
+// because Anthropic always emits whole seconds; clamped at the use site
+// so a buggy proxy can't pin us for an hour.
+struct StreamError {
+    std::string message;
+    std::optional<std::chrono::seconds> retry_after;
+};
 // Wire-alive heartbeat. Emitted by the transport for SSE frames that
 // carry no reducer-visible payload but prove the connection is healthy
 // and the model is still working: SSE `ping` events (Anthropic's proxy
@@ -212,7 +236,7 @@ using Msg = std::variant<
     ComposerCharInput, ComposerBackspace, ComposerEnter, ComposerNewline,
     ComposerSubmit, ComposerToggleExpand,
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
-    ComposerPaste,
+    ComposerPaste, ComposerRecallQueued,
     StreamStarted, StreamTextDelta,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,

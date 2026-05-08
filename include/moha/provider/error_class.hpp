@@ -24,6 +24,8 @@
 // Anthropic ships a new error_type.
 
 #include <chrono>
+#include <cstdint>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -171,6 +173,29 @@ backoff(ErrorClass kind, int attempt) noexcept {
         milliseconds{12000}, milliseconds{25000}, milliseconds{45000},
     };
     return table[attempt];
+}
+
+// Backoff with ±20% jitter applied to the base schedule. Used when the
+// server didn't hand us a Retry-After hint and we're falling back to our
+// own ladder. Jitter matters during regional brown-outs: hundreds of
+// clients hit the same 503 within a 1 s window, and without jitter every
+// one of them would retry on the same 500 ms / 2 s / 5 s tick — re-
+// overloading the edge that just shed them. ±20% spreads the herd
+// across a 0.8x–1.2x window without making the delays feel
+// unpredictable to the user.
+//
+// Not constexpr because thread_local mt19937 needs runtime init.
+// Caller's responsibility to pass `attempt` consistently across retries
+// of the same turn (the source ctx's `transient_retries` counter).
+[[nodiscard]] inline std::chrono::milliseconds
+backoff_with_jitter(ErrorClass kind, int attempt) noexcept {
+    auto base = backoff(kind, attempt);
+    thread_local std::mt19937 rng{std::random_device{}()};
+    std::uniform_real_distribution<double> dist(0.80, 1.20);
+    auto scaled = static_cast<std::int64_t>(
+        static_cast<double>(base.count()) * dist(rng));
+    if (scaled < 100) scaled = 100;  // floor — never busy-loop on a tiny base
+    return std::chrono::milliseconds{scaled};
 }
 
 // Hard cap on automatic retries. Past this, surface as terminal.

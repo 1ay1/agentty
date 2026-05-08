@@ -56,18 +56,44 @@ Cmd<Msg> launch_stream(Model& m) {
     // runs, so active_ctx is non-null here.
     req.cancel = std::make_shared<http::CancelToken>();
     if (auto* a = active_ctx(m.s.phase)) a->cancel = req.cancel;
+    // Capture the token by value so the worker can compare against the
+    // cancel-state at every dispatch boundary. Without this guard, a
+    // cancelled worker's trailing events (the StreamError("cancelled")
+    // unwound by the worker ~200 ms after Esc, in particular) flow into
+    // the reducer's StreamError handler and run `active_ctx(m.s.phase)
+    // ->cancel.reset()` — but the active phase may have been replaced
+    // with a fresh ctx if the user typed and submitted a new message in
+    // the meantime, which means we silently null out the *new* turn's
+    // cancel token. Result: Esc on the new turn does nothing, the user
+    // can't cancel anymore, and "moha gets stuck — nothing works".
+    auto cancel_for_guard = req.cancel;
 
-    return Cmd<Msg>::task([req = std::move(req)](std::function<void(Msg)> dispatch) mutable {
+    return Cmd<Msg>::task([req = std::move(req), cancel_for_guard]
+                          (std::function<void(Msg)> dispatch) mutable {
+        // Suppress every event after the token is tripped — including the
+        // worker's own terminal StreamError("cancelled"). The UI thread
+        // already did the cancel-side cleanup synchronously in the
+        // CancelStream handler (phase=Idle, status="cancelled", tool
+        // calls marked Cancelled, empty placeholder dropped), so a
+        // trailing event here would either be a no-op against an Idle
+        // phase or — worse — a write into a brand-new turn's state.
+        // The check matches the worker's own cancellation gate, so once
+        // the token is tripped no further events flow into the reducer
+        // from this worker.
+        auto guarded = [dispatch, cancel_for_guard](Msg m) {
+            if (cancel_for_guard && cancel_for_guard->is_cancelled()) return;
+            dispatch(std::move(m));
+        };
         try {
-            deps().stream(std::move(req), [dispatch](Msg m) {
-                dispatch(std::move(m));
+            deps().stream(std::move(req), [guarded](Msg m) {
+                guarded(std::move(m));
             });
         } catch (const std::exception& e) {
             // The stream backend threw before producing a terminal event —
             // surface it as StreamError so the UI doesn't hang on the spinner.
-            dispatch(StreamError{std::string{"stream backend: "} + e.what()});
+            guarded(StreamError{std::string{"stream backend: "} + e.what()});
         } catch (...) {
-            dispatch(StreamError{"stream backend: unknown exception"});
+            guarded(StreamError{"stream backend: unknown exception"});
         }
     });
 }

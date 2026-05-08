@@ -24,7 +24,7 @@ maya::Conversation::Config conversation_config(const Model& m) {
         std::clamp(m.ui.thread_view_start, 0, static_cast<int>(total)));
     int turn = 1 + m.ui.thread_view_start_turn;
 
-    cfg.turns.reserve(total - start);
+    cfg.turns.reserve(total - start + m.ui.composer.queued.size());
     for (std::size_t i = start; i < total; ++i) {
         const auto& msg = m.d.current.messages[i];
         // Continuation: a 2nd+ Assistant in a same-speaker run.  We pass
@@ -46,6 +46,33 @@ maya::Conversation::Config conversation_config(const Model& m) {
         // the next user message gets the next sequential turn (otherwise
         // a 5-round agent action would push the next user to turn N+5).
         if (msg.role == Role::Assistant && !continuation) ++turn;
+    }
+
+    // Queued-message previews: render typed-but-not-yet-sent messages as
+    // user turns at the tail of the transcript so the user can SEE what
+    // they queued, not just a count. Mirrors Claude Code's behaviour
+    // (offset 80106500 in the 2.1.119 binary): no special glyph, no
+    // "queued:" label, no dim modifier — visually identical to a real
+    // user message. The "this is queued, not sent yet" cue comes from
+    // (a) the absence of a following assistant turn and (b) the
+    // composer's `❚ N queued` chip.
+    //
+    // msg_idx values are taken from one-past-the-end of the message
+    // vector so turn_config's cache check
+    // (`msg_idx + 1 < messages.size()`) is structurally false — no
+    // entries written for synthetic turns, no stale hits when the queue
+    // changes shape between frames.
+    if (!m.ui.composer.queued.empty()) {
+        auto now = std::chrono::system_clock::now();
+        for (std::size_t qi = 0; qi < m.ui.composer.queued.size(); ++qi) {
+            Message synthetic;
+            synthetic.role      = Role::User;
+            synthetic.text      = m.ui.composer.queued[qi];
+            synthetic.timestamp = now;
+            cfg.turns.push_back(turn_config(synthetic, total + qi, turn,
+                                            m, /*continuation=*/false));
+            ++turn;
+        }
     }
 
     cfg.in_flight = activity_indicator_config(m);
