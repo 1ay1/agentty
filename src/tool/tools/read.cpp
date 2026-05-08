@@ -6,9 +6,11 @@
 
 #include <filesystem>
 #include <format>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 
 #include <nlohmann/json.hpp>
 
@@ -18,6 +20,50 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
+
+// ── Stale-Read suppression ──────────────────────────────────────────────
+// Mirrors Claude Code 2.1.119's `tengu_noreread` mechanism (binary at
+// offset 134969). When the model issues a Read against a (path, offset,
+// limit) it has already read AND the file's mtime hasn't moved since,
+// return a tiny sentinel string instead of re-shipping the bytes:
+//
+//   "File unchanged since last read. The content from the earlier
+//    Read tool_result in this conversation is still current — refer to
+//    that instead of re-reading."
+//
+// The earlier tool_result is still in the conversation prefix (and
+// cached via cache_control on the last message's last block), so the
+// model just refers to it. A 5K-token re-read collapses to ~25 tokens.
+//
+// Cache is process-global, mutex-protected. A fresh moha process starts
+// empty (the natural session boundary). Edit/Write that mutate a file
+// also bump its mtime, so the cache self-invalidates without any
+// invalidation hooks. Different (offset, limit) requests are tracked
+// separately because the sentinel points to the *earlier exact range*
+// — telling the model to refer to a 1-50 read when it just asked for
+// 51-100 would be wrong.
+struct ReadCacheKey {
+    std::string canonical_path;
+    int offset = 1;
+    int limit  = 2000;
+    bool operator==(const ReadCacheKey&) const noexcept = default;
+};
+struct ReadCacheKeyHash {
+    [[nodiscard]] std::size_t operator()(const ReadCacheKey& k) const noexcept {
+        std::size_t h = std::hash<std::string>{}(k.canonical_path);
+        h = h * 31u + static_cast<std::size_t>(k.offset);
+        h = h * 31u + static_cast<std::size_t>(k.limit);
+        return h;
+    }
+};
+struct ReadCache {
+    std::mutex mu;
+    std::unordered_map<ReadCacheKey, fs::file_time_type, ReadCacheKeyHash> seen;
+};
+[[nodiscard]] ReadCache& read_cache() {
+    static ReadCache c;
+    return c;
+}
 
 struct ReadArgs {
     util::NormalizedPath path;
@@ -60,6 +106,38 @@ ExecResult run_read(const ReadArgs& a) {
             + ". Run `list_dir` on the parent directory or `glob` by name to verify."));
     if (!fs::is_regular_file(p, ec))
         return std::unexpected(ToolError::not_a_file("not a regular file: " + a.path.string()));
+
+    // Stale-Read suppression. Compute the canonical path + current mtime
+    // BEFORE the file_size / binary / read passes — we want the sentinel
+    // to win even on a 1 MiB file that would otherwise blow the cap, so a
+    // model that re-reads "same file again, oops" doesn't pay the read
+    // cost AND get a too-large error. weakly_canonical handles symlinks
+    // without requiring the path to exist beyond what `fs::exists` above
+    // already proved. A failure to canonicalize (rare — typically only
+    // hits on broken symlinks) just skips caching for this call.
+    fs::file_time_type current_mtime{};
+    {
+        std::error_code mtime_ec;
+        current_mtime = fs::last_write_time(p, mtime_ec);
+        if (!mtime_ec) {
+            std::error_code canon_ec;
+            auto canon = fs::weakly_canonical(p, canon_ec);
+            if (!canon_ec) {
+                ReadCacheKey key{canon.string(), a.offset, a.limit};
+                std::lock_guard lk{read_cache().mu};
+                auto it = read_cache().seen.find(key);
+                if (it != read_cache().seen.end()
+                    && it->second == current_mtime) {
+                    return ToolOutput{
+                        "File unchanged since last read. The content from the "
+                        "earlier Read tool_result in this conversation is still "
+                        "current \xe2\x80\x94 refer to that instead of "
+                        "re-reading.",
+                        std::nullopt};
+                }
+            }
+        }
+    }
     // Size cap, enforced UNCONDITIONALLY — the previous gate was
     // `&& a.offset == 1`, which let any offset>1 read load a 10 GB file
     // into memory and scan it linearly to count lines. The cap is the
@@ -151,6 +229,22 @@ ExecResult run_read(const ReadArgs& a) {
     }
     if (!a.display_description.empty())
         out = a.display_description + "\n\n" + out;
+
+    // Record the (path, offset, limit) → mtime pair so the next Read of
+    // the same range short-circuits to the sentinel. Computed up top so
+    // we use the same canonicalisation here. A failure to canonicalise
+    // (broken symlink edge case) just skips the bookkeeping; the next
+    // call falls through to a real read again, which is fine.
+    if (current_mtime.time_since_epoch().count() != 0) {
+        std::error_code canon_ec;
+        auto canon = fs::weakly_canonical(p, canon_ec);
+        if (!canon_ec) {
+            ReadCacheKey key{canon.string(), a.offset, a.limit};
+            std::lock_guard lk{read_cache().mu};
+            read_cache().seen[std::move(key)] = current_mtime;
+        }
+    }
+
     return ToolOutput{std::move(out), std::nullopt};
 }
 

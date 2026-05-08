@@ -35,6 +35,18 @@ struct ComposerPaste { std::string text; };
 // must resubmit to re-queue. If the user clears the composer after
 // recall, the items are gone (same as Claude Code's behaviour).
 struct ComposerRecallQueued {};
+// Auto / manual conversation compaction. Mirrors Claude Code 2.1.119's
+// `BetaToolRunner.compactionControl` (binary near offset 134600). When
+// the running input-token total approaches the model's context window,
+// or the user invokes "Compact context" from the palette, the runtime
+// appends a synthetic User message asking the model to summarise the
+// conversation per a structured schema; the resulting assistant text is
+// then promoted to a single User message that REPLACES the entire
+// conversation history. The next turn proceeds against the compacted
+// prefix as if the summary were the only prior context. m.s.compacting
+// is the in-flight flag — set on dispatch, cleared on the StreamFinished
+// that lands the summary.
+struct CompactContext {};
 
 // ── Streaming from provider ──────────────────────────────────────────────
 struct StreamStarted {};
@@ -236,7 +248,7 @@ using Msg = std::variant<
     ComposerCharInput, ComposerBackspace, ComposerEnter, ComposerNewline,
     ComposerSubmit, ComposerToggleExpand,
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
-    ComposerPaste, ComposerRecallQueued,
+    ComposerPaste, ComposerRecallQueued, CompactContext,
     StreamStarted, StreamTextDelta,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,

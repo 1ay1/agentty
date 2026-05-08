@@ -694,6 +694,73 @@ json build_messages(const Thread& t) {
     return msgs;
 }
 
+namespace {
+
+// Read a text file, swallowing any I/O error — returns empty string on
+// missing file or unreadable. Capped at 64 KiB to keep one rogue
+// 200 MB CLAUDE.md from poisoning the system prompt on every turn.
+[[nodiscard]] std::string read_optional_memory(const std::filesystem::path& p) noexcept {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec) || ec) return {};
+    auto sz = std::filesystem::file_size(p, ec);
+    if (ec || sz == 0 || sz > 64u * 1024u) return {};
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return {};
+    std::string out(static_cast<std::size_t>(sz), '\0');
+    f.read(out.data(), static_cast<std::streamsize>(sz));
+    out.resize(static_cast<std::size_t>(f.gcount()));
+    // Trim trailing whitespace so the wrapper tag doesn't get a blank
+    // line jammed against `</user-memory>`.
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'
+                            || out.back() == ' ' || out.back() == '\t')) {
+        out.pop_back();
+    }
+    return out;
+}
+
+// Resolve the user's home directory portably. Tries HOME (POSIX) first,
+// USERPROFILE (Windows) second; returns empty path on neither set.
+[[nodiscard]] std::filesystem::path home_dir() noexcept {
+    if (auto* h = std::getenv("HOME"); h && *h) return std::filesystem::path{h};
+#if defined(_WIN32)
+    if (auto* h = std::getenv("USERPROFILE"); h && *h) return std::filesystem::path{h};
+#endif
+    return {};
+}
+
+// CLAUDE.md memory hierarchy — mirrors Claude Code's resolution
+// (binary near offset 134900):
+//
+//   User    ~/CLAUDE.md             personal, all projects
+//   Project <cwd>/CLAUDE.md         committed, project-specific
+//   Local   <cwd>/CLAUDE.local.md   gitignored, personal-to-this-project
+//
+// Each tier is wrapped in its own tag so the model can tell them apart.
+// Empty / missing tiers are silently elided. Read every turn (cheap I/O,
+// allows mid-session edits to take effect on the next message); the
+// system-prompt cache_control breakpoint catches the result so the wire
+// cost is paid once per ~5 min cache TTL window regardless.
+[[nodiscard]] std::string collect_memory_blocks() {
+    std::string user    = read_optional_memory(home_dir() / "CLAUDE.md");
+    std::string project = read_optional_memory(std::filesystem::path{"CLAUDE.md"});
+    std::string local   = read_optional_memory(std::filesystem::path{"CLAUDE.local.md"});
+
+    if (user.empty() && project.empty() && local.empty()) return {};
+
+    std::ostringstream m;
+    m << "\n\n<memory>\n"
+      << "Project-specific guidance the user has authored. Treat these "
+         "as persistent context for THIS workspace and user; lower tiers "
+         "(local, then project, then user) win on conflicting rules.\n";
+    if (!user.empty())    m << "<user-memory>\n"    << user    << "\n</user-memory>\n";
+    if (!project.empty()) m << "<project-memory>\n" << project << "\n</project-memory>\n";
+    if (!local.empty())   m << "<local-memory>\n"   << local   << "\n</local-memory>\n";
+    m << "</memory>";
+    return m.str();
+}
+
+} // namespace
+
 std::string default_system_prompt() {
 #if defined(_WIN32)
     constexpr const char* os_name  = "Windows";
@@ -763,6 +830,10 @@ std::string default_system_prompt() {
         << "<shell-notes>\n"
         << shell_hint << "\n"
         << "</shell-notes>\n";
+    // Append CLAUDE.md tiers (User + Project + Local) when present.
+    // Lives at the END of the prompt so the always-on rules above
+    // anchor first; user-authored memory then layers on top.
+    oss << collect_memory_blocks();
     return oss.str();
 }
 

@@ -440,6 +440,83 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // the next turn's stream the moment it launches. Phase transitions
     // below (or in kick_pending_tools) drive whether active() flips off.
     if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
+
+    // Compaction completion. The CompactContext handler appended a
+    // synthetic User "summarise per spec" message + Assistant
+    // placeholder; the assistant has now produced the summary text in
+    // that placeholder. Replace the entire messages vector with a
+    // single User message holding the summary, drop tools-handling /
+    // queue-drain (no tool_use should have come back, and queued
+    // messages naturally fire on the next user turn), and short-circuit
+    // out of the rest of finalize_turn so we don't run the
+    // kick_pending_tools / truncation-retry / queue-drain that the
+    // normal path needs.
+    if (m.s.compacting) {
+        std::string summary;
+        if (!m.d.current.messages.empty()
+            && m.d.current.messages.back().role == Role::Assistant) {
+            auto& last = m.d.current.messages.back();
+            if (!last.pending_stream.empty()) {
+                last.streaming_text += last.pending_stream;
+                last.pending_stream.clear();
+            }
+            // Prefer streaming_text (in-flight) merged with text (settled);
+            // either may be the live target depending on whether
+            // message_stop had time to commit.
+            summary = std::move(last.text);
+            if (!last.streaming_text.empty()) summary += last.streaming_text;
+        }
+        // Strip <summary>...</summary> wrapper if the model honoured it
+        // — keeps the persisted body clean. Falls back to the whole
+        // assistant text if the wrapper is missing.
+        constexpr std::string_view kOpen = "<summary>";
+        constexpr std::string_view kClose = "</summary>";
+        if (auto a_pos = summary.find(kOpen); a_pos != std::string::npos) {
+            auto body = a_pos + kOpen.size();
+            auto b_pos = summary.find(kClose, body);
+            if (b_pos != std::string::npos) {
+                summary = summary.substr(body, b_pos - body);
+            }
+        }
+        // Trim leading / trailing whitespace.
+        auto is_space = [](char c) { return c==' '||c=='\t'||c=='\n'||c=='\r'; };
+        while (!summary.empty() && is_space(summary.front())) summary.erase(summary.begin());
+        while (!summary.empty() && is_space(summary.back()))  summary.pop_back();
+        if (summary.empty()) summary = "[compaction produced no text]";
+
+        Message replacement;
+        replacement.role = Role::User;
+        replacement.text = "Conversation continuation summary (prior history "
+                           "compacted to save context):\n\n" + summary;
+        m.d.current.messages.clear();
+        m.d.current.messages.push_back(std::move(replacement));
+        m.d.current.updated_at = std::chrono::system_clock::now();
+
+        m.s.compacting    = false;
+        m.s.phase         = phase::Idle{};
+        m.s.tokens_in     = 0;
+        m.s.tokens_out    = 0;
+        m.s.status        = "context compacted";
+        auto now_ts = std::chrono::steady_clock::now();
+        m.s.status_until  = now_ts + std::chrono::seconds{4};
+        deps().save_thread(m.d.current);
+
+        // Drain any messages the user queued during compaction. Same
+        // shape as the post-StreamFinished drain at the end of this
+        // function, but tailored: we're already Idle, no pending tools
+        // to kick.
+        if (!m.ui.composer.queued.empty()) {
+            m.ui.composer.text = m.ui.composer.queued.front();
+            m.ui.composer.queued.erase(m.ui.composer.queued.begin());
+            auto [mm, sub_cmd] = submit_message(std::move(m));
+            m = std::move(mm);
+            return sub_cmd;
+        }
+        auto stamp = m.s.status_until;
+        return Cmd<Msg>::after(std::chrono::seconds{4}
+                               + std::chrono::milliseconds{50},
+                               Msg{ClearStatus{stamp}});
+    }
     bool any_truncated = false;
     const bool max_tokens_hit = (stop_reason == StopReason::MaxTokens);
     if (!m.d.current.messages.empty()) {

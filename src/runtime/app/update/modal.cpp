@@ -5,6 +5,7 @@
 // shared internal header rather than an anonymous namespace.
 
 #include "moha/runtime/app/update/internal.hpp"
+#include "moha/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -106,6 +107,32 @@ Step submit_message(Model m) {
         m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
         m.ui.composer.cursor = 0;
         return done(std::move(m));
+    }
+
+    // Auto-compaction trigger. Mirrors Claude Code 2.1.119's
+    // `BetaToolRunner.compactionControl` (binary near offset 134600,
+    // default `um8 = 1e5` = 100k tokens). Threshold is 100k or 80% of
+    // the model's context_max, whichever is lower — gives a safety
+    // margin before we'd otherwise blow the window. When tripped,
+    // queue the user's just-typed message and dispatch CompactContext;
+    // the post-compaction drain in finalize_turn submits the queued
+    // message against the now-shrunk history. tokens_in is the
+    // last-turn input token count; on a fresh thread it's 0 so this
+    // gate sleeps until the conversation has actually grown.
+    constexpr int kCompactThresholdAbs = 100'000;
+    int rel_threshold = (m.s.context_max > 0)
+        ? static_cast<int>(m.s.context_max * 0.80)
+        : kCompactThresholdAbs;
+    int threshold = (rel_threshold < kCompactThresholdAbs && rel_threshold > 0)
+                  ? rel_threshold : kCompactThresholdAbs;
+    if (m.s.tokens_in > threshold && !m.d.current.messages.empty()) {
+        m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
+        m.ui.composer.cursor = 0;
+        // Reuse the CompactContext reducer arm so the path is one
+        // place: it appends the synthetic prompt + placeholder, sets
+        // m.s.compacting, and launches the stream. finalize_turn's
+        // compaction branch drains m.ui.composer.queued post-compact.
+        return moha::app::update(std::move(m), Msg{CompactContext{}});
     }
 
     Message user;

@@ -332,6 +332,27 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // session.
             if (m.s.in_scheduled()) return done(std::move(m));
 
+            // Compaction failed mid-flight (rate limit, network drop,
+            // etc.). Pop the synthetic User "summarise per spec" + the
+            // assistant placeholder we appended in the CompactContext
+            // handler, restoring the conversation to the state the user
+            // saw before they hit "Compact context". Then let the
+            // normal error path finish (it'll surface "transient —
+            // retrying…" or terminal text). Without this rewind, a
+            // failed compaction leaves the summary prompt + a partially-
+            // streamed assistant reply permanently in the transcript.
+            if (m.s.compacting) {
+                m.s.compacting = false;
+                if (m.d.current.messages.size() >= 2
+                    && m.d.current.messages.back().role == Role::Assistant) {
+                    m.d.current.messages.pop_back();
+                    if (!m.d.current.messages.empty()
+                        && m.d.current.messages.back().role == Role::User) {
+                        m.d.current.messages.pop_back();
+                    }
+                }
+            }
+
             // Worker thread is unwinding; drop the token so the next turn
             // (or scheduled retry) mints a fresh one. Reaches into the
             // ctx (rather than dropping the whole ctx) because we may
@@ -508,6 +529,77 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // message, and re-issue the request.
             return {std::move(m), cmd::launch_stream(m)};
         },
+        [&](CompactContext) -> Step {
+            // Refuse if a turn is already in flight or compaction is
+            // already running — the next CompactContext lands cleanly
+            // on Idle. Refuse on an empty thread (nothing to compact).
+            // Refuse if last message is a streaming assistant
+            // placeholder (would corrupt mid-turn state).
+            if (!m.s.is_idle() || m.s.compacting) return done(std::move(m));
+            if (m.d.current.messages.empty()) return done(std::move(m));
+
+            // Synthetic User message asking the model to summarise.
+            // Mirrors Claude Code's `mm8` summary prompt (binary near
+            // offset 134600). The schema (Task / State / Discoveries /
+            // Next Steps / Context-to-Preserve) is deliberately verbose
+            // — it nudges the model to write a recoverable summary
+            // rather than a one-paragraph précis that loses
+            // operationally-load-bearing details.
+            Message synth;
+            synth.role = Role::User;
+            synth.text =
+                "You have been working on the task described above but have "
+                "not yet completed it. Write a continuation summary that "
+                "will allow you (or another instance of yourself) to resume "
+                "work efficiently in a future context window where the "
+                "conversation history will be replaced with this summary. "
+                "Your summary should be structured, concise, and actionable. "
+                "Include:\n"
+                "1. Task Overview\n"
+                "  The user's core request and success criteria\n"
+                "  Any clarifications or constraints they specified\n"
+                "2. Current State\n"
+                "  What has been completed so far\n"
+                "  Files created, modified, or analyzed (with paths if relevant)\n"
+                "  Key outputs or artifacts produced\n"
+                "3. Important Discoveries\n"
+                "  Technical constraints or requirements uncovered\n"
+                "  Decisions made and their rationale\n"
+                "  Errors encountered and how they were resolved\n"
+                "  What approaches were tried that didn't work (and why)\n"
+                "4. Next Steps\n"
+                "  Specific actions needed to complete the task\n"
+                "  Any blockers or open questions to resolve\n"
+                "  Priority order if multiple steps remain\n"
+                "5. Context to Preserve\n"
+                "  User preferences or style requirements\n"
+                "  Domain-specific details that aren't obvious\n"
+                "  Any promises made to the user\n"
+                "Be concise but complete \xe2\x80\x94 err on the side of "
+                "including information that would prevent duplicate work or "
+                "repeated mistakes. Write in a way that enables immediate "
+                "resumption of the task. Do not call any tools; just write "
+                "the summary text. Wrap the summary in <summary></summary> "
+                "tags.";
+            m.d.current.messages.push_back(std::move(synth));
+
+            // Assistant placeholder + fresh phase::Active matching the
+            // standard submit path so the existing stream-event pipeline
+            // (deltas, finished, error) doesn't need a second code path.
+            Message placeholder;
+            placeholder.role = Role::Assistant;
+            m.d.current.messages.push_back(std::move(placeholder));
+
+            auto now = std::chrono::steady_clock::now();
+            phase::Active ctx;
+            ctx.started       = now;
+            ctx.last_event_at = now;
+            m.s.phase     = phase::Streaming{std::move(ctx)};
+            m.s.compacting = true;
+            m.s.status      = "compacting context\xe2\x80\xa6";   // …
+            m.s.status_until = {};   // sticky until compaction completes
+            return {std::move(m), cmd::launch_stream(m)};
+        },
         [&](CancelStream) -> Step {
             // Esc — full synchronous teardown. The worker's trailing
             // events (StreamError("cancelled"), late text deltas, late
@@ -525,6 +617,24 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
             // going away here makes the pending RetryStream Msg a
             // no-op when it fires.
             if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
+
+            // Compaction-cancel: pop the synthetic "summarise per spec"
+            // user message + the assistant placeholder so the transcript
+            // returns to its pre-compaction shape. Without this the
+            // user sees their cancelled compaction prompt linger in
+            // history. Mirrors the StreamError handler's compaction
+            // rewind.
+            if (m.s.compacting) {
+                m.s.compacting = false;
+                if (!m.d.current.messages.empty()
+                    && m.d.current.messages.back().role == Role::Assistant) {
+                    m.d.current.messages.pop_back();
+                }
+                if (!m.d.current.messages.empty()
+                    && m.d.current.messages.back().role == Role::User) {
+                    m.d.current.messages.pop_back();
+                }
+            }
 
             // Salvage partial assistant work and finalise in-flight
             // tool calls so the transcript reads cleanly: a Pending /
@@ -889,6 +999,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
                 case Command::OpenModels:    return update(std::move(m), OpenModelPicker{});
                 case Command::OpenThreads:   return update(std::move(m), OpenThreadList{});
                 case Command::OpenPlan:      return update(std::move(m), OpenTodoModal{});
+                case Command::CompactContext:return update(std::move(m), CompactContext{});
                 case Command::Quit:          return update(std::move(m), Quit{});
             }
             return done(std::move(m));

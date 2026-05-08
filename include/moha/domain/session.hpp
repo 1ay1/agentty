@@ -177,6 +177,15 @@ struct StreamState {
     int tokens_in   = 0;
     int tokens_out  = 0;
     int context_max = 200000;
+    // True while a compaction round is in flight: the synthetic
+    // "summarise per spec" user message has been appended and the
+    // assistant is producing the summary. StreamFinished's compaction
+    // branch reads this flag, replaces messages with a single
+    // compacted-summary user message, and resets it. Invariant: only
+    // ever true when phase != Idle (the transition is paired with the
+    // launch of the compaction stream); StreamError on a compaction
+    // turn clears it without applying.
+    bool compacting = false;
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
     // banner once now() passes this point and the reducer treats the
