@@ -37,6 +37,14 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
         bump_cat(std::string{tool_category_label(tc.name.value)});
     }
 
+    // Cross-tool semantics: scan completed Greps once up-front and build
+    // a `path → {line numbers}` index. Subsequent Read/find_definition
+    // tools that open any of those paths inherit the grep hits as
+    // `highlight_lines`, anchoring the user's eye on lines the assistant
+    // flagged earlier in the same turn instead of forcing a re-scan.
+    // Mirrors agent_session.cpp's grep_hits → FileRead wiring in maya.
+    const GrepHits grep_hits = collect_grep_hits(msg);
+
     maya::AgentTimeline::Config cfg;
     cfg.frame = spinner_frame;
 
@@ -67,7 +75,7 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
             .elapsed_seconds = tc.is_terminal() ? tool_elapsed(tc) : 0.0f,
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
-            .body            = tool_body_preview_config(tc),
+            .body            = tool_body_preview_config(tc, &grep_hits),
         });
     }
 
