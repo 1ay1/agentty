@@ -50,8 +50,23 @@
 
 namespace {
 
+// Compiled-in project version — populated by CMakeLists.txt's
+// target_compile_definitions(moha PRIVATE MOHA_VERSION=...). The fallback
+// "0.0.0-dev" is only reached on a build that bypasses our CMake (e.g.
+// hand-invoked compiler), which keeps the binary self-describing instead
+// of a hard #error.
+#ifndef MOHA_VERSION
+#define MOHA_VERSION "0.0.0-dev"
+#endif
+
+void print_version() {
+    std::printf("moha %s\n", MOHA_VERSION);
+}
+
 void print_usage() {
     std::fprintf(stderr,
+        "moha %s\n"
+        "\n"
         "usage: moha [subcommand] [options]\n"
         "\n"
         "subcommands:\n"
@@ -72,7 +87,10 @@ void print_usage() {
         "                      MODE = auto (default: use if available),\n"
         "                             on  (require backend; fail otherwise),\n"
         "                             off (disable wrapping).\n"
-        "\n");
+        "  -V, --version       Print the moha version and exit.\n"
+        "  -h, --help          Show this message.\n"
+        "\n",
+        MOHA_VERSION);
 }
 
 struct Args {
@@ -110,6 +128,13 @@ Args parse_args(int argc, char** argv) {
             out.cli_sandbox = argv[++i];
         } else if (a == "-h" || a == "--help") {
             out.subcommand = "help";
+        } else if (a == "-V" || a == "--version" || a == "version") {
+            // Standalone version subcommand / flag. Treated as a
+            // top-level dispatch path so it short-circuits the rest
+            // of argparse — `moha --version -k garbage` shouldn't
+            // complain about the unused -k.
+            out.subcommand = "version";
+            return out;
         } else {
             std::fprintf(stderr, "unknown arg: %s\n\n", a.c_str());
             out.bad = true;
@@ -154,7 +179,8 @@ int main(int argc, char** argv) {
 
     auto args = parse_args(argc, argv);
     if (args.bad)                    { print_usage(); return 2; }
-    if (args.subcommand == "help")   { print_usage(); return 0; }
+    if (args.subcommand == "help")    { print_usage();   return 0; }
+    if (args.subcommand == "version") { print_version(); return 0; }
     if (args.subcommand == "login")  return auth::cmd_login();
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();

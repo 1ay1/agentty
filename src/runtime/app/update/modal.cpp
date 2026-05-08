@@ -92,7 +92,17 @@ Step submit_message(Model m) {
     using maya::Cmd;
     if (m.ui.composer.text.empty()) return done(std::move(m));
 
-    if (m.s.is_streaming() || m.s.is_executing_tool()) {
+    // Belt-and-suspenders: queue if any non-Idle phase is in flight.
+    // The bare check (Streaming || ExecutingTool) was correct in
+    // practice — the keymap routes Esc/y/n/a to the permission modal
+    // when `pending_permission.has_value()`, so an AwaitingPermission
+    // phase can't reach a ComposerEnter dispatch — but `active()` /
+    // `!is_idle()` makes the guarantee structural instead of relying
+    // on two separate gating layers staying in sync. Future addition
+    // of new phases (or a refactor that lets the composer stay live
+    // during AwaitingPermission) won't silently regress to "submit
+    // overwrites the active ctx".
+    if (m.s.active()) {
         m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
         m.ui.composer.cursor = 0;
         return done(std::move(m));

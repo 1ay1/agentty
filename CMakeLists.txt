@@ -396,6 +396,11 @@ if(MOHA_BUILD_TESTS)
 endif()
 
 target_include_directories(moha PRIVATE include)
+# Bake the project version into the binary so `moha --version` /
+# the User-Agent string don't drift from CMakeLists.txt's
+# `project(moha VERSION X.Y.Z)`. Single source of truth — bumping
+# the project line bumps every site that reads the macro.
+target_compile_definitions(moha PRIVATE MOHA_VERSION="${PROJECT_VERSION}")
 target_link_libraries(moha PRIVATE
     maya::maya
     nlohmann_json::nlohmann_json
