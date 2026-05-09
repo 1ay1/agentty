@@ -60,21 +60,21 @@ namespace {
 #endif
 
 void print_version() {
-    std::printf("moha %s\n", MOHA_VERSION);
+    std::printf("agentty %s\n", MOHA_VERSION);
 }
 
 void print_usage() {
     std::fprintf(stderr,
-        "moha %s\n"
+        "agentty %s\n"
         "\n"
-        "usage: moha [subcommand] [options]\n"
+        "usage: agentty [subcommand] [options]\n"
         "\n"
         "subcommands:\n"
         "  login             Authenticate (OAuth via claude.ai or API key)\n"
         "  logout            Remove saved credentials\n"
         "  status            Show current auth status\n"
-        "  airgap            Launch moha on an air-gapped host via SSH tunnel\n"
-        "                    (`moha airgap --help` for details)\n"
+        "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"
+        "                    (`agentty airgap --help` for details)\n"
         "  help              Show this message\n"
         "\n"
         "options:\n"
@@ -87,7 +87,7 @@ void print_usage() {
         "                      MODE = auto (default: use if available),\n"
         "                             on  (require backend; fail otherwise),\n"
         "                             off (disable wrapping).\n"
-        "  -V, --version       Print the moha version and exit.\n"
+        "  -V, --version       Print the agentty version and exit.\n"
         "  -h, --help          Show this message.\n"
         "\n",
         MOHA_VERSION);

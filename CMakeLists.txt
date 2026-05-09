@@ -391,6 +391,13 @@ add_executable(moha
     ${MOHA_TOOL_SOURCES}
     ${MOHA_RUNTIME_SOURCES}
 )
+# `agentty` is the public brand; `moha` is the internal codename
+# (matches the `namespace moha` in headers, the include/moha/ tree,
+# the MOHA_* CMake options, and ~/.config/moha/ — all kept stable
+# so existing dev workflows / configs don't churn). Only the
+# installed/built artefact name flips, so users see `agentty
+# --version` and `agentty status` without any deeper rename.
+set_target_properties(moha PROPERTIES OUTPUT_NAME agentty)
 
 target_include_directories(moha PRIVATE include)
 # Bake the project version into the binary so `moha --version` /
