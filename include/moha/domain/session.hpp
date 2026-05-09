@@ -186,6 +186,18 @@ struct StreamState {
     // launch of the compaction stream); StreamError on a compaction
     // turn clears it without applying.
     bool compacting = false;
+    // True between `init()` kicking off the background OAuth refresh
+    // and `TokenRefreshed` landing. While set, `submit_message` queues
+    // the user's text into `composer.queued` instead of dispatching a
+    // stream — Deps still holds the pre-refresh (expired) auth header,
+    // and a request fired now would 401. The TokenRefreshed handler
+    // clears the flag and drains the queue once new creds are live.
+    bool oauth_refresh_in_flight = false;
+    // True while the background thread-history load kicked off from
+    // `init()` is still running. The thread picker view consults this
+    // to render a "loading…" placeholder instead of an empty list.
+    // Cleared by the `ThreadsLoaded` handler.
+    bool threads_loading = false;
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
     // banner once now() passes this point and the reducer treats the

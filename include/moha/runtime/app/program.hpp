@@ -15,13 +15,13 @@
 
 namespace moha::app {
 
-[[nodiscard]] Model init();
+[[nodiscard]] std::pair<Model, maya::Cmd<Msg>> init();
 
 struct MohaApp {
     using Model = ::moha::Model;
     using Msg   = ::moha::Msg;
 
-    static Model init() { return ::moha::app::init(); }
+    static std::pair<Model, maya::Cmd<Msg>> init() { return ::moha::app::init(); }
 
     static auto update(Model m, Msg msg) -> std::pair<Model, maya::Cmd<Msg>> {
         return ::moha::app::update(std::move(m), std::move(msg));

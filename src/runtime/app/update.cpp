@@ -948,9 +948,18 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
 
         // ── Thread list ─────────────────────────────────────────────────
         [&](OpenThreadList) -> Step {
-            m.d.threads = deps().load_threads();
+            // Refresh in the background if no load is in flight — the
+            // walk + parse is too slow (seconds, with hundreds of
+            // multi-MB thread files) to do synchronously here. The
+            // picker opens immediately against the cached list; new
+            // entries fade in when ThreadsLoaded lands.
+            maya::Cmd<Msg> cmd = maya::Cmd<Msg>::none();
+            if (!m.s.threads_loading) {
+                m.s.threads_loading = true;
+                cmd = cmd::load_threads_async();
+            }
             m.ui.thread_list = pick::OpenAt{0};
-            return done(std::move(m));
+            return {std::move(m), std::move(cmd)};
         },
         [&](CloseThreadList) -> Step {
             m.ui.thread_list = pick::Closed{};
@@ -1084,6 +1093,12 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](LoginCursorRight)       -> Step { return detail::login_cursor_right(std::move(m)); },
         [&](LoginSubmit)            -> Step { return detail::login_submit(std::move(m)); },
         [&](LoginExchanged& e)      -> Step { return detail::login_exchanged(std::move(m), std::move(e.result)); },
+        [&](TokenRefreshed& e)      -> Step { return detail::token_refreshed(std::move(m), std::move(e.result)); },
+        [&](ThreadsLoaded& e)       -> Step {
+            m.d.threads = std::move(e.threads);
+            m.s.threads_loading = false;
+            return done(std::move(m));
+        },
 
         // ── Profile ─────────────────────────────────────────────────────
         [&](CycleProfile) -> Step {

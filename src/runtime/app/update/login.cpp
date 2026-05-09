@@ -210,4 +210,63 @@ Step login_exchanged(Model m, auth::TokenResult result) {
     return done(std::move(m));
 }
 
+Step token_refreshed(Model m, auth::TokenResult result) {
+    // Background-refresh result. Distinct from login_exchanged: this
+    // path was kicked off by `init()` for a stale-but-refreshable token
+    // on disk, not by a user-driven login flow, so the modal state
+    // doesn't change here.
+    m.s.oauth_refresh_in_flight = false;
+
+    if (!result) {
+        // Refresh failed — surface the typed error in the bottom row.
+        // The "error:" prefix triggers shortcut_row.cpp's danger
+        // styling. 6s gives the user time to read before the toast
+        // expires; the Cmd::after sentinel auto-clears so a later
+        // status write doesn't get pre-empted.
+        std::string text = std::string{"error: token refresh failed: "}
+                         + result.error().render();
+        auto cmd = set_status_toast(m, std::move(text),
+                                    std::chrono::seconds{6});
+        // Leave any queued composer text alone — the user can resubmit
+        // (after re-authenticating via the login modal) without
+        // retyping. The first manual send in that state will hit the
+        // stale-token 401 path, but the in-app login modal is the
+        // recovery surface.
+        return {std::move(m), std::move(cmd)};
+    }
+
+    // Refresh OK — install fresh creds into Deps so the next stream
+    // uses the new bearer, persist them so a relaunch doesn't refresh
+    // again, and surface a success toast.
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    auto& tok = *result;
+    auth::Credentials creds{auth::cred::OAuth{
+        std::move(tok.access_token),
+        std::move(tok.refresh_token),
+        tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
+    }};
+    auth::save_credentials(creds);
+    moha::app::update_auth(auth::header_value(creds), auth::style(creds));
+
+    auto toast_cmd = set_status_toast(m, "OAuth token refreshed",
+                                      std::chrono::seconds{3});
+
+    // Drain any text the user queued while the refresh was in flight.
+    // Mirrors the stream-finish drain at update/stream.cpp:617 — pull
+    // the front off `composer.queued`, hand it to submit_message, and
+    // batch its Cmd alongside the toast so the user's first turn fires
+    // the moment fresh creds are live.
+    if (m.s.is_idle() && !m.ui.composer.queued.empty()) {
+        m.ui.composer.text = m.ui.composer.queued.front();
+        m.ui.composer.queued.erase(m.ui.composer.queued.begin());
+        auto [mm, sub_cmd] = submit_message(std::move(m));
+        m = std::move(mm);
+        return {std::move(m),
+            Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                std::move(toast_cmd), std::move(sub_cmd)})};
+    }
+    return {std::move(m), std::move(toast_cmd)};
+}
+
 } // namespace moha::app::detail

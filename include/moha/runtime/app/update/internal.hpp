@@ -81,6 +81,7 @@ Step login_cursor_left    (Model m);
 Step login_cursor_right   (Model m);
 Step login_submit         (Model m);
 Step login_exchanged      (Model m, moha::auth::TokenResult result);
+Step token_refreshed      (Model m, moha::auth::TokenResult result);
 
 } // namespace detail
 } // namespace moha::app

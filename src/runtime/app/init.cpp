@@ -1,6 +1,10 @@
 #include "moha/runtime/app/program.hpp"
+#include "moha/runtime/app/cmd_factory.hpp"
 #include "moha/runtime/login.hpp"
 #include "moha/runtime/view/helpers.hpp"
+#include "moha/auth/auth.hpp"
+
+#include <vector>
 
 namespace moha::app {
 
@@ -14,9 +18,15 @@ std::vector<ModelInfo> seed_models() {
 }
 } // namespace
 
-Model init() {
+std::pair<Model, maya::Cmd<Msg>> init() {
     Model m;
-    m.d.threads          = deps().load_threads();
+    // Thread history is the single largest startup cost: a real-world
+    // history of hundreds of multi-MB thread JSONs serializes into
+    // seconds of synchronous parse work before the first frame can
+    // render. Defer to a background task; ThreadsLoaded fills the list
+    // when it lands. The thread picker reads `m.s.threads_loading` to
+    // show a "loading…" hint until then.
+    m.s.threads_loading  = true;
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
@@ -41,7 +51,24 @@ Model init() {
     if (deps().auth_header.empty())
         m.ui.login = ui::login::Picking{};
 
-    return m;
+    std::vector<maya::Cmd<Msg>> cmds;
+    cmds.push_back(cmd::load_threads_async());
+
+    // Background OAuth refresh handoff. `auth::resolve()` parked a
+    // refresh token here when it found expired-but-refreshable creds
+    // on disk; pick it up and dispatch the network round trip on a
+    // worker so the TUI is interactive immediately. Sticky toast (no
+    // expiry) — TokenRefreshed clears it on completion. The
+    // oauth_refresh_in_flight flag gates submit_message so the user
+    // can't fire a stream with the stale auth_header still in Deps.
+    if (auto refresh = auth::take_pending_refresh()) {
+        m.s.oauth_refresh_in_flight = true;
+        m.s.status = "refreshing OAuth token…";
+        m.s.status_until = {};
+        cmds.push_back(cmd::refresh_oauth(std::move(*refresh)));
+    }
+
+    return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }
 
 } // namespace moha::app

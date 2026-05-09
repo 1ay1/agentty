@@ -331,4 +331,44 @@ Cmd<Msg> oauth_exchange(auth::OAuthCode    code,
         });
 }
 
+Cmd<Msg> load_threads_async() {
+    // task_isolated rather than task: the JSON parse can take seconds
+    // on a deep history (the directory walk is `directory_iterator` +
+    // `nlohmann::json::parse` per file). Isolating it keeps the shared
+    // worker pool free for stream / tool tasks the user fires in the
+    // meantime.
+    return Cmd<Msg>::task_isolated([](std::function<void(Msg)> dispatch) {
+        try {
+            auto threads = deps().load_threads();
+            dispatch(ThreadsLoaded{std::move(threads)});
+        } catch (...) {
+            // Best-effort: a corrupt file is already logged + skipped
+            // by load_all_threads, so any throw here is something the
+            // user can't act on. Dispatch an empty list so the UI
+            // doesn't sit on "loading…" forever.
+            dispatch(ThreadsLoaded{std::vector<Thread>{}});
+        }
+    });
+}
+
+Cmd<Msg> refresh_oauth(std::string refresh_token) {
+    return Cmd<Msg>::task(
+        [refresh_token = std::move(refresh_token)]
+        (std::function<void(Msg)> dispatch) {
+            try {
+                auto r = auth::refresh_access_token(
+                    auth::RefreshToken{refresh_token});
+                dispatch(TokenRefreshed{std::move(r)});
+            } catch (const std::exception& e) {
+                dispatch(TokenRefreshed{std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network,
+                    std::string{"refresh threw: "} + e.what()})});
+            } catch (...) {
+                dispatch(TokenRefreshed{std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network,
+                    "refresh threw: unknown exception"})});
+            }
+        });
+}
+
 } // namespace moha::app::cmd

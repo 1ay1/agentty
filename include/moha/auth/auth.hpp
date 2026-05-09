@@ -143,9 +143,27 @@ using TokenResult = std::expected<OAuthToken, OAuthError>;
 void open_browser(const std::string& url);
 
 // Resolve credentials following the documented priority order.
-// `cli_api_key` (from `-k`) takes top priority if non-empty. Auto-refresh
-// expired OAuth tokens when refresh_token is available.
+// `cli_api_key` (from `-k`) takes top priority if non-empty.
+//
+// Non-blocking: an expired OAuth token with a refresh_token is returned
+// as-is (still expired). The refresh token is stashed via
+// `set_pending_refresh()` so the in-app reducer can kick off a
+// background refresh once the maya runtime is up — the TUI starts
+// immediately instead of waiting on a synchronous network round trip.
 [[nodiscard]] Credentials resolve(const std::string& cli_api_key);
+
+// ── Pending OAuth refresh handoff ────────────────────────────────────────
+// One-shot channel from `auth::resolve()` (called pre-TUI from main()) to
+// `MohaApp::init()` (called from inside maya::run()). resolve() writes the
+// refresh token here if a background refresh is needed; init() takes it
+// to construct a `Cmd<Msg>::task(...)` that performs the refresh
+// asynchronously and dispatches a `TokenRefreshed` Msg on completion.
+//
+// Both functions run on the main thread (sequentially: main → maya::run
+// → P::init), so no atomics or locks are needed; the std::optional is
+// just a single-producer / single-consumer mailbox.
+void set_pending_refresh(std::string refresh_token);
+[[nodiscard]] std::optional<std::string> take_pending_refresh();
 
 // ── Interactive CLI flows (blocking, stdout/stdin — NOT in TUI) ──────────
 int cmd_login();

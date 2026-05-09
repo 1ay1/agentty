@@ -103,7 +103,12 @@ Step submit_message(Model m) {
     // of new phases (or a refactor that lets the composer stay live
     // during AwaitingPermission) won't silently regress to "submit
     // overwrites the active ctx".
-    if (m.s.active()) {
+    //
+    // Also queue while a background OAuth refresh is in flight. Deps
+    // still holds the pre-refresh (expired) auth header until the
+    // TokenRefreshed handler swaps it; firing a stream now would 401.
+    // The handler drains this queue once new creds are live.
+    if (m.s.active() || m.s.oauth_refresh_in_flight) {
         m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
         m.ui.composer.cursor = 0;
         return done(std::move(m));

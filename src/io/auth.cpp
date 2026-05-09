@@ -512,6 +512,24 @@ TokenResult refresh_access_token(const RefreshToken& refresh_token) {
 // Resolve on startup
 // ---------------------------------------------------------------------------
 
+// Single-shot mailbox: written by resolve() on the main thread before the
+// TUI is up, read by MohaApp::init() on the same main thread once
+// maya::run has started. Single-producer / single-consumer, so a plain
+// std::optional is sufficient — no atomics needed.
+namespace {
+std::optional<std::string> g_pending_refresh{};
+}
+
+void set_pending_refresh(std::string refresh_token) {
+    g_pending_refresh = std::move(refresh_token);
+}
+
+std::optional<std::string> take_pending_refresh() {
+    auto out = std::move(g_pending_refresh);
+    g_pending_refresh.reset();
+    return out;
+}
+
 Credentials resolve(const std::string& cli_api_key) {
     if (!cli_api_key.empty())
         return Credentials{cred::ApiKey{cli_api_key}};
@@ -523,8 +541,10 @@ Credentials resolve(const std::string& cli_api_key) {
     auto loaded = load_credentials();
     if (!loaded) return Credentials{cred::None{}};
 
-    // Refresh path is only meaningful for the OAuth alternative; the
-    // visit ensures we never read OAuth fields off an ApiKey by mistake.
+    // Non-blocking: expired-with-refresh stashes the refresh token for
+    // the reducer to pick up after the TUI is mounted; the network
+    // round trip happens off the startup path. Expired-without-refresh
+    // returns None so init.cpp opens the login modal.
     return std::visit([&](auto v) -> Credentials {
         using T = std::decay_t<decltype(v)>;
         if constexpr (!std::same_as<T, cred::OAuth>) {
@@ -534,30 +554,19 @@ Credentials resolve(const std::string& cli_api_key) {
                               && now_ms() >= v.expires_at_ms;
             if (!expired) return Credentials{std::move(v)};
             if (v.refresh_token.empty()) {
-                std::fprintf(stderr,
-                    "moha: stored OAuth token is expired and no refresh token.\n"
-                    "      run 'moha login'.\n");
+                // Nothing to refresh with; the in-TUI login modal will
+                // surface the empty-creds state to the user.
                 return Credentials{cred::None{}};
             }
-            std::fprintf(stderr, "moha: refreshing OAuth token... ");
-            auto tr = refresh_access_token(RefreshToken{v.refresh_token});
-            if (tr) {
-                v.access_token = std::move(tr->access_token);
-                if (!tr->refresh_token.empty())
-                    v.refresh_token = std::move(tr->refresh_token);
-                v.expires_at_ms = tr->expires_in_s
-                    ? now_ms() + tr->expires_in_s * 1000 : 0;
-                Credentials out{std::move(v)};
-                save_credentials(out);
-                std::fprintf(stderr, "ok\n");
-                return out;
-            }
-            std::fprintf(stderr, "FAILED: %s\n",
-                         tr.error().render().c_str());
-            std::fprintf(stderr,
-                "moha: stored OAuth token is expired and refresh failed.\n"
-                "      run 'moha login' to re-authenticate.\n");
-            return Credentials{cred::None{}};
+            // Hand the refresh token off to the reducer's init Cmd.
+            // The expired access_token is returned so anyone who
+            // inspects creds (e.g. the auth_header in Deps) sees the
+            // pre-refresh state until the background task lands;
+            // submit_message gates user sends on the
+            // oauth_refresh_in_flight flag so no request is fired with
+            // a known-stale token.
+            set_pending_refresh(v.refresh_token);
+            return Credentials{std::move(v)};
         }
     }, *loaded);
 }

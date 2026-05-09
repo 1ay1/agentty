@@ -41,4 +41,20 @@ namespace moha::app::cmd {
                                             auth::PkceVerifier verifier,
                                             auth::OAuthState   state);
 
+// Run the OAuth refresh HTTP POST off the UI thread. Dispatched from
+// `MohaApp::init()` when `auth::take_pending_refresh()` returned a
+// stashed token (i.e. on-disk creds were expired but had a refresh
+// token). The TUI is already drawn by the time this runs, so the user
+// sees a sticky "refreshing OAuth token…" toast in the bottom row
+// instead of the old pre-TUI stderr line, and startup is no longer
+// gated on the network round trip.
+[[nodiscard]] maya::Cmd<Msg> refresh_oauth(std::string refresh_token);
+
+// Walk ~/.moha/threads/ and parse every thread JSON off the UI thread.
+// Dispatches `ThreadsLoaded{vec}` on completion. The directory walk +
+// parse can take seconds with hundreds of multi-MB files in real-world
+// use, so it runs as a background task instead of blocking startup;
+// `init()` returns immediately with an empty thread list.
+[[nodiscard]] maya::Cmd<Msg> load_threads_async();
+
 } // namespace moha::app::cmd

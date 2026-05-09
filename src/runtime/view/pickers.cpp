@@ -51,7 +51,10 @@ Element thread_list(const Model& m) {
     if (!picker) return nothing();
     std::vector<Element> rows;
     if (m.d.threads.empty()) {
-        rows.push_back(text("  No threads yet.", fg_italic(muted)));
+        rows.push_back(text(
+            m.s.threads_loading ? "  Loading conversations…"
+                                : "  No threads yet.",
+            fg_italic(muted)));
     }
     int i = 0;
     for (const auto& t : m.d.threads) {

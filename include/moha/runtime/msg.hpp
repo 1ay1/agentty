@@ -157,6 +157,25 @@ struct LoginSubmit      {};
 // Network / MissingToken without parsing strings.
 struct LoginExchanged   { moha::auth::TokenResult result; };
 
+// Result of the background OAuth refresh kicked off from init() when
+// `auth::resolve()` returned an expired token paired with a refresh
+// token. Same TokenResult shape as LoginExchanged, handled in
+// update/login.cpp::token_refreshed: success installs the new creds via
+// `update_auth` + saves to disk + drains any queued composer text;
+// failure surfaces an `error: token refresh failed: ...` toast and
+// leaves the queue intact so the user can retry through the in-app
+// login modal.
+struct TokenRefreshed   { moha::auth::TokenResult result; };
+
+// Result of the background thread-history load kicked off from
+// `MohaApp::init()`. The on-disk thread JSON walk used to run
+// synchronously on startup; with hundreds of multi-MB files (real-world
+// usage) it was the dominant startup cost (~1.7 s for 643 threads at
+// 376 MB total). Now `init()` returns immediately with an empty
+// `m.d.threads` and a `Cmd::task` that does the directory walk +
+// JSON parse off the UI thread; this Msg lands when it's done.
+struct ThreadsLoaded    { std::vector<Thread> threads; };
+
 // ── Tool execution (local) ───────────────────────────────────────────────
 // Tool finished executing. `result` is `expected<output_text, ToolError>`
 // — the success/failure distinction is the type, not a parallel `bool error`
@@ -262,6 +281,7 @@ using Msg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos,
     OpenLogin, CloseLogin, LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit, LoginExchanged,
+    TokenRefreshed, ThreadsLoaded,
     CycleProfile,
     OpenDiffReview, CloseDiffReview, DiffReviewMove,
     DiffReviewNextFile, DiffReviewPrevFile,
