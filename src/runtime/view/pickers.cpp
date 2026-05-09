@@ -9,18 +9,18 @@
 #include "moha/runtime/view/palette.hpp"
 
 // All sizing here is responsive — the public maya layout does the
-// math, never moha. Each picker is a `vstack()` with:
-//
-//   .width(Dimension::percent(N))        — grows with parent (terminal)
-//   .min_width(Dimension::fixed(MIN))    — readable on narrow terms
-//   .max_width(Dimension::fixed(MAX))    — bounded so a 4K terminal
-//                                          doesn't get a 200-col modal
+// math, never moha. Each picker is a `vstack()` that just declares
+// its `min_width` / `max_width` bounds; the Overlay widget exposes a
+// terminal-wide bg-vstack as the picker's parent, default
+// align_items=Stretch makes the picker truly grow into that parent
+// (capped by max_width), so on an 80-col terminal you get the floor
+// and on a 200-col terminal you get the ceiling — no percent
+// arithmetic, no terminal-size detection from moha.
 //
 // Per-row truncation rides on `text(...) | clip` (TextWrap::TruncateEnd):
 // maya measures the column it allocated to the text, returns a
-// truncated-with-ellipsis line if the natural content overflows.
-// moha never queries terminal size and never recomputes column
-// widths — that's maya's job and lives there.
+// truncated-with-ellipsis single line if the natural content
+// overflows. moha never recomputes column widths — that's maya's job.
 
 namespace moha::ui {
 
@@ -59,17 +59,18 @@ std::string parent_segment(std::string_view dir) {
 // each picker passes its own min / max / percent + accent color +
 // border title and gets the same shape back.
 struct PickerShape {
-    int   pct_w   = 80;   // % of available width
     int   min_w   = 50;   // never narrower
-    int   max_w   = 120;  // never wider
+    int   max_w   = 200;  // never wider
     Color accent  = fg;
     std::string title;
 };
 
 Element wrap_picker(PickerShape s, std::vector<Element> rows) {
+    // No `width()` — default cross-axis stretch in the Overlay's
+    // bg-vstack lets the picker grow to terminal width, capped at
+    // max_w. min_w guarantees readability on narrow terminals.
     return vstack()
         .padding(1, 2)
-        .width(Dimension::percent(static_cast<float>(s.pct_w)))
         .min_width(Dimension::fixed(s.min_w))
         .max_width(Dimension::fixed(s.max_w))
         .border(BorderStyle::Round)
@@ -112,7 +113,7 @@ Element model_picker(const Model& m) {
         text("F", fg_of(fg)), text(" favorite  ", fg_dim(muted)),
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
-    return wrap_picker({.pct_w = 50, .min_w = 40, .max_w = 80,
+    return wrap_picker({.min_w = 40, .max_w = 90,
                         .accent = accent, .title = " Models "},
                        std::move(rows));
 }
@@ -146,7 +147,7 @@ Element thread_list(const Model& m) {
         text("N", fg_of(fg)), text(" new  ", fg_dim(muted)),
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
-    return wrap_picker({.pct_w = 60, .min_w = 50, .max_w = 110,
+    return wrap_picker({.min_w = 50, .max_w = 140,
                         .accent = info, .title = " Threads "},
                        std::move(rows));
 }
@@ -178,7 +179,7 @@ Element command_palette(const Model& m) {
             ).build());
         }
     }
-    return wrap_picker({.pct_w = 70, .min_w = 50, .max_w = 110,
+    return wrap_picker({.min_w = 50, .max_w = 140,
                         .accent = highlight, .title = " Command Palette "},
                        std::move(rows));
 }
@@ -228,7 +229,7 @@ Element mention_palette(const Model& m) {
                 fg_dim(muted)));
         }
     }
-    return wrap_picker({.pct_w = 85, .min_w = 50, .max_w = 130,
+    return wrap_picker({.min_w = 50, .max_w = 200,
                         .accent = info, .title = " Mention File "},
                        std::move(rows));
 }
@@ -275,7 +276,7 @@ Element symbol_palette(const Model& m) {
                 fg_dim(muted)));
         }
     }
-    return wrap_picker({.pct_w = 85, .min_w = 60, .max_w = 140,
+    return wrap_picker({.min_w = 60, .max_w = 200,
                         .accent = highlight, .title = " Symbol "},
                        std::move(rows));
 }
@@ -318,7 +319,7 @@ Element todo_modal(const Model& m) {
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
 
-    return wrap_picker({.pct_w = 60, .min_w = 45, .max_w = 90,
+    return wrap_picker({.min_w = 45, .max_w = 110,
                         .accent = info, .title = " Plan "},
                        std::move(rows));
 }
