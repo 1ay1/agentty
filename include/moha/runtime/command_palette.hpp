@@ -24,6 +24,7 @@ enum class Command : std::uint8_t {
     OpenThreads,
     OpenPlan,
     CompactContext,
+    OpenLogin,
     Quit,
 };
 
@@ -43,6 +44,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenThreads,   "Open threads",       "Browse saved conversations"},
     CommandDef{Command::OpenPlan,      "Open plan",          "View task progress"},
     CommandDef{Command::CompactContext,"Compact context",    "Replace history with a structured summary"},
+    CommandDef{Command::OpenLogin,     "Login",              "Sign in via OAuth or API key"},
     CommandDef{Command::Quit,          "Quit",               "Exit moha"},
 };
 

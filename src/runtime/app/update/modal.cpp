@@ -13,6 +13,7 @@
 
 #include "moha/runtime/app/cmd_factory.hpp"
 #include "moha/runtime/app/deps.hpp"
+#include "moha/runtime/composer_attachment.hpp"
 #include "moha/store/store.hpp"
 
 namespace moha::app::detail {
@@ -91,7 +92,38 @@ maya::Cmd<Msg> maybe_virtualize(Model& m) {
 
 Step submit_message(Model m) {
     using maya::Cmd;
-    if (m.ui.composer.text.empty()) return done(std::move(m));
+    // Composer is non-empty if it has typed text OR an attachment chip.
+    // Even an "empty-looking" buffer with chips should submit — those
+    // chips ARE the message (a single dropped @file or paste, with no
+    // surrounding prose). The expand pass below pulls each chip's body
+    // into the wire text.
+    if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
+        return done(std::move(m));
+
+    // Drain composer.text + composer.attachments into a single fully
+    // expanded payload string, resetting composer fields. Used by the
+    // queue-on-busy and queue-on-compact paths and by the actual
+    // submit path below — all three need the same "linearise chips
+    // now, attachments vector becomes empty" semantics so a Recall
+    // (Up arrow) of a queued item never resurrects a placeholder
+    // pointing at a dropped index.
+    auto drain_composer = [](Model& mm) {
+        std::string out = mm.ui.composer.attachments.empty()
+            ? std::exchange(mm.ui.composer.text, {})
+            : attachment::expand(mm.ui.composer.text, mm.ui.composer.attachments);
+        mm.ui.composer.text.clear();
+        mm.ui.composer.attachments.clear();
+        mm.ui.composer.cursor = 0;
+        // Submit boundary clears the per-draft transient state. Undo
+        // / redo and the history-walk index belong to the draft the
+        // user just sent; carrying them into the next draft would
+        // produce surprising "Ctrl+Z restores half of last turn".
+        mm.ui.composer.undo_stack.clear();
+        mm.ui.composer.redo_stack.clear();
+        mm.ui.composer.history_idx = -1;
+        mm.ui.composer.draft_save.reset();
+        return out;
+    };
 
     // Belt-and-suspenders: queue if any non-Idle phase is in flight.
     // The bare check (Streaming || ExecutingTool) was correct in
@@ -109,8 +141,7 @@ Step submit_message(Model m) {
     // TokenRefreshed handler swaps it; firing a stream now would 401.
     // The handler drains this queue once new creds are live.
     if (m.s.active() || m.s.oauth_refresh_in_flight) {
-        m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
-        m.ui.composer.cursor = 0;
+        m.ui.composer.queued.push_back(drain_composer(m));
         return done(std::move(m));
     }
 
@@ -137,8 +168,7 @@ Step submit_message(Model m) {
     if (threshold > 0
         && m.s.tokens_in > threshold
         && !m.d.current.messages.empty()) {
-        m.ui.composer.queued.push_back(std::exchange(m.ui.composer.text, {}));
-        m.ui.composer.cursor = 0;
+        m.ui.composer.queued.push_back(drain_composer(m));
         // Reuse the CompactContext reducer arm so the path is one
         // place: it appends the synthetic prompt + placeholder, sets
         // m.s.compacting, and launches the stream. finalize_turn's
@@ -148,8 +178,22 @@ Step submit_message(Model m) {
 
     Message user;
     user.role = Role::User;
-    user.text = std::exchange(m.ui.composer.text, {});
-    m.ui.composer.cursor = 0;
+    // Image attachments need to reach the wire as image content
+    // blocks, NOT as the "[image: ...]" prose marker that
+    // attachment::expand emits. Lift the bytes off the composer
+    // BEFORE drain — drain still emits the marker into user.text so
+    // surrounding prose stays anchored, but the actual bytes ride on
+    // user.images and the transport flattens them into Anthropic's
+    // image block format.
+    for (auto& att : m.ui.composer.attachments) {
+        if (att.kind == Attachment::Kind::Image) {
+            ImageContent img;
+            img.media_type = std::move(att.media_type);
+            img.bytes      = std::move(att.body);
+            user.images.push_back(std::move(img));
+        }
+    }
+    user.text = drain_composer(m);
     if (m.d.current.title.empty())
         m.d.current.title = deps().title_from(user.text);
     m.d.current.messages.push_back(std::move(user));

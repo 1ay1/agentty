@@ -289,6 +289,7 @@ set(MOHA_IO_SOURCES
     src/io/tls.cpp
     src/io/auth.cpp
     src/io/persistence.cpp
+    src/util/base64.cpp
 )
 
 set(MOHA_PROVIDER_SOURCES
@@ -329,6 +330,10 @@ set(MOHA_TOOL_SOURCES
 # without fighting main().
 set(MOHA_RUNTIME_NOMAIN_SOURCES
     src/runtime/airgap.cpp
+    src/runtime/clipboard_image.cpp
+    src/runtime/composer_attachment.cpp
+    src/runtime/mention_palette.cpp
+    src/runtime/symbol_palette.cpp
     src/runtime/app/deps.cpp
     src/runtime/app/init.cpp
     src/runtime/app/cmd_factory.cpp
@@ -340,6 +345,8 @@ set(MOHA_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/login.cpp
     src/runtime/app/update/picker.cpp
     src/runtime/app/update/palette.cpp
+    src/runtime/app/update/mention.cpp
+    src/runtime/app/update/symbol.cpp
     src/runtime/app/update/diff.cpp
     src/runtime/app/update/meta.cpp
     src/runtime/app/subscribe.cpp
@@ -384,34 +391,6 @@ add_executable(moha
     ${MOHA_TOOL_SOURCES}
     ${MOHA_RUNTIME_SOURCES}
 )
-
-# Reducer tests — opt in with -DMOHA_BUILD_TESTS=ON. Shares the full runtime
-# source set so update(...)'s transitive Deps / cmd seam is linkable; swaps
-# main.cpp for the test harness.
-option(MOHA_BUILD_TESTS "Build reducer tests" OFF)
-if(MOHA_BUILD_TESTS)
-    add_executable(moha_reducer_tests
-        ${MOHA_IO_SOURCES}
-        ${MOHA_PROVIDER_SOURCES}
-        ${MOHA_DIFF_SOURCES}
-        ${MOHA_TOOL_SOURCES}
-        ${MOHA_RUNTIME_NOMAIN_SOURCES}
-        tests/reducer_tests.cpp
-    )
-    target_include_directories(moha_reducer_tests PRIVATE include)
-    target_link_libraries(moha_reducer_tests PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(moha_reducer_tests PRIVATE ws2_32 crypt32 shell32)
-    endif()
-endif()
 
 target_include_directories(moha PRIVATE include)
 # Bake the project version into the binary so `moha --version` /

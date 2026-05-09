@@ -99,6 +99,8 @@ Step tool_update          (Model m, msg::ToolMsg           tm);
 Step model_picker_update  (Model m, msg::ModelPickerMsg    pm);
 Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
 Step palette_update       (Model m, msg::CommandPaletteMsg pm);
+Step mention_update       (Model m, msg::MentionPaletteMsg mm);
+Step symbol_update        (Model m, msg::SymbolPaletteMsg  sm);
 Step todo_update          (Model m, msg::TodoMsg           tm);
 Step login_update         (Model m, msg::LoginMsg          lm);
 Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);

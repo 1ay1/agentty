@@ -82,6 +82,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::OpenThreads:   return moha::app::update(std::move(m), Msg{OpenThreadList{}});
                 case Command::OpenPlan:      return moha::app::update(std::move(m), Msg{OpenTodoModal{}});
                 case Command::CompactContext:return moha::app::update(std::move(m), Msg{CompactContext{}});
+                case Command::OpenLogin:     return moha::app::update(std::move(m), Msg{OpenLogin{}});
                 case Command::Quit:          return moha::app::update(std::move(m), Msg{Quit{}});
             }
             return done(std::move(m));

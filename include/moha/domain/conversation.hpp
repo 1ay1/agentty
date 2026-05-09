@@ -186,6 +186,18 @@ struct ToolUse {
     }
 };
 
+/// Image content attached to a User message. Serialized on the wire
+/// as an Anthropic image content block — `{"type":"image","source":
+/// {"type":"base64","media_type":"...","data":"..."}}`. Bytes are
+/// stored raw in memory (NOT base64) so the in-RAM representation
+/// stays compact; encoding happens at the JSON write boundary.
+/// Persisted on disk as base64 so a loaded thread can be re-sent on
+/// a follow-up turn without re-asking the user for the file.
+struct ImageContent {
+    std::string media_type;  // "image/png", "image/jpeg", "image/webp", "image/gif"
+    std::string bytes;       // raw image bytes, NOT base64
+};
+
 struct Message {
     // Stable per-message identity. Generated on construction; round-
     // tripped through persistence so it survives reloads. The view's
@@ -197,6 +209,13 @@ struct Message {
     MessageId   id = new_message_id();
     Role        role = Role::User;
     std::string text;
+    /// Image attachments on a User message — the bytes that the
+    /// transport flattens into Anthropic image content blocks. Empty
+    /// for Assistant messages and for User messages that didn't carry
+    /// any image at submit time. Order matches the `[image: ...]`
+    /// markers in `text` so the rendered prose still anchors the
+    /// images visually.
+    std::vector<ImageContent> images;
     std::string streaming_text;
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,

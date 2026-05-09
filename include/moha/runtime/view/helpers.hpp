@@ -70,4 +70,12 @@ namespace moha::ui {
 [[nodiscard]] int utf8_prev(std::string_view s, int byte_pos) noexcept;
 [[nodiscard]] int utf8_next(std::string_view s, int byte_pos) noexcept;
 
+// Chip-aware variants: same as utf8_prev/utf8_next, but treat any
+// composer attachment placeholder (\x01ATT:N\x01) as a single
+// navigation unit. Cursor entering the closing sentinel from the
+// right jumps to before the opening sentinel; entering the opening
+// sentinel from the left jumps to after the closing sentinel.
+[[nodiscard]] int chip_prev(std::string_view s, int byte_pos) noexcept;
+[[nodiscard]] int chip_next(std::string_view s, int byte_pos) noexcept;
+
 } // namespace moha::ui

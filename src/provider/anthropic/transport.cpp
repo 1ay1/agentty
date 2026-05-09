@@ -22,6 +22,7 @@
 #include "moha/domain/catalog.hpp"
 #include "moha/io/http.hpp"
 #include "moha/tool/registry.hpp"
+#include "moha/util/base64.hpp"
 
 namespace moha::provider::anthropic {
 
@@ -736,6 +737,31 @@ void write_text_block(std::string& out, std::string_view text, bool pin_cache) {
     out.push_back('}');
 }
 
+// Anthropic image content block:
+//   {"type":"image","source":{"type":"base64",
+//                              "media_type":"image/png","data":"..."}}
+// `data` is standard RFC-4648 base64 (NOT base64url). We encode the
+// bytes once at write time — keeping them raw in `ImageContent.bytes`
+// avoids the +33% memory overhead in the running model state.
+void write_image_block(std::string& out, const ImageContent& img,
+                       bool pin_cache) {
+    out.push_back('{');
+    bool first = true;
+    json_write_field(out, "type", "image", first);
+    if (!first) out.push_back(',');
+    first = false;
+    out.append(R"("source":{"type":"base64",)");
+    out.append(R"("media_type":)");
+    json_write_escaped_string(out,
+        img.media_type.empty() ? std::string_view{"image/png"}
+                               : std::string_view{img.media_type});
+    out.append(R"(,"data":)");
+    json_write_escaped_string(out, util::base64_encode(img.bytes));
+    out.push_back('}');
+    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    out.push_back('}');
+}
+
 void write_tool_use_block(std::string& out, const ToolUse& tc, bool pin_cache) {
     out.push_back('{');
     bool first = true;
@@ -786,7 +812,9 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     // contributes TWO messages (assistant + tool_results follow-up).
     int total_msgs = 0;
     for (const auto& m : t.messages) {
+        const bool has_images = (m.role == Role::User && !m.images.empty());
         if (!m.text.empty()
+         || has_images
          || (m.role == Role::Assistant && !m.tool_calls.empty())) {
             ++total_msgs;
         }
@@ -813,9 +841,10 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
 
     for (const auto& m : t.messages) {
         // ── Primary message (text + tool_use blocks if Assistant) ──
-        const bool has_text  = !m.text.empty();
-        const bool has_tools = (m.role == Role::Assistant && !m.tool_calls.empty());
-        if (has_text || has_tools) {
+        const bool has_text   = !m.text.empty();
+        const bool has_images = (m.role == Role::User && !m.images.empty());
+        const bool has_tools  = (m.role == Role::Assistant && !m.tool_calls.empty());
+        if (has_text || has_images || has_tools) {
             const int my_idx   = emitted;
             const bool do_pin  = pinning_for(my_idx);
             emit_msg_open();
@@ -823,13 +852,23 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
             out.append(R"("role":)");
             out.append(m.role == Role::User ? R"("user")" : R"("assistant")");
             out.append(R"(,"content":[)");
-            // Emit text first (matches cli.js block order), then
-            // tool_use blocks. Cache breakpoint goes on the LAST block
-            // of the message — track its position so we can flag it
-            // when we get there.
-            int blocks = (has_text ? 1 : 0)
+            // Anthropic accepts mixed content arrays. Emit images
+            // FIRST so the prose that references them ("describe this
+            // screenshot") follows in the same content array — the
+            // model reads in array order and benefits from having the
+            // visual context loaded before the prompt text. Then the
+            // text block, then any tool_use blocks (Assistant turns).
+            int blocks = (has_images ? static_cast<int>(m.images.size()) : 0)
+                       + (has_text ? 1 : 0)
                        + (has_tools ? static_cast<int>(m.tool_calls.size()) : 0);
             int block_emitted = 0;
+            if (has_images) {
+                for (const auto& img : m.images) {
+                    if (block_emitted++ > 0) out.push_back(',');
+                    const bool last_block = (block_emitted == blocks);
+                    write_image_block(out, img, do_pin && last_block);
+                }
+            }
             if (has_text) {
                 if (block_emitted++ > 0) out.push_back(',');
                 const bool last_block = (block_emitted == blocks);

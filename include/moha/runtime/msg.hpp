@@ -67,6 +67,31 @@ struct ComposerPaste { std::string text; };
 // recall, the items are gone (same as Claude Code's behaviour).
 struct ComposerRecallQueued {};
 
+// Word-wise cursor jumps (Ctrl+Left / Ctrl+Right). Word boundaries
+// are whitespace runs; chip placeholders count as a single word.
+struct ComposerCursorWordLeft {};
+struct ComposerCursorWordRight {};
+// Kill-line family (Ctrl+K / Ctrl+U). Kill-to-end deletes from the
+// cursor to the next '\n' (or end-of-buffer); kill-to-beginning
+// deletes from the previous '\n' (or start-of-buffer) to the cursor.
+struct ComposerKillToEndOfLine {};
+struct ComposerKillToBeginningOfLine {};
+// Undo / redo (Ctrl+Z / Ctrl+Y). Each mutating composer op snapshots
+// the prior state into a per-composer stack; new edits clear redo.
+struct ComposerUndo {};
+struct ComposerRedo {};
+// History walking — ↑/↓ over previous user messages in the active
+// thread. Prev steps further into the past; Next walks back toward
+// the live draft (which was snapshotted on the first Prev).
+struct ComposerHistoryPrev {};
+struct ComposerHistoryNext {};
+// Explicit "paste image from system clipboard" (Ctrl+V). Bracketed
+// paste (Ctrl+Shift+V) only carries UTF-8 text — for an image-on-
+// clipboard path the reducer shells out to wl-paste / xclip /
+// pngpaste / PowerShell to capture the raw PNG bytes. See
+// runtime/clipboard_image.{hpp,cpp}.
+struct ComposerImagePasteFromClipboard {};
+
 // ── Streaming from provider ──────────────────────────────────────────────
 struct StreamStarted {};
 struct StreamTextDelta { std::string text; };
@@ -219,6 +244,22 @@ struct CommandPaletteBackspace {};
 struct CommandPaletteMove { int delta; };
 struct CommandPaletteSelect {};
 
+// ── @file mention picker ────────────────────────────────────────────────
+struct OpenMentionPalette {};
+struct CloseMentionPalette {};
+struct MentionPaletteInput { char32_t ch; };
+struct MentionPaletteBackspace {};
+struct MentionPaletteMove { int delta; };
+struct MentionPaletteSelect {};
+
+// ── #symbol picker (parallel to @file) ──────────────────────────────────
+struct OpenSymbolPalette {};
+struct CloseSymbolPalette {};
+struct SymbolPaletteInput { char32_t ch; };
+struct SymbolPaletteBackspace {};
+struct SymbolPaletteMove { int delta; };
+struct SymbolPaletteSelect {};
+
 // ── Todo modal ───────────────────────────────────────────────────────────
 struct OpenTodoModal {};
 struct CloseTodoModal {};
@@ -307,6 +348,11 @@ using ComposerMsg = std::variant<
     ComposerCharInput, ComposerBackspace, ComposerEnter, ComposerNewline,
     ComposerSubmit, ComposerToggleExpand,
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
+    ComposerCursorWordLeft, ComposerCursorWordRight,
+    ComposerKillToEndOfLine, ComposerKillToBeginningOfLine,
+    ComposerUndo, ComposerRedo,
+    ComposerHistoryPrev, ComposerHistoryNext,
+    ComposerImagePasteFromClipboard,
     ComposerPaste, ComposerRecallQueued>;
 
 using StreamMsg = std::variant<
@@ -330,6 +376,14 @@ using ThreadListMsg = std::variant<
 using CommandPaletteMsg = std::variant<
     OpenCommandPalette, CloseCommandPalette, CommandPaletteInput,
     CommandPaletteBackspace, CommandPaletteMove, CommandPaletteSelect>;
+
+using MentionPaletteMsg = std::variant<
+    OpenMentionPalette, CloseMentionPalette, MentionPaletteInput,
+    MentionPaletteBackspace, MentionPaletteMove, MentionPaletteSelect>;
+
+using SymbolPaletteMsg = std::variant<
+    OpenSymbolPalette, CloseSymbolPalette, SymbolPaletteInput,
+    SymbolPaletteBackspace, SymbolPaletteMove, SymbolPaletteSelect>;
 
 using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
@@ -369,6 +423,8 @@ using Msg = std::variant<
     msg::ModelPickerMsg,
     msg::ThreadListMsg,
     msg::CommandPaletteMsg,
+    msg::MentionPaletteMsg,
+    msg::SymbolPaletteMsg,
     msg::TodoMsg,
     msg::LoginMsg,
     msg::DiffReviewMsg,

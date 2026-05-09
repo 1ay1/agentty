@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "moha/domain/catalog.hpp"
+#include "moha/runtime/composer_attachment.hpp"
 #include "moha/runtime/view/palette.hpp"
 
 namespace moha::ui {
@@ -169,6 +170,29 @@ int utf8_next(std::string_view s, int byte_pos) noexcept {
     int p = byte_pos + 1;
     while (p < n && (static_cast<uint8_t>(s[p]) & 0xC0) == 0x80) ++p;
     return p;
+}
+
+int chip_prev(std::string_view s, int byte_pos) noexcept {
+    if (byte_pos <= 0) return 0;
+    // Closing sentinel of a placeholder at byte_pos - 1 → jump past
+    // the whole token in one step. attachment::placeholder_len_ending_at
+    // returns 0 when the bytes don't form a valid placeholder, so the
+    // fallback to utf8_prev keeps non-placeholder cases unchanged.
+    if (auto len = attachment::placeholder_len_ending_at(
+            s, static_cast<std::size_t>(byte_pos)); len > 0) {
+        return byte_pos - static_cast<int>(len);
+    }
+    return utf8_prev(s, byte_pos);
+}
+
+int chip_next(std::string_view s, int byte_pos) noexcept {
+    int n = static_cast<int>(s.size());
+    if (byte_pos >= n) return n;
+    if (auto len = attachment::placeholder_len_at(
+            s, static_cast<std::size_t>(byte_pos)); len > 0) {
+        return byte_pos + static_cast<int>(len);
+    }
+    return utf8_next(s, byte_pos);
 }
 
 } // namespace moha::ui

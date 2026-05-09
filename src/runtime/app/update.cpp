@@ -40,6 +40,8 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](msg::ModelPickerMsg pm)    { return detail::model_picker_update (std::move(m), std::move(pm)); },
         [&](msg::ThreadListMsg tm)     { return detail::thread_list_update  (std::move(m), std::move(tm)); },
         [&](msg::CommandPaletteMsg pm) { return detail::palette_update      (std::move(m), std::move(pm)); },
+        [&](msg::MentionPaletteMsg mm) { return detail::mention_update      (std::move(m), std::move(mm)); },
+        [&](msg::SymbolPaletteMsg sm)  { return detail::symbol_update       (std::move(m), std::move(sm)); },
         [&](msg::TodoMsg tm)           { return detail::todo_update         (std::move(m), std::move(tm)); },
         [&](msg::LoginMsg lm)          { return detail::login_update        (std::move(m), std::move(lm)); },
         [&](msg::DiffReviewMsg dm)     { return detail::diff_review_update  (std::move(m), std::move(dm)); },

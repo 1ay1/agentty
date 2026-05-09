@@ -52,6 +52,40 @@ std::optional<Msg> on_command_palette(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+std::optional<Msg> on_mention_palette(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        auto sk = std::get<SpecialKey>(ev.key);
+        switch (sk) {
+            case SpecialKey::Escape:    return CloseMentionPalette{};
+            case SpecialKey::Enter:     return MentionPaletteSelect{};
+            case SpecialKey::Up:        return MentionPaletteMove{-1};
+            case SpecialKey::Down:      return MentionPaletteMove{+1};
+            case SpecialKey::Backspace: return MentionPaletteBackspace{};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key))
+        return MentionPaletteInput{ck->codepoint};
+    return std::nullopt;
+}
+
+std::optional<Msg> on_symbol_palette(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        auto sk = std::get<SpecialKey>(ev.key);
+        switch (sk) {
+            case SpecialKey::Escape:    return CloseSymbolPalette{};
+            case SpecialKey::Enter:     return SymbolPaletteSelect{};
+            case SpecialKey::Up:        return SymbolPaletteMove{-1};
+            case SpecialKey::Down:      return SymbolPaletteMove{+1};
+            case SpecialKey::Backspace: return SymbolPaletteBackspace{};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key))
+        return SymbolPaletteInput{ck->codepoint};
+    return std::nullopt;
+}
+
 std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -185,6 +219,8 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
 struct ComposerKeyState {
     bool text_empty;
     bool has_queued;
+    bool in_history;     // walking over prior user messages — ↓ has meaning
+    bool has_history;    // any prior user turns exist at all — ↑ has meaning
 };
 
 std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
@@ -204,31 +240,74 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
                        ? Msg{ComposerNewline{}}
                        : Msg{ComposerEnter{}};
             case SpecialKey::Backspace: return ComposerBackspace{};
-            case SpecialKey::Left:      return ComposerCursorLeft{};
-            case SpecialKey::Right:     return ComposerCursorRight{};
+            case SpecialKey::Left:
+                // Ctrl+Left = jump-by-word. Mirrors readline / every
+                // text editor. Plain Left is per-character (chip-aware).
+                if (ev.mods.ctrl) return ComposerCursorWordLeft{};
+                return ComposerCursorLeft{};
+            case SpecialKey::Right:
+                if (ev.mods.ctrl) return ComposerCursorWordRight{};
+                return ComposerCursorRight{};
             case SpecialKey::Home:      return ComposerCursorHome{};
             case SpecialKey::End:       return ComposerCursorEnd{};
             case SpecialKey::Up:
-                // ↑ on an empty composer with at least one queued
-                // message recalls the whole editable queue back into
-                // the composer — Claude Code's "Press up to edit
-                // queued messages" affordance (binary offsets
-                // 84602515 + 76303220). The empty-input gate matches
-                // Claude Code's `H8.length > 1` check (don't hijack
-                // ↑ inside multi-line text editing). When there's
-                // nothing to recall this falls through as a no-op
-                // since moha doesn't yet have a sent-message-history
-                // recall path. (When there's text, ↑ is reserved for
-                // the future history-cycling path.)
+                // ↑ priorities, in order:
+                //   1. queue non-empty AND composer empty → recall queue
+                //      (Claude Code's "Press up to edit queued
+                //      messages" affordance, binary offsets 84602515 /
+                //      76303220).
+                //   2. already mid-history-walk → step further into the
+                //      past.
+                //   3. composer empty AND there's at least one prior
+                //      user turn → start history walk.
+                // Anything else (multi-line text editing, etc.) falls
+                // through so ↑ stays available for cursor moves later.
                 if (s.text_empty && s.has_queued)
                     return Msg{ComposerRecallQueued{}};
+                if (s.in_history) return ComposerHistoryPrev{};
+                if (s.text_empty && s.has_history) return ComposerHistoryPrev{};
+                return std::nullopt;
+            case SpecialKey::Down:
+                // ↓ only has meaning while walking history — it walks
+                // back toward the live draft. Outside the walk it
+                // falls through.
+                if (s.in_history) return ComposerHistoryNext{};
                 return std::nullopt;
             case SpecialKey::Escape:    return Quit{};
             default: return std::nullopt;
         }
     }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        // Ctrl-prefixed letter keys: editor-style controls. Tested
+        // before the printable-text branch so a Ctrl+Z arriving as
+        // CharKey{0x1A} or CharKey{'z'}+ctrl is captured either way.
+        if (ev.mods.ctrl && !ev.mods.alt) {
+            char32_t c = ck->codepoint;
+            // Some terminals deliver ASCII Ctrl-X as 0x01..0x1A; others
+            // (KKP / modifyOtherKeys) keep it as the lower-case letter
+            // with mods.ctrl=true. Normalise.
+            if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+            switch (c) {
+                case U'k': return ComposerKillToEndOfLine{};
+                case U'u': return ComposerKillToBeginningOfLine{};
+                case U'z':
+                    // Ctrl+Shift+Z is the alternate Redo binding (no
+                    // Ctrl+Y on macOS muscle-memory). Plain Ctrl+Z is
+                    // Undo.
+                    return ev.mods.shift ? Msg{ComposerRedo{}}
+                                         : Msg{ComposerUndo{}};
+                case U'y': return ComposerRedo{};
+                case U'v':
+                    // Ctrl+V → image paste from clipboard. The terminal's
+                    // bracketed-paste (Ctrl+Shift+V) delivers UTF-8 only;
+                    // for binary clipboard content we shell out to wl-paste
+                    // / xclip / pngpaste / PowerShell from the reducer arm.
+                    return ComposerImagePasteFromClipboard{};
+                default: break;
+            }
+        }
         if (ck->codepoint >= 0x20) return ComposerCharInput{ck->codepoint};
+    }
     return std::nullopt;
 }
 
@@ -237,6 +316,8 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
 Sub<Msg> subscribe(const Model& m) {
     const bool in_perm    = m.d.pending_permission.has_value();
     const bool in_cmd     = is_open(m.ui.command_palette);
+    const bool in_mention = mention_is_open(m.ui.mention_palette);
+    const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_threads = pick::is_open(m.ui.thread_list);
     const bool in_diff    = pick::is_open(m.ui.diff_review);
@@ -244,9 +325,14 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_login   = ui::login::is_open(m.ui.login);
     const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
+    bool has_history = false;
+    for (const auto& msg : m.d.current.messages)
+        if (msg.role == Role::User && !msg.text.empty()) { has_history = true; break; }
     const ComposerKeyState composer_state{
         m.ui.composer.text.empty(),
         !m.ui.composer.queued.empty(),
+        m.ui.composer.history_idx >= 0,
+        has_history,
     };
 
     auto key_sub = Sub<Msg>::on_key(
@@ -257,6 +343,8 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_login)   return on_login(login_state, ev);
             if (in_perm)    return on_permission(ev);
             if (in_cmd)     return on_command_palette(ev);
+            if (in_mention) return on_mention_palette(ev);
+            if (in_symbol)  return on_symbol_palette(ev);
             if (in_models)  return on_model_picker(ev);
             if (in_threads) return on_thread_list(ev);
             if (in_diff)    return on_diff_review(ev);

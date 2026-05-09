@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "moha/tool/util/utf8.hpp"
+#include "moha/util/base64.hpp"
 
 namespace moha::persistence {
 
@@ -120,6 +121,21 @@ static json message_to_json(const Message& m) {
         tcs.push_back(std::move(t));
     }
     j["tool_calls"] = std::move(tcs);
+    // Image attachments on User messages — stored on disk as base64
+    // so a thread reload can be re-sent on a follow-up turn without
+    // having to re-paste the original. Adds ~33% to the message JSON
+    // size; absent for messages that didn't carry images, so non-
+    // image threads are unaffected.
+    if (!m.images.empty()) {
+        json imgs = json::array();
+        for (const auto& img : m.images) {
+            json e;
+            e["media_type"] = img.media_type;
+            e["data"]       = util::base64_encode(img.bytes);
+            imgs.push_back(std::move(e));
+        }
+        j["images"] = std::move(imgs);
+    }
     if (m.checkpoint_id) j["checkpoint_id"] = *m.checkpoint_id;
     // Persist the per-message error so reopening a thread shows which
     // turn died and why. UTF-8 scrubbed for the same reason as `text`.
@@ -232,6 +248,23 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
                 DeserializeErrorKind::InvalidValue, "messages[*].checkpoint_id",
                 "expected string"});
         m.checkpoint_id = CheckpointId{cp.get<std::string>()};
+    }
+    if (j.contains("images")) {
+        const auto& arr = j["images"];
+        if (!arr.is_array())
+            return std::unexpected(DeserializeError{
+                DeserializeErrorKind::InvalidValue, "messages[*].images",
+                "expected array"});
+        for (const auto& e : arr) {
+            if (!e.is_object()) continue;
+            ImageContent img;
+            img.media_type = e.value("media_type", "image/png");
+            auto data_b64 = e.value("data", std::string{});
+            img.bytes = util::base64_decode(data_b64);
+            // Drop entries that decode to nothing — corrupted base64
+            // shouldn't kill the whole thread load.
+            if (!img.bytes.empty()) m.images.push_back(std::move(img));
+        }
     }
     return m;
 }
