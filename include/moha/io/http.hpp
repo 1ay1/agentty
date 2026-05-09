@@ -3,8 +3,15 @@
 //
 // Mirrors Zed's layering (reqwest_client → hyper → h2 → rustls) but in C++:
 // tls_context (OpenSSL SSL_CTX with platform-root verification) is opened once,
-// a process-wide Client keeps a pool of HTTP/2 connections keyed by (host,port),
-// and each request multiplexes a stream over whichever connection is idle.
+// and a process-wide Client keeps a pool of HTTP/2 connections keyed by
+// (host, port). Each request grabs an *idle* connection from that pool, runs
+// a single stream over it end-to-end, then returns the connection. Despite
+// the h2 wire format, we don't multiplex — at most one stream ID is open on
+// any given connection at any given time. Concurrency lives in the pool
+// (parallel requests dial / pick distinct connections), not in the h2
+// session. See the StreamCtx comment in http.cpp for the trade-off: moha's
+// request shape is sequential by design, so we run h2 essentially as
+// h1.1 + keepalive + HPACK + PING.
 //
 // Cancellation is cooperative: every request accepts a CancelToken that the
 // I/O loop polls between nghttp2 frame boundaries. Tripping the token closes
@@ -77,6 +84,22 @@ struct Request {
     std::string path;     // "/v1/messages"
     Headers     headers;
     std::string body;     // empty for GET; utf-8 bytes for POST.
+
+    // Hard cap on the buffered (unary, non-streaming) response body. The
+    // call returns a typed `body_too_large` HttpError once exceeded and
+    // RST_STREAMs the stream so we don't keep reading. Default 16 MiB is
+    // generous for an HTTP API call but bounded enough that a runaway
+    // upstream (test harness, misconfigured proxy, body-replay loop)
+    // can't OOM the process before anyone notices.
+    //
+    // Callers with known-tiny responses should tighten this:
+    //   • auth (OAuth token exchange / refresh): ~1 KB JSON  → 1 MiB
+    //   • Anthropic /v1/models: ~30 KB JSON                  → 1 MiB
+    //   • web_fetch tool: arbitrary user-pasted URL          → leave default
+    //
+    // Streaming responses (Client::stream) bypass this entirely — each
+    // SSE chunk flows through the on_chunk callback without buffering.
+    std::size_t max_body_bytes = 16ull * 1024 * 1024;
 };
 
 // Parsed env-var-driven dial override.  Format: "host" or "host:port" —

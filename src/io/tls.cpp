@@ -220,8 +220,41 @@ SharedCtx& shared() {
     std::call_once(once, [] {
         s->verifying = build_ctx(false);
         // Env gate: MOHA_INSECURE=1 collapses both handles into the insecure
-        // one, so accidentally using the "verified" one still follows the
-        // user's explicit override.
+        // one, so a code path that asks for the "verified" handle still
+        // follows the user's explicit opt-out.
+        //
+        // ── MOHA_INSECURE lifecycle (read this before exporting the var) ──
+        //
+        // The env var is sampled exactly ONCE — here, on the first call to
+        // shared() — and cached for the rest of the process via call_once.
+        // Effects of that:
+        //
+        //   • In a CLI run (the only intended use): set MOHA_INSECURE=1
+        //     before launching `moha`, the first TLS handshake reads it
+        //     and both contexts become insecure. Working as intended.
+        //
+        //   • A mid-process setenv("MOHA_INSECURE", "1", 1) is silently
+        //     ignored — we already built the verifying context. Same for
+        //     unsetenv(). This breaks the obvious test pattern:
+        //
+        //       setenv("MOHA_INSECURE", "1", 1);
+        //       run_request();           // verifies (already cached)
+        //       unsetenv("MOHA_INSECURE");
+        //
+        //     If you need that flow, set the var BEFORE the first http
+        //     request of the process — typically in main() or a test
+        //     fixture's SetUp(), not between assertions.
+        //
+        //   • If moha is ever embedded as a library, callers can't
+        //     change verification posture after the first SSL handshake
+        //     short of restarting the process. Document this at the
+        //     embedding seam if you go that route.
+        //
+        // Why one-shot rather than re-reading per shared_context() call:
+        // SSL_CTX is a heavyweight object (loads the system CA bundle,
+        // verifies the trust store) and connections already established
+        // against the cached pointer wouldn't migrate to a freshly-built
+        // one anyway, so a "live" knob would lie about its scope.
         if (const char* e = std::getenv("MOHA_INSECURE"); e && *e == '1') {
             s->insecure  = build_ctx(true);
             s->verifying = s->insecure;

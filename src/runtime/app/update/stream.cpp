@@ -495,16 +495,16 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         replacement.text = "Conversation continuation summary (prior history "
                            "compacted to save context):\n\n" + summary;
         // Compaction has just dropped every prior turn's `tool_calls[].
-        // output` along with their text bodies — megabytes to hundreds of
-        // megabytes on a long session. The view cache still holds the
-        // pre-built Element trees keyed by (thread_id, msg_idx); without
-        // an explicit evict, those Elements pin string copies of every
-        // tool output that just disappeared from the conversation, and
-        // the user's RSS doesn't move despite the logical working set
-        // collapsing to one summary message. Drop them here, before we
-        // assign the replacement (so the new msg_idx=0 entry isn't
-        // collateral), then nudge the allocator to return pages.
-        ui::evict_thread(m.d.current.id);
+        // output` along with their text bodies — megabytes to hundreds
+        // of megabytes on a long session. The view cache still holds
+        // the pre-built Element trees, but they're keyed by
+        // (thread_id, message_id) and the replacement message has a
+        // fresh MessageId, so cache lookups for it miss cleanly — no
+        // stale Element returned for what used to be msg_idx 0. The
+        // old entries are orphans that LRU pushes out as the next
+        // ~32 cache accesses fill the slots. We still nudge the
+        // allocator to return pages because the freed strings (tool
+        // outputs) aren't held by the cache after the orphans drain.
         m.d.current.messages.clear();
         m.d.current.messages.push_back(std::move(replacement));
         m.d.current.updated_at = std::chrono::system_clock::now();
@@ -584,22 +584,59 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         }
     }
 
-    // Surface a clear error on max_tokens cutoff — retrying would just burn
-    // the budget the same way again. Replace the generic guard message with
-    // one that names the actual cause.
-    if (any_truncated && max_tokens_hit
+    // ── max_tokens cutoff handling ──
+    //
+    // When stop_reason == max_tokens, generation halted at the model's
+    // output cap. If a tool block was being streamed at that moment, its
+    // input_json is truncated — which has two failure modes:
+    //
+    //   (a) The truncation is "syntactically obvious" (the parser can't
+    //       close the JSON, or required schema fields are missing).
+    //       guard_truncated_tool_args above sets `any_truncated` and
+    //       fails the tool with a generic incomplete-args message.
+    //
+    //   (b) The truncation lands at a syntactically valid point — common
+    //       for `write`/`edit` whose `content` field happens to close
+    //       cleanly mid-body. The args parse, schema validation passes,
+    //       guard returns false. The tool would dispatch and write a
+    //       half-truncated file, surfacing as either silent corruption
+    //       or a confusing tool-runner error that misleads the model
+    //       into thinking its argument shape was wrong.
+    //
+    // Both need the same treatment: fail the tool with a message that
+    // names the real cause (max_tokens cap) and points the model at
+    // the actionable workaround (smaller payload / `edit` over `write` /
+    // multiple calls). Don't retry — the budget is the same next time
+    // and the model would burn it the same way. The retry guard below
+    // already enforces this via `!max_tokens_hit`.
+    //
+    // We force-fail *every* still-pending tool here, not just ones
+    // guard caught, to cover case (b) cleanly. Tools already in a
+    // terminal state (Done from an earlier sub-turn, etc.) are left
+    // alone.
+    if (max_tokens_hit
         && !m.d.current.messages.empty()
         && m.d.current.messages.back().role == Role::Assistant) {
+        constexpr std::string_view kMaxTokensExplanation =
+            "Output token cap (max_tokens) was reached before the tool "
+            "input finished streaming, so the call was cut off. Even if "
+            "the args parsed, the body is likely truncated. Retry with a "
+            "smaller payload: prefer `edit` over `write` for long files, "
+            "or split the change across multiple calls.";
+        const auto now = std::chrono::steady_clock::now();
         for (auto& tc : m.d.current.messages.back().tool_calls) {
-            if (auto* f = std::get_if<ToolUse::Failed>(&tc.status);
-                f && f->output.starts_with("Tool call arguments look incomplete")) {
-                f->output = "Output token cap (max_tokens) was reached before "
-                            "the tool input finished streaming, so the call "
-                            "was cut off. Retry with a smaller payload — for "
-                            "long files, prefer the `edit` tool over `write`, "
-                            "or split the change across multiple calls.";
+            if (tc.is_pending()) {
+                tc.status = ToolUse::Failed{
+                    tc.started_at(), now, std::string{kMaxTokensExplanation}};
+            } else if (auto* f = std::get_if<ToolUse::Failed>(&tc.status);
+                       f && f->output.starts_with("Tool call arguments look incomplete")) {
+                // guard_truncated_tool_args already failed this one with
+                // a generic message. Upgrade it to the max_tokens-aware
+                // version so the model gets a single coherent story.
+                f->output.assign(kMaxTokensExplanation);
             }
         }
+        (void)any_truncated;  // both (a) and (b) covered above
     }
 
     // Transparent retry on upstream truncation — libcurl's TCP keepalive

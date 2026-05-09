@@ -127,13 +127,16 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                     m.ui.thread_list = pick::Closed{};
                     return done(std::move(m));
                 }
-                // Drop the outgoing thread's pre-built Element trees.
-                // Each cached entry pins a turn's full UI — markdown
-                // body + every tool card with its rendered output —
-                // and would otherwise live on past the thread switch
-                // until LRU pressure (which often never comes on a
-                // single subsequent thread) eventually rolled it out.
-                ui::evict_thread(m.d.current.id);
+                // Cache invalidation is implicit: the new thread's
+                // (thread_id, message_id) keys differ from the old
+                // thread's, so view-side cache lookups against the new
+                // thread's messages all miss and rebuild. Old thread's
+                // entries linger until LRU pushes them out — bounded
+                // by cap (32) × per-entry size, so transient memory
+                // overhead is on the order of tens of MiB until the
+                // new thread's accesses reclaim those slots. The
+                // reducer no longer reaches into the view cache; this
+                // arm is purely a Model state transition.
                 m.d.current = std::move(*loaded);
                 // Hand the freed pages back to the kernel. glibc malloc
                 // will otherwise hold the released arenas indefinitely;
@@ -150,13 +153,11 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         },
         [&](NewThread) -> Step {
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
-            // Drop the outgoing thread's view-cache entries before we
-            // overwrite m.d.current; otherwise the old Element trees
-            // (markdown bodies + tool-card UI for every turn) sit
-            // pinned in the LRU until they age out. evict_thread is
-            // keyed by ThreadId so the new thread's renders are
-            // unaffected.
-            ui::evict_thread(m.d.current.id);
+            // No cache eviction needed — the freshly-minted Thread
+            // has a different ThreadId, and a freshly-appended Message
+            // has a fresh MessageId, so the old (tid, mid) keys never
+            // collide with new lookups. LRU drains the previous
+            // thread's entries as the new thread fills the cap.
             m.d.current = Thread{};
             m.d.current.id = deps().new_thread_id();
             m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();

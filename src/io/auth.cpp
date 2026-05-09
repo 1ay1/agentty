@@ -410,6 +410,11 @@ FormPostResult http_post_form(const std::string& url,
         {"user-agent",   "moha/0.1.0"},
     };
     hreq.body = form_urlencode(fields);
+    // OAuth token exchange/refresh response is a tiny JSON object
+    // (access_token, refresh_token, expires_in, ~1 KB). Tighten the
+    // unary body cap so a runaway/misbehaving OAuth proxy can't stream
+    // gigabytes back at us before we notice.
+    hreq.max_body_bytes = 1ull * 1024 * 1024;
 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(10'000);

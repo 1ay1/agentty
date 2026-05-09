@@ -178,7 +178,16 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
     return std::nullopt;
 }
 
-std::optional<Msg> on_composer(const Model& m, const KeyEvent& ev) {
+// Composer state needed for keymap decisions, captured into the
+// subscription so the lambda doesn't have to retain a Model copy
+// (Model is move-only since the view cache moved on-board, and a
+// reference would dangle past the subscribe() call).
+struct ComposerKeyState {
+    bool text_empty;
+    bool has_queued;
+};
+
+std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
         switch (sk) {
@@ -211,8 +220,7 @@ std::optional<Msg> on_composer(const Model& m, const KeyEvent& ev) {
                 // since moha doesn't yet have a sent-message-history
                 // recall path. (When there's text, ↑ is reserved for
                 // the future history-cycling path.)
-                if (m.ui.composer.text.empty()
-                    && !m.ui.composer.queued.empty())
+                if (s.text_empty && s.has_queued)
                     return Msg{ComposerRecallQueued{}};
                 return std::nullopt;
             case SpecialKey::Escape:    return Quit{};
@@ -236,6 +244,10 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_login   = ui::login::is_open(m.ui.login);
     const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
+    const ComposerKeyState composer_state{
+        m.ui.composer.text.empty(),
+        !m.ui.composer.queued.empty(),
+    };
 
     auto key_sub = Sub<Msg>::on_key(
         [=, login_state = m.ui.login](const KeyEvent& ev) -> std::optional<Msg> {
@@ -257,7 +269,7 @@ Sub<Msg> subscribe(const Model& m) {
                 && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
                 return CancelStream{};
             if (auto msg = on_global(ev)) return msg;
-            return on_composer(m, ev);
+            return on_composer(composer_state, ev);
         });
 
     auto paste_sub = Sub<Msg>::on_paste([in_login](std::string s) -> Msg {

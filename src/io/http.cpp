@@ -215,12 +215,55 @@ struct EndpointHash {
     }
 };
 
+// Forward-declare so StreamCtx can carry a back-pointer to its Connection.
+// The on_frame_recv callback uses this to record GOAWAY state on the
+// Connection (which outlives any single request) — see Connection::is_alive
+// and the GOAWAY arm of on_frame_recv below.
+class Connection;
+
 // -----------------------------------------------------------------------
 // StreamCtx — per-request state owned by the Connection while a stream
-// is in flight.  One at a time per connection in our design (we don't
-// multiplex tool streams over one connection, which keeps the lifecycle
-// simple and sidesteps the CURLSH-class bug).  The connection still
-// benefits from h2 framing + keepalive.
+// is in flight.  Single-stream-per-connection by design: we forfeit h2's
+// headline feature (multiplexing N streams over one connection) and run
+// h2 essentially as h1.1 + keepalive + HPACK + PING.  Concretely:
+//
+//   • Pool keyed by (host, port).  A request takes an idle connection,
+//     runs one stream end-to-end, and returns the connection.  A second
+//     concurrent request waits for an idle connection or dials a new one.
+//   • The h2 session on the wire only ever has one open stream ID at a
+//     time.  We pay framing + HPACK cost on every byte; we cash zero of
+//     the multiplex benefit those costs are designed to amortize.
+//
+// Why this is fine for moha (not the same as why we picked it):
+//   moha's request shape is inherently sequential — one chat stream at a
+//   time, tool calls dispatched in series after the assistant turn closes.
+//   Nothing in the runtime ever asks for two streams to the same provider
+//   in parallel, so the unused multiplexer doesn't actually cost us
+//   anything beyond a few percent of framing overhead per request.
+//
+// Why we picked it (the honest version):
+//   It was the cheap default.  Multi-stream lifecycle on one h2 session
+//   means routing per-stream wakeups, abort signals, and header state
+//   through shared connection bookkeeping — not hard, but real work for a
+//   workload that doesn't need it.  The earlier comment cited "the
+//   CURLSH-class bug" as the rationale; that's true (shared handle state
+//   across streams is a known footgun, libcurl's CURLSH catalogues a
+//   half-dozen variants) but it was a post-hoc justification, not the
+//   trigger.  The trigger was "we don't need concurrency, so don't
+//   build for it."
+//
+// Why h2 at all rather than h1.1:
+//   Anthropic's edge serves both.  Claude Code negotiates h2, and moha's
+//   transport mimics Claude Code's wire shape so OAuth tokens are
+//   accepted (see the project_claude_code_wire memory).  The marginal
+//   wins on top of h1.1 — HPACK's smaller retry headers, PING-based
+//   keepalive primitive — are cheap; the real reason is wire-format
+//   parity.
+//
+// If a future workload needs concurrent streams, the cost to lift this is
+// real (per-stream cancel routing, stream-id → caller map under the
+// session lock, ordering rules around RST_STREAM vs headers in flight).
+// Don't repeat the multiplex-is-free folklore until you've paid for it.
 // -----------------------------------------------------------------------
 struct StreamCtx {
     // Request side
@@ -242,6 +285,18 @@ struct StreamCtx {
     // Result propagation — if we hit an abort during a stream, we keep the
     // reason to hand to the caller.
     std::string error;
+
+    // Per-request unary body cap. Mirrors Request::max_body_bytes; copied
+    // in by run() so the on_data_chunk callback (which only sees
+    // user_data → StreamCtx) can enforce per-call limits without
+    // reaching back to a Request reference.
+    std::size_t max_body_bytes = 16ull * 1024 * 1024;
+
+    // Back-pointer to the owning Connection. The on_frame_recv callback
+    // (which sees the session via user_data → StreamCtx) uses this to
+    // forward connection-level events — currently just GOAWAY's
+    // last_stream_id — onto state that outlives the request.
+    Connection* conn = nullptr;
 };
 
 // -----------------------------------------------------------------------
@@ -267,11 +322,54 @@ public:
     [[nodiscard]] socket_t fd() const { return fd_; }
     [[nodiscard]] nghttp2_session* session() { return session_; }
     [[nodiscard]] const Endpoint& endpoint() const { return endpoint_; }
+
+    // Liveness for pool reuse. Two stages:
+    //   (1) nghttp2 thinks the session has work to do or is at least
+    //       readable. If neither, the session has wound down.
+    //   (2) GOAWAY gate. After the peer sends GOAWAY with last_stream_id
+    //       = N, RFC 7540 §6.8 forbids the client from initiating any
+    //       stream with id > N — the server has promised to RST it. The
+    //       earlier check (nghttp2_session_want_read || want_write) is
+    //       NOT enough on its own here: a session that received GOAWAY
+    //       still wants_read while it drains in-flight streams' frames,
+    //       and still wants_write while it ACKs SETTINGS or echoes PINGs.
+    //       The connection looks alive at the protocol level but is
+    //       dead-walking for new streams.
+    //
+    //       Without this gate the next acquire from the pool returns
+    //       this corpse, the new request gets RST_STREAM, the retry
+    //       layer eats one round-trip (correctness intact, perf cost).
+    //       Bites hardest under provider brownouts where GOAWAY is the
+    //       primary signal.
     [[nodiscard]] bool is_alive() const {
         if (!session_) return false;
-        // nghttp2 flags EOF / GOAWAY internally; this catches both.
-        return nghttp2_session_want_read(session_)
-            || nghttp2_session_want_write(session_);
+        if (!nghttp2_session_want_read(session_) &&
+            !nghttp2_session_want_write(session_)) {
+            return false;
+        }
+        if (goaway_received_) {
+            // nghttp2_session_get_next_stream_id returns the id we WILL
+            // allocate on the next nghttp2_submit_request, NOT the last
+            // one we used. Compare directly against the peer's
+            // last_stream_id; if equal we're still allowed (the peer
+            // committed to processing through that id), > means refuse.
+            const int32_t next = nghttp2_session_get_next_stream_id(session_);
+            if (next > goaway_last_stream_id_) return false;
+        }
+        return true;
+    }
+
+    // Called from the on_frame_recv callback when a GOAWAY frame
+    // arrives. Idempotent — if multiple GOAWAYs arrive (peer is
+    // allowed to send a tightening one), we keep the smallest
+    // last_stream_id, which is the one that actually constrains us.
+    void mark_goaway(int32_t last_stream_id) noexcept {
+        if (!goaway_received_) {
+            goaway_received_ = true;
+            goaway_last_stream_id_ = last_stream_id;
+        } else if (last_stream_id < goaway_last_stream_id_) {
+            goaway_last_stream_id_ = last_stream_id;
+        }
     }
 
     // Execute a single request/stream on this connection.  The connection
@@ -300,6 +398,12 @@ private:
     const uint8_t*   pend_buf_ = nullptr;
     size_t           pend_off_ = 0;
     size_t           pend_len_ = 0;
+    // GOAWAY state, set by on_frame_recv when the peer signals shutdown
+    // intent. Kept on the Connection (not the per-request StreamCtx) so
+    // the flag survives across run() invocations: the pool's is_alive
+    // gate consults it on every reuse.
+    bool             goaway_received_       = false;
+    int32_t          goaway_last_stream_id_ = 0;
 };
 
 // -----------------------------------------------------------------------
@@ -311,6 +415,16 @@ static int on_frame_recv(nghttp2_session* /*s*/, const nghttp2_frame* frame,
                          void* user_data) {
     auto* sc = static_cast<StreamCtx*>(user_data);
     if (!sc) return 0;
+    // GOAWAY is connection-scoped (stream_id == 0 on the wire) — handle
+    // before the per-stream filter below, otherwise the early return
+    // would drop it. Forward last_stream_id to the Connection so the
+    // pool's is_alive gate can refuse this connection on the next
+    // acquire (otherwise we'd hand the caller a connection that's
+    // guaranteed to RST any newly-submitted stream).
+    if (frame->hd.type == NGHTTP2_GOAWAY) {
+        if (sc->conn) sc->conn->mark_goaway(frame->goaway.last_stream_id);
+        return 0;
+    }
     if (frame->hd.stream_id != sc->stream_id) return 0;
     if (frame->hd.type == NGHTTP2_HEADERS
         && frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
@@ -341,17 +455,15 @@ static int on_data_chunk(nghttp2_session* s, uint8_t /*flags*/,
             }
         }
     } else {
-        // Hard cap on the buffered (unary) response body. Anthropic's
-        // /v1/messages reply is well under a megabyte; a runaway upstream
-        // (test harness, misconfigured proxy, body-replay loop) would
-        // otherwise grow this string until the process OOMs. 100 MiB
-        // dwarfs any legitimate API response while still being orders of
-        // magnitude under typical RAM. Once exceeded, RST_STREAM the
-        // request and surface a typed Body error from the public API.
-        constexpr std::size_t kMaxBufferedBody = 100ull * 1024 * 1024;
-        if (sc->buffered_body.size() + len > kMaxBufferedBody) {
+        // Per-request cap on the buffered (unary) response body — see
+        // Request::max_body_bytes for the policy and per-caller defaults.
+        // A runaway upstream that exceeds the cap is RST_STREAMed and
+        // the call returns a typed body-too-large HttpError; we do NOT
+        // try to recover the partial body since the caller asked for a
+        // bounded response.
+        if (sc->buffered_body.size() + len > sc->max_body_bytes) {
             sc->error = "response body exceeded "
-                      + std::to_string(kMaxBufferedBody) + " bytes";
+                      + std::to_string(sc->max_body_bytes) + " bytes";
             sc->handler_aborted = true;
             nghttp2_submit_rst_stream(s, NGHTTP2_FLAG_NONE, stream_id,
                                       NGHTTP2_CANCEL);
@@ -906,6 +1018,10 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     nghttp2_data_provider* dpp = req.body.empty() ? nullptr : &dp;
 
     // Rebind user_data so the static callbacks find this request's ctx.
+    // Also stamp the back-pointer so on_frame_recv can forward
+    // connection-scoped events (currently GOAWAY) onto the Connection.
+    sctx.conn = this;
+    sctx.max_body_bytes = req.max_body_bytes;
     nghttp2_session_set_user_data(session_, &sctx);
 
     int32_t sid = nghttp2_submit_request(session_, nullptr,

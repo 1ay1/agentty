@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <unordered_map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -18,6 +19,7 @@
 #include <nlohmann/json.hpp>
 #include <simdjson.h>
 
+#include "moha/domain/catalog.hpp"
 #include "moha/io/http.hpp"
 #include "moha/tool/registry.hpp"
 
@@ -511,20 +513,20 @@ constexpr const char* stainless_arch() {
 // redact one and surface the visible thinking deltas in the UI.
 std::string select_betas(std::string_view model, bool is_oauth,
                          bool any_eager_streaming = false) {
-    std::vector<std::string_view> b;
-    const bool is_haiku   = model.find("haiku")     != std::string_view::npos;
-    const bool is_claude4 = model.find("opus-4")    != std::string_view::npos
-                         || model.find("sonnet-4")  != std::string_view::npos
-                         || model.find("haiku-4")   != std::string_view::npos;
+    // Single decode site for all model-id introspection — see
+    // ModelCapabilities::from_id for why we tokenise rather than
+    // substring-match. Adding a new beta gated on a new family /
+    // generation goes here; nothing else in transport.cpp parses
+    // model strings.
+    const auto caps = ModelCapabilities::from_id(model);
 
-    if (!is_haiku)   b.emplace_back(headers::beta_claude_code);          // !q
-    if (is_oauth)    b.emplace_back(headers::beta_oauth);                // Hq()
-    if (model.find("[1m]") != std::string_view::npos)
-                     b.emplace_back(headers::beta_context_1m);           // AL(H)
-    if (is_claude4)  b.emplace_back(headers::beta_context_management);   // eU(provider) && CR4(H)
-    b.emplace_back(headers::beta_prompt_cache_scope);                    // _ (fa() — always true firstParty)
-    if (any_eager_streaming)
-                     b.emplace_back(headers::beta_fine_grained_streaming);
+    std::vector<std::string_view> b;
+    if (!caps.is_haiku())              b.emplace_back(headers::beta_claude_code);          // !q
+    if (is_oauth)                      b.emplace_back(headers::beta_oauth);                // Hq()
+    if (caps.extended_context_1m)      b.emplace_back(headers::beta_context_1m);           // AL(H)
+    if (caps.generation_4_or_later)    b.emplace_back(headers::beta_context_management);   // eU(provider) && CR4(H)
+    b.emplace_back(headers::beta_prompt_cache_scope);                                      // _ (fa() — always true firstParty)
+    if (any_eager_streaming)           b.emplace_back(headers::beta_fine_grained_streaming);
 
     std::string out;
     for (size_t i = 0; i < b.size(); ++i) {
@@ -637,61 +639,240 @@ std::string make_user_id() {
 
 } // namespace
 
-json build_messages(const Thread& t) {
-    json msgs = json::array();
-    for (const auto& m : t.messages) {
-        json jm;
-        jm["role"] = (m.role == Role::User) ? "user" : "assistant";
-        json content = json::array();
-        if (!m.text.empty()) {
-            content.push_back({{"type", "text"}, {"text", scrub_utf8(m.text)}});
-        }
-        for (const auto& tc : m.tool_calls) {
-            if (m.role == Role::Assistant) {
-                // tc.args is stably owned by the Message and survives the
-                // request build, so a copy here is only needed because
-                // nlohmann::json doesn't model references. For multi-KB
-                // write/edit args this is a real cost — leave as-is for
-                // now (clean fix would be a string_view-keyed json shim
-                // or building the request body without nlohmann), but we
-                // at least avoid the redundant intermediate copy from the
-                // previous `json input = ...; std::move(input)` shape.
-                content.push_back({
-                    {"type", "tool_use"},
-                    {"id", tc.id.value},
-                    {"name", tc.name.value},
-                    {"input", tc.args.is_object() ? tc.args : json::object()},
-                });
-            }
-        }
-        if (!content.empty()) {
-            jm["content"] = std::move(content);
-            msgs.push_back(std::move(jm));
-        }
+// ── Streaming string-backed message-array writer ─────────────────────────
+//
+// Building the messages array via nlohmann::json was the largest hidden
+// allocation in the request hot path. The `{"input", tc.args.is_object()
+// ? tc.args : json::object()}` initializer-list deep-copies tc.args; for
+// a `write` tool whose `content` field is a 1 MiB file body, that's a
+// 1 MiB recursive json clone followed by another 1+ MiB allocation when
+// `body.dump()` re-serializes it. Two big copies per request, paid again
+// on every retry.
+//
+// `messages_json_string` writes the messages array directly into a
+// std::string buffer, JSON-escaping inline. The win lands on tc.args:
+// tc.args_dump() already caches the serialized form (used by the view
+// for permission cards), so we splice those bytes verbatim into the
+// "input" field. No clone, no re-parse, no re-dump. For unrecoverable
+// edge cases (an args object that somehow lost its dump cache) we fall
+// back to an on-demand dump rather than copying through json.
+//
+// Cache-breakpoint pinning (the `pin_last_block` helper that mutates
+// the last content block of the last + second-to-last messages) is now
+// done inline during write — we count messages first, then know in
+// advance which are the pin-eligible ones.
+namespace {
 
-        if (m.role == Role::Assistant && !m.tool_calls.empty()) {
-            json user_msg;
-            user_msg["role"] = "user";
-            json results = json::array();
-            for (const auto& tc : m.tool_calls) {
-                if (tc.is_terminal()) {
-                    results.push_back({
-                        {"type", "tool_result"},
-                        {"tool_use_id", tc.id.value},
-                        {"content", tc.output().empty()
-                            ? std::string{"(no output)"}
-                            : scrub_utf8(tc.output())},
-                        {"is_error", tc.is_failed() || tc.is_rejected()},
-                    });
+[[nodiscard]] inline bool is_assistant_with_results(const Message& m) noexcept {
+    if (m.role != Role::Assistant || m.tool_calls.empty()) return false;
+    for (const auto& tc : m.tool_calls) if (tc.is_terminal()) return true;
+    return false;
+}
+
+void json_write_escaped_string(std::string& out, std::string_view s) {
+    out.push_back('"');
+    out.reserve(out.size() + s.size() + 2);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  out.append("\\\"", 2); break;
+            case '\\': out.append("\\\\", 2); break;
+            case '\b': out.append("\\b",  2); break;
+            case '\f': out.append("\\f",  2); break;
+            case '\n': out.append("\\n",  2); break;
+            case '\r': out.append("\\r",  2); break;
+            case '\t': out.append("\\t",  2); break;
+            default:
+                if (c < 0x20) {
+                    // \u00XX for control bytes.
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out.append(buf, 6);
+                } else {
+                    // Printable + UTF-8 multibyte: passthrough. We
+                    // assume the caller already scrub_utf8'd inputs
+                    // (text bodies, tool outputs, args), so multi-byte
+                    // sequences here are well-formed.
+                    out.push_back(static_cast<char>(c));
                 }
-            }
-            if (!results.empty()) {
-                user_msg["content"] = std::move(results);
-                msgs.push_back(std::move(user_msg));
-            }
         }
     }
-    return msgs;
+    out.push_back('"');
+}
+
+void json_write_field(std::string& out, std::string_view key,
+                      std::string_view value, bool& first) {
+    if (!first) out.push_back(',');
+    first = false;
+    json_write_escaped_string(out, key);
+    out.push_back(':');
+    json_write_escaped_string(out, value);
+}
+
+// Splice raw pre-serialized JSON into a value slot (no escaping).
+void json_write_raw_field(std::string& out, std::string_view key,
+                          std::string_view raw_value, bool& first) {
+    if (!first) out.push_back(',');
+    first = false;
+    json_write_escaped_string(out, key);
+    out.push_back(':');
+    out.append(raw_value);
+}
+
+void json_write_bool_field(std::string& out, std::string_view key,
+                           bool v, bool& first) {
+    json_write_raw_field(out, key, v ? "true" : "false", first);
+}
+
+// Cache-control marker for prompt caching. Compile-time string so we
+// don't pay re-serialization on every breakpoint.
+constexpr std::string_view kCacheCtlJsonRaw = R"({"type":"ephemeral"})";
+
+void write_text_block(std::string& out, std::string_view text, bool pin_cache) {
+    out.push_back('{');
+    bool first = true;
+    json_write_field(out, "type", "text", first);
+    json_write_field(out, "text", text, first);
+    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    out.push_back('}');
+}
+
+void write_tool_use_block(std::string& out, const ToolUse& tc, bool pin_cache) {
+    out.push_back('{');
+    bool first = true;
+    json_write_field(out, "type", "tool_use", first);
+    json_write_field(out, "id",   tc.id.value, first);
+    json_write_field(out, "name", tc.name.value, first);
+    // Splice the cached args dump verbatim. args_dump() guarantees a
+    // valid JSON-object string ("{}" minimum, never empty); fall back
+    // to a fresh dump if for any reason the cache is in an unexpected
+    // shape (defensive — shouldn't fire in practice).
+    std::string_view dump = tc.args_dump();
+    std::string fallback;
+    if (dump.empty() || dump.front() != '{') {
+        fallback = tc.args.is_object() ? tc.args.dump() : std::string{"{}"};
+        dump = fallback;
+    }
+    json_write_raw_field(out, "input", dump, first);
+    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    out.push_back('}');
+}
+
+void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache) {
+    out.push_back('{');
+    bool first = true;
+    json_write_field(out, "type", "tool_result", first);
+    json_write_field(out, "tool_use_id", tc.id.value, first);
+    auto raw_output = tc.output();
+    std::string scrubbed;
+    if (raw_output.empty()) {
+        json_write_field(out, "content", "(no output)", first);
+    } else {
+        scrubbed = scrub_utf8(raw_output);
+        json_write_field(out, "content", scrubbed, first);
+    }
+    json_write_bool_field(out, "is_error", tc.is_failed() || tc.is_rejected(), first);
+    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    out.push_back('}');
+}
+
+} // namespace
+
+[[nodiscard]] std::string messages_json_string(const Thread& t) {
+    // First pass: figure out where the cache breakpoints land. cli.js
+    // pins BOTH the last and second-to-last *emitted* messages' last
+    // content blocks (rolling cache reuse — turn N's last becomes turn
+    // N+1's second-to-last). A "message" here is whatever lands in the
+    // output array, so an Assistant turn with terminal tool_calls
+    // contributes TWO messages (assistant + tool_results follow-up).
+    int total_msgs = 0;
+    for (const auto& m : t.messages) {
+        if (!m.text.empty()
+         || (m.role == Role::Assistant && !m.tool_calls.empty())) {
+            ++total_msgs;
+        }
+        if (is_assistant_with_results(m)) ++total_msgs;
+    }
+    const int pin_last       = total_msgs - 1;
+    const int pin_second_last = total_msgs - 2;
+
+    std::string out;
+    // Conservative reserve: typical sessions are ~64 KiB; a write turn
+    // can push past 1 MiB. Either way, let the std::string growth
+    // strategy take it from here without an early reallocation.
+    out.reserve(64 * 1024);
+    out.push_back('[');
+
+    int emitted = 0;
+    auto emit_msg_open = [&] {
+        if (emitted > 0) out.push_back(',');
+        ++emitted;
+    };
+    auto pinning_for = [&](int idx) {
+        return idx == pin_last || idx == pin_second_last;
+    };
+
+    for (const auto& m : t.messages) {
+        // ── Primary message (text + tool_use blocks if Assistant) ──
+        const bool has_text  = !m.text.empty();
+        const bool has_tools = (m.role == Role::Assistant && !m.tool_calls.empty());
+        if (has_text || has_tools) {
+            const int my_idx   = emitted;
+            const bool do_pin  = pinning_for(my_idx);
+            emit_msg_open();
+            out.push_back('{');
+            out.append(R"("role":)");
+            out.append(m.role == Role::User ? R"("user")" : R"("assistant")");
+            out.append(R"(,"content":[)");
+            // Emit text first (matches cli.js block order), then
+            // tool_use blocks. Cache breakpoint goes on the LAST block
+            // of the message — track its position so we can flag it
+            // when we get there.
+            int blocks = (has_text ? 1 : 0)
+                       + (has_tools ? static_cast<int>(m.tool_calls.size()) : 0);
+            int block_emitted = 0;
+            if (has_text) {
+                if (block_emitted++ > 0) out.push_back(',');
+                const bool last_block = (block_emitted == blocks);
+                write_text_block(out, scrub_utf8(m.text), do_pin && last_block);
+            }
+            if (has_tools) {
+                for (const auto& tc : m.tool_calls) {
+                    if (block_emitted++ > 0) out.push_back(',');
+                    const bool last_block = (block_emitted == blocks);
+                    write_tool_use_block(out, tc, do_pin && last_block);
+                }
+            }
+            out.append("]}");
+        }
+
+        // ── Tool-result follow-up (synthetic User turn) ──
+        if (is_assistant_with_results(m)) {
+            const int my_idx   = emitted;
+            const bool do_pin  = pinning_for(my_idx);
+            emit_msg_open();
+            out.append(R"({"role":"user","content":[)");
+            int total_results = 0;
+            for (const auto& tc : m.tool_calls) if (tc.is_terminal()) ++total_results;
+            int result_emitted = 0;
+            for (const auto& tc : m.tool_calls) {
+                if (!tc.is_terminal()) continue;
+                if (result_emitted++ > 0) out.push_back(',');
+                const bool last_block = (result_emitted == total_results);
+                write_tool_result_block(out, tc, do_pin && last_block);
+            }
+            out.append("]}");
+        }
+    }
+
+    out.push_back(']');
+    return out;
+}
+
+// Compatibility shim: the public signature still returns json (callers
+// outside transport.cpp's hot path may depend on it). The hot path uses
+// `messages_json_string` directly.
+json build_messages(const Thread& t) {
+    return json::parse(messages_json_string(t));
 }
 
 namespace {
@@ -718,6 +899,65 @@ namespace {
     return out;
 }
 
+// mtime-keyed cache wrapper around read_optional_memory. The CLAUDE.md
+// hierarchy is read on every turn (3 files: ~/CLAUDE.md, ./CLAUDE.md,
+// ./CLAUDE.local.md), each capped at 64 KiB. Per-turn that's:
+//
+//   • on a local SSD: ~3 × stat+open+read = sub-millisecond
+//   • on an NFS home: ~3 × roundtrip ≈ 30-100 ms before the worker
+//     even starts building the request
+//
+// The contents change between turns at most rarely (the user editing
+// their CLAUDE.md mid-session). Cache by filesystem mtime: stat once
+// to get last_write_time; if it matches the cached entry, hand back
+// the cached body. Process-lifetime cache; bounded by the 3 paths
+// collect_memory_blocks looks at and the 64 KiB-per-file content cap,
+// so worst case ~192 KiB of process memory.
+//
+// Concurrency: the system prompt is built on the stream worker thread
+// (Cmd::stream's task body). Two concurrent stream calls against the
+// same Anthropic endpoint are serialized at the connection-pool layer,
+// so there's effectively one writer in practice — but the mutex
+// removes "in practice" from the contract.
+[[nodiscard]] std::string read_memory_cached(const std::filesystem::path& p) {
+    struct Entry {
+        std::filesystem::file_time_type mtime{};
+        std::string                     content;
+    };
+    static std::unordered_map<std::string, Entry> cache;
+    static std::mutex                              mu;
+
+    const std::string key = p.string();
+    std::error_code   ec;
+    auto              now_mtime = std::filesystem::last_write_time(p, ec);
+
+    if (ec) {
+        // File missing / unreadable — drop any previous cache entry so
+        // a re-creation later is observed (the next call will re-stat
+        // and miss into the read path).
+        std::lock_guard lk(mu);
+        cache.erase(key);
+        return {};
+    }
+
+    {
+        std::lock_guard lk(mu);
+        auto it = cache.find(key);
+        if (it != cache.end() && it->second.mtime == now_mtime) {
+            return it->second.content;
+        }
+    }
+
+    // Cache miss or stale — read outside the lock so a slow NFS read
+    // doesn't block other paths' cache hits.
+    std::string body = read_optional_memory(p);
+    {
+        std::lock_guard lk(mu);
+        cache[key] = Entry{now_mtime, body};
+    }
+    return body;
+}
+
 // Resolve the user's home directory portably. Tries HOME (POSIX) first,
 // USERPROFILE (Windows) second; returns empty path on neither set.
 [[nodiscard]] std::filesystem::path home_dir() noexcept {
@@ -736,14 +976,15 @@ namespace {
 //   Local   <cwd>/CLAUDE.local.md   gitignored, personal-to-this-project
 //
 // Each tier is wrapped in its own tag so the model can tell them apart.
-// Empty / missing tiers are silently elided. Read every turn (cheap I/O,
-// allows mid-session edits to take effect on the next message); the
-// system-prompt cache_control breakpoint catches the result so the wire
-// cost is paid once per ~5 min cache TTL window regardless.
+// Empty / missing tiers are silently elided. The wire cost is paid once
+// per ~5 min cache_control TTL window regardless (the system-prompt
+// cache_control breakpoint catches the result); the disk cost is
+// memoized through read_memory_cached so the per-turn footprint is
+// 3× stat() + memcpy of the cached body, not 3× full read.
 [[nodiscard]] std::string collect_memory_blocks() {
-    std::string user    = read_optional_memory(home_dir() / "CLAUDE.md");
-    std::string project = read_optional_memory(std::filesystem::path{"CLAUDE.md"});
-    std::string local   = read_optional_memory(std::filesystem::path{"CLAUDE.local.md"});
+    std::string user    = read_memory_cached(home_dir() / "CLAUDE.md");
+    std::string project = read_memory_cached(std::filesystem::path{"CLAUDE.md"});
+    std::string local   = read_memory_cached(std::filesystem::path{"CLAUDE.local.md"});
 
     if (user.empty() && project.empty() && local.empty()) return {};
 
@@ -916,21 +1157,16 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         body["system"] = std::move(sys);
     }
 
-    json msgs_j = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
-    // Conversation cache breakpoints: cli.js pins BOTH the second-to-last
-    // and the last message's last content block (see auto-mode classifier
-    // and main loop). Two breakpoints enable rolling re-use — turn N's last
-    // breakpoint becomes turn N+1's second-to-last, so the cached prefix
-    // matches incrementally. With system + last-tool we sit at the 4-slot
-    // Anthropic ceiling.
-    auto pin_last_block = [&](json& msg) {
-        if (!msg.contains("content") || !msg["content"].is_array()
-            || msg["content"].empty()) return;
-        msg["content"].back()["cache_control"] = kCacheCtl;
-    };
-    if (msgs_j.size() >= 2) pin_last_block(msgs_j[msgs_j.size() - 2]);
-    if (!msgs_j.empty())    pin_last_block(msgs_j.back());
-    body["messages"] = std::move(msgs_j);
+    // Build the messages array directly into a string buffer. Cache
+    // breakpoints (last + second-to-last messages, last block of each)
+    // are inlined during the write — see messages_json_string. We
+    // splice this into the dumped body below rather than going through
+    // `body["messages"] = json::parse(...)`, which would re-parse the
+    // string back into a json tree just so body.dump() could
+    // re-serialize it again. For a write-tool turn with 1 MiB of
+    // content, the round-trip was the dominant request-build cost.
+    std::string messages_str = messages_json_string(
+        Thread{ThreadId{""}, "", req.messages, {}, {}});
     if (!req.tools.empty()) {
         json tools_j = json::array();
         for (const auto& t : req.tools) tools_j.push_back(tool_spec_to_json(t));
@@ -942,6 +1178,15 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         body["tools"] = std::move(tools_j);
     }
     body["metadata"] = json{{"user_id", make_user_id()}};
+    // Splice marker for the messages array. nlohmann gives the dumped
+    // form `"messages":<unique-string>"`; we string-replace the
+    // placeholder with messages_json_string. Picked a token that
+    // can't appear inside a legitimately-escaped JSON string so the
+    // find() is unambiguous even on weird payloads.
+    constexpr std::string_view kMessagesPlaceholder =
+        "\x01__moha_messages_splice__\x01";
+    body["messages"] = std::string{kMessagesPlaceholder};
+
     // Last-line-of-defence: if any string in the request tree still carries
     // non-UTF-8 bytes (a tool that bypassed the scrub, a new code path), the
     // dump() below throws type_error.316. We used to terminate(); now we
@@ -954,6 +1199,22 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         sink(StreamError{std::string{"request build failed (invalid UTF-8 in conversation): "} + e.what()});
         sink(StreamFinished{StopReason::Unspecified});
         return;
+    }
+    // Replace the dumped placeholder string with the raw messages JSON.
+    // nlohmann emits std::string values as JSON strings (quoted +
+    // escaped). The control bytes \x01 round-trip as ``, so the
+    // dumped form is `"__moha_messages_splice__"` — find
+    // and replace that.
+    {
+        constexpr std::string_view kDumpedPlaceholder =
+            "\"\\u0001__moha_messages_splice__\\u0001\"";
+        auto pos = body_str.find(kDumpedPlaceholder);
+        if (pos == std::string::npos) {
+            sink(StreamError{"request build failed: messages placeholder not found in dumped body"});
+            sink(StreamFinished{StopReason::Unspecified});
+            return;
+        }
+        body_str.replace(pos, kDumpedPlaceholder.size(), messages_str);
     }
 
     dbg("==== request ====\n%s\n==== /request ====\n", body_str.c_str());
@@ -1135,6 +1396,10 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
     hreq.headers = build_request_headers(is_oauth, auth_header,
                                          is_oauth ? headers::beta_oauth : "",
                                          /*timeout_seconds=*/10);
+    // /v1/models is a small list (~30 KB at typical catalog size). Cap
+    // hard so a misbehaving proxy / replay loop can't stream us into
+    // OOM on a routine startup probe.
+    hreq.max_body_bytes = 1ull * 1024 * 1024;
 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(5'000);

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <string>
 
+#include "moha/domain/catalog.hpp"
 #include "moha/runtime/view/helpers.hpp"
 #include "moha/runtime/view/palette.hpp"
 
@@ -20,11 +21,11 @@ activity_indicator_config(const Model& m) {
                        [](const auto& tc){ return !tc.is_terminal(); });
     if (tl_visible) return std::nullopt;
 
-    const auto& mid = m.d.model_id.value;
-    maya::Color edge = (mid.find("opus")   != std::string::npos) ? accent
-                     : (mid.find("sonnet") != std::string::npos) ? info
-                     : (mid.find("haiku")  != std::string::npos) ? success
-                                                                 : highlight;
+    const auto caps = ModelCapabilities::from_id(m.d.model_id.value);
+    maya::Color edge = caps.is_opus()   ? accent
+                     : caps.is_sonnet() ? info
+                     : caps.is_haiku()  ? success
+                                        : highlight;
     maya::ActivityIndicator::Config cfg;
     cfg.edge_color    = edge;
     cfg.spinner_glyph = std::string{m.s.spinner.current_frame()};

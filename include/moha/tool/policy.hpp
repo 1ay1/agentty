@@ -64,13 +64,23 @@ enum class Decision : std::uint8_t {
 }
 
 // ── Compile-time proofs of the trust matrix ──────────────────────────────
-// The whole policy is constexpr, so we can verify it cell-by-cell at
-// compile time. If anyone ever tweaks the table in a way that breaks
-// these properties, the build fails — no test run required.
+// The whole policy is constexpr, so we can verify it at compile time.
+// EffectSet is a 4-bit bitset (ReadFs / WriteFs / Net / Exec) — 16 distinct
+// sets — and there are 3 profiles, so the cell space is exactly
+// 16 × 3 = 48 cells. The block below covers ALL of them: a separate
+// `expected_decision()` function encodes the policy spec in prose-style
+// short-circuit form, and an exhaustive constexpr loop checks
+// `permission(e, p) == expected_decision(e, p)` over every cell. If
+// anyone tweaks the table in a way that breaks any cell — or extends
+// EffectSet without updating the spec — the static_assert fires; no
+// test run required.
 //
-// Reading guide: each `static_assert` is one cell of the trust matrix
-// or one structural property the policy must hold. Adding a new Effect
-// or a new Profile arm: extend this block with the new expectations.
+// (Earlier this block listed ~20 spot-checks against named EffectSets.
+// That documented the intent well but only verified ~10 of the 48
+// cells; the four-effect combinations and several effect-only-with-
+// non-matching-profile cases were structurally implied by the policy
+// function's short-circuit shape rather than actually asserted. The
+// loop below closes that gap.)
 namespace proofs {
 
 inline constexpr EffectSet kPure  {};
@@ -80,46 +90,73 @@ inline constexpr EffectSet kNet   {Effect::Net};
 inline constexpr EffectSet kExec  {Effect::Exec};
 inline constexpr EffectSet kEdit  {Effect::ReadFs, Effect::WriteFs};
 
-// Property 1 — Profile::Write is fully autonomous: every effect is
-// allowed, no prompt is ever shown.
-static_assert(permission(kPure,  Profile::Write) == Decision::Allow);
-static_assert(permission(kRead,  Profile::Write) == Decision::Allow);
-static_assert(permission(kWrite, Profile::Write) == Decision::Allow);
-static_assert(permission(kNet,   Profile::Write) == Decision::Allow);
-static_assert(permission(kExec,  Profile::Write) == Decision::Allow);
-static_assert(permission(kEdit,  Profile::Write) == Decision::Allow);
+// Independent re-statement of the policy. Lives separate from
+// `permission()` so the two are written as parallel expressions of the
+// same rule — a one-handed change to either trips the exhaustive
+// check below. Adding an Effect or a Profile arm: extend BOTH sides.
+[[nodiscard]] constexpr Decision expected_decision(EffectSet e, Profile p) noexcept {
+    // Profile::Write is fully autonomous: every effect is allowed, no
+    // prompt is ever shown.
+    if (p == Profile::Write) return Decision::Allow;
 
-// Property 2 — Profile::Ask trusts read-only inspection (otherwise an
-// agent loop is unusable: every read-file/grep/glob would prompt). It
-// gates everything that mutates state, runs code, or hits the network.
-static_assert(permission(kPure,  Profile::Ask)   == Decision::Allow);
-static_assert(permission(kRead,  Profile::Ask)   == Decision::Allow);
-static_assert(permission(kWrite, Profile::Ask)   == Decision::Prompt);
-static_assert(permission(kNet,   Profile::Ask)   == Decision::Prompt);
-static_assert(permission(kExec,  Profile::Ask)   == Decision::Prompt);
-static_assert(permission(kEdit,  Profile::Ask)   == Decision::Prompt);
+    // Anything that mutates state, runs code, or hits the network
+    // prompts under any non-Write profile. Exec is the maximal
+    // capability — a tool that has it prompts regardless of what else
+    // it carries.
+    if (e.has(Effect::Exec))    return Decision::Prompt;
+    if (e.has(Effect::WriteFs)) return Decision::Prompt;
+    if (e.has(Effect::Net))     return Decision::Prompt;
 
-// Property 3 — Profile::Minimal prompts for *anything* that touches the
-// outside world (including reads). Only Pure tools auto-allow.
-static_assert(permission(kPure,  Profile::Minimal) == Decision::Allow);
+    // Profile::Minimal prompts even for read-only inspection — only
+    // pure tools auto-allow. Profile::Ask trusts ReadFs so an agent
+    // loop's read-file / grep / glob doesn't prompt on every step.
+    if (p == Profile::Minimal && e.has(Effect::ReadFs)) return Decision::Prompt;
+    return Decision::Allow;
+}
+
+// Walk every (EffectSet, Profile) cell and require the policy to agree
+// with the spec. 4 effect bits × 3 profiles = 48 cells, all covered.
+[[nodiscard]] constexpr bool exhaustive_matches_spec() noexcept {
+    constexpr Profile kProfiles[] = {
+        Profile::Write, Profile::Ask, Profile::Minimal,
+    };
+    constexpr std::uint8_t kAllEffectBits =
+        static_cast<std::uint8_t>(Effect::ReadFs)
+        | static_cast<std::uint8_t>(Effect::WriteFs)
+        | static_cast<std::uint8_t>(Effect::Net)
+        | static_cast<std::uint8_t>(Effect::Exec);
+    for (std::uint16_t bits = 0; bits <= kAllEffectBits; ++bits) {
+        // Skip combinations that include unallocated bits — keeps the
+        // sweep honest if the Effect enum ever grows to non-contiguous
+        // values; the static_assert below pins the bitset width.
+        if ((bits & ~static_cast<std::uint16_t>(kAllEffectBits)) != 0) continue;
+        EffectSet e{static_cast<std::uint8_t>(bits)};
+        for (Profile p : kProfiles) {
+            if (permission(e, p) != expected_decision(e, p)) return false;
+        }
+    }
+    return true;
+}
+static_assert(exhaustive_matches_spec(),
+              "policy::permission disagrees with expected_decision on at "
+              "least one cell — update both sides together.");
+
+// Pin the bitset width: if a fifth Effect tag is added, this fires and
+// reminds you to update kAllEffectBits + expected_decision(). Without
+// it the loop above silently wouldn't sweep the new bit.
+static_assert(static_cast<std::uint8_t>(Effect::Exec) == (1u << 3),
+              "Effect bit assignment changed — review exhaustive_matches_spec()");
+
+// Named-cell spot-checks below are KEPT as documentation (they read
+// better than the loop) but are now redundant with the exhaustive
+// proof. Don't trust them as a coverage signal — the loop above is.
+static_assert(permission(kPure,  Profile::Write)   == Decision::Allow);
+static_assert(permission(kEdit,  Profile::Write)   == Decision::Allow);
+static_assert(permission(kRead,  Profile::Ask)     == Decision::Allow);
+static_assert(permission(kWrite, Profile::Ask)     == Decision::Prompt);
+static_assert(permission(kExec,  Profile::Ask)     == Decision::Prompt);
 static_assert(permission(kRead,  Profile::Minimal) == Decision::Prompt);
-static_assert(permission(kWrite, Profile::Minimal) == Decision::Prompt);
-static_assert(permission(kNet,   Profile::Minimal) == Decision::Prompt);
-static_assert(permission(kExec,  Profile::Minimal) == Decision::Prompt);
-
-// Property 4 — Exec is the maximal capability: any tool that has it
-// prompts under any non-Write profile, regardless of what other effects
-// it carries.
-static_assert(permission(EffectSet{Effect::Exec, Effect::ReadFs},  Profile::Ask)
-              == Decision::Prompt);
-static_assert(permission(EffectSet{Effect::Exec, Effect::WriteFs, Effect::Net},
-                         Profile::Ask) == Decision::Prompt);
-
-// Property 5 — Profile::Write *cannot* be made to prompt by adding more
-// effects. The policy short-circuits on profile alone.
-static_assert(permission(EffectSet{Effect::Exec, Effect::WriteFs,
-                                   Effect::Net, Effect::ReadFs},
-                         Profile::Write) == Decision::Allow);
+static_assert(permission(kPure,  Profile::Minimal) == Decision::Allow);
 
 } // namespace proofs
 

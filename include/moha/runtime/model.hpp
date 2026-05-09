@@ -20,6 +20,7 @@
 #include "moha/runtime/command_palette.hpp"
 #include "moha/runtime/login.hpp"
 #include "moha/runtime/picker.hpp"
+#include "moha/runtime/view/cache.hpp"
 
 namespace moha {
 
@@ -91,6 +92,24 @@ struct Model {
         // maybe_virtualize alongside thread_view_start; resets to 0 on
         // thread switch (same lifecycle as thread_view_start).
         int                 thread_view_start_turn = 0;
+
+        // Per-(thread, msg) render cache. View code reads + writes
+        // through this — markdown rendering and per-turn Element
+        // building both memoize here. The reducer evicts entries on
+        // thread switch / NewThread / compaction, where the cached
+        // Element trees would otherwise pin the previous turn's UI
+        // forever.
+        //
+        // Mutable: filling a render cache during view doesn't change
+        // observable Model state (every cache hit returns the same
+        // Element it would have rebuilt from scratch), and the view
+        // path takes `const Model&` by convention. Earlier this lived
+        // as a process-global thread_local map outside Model — the
+        // pointer-equivalence was identical but the reducer was
+        // reaching outside Model to call evict_thread(), which type-
+        // checked but lied about purity. Now every cache mutation is
+        // visible in the returned Model.
+        mutable ui::ViewCache view_cache;
     };
 
     Domain      d;

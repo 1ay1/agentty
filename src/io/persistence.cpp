@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <random>
 #include <sstream>
 
@@ -99,6 +100,11 @@ static json message_to_json(const Message& m) {
     // bad bytes can never reach dump(). Tools that already scrub upstream
     // pay only the validate cost here.
     json j;
+    // Round-trip the per-message stable id so on-disk → in-memory
+    // reload preserves cache keys across sessions. Generated fresh
+    // when missing on load (see parse_message) so older threads upgrade
+    // transparently — no migration step needed.
+    j["id"] = m.id.value;
     j["role"] = role_to_string(m.role);
     j["text"] = tools::util::to_valid_utf8(m.text);
     j["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
@@ -165,6 +171,13 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
             DeserializeErrorKind::InvalidValue, "messages[*]",
             "expected object"});
     Message m;
+    // `id` was added in 2026-05; older thread files don't carry it,
+    // so the default-constructed `m.id` (already-fresh from
+    // new_message_id()) stands in for them. New writes will persist
+    // this fresh id, so a save-after-load completes the migration.
+    if (auto it = j.find("id"); it != j.end() && it->is_string()
+        && !it->get<std::string>().empty())
+        m.id = MessageId{it->get<std::string>()};
     m.role = role_from_string(j.value("role", "user"));
     m.text = j.value("text", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
@@ -477,3 +490,28 @@ std::string title_from_first_message(std::string_view text) {
 }
 
 } // namespace moha::persistence
+
+namespace moha {
+
+// Per-Message stable identity. Generated at Message default-construction
+// (see Message::id in conversation.hpp). The cache key (thread_id,
+// message_id) is stable across vector index shifts (compaction,
+// deletion, reordering) so a render-cache lookup never returns a
+// stale Element for a now-different message at the same position.
+//
+// Implementation mirrors persistence::new_id() — 64-bit random hex,
+// thread-safe via static mt19937 + std::random_device. 16 hex digits
+// is more than enough for within-process uniqueness; the chance of two
+// IDs colliding within a session is ~2⁻³² even at a million messages,
+// well below any realistic load.
+MessageId new_message_id() {
+    static std::mt19937_64 rng{std::random_device{}()};
+    static std::mutex      mu;
+    std::lock_guard<std::mutex> lk(mu);
+    std::uniform_int_distribution<uint64_t> dist;
+    std::ostringstream oss;
+    oss << std::hex << dist(rng);
+    return MessageId{oss.str()};
+}
+
+} // namespace moha

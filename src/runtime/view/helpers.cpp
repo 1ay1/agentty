@@ -6,6 +6,7 @@
 #include <ctime>
 #include <variant>
 
+#include "moha/domain/catalog.hpp"
 #include "moha/runtime/view/palette.hpp"
 
 namespace moha::ui {
@@ -147,12 +148,12 @@ std::string utf8_encode(char32_t cp) {
 }
 
 int context_max_for_model(std::string_view model_id) noexcept {
-    // The `[1m]` tag is moha's internal marker for the 1 M-context window
-    // beta (`context-1m-2025-08-07`). Sonnet 4.6 / opus-4-7 with the tag
-    // get a 1 M window; without it they're standard 200 K. Haiku stays
-    // 200 K. If new models with different windows ship, extend here.
-    if (model_id.find("[1m]") != std::string_view::npos) return 1'000'000;
-    return 200'000;
+    // ModelCapabilities owns the model-id parsing; this just consumes
+    // the typed flag. If new models with different windows ship,
+    // extend ModelCapabilities or branch on caps.family/generation
+    // here rather than re-introducing substring sniffing.
+    return ModelCapabilities::from_id(model_id).extended_context_1m
+         ? 1'000'000 : 200'000;
 }
 
 int utf8_prev(std::string_view s, int byte_pos) noexcept {

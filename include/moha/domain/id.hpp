@@ -39,11 +39,24 @@ struct ToolCallIdTag   {};
 struct ModelIdTag      {};
 struct CheckpointIdTag {};
 struct ToolNameTag     {};
+struct MessageIdTag    {};
 
 using ThreadId     = Id<ThreadIdTag>;
 using ToolCallId   = Id<ToolCallIdTag>;
 using ModelId      = Id<ModelIdTag>;
 using CheckpointId = Id<CheckpointIdTag>;
 using ToolName     = Id<ToolNameTag>;
+// Per-message stable identity. Generated at Message construction and
+// persisted to disk so cache keys (and any future per-message indexing)
+// stay valid across reloads. Lets the view-side render cache key by
+// content identity rather than position — compacting / removing /
+// reordering messages doesn't collide with stale cache entries the way
+// (thread_id, msg_idx) keying would.
+using MessageId    = Id<MessageIdTag>;
+
+// Generate a fresh MessageId. Hex-encoded 64-bit random — wide enough
+// that within-process collisions are astronomically unlikely. Defined
+// in src/io/persistence.cpp alongside the matching ThreadId generator.
+[[nodiscard]] MessageId new_message_id();
 
 } // namespace moha

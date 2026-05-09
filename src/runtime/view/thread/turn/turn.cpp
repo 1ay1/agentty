@@ -8,6 +8,7 @@
 
 #include <maya/widget/markdown.hpp>
 
+#include "moha/domain/catalog.hpp"
 #include "moha/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 #include "moha/runtime/view/cache.hpp"
 #include "moha/runtime/view/helpers.hpp"
@@ -22,9 +23,8 @@ namespace {
 //    moha — strictly because cross-frame cache state lives in the
 //    StreamingMarkdown widget instance, which we keep alive across
 //    frames so its block cache survives.
-maya::Element cached_markdown_for(const Message& msg, const ThreadId& tid,
-                                  std::size_t msg_idx) {
-    auto& cache = message_md_cache(tid, msg_idx);
+maya::Element cached_markdown_for(const Message& msg, const Model& m) {
+    auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
     if (msg.text.empty()) {
         if (!cache.streaming)
             cache.streaming = std::make_shared<maya::StreamingMarkdown>();
@@ -52,12 +52,13 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
         return {highlight, "\xe2\x9d\xaf", "You"};                   // ❯
     }
     const auto& id = m.d.model_id.value;
+    const auto caps = ModelCapabilities::from_id(id);
     maya::Color c;
     std::string label;
-    if      (id.find("opus")   != std::string::npos) { c = accent;    label = "Opus";   }
-    else if (id.find("sonnet") != std::string::npos) { c = info;      label = "Sonnet"; }
-    else if (id.find("haiku")  != std::string::npos) { c = success;   label = "Haiku";  }
-    else                                              { c = highlight; label = id;       }
+    if      (caps.is_opus())   { c = accent;    label = "Opus";   }
+    else if (caps.is_sonnet()) { c = info;      label = "Sonnet"; }
+    else if (caps.is_haiku())  { c = success;   label = "Haiku";  }
+    else                       { c = highlight; label = id;       }
     for (std::size_t i = 0; i + 2 < id.size(); ++i) {
         char ch = id[i];
         if (ch >= '0' && ch <= '9') {
@@ -123,7 +124,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     // Element and skips Turn::build() entirely on settled turns.
     const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
     if (can_cache) {
-        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.cfg && slot.cfg->continuation == continuation) return *slot.cfg;
     }
 
@@ -149,7 +150,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             // Cross-frame StreamingMarkdown cache requires holding the
             // widget instance; feed its built Element via the typed
             // Element variant of BodySlot.
-            cfg.body.emplace_back(cached_markdown_for(msg, m.d.current.id, msg_idx));
+            cfg.body.emplace_back(cached_markdown_for(msg, m));
         }
         if (!msg.tool_calls.empty()) {
             cfg.body.emplace_back(
@@ -166,7 +167,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     }
 
     if (can_cache) {
-        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
     }
     return cfg;
@@ -190,7 +191,7 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // render-by-reference forever after.
     const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
     if (can_cache) {
-        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.element && slot.element_continuation == continuation)
             return {*slot.element, continuation};
     }
@@ -199,7 +200,7 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation);
     auto built = maya::Turn{std::move(cfg)}.build();
     if (can_cache) {
-        auto& slot = turn_config_cache(m.d.current.id, msg_idx);
+        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         slot.element = std::make_shared<maya::Element>(built);
         slot.element_continuation = continuation;
     }

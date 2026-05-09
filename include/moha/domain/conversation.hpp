@@ -187,6 +187,14 @@ struct ToolUse {
 };
 
 struct Message {
+    // Stable per-message identity. Generated on construction; round-
+    // tripped through persistence so it survives reloads. The view's
+    // render cache keys by (thread_id, message.id) rather than
+    // (thread_id, msg_idx) — compaction, deletion, or reordering
+    // therefore can't return a stale cached Element for a now-different
+    // message at the same position. Default-init via new_message_id()
+    // means EVERY Message is identifiable as soon as it exists.
+    MessageId   id = new_message_id();
     Role        role = Role::User;
     std::string text;
     std::string streaming_text;

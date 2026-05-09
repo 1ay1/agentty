@@ -93,7 +93,7 @@ S-Tab      cycle profile          ^N     new thread
 
 ## Air-gapped hosts (SSH tunnel)
 
-Run moha on a box that can't reach the internet directly — your laptop relays the bytes, TLS / cert verification still pin on the real upstreams so a tampering tunnel endpoint can't MITM you.
+Run moha on a box that can't reach the internet directly — your laptop relays the bytes, TLS / cert verification still pin on the real upstreams so the network path between laptop and remote can't MITM you.
 
 One command, from the laptop that *does* have internet:
 
@@ -103,6 +103,8 @@ moha airgap user@airgapped-host            # every time after
 ```
 
 How it works: `ssh -R 1080` (port-only form) makes OpenSSH expose a SOCKS5 proxy on the remote at `localhost:1080`; connections to it are tunnelled back over SSH and dialed by your laptop.  The remote moha gets `MOHA_SOCKS_PROXY=localhost:1080` and routes every TCP destination through that single proxy — chat (`api.anthropic.com`), OAuth refresh (`platform.claude.com`), and `web_fetch` / `web_search` against arbitrary URLs all work without per-host enumeration.  TLS happens end-to-end with the real upstream over the tunnelled socket, so the proxy can't MITM you.
+
+> **Trust model.** `moha airgap` doesn't trust the *network* between laptop and remote, but it does trust the *remote* with your tokens. `--setup` puts a copy of `~/.config/moha/credentials.json` (containing your OAuth refresh token, or API key) on the remote at chmod 600. A compromised remote can therefore exfiltrate your Anthropic credentials independent of the tunnel — protecting the byte stream doesn't help if the endpoint is hostile. Run airgap mode against hosts you'd already trust with the same secret; it's not a substitute for sandboxing the remote itself.
 
 `--setup` does three small remote operations: `mkdir -p ~/.config/moha && chmod 700`, `scp` the laptop's `~/.config/moha/credentials.json` over, then `chmod 600` it on the remote.  Re-run after a fresh `moha login` on the laptop (e.g. once the refresh token itself eventually rotates).
 
