@@ -223,7 +223,10 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
     return m;
 }
 
-static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
+// Populates id/title/timestamps only; leaves messages empty. Used by the
+// directory-walking metadata load that backs the thread picker.
+static std::expected<Thread, DeserializeError>
+parse_thread_meta_only(const json& j) {
     if (!j.is_object())
         return std::unexpected(DeserializeError{
             DeserializeErrorKind::InvalidValue, "", "expected top-level object"});
@@ -241,12 +244,114 @@ static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
     if (j.contains("updated_at"))
         t.updated_at = std::chrono::system_clock::time_point{
             std::chrono::seconds{j["updated_at"].get<long long>()}};
+    return t;
+}
+
+static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
+    auto meta = parse_thread_meta_only(j);
+    if (!meta) return meta;
+    Thread t = std::move(*meta);
     for (const auto& mj : j.value("messages", json::array())) {
         auto msg = parse_message(mj);
         if (!msg) return std::unexpected(std::move(msg).error());
         t.messages.push_back(std::move(*msg));
     }
     return t;
+}
+
+// SAX handler that pulls the four top-level metadata fields out of a thread
+// JSON file without ever materialising the messages array. The directory
+// walk runs this once per file at startup; with 649 files at ~580 KB each
+// the previous tree-build path peaked at hundreds of MB of intermediate
+// json::value_t allocations *and* left the converted Thread::messages live
+// forever. SAX gives us O(file_bytes) parse cost with O(1) live state per
+// file: a few dozen bytes for the metadata fields plus depth tracking.
+//
+// Note the on-disk key order is alphabetical (json::dump(2) sorts keys),
+// so the layout is `created_at, id, messages, title, updated_at` — i.e.
+// `title` and `updated_at` arrive *after* the messages array. The skip
+// state must therefore unwind cleanly when the array closes, otherwise
+// those two fields are silently lost.
+struct ThreadMetaSax {
+    Thread out;
+    std::string last_key;
+    int depth = 0;        // current nesting depth inside the JSON
+    int skip_target = -1; // -1 == not skipping; otherwise resume when depth <= skip_target
+    bool got_id = false;
+
+    bool skipping() const noexcept { return skip_target >= 0; }
+
+    bool key(std::string& v) {
+        last_key = std::move(v);
+        return true;
+    }
+    bool string(std::string& v) {
+        if (!skipping() && depth == 1) {
+            if (last_key == "id") {
+                if (v.empty()) return false; // hard fail — caller treats as parse error
+                out.id = ThreadId{std::move(v)};
+                got_id = true;
+            } else if (last_key == "title") {
+                out.title = std::move(v);
+            }
+        }
+        return true;
+    }
+    bool number_integer(std::int64_t v)            { return num(static_cast<long long>(v)); }
+    bool number_unsigned(std::uint64_t v)          { return num(static_cast<long long>(v)); }
+    bool number_float(double, const std::string&)  { return true; }
+    bool num(long long v) {
+        if (!skipping() && depth == 1) {
+            if (last_key == "created_at")
+                out.created_at = std::chrono::system_clock::time_point{
+                    std::chrono::seconds{v}};
+            else if (last_key == "updated_at")
+                out.updated_at = std::chrono::system_clock::time_point{
+                    std::chrono::seconds{v}};
+        }
+        return true;
+    }
+    bool boolean(bool)             { return true; }
+    bool null()                    { return true; }
+    bool start_object(std::size_t) { return enter_container(); }
+    bool end_object()              { return leave_container(); }
+    bool start_array(std::size_t)  { return enter_container(); }
+    bool end_array()               { return leave_container(); }
+    bool binary(json::binary_t&)   { return true; }
+    bool parse_error(std::size_t, const std::string&,
+                     const json::exception&) { return false; }
+
+    bool enter_container() {
+        // If we're at the top-level object (depth==1) and the latest key
+        // was "messages", arm the skip: we'll resume when depth comes
+        // back down to 1. The ++depth must come AFTER this check so that
+        // nested containers inside the messages array don't re-arm it.
+        if (!skipping() && depth == 1 && last_key == "messages")
+            skip_target = 1;
+        ++depth;
+        return true;
+    }
+    bool leave_container() {
+        --depth;
+        if (skipping() && depth == skip_target)
+            skip_target = -1;
+        return true;
+    }
+};
+
+[[nodiscard]] static std::expected<Thread, DeserializeError>
+load_thread_meta_file(const fs::path& p) {
+    std::ifstream ifs(p);
+    if (!ifs) return std::unexpected(DeserializeError{
+        DeserializeErrorKind::Io, "", "open failed: " + p.string()});
+    ThreadMetaSax sax;
+    bool ok = json::sax_parse(ifs, &sax);
+    if (!ok || !sax.got_id) {
+        return std::unexpected(DeserializeError{
+            DeserializeErrorKind::JsonParse, "",
+            "metadata sax parse failed: " + p.string()});
+    }
+    return std::move(sax.out);
 }
 
 std::expected<Thread, DeserializeError>
@@ -265,12 +370,17 @@ load_thread_file(const std::filesystem::path& p) {
 }
 
 std::vector<Thread> load_all_threads() {
+    // Metadata-only directory walk — leaves Thread::messages empty. The
+    // previous full-parse loaded all 649 files into Message/ToolUse trees
+    // (376 MB on disk → ~1.2 GB live) at startup, even though the picker
+    // only ever reads title + updated_at. Bodies are now lazy-loaded on
+    // ThreadListSelect via load_thread_file.
     std::vector<Thread> out;
     std::error_code ec;
     if (!fs::exists(threads_dir(), ec)) return out;
     for (const auto& e : fs::directory_iterator(threads_dir(), ec)) {
         if (e.path().extension() != ".json") continue;
-        auto loaded = load_thread_file(e.path());
+        auto loaded = load_thread_meta_file(e.path());
         if (loaded) {
             out.push_back(std::move(*loaded));
         } else {

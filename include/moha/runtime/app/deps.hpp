@@ -12,6 +12,7 @@
 // hidden behind std::function-style erasure.
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,7 +31,10 @@ struct Deps {
 
     // ── Store seam (just the calls update.cpp actually makes) ────────────
     std::function<void(const Thread&)>          save_thread;
+    // Returns thread *metadata* (empty messages) for the picker. Full
+    // bodies are fetched on demand via load_thread.
     std::function<std::vector<Thread>()>        load_threads;
+    std::function<std::optional<Thread>(const ThreadId&)> load_thread;
     std::function<store::Settings()>            load_settings;
     std::function<void(const store::Settings&)> save_settings;
     std::function<ThreadId()>                    new_thread_id;
@@ -60,6 +64,7 @@ void install(P& p, S& s, std::string auth_header, auth::Style style) {
         },
         .save_thread     = [&s](const Thread& t) { s.save_thread(t); },
         .load_threads    = [&s] { return s.load_threads(); },
+        .load_thread     = [&s](const ThreadId& id) { return s.load_thread(id); },
         .load_settings   = [&s] { return s.load_settings(); },
         .save_settings   = [&s](const store::Settings& x) { s.save_settings(x); },
         .new_thread_id   = [&s] { return s.new_id(); },

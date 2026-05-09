@@ -30,16 +30,32 @@ namespace detail {
 inline constexpr std::size_t kMaxStreamingBytes = 8 * 1024 * 1024;
 
 // View virtualization thresholds — when the transcript exceeds kViewWindow
-// messages, slice kSliceChunk of the oldest into terminal scrollback so Yoga
-// paint stays bounded. The old 60/20 pair let tool-heavy turns (e.g. a
-// coding session with 40+ bash/read/edit calls inside a single assistant
-// message) push the live canvas past ~3000 rows, at which point render
-// latency spiked enough to visibly stall the status bar & composer even
-// though the worker thread was still pumping deltas. 40/15 keeps the hot
-// set small enough that one render pass fits comfortably inside a Tick
-// interval on modest hardware.
-inline constexpr int kViewWindow = 40;
-inline constexpr int kSliceChunk = 15;
+// messages, slice kSliceChunk of the oldest into terminal scrollback so the
+// per-frame Yoga layout pass stays bounded.
+//
+// Per-Element caching (715679f) eliminated the per-frame Turn::build()
+// rebuild for settled turns — but maya still walks the full visible
+// element tree through Yoga every frame, and layout cost scales linearly
+// with node count. Tool-heavy sessions (Read / Grep / Bash cards stacked
+// under a single user message) easily blow past the per-message average:
+// one assistant message with 5+ tool rounds is 100-200 nodes on its own.
+// With kViewWindow = 40 the live canvas reached 5000+ nodes, render
+// latency hit ~Tick interval at the bottom of the visible window, and the
+// composer's redraw started to lag behind keystrokes (a "flicker that
+// becomes stuck hiding the composer" — the next frame falls behind the
+// terminal's actual cursor position).
+//
+// 20/8 caps the live tree to roughly 2-3 turns worth of tool cards (about
+// 1000-1500 nodes), which fits inside one Tick on modest hardware. The
+// trade-off is that the user sees fewer scrollback turns "above the fold"
+// in the live canvas — but committed turns remain in the terminal's
+// native scrollback, which is where Page-Up / mouse-wheel land anyway.
+//
+// History:
+//   60/20 → 40/15 (rendered-canvas-rows-bound spike on long sessions)
+//   40/15 → 20/8  (Yoga layout cost on tool-heavy turns)
+inline constexpr int kViewWindow = 20;
+inline constexpr int kSliceChunk = 8;
 
 // ── update_stream.cpp ────────────────────────────────────────────────────
 void update_stream_preview(ToolUse& tc);
@@ -47,7 +63,7 @@ bool guard_truncated_tool_args(ToolUse& tc);
 nlohmann::json salvage_args(const ToolUse& tc);
 maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 
-// ── update_modal.cpp ─────────────────────────────────────────────────────
+// ── update/modal.cpp helpers ─────────────────────────────────────────────
 Step           submit_message(Model m);
 maya::Cmd<Msg> maybe_virtualize(Model& m);
 void           persist_settings(const Model& m);
@@ -61,27 +77,32 @@ void           persist_settings(const Model& m);
 maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
                                 std::chrono::seconds ttl = std::chrono::seconds{3});
 
-// ── update_tool.cpp ──────────────────────────────────────────────────────
+// ── update/stream.cpp helpers ────────────────────────────────────────────
+// (declared at module scope above — `update_stream_preview`, `salvage_args`,
+// `finalize_turn`. The stream_update reducer below uses them.)
+
+// ── update/tool.cpp helpers ──────────────────────────────────────────────
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result);
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 
-// ── update/login.cpp ─────────────────────────────────────────────────────
-// In-app login modal reducer arms. Live in their own TU because the OAuth
-// flow needs auth + cmd_factory + view helpers that update.cpp would
-// otherwise have to drag in just for one modal.
-Step open_login           (Model m);
-Step close_login          (Model m);
-Step login_pick_method    (Model m, char32_t key);
-Step login_char_input     (Model m, char32_t ch);
-Step login_backspace      (Model m);
-Step login_paste          (Model m, std::string text);
-Step login_cursor_left    (Model m);
-Step login_cursor_right   (Model m);
-Step login_submit         (Model m);
-Step login_exchanged      (Model m, moha::auth::TokenResult result);
-Step token_refreshed      (Model m, moha::auth::TokenResult result);
+// ── Per-domain reducers ──────────────────────────────────────────────────
+// One per slice of `Msg`. update.cpp's top-level std::visit dispatches a
+// Msg to the matching reducer below; each reducer has its own visit over
+// its domain variant, instantiated in its own TU. Adding a leaf to one
+// domain only recompiles that domain's TU plus msg.hpp's downstream
+// includers — not the other nine reducers.
+Step composer_update      (Model m, msg::ComposerMsg       cm);
+Step stream_update        (Model m, msg::StreamMsg         sm);
+Step tool_update          (Model m, msg::ToolMsg           tm);
+Step model_picker_update  (Model m, msg::ModelPickerMsg    pm);
+Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
+Step palette_update       (Model m, msg::CommandPaletteMsg pm);
+Step todo_update          (Model m, msg::TodoMsg           tm);
+Step login_update         (Model m, msg::LoginMsg          lm);
+Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);
+Step meta_update          (Model m, msg::MetaMsg           mm);
 
 } // namespace detail
 } // namespace moha::app

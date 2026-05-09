@@ -269,4 +269,26 @@ Step token_refreshed(Model m, auth::TokenResult result) {
     return {std::move(m), std::move(toast_cmd)};
 }
 
+// ============================================================================
+// login_update — reducer for `msg::LoginMsg`
+// ============================================================================
+// Thin dispatch over the per-arm helpers above; the typed state-machine
+// guarantees the helpers see a modal in the right state.
+
+Step login_update(Model m, msg::LoginMsg lm) {
+    return std::visit(overload{
+        [&](OpenLogin)              -> Step { return open_login(std::move(m)); },
+        [&](CloseLogin)             -> Step { return close_login(std::move(m)); },
+        [&](LoginPickMethod& e)     -> Step { return login_pick_method(std::move(m), e.key); },
+        [&](LoginCharInput& e)      -> Step { return login_char_input(std::move(m), e.ch); },
+        [&](LoginBackspace)         -> Step { return login_backspace(std::move(m)); },
+        [&](LoginPaste& e)          -> Step { return login_paste(std::move(m), std::move(e.text)); },
+        [&](LoginCursorLeft)        -> Step { return login_cursor_left(std::move(m)); },
+        [&](LoginCursorRight)       -> Step { return login_cursor_right(std::move(m)); },
+        [&](LoginSubmit)            -> Step { return login_submit(std::move(m)); },
+        [&](LoginExchanged& e)      -> Step { return login_exchanged(std::move(m), std::move(e.result)); },
+        [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
+    }, lm);
+}
+
 } // namespace moha::app::detail

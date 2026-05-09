@@ -12,8 +12,13 @@
 #include <span>
 #include <utility>
 
+#include <maya/core/overload.hpp>
+
+#include "moha/provider/error_class.hpp"
 #include "moha/runtime/app/cmd_factory.hpp"
 #include "moha/runtime/app/deps.hpp"
+#include "moha/runtime/mem.hpp"
+#include "moha/runtime/view/cache.hpp"
 #include "moha/tool/spec.hpp"
 #include "moha/tool/util/partial_json.hpp"
 
@@ -22,6 +27,7 @@ namespace moha::app::detail {
 using json = nlohmann::json;
 using moha::tools::util::sniff_string;
 using moha::tools::util::sniff_string_progressive;
+using maya::Cmd;
 
 namespace {
 
@@ -488,6 +494,17 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         replacement.role = Role::User;
         replacement.text = "Conversation continuation summary (prior history "
                            "compacted to save context):\n\n" + summary;
+        // Compaction has just dropped every prior turn's `tool_calls[].
+        // output` along with their text bodies — megabytes to hundreds of
+        // megabytes on a long session. The view cache still holds the
+        // pre-built Element trees keyed by (thread_id, msg_idx); without
+        // an explicit evict, those Elements pin string copies of every
+        // tool output that just disappeared from the conversation, and
+        // the user's RSS doesn't move despite the logical working set
+        // collapsing to one summary message. Drop them here, before we
+        // assign the replacement (so the new msg_idx=0 entry isn't
+        // collateral), then nudge the allocator to return pages.
+        ui::evict_thread(m.d.current.id);
         m.d.current.messages.clear();
         m.d.current.messages.push_back(std::move(replacement));
         m.d.current.updated_at = std::chrono::system_clock::now();
@@ -500,6 +517,13 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         auto now_ts = std::chrono::steady_clock::now();
         m.s.status_until  = now_ts + std::chrono::seconds{4};
         deps().save_thread(m.d.current);
+        // Hand the freshly-freed arenas back to the OS. On glibc malloc
+        // (the common Linux case) the dropped tool-output strings would
+        // otherwise sit on the free list indefinitely — the user sees
+        // "context compacted" but their RSS doesn't budge, which makes
+        // the feature feel broken on the only metric they can observe.
+        // No-op on musl / macOS / Windows; eager on mimalloc.
+        release_to_kernel();
 
         // Drain any messages the user queued during compaction. Same
         // shape as the post-StreamFinished drain at the end of this
@@ -622,6 +646,463 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
     }
     return kp;
+}
+
+// ============================================================================
+// stream_update — reducer for `msg::StreamMsg`
+// ============================================================================
+// Every event handler bumps `last_event_at` so the Tick-based stall watchdog
+// can tell "stream is alive but quiet" from "stream is stalled."
+
+Step stream_update(Model m, msg::StreamMsg sm) {
+    using maya::overload;
+
+    return std::visit(overload{
+        [&](StreamStarted) -> Step {
+            auto now = std::chrono::steady_clock::now();
+            // The phase variant guarantees a non-null ctx when active;
+            // StreamStarted only fires after submit_message / retry has
+            // already moved us into Streaming.
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->started        = now;
+                a->last_event_at  = now;
+                a->retry          = retry::Fresh{};   // fresh stream → re-arm watchdog
+                // Reset the live-rate accumulator so each sub-turn
+                // (post-tool) measures its own generation speed instead
+                // of polluting the CURRENT-rate display with the previous
+                // turn's bytes. The sparkline ring (rate_history) lives
+                // on StreamState — it carries across sub-turns / tool
+                // gaps so the user sees a continuous trace of generation
+                // rate over the whole session, not a fresh empty bar
+                // after every tool call.
+                a->live_delta_bytes       = 0;
+                a->first_delta_at         = {};
+                a->rate_last_sample_at    = {};
+                a->rate_last_sample_bytes = 0;
+            }
+            // Fresh stream is alive — wipe any leftover toast (retry
+            // countdown, "error: …", "cancelled") from the previous
+            // attempt so the status row doesn't show a stale message
+            // on top of a healthy connection.
+            m.s.status.clear();
+            m.s.status_until = {};
+            return done(std::move(m));
+        },
+        [&](StreamTextDelta& e) -> Step {
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = now;
+                if (!e.text.empty()) {
+                    if (a->first_delta_at.time_since_epoch().count() == 0)
+                        a->first_delta_at = now;
+                    a->live_delta_bytes += e.text.size();
+                }
+            }
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                // Append to the smoothing buffer rather than directly to
+                // streaming_text — the Tick handler drips it out at a
+                // controlled rate so server bursts don't visually jump.
+                // Cap is on the COMBINED visible + buffered size so
+                // smoothing can't push past the per-message budget.
+                auto& msg = m.d.current.messages.back();
+                const std::size_t in_flight =
+                    msg.streaming_text.size() + msg.pending_stream.size();
+                if (in_flight < kMaxStreamingBytes) {
+                    const auto room = kMaxStreamingBytes - in_flight;
+                    if (e.text.size() <= room) msg.pending_stream += e.text;
+                    else                       msg.pending_stream.append(e.text, 0, room);
+                }
+            }
+            return done(std::move(m));
+        },
+        [&](StreamToolUseStart& e) -> Step {
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) a->last_event_at = now;
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                ToolUse tc;
+                tc.id   = e.id;
+                tc.name = e.name;
+                tc.args = json::object();
+                // Stamp start now so the card shows a live timer during the
+                // args-streaming phase too — lets the user tell "model hasn't
+                // started emitting" from "execution is slow" at a glance.
+                tc.status = ToolUse::Pending{now};
+                m.d.current.messages.back().tool_calls.push_back(std::move(tc));
+                // Args-stream watchdog removed at user request — no
+                // automatic Pending → Failed timeout. A tool whose
+                // tool_use_start streams in but never gets its End
+                // event will stay Pending until the user cancels via
+                // Esc.  Stream-level errors still surface via the
+                // StreamError handler, which clears the in-flight tools.
+            }
+            return done(std::move(m));
+        },
+        [&](StreamToolUseDelta& e) -> Step {
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = now;
+                if (!e.partial_json.empty()) {
+                    if (a->first_delta_at.time_since_epoch().count() == 0)
+                        a->first_delta_at = now;
+                    a->live_delta_bytes += e.partial_json.size();
+                }
+            }
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant
+                && !m.d.current.messages.back().tool_calls.empty()) {
+                auto& tc = m.d.current.messages.back().tool_calls.back();
+                // Bounded append — beyond the cap we drop further bytes so
+                // the salvage path at StreamToolUseEnd runs on whatever
+                // scalars sniffed cleanly.
+                if (tc.args_streaming.size() < kMaxStreamingBytes) {
+                    const auto room = kMaxStreamingBytes - tc.args_streaming.size();
+                    if (e.partial_json.size() <= room) tc.args_streaming += e.partial_json;
+                    else tc.args_streaming.append(e.partial_json, 0, room);
+                }
+                // Throttle the live preview. First delta runs unconditionally
+                // so the header paints immediately, then subsequent re-parses
+                // are spaced ~120 ms. StreamToolUseEnd always runs the full
+                // parse, so the final state is exact.
+                using clock = std::chrono::steady_clock;
+                constexpr auto kPreviewInterval = std::chrono::milliseconds{120};
+                auto now2 = clock::now();
+                if (tc.last_preview_at.time_since_epoch().count() == 0
+                    || now2 - tc.last_preview_at >= kPreviewInterval) {
+                    update_stream_preview(tc);
+                    tc.last_preview_at = now2;
+                }
+            }
+            return done(std::move(m));
+        },
+        [&](StreamToolUseEnd) -> Step {
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant
+                && !m.d.current.messages.back().tool_calls.empty()) {
+                auto& tc = m.d.current.messages.back().tool_calls.back();
+                // Empty args_streaming is legitimate for argumentless tools;
+                // args was seeded to {} at StreamToolUseStart.
+                if (!tc.args_streaming.empty()) {
+                    try {
+                        tc.args = json::parse(tc.args_streaming);
+                        tc.mark_args_dirty();
+                        std::string{}.swap(tc.args_streaming);
+                    } catch (const std::exception& ex) {
+                        // Parse failed — typically an SSE cutoff mid-content.
+                        // Salvage whatever scalar fields we can so the tool
+                        // still has a shot at running instead of nuking the
+                        // whole turn.
+                        auto salvaged = salvage_args(tc);
+                        if (!salvaged.empty()) {
+                            tc.args = std::move(salvaged);
+                            tc.mark_args_dirty();
+                            std::string{}.swap(tc.args_streaming);
+                        } else {
+                            auto now = std::chrono::steady_clock::now();
+                            tc.status = ToolUse::Failed{
+                                tc.started_at(), now,
+                                std::string{"invalid tool arguments: "} + ex.what()
+                                    + "\nraw: " + tc.args_streaming};
+                            std::string{}.swap(tc.args_streaming);
+                        }
+                    }
+                }
+                // Required-field check is deferred to finalize_turn so the
+                // turn-level retry logic owns the single decision point.
+            }
+            return done(std::move(m));
+        },
+        [&](StreamUsage& e) -> Step {
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
+            // `input_tokens` from Anthropic is the FULL prefix for this
+            // request, NOT the delta. Accumulating across turns triple-counted
+            // by turn 5. Replace, don't add. Cache fields are excluded from
+            // `input_tokens` per the API but still occupy the context window,
+            // so the true "tokens in context" is the sum.
+            if (e.input_tokens || e.cache_read_input_tokens
+                || e.cache_creation_input_tokens) {
+                m.s.tokens_in = e.input_tokens
+                                   + e.cache_read_input_tokens
+                                   + e.cache_creation_input_tokens;
+            }
+            if (e.output_tokens) m.s.tokens_out = e.output_tokens;
+            return done(std::move(m));
+        },
+        [&](StreamHeartbeat) -> Step {
+            // Wire-alive signal from the transport (SSE `ping` or
+            // `thinking_delta`). No payload, no UI effect — we just
+            // bump last_event_at so the stall watchdog knows the
+            // connection is healthy. Critical during extended-thinking
+            // passes where the model reasons silently for 60-120 s
+            // between visible deltas; without this the watchdog would
+            // fire on every non-trivial opus turn.
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
+            return done(std::move(m));
+        },
+        [&](StreamFinished e) -> Step {
+            auto cmd = finalize_turn(m, e.stop_reason);
+            return {std::move(m), std::move(cmd)};
+        },
+        [&](StreamError& e) -> Step {
+            // Dedupe: when the stall watchdog fired, it tripped the
+            // cancel token, which causes the worker thread to unwind
+            // and emit its own StreamError("cancelled") shortly after.
+            // The first error already scheduled a retry; ignore any
+            // subsequent ones that arrive before that retry runs,
+            // otherwise we'd race two worker threads into the same
+            // session.
+            if (m.s.in_scheduled()) return done(std::move(m));
+
+            // Compaction failed mid-flight (rate limit, network drop,
+            // etc.). Pop the synthetic User "summarise per spec" + the
+            // assistant placeholder we appended in the CompactContext
+            // handler, restoring the conversation to the state the user
+            // saw before they hit "Compact context". Then let the
+            // normal error path finish (it'll surface "transient —
+            // retrying…" or terminal text). Without this rewind, a
+            // failed compaction leaves the summary prompt + a partially-
+            // streamed assistant reply permanently in the transcript.
+            if (m.s.compacting) {
+                m.s.compacting = false;
+                if (m.d.current.messages.size() >= 2
+                    && m.d.current.messages.back().role == Role::Assistant) {
+                    m.d.current.messages.pop_back();
+                    if (!m.d.current.messages.empty()
+                        && m.d.current.messages.back().role == Role::User) {
+                        m.d.current.messages.pop_back();
+                    }
+                }
+            }
+
+            // Worker thread is unwinding; drop the token so the next turn
+            // (or scheduled retry) mints a fresh one. Reaches into the
+            // ctx (rather than dropping the whole ctx) because we may
+            // still need the retry counters for the can_retry check.
+            if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
+
+            // Move any partial streaming_text into the message body so
+            // the assistant's in-flight output isn't lost regardless of
+            // what we do next (retry or terminal). Drain the smoothing
+            // buffer first so the error path preserves every received
+            // byte even if the Tick pacer hadn't revealed it yet.
+            Message* last = nullptr;
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                last = &m.d.current.messages.back();
+                if (!last->pending_stream.empty()) {
+                    last->streaming_text += last->pending_stream;
+                    last->pending_stream.clear();
+                }
+                if (!last->streaming_text.empty()) {
+                    if (last->text.empty()) last->text = std::move(last->streaming_text);
+                    else                    last->text += std::move(last->streaming_text);
+                    std::string{}.swap(last->streaming_text);
+                }
+            }
+
+            // Classify and decide retry vs terminal.
+            auto klass = provider::classify(e.message);
+            // If the stall watchdog fired this turn, the worker thread
+            // will eventually unwind and emit StreamError("cancelled")
+            // — that's our doing, not the user's. Force-classify it as
+            // Transient so the retry machinery treats it as a recoverable
+            // upstream stall, not a user cancel.
+            if (m.s.in_stall_fired()
+                && klass == provider::ErrorClass::Cancelled) {
+                klass = provider::ErrorClass::Transient;
+            }
+
+            // "Committed work" gating for retry: only Done/Running tool
+            // calls + finalized text body block a retry. A Pending tool
+            // (StreamToolUseStart fired, args may have been mid-streaming
+            // when the stall hit) is NOT committed — re-running gives
+            // the model a chance to re-emit it cleanly. Same definition
+            // the truncation-retry path uses (see above).
+            bool has_committed = false;
+            if (last) {
+                has_committed = !last->text.empty() ||
+                    std::ranges::any_of(last->tool_calls, [](const auto& tc) {
+                        return tc.is_done() || tc.is_running();
+                    });
+            }
+            const phase::Active* err_ctx = active_ctx(m.s.phase);
+            int prior_transient = err_ctx ? err_ctx->transient_retries : 0;
+            bool can_retry = (klass == provider::ErrorClass::Transient
+                           || klass == provider::ErrorClass::RateLimit)
+                          && prior_transient < provider::kMaxRetries
+                          && !has_committed
+                          && err_ctx;   // can't retry from Idle (no ctx)
+
+            if (can_retry) {
+                int attempt = prior_transient;
+                std::chrono::milliseconds delay;
+                if (e.retry_after.has_value()) {
+                    auto s = e.retry_after->count();
+                    if (s < 1)   s = 1;
+                    if (s > 120) s = 120;
+                    delay = std::chrono::seconds(s);
+                } else {
+                    delay = provider::backoff_with_jitter(klass, attempt);
+                }
+                auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    delay + std::chrono::milliseconds{999}).count();
+                m.s.status = std::string{provider::to_string(klass)}
+                           + " — retrying in " + std::to_string(secs) + "s"
+                           + " (attempt " + std::to_string(attempt + 1)
+                           + "/" + std::to_string(provider::kMaxRetries) + ")…";
+                m.s.status_until = std::chrono::steady_clock::now()
+                                 + delay + std::chrono::milliseconds{1500};
+                auto ctx = take_active_ctx(std::move(m.s.phase)).value();
+                ctx.transient_retries = attempt + 1;
+                ctx.retry             = retry::Scheduled{};
+                m.s.phase = phase::Streaming{std::move(ctx)};
+                if (last) m.d.current.messages.pop_back();
+                Message placeholder;
+                placeholder.role = Role::Assistant;
+                m.d.current.messages.push_back(std::move(placeholder));
+                return {std::move(m),
+                    Cmd<Msg>::after(delay, Msg{RetryStream{}})};
+            }
+
+            // Terminal path — discard the source ctx and drop to Idle.
+            m.s.phase = phase::Idle{};
+            if (klass == provider::ErrorClass::Cancelled) {
+                m.s.status = "cancelled";
+            } else {
+                m.s.status = "error: " + e.message;
+            }
+            if (last) {
+                if (klass != provider::ErrorClass::Cancelled)
+                    last->error = e.message;
+                std::string fail_msg = "stream ended before tool args "
+                                       "closed: " + e.message;
+                auto contains_ci = [](std::string_view hay,
+                                      std::string_view needle) noexcept {
+                    if (needle.size() > hay.size()) return false;
+                    for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                        bool ok = true;
+                        for (std::size_t j = 0; j < needle.size(); ++j) {
+                            char a = hay[i + j], b = needle[j];
+                            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                            if (a != b) { ok = false; break; }
+                        }
+                        if (ok) return true;
+                    }
+                    return false;
+                };
+                if (contains_ci(e.message, "filtering policy")
+                    || contains_ci(e.message, "content filter")
+                    || contains_ci(e.message, "blocked by content")) {
+                    fail_msg =
+                        "Anthropic's safety classifier blocked the tool "
+                        "input mid-stream (\"" + e.message + "\"). This "
+                        "is the upstream policy on the OAuth path "
+                        "tripping on generated content; it is "
+                        "probabilistic. Try once more if the content is "
+                        "innocuous (lorem ipsum, JSON, code) — most "
+                        "false positives clear on retry. If it blocks "
+                        "again, write a short stub file via `write` and "
+                        "build the rest with successive `edit` calls. "
+                        "(Direct API-key callers usually bypass this "
+                        "filter entirely; a long chain of safety "
+                        "blocks on OAuth is a hint to switch auth.)";
+                }
+                for (auto& tc : last->tool_calls) {
+                    if (tc.is_pending()) {
+                        auto now = std::chrono::steady_clock::now();
+                        tc.status = ToolUse::Failed{
+                            tc.started_at(), now, fail_msg};
+                    }
+                    std::string{}.swap(tc.args_streaming);
+                }
+            }
+            {
+                auto now = std::chrono::steady_clock::now();
+                auto ttl = std::chrono::seconds{
+                    klass == provider::ErrorClass::Cancelled ? 3 : 6};
+                m.s.status_until = now + ttl;
+                auto stamp = m.s.status_until;
+                return {std::move(m), Cmd<Msg>::after(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
+                        + std::chrono::milliseconds{50},
+                    Msg{ClearStatus{stamp}})};
+            }
+        },
+        [&](RetryStream) -> Step {
+            // Scheduled retry fired. If the user cancelled during the
+            // wait (Esc → CancelStream dropped phase to Idle), do
+            // nothing. Otherwise transition retry back to Fresh on
+            // the in-flight ctx so the freshly-launched stream's own
+            // errors flow through the normal classifier path.
+            if (auto* a = active_ctx(m.s.phase)) a->retry = retry::Fresh{};
+            if (m.s.is_idle()) return done(std::move(m));
+            return {std::move(m), cmd::launch_stream(m)};
+        },
+        [&](CancelStream) -> Step {
+            // Esc — full synchronous teardown.
+            if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
+
+            // Compaction-cancel: pop the synthetic "summarise per spec"
+            // user message + the assistant placeholder so the transcript
+            // returns to its pre-compaction shape.
+            if (m.s.compacting) {
+                m.s.compacting = false;
+                if (!m.d.current.messages.empty()
+                    && m.d.current.messages.back().role == Role::Assistant) {
+                    m.d.current.messages.pop_back();
+                }
+                if (!m.d.current.messages.empty()
+                    && m.d.current.messages.back().role == Role::User) {
+                    m.d.current.messages.pop_back();
+                }
+            }
+
+            // Salvage partial assistant work and finalise in-flight tool calls.
+            auto now = std::chrono::steady_clock::now();
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& last = m.d.current.messages.back();
+                if (!last.pending_stream.empty()) {
+                    last.streaming_text += last.pending_stream;
+                    last.pending_stream.clear();
+                }
+                if (!last.streaming_text.empty()) {
+                    if (last.text.empty()) last.text = std::move(last.streaming_text);
+                    else                   last.text += std::move(last.streaming_text);
+                    std::string{}.swap(last.streaming_text);
+                }
+                for (auto& tc : last.tool_calls) {
+                    if (!tc.is_terminal()) {
+                        tc.status = ToolUse::Failed{
+                            tc.started_at(), now, "cancelled"};
+                    }
+                    std::string{}.swap(tc.args_streaming);
+                }
+                if (last.text.empty() && last.tool_calls.empty()) {
+                    m.d.current.messages.pop_back();
+                }
+            }
+
+            m.d.pending_permission.reset();
+            m.s.phase = phase::Idle{};
+            m.s.status = "cancelled";
+            {
+                auto ttl = std::chrono::seconds{3};
+                m.s.status_until = now + ttl;
+                auto stamp = m.s.status_until;
+                return {std::move(m), Cmd<Msg>::after(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
+                        + std::chrono::milliseconds{50},
+                    Msg{ClearStatus{stamp}})};
+            }
+        },
+    }, sm);
 }
 
 } // namespace moha::app::detail

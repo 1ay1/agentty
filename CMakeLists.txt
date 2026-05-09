@@ -231,8 +231,21 @@ if(MOHA_USE_MIMALLOC)
     if(TARGET mimalloc-static OR TARGET mimalloc)
         set(MOHA_HAS_MIMALLOC TRUE)
     else()
-        message(STATUS "moha: MOHA_USE_MIMALLOC=ON but mimalloc package not "
-                       "found — building against system allocator.")
+        # WARNING (not STATUS) on purpose: this is the difference between
+        # a process that returns memory to the kernel promptly (mimalloc)
+        # and one that hoards a long session's freed arenas in glibc's
+        # free-list until exit (system allocator). On a long-running
+        # interactive session that's hundreds of MiB of unreclaimed RSS.
+        # The user should see the message during configure, not have it
+        # buried in a quiet STATUS line.
+        message(WARNING "moha: MOHA_USE_MIMALLOC=ON but mimalloc not found "
+                       "— building against the system allocator. On "
+                       "Linux/glibc this means freed memory is not returned "
+                       "to the kernel until process exit; long sessions will "
+                       "look bloated in RSS. Install via `apt install "
+                       "libmimalloc-dev` / `pacman -S mimalloc` / `brew "
+                       "install mimalloc` / vcpkg `mimalloc` and "
+                       "reconfigure to enable it.")
     endif()
 endif()
 
@@ -320,10 +333,15 @@ set(MOHA_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/init.cpp
     src/runtime/app/cmd_factory.cpp
     src/runtime/app/update.cpp
+    src/runtime/app/update/composer.cpp
     src/runtime/app/update/stream.cpp
     src/runtime/app/update/modal.cpp
     src/runtime/app/update/tool.cpp
     src/runtime/app/update/login.cpp
+    src/runtime/app/update/picker.cpp
+    src/runtime/app/update/palette.cpp
+    src/runtime/app/update/diff.cpp
+    src/runtime/app/update/meta.cpp
     src/runtime/app/subscribe.cpp
 
     src/runtime/view/cache.cpp

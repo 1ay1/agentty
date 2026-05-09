@@ -23,7 +23,23 @@ struct Entry {
 
 thread_local std::unordered_map<std::string, Entry> g_entries;
 thread_local std::list<std::string>                 g_lru;
-std::atomic<std::size_t>                            g_cap{4096};
+// 32 entries × O(turn) Elements is sized to the realistic re-render
+// window (active turn + visible window + a small scrollback margin),
+// not the full transcript. The cap matters because every entry pins
+// a fully built `maya::Element` tree for that turn — including the
+// rendered widget for every tool call's `Done::output`. With a 100 KB
+// `read` result and a few code blocks per turn, a single entry can
+// cost several MiB of heap; 256 entries on a long session was
+// observed to retain >1 GiB of Element nodes after the underlying
+// `Message::tool_calls[].output` strings had already been compacted
+// out of the conversation. The previous 4096 cap was worse still.
+//
+// 32 is the sweet spot: a turn that scrolls off the visible window
+// will *usually* still be in cache when the user scrolls back to it,
+// and a thread switch / compaction (which call `evict_thread` /
+// `evict_message` directly) reclaims its entries immediately rather
+// than waiting for LRU pressure that never comes on a single thread.
+std::atomic<std::size_t>                            g_cap{32};
 
 std::string message_key(const ThreadId& tid, std::size_t msg_idx) {
     std::string k;

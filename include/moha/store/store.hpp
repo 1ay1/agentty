@@ -4,6 +4,7 @@
 // stores, hypothetical cloud sync) live outside this header.
 
 #include <concepts>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,8 +25,14 @@ struct Settings {
 };
 
 template <class S>
-concept Store = requires(S& s, const Thread& t, const Settings& settings) {
+concept Store = requires(S& s, const Thread& t, const ThreadId& id,
+                         const Settings& settings) {
+    // load_threads returns thread *metadata only* (id, title, timestamps).
+    // The messages vector on each returned Thread is empty — full bodies
+    // are fetched lazily via load_thread on selection. This keeps startup
+    // RAM proportional to thread count, not total transcript bytes.
     { s.load_threads() }     -> std::same_as<std::vector<Thread>>;
+    { s.load_thread(id) }    -> std::same_as<std::optional<Thread>>;
     { s.save_thread(t) }     -> std::same_as<void>;
     { s.load_settings() }    -> std::same_as<Settings>;
     { s.save_settings(settings) } -> std::same_as<void>;

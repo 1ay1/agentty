@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -40,7 +41,13 @@ struct DeserializeError {
 [[nodiscard]] std::filesystem::path data_dir();
 [[nodiscard]] std::filesystem::path threads_dir();
 
-// Directory-walking loader: returns every thread we could deserialize.
+// Directory-walking loader: returns every thread we could deserialize,
+// **metadata only** (id, title, created_at, updated_at — `messages` is
+// empty). The thread picker only needs the metadata; full message bodies
+// are loaded lazily via `load_thread_file` on selection. This keeps
+// startup RAM proportional to thread count, not transcript bytes — a
+// 649-thread / 376 MB on-disk history was loading ~1.2 GB live before.
+//
 // Files that fail (bad JSON, missing required fields) are logged to
 // stderr and skipped — the per-file failure type is `DeserializeError`,
 // preserved internally; a caller that wants strict semantics can use
@@ -71,6 +78,12 @@ class FsStore {
 public:
     [[nodiscard]] std::vector<Thread> load_threads() {
         return persistence::load_all_threads();
+    }
+    [[nodiscard]] std::optional<Thread> load_thread(const ThreadId& id) {
+        auto p = persistence::threads_dir() / (id.value + ".json");
+        auto loaded = persistence::load_thread_file(p);
+        if (!loaded) return std::nullopt;
+        return std::move(*loaded);
     }
     void save_thread(const Thread& t)            { persistence::save_thread(t); }
     [[nodiscard]] store::Settings load_settings()          { return persistence::load_settings(); }

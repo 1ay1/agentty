@@ -7,6 +7,7 @@
 // profile / tool / stream handlers at least once.
 
 #include <cstdio>
+#include <optional>
 #include <source_location>
 #include <string>
 #include <string_view>
@@ -61,6 +62,7 @@ void install_stub_deps() {
         .stream         = [](moha::provider::Request, moha::provider::EventSink) {},
         .save_thread    = [](const moha::Thread&) {},
         .load_threads   = [] { return std::vector<moha::Thread>{}; },
+        .load_thread    = [](const moha::ThreadId&) { return std::optional<moha::Thread>{}; },
         .load_settings  = [] { return moha::store::Settings{}; },
         .save_settings  = [](const moha::store::Settings&) {},
         .new_thread_id  = [] { return moha::ThreadId{"t-test"}; },
