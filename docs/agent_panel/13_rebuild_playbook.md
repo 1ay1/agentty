@@ -5,7 +5,7 @@ panel *should* look like; this doc says *what to do, in what order,
 to get there*. It's written for an engineer (or future me) who:
 
 1. Has read at least the README and `01_zed_anatomy.md`
-2. Can build moha (`cmake --build build`) and run it locally
+2. Can build agentty (`cmake --build build`) and run it locally
 3. Knows where the source files live (or can find them in a few
    minutes)
 
@@ -22,17 +22,17 @@ Before starting:
       `05_design_tokens.md`. (~30 min)
 - [ ] Skim `02_maya_reference.md` and `03_translation.md` for the
       primitives table. (~15 min)
-- [ ] Build moha from source. Run it, send a message, watch a tool
+- [ ] Build agentty from source. Run it, send a message, watch a tool
       call complete. Look at the panel — note 3 specific things you
       want to change.
 - [ ] Open Zed's agent panel side by side. Same prompt. Note the
       visual differences.
-- [ ] If the local moha build is broken, **fix the build first**.
+- [ ] If the local agentty build is broken, **fix the build first**.
       Don't start UI work on a non-compiling base.
 
 ## 1. The principle
 
-The current moha panel diverges from Zed in many small ways. Don't
+The current agentty panel diverges from Zed in many small ways. Don't
 try to converge in one sweep — that's how the previous attempts
 failed. Instead, **convert one region at a time**, from the bottom
 up:
@@ -58,11 +58,11 @@ literals with named tokens. Code change is mechanical; visual is
 identical.
 
 **Tasks**:
-1. Create `include/moha/tokens.hpp` with the namespaces from
+1. Create `include/agentty/tokens.hpp` with the namespaces from
    `05_design_tokens § 1`.
 2. Search the source for `Color::rgb(` and replace each with the
    appropriate token.
-3. Audit current file: every color in moha source must be derivable
+3. Audit current file: every color in agentty source must be derivable
    from tokens. If you find a one-off color that doesn't match any
    token, **add a new token to `tokens.hpp`** rather than leaving the
    inline literal — exception: status badges with semantic-only meaning
@@ -75,7 +75,7 @@ identical.
 - [ ] Visual diff vs `master`: byte-identical render
 
 **Common pitfalls**:
-- Forgetting `include/moha/tokens.hpp` in the include path → linker
+- Forgetting `include/agentty/tokens.hpp` in the include path → linker
   errors. They're constexpr, so fine to put in a header.
 - Confusing `border::dim` (50, 56, 66) with `bg::editor` (40, 44, 52).
   When in doubt, look up in the design tokens doc.
@@ -241,7 +241,7 @@ indented `padding(0, 2, 0, 2)`. Code blocks render with the right bg.
    `tu.status == Confirmation`.
 7. Wire keys: `Y/A/Shift+A/N/D/Shift+D/Esc`.
 8. Persist workspace permissions to
-   `~/.config/moha/permissions/<workspace_hash>.json`.
+   `~/.config/agentty/permissions/<workspace_hash>.json`.
 
 **You're done when**:
 - [ ] Bash with a never-allowed command pops a permission card
@@ -268,7 +268,7 @@ indented `padding(0, 2, 0, 2)`. Code blocks render with the right bg.
    `?` (help).
 
 **You're done when**:
-- [ ] Top bar shows `◆ moha · <thread title>  ●Idle  …`
+- [ ] Top bar shows `◆ agentty · <thread title>  ●Idle  …`
 - [ ] Phase indicator pulses spinner when streaming
 - [ ] Bottom status bar shows context-sensitive hint
 - [ ] `?` opens help modal (with at least 5 sections from
@@ -309,7 +309,7 @@ Order within this phase: token meter → mode toggles → slash popup
 ### History route
 
 1. `Msg::OpenRoute{History}` populates `m.history_view` from
-   `~/.config/moha/threads/<workspace>/`.
+   `~/.config/agentty/threads/<workspace>/`.
 2. Render the layout from `11_navigation § 4`.
 3. Group + search.
 4. Open / new / delete actions.
@@ -447,7 +447,7 @@ When new features arrive:
 - Adding a new tool kind:
   1. Update `tool_kind_from_name()` in `07_tool_cards § 7`
   2. Add a typed widget in `maya/include/maya/widget/<kind>_tool.hpp`
-  3. Add `render_<kind>_tool` in moha
+  3. Add `render_<kind>_tool` in agentty
   4. Update permission gating-key in `09_permissions § 3`
   5. Add icon to `05_design_tokens § 4`
 - Adding a new key binding:

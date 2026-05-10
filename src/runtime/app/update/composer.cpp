@@ -4,7 +4,7 @@
 // streaming / tools. ComposerEnter / ComposerSubmit route through
 // detail::submit_message which handles the broader "kick a new turn" flow.
 
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -16,15 +16,15 @@
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/clipboard_image.hpp"
-#include "moha/runtime/command_palette.hpp"
-#include "moha/runtime/composer_attachment.hpp"
-#include "moha/runtime/mention_palette.hpp"
-#include "moha/runtime/symbol_palette.hpp"
-#include "moha/runtime/view/helpers.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/clipboard_image.hpp"
+#include "agentty/runtime/command_palette.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/mention_palette.hpp"
+#include "agentty/runtime/symbol_palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 namespace {
 
@@ -633,4 +633,4 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     }, cm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

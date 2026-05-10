@@ -4,24 +4,24 @@
 // through with Up/Down, and confirms with Enter; the underlying data comes
 // from the store + provider so neither reducer is purely-local.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/runtime/app/deps.hpp"
-#include "moha/runtime/mem.hpp"
-#include "moha/runtime/picker.hpp"
-#include "moha/runtime/view/cache.hpp"
-#include "moha/runtime/view/helpers.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/mem.hpp"
+#include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/view/cache.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
-namespace pick = moha::ui::pick;
+namespace pick = agentty::ui::pick;
 using maya::overload;
 using maya::Cmd;
 
@@ -182,4 +182,4 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
     }, tm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

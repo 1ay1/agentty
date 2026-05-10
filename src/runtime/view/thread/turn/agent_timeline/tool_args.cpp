@@ -3,11 +3,11 @@
 // shaping — so both thread.cpp (timeline compact-body) and tool_card.cpp
 // (widget render) can link against it without dragging widget headers.
 
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 #include <chrono>
 
-namespace moha::ui {
+namespace agentty::ui {
 
 std::string safe_arg(const nlohmann::json& args, const char* key) {
     if (!args.is_object()) return {};
@@ -104,4 +104,4 @@ int parse_exit_code(const std::string& output) {
     return 0;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

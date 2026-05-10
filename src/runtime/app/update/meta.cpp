@@ -3,8 +3,8 @@
 // watchdog + token-rate sampler, profile cycling, conversation
 // compaction kickoff, scroll/toggle, status-toast cleanup, and Quit.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -12,10 +12,10 @@
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/runtime/app/deps.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 using maya::overload;
 using maya::Cmd;
@@ -223,4 +223,4 @@ Step meta_update(Model m, msg::MetaMsg mm) {
     }, mm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

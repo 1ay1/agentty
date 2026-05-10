@@ -1,19 +1,19 @@
-#include "moha/runtime/view/view.hpp"
+#include "agentty/runtime/view/view.hpp"
 
 #include <optional>
 
 #include <maya/widget/app_layout.hpp>
 
-#include "moha/runtime/login.hpp"
-#include "moha/runtime/view/changes_strip.hpp"
-#include "moha/runtime/view/composer.hpp"
-#include "moha/runtime/view/diff_review.hpp"
-#include "moha/runtime/view/login.hpp"
-#include "moha/runtime/view/pickers.hpp"
-#include "moha/runtime/view/status_bar/status_bar.hpp"
-#include "moha/runtime/view/thread/thread.hpp"
+#include "agentty/runtime/login.hpp"
+#include "agentty/runtime/view/changes_strip.hpp"
+#include "agentty/runtime/view/composer.hpp"
+#include "agentty/runtime/view/diff_review.hpp"
+#include "agentty/runtime/view/login.hpp"
+#include "agentty/runtime/view/pickers.hpp"
+#include "agentty/runtime/view/status_bar/status_bar.hpp"
+#include "agentty/runtime/view/thread/thread.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 namespace {
 
@@ -43,4 +43,4 @@ maya::Element view(const Model& m) {
     }}.build();
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

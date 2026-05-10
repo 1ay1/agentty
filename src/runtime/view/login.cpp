@@ -4,20 +4,20 @@
 // title, key hints) is shared so the layout doesn't shift between
 // transitions.
 
-#include "moha/runtime/view/login.hpp"
+#include "agentty/runtime/view/login.hpp"
 
 #include <string>
 #include <variant>
 #include <vector>
 
-#include "moha/runtime/login.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/login.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 using namespace maya;
 using namespace maya::dsl;
-// `login::` resolves to `moha::ui::login::` from this scope without an
+// `login::` resolves to `agentty::ui::login::` from this scope without an
 // alias — and MSVC rejects an alias whose name shadows the existing
 // nested namespace, so don't write one.
 
@@ -117,7 +117,7 @@ Element panel_api_key(const login::ApiKeyInput& s) {
     std::vector<Element> rows;
     rows.push_back(text("Anthropic API key", fg_bold(fg)));
     rows.push_back(text(""));
-    rows.push_back(text("Paste an sk-ant-… key. It will be saved to ~/.config/moha.",
+    rows.push_back(text("Paste an sk-ant-… key. It will be saved to ~/.config/agentty.",
                         fg_dim(muted)));
     rows.push_back(text(""));
     rows.push_back(text("Key:", fg_dim(muted)));
@@ -152,8 +152,8 @@ Element login_modal(const Model& m) {
     auto content = (v(std::move(body)) | padding(1, 2) | width(70));
     return (v(content.build())
             | border(BorderStyle::Round) | bcolor(accent)
-            | btext(" Sign in to moha ", BorderTextPos::Top, BorderTextAlign::Center)
+            | btext(" Sign in to agentty ", BorderTextPos::Top, BorderTextAlign::Center)
             ).build();
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

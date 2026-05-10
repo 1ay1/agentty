@@ -1,15 +1,15 @@
-#include "moha/runtime/view/status_bar/status_bar.hpp"
+#include "agentty/runtime/view/status_bar/status_bar.hpp"
 
-#include "moha/runtime/view/status_bar/context_gauge.hpp"
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/status_bar/model_badge.hpp"
-#include "moha/runtime/view/status_bar/phase_chip.hpp"
-#include "moha/runtime/view/status_bar/shortcut_row.hpp"
-#include "moha/runtime/view/status_bar/status_banner.hpp"
-#include "moha/runtime/view/status_bar/title_chip.hpp"
-#include "moha/runtime/view/status_bar/token_stream_sparkline.hpp"
+#include "agentty/runtime/view/status_bar/context_gauge.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/status_bar/model_badge.hpp"
+#include "agentty/runtime/view/status_bar/phase_chip.hpp"
+#include "agentty/runtime/view/status_bar/shortcut_row.hpp"
+#include "agentty/runtime/view/status_bar/status_banner.hpp"
+#include "agentty/runtime/view/status_bar/title_chip.hpp"
+#include "agentty/runtime/view/status_bar/token_stream_sparkline.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::StatusBar::Config status_bar_config(const Model& m) {
     const bool is_streaming = m.s.is_streaming() && m.s.active();
@@ -33,4 +33,4 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

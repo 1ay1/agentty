@@ -1,0 +1,87 @@
+#pragma once
+// Shared filesystem helpers. Tool implementations need normalized paths,
+// binary detection, and a predictable "which directories to skip during
+// traversal" list — centralised here so the rules are consistent across
+// grep / glob / list_dir / find_definition.
+
+#include <expected>
+#include <filesystem>
+#include <string>
+#include <string_view>
+
+#include "agentty/tool/registry.hpp"   // ToolError + factories
+
+namespace agentty::tools::util {
+
+namespace fs = std::filesystem;
+
+// Read an entire file as a binary blob. Returns "" on open failure (callers
+// that need to distinguish missing vs empty should stat first).
+[[nodiscard]] std::string read_file(const fs::path& p);
+
+// Write content atomically-ish (truncate + write + flush). Returns the
+// empty string on success, or a human-readable error otherwise. Keeps tool
+// lambdas terse while still forcing callers to surface failures.
+[[nodiscard]] std::string write_file(const fs::path& p, std::string_view content);
+
+// Normalise a user-supplied path. Accepts forward slashes on Windows
+// (the model frequently produces them), strips surrounding whitespace and
+// quotes, and returns an absolute path relative to cwd when not already
+// absolute — so error messages name an unambiguous location.
+[[nodiscard]] fs::path normalize_path(std::string_view s);
+
+// Strong typedef for an already-normalised filesystem path. The only way
+// to construct one is from a raw string via `NormalizedPath{"..."}`, which
+// calls `normalize_path` — so "did I already normalize this?" is answered
+// by the type. Passed by value (cheap: holds a single fs::path).
+struct NormalizedPath {
+    fs::path value;
+
+    explicit NormalizedPath(std::string_view raw) : value(normalize_path(raw)) {}
+
+    [[nodiscard]] const fs::path& path() const noexcept { return value; }
+    [[nodiscard]] std::string string() const { return value.string(); }
+    [[nodiscard]] bool empty() const noexcept { return value.empty(); }
+};
+
+// ── Workspace boundary ──────────────────────────────────────────────────
+// Every filesystem-touching tool refuses paths outside this root. Set
+// once at startup (main.cpp from cwd, or from the --workspace CLI flag);
+// query freely from tool implementations. The default before
+// `set_workspace_root` is called is the process's cwd at first call —
+// safe for tests and standalone helper use.
+//
+// The boundary is the simplest sandbox layer: it doesn't stop a model
+// from running shell commands that walk anywhere, but it does stop the
+// fast path of "model casually `read`s ~/.ssh/id_rsa or `write`s to
+// /etc/hosts". Pair with bash gating + a future OS-native sandbox
+// (sandbox-exec / bwrap / firejail) for a defense-in-depth story.
+void set_workspace_root(fs::path root);
+
+[[nodiscard]] const fs::path& workspace_root();
+
+// True if `target` is at-or-under the workspace root after canonicalising
+// both sides. Symlink escape is blocked: a link inside the workspace that
+// points to /etc would resolve to /etc and fail the prefix check. Uses
+// weakly_canonical so a not-yet-existing path (e.g. write target) is
+// still checked correctly against its existing parent components.
+[[nodiscard]] bool is_within_workspace(const fs::path& target);
+
+// Construct a NormalizedPath that's been workspace-checked in one shot.
+// Tools call:
+//     auto p = util::make_workspace_path(*raw, "read");
+//     if (!p) return std::unexpected(p.error());
+// `tool_name` only appears in the error message and is purely cosmetic.
+[[nodiscard]] std::expected<struct NormalizedPath, ToolError>
+make_workspace_path(std::string_view raw, std::string_view tool_name);
+
+// True for directory names we want recursive traversals (grep / glob /
+// list_dir) to skip by default. Keeps the skip list in one place so tools
+// stay in sync (e.g. adding `_deps` to every tool at once).
+[[nodiscard]] bool should_skip_dir(std::string_view name) noexcept;
+
+// Heuristic: scan the first 512 bytes for a NUL. Good enough to avoid
+// grep'ing PNGs / executables / model weights into the prompt.
+[[nodiscard]] bool is_binary_file(const fs::path& p);
+
+} // namespace agentty::tools::util

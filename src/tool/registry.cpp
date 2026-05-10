@@ -1,5 +1,5 @@
-#include "moha/tool/registry.hpp"
-#include "moha/tool/tools.hpp"
+#include "agentty/tool/registry.hpp"
+#include "agentty/tool/tools.hpp"
 
 #include <algorithm>
 #include <format>
@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace moha::tools {
+namespace agentty::tools {
 
 std::string_view to_string(ErrorKind k) noexcept {
     switch (k) {
@@ -147,4 +147,4 @@ const ToolDef* find(std::string_view name) {
     return nullptr;
 }
 
-} // namespace moha::tools
+} // namespace agentty::tools

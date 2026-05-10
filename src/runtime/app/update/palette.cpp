@@ -4,20 +4,20 @@
 // re-enters the top-level update() to fan a Command::* into the matching
 // domain Msg.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/picker.hpp"
-#include "moha/runtime/view/helpers.hpp"
+#include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
-namespace pick = moha::ui::pick;
+namespace pick = agentty::ui::pick;
 using maya::overload;
 
 Step palette_update(Model m, msg::CommandPaletteMsg pm) {
@@ -73,17 +73,17 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 || o->index >= static_cast<int>(matches.size()))
                 return done(std::move(m));
             switch (matches[static_cast<std::size_t>(o->index)]->id) {
-                case Command::NewThread:     return moha::app::update(std::move(m), Msg{NewThread{}});
-                case Command::ReviewChanges: return moha::app::update(std::move(m), Msg{OpenDiffReview{}});
-                case Command::AcceptAll:     return moha::app::update(std::move(m), Msg{AcceptAllChanges{}});
-                case Command::RejectAll:     return moha::app::update(std::move(m), Msg{RejectAllChanges{}});
-                case Command::CycleProfile:  return moha::app::update(std::move(m), Msg{CycleProfile{}});
-                case Command::OpenModels:    return moha::app::update(std::move(m), Msg{OpenModelPicker{}});
-                case Command::OpenThreads:   return moha::app::update(std::move(m), Msg{OpenThreadList{}});
-                case Command::OpenPlan:      return moha::app::update(std::move(m), Msg{OpenTodoModal{}});
-                case Command::CompactContext:return moha::app::update(std::move(m), Msg{CompactContext{}});
-                case Command::OpenLogin:     return moha::app::update(std::move(m), Msg{OpenLogin{}});
-                case Command::Quit:          return moha::app::update(std::move(m), Msg{Quit{}});
+                case Command::NewThread:     return agentty::app::update(std::move(m), Msg{NewThread{}});
+                case Command::ReviewChanges: return agentty::app::update(std::move(m), Msg{OpenDiffReview{}});
+                case Command::AcceptAll:     return agentty::app::update(std::move(m), Msg{AcceptAllChanges{}});
+                case Command::RejectAll:     return agentty::app::update(std::move(m), Msg{RejectAllChanges{}});
+                case Command::CycleProfile:  return agentty::app::update(std::move(m), Msg{CycleProfile{}});
+                case Command::OpenModels:    return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
+                case Command::OpenThreads:   return agentty::app::update(std::move(m), Msg{OpenThreadList{}});
+                case Command::OpenPlan:      return agentty::app::update(std::move(m), Msg{OpenTodoModal{}});
+                case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
+                case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});
+                case Command::Quit:          return agentty::app::update(std::move(m), Msg{Quit{}});
             }
             return done(std::move(m));
         },
@@ -107,4 +107,4 @@ Step todo_update(Model m, msg::TodoMsg tm) {
     }, tm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

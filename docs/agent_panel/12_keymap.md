@@ -46,7 +46,7 @@ all Zed `Cmd+X` bindings with `Ctrl+X` on translation.
 | `Ctrl+/` | Same as `?` (always works) | `OpenModal{Help}` |
 | `F5` | Refresh current view (re-fetch state) | `Refresh{}` |
 | `F11` | Toggle fullscreen-ish (hide chrome + status bar) | `ToggleFullscreen{}` |
-| `Ctrl+Q` | Quit moha (with confirm if streaming) | `Quit{}` |
+| `Ctrl+Q` | Quit agentty (with confirm if streaming) | `Quit{}` |
 
 ## 3. Composer bindings
 
@@ -257,7 +257,7 @@ void route_key_event(KeyEvent ev, Model& m, EventBus& bus) {
 
 Zed uses `Cmd` heavily (macOS GPUI). Translations:
 
-| Zed | moha |
+| Zed | agentty |
 |---|---|
 | `Cmd+Enter` | `Enter` (composer submit) — Zed needs `Cmd` to disambiguate from newline; we make `Shift+Enter` newline by default |
 | `Cmd+K` | `Ctrl+K` |
@@ -275,7 +275,7 @@ e.g.), document the gap and pick a reasonable substitute.
 ## 10. Customization
 
 Defer customization. Hardcode the bindings above in
-`include/moha/keymap.hpp`. Adding `~/.config/moha/keymap.json`
+`include/agentty/keymap.hpp`. Adding `~/.config/agentty/keymap.json`
 support is a quality-of-life feature; not needed for the rebuild.
 
 When customization is added later, the structure should be:

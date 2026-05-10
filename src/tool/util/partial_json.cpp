@@ -1,9 +1,9 @@
-#include "moha/tool/util/partial_json.hpp"
+#include "agentty/tool/util/partial_json.hpp"
 
 #include <cstring>
 #include <vector>
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 namespace {
 
@@ -236,4 +236,4 @@ sniff_string_progressive(std::string_view raw, std::string_view key) {
     return decode_string_from(raw, *off);
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util

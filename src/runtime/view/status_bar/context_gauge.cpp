@@ -1,6 +1,6 @@
-#include "moha/runtime/view/status_bar/context_gauge.hpp"
+#include "agentty/runtime/view/status_bar/context_gauge.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::ContextGauge::Config context_gauge_config(const Model& m) {
     maya::ContextGauge::Config cfg;
@@ -11,4 +11,4 @@ maya::ContextGauge::Config context_gauge_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

@@ -4,19 +4,19 @@
 // flushing the composer's queued-message buffer, which is why it lives in a
 // shared internal header rather than an anonymous namespace.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <utility>
 
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/runtime/app/deps.hpp"
-#include "moha/runtime/composer_attachment.hpp"
-#include "moha/store/store.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/store/store.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 namespace {
 
@@ -173,7 +173,7 @@ Step submit_message(Model m) {
         // place: it appends the synthetic prompt + placeholder, sets
         // m.s.compacting, and launches the stream. finalize_turn's
         // compaction branch drains m.ui.composer.queued post-compact.
-        return moha::app::update(std::move(m), Msg{CompactContext{}});
+        return agentty::app::update(std::move(m), Msg{CompactContext{}});
     }
 
     Message user;
@@ -252,4 +252,4 @@ maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
         Msg{ClearStatus{stamp}});
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

@@ -1,6 +1,6 @@
 # Streaming state machine
 
-`StreamState` (see `include/moha/domain/session.hpp`) owns the per-turn
+`StreamState` (see `include/agentty/domain/session.hpp`) owns the per-turn
 lifetime of a single in-flight LLM request.  It is pure domain (no sockets,
 no curl) but strictly more volatile than the `Thread` / `Message` types:
 `phase` flips on every delta and the cancel handle tears down the live

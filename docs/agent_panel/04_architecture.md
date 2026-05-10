@@ -1,10 +1,10 @@
 # 04 — Architecture: Model, Msg, update, view, streaming
 
-This doc specifies the **shape** the moha agent panel should have:
+This doc specifies the **shape** the agentty agent panel should have:
 how state is organized, what messages flow through `update`, and how
 the streaming SSE feed reaches the UI without blocking.
 
-It documents the target shape, calling out where moha's current
+It documents the target shape, calling out where agentty's current
 implementation matches and where it diverges. Use the rebuild playbook
 (`13_rebuild_playbook.md`) to sequence the migration.
 
@@ -37,11 +37,11 @@ escape via `Cmd::task` (and only those that need to). `view` is pure.
 
 ## 2. Model — the target shape
 
-Lives in `include/moha/model.hpp`. The current model exists; the gap
+Lives in `include/agentty/model.hpp`. The current model exists; the gap
 list is at the bottom.
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 enum class Phase {
     Idle,
@@ -163,7 +163,7 @@ struct Model {
     std::optional<DiffReviewState> diff_review;
 };
 
-} // namespace moha
+} // namespace agentty
 ```
 
 ### Key invariants
@@ -183,7 +183,7 @@ enforced by code.
 Group messages by **what they're about**, not by widget. Roughly:
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 // ── Composer ──────────────────────────────────────────────────────
 struct ComposerCharInput { char32_t cp; };
@@ -295,12 +295,12 @@ using Msg = std::variant<
     Tick, Resize, Quit, NoOp
 >;
 
-} // namespace moha
+} // namespace agentty
 ```
 
-That's roughly 70 message types — same order of magnitude as moha's
+That's roughly 70 message types — same order of magnitude as agentty's
 current count. The current taxonomy is in
-`include/moha/msg.hpp:87-108`; some renames and additions needed but
+`include/agentty/msg.hpp:87-108`; some renames and additions needed but
 no architectural shift.
 
 ## 4. update — the dispatch table
@@ -381,7 +381,7 @@ Layout target (TUI):
 Skeleton:
 
 ```cpp
-Element MohaApp::view(const Model& m) {
+Element AgenttyApp::view(const Model& m) {
     using namespace maya::dsl;
 
     auto chrome    = views::chrome(m);
@@ -419,7 +419,7 @@ them at a fixed position over the chrome.
 ## 6. subscribe — input policy
 
 ```cpp
-Sub<Msg> MohaApp::subscribe(const Model& m) {
+Sub<Msg> AgenttyApp::subscribe(const Model& m) {
     // Always-on subscriptions
     auto keys = Sub<Msg>::on_key([m](const KeyEvent& k) -> std::optional<Msg> {
         return route_key_event(m, k);
@@ -566,7 +566,7 @@ haiku-4-5 — the API requires the beta header
 cocktail. Sending the header on 4.6+ is a no-op, so we always include
 it whenever any tool in the request opts in.
 
-In moha:
+In agentty:
 
 - `ToolDef::eager_input_streaming` (registry.hpp) — set `true` on tools
   whose input field can be large enough that batching would be
@@ -586,7 +586,7 @@ In moha:
 ### Cross-references
 
 This is what Zed and Claude Code both do; verifying against either is
-the fastest way to check moha's wire shape if streaming feels off:
+the fastest way to check agentty's wire shape if streaming feels off:
 
 - **Zed**: `crates/agent/src/tools/streaming_edit_file_tool.rs` — the
   `StreamingEditFileTool` opts in via the trait method
@@ -610,7 +610,7 @@ empty until the entire tool input has been buffered server-side, and
 no amount of client-side throttling or partial-JSON parsing can make
 the card feel alive — the bytes simply aren't there yet.
 
-This is also why moha's edit card renders **all** edits during
+This is also why agentty's edit card renders **all** edits during
 streaming, not just the first: with FGTS on, `edits[1].old_text` is
 already arriving on the wire while `edits[0].new_text` is still
 filling in. The streaming reducer mirrors the entire `edits[]` array
@@ -721,7 +721,7 @@ std::pair<Model, Cmd<Msg>> kick_pending_tools(Model m) {
 ```
 
 This loop is the core of the agent state machine. It's almost identical
-to what moha already has — main difference is the additional
+to what agentty already has — main difference is the additional
 `Approved → Running` distinct status for clearer UI feedback.
 
 ### run_tool_cmd
@@ -801,9 +801,9 @@ this is part of the rebuild work.
 
 `src/persistence.cpp` already implements:
 
-- `~/.moha/threads/<id>.json` — one file per thread, JSON-serialized
+- `~/.agentty/threads/<id>.json` — one file per thread, JSON-serialized
   `Thread`
-- `~/.moha/settings.json` — model id, profile, favorite models
+- `~/.agentty/settings.json` — model id, profile, favorite models
 
 **Hooks during update**:
 
@@ -828,7 +828,7 @@ If the save fails, it could dispatch a `Toast{ "couldn't save" }` — but
 the current persistence layer doesn't surface errors, so this is
 optional.
 
-## 9. Where current moha matches & diverges
+## 9. Where current agentty matches & diverges
 
 Match (good — keep these):
 
@@ -873,6 +873,6 @@ If `update`, `view`, and `subscribe` follow the rules:
 - **Crashes during streaming** can resume cleanly: persisted Model
   contains all the in-progress state.
 
-The current moha implementation respects this contract about 80% of the
+The current agentty implementation respects this contract about 80% of the
 way. The rebuild is mostly about closing the remaining 20% — and using
 the resulting clean state to land the visual rebuild.

@@ -1,13 +1,13 @@
-#include "moha/runtime/view/thread/activity_indicator.hpp"
+#include "agentty/runtime/view/thread/activity_indicator.hpp"
 
 #include <algorithm>
 #include <string>
 
-#include "moha/domain/catalog.hpp"
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/domain/catalog.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 std::optional<maya::ActivityIndicator::Config>
 activity_indicator_config(const Model& m) {
@@ -33,4 +33,4 @@ activity_indicator_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

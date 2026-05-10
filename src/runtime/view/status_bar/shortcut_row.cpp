@@ -1,10 +1,10 @@
-#include "moha/runtime/view/status_bar/shortcut_row.hpp"
+#include "agentty/runtime/view/status_bar/shortcut_row.hpp"
 
 #include <chrono>
 
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::ShortcutRow::Config shortcut_row_config(const Model& m) {
     maya::ShortcutRow::Config cfg;
@@ -68,4 +68,4 @@ maya::ShortcutRow::Config shortcut_row_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

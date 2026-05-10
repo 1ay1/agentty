@@ -1,13 +1,13 @@
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
 #include <string>
 #include <string_view>
 #include <utility>
 
-#include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 namespace {
 
@@ -25,9 +25,9 @@ namespace {
 }
 
 // Parse `## Matches in <path>` and `### L<start>-<end>` markers out of
-// moha's grep tool output and accumulate (path → {start lines}) into
+// agentty's grep tool output and accumulate (path → {start lines}) into
 // `out`. We use the BLOCK START line as a representative match anchor
-// — moha's output groups matches with surrounding context, so the
+// — agentty's output groups matches with surrounding context, so the
 // individual match offsets aren't recoverable from the rendered body
 // (they live in structured `events` upstream that don't reach the view).
 // Block-start is good enough for the highlight_lines anchor; the user's
@@ -219,7 +219,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     }
 
     // ── Generic line-oriented tools that DON'T have a structured body
-    //    Kind: head+tail CodeBlock preview. moha's grep emits markdown
+    //    Kind: head+tail CodeBlock preview. agentty's grep emits markdown
     //    (`## Matches in <path>` / `### L<s>-<e>` blocks) rather than
     //    the raw `path:line:text` shape that maya::Kind::GrepMatches
     //    parses, so it stays on CodeBlock here. (The cross-tool grep_hits
@@ -270,4 +270,4 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     return out;     // kind = None
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

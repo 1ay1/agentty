@@ -1,16 +1,16 @@
-#include "moha/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
                                                   int spinner_frame,
@@ -122,4 +122,4 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

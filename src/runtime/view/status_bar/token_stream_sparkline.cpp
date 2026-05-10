@@ -1,12 +1,12 @@
-#include "moha/runtime/view/status_bar/token_stream_sparkline.hpp"
+#include "agentty/runtime/view/status_bar/token_stream_sparkline.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <vector>
 
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 namespace {
 
@@ -68,4 +68,4 @@ maya::TokenStreamSparkline::Config token_stream_sparkline_config(const Model& m)
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

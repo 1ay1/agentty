@@ -1,6 +1,6 @@
-#include "moha/tool/util/sandbox.hpp"
+#include "agentty/tool/util/sandbox.hpp"
 
-#include "moha/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace moha::tools::util::sandbox {
+namespace agentty::tools::util::sandbox {
 
 namespace fs = std::filesystem;
 
@@ -62,7 +62,7 @@ std::atomic<Backend> g_backend{Backend::None};
 // we're actually defending against: a compromised or sloppy model
 // running `rm -rf ~` or `cat ~/.ssh/id_rsa` after one user approval.
 //
-// `--die-with-parent` ensures the sandbox dies if moha dies — no
+// `--die-with-parent` ensures the sandbox dies if agentty dies — no
 // detached zombies. `--unshare-pid` gives the child a clean PID
 // namespace so kills work cleanly. `--new-session` so the child can't
 // steal the controlling tty.
@@ -333,4 +333,4 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
     return run_wrapped_argv(argv, max_bytes, timeout);
 }
 
-} // namespace moha::tools::util::sandbox
+} // namespace agentty::tools::util::sandbox

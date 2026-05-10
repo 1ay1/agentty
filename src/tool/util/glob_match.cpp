@@ -1,6 +1,6 @@
-#include "moha/tool/util/glob.hpp"
+#include "agentty/tool/util/glob.hpp"
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 bool glob_match(std::string_view pattern, std::string_view name) noexcept {
     size_t pi = 0, ni = 0, star = std::string_view::npos, match = 0;
@@ -56,4 +56,4 @@ bool glob_match(std::string_view pattern, std::string_view name) noexcept {
     return pi == pattern.size();
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util

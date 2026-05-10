@@ -1,4 +1,4 @@
-#include "moha/runtime/view/thread/turn/turn.hpp"
+#include "agentty/runtime/view/thread/turn/turn.hpp"
 
 #include <chrono>
 #include <memory>
@@ -8,19 +8,19 @@
 
 #include <maya/widget/markdown.hpp>
 
-#include "moha/domain/catalog.hpp"
-#include "moha/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
-#include "moha/runtime/view/cache.hpp"
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/thread/turn/permission.hpp"
+#include "agentty/domain/catalog.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
+#include "agentty/runtime/view/cache.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/permission.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 namespace {
 
 // ── Cached markdown render. The ONE Element-returning helper kept in
-//    moha — strictly because cross-frame cache state lives in the
+//    agentty — strictly because cross-frame cache state lives in the
 //    StreamingMarkdown widget instance, which we keep alive across
 //    frames so its block cache survives.
 maya::Element cached_markdown_for(const Message& msg, const Model& m) {
@@ -109,7 +109,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m,
                                bool continuation) {
     // Settled-turn cache.  A message that has a successor in the messages
-    // vector is by construction fully resolved — moha only appends a new
+    // vector is by construction fully resolved — agentty only appends a new
     // message once the current turn's text is final, all tools terminal,
     // and any permission prompt resolved.  Reusing the prior frame's
     // built Config skips per-frame rebuilding of the turn header, the
@@ -182,7 +182,7 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // every frame. The build itself laid out the agent_timeline + every
     // tool card + markdown body + permission rows into the inline-frame
     // glyph stream — that's the dominant cost on a long thread, NOT
-    // building the Config. Settled (`msg_idx + 1 < total`) means moha
+    // building the Config. Settled (`msg_idx + 1 < total`) means agentty
     // has appended a successor message, which by construction means the
     // turn fully resolved (text final, all tools terminal, any
     // permission prompt closed). The Element is therefore safe to
@@ -207,4 +207,4 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     return {std::move(built), continuation};
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

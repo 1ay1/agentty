@@ -1,4 +1,4 @@
-#include "moha/runtime/symbol_palette.hpp"
+#include "agentty/runtime/symbol_palette.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -9,9 +9,9 @@
 #include <string_view>
 #include <system_error>
 
-#include "moha/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 
-namespace moha {
+namespace agentty {
 
 namespace {
 namespace fs = std::filesystem;
@@ -173,4 +173,4 @@ filter_symbols(const std::vector<SymbolEntry>& entries, std::string_view query) 
     return matches;
 }
 
-} // namespace moha
+} // namespace agentty

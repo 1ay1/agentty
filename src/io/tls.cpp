@@ -1,4 +1,4 @@
-#include "moha/io/tls.hpp"
+#include "agentty/io/tls.hpp"
 
 #include <atomic>
 #include <cstdlib>
@@ -31,7 +31,7 @@
 #  endif
 #endif
 
-namespace moha::tls {
+namespace agentty::tls {
 
 namespace {
 
@@ -147,7 +147,7 @@ bool load_system_roots(SSL_CTX* ctx) {
 
 // --------------------------------------------------------------------------
 // One-time SSL_CTX build. Two contexts: one with peer verification, one
-// insecure (for MOHA_INSECURE=1 / --insecure).  Lazy-initialized under a
+// insecure (for AGENTTY_INSECURE=1 / --insecure).  Lazy-initialized under a
 // mutex; the first caller pays the setup cost, the rest see the cached ptr.
 // Leaked at process exit — SSL_CTX_free would race any in-flight SSL that
 // outlives main's cleanup.
@@ -219,33 +219,33 @@ SharedCtx& shared() {
     static std::once_flag once;
     std::call_once(once, [] {
         s->verifying = build_ctx(false);
-        // Env gate: MOHA_INSECURE=1 collapses both handles into the insecure
+        // Env gate: AGENTTY_INSECURE=1 collapses both handles into the insecure
         // one, so a code path that asks for the "verified" handle still
         // follows the user's explicit opt-out.
         //
-        // ── MOHA_INSECURE lifecycle (read this before exporting the var) ──
+        // ── AGENTTY_INSECURE lifecycle (read this before exporting the var) ──
         //
         // The env var is sampled exactly ONCE — here, on the first call to
         // shared() — and cached for the rest of the process via call_once.
         // Effects of that:
         //
-        //   • In a CLI run (the only intended use): set MOHA_INSECURE=1
-        //     before launching `moha`, the first TLS handshake reads it
+        //   • In a CLI run (the only intended use): set AGENTTY_INSECURE=1
+        //     before launching `agentty`, the first TLS handshake reads it
         //     and both contexts become insecure. Working as intended.
         //
-        //   • A mid-process setenv("MOHA_INSECURE", "1", 1) is silently
+        //   • A mid-process setenv("AGENTTY_INSECURE", "1", 1) is silently
         //     ignored — we already built the verifying context. Same for
         //     unsetenv(). This breaks the obvious test pattern:
         //
-        //       setenv("MOHA_INSECURE", "1", 1);
+        //       setenv("AGENTTY_INSECURE", "1", 1);
         //       run_request();           // verifies (already cached)
-        //       unsetenv("MOHA_INSECURE");
+        //       unsetenv("AGENTTY_INSECURE");
         //
         //     If you need that flow, set the var BEFORE the first http
         //     request of the process — typically in main() or a test
         //     fixture's SetUp(), not between assertions.
         //
-        //   • If moha is ever embedded as a library, callers can't
+        //   • If agentty is ever embedded as a library, callers can't
         //     change verification posture after the first SSL handshake
         //     short of restarting the process. Document this at the
         //     embedding seam if you go that route.
@@ -255,7 +255,7 @@ SharedCtx& shared() {
         // verifies the trust store) and connections already established
         // against the cached pointer wouldn't migrate to a freshly-built
         // one anyway, so a "live" knob would lie about its scope.
-        if (const char* e = std::getenv("MOHA_INSECURE"); e && *e == '1') {
+        if (const char* e = std::getenv("AGENTTY_INSECURE"); e && *e == '1') {
             s->insecure  = build_ctx(true);
             s->verifying = s->insecure;
         } else {
@@ -325,4 +325,4 @@ std::string last_error(SSL* ssl) {
     return out;
 }
 
-} // namespace moha::tls
+} // namespace agentty::tls

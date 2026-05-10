@@ -1,17 +1,17 @@
-// moha — terminal Claude Code clone built on maya.
+// agentty — terminal Claude Code clone built on maya.
 //
 // main.cpp is wiring only:
 //   1. parse argv (subcommands + options)
 //   2. resolve credentials
 //   3. construct the Provider + Store satisfying the io concepts
 //   4. install the Deps so update/cmd_factory can reach them
-//   5. hand MohaApp to maya's runtime
+//   5. hand AgenttyApp to maya's runtime
 
 // Route global operator new/delete through mimalloc. Must live in exactly
 // one TU of the final executable — main.cpp is the natural home. Enabled
-// by -DMOHA_USE_MIMALLOC=ON at configure time (default ON, silently off if
+// by -DAGENTTY_USE_MIMALLOC=ON at configure time (default ON, silently off if
 // the package isn't available).
-#if defined(MOHA_USE_MIMALLOC)
+#if defined(AGENTTY_USE_MIMALLOC)
 #  include <mimalloc-new-delete.h>
 #endif
 
@@ -39,28 +39,28 @@
 
 #include <maya/maya.hpp>
 
-#include "moha/runtime/airgap.hpp"
-#include "moha/runtime/app/deps.hpp"
-#include "moha/runtime/app/program.hpp"
-#include "moha/auth/auth.hpp"
-#include "moha/io/persistence.hpp"
-#include "moha/provider/anthropic/provider.hpp"
-#include "moha/tool/util/fs_helpers.hpp"
-#include "moha/tool/util/sandbox.hpp"
+#include "agentty/runtime/airgap.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/program.hpp"
+#include "agentty/auth/auth.hpp"
+#include "agentty/io/persistence.hpp"
+#include "agentty/provider/anthropic/provider.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/sandbox.hpp"
 
 namespace {
 
 // Compiled-in project version — populated by CMakeLists.txt's
-// target_compile_definitions(moha PRIVATE MOHA_VERSION=...). The fallback
+// target_compile_definitions(agentty PRIVATE AGENTTY_VERSION=...). The fallback
 // "0.0.0-dev" is only reached on a build that bypasses our CMake (e.g.
 // hand-invoked compiler), which keeps the binary self-describing instead
 // of a hard #error.
-#ifndef MOHA_VERSION
-#define MOHA_VERSION "0.0.0-dev"
+#ifndef AGENTTY_VERSION
+#define AGENTTY_VERSION "0.0.0-dev"
 #endif
 
 void print_version() {
-    std::printf("agentty %s\n", MOHA_VERSION);
+    std::printf("agentty %s\n", AGENTTY_VERSION);
 }
 
 void print_usage() {
@@ -90,7 +90,7 @@ void print_usage() {
         "  -V, --version       Print the agentty version and exit.\n"
         "  -h, --help          Show this message.\n"
         "\n",
-        MOHA_VERSION);
+        AGENTTY_VERSION);
 }
 
 struct Args {
@@ -131,7 +131,7 @@ Args parse_args(int argc, char** argv) {
         } else if (a == "-V" || a == "--version" || a == "version") {
             // Standalone version subcommand / flag. Treated as a
             // top-level dispatch path so it short-circuits the rest
-            // of argparse — `moha --version -k garbage` shouldn't
+            // of argparse — `agentty --version -k garbage` shouldn't
             // complain about the unused -k.
             out.subcommand = "version";
             return out;
@@ -171,7 +171,7 @@ struct Win32PerfTuning {
 #endif
 
 int main(int argc, char** argv) {
-    using namespace moha;
+    using namespace agentty;
 
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
         std::error_code ec;
         if (!std::filesystem::is_directory(req, ec)) {
             std::fprintf(stderr,
-                "moha: --workspace path is not a directory: %s\n",
+                "agentty: --workspace path is not a directory: %s\n",
                 args.cli_workspace.c_str());
             return 2;
         }
@@ -237,20 +237,20 @@ int main(int argc, char** argv) {
               || args.cli_sandbox.empty())   mode = tools::util::sandbox::Mode::Auto;
         else {
             std::fprintf(stderr,
-                "moha: --sandbox must be auto, on, or off (got '%s')\n",
+                "agentty: --sandbox must be auto, on, or off (got '%s')\n",
                 args.cli_sandbox.c_str());
             return 2;
         }
         bool ok = tools::util::sandbox::init(mode);
         if (!ok) {
             std::fprintf(stderr,
-                "moha: --sandbox=on but no backend available. %s\n",
+                "agentty: --sandbox=on but no backend available. %s\n",
                 tools::util::sandbox::describe_state().c_str());
             return 2;
         }
         // Status line so the user knows what they got. Stdout is fine —
         // maya runs after this returns, no clobbering.
-        std::fprintf(stderr, "moha: %s\n",
+        std::fprintf(stderr, "agentty: %s\n",
                      tools::util::sandbox::describe_state().c_str());
     }
 
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
 
     // fps = 0 → pure event-driven: maya only renders on Msg / input / timer.
     // The spinner-tick subscription (gated on stream.active) supplies frames
-    // while streaming; idle moha costs zero CPU.
-    maya::run<app::MohaApp>({.title = "moha", .fps = 0, .mode = maya::Mode::Inline});
+    // while streaming; idle agentty costs zero CPU.
+    maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0, .mode = maya::Mode::Inline});
     return 0;
 }

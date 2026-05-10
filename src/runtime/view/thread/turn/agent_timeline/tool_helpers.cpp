@@ -1,4 +1,4 @@
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -7,15 +7,15 @@
 #include <string_view>
 #include <system_error>
 
-#include "moha/runtime/view/palette.hpp"
-#include "moha/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 // ── Display ─────────────────────────────────────────────────────────────
 
 // Pretty title-case for the tool name shown as the timeline event label.
-// Maps moha's lowercase canonical names to brand TitleCase forms.
+// Maps agentty's lowercase canonical names to brand TitleCase forms.
 std::string tool_display_name(const std::string& n) {
     if (n == "read")            return "Read";
     if (n == "write")           return "Write";
@@ -302,4 +302,4 @@ std::string tool_timeline_detail(const ToolUse& tc) {
     return safe_arg(tc.args, "display_description");
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

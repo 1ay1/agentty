@@ -1,13 +1,13 @@
-#include "moha/runtime/composer_attachment.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
 
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
 
-#include "moha/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 
-namespace moha::attachment {
+namespace agentty::attachment {
 
 std::string make_placeholder(std::size_t idx) {
     // \x01ATT:N\x01 — see header for layout rationale.
@@ -304,4 +304,4 @@ std::string chip_label(const Attachment& a) {
     return buf;
 }
 
-} // namespace moha::attachment
+} // namespace agentty::attachment

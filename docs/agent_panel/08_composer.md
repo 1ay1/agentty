@@ -3,7 +3,7 @@
 The composer is the bottom-of-panel input region. It's where the user
 writes new messages, attaches context (files, fetches, threads),
 toggles modes, and sends. In Zed this is `MessageEditor`
-(`crates/agent_ui/src/message_editor.rs`); in moha this is the only
+(`crates/agent_ui/src/message_editor.rs`); in agentty this is the only
 *interactive* widget on screen most of the time, so it carries a lot
 of weight.
 
@@ -42,7 +42,7 @@ The container:
 ```cpp
 Element views::composer(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     auto border_col = m.composer.focused
         ? tokens::border::focus
@@ -339,7 +339,7 @@ in red — the model will likely refuse, the user should see why.
 
 The budget value comes from per-model metadata. Default: 200k for
 Claude 4.x, 128k for GPT-4. Centralize in
-`include/moha/model_meta.hpp`.
+`include/agentty/model_meta.hpp`.
 
 ## 6. Slash commands and `@` mentions
 
@@ -578,7 +578,7 @@ The user's original message text isn't mutated until they press
 Recommended struct:
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 struct ComposerState {
     std::string                       text;
@@ -615,7 +615,7 @@ struct ContextRef {
     std::string payload;      // resolved content (file body, etc.)
 };
 
-} // namespace moha
+} // namespace agentty
 ```
 
 ### Persisting drafts

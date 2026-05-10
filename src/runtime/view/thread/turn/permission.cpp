@@ -1,6 +1,6 @@
-#include "moha/runtime/view/thread/turn/permission.hpp"
+#include "agentty/runtime/view/thread/turn/permission.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::Permission::Config inline_permission_config(const PendingPermission& pp,
                                                   const ToolUse& tc) {
@@ -31,4 +31,4 @@ maya::Permission::Config inline_permission_config(const PendingPermission& pp,
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

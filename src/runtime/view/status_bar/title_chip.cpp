@@ -1,9 +1,9 @@
-#include "moha/runtime/view/status_bar/title_chip.hpp"
+#include "agentty/runtime/view/status_bar/title_chip.hpp"
 
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::TitleChip::Config title_chip_config(const Model& m) {
     maya::TitleChip::Config cfg;
@@ -14,4 +14,4 @@ maya::TitleChip::Config title_chip_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

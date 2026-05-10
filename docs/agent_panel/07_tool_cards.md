@@ -113,7 +113,7 @@ Notes:
 - Each per-tool widget has its own status enum (`BashStatus`,
   `EditStatus`, `ReadStatus`, etc.) — the *meanings* match this table
   but the names differ slightly (`Success` vs `Completed` vs `Done`).
-  When a moha tool callback resolves, **map** to the typed enum. Don't
+  When a agentty tool callback resolves, **map** to the typed enum. Don't
   invent a 7th status.
 - The `Cancelled` status is not yet present in any of maya's
   per-tool widgets. For now, fold cancellation into `Failed` with a
@@ -129,7 +129,7 @@ Notes:
 Solid Round border + red color reads as "this is a normal card, just
 red." Dashed border signals "this didn't complete the way it was
 supposed to." The eye picks it up faster. Zed uses solid borders
-throughout; the dashed variant is a moha addition that survives the
+throughout; the dashed variant is a agentty addition that survives the
 loss of color (e.g., on accessibility-mode terminals that drop to
 mono). Keep it.
 
@@ -155,7 +155,7 @@ disclosure cue is the absence/presence of the `┈┈┈` separator line
 | `think` (extended thinking) | **Expanded** when streaming, collapsed once done | Reading the model think feels live |
 | `agent` (subagent invocation) | Collapsed | Disclosed body shows nested cards |
 
-This isn't enforced by the widgets — the *caller* (moha) decides the
+This isn't enforced by the widgets — the *caller* (agentty) decides the
 initial `expanded` flag based on tool kind + outcome. Centralize the
 rule:
 
@@ -179,7 +179,7 @@ re-renders.
 ### Indicator
 
 Zed adds a subtle `▾` / `▸` chevron at the right end of the header. We
-**don't** in moha — the `┈┈┈` separator + body presence is the cue.
+**don't** in agentty — the `┈┈┈` separator + body presence is the cue.
 Adding a chevron crowds the header and forces a right-align computation
 that's awkward in our DSL. Skip it.
 
@@ -201,7 +201,7 @@ back to `ToolCall` (generic) only for unknown tools.
 │ src/main.cpp                            0.3s   │
 │ ┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈   │
 │  1: #include <iostream>                        │
-│  2: #include "moha/agent.hpp"                  │
+│  2: #include "agentty/agent.hpp"                  │
 │ …                                              │
 │ 42: int main() {                               │
 ╰────────────────────────────────────────────────╯
@@ -453,7 +453,7 @@ Note: this overlaps with the "thinking block" disclosure described in
 | | Thinking block (§ 06.5) | Think tool card |
 |---|---|---|
 | Source | Anthropic `thinking` content type | A tool named `think` (model-invoked) |
-| Today | Not differentiated in moha (mixed into text) | Doesn't exist as a separate tool |
+| Today | Not differentiated in agentty (mixed into text) | Doesn't exist as a separate tool |
 | When to use | Extended thinking output | If the model uses an explicit `think` tool |
 
 Until either is added, this section is forward-looking. Skip both
@@ -492,7 +492,7 @@ just compose `views::message_stream(subagent_model)` inside this card.
 Subagent message bubbles get the **dashed** border + left rule
 treatment described in `06_message_stream.md § 4 (subagent variant)`.
 
-moha doesn't support subagents today — defer this implementation.
+agentty doesn't support subagents today — defer this implementation.
 Track in `13_rebuild_playbook.md`.
 
 ### 5.9 Other / generic
@@ -565,7 +565,7 @@ The render loop walks `msg.tool_calls : std::vector<ToolUse>` and
 dispatches per-tool. Recommended `ToolUse` shape:
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 enum class ToolKind {
     Read, Edit, Write, Bash, Search, Fetch, Think, Agent, Other,
@@ -595,7 +595,7 @@ struct ToolUse {
     std::optional<PendingPermission> pending_permission;
 };
 
-} // namespace moha
+} // namespace agentty
 ```
 
 The render dispatch:

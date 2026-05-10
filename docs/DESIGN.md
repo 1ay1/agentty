@@ -1,6 +1,6 @@
-# moha — the one idea
+# agentty — the one idea
 
-moha is a type-theoretic agent. Every value is typed, every state machine is
+agentty is a type-theoretic agent. Every value is typed, every state machine is
 a sum type, every fallible operation is `std::expected<T, E>`, every
 cross-cutting concern (effects, identity, capabilities) is a type-level
 fact. The **dynamism boundary** — JSON, network, terminal IO — is one thin
@@ -93,8 +93,8 @@ permission` (one permission decider), `update` (one reducer with one
 ### 5. Layered separation. Domain types are pure values. I/O lives behind concepts.
 
 ```
-include/moha/domain/      ← pure value types only. No I/O. No UI. No threads.
-include/moha/{io,provider,tool}/ ← satisfies a concept; injected via deps.
+include/agentty/domain/      ← pure value types only. No I/O. No UI. No threads.
+include/agentty/{io,provider,tool}/ ← satisfies a concept; injected via deps.
 src/runtime/              ← Elm loop. update is pure. Cmd carries the IO.
 maya/                     ← presentation. Consumes a Model, emits Msg.
 ```
@@ -145,19 +145,19 @@ that gate the validity of other fields.
 
 ## Patterns by layer
 
-### Domain (`include/moha/domain/`)
+### Domain (`include/agentty/domain/`)
 - Pure value types. `std::variant` for state, `std::expected` for fallibility.
 - `to_string(X)` for every enum/variant — used by serialization and rendering.
 - Strong IDs via `Id<Tag>`.
 - No I/O. No threads. No `static` mutable state.
 
-### IO + Provider (`include/moha/io/`, `include/moha/provider/`)
+### IO + Provider (`include/agentty/io/`, `include/agentty/provider/`)
 - Satisfies a concept; injected via `deps()` so tests inject fakes.
 - All public methods return `std::expected<T, FooError>` with a typed `Kind`.
 - Catch all exceptions at the boundary; convert to typed.
 - Raw JSON / strings stay inside; typed values come out.
 
-### Tools (`include/moha/tool/`, `src/tool/tools/*`)
+### Tools (`include/agentty/tool/`, `src/tool/tools/*`)
 - Each tool: typed `Args` struct + `parse_args(json) → expected<Args, ToolError>`
   + `run(Args) → ExecResult`. Glued together by `util::adapt<Args>`.
 - Declares its `effects` — never its own permission lambda.
@@ -185,10 +185,10 @@ that gate the validity of other fields.
 
 The fastest path to reading the codebase, top to bottom:
 
-1. `include/moha/domain/` — the value types. Start here. `conversation.hpp`
+1. `include/agentty/domain/` — the value types. Start here. `conversation.hpp`
    for the chat model, `session.hpp` for streaming state, `profile.hpp` for
    permission tier.
-2. `include/moha/runtime/msg.hpp` — every event the runtime can react to,
+2. `include/agentty/runtime/msg.hpp` — every event the runtime can react to,
    as a closed variant. This is the menu.
 3. `src/runtime/app/update.cpp` — the reducer. Top-level `std::visit` with
    one arm per Msg. Heavy paths jump to `update/{stream,modal,tool}.cpp`.
@@ -196,7 +196,7 @@ The fastest path to reading the codebase, top to bottom:
    `launch_stream`, `run_tool`, `kick_pending_tools`.
 5. `src/runtime/view/view.cpp` — top-level view composition. Then
    `thread.cpp`, `composer.cpp`, `statusbar.cpp` for the panels.
-6. `include/moha/tool/{effects,policy}.hpp` — the capability + policy
+6. `include/agentty/tool/{effects,policy}.hpp` — the capability + policy
    layer. Read this before reading any individual tool.
 7. `src/tool/tools/*` — tools, all built from the same template.
 
@@ -205,7 +205,7 @@ If anything you read above doesn't match this document, the document wins
 
 ---
 
-## Worked examples — "what does this look like in moha?"
+## Worked examples — "what does this look like in agentty?"
 
 ### Typed errors at the dynamism boundary
 
@@ -300,11 +300,11 @@ looks like in this codebase. Match them when adding new code.
 ## Compile-time proofs ("if it builds, it's right")
 
 C++26's `consteval` + `static_assert` lets us turn invariants into
-build-time proofs. Where moha can prove a property at compile time, it
+build-time proofs. Where agentty can prove a property at compile time, it
 *does* — and any future change that would break the property breaks the
 build instead of producing a wrong answer at runtime.
 
-### Trust matrix (`include/moha/tool/policy.hpp`)
+### Trust matrix (`include/agentty/tool/policy.hpp`)
 
 The permission policy `(EffectSet × Profile) → Decision` is a `constexpr`
 function, so each cell of the trust matrix can be `static_assert`-ed.
@@ -324,7 +324,7 @@ contributor changing the policy gets a **build error** at the cell that
 broke. There is no test runner, no fixture file — the proof lives next
 to the function it checks.
 
-### HTTP error → ErrorClass mapping (`include/moha/provider/error_class.hpp`)
+### HTTP error → ErrorClass mapping (`include/agentty/provider/error_class.hpp`)
 
 Same shape, applied to the retry policy:
 
@@ -339,7 +339,7 @@ If someone reorders the switch arms in `classify` or adds a new
 HttpErrorKind without updating it, the build breaks before any HTTP
 request can take a wrong branch.
 
-### Tool catalog (`include/moha/tool/spec.hpp`)
+### Tool catalog (`include/agentty/tool/spec.hpp`)
 
 The catalog of every tool — name, effects, FGTS opt-in — is a
 `constexpr std::array`, and the invariants are `consteval` predicates:
@@ -365,7 +365,7 @@ translation unit. The catalog is *the* source of truth for capabilities;
 no factory can override its declared effects, no factory can register
 itself under a name not in the catalog.
 
-### Refinement types (`include/moha/domain/refined.hpp`)
+### Refinement types (`include/agentty/domain/refined.hpp`)
 
 `Refined<T, Predicate>` carries a type-level proof that some predicate
 holds on its inner value. Constructors are private; the only way to

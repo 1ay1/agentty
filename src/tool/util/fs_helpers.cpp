@@ -1,4 +1,4 @@
-#include "moha/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -29,7 +29,7 @@
 #  include <sys/stat.h>
 #endif
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 namespace {
 // Translate the most common filesystem errno values to a sentence the
@@ -141,7 +141,7 @@ std::string write_file(const fs::path& p, std::string_view content) {
     const unsigned long pid = static_cast<unsigned long>(::getpid());
 #endif
     fs::path tmp = p;
-    tmp += fs::path(".moha-tmp-" + std::to_string(pid) + "-" + std::to_string(n));
+    tmp += fs::path(".agentty-tmp-" + std::to_string(pid) + "-" + std::to_string(n));
 
     // Preserve existing mode on POSIX so the rename doesn't regress perms.
 #ifndef _WIN32
@@ -344,7 +344,7 @@ make_workspace_path(std::string_view raw, std::string_view tool_name) {
             "tool '" + std::string{tool_name} + "' refused: '"
             + p.string() + "' is outside the workspace root '"
             + workspace_root().string() + "'. "
-            "Restart moha in a parent directory or pass "
+            "Restart agentty in a parent directory or pass "
             "--workspace <dir> to widen the scope."));
     }
     return p;
@@ -372,4 +372,4 @@ bool is_binary_file(const fs::path& p) {
     return false;
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util

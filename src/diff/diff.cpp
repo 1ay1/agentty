@@ -1,11 +1,11 @@
-#include "moha/diff/diff.hpp"
+#include "agentty/diff/diff.hpp"
 
 #include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
 
-namespace moha::diff {
+namespace agentty::diff {
 
 namespace {
 std::vector<std::string> split_lines(const std::string& s) {
@@ -177,4 +177,4 @@ std::string apply_accepted(const FileChange& c) {
     return joined;
 }
 
-} // namespace moha::diff
+} // namespace agentty::diff

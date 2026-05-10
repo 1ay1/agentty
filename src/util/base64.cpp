@@ -1,10 +1,10 @@
-#include "moha/util/base64.hpp"
+#include "agentty/util/base64.hpp"
 
 #include <array>
 #include <cctype>
 #include <cstdint>
 
-namespace moha::util {
+namespace agentty::util {
 
 namespace {
 
@@ -76,4 +76,4 @@ std::string base64_decode(std::string_view encoded) {
     return out;
 }
 
-} // namespace moha::util
+} // namespace agentty::util

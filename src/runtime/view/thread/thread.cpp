@@ -1,9 +1,9 @@
-#include "moha/runtime/view/thread/thread.hpp"
+#include "agentty/runtime/view/thread/thread.hpp"
 
-#include "moha/runtime/view/thread/conversation.hpp"
-#include "moha/runtime/view/thread/welcome_screen.hpp"
+#include "agentty/runtime/view/thread/conversation.hpp"
+#include "agentty/runtime/view/thread/welcome_screen.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::Thread::Config thread_config(const Model& m) {
     maya::Thread::Config cfg;
@@ -16,4 +16,4 @@ maya::Thread::Config thread_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

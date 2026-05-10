@@ -6,18 +6,18 @@
 // loaded later, at submit time (modal.cpp), so an edited file is read
 // with its latest contents.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/composer_attachment.hpp"
-#include "moha/runtime/mention_palette.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/mention_palette.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 using maya::overload;
 
@@ -98,4 +98,4 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
     }, mm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

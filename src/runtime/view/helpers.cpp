@@ -1,4 +1,4 @@
-#include "moha/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 
 #include <concepts>
 #include <cstdint>
@@ -6,11 +6,11 @@
 #include <ctime>
 #include <variant>
 
-#include "moha/domain/catalog.hpp"
-#include "moha/runtime/composer_attachment.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/domain/catalog.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::Color profile_color(Profile p) noexcept {
     switch (p) {
@@ -195,4 +195,4 @@ int chip_next(std::string_view s, int byte_pos) noexcept {
     return utf8_next(s, byte_pos);
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

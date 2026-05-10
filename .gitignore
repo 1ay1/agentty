@@ -11,3 +11,7 @@ compile_commands.json
 .DS_Store
 .env
 credentials.json
+
+# Release artifacts (uploaded to GitHub releases, not committed)
+agentty-linux-*
+SHA256SUMS

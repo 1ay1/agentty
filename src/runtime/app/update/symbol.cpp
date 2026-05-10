@@ -3,18 +3,18 @@
 // candidate type (SymbolEntry vs string) and the chip kind appended on
 // select (Attachment::Symbol vs FileRef).
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/composer_attachment.hpp"
-#include "moha/runtime/symbol_palette.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/symbol_palette.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 using maya::overload;
 
@@ -91,4 +91,4 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
     }, sm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

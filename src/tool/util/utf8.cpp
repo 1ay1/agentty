@@ -1,4 +1,4 @@
-#include "moha/tool/util/utf8.hpp"
+#include "agentty/tool/util/utf8.hpp"
 
 #include <cstdint>
 
@@ -12,7 +12,7 @@
 #  include <windows.h>
 #endif
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 bool is_valid_utf8(std::string_view s) noexcept {
     size_t i = 0;
@@ -117,4 +117,4 @@ std::string to_valid_utf8(std::string s) {
     return sanitize_utf8(s);
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util

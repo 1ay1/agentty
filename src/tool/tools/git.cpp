@@ -1,9 +1,9 @@
-#include "moha/tool/spec.hpp"
-#include "moha/tool/tools.hpp"
-#include "moha/tool/util/arg_reader.hpp"
-#include "moha/tool/util/fs_helpers.hpp"
-#include "moha/tool/util/subprocess.hpp"
-#include "moha/tool/util/tool_args.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/tools.hpp"
+#include "agentty/tool/util/arg_reader.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/subprocess.hpp"
+#include "agentty/tool/util/tool_args.hpp"
 
 #include <string>
 #include <utility>
@@ -11,7 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace moha::tools {
+namespace agentty::tools {
 
 using json = nlohmann::json;
 
@@ -274,4 +274,4 @@ ToolDef tool_git_commit() {
     return t;
 }
 
-} // namespace moha::tools
+} // namespace agentty::tools

@@ -1,10 +1,10 @@
-#include "moha/tool/spec.hpp"
-#include "moha/tool/tools.hpp"
-#include "moha/tool/util/arg_reader.hpp"
-#include "moha/tool/util/fs_helpers.hpp"
-#include "moha/tool/util/fuzzy_match.hpp"
-#include "moha/tool/util/tool_args.hpp"
-#include "moha/diff/diff.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/tools.hpp"
+#include "agentty/tool/util/arg_reader.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/fuzzy_match.hpp"
+#include "agentty/tool/util/tool_args.hpp"
+#include "agentty/diff/diff.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -16,7 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace moha::tools {
+namespace agentty::tools {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -38,7 +38,7 @@ struct EditArgs {
 // Accepts three shapes, in preference order:
 //   1. `edits: [{old_text, new_text, replace_all?}, ...]`   (new canonical)
 //   2. `old_text` / `new_text` at top level    (Zed's legacy single-edit)
-//   3. `old_string` / `new_string` at top level (moha's original schema)
+//   3. `old_string` / `new_string` at top level (agentty's original schema)
 // Missing / wrong-typed fields are tolerated where recoverable — we only
 // return an error when there is genuinely nothing to do.
 std::expected<EditArgs, ToolError> parse_edit_args(const json& j) {
@@ -451,4 +451,4 @@ ToolDef tool_edit() {
     return t;
 }
 
-} // namespace moha::tools
+} // namespace agentty::tools

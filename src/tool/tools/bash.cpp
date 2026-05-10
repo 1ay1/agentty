@@ -1,12 +1,12 @@
-#include "moha/domain/refined.hpp"
-#include "moha/tool/spec.hpp"
-#include "moha/tool/tools.hpp"
-#include "moha/tool/util/arg_reader.hpp"
-#include "moha/tool/util/bash_validate.hpp"
-#include "moha/tool/util/fs_helpers.hpp"
-#include "moha/tool/util/sandbox.hpp"
-#include "moha/tool/util/subprocess.hpp"
-#include "moha/tool/util/tool_args.hpp"
+#include "agentty/domain/refined.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/tools.hpp"
+#include "agentty/tool/util/arg_reader.hpp"
+#include "agentty/tool/util/bash_validate.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/util/subprocess.hpp"
+#include "agentty/tool/util/tool_args.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -16,7 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace moha::tools {
+namespace agentty::tools {
 
 using json = nlohmann::json;
 
@@ -32,7 +32,7 @@ namespace {
 //      (canvas.cpp:222 skips `< 0x20`) but the *parameter tail* of each
 //      sequence (`[?25l`, `[2J`, `[38;2;255;180;26m`, …) becomes giant
 //      blobs of literal text — a 10×80 RGB burst is ~12 KB *post*-strip.
-//   2. That blob lands in moha's tool body preview as a TextElement and
+//   2. That blob lands in agentty's tool body preview as a TextElement and
 //      blows up the canvas height in a single frame.  compose_inline_frame's
 //      partial-rewrite path can't handle frame-to-frame growth larger
 //      than `term_h - composer_height` cleanly — the symptom is whole
@@ -312,4 +312,4 @@ ToolDef tool_bash() {
     return t;
 }
 
-} // namespace moha::tools
+} // namespace agentty::tools

@@ -1,7 +1,7 @@
 # 01 — Zed Agent Panel: Anatomy
 
 This is the visual + behavioral spec of Zed's agent panel. It is the
-**source of truth** for what moha is trying to be. Every doc downstream of
+**source of truth** for what agentty is trying to be. Every doc downstream of
 this one references the regions and elements named here.
 
 All file refs are to `/Users/ayush/projects/zed/crates/agent_ui/src/`.
@@ -217,7 +217,7 @@ fn tool_card_border_color(&self, cx) -> Hsla {
 **Translation rule**: in maya, normal cards use `BorderStyle::Round`;
 failed/cancelled cards use `BorderStyle::Dashed`. Both colors come from
 the same dim-ish border palette but the **failed card border tints
-toward red** in moha (the original work in `bash_tool.hpp` etc. uses
+toward red** in agentty (the original work in `bash_tool.hpp` etc. uses
 `Color::rgb(120, 60, 65)`).
 
 ### 4c. Card header
@@ -533,9 +533,9 @@ TUI substitutes (terminals don't always pass `Cmd`):
 - `Cmd+Shift+H` → `Ctrl+H`
 - etc.
 
-## 11. What this means for moha — the gap list
+## 11. What this means for agentty — the gap list
 
-Specific gaps the rebuild has to close (cross-referenced from the moha
+Specific gaps the rebuild has to close (cross-referenced from the agentty
 audit):
 
 1. **Modal overlays** for model picker / thread list / command palette /
@@ -549,7 +549,7 @@ audit):
 4. **Composer** is a bare bordered input — no mention chips, no
    send/stop button, no token meter, no Fast/Think toggles.
 5. **Permission footer** is rendered (good), but the granularity dropdown
-   is missing — moha only offers `Y / N / A` with one auto-derived
+   is missing — agentty only offers `Y / N / A` with one auto-derived
    pattern.
 6. **No agent selector** in chrome.
 7. **No checkpoint restore** — the divider renders but the action is a

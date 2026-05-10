@@ -5,7 +5,7 @@ here for color names, cell counts, and typographic substitutes.
 
 ## 1. Color philosophy
 
-**moha does not have a theming system.** No `tokens` namespace, no
+**agentty does not have a theming system.** No `tokens` namespace, no
 `Theme` struct, no RGB literals scattered through the code. The
 terminal's user-chosen palette (iTerm2, Ghostty, Alacritty, etc.) is
 the source of truth for what every color *looks like*. Our job is to
@@ -14,7 +14,7 @@ and let the user's terminal decide the actual hue.
 
 Why: every past attempt at hard-coded RGB has fought the user's terminal
 theme. A user on a Solarized Light terminal expects pale ANSI red, not
-moha's idea of red-pink. Forcing 24-bit RGB makes moha look broken
+agentty's idea of red-pink. Forcing 24-bit RGB makes agentty look broken
 inside their own setup.
 
 ### The rules
@@ -43,9 +43,9 @@ inside their own setup.
    bg is part of the signal (and even then, prefer leaving bg unset
    and using `with_inverse()` for emphasis).
 
-6. **No `Color::rgb(...)` or `Color::hex(...)` in moha code.** Period.
+6. **No `Color::rgb(...)` or `Color::hex(...)` in agentty code.** Period.
    The `Color` class still has those constructors — they exist for
-   maya users who want them — but moha does not use them.
+   maya users who want them — but agentty does not use them.
 
 ## 2. The semantic mapping
 
@@ -70,7 +70,7 @@ helper that matches the *meaning*, not a hue you have in mind.
 If you reach for an ANSI color you don't see above (e.g.,
 `Color::white()`, `Color::black()`), stop and reconsider — those force
 specific hues that fight light-themed terminals. The seven helpers
-above plus their `bright_*` variants are what moha uses.
+above plus their `bright_*` variants are what agentty uses.
 
 ## 3. Tool card states (named-ANSI version)
 
@@ -277,7 +277,7 @@ render in *its* palette.
 
 After every significant style change:
 
-1. Build moha (`cmake --build build`) and run inside iTerm2, Ghostty,
+1. Build agentty (`cmake --build build`) and run inside iTerm2, Ghostty,
    Alacritty (truecolor terminals). Also try **Terminal.app classic**
    — it has the most restrictive color and modifier support, so
    anything that looks wrong there is a real issue.
@@ -285,7 +285,7 @@ After every significant style change:
    matching dark theme. Match the *layout and spacing*; the colors
    will differ by terminal palette and that's fine.
 3. **Switch your terminal theme** — try Solarized Light, Tomorrow
-   Night, Gruvbox. moha should look consistent inside each one. If
+   Night, Gruvbox. agentty should look consistent inside each one. If
    anything reads as "wrong color" relative to the terminal palette,
    there's a stray RGB literal somewhere.
 4. Check at three widths: 80 cols (laptop), 120 cols (typical), 200+

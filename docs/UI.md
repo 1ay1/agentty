@@ -1,13 +1,13 @@
-# moha UI — maya widget reference
+# agentty UI — maya widget reference
 
-What every widget in moha's UI accepts (Config schema) and what moha
+What every widget in agentty's UI accepts (Config schema) and what agentty
 fills in. Read this alongside [`RENDERING.md`](RENDERING.md), which
 walks the visual hierarchy and data flow.
 
 The architectural rule:
 
-> moha builds **widget Configs** from `Model` state. maya widgets own
-> all rendering. moha constructs no Elements.
+> agentty builds **widget Configs** from `Model` state. maya widgets own
+> all rendering. agentty constructs no Elements.
 
 Concrete: every `.cpp` under `src/runtime/view/` (except the legacy
 overlay files in §24) contains zero `Element{...}`, zero `dsl::v(...)`,
@@ -125,7 +125,7 @@ struct WelcomeScreen::Config {
 ```
 
 Widget owns: wordmark gradient (last row dim), centering, small-caps
-title in starters card, bottom hint row layout. moha owns the brand
+title in starters card, bottom hint row layout. agentty owns the brand
 content (the `m o h a` glyphs, tagline copy, starter prompts).
 
 Adapter: `thread/welcome_screen.cpp::welcome_screen_config(m)`.
@@ -195,8 +195,8 @@ Turn:
    `rail_color`.
 5. Optional `CheckpointDivider` above the rail.
 
-**Why typed slots:** moha can't construct `Element{TextElement{}}` for
-spacers anymore. Turn handles spacing itself; moha just lists the
+**Why typed slots:** agentty can't construct `Element{TextElement{}}` for
+spacers anymore. Turn handles spacing itself; agentty just lists the
 content slots in order.
 
 Adapter: `thread/turn/turn.cpp::turn_config(msg, idx, n, m)`.
@@ -410,7 +410,7 @@ Adapter: `composer.cpp::composer_config(m)`.
 Five fixed rows (always 5 — the status row never grows or shrinks, so
 the composer above never bobs vertically when a toast appears).
 StatusBar::Config nests **typed sub-widget Configs** so each
-sub-widget gets its own moha adapter:
+sub-widget gets its own agentty adapter:
 
 ```cpp
 struct StatusBar::Config {
@@ -631,7 +631,7 @@ Width-aware row of half-block glyphs in the phase color, dim. Reads as
 a "soft state shelf" rather than a hard line — the color carries
 app-state information without using extra chrome characters.
 
-No moha adapter — used internally by `StatusBar` (top + bottom
+No agentty adapter — used internally by `StatusBar` (top + bottom
 strips), driven by `StatusBar::Config::phase_color`.
 
 ---
@@ -677,7 +677,7 @@ widgetized, `pick_overlay` becomes a config-builder too.
 
 ---
 
-## 24. moha adapter functions
+## 24. agentty adapter functions
 
 Every per-widget adapter file under `src/runtime/view/` has the same
 shape: one function `Model → SomeWidget::Config`.
@@ -717,7 +717,7 @@ Top-level shared (no widget binding): `cache.cpp`, `helpers.cpp`,
 The single `Element`-returning function inside an adapter is
 `cached_markdown_for` (private to `thread/turn/turn.cpp`) — it exists
 because `maya::StreamingMarkdown` is stateful (per-block parse cache
-must persist across frames). moha holds the widget instance, calls
+must persist across frames). agentty holds the widget instance, calls
 `set_content()` per frame, and slots `instance.build()` into a Turn
 body via the typed `Element` variant.
 
@@ -758,14 +758,14 @@ src/runtime/view/
     └── shortcut_row.cpp              # ShortcutRow        (shortcut row)
 ```
 
-Headers mirror the same layout under `include/moha/runtime/view/`.
+Headers mirror the same layout under `include/agentty/runtime/view/`.
 
 ---
 
 ## 26. Caching
 
 ```cpp
-// include/moha/runtime/view/cache.hpp
+// include/agentty/runtime/view/cache.hpp
 struct MessageMdCache {
     std::shared_ptr<maya::Element>           finalized;
     std::shared_ptr<maya::StreamingMarkdown> streaming;
@@ -789,12 +789,12 @@ resets on `StreamStarted`).
 
 ## 27. The DSL (for widget authors and overlay modals)
 
-`maya/include/maya/dsl.hpp`. moha's main view files don't import it
+`maya/include/maya/dsl.hpp`. agentty's main view files don't import it
 anymore — they only build Configs. But:
 
 1. **Widget authors** use it inside `maya/include/maya/widget/*.hpp`
    when implementing `build()`.
-2. **Overlay modals** in moha (`login.cpp`, `pickers.cpp`,
+2. **Overlay modals** in agentty (`login.cpp`, `pickers.cpp`,
    `diff_review.cpp`) still construct elements via DSL; they predate
    the controller-only refactor and will be widgetized next.
 
@@ -845,4 +845,4 @@ Future widgets to absorb them:
 
 Once those land, every host file under `src/runtime/view/` is a pure
 data adapter and the `using namespace maya::dsl` line disappears from
-moha entirely.
+agentty entirely.

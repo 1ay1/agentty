@@ -1,6 +1,6 @@
-#include "moha/runtime/view/status_bar/model_badge.hpp"
+#include "agentty/runtime/view/status_bar/model_badge.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::ModelBadge model_badge_config(const Model& m) {
     maya::ModelBadge mb{m.d.model_id.value};
@@ -8,4 +8,4 @@ maya::ModelBadge model_badge_config(const Model& m) {
     return mb;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

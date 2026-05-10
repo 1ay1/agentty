@@ -1,8 +1,8 @@
-#include "moha/runtime/view/changes_strip.hpp"
+#include "agentty/runtime/view/changes_strip.hpp"
 
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::ChangesStrip::Config changes_strip_config(const Model& m) {
     maya::ChangesStrip::Config cfg;
@@ -26,4 +26,4 @@ maya::ChangesStrip::Config changes_strip_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

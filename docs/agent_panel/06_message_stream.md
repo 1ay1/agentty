@@ -43,7 +43,7 @@ Notes:
 
 - `gap_<1>` between message blocks gives the breathing room. Don't
   encode it as `padding(1, ...)` on each block — that double-counts.
-- `max_width(120)` + `align_self::Center` is the moha equivalent of
+- `max_width(120)` + `align_self::Center` is the agentty equivalent of
   Zed's `max_w(max_content_width).mx_auto()`.
 - Wrap the **column**, not the individual messages. This keeps the
   centering math local to one box.
@@ -72,7 +72,7 @@ Element views::empty_state(const Model& m) {
 
 A vertically + horizontally centered prompt. No "Send a message" button
 — Zed doesn't have one, the editor below is the action. The icon (◆) is
-moha's "agent identity" mark; pick a glyph that survives in 80-col
+agentty's "agent identity" mark; pick a glyph that survives in 80-col
 terminals.
 
 ## 3. Render dispatch per message
@@ -119,7 +119,7 @@ the assistant turn that produced them.
 ```cpp
 Element views::user_bubble(const Message& msg, const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     auto border_col = msg.editing
         ? tokens::border::focus
@@ -166,7 +166,7 @@ Behaviors:
 
 ### Subagent message variant
 
-When a message is from a subagent (which moha may not have today, but
+When a message is from a subagent (which agentty may not have today, but
 the data model can carry an `agent_id` field on `Message` to mark it),
 the bubble:
 
@@ -175,12 +175,12 @@ the bubble:
 - Indent: `padding(0, 0, 0, 4)` left padding, plus a single-cell wide
   vertical line on the left at `border::dim` color
 
-For now, skip the subagent variant. Add it if/when moha supports
+For now, skip the subagent variant. Add it if/when agentty supports
 multi-agent threads.
 
 ## 5. Assistant chunks
 
-The assistant message in moha's data model is a single entity with
+The assistant message in agentty's data model is a single entity with
 `text` + `tool_calls`. In Zed it's split into "blocks" by the model
 output (text → tool → text → tool → text). Render the same shape.
 
@@ -275,7 +275,7 @@ Element views::thinking_block(const ThinkingChunk& th, const Model& m) {
 }
 ```
 
-Today, the moha data model has no `ThinkingChunk` — Claude's `thinking`
+Today, the agentty data model has no `ThinkingChunk` — Claude's `thinking`
 content arrives in `StreamTextDelta` undifferentiated. Adding a
 distinct streaming type is a model-side change (anthropic.cpp). Track
 this as a deferred enhancement in `13_rebuild_playbook.md`.
@@ -319,7 +319,7 @@ inline label.
   `Shift+PageUp / Shift+PageDown`, highlight the focused divider
   (border-focused color on the label).
 - `Restore` returns the working tree (and the thread state) to the
-  snapshot at this point. moha's persistence layer does not yet
+  snapshot at this point. agentty's persistence layer does not yet
   implement snapshot/restore (`src/main.cpp:1182` is a stub) — see
   `13_rebuild_playbook.md`.
 
@@ -404,7 +404,7 @@ struct ScrollState {
 ### Implementation note
 
 maya's `Scrollable` (`maya/include/maya/widget/scrollable.hpp`)
-provides the viewport. moha currently doesn't wrap its message stack in
+provides the viewport. agentty currently doesn't wrap its message stack in
 one — the gap is documented in the audit and tracked in the rebuild
 playbook.
 

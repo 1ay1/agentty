@@ -1,5 +1,5 @@
-#include "moha/io/http.hpp"
-#include "moha/io/tls.hpp"
+#include "agentty/io/http.hpp"
+#include "agentty/io/tls.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -82,7 +82,7 @@ static void sock_set_nonblock(socket_t s) {
 }
 #endif
 
-namespace moha::http {
+namespace agentty::http {
 
 using clock_t_ = std::chrono::steady_clock;
 using ms_t     = std::chrono::milliseconds;
@@ -205,7 +205,7 @@ struct Endpoint {
 struct EndpointHash {
     size_t operator()(const Endpoint& e) const noexcept {
         // djb2 over host + dial_host plus the two ports — good enough for
-        // the handful of endpoints moha ever talks to.
+        // the handful of endpoints agentty ever talks to.
         size_t h = 5381;
         for (char c : e.host) h = ((h << 5) + h) + static_cast<unsigned char>(c);
         for (char c : e.dial_host) h = ((h << 5) + h) + static_cast<unsigned char>(c);
@@ -234,8 +234,8 @@ class Connection;
 //     time.  We pay framing + HPACK cost on every byte; we cash zero of
 //     the multiplex benefit those costs are designed to amortize.
 //
-// Why this is fine for moha (not the same as why we picked it):
-//   moha's request shape is inherently sequential — one chat stream at a
+// Why this is fine for agentty (not the same as why we picked it):
+//   agentty's request shape is inherently sequential — one chat stream at a
 //   time, tool calls dispatched in series after the assistant turn closes.
 //   Nothing in the runtime ever asks for two streams to the same provider
 //   in parallel, so the unused multiplexer doesn't actually cost us
@@ -253,7 +253,7 @@ class Connection;
 //   build for it."
 //
 // Why h2 at all rather than h1.1:
-//   Anthropic's edge serves both.  Claude Code negotiates h2, and moha's
+//   Anthropic's edge serves both.  Claude Code negotiates h2, and agentty's
 //   transport mimics Claude Code's wire shape so OAuth tokens are
 //   accepted (see the project_claude_code_wire memory).  The marginal
 //   wins on top of h1.1 — HPACK's smaller retry headers, PING-based
@@ -711,7 +711,7 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
     // then negotiate a tunnel to the upstream's tcp_host()/tcp_port().
     // The fd we return looks like a direct connection to the upstream,
     // ready for TLS — wrap_client below uses ep.host for SNI as ever.
-    const auto& sx = moha_socks_proxy();
+    const auto& sx = agentty_socks_proxy();
 
     addrinfo hints{}; hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
@@ -1210,7 +1210,7 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     // Client preface + SETTINGS.  We bump INITIAL_WINDOW_SIZE to 8 MiB on
     // our side so long response bodies (SSE for a 32k-token message) don't
     // stall on flow control.  The default 64 KiB is exactly the footgun
-    // that bit moha under libcurl — we fix it here explicitly rather than
+    // that bit agentty under libcurl — we fix it here explicitly rather than
     // trusting an implementation detail.
     nghttp2_settings_entry iv[] = {
         { NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE,    8 * 1024 * 1024 },
@@ -1243,7 +1243,7 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
 // well past a minute, but we recycle proactively so the pool doesn't
 // stagnate on a dead-but-silent socket.
 //
-// Through MOHA_SOCKS_PROXY (the air-gapped-via-SSH path), every reconnect
+// Through AGENTTY_SOCKS_PROXY (the air-gapped-via-SSH path), every reconnect
 // is *much* more expensive: SOCKS5 handshake over the SSH channel + DNS
 // on the proxy host + TLS handshake on the tunnelled byte stream.
 // Together that's typically 200-500 ms of overhead per dial.  The
@@ -1255,7 +1255,7 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
 // safety so we don't hang on to a connection forever.
 inline auto idle_ttl() noexcept -> std::chrono::seconds {
     static const std::chrono::seconds v =
-        moha_socks_proxy().active() ? std::chrono::seconds(450)
+        agentty_socks_proxy().active() ? std::chrono::seconds(450)
                                     : std::chrono::seconds(90);
     return v;
 }
@@ -1269,7 +1269,7 @@ struct PooledConn {
 
 // Cap entries-per-endpoint so a misbehaving caller (e.g. an auto-retry
 // loop) can't grow the pool unboundedly and exhaust file descriptors.
-// 16 covers any realistic concurrency for a single CLI session — moha
+// 16 covers any realistic concurrency for a single CLI session — agentty
 // currently never has more than one in-flight request to api.anthropic.com.
 constexpr std::size_t kMaxPoolEntriesPerEndpoint = 16;
 
@@ -1366,7 +1366,7 @@ struct Client::Impl {
 Client::Client() : Client(Config{}) {}
 
 Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
-    if (const char* e = std::getenv("MOHA_INSECURE"); e && *e == '1')
+    if (const char* e = std::getenv("AGENTTY_INSECURE"); e && *e == '1')
         cfg.insecure = true;
     impl_->cfg = std::move(cfg);
     ensure_net_init();
@@ -1558,19 +1558,19 @@ DialOverride parse_dial_env(const char* var_name) {
 }
 } // namespace
 
-const DialOverride& moha_api_host_override() {
-    static const DialOverride cached = parse_dial_env("MOHA_API_HOST");
+const DialOverride& agentty_api_host_override() {
+    static const DialOverride cached = parse_dial_env("AGENTTY_API_HOST");
     return cached;
 }
 
-const DialOverride& moha_oauth_host_override() {
-    static const DialOverride cached = parse_dial_env("MOHA_OAUTH_HOST");
+const DialOverride& agentty_oauth_host_override() {
+    static const DialOverride cached = parse_dial_env("AGENTTY_OAUTH_HOST");
     return cached;
 }
 
-const DialOverride& moha_socks_proxy() {
-    static const DialOverride cached = parse_dial_env("MOHA_SOCKS_PROXY");
+const DialOverride& agentty_socks_proxy() {
+    static const DialOverride cached = parse_dial_env("AGENTTY_SOCKS_PROXY");
     return cached;
 }
 
-} // namespace moha::http
+} // namespace agentty::http

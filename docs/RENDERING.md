@@ -1,6 +1,6 @@
-# Conversation rendering — moha as controller, maya as view
+# Conversation rendering — agentty as controller, maya as view
 
-How a `Model` becomes terminal cells. moha is a pure data adapter: it
+How a `Model` becomes terminal cells. agentty is a pure data adapter: it
 extracts state from the runtime model and emits **widget Configs**.
 maya owns every Element, every chrome glyph, every layout decision,
 every breathing animation. The host app constructs no Elements.
@@ -66,9 +66,9 @@ primitives that the widgets are built on top of.
 
 ## 1. The architectural rule
 
-> **moha constructs no Elements.** Every `Element{...}`, every
+> **agentty constructs no Elements.** Every `Element{...}`, every
 > `dsl::v(...)`, every `dsl::h(...)`, every `dsl::text(...)` lives in
-> a maya widget. moha extracts state into widget Configs and lets
+> a maya widget. agentty extracts state into widget Configs and lets
 > maya render.
 
 Concrete: every `.cpp` under `src/runtime/view/` (except the legacy
@@ -80,7 +80,7 @@ adapter file**, and the directory layout mirrors the widget tree
 The single exception is `cached_markdown_for` (private to
 `thread/turn/turn.cpp`): it returns an `Element` because
 `maya::StreamingMarkdown` is stateful and its block-cache must
-persist across frames. moha caches the widget *instance*, calls
+persist across frames. agentty caches the widget *instance*, calls
 `set_content()` on it, and slots the resulting `Element` into a Turn
 body slot via the typed `Element` variant. No `Element{...}` literals
 — only `widget.build()` calls.
@@ -172,7 +172,7 @@ Every name above is a real widget at `maya/include/maya/widget/<name>.hpp`.
 ## 3. Data flow — `view(m)` to terminal cells
 
 ```
-moha::ui::view(m)                                       [view.cpp]
+agentty::ui::view(m)                                       [view.cpp]
     ↓
     builds maya::AppLayout::Config { … }
         .thread          = thread_config(m)             [thread/thread.cpp]
@@ -251,7 +251,7 @@ return Conversation{cfg_.conversation}.build();
 
 `Thread::Config` nests `WelcomeScreen::Config` *and*
 `Conversation::Config`; the widget just picks the branch. Each
-sub-widget gets its own moha adapter (`thread/welcome_screen.cpp`,
+sub-widget gets its own agentty adapter (`thread/welcome_screen.cpp`,
 `thread/conversation.cpp`).
 
 `Conversation::Config` itself nests typed sub-configs:
@@ -306,9 +306,9 @@ Per-slot widget invocation:
 
 The escape-hatch `Element` slot exists for one reason: cross-frame
 caching. `maya::StreamingMarkdown` keeps a per-block parse cache that
-must survive between renders, so moha holds the widget instance in
+must survive between renders, so agentty holds the widget instance in
 its `MessageMdCache` and feeds the resulting `Element` back through
-the slot list. That's the only `Element`-producing call moha makes.
+the slot list. That's the only `Element`-producing call agentty makes.
 
 ---
 
@@ -378,7 +378,7 @@ A discriminated body widget. `Config::kind` picks the renderer:
 | `TodoList`  | `todos[]`           | `✓` completed (dim), `◍` in-progress, `○` pending           |
 
 All elision math (split lines → keep first `head` + last `tail` →
-insert dim middle marker) lives inside the widget. moha just provides
+insert dim middle marker) lives inside the widget. agentty just provides
 the raw `text` / `hunks[]` / `todos[]`.
 
 ---
@@ -388,9 +388,9 @@ the raw `text` / `hunks[]` / `todos[]`.
 ### `maya::WelcomeScreen` — empty-thread splash
 
 ```
-                        ┌┬┐┌─┐┬ ┬┌─┐
-                        ││││ │├─┤├─┤
-                        ┴ ┴└─┘┴ ┴┴ ┴
+                    ┌─┐┌─┐┌─┐┌┐ ┌┬┐┌┬┐┬ ┬
+                    ├─┤│ ┐├─ │└┐ │  │ └┬┘
+                    ┴ ┴└─┘└─┘┘ ┘ ┴  ┴  ┴ 
 
                 a calm middleware between you and the model
 
@@ -407,7 +407,7 @@ the raw `text` / `hunks[]` / `todos[]`.
       type to begin  ·  ^K palette  ·  ^J threads  ·  ^N new
 ```
 
-moha supplies brand content (wordmark glyphs, tagline, starter
+agentty supplies brand content (wordmark glyphs, tagline, starter
 prompts, hint keys); the widget owns the layout, the wordmark gradient
 ("last row dim"), the small-caps title, the centering.
 
@@ -438,7 +438,7 @@ word-and-token counters / profile chip.
 ### `maya::StatusBar` — bottom panel
 
 `StatusBar::Config` nests **typed sub-widget Configs**, so each
-sub-widget gets its own moha adapter (one widget = one adapter file):
+sub-widget gets its own agentty adapter (one widget = one adapter file):
 
 ```cpp
 struct StatusBar::Config {
@@ -491,7 +491,7 @@ the bottom edge, with an opaque background to mask the base.
 
 ---
 
-## 10. moha's adapter side — one widget, one adapter file
+## 10. agentty's adapter side — one widget, one adapter file
 
 Every adapter file under `src/runtime/view/` has the same shape: one
 function `Model → SomeWidget::Config`. Filenames mirror the widget
@@ -547,7 +547,7 @@ frames.
 
 `StreamingMarkdown` is the only widget held across frames — its
 internal block-boundary cache makes each delta `O(new_chars)` rather
-than re-parsing the full transcript. moha keeps the instance alive,
+than re-parsing the full transcript. agentty keeps the instance alive,
 calls `set_content(streaming_text)` each frame, slots
 `instance.build()` into the Turn body via the `Element` variant.
 
@@ -617,7 +617,7 @@ view(m)                                    ┐
    (slotted into AppLayout's vstack alongside changes_strip / composer / status_bar)
 ```
 
-Every transition is `widget.build()` returning an `Element`. moha
+Every transition is `widget.build()` returning an `Element`. agentty
 participates only at the entry: building the top-level Config tree.
 
 ---
@@ -652,7 +652,7 @@ maya/include/maya/widget/
 └── overlay.hpp                   z-stack base + centered modal
 ```
 
-### moha adapters — directory tree mirrors the widget hierarchy
+### agentty adapters — directory tree mirrors the widget hierarchy
 
 ```
 src/runtime/view/
@@ -685,7 +685,7 @@ src/runtime/view/
     └── shortcut_row.cpp                  # ShortcutRow        (shortcut row)
 ```
 
-Headers mirror the same layout under `include/moha/runtime/view/`.
+Headers mirror the same layout under `include/agentty/runtime/view/`.
 
 `login.cpp`, `pickers.cpp`, `diff_review.cpp` are modal overlays that
 still construct elements directly — they predate the controller-only

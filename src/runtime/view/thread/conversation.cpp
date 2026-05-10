@@ -1,13 +1,13 @@
-#include "moha/runtime/view/thread/conversation.hpp"
+#include "agentty/runtime/view/thread/conversation.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 
-#include "moha/runtime/view/thread/activity_indicator.hpp"
-#include "moha/runtime/view/thread/turn/turn.hpp"
+#include "agentty/runtime/view/thread/activity_indicator.hpp"
+#include "agentty/runtime/view/thread/turn/turn.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 maya::Conversation::Config conversation_config(const Model& m) {
     maya::Conversation::Config cfg;
@@ -87,4 +87,4 @@ maya::Conversation::Config conversation_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

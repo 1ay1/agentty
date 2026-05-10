@@ -1,4 +1,4 @@
-#include "moha/provider/anthropic/transport.hpp"
+#include "agentty/provider/anthropic/transport.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,12 +19,12 @@
 #include <nlohmann/json.hpp>
 #include <simdjson.h>
 
-#include "moha/domain/catalog.hpp"
-#include "moha/io/http.hpp"
-#include "moha/tool/registry.hpp"
-#include "moha/util/base64.hpp"
+#include "agentty/domain/catalog.hpp"
+#include "agentty/io/http.hpp"
+#include "agentty/tool/registry.hpp"
+#include "agentty/util/base64.hpp"
 
-namespace moha::provider::anthropic {
+namespace agentty::provider::anthropic {
 
 namespace {
 
@@ -103,8 +103,8 @@ std::string scrub_utf8(std::string_view in) {
     return out;
 }
 
-// Env-var-gated request/SSE dump. Set MOHA_DEBUG_API=1 to write to
-// $MOHA_DEBUG_FILE (or ./moha-api.log). Appends, never truncates.
+// Env-var-gated request/SSE dump. Set AGENTTY_DEBUG_API=1 to write to
+// $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
 FILE* debug_log() {
     static std::mutex m;
     static FILE* fp = nullptr;
@@ -112,10 +112,10 @@ FILE* debug_log() {
     std::lock_guard<std::mutex> lk(m);
     if (tried) return fp;
     tried = true;
-    const char* on = std::getenv("MOHA_DEBUG_API");
+    const char* on = std::getenv("AGENTTY_DEBUG_API");
     if (!on || !*on || *on == '0') return nullptr;
-    const char* path = std::getenv("MOHA_DEBUG_FILE");
-    std::string p = (path && *path) ? std::string{path} : std::string{"moha-api.log"};
+    const char* path = std::getenv("AGENTTY_DEBUG_FILE");
+    std::string p = (path && *path) ? std::string{path} : std::string{"agentty-api.log"};
     fp = std::fopen(p.c_str(), "ab");
     return fp;
 }
@@ -508,7 +508,7 @@ constexpr const char* stainless_arch() {
 // 20-30 s of dead-air between a tool_use's `display_description` and its
 // `content` field — the model was generating redacted thinking tokens we
 // never see, then dumping the whole `content` body in one burst. CC papers
-// over this with a "Thinking…" spinner; moha's TUI doesn't, so it just looks
+// over this with a "Thinking…" spinner; agentty's TUI doesn't, so it just looks
 // frozen. Dropping both betas forces the model to start emitting `content`
 // immediately. If you ever want to render thinking blocks, drop only the
 // redact one and surface the visible thinking deltas in the UI.
@@ -596,7 +596,7 @@ std::string machine_id_hex(int nibbles) {
         if (seed.empty()) {
             if (const char* h = std::getenv("HOSTNAME")) seed = h;
         }
-        if (seed.empty()) seed = "moha-anonymous";
+        if (seed.empty()) seed = "agentty-anonymous";
         // FNV-1a 64-bit, twice with different offsets to pad to 128 bits.
         auto fnv = [](std::string_view s, uint64_t off) {
             uint64_t h = off;
@@ -617,7 +617,7 @@ std::string make_user_id() {
     // CC v2.1.113's `T7H()` returns `metadata.user_id` as a JSON-stringified
     // object: `{"device_id":..,"account_uuid":..,"session_id":..}`. Earlier
     // CLI builds used the flat `user_<hex>_account_<hex>_session_<hex>` shape
-    // — moha shipped that and it correlated with a 20-30 s mid-stream pause
+    // — agentty shipped that and it correlated with a 20-30 s mid-stream pause
     // on long tool_use bodies. Anthropic's edge appears to inspect this field
     // for routing/quota; matching the new shape byte-for-byte is part of the
     // fix. We don't own a real account UUID under OAuth here, so we leave it
@@ -1068,7 +1068,7 @@ std::string default_system_prompt() {
     try { cwd = std::filesystem::current_path().string(); } catch (...) {}
 
     std::ostringstream oss;
-    oss << "You are Moha, a terminal coding assistant. Act, don't ask. "
+    oss << "You are agentty, a terminal coding assistant. Act, don't ask. "
         << "When the user says something vague (\"edit it\", \"make it "
         << "better\", \"improve it\", \"make it interesting\", \"fix it\"), "
         << "make a reasonable improvement yourself with `edit` — do NOT "
@@ -1133,7 +1133,7 @@ std::vector<ToolSpec> default_tools() {
 
 void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     if (req.auth_header.empty()) {
-        sink(StreamError{"not authenticated — run 'moha login' or set ANTHROPIC_API_KEY"});
+        sink(StreamError{"not authenticated — run 'agentty login' or set ANTHROPIC_API_KEY"});
         return;
     }
 
@@ -1223,7 +1223,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // can't appear inside a legitimately-escaped JSON string so the
     // find() is unambiguous even on weird payloads.
     constexpr std::string_view kMessagesPlaceholder =
-        "\x01__moha_messages_splice__\x01";
+        "\x01__agentty_messages_splice__\x01";
     body["messages"] = std::string{kMessagesPlaceholder};
 
     // Last-line-of-defence: if any string in the request tree still carries
@@ -1242,11 +1242,11 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // Replace the dumped placeholder string with the raw messages JSON.
     // nlohmann emits std::string values as JSON strings (quoted +
     // escaped). The control bytes \x01 round-trip as ``, so the
-    // dumped form is `"__moha_messages_splice__"` — find
+    // dumped form is `"__agentty_messages_splice__"` — find
     // and replace that.
     {
         constexpr std::string_view kDumpedPlaceholder =
-            "\"\\u0001__moha_messages_splice__\\u0001\"";
+            "\"\\u0001__agentty_messages_splice__\\u0001\"";
         auto pos = body_str.find(kDumpedPlaceholder);
         if (pos == std::string::npos) {
             sink(StreamError{"request build failed: messages placeholder not found in dumped body"});
@@ -1265,7 +1265,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     hreq.method  = http::HttpMethod::Post;
     hreq.host    = "api.anthropic.com";
     hreq.port    = 443;
-    if (const auto& ov = http::moha_api_host_override(); ov.active()) {
+    if (const auto& ov = http::agentty_api_host_override(); ov.active()) {
         hreq.dial_host = ov.host;
         hreq.dial_port = ov.port;
     }
@@ -1404,7 +1404,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
             if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
         }
         if (http_status == 401 || http_status == 403)
-            msg += "  (run 'moha login' to re-authenticate)";
+            msg += "  (run 'agentty login' to re-authenticate)";
         emit_terminal(ctx, std::move(msg), retry_after_hint);
         return;
     }
@@ -1425,7 +1425,7 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
     hreq.method  = http::HttpMethod::Get;
     hreq.host    = "api.anthropic.com";
     hreq.port    = 443;
-    if (const auto& ov = http::moha_api_host_override(); ov.active()) {
+    if (const auto& ov = http::agentty_api_host_override(); ov.active()) {
         hreq.dial_host = ov.host;
         hreq.dial_port = ov.port;
     }
@@ -1464,4 +1464,4 @@ std::vector<ModelInfo> list_models(const std::string& auth_header,
     return result;
 }
 
-} // namespace moha::provider::anthropic
+} // namespace agentty::provider::anthropic

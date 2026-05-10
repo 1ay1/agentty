@@ -95,7 +95,7 @@ Use `Permission`'s key-hint logic only as the inner body:
 ```cpp
 Element views::tool_card_with_permission(const ToolUse& tu, const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     auto& pp = *tu.pending_permission;
 
@@ -275,7 +275,7 @@ shows people want finer control.
 A persistent dictionary of `gating_key → AllowState`:
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 enum class AllowState {
     Unknown,         // never decided — ask
@@ -294,7 +294,7 @@ struct PermissionStore {
     void save_to_disk();
 };
 
-} // namespace moha
+} // namespace agentty
 ```
 
 ### Scopes
@@ -303,10 +303,10 @@ Three layered stores, looked up in order:
 
 1. **Per-thread** (`m.current.permissions`) — cleared when starting
    a new thread. Ephemeral allows like `[Y]` (one-shot) live here.
-2. **Per-workspace** (`~/.config/moha/permissions/<workspace_hash>.json`)
+2. **Per-workspace** (`~/.config/agentty/permissions/<workspace_hash>.json`)
    — persistent across threads in this directory, cleared on
    `Reset`.
-3. **Global** (`~/.config/moha/permissions/global.json`) — for keys
+3. **Global** (`~/.config/agentty/permissions/global.json`) — for keys
    the user wants to whitelist universally (rare).
 
 `[A] Always allow` writes to the per-workspace store by default. To

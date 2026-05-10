@@ -1,8 +1,8 @@
-#include "moha/tool/spec.hpp"
-#include "moha/tool/tools.hpp"
-#include "moha/tool/util/arg_reader.hpp"
-#include "moha/tool/util/tool_args.hpp"
-#include "moha/io/http.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/tools.hpp"
+#include "agentty/tool/util/arg_reader.hpp"
+#include "agentty/tool/util/tool_args.hpp"
+#include "agentty/io/http.hpp"
 
 #include <chrono>
 #include <cctype>
@@ -11,7 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace moha::tools {
+namespace agentty::tools {
 
 using json = nlohmann::json;
 
@@ -63,7 +63,7 @@ ExecResult run_web_search(const WebSearchArgs& a) {
     req.host   = "html.duckduckgo.com";
     req.port   = 443;
     req.path   = "/html/?q=" + url_escape(a.query);
-    req.headers.push_back({"user-agent", "moha/0.1 (terminal agent)"});
+    req.headers.push_back({"user-agent", "agentty/0.1 (terminal agent)"});
 
     http::Timeouts tos{
         .connect = std::chrono::milliseconds(10'000),
@@ -182,4 +182,4 @@ ToolDef tool_web_search() {
     return t;
 }
 
-} // namespace moha::tools
+} // namespace agentty::tools

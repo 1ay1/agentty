@@ -1,4 +1,4 @@
-// moha::app::update — pure (Model, Msg) -> (Model, Cmd<Msg>) reducer.
+// agentty::app::update — pure (Model, Msg) -> (Model, Cmd<Msg>) reducer.
 //
 // Top-level orchestrator: a single 10-arm std::visit that dispatches on
 // the domain (msg::ComposerMsg / msg::StreamMsg / …) and forwards to
@@ -19,15 +19,15 @@
 //     constructor walks each domain alternative; only the matching
 //     domain accepts a given leaf, so the wrap is unambiguous.
 
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
 
-namespace moha::app {
+namespace agentty::app {
 
 using maya::Cmd;
 using maya::overload;
@@ -49,4 +49,4 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
     }, msg);
 }
 
-} // namespace moha::app
+} // namespace agentty::app

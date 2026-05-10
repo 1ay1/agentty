@@ -78,7 +78,7 @@ Layout:
 ```cpp
 Element views::diff_review_route(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     auto& dr = *m.diff_review;     // present only when route active
 
@@ -177,7 +177,7 @@ Each hunk:
 ```cpp
 Element render_hunk(const Hunk& h, bool is_focused) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     std::vector<Element> rows;
 
@@ -319,7 +319,7 @@ error banner above the footer:
 ## 7. Data model
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 struct DiffFile {
     std::string path;
@@ -342,7 +342,7 @@ struct Model {
     std::optional<DiffReview> diff_review;   // present when route is active
 };
 
-} // namespace moha
+} // namespace agentty
 ```
 
 The `Route::DiffReview` enum value (see `04_architecture § 4`) gates

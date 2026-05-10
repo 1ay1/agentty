@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(moha VERSION 0.1.0 LANGUAGES CXX)
+project(agentty VERSION 0.1.0 LANGUAGES CXX)
 
 # CMake (as of 4.2) has no /std:c++26 mapping for MSVC yet. Ask for C++23
 # there and opt into /std:c++latest so MSVC 14.50+ exposes available C++26
@@ -37,7 +37,7 @@ if(MSVC)
 endif()
 
 # ── Standalone binary plumbing ─────────────────────────────────────────
-# MOHA_STANDALONE=ON produces a binary with no third-party shared-library
+# AGENTTY_STANDALONE=ON produces a binary with no third-party shared-library
 # dependencies — drop it on any compatible machine (matching libc
 # version) and it runs. On every platform it forces the right static-
 # linking knobs:
@@ -46,17 +46,17 @@ endif()
 #              folded in via -static-libstdc++ / -static-libgcc. libc
 #              stays dynamic (fully-static glibc breaks the NSS resolver
 #              and DNS lookups; if you need a 100% static binary, build
-#              against musl with -DMOHA_FULLY_STATIC=ON).
+#              against musl with -DAGENTTY_FULLY_STATIC=ON).
 #   macOS      OpenSSL + nghttp2 statically linked. libSystem stays
 #              dynamic (the only ABI Apple supports for distribution).
-#   Windows    Forces MOHA_STATIC_RUNTIME=ON (/MT) so the MSVC CRT is
+#   Windows    Forces AGENTTY_STATIC_RUNTIME=ON (/MT) so the MSVC CRT is
 #              statically embedded; nghttp2 + OpenSSL come from the
 #              x64-windows-static vcpkg triplet.
 #
-# Build with `cmake -B build-rel -DCMAKE_BUILD_TYPE=Release -DMOHA_STANDALONE=ON`.
-option(MOHA_STATIC_RUNTIME "Link the MSVC runtime statically (/MT)" OFF)
-option(MOHA_STANDALONE     "Produce a standalone binary with no third-party shared-library deps" OFF)
-option(MOHA_FULLY_STATIC   "Fully static link (Linux only, requires musl toolchain)" OFF)
+# Build with `cmake -B build-rel -DCMAKE_BUILD_TYPE=Release -DAGENTTY_STANDALONE=ON`.
+option(AGENTTY_STATIC_RUNTIME "Link the MSVC runtime statically (/MT)" OFF)
+option(AGENTTY_STANDALONE     "Produce a standalone binary with no third-party shared-library deps" OFF)
+option(AGENTTY_FULLY_STATIC   "Fully static link (Linux only, requires musl toolchain)" OFF)
 
 # mimalloc override — Microsoft's fast allocator. MSVCRT's malloc is notably
 # slow on the small-string churn pattern (std::string everywhere in RenderOp,
@@ -65,23 +65,23 @@ option(MOHA_FULLY_STATIC   "Fully static link (Linux only, requires musl toolcha
 # 15–25% wins on allocator-heavy Windows workloads. Default ON when the
 # package is installed; harmless on POSIX (mimalloc works there too but the
 # delta vs. glibc/jemalloc is smaller).
-option(MOHA_USE_MIMALLOC   "Route operator new/delete through mimalloc (big Win32 win)" ON)
+option(AGENTTY_USE_MIMALLOC   "Route operator new/delete through mimalloc (big Win32 win)" ON)
 
 # CPU ISA baseline. Default avx2 (Haswell+/Zen1+, ~2013), which covers ~every
 # desktop/laptop in use. Drop to "avx" for Sandy/Ivy Bridge (2011–2012) or
 # older VM hosts, "sse2" for truly ancient, "native" to let the compiler pick
 # based on the build machine. MSVC only exposes a handful of /arch values;
 # GCC/Clang understand -march= directly.
-set(MOHA_ARCH "avx2" CACHE STRING
+set(AGENTTY_ARCH "avx2" CACHE STRING
     "CPU baseline: native, avx2 (default), avx, or sse2.")
-set_property(CACHE MOHA_ARCH PROPERTY STRINGS native avx2 avx sse2)
+set_property(CACHE AGENTTY_ARCH PROPERTY STRINGS native avx2 avx sse2)
 
-if(MOHA_STANDALONE AND MSVC)
+if(AGENTTY_STANDALONE AND MSVC)
     # On Windows, standalone implies static MSVC runtime — there's no
     # other way to ship a "drop it on any machine" .exe.
-    set(MOHA_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
+    set(AGENTTY_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
 endif()
-if(MOHA_STATIC_RUNTIME AND MSVC)
+if(AGENTTY_STATIC_RUNTIME AND MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
@@ -92,8 +92,8 @@ endif()
 # (Arch, Debian default, Fedora) only package OpenSSL as .so; users on
 # Alpine, vcpkg-static, or who installed openssl-static get the full
 # standalone build.
-set(MOHA_STANDALONE_OPENSSL_FALLBACK FALSE)
-if(MOHA_STANDALONE)
+set(AGENTTY_STANDALONE_OPENSSL_FALLBACK FALSE)
+if(AGENTTY_STANDALONE)
     set(OPENSSL_USE_STATIC_LIBS TRUE)
 endif()
 
@@ -101,8 +101,8 @@ endif()
 # in Debug (would drag build times without shipping value). Supported by
 # GCC, Clang, MSVC, and AppleClang; CMake picks the right flag per toolchain.
 include(CheckIPOSupported)
-check_ipo_supported(RESULT MOHA_HAS_IPO OUTPUT MOHA_IPO_ERR)
-if(MOHA_HAS_IPO AND (CMAKE_BUILD_TYPE STREQUAL "Release"
+check_ipo_supported(RESULT AGENTTY_HAS_IPO OUTPUT AGENTTY_IPO_ERR)
+if(AGENTTY_HAS_IPO AND (CMAKE_BUILD_TYPE STREQUAL "Release"
                      OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"
                      OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -112,6 +112,16 @@ include(FetchContent)
 
 set(MAYA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(MAYA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+
+# STANDALONE builds must be portable across every chip of the target arch.
+# Maya's default `-march=native -mtune=native` would otherwise bake the
+# producing host's microarchitecture into libmaya.a (most visible on
+# aarch64 — a Graviton3-built binary SIGILLs on a Cortex-A72). Force the
+# native-tuning gate off so maya falls back to the compiler's default
+# baseline (`-march=x86-64` / `armv8-a`).
+if(AGENTTY_STANDALONE)
+    set(MAYA_NATIVE_TUNING OFF CACHE BOOL "" FORCE)
+endif()
 
 # Prefer the in-tree submodule when present; only fall back to fetch.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
@@ -171,7 +181,7 @@ if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
 endif()
 
-# Treat maya's headers as system so its warnings don't surface in moha builds.
+# Treat maya's headers as system so its warnings don't surface in agentty builds.
 set_target_properties(maya PROPERTIES SYSTEM TRUE)
 
 # Same treatment for simdjson's headers — upstream's `operator "" _padded`
@@ -186,10 +196,10 @@ endif()
 
 find_package(Threads REQUIRED)
 
-# OpenSSL: if MOHA_STANDALONE asked for static and the static archive is
+# OpenSSL: if AGENTTY_STANDALONE asked for static and the static archive is
 # missing, retry with shared libs and flag the fallback so the user sees
 # a clear note at the end of configure.
-if(MOHA_STANDALONE)
+if(AGENTTY_STANDALONE)
     find_package(OpenSSL QUIET)
     if(NOT OpenSSL_FOUND)
         unset(OPENSSL_USE_STATIC_LIBS)
@@ -197,7 +207,7 @@ if(MOHA_STANDALONE)
         unset(OPENSSL_CRYPTO_LIBRARY CACHE)
         unset(OPENSSL_SSL_LIBRARY CACHE)
         find_package(OpenSSL REQUIRED)
-        set(MOHA_STANDALONE_OPENSSL_FALLBACK TRUE)
+        set(AGENTTY_STANDALONE_OPENSSL_FALLBACK TRUE)
     endif()
 else()
     find_package(OpenSSL REQUIRED)
@@ -210,9 +220,9 @@ find_package(nghttp2 CONFIG QUIET)
 # Skip pkg-config for fully-static builds: pkg-config returns the dynamic
 # library path by default (libnghttp2.so), which the `-static` link below
 # can't accept ("attempted static link of dynamic object").  The manual
-# find_library path further down (gated on MOHA_STANDALONE) explicitly
+# find_library path further down (gated on AGENTTY_STANDALONE) explicitly
 # prefers libnghttp2.a, so let it take over.
-if(NOT TARGET nghttp2::nghttp2 AND NOT MOHA_FULLY_STATIC)
+if(NOT TARGET nghttp2::nghttp2 AND NOT AGENTTY_FULLY_STATIC)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(NGHTTP2 IMPORTED_TARGET libnghttp2)
@@ -225,11 +235,11 @@ endif()
 # comes from the upstream CMake export (vcpkg / brew / apt). If missing, we
 # silently continue without it rather than failing — it's a perf knob, not a
 # correctness requirement.
-set(MOHA_HAS_MIMALLOC FALSE)
-if(MOHA_USE_MIMALLOC)
+set(AGENTTY_HAS_MIMALLOC FALSE)
+if(AGENTTY_USE_MIMALLOC)
     find_package(mimalloc CONFIG QUIET)
     if(TARGET mimalloc-static OR TARGET mimalloc)
-        set(MOHA_HAS_MIMALLOC TRUE)
+        set(AGENTTY_HAS_MIMALLOC TRUE)
     else()
         # WARNING (not STATUS) on purpose: this is the difference between
         # a process that returns memory to the kernel promptly (mimalloc)
@@ -238,7 +248,7 @@ if(MOHA_USE_MIMALLOC)
         # interactive session that's hundreds of MiB of unreclaimed RSS.
         # The user should see the message during configure, not have it
         # buried in a quiet STATUS line.
-        message(WARNING "moha: MOHA_USE_MIMALLOC=ON but mimalloc not found "
+        message(WARNING "agentty: AGENTTY_USE_MIMALLOC=ON but mimalloc not found "
                        "— building against the system allocator. On "
                        "Linux/glibc this means freed memory is not returned "
                        "to the kernel until process exit; long sessions will "
@@ -254,7 +264,7 @@ if(NOT TARGET nghttp2::nghttp2)
     # Standalone builds prefer the static archive (libnghttp2.a /
     # nghttp2_static.lib); regular builds prefer the shared library so
     # devs don't need a static archive installed.
-    if(MOHA_STANDALONE)
+    if(AGENTTY_STANDALONE)
         if(MSVC)
             find_library(NGHTTP2_LIBRARY NAMES nghttp2_static nghttp2)
         else()
@@ -276,7 +286,7 @@ if(NOT TARGET nghttp2::nghttp2)
 endif()
 
 # ── Source groups, by domain ──────────────────────────────────────────────
-# The header tree under include/moha/ mirrors this grouping one-for-one:
+# The header tree under include/agentty/ mirrors this grouping one-for-one:
 #   domain/   — pure value types (no I/O, no UI). Headers only.
 #   io/       — sockets, TLS, HTTP/2, OAuth, on-disk persistence.
 #   provider/ — wire-format adapters for upstream LLM APIs.
@@ -284,7 +294,7 @@ endif()
 #   tool/     — the agent's capability surface: registry + per-tool impls.
 #   runtime/  — the Elm-style app: model, update, subscriptions, view tree.
 
-set(MOHA_IO_SOURCES
+set(AGENTTY_IO_SOURCES
     src/io/http.cpp
     src/io/tls.cpp
     src/io/auth.cpp
@@ -292,15 +302,15 @@ set(MOHA_IO_SOURCES
     src/util/base64.cpp
 )
 
-set(MOHA_PROVIDER_SOURCES
+set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
 )
 
-set(MOHA_DIFF_SOURCES
+set(AGENTTY_DIFF_SOURCES
     src/diff/diff.cpp
 )
 
-set(MOHA_TOOL_SOURCES
+set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
@@ -328,7 +338,7 @@ set(MOHA_TOOL_SOURCES
 
 # Everything except the entry point — so tests can link the same runtime
 # without fighting main().
-set(MOHA_RUNTIME_NOMAIN_SOURCES
+set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/airgap.cpp
     src/runtime/clipboard_image.cpp
     src/runtime/composer_attachment.cpp
@@ -379,33 +389,26 @@ set(MOHA_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/view.cpp
 )
 
-set(MOHA_RUNTIME_SOURCES
+set(AGENTTY_RUNTIME_SOURCES
     src/runtime/main.cpp
-    ${MOHA_RUNTIME_NOMAIN_SOURCES}
+    ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
 )
 
-add_executable(moha
-    ${MOHA_IO_SOURCES}
-    ${MOHA_PROVIDER_SOURCES}
-    ${MOHA_DIFF_SOURCES}
-    ${MOHA_TOOL_SOURCES}
-    ${MOHA_RUNTIME_SOURCES}
+add_executable(agentty
+    ${AGENTTY_IO_SOURCES}
+    ${AGENTTY_PROVIDER_SOURCES}
+    ${AGENTTY_DIFF_SOURCES}
+    ${AGENTTY_TOOL_SOURCES}
+    ${AGENTTY_RUNTIME_SOURCES}
 )
-# `agentty` is the public brand; `moha` is the internal codename
-# (matches the `namespace moha` in headers, the include/moha/ tree,
-# the MOHA_* CMake options, and ~/.config/moha/ — all kept stable
-# so existing dev workflows / configs don't churn). Only the
-# installed/built artefact name flips, so users see `agentty
-# --version` and `agentty status` without any deeper rename.
-set_target_properties(moha PROPERTIES OUTPUT_NAME agentty)
 
-target_include_directories(moha PRIVATE include)
-# Bake the project version into the binary so `moha --version` /
+target_include_directories(agentty PRIVATE include)
+# Bake the project version into the binary so `agentty --version` /
 # the User-Agent string don't drift from CMakeLists.txt's
-# `project(moha VERSION X.Y.Z)`. Single source of truth — bumping
+# `project(agentty VERSION X.Y.Z)`. Single source of truth — bumping
 # the project line bumps every site that reads the macro.
-target_compile_definitions(moha PRIVATE MOHA_VERSION="${PROJECT_VERSION}")
-target_link_libraries(moha PRIVATE
+target_compile_definitions(agentty PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+target_link_libraries(agentty PRIVATE
     maya::maya
     nlohmann_json::nlohmann_json
     simdjson::simdjson
@@ -414,16 +417,16 @@ target_link_libraries(moha PRIVATE
     OpenSSL::Crypto
     Threads::Threads
 )
-if(MOHA_HAS_MIMALLOC)
+if(AGENTTY_HAS_MIMALLOC)
     # Prefer static target so operator new/delete routing is linked in the
     # exe without an accompanying DLL / dylib.
     if(TARGET mimalloc-static)
-        target_link_libraries(moha PRIVATE mimalloc-static)
+        target_link_libraries(agentty PRIVATE mimalloc-static)
     else()
-        target_link_libraries(moha PRIVATE mimalloc)
+        target_link_libraries(agentty PRIVATE mimalloc)
     endif()
-    target_compile_definitions(moha PRIVATE MOHA_USE_MIMALLOC=1)
-    message(STATUS "moha: mimalloc allocator override enabled.")
+    target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
+    message(STATUS "agentty: mimalloc allocator override enabled.")
 endif()
 if(WIN32)
     # ws2_32   — Winsock2 (sockets, WSAPoll)
@@ -431,40 +434,40 @@ if(WIN32)
     # shell32  — already needed by existing code paths
     # winmm    — timeBeginPeriod / timeEndPeriod in main.cpp (the
     #            `#pragma comment(lib, "winmm.lib")` only works on MSVC).
-    target_link_libraries(moha PRIVATE ws2_32 crypt32 shell32 winmm)
+    target_link_libraries(agentty PRIVATE ws2_32 crypt32 shell32 winmm)
     # Static OpenSSL on Windows additionally pulls in these system libs
     # (used by libcrypto's CSP / certificate APIs). Innocuous in dynamic
-    # builds — the linker dedupes — but required when MOHA_STANDALONE=ON.
-    if(MOHA_STANDALONE)
-        target_link_libraries(moha PRIVATE bcrypt secur32 advapi32 user32)
+    # builds — the linker dedupes — but required when AGENTTY_STANDALONE=ON.
+    if(AGENTTY_STANDALONE)
+        target_link_libraries(agentty PRIVATE bcrypt secur32 advapi32 user32)
     endif()
 endif()
 if(APPLE)
     # macOS root cert loader uses the Security and CoreFoundation frameworks.
-    target_link_libraries(moha PRIVATE
+    target_link_libraries(agentty PRIVATE
         "-framework Security"
         "-framework CoreFoundation")
 endif()
 
 # ── Standalone link knobs (per-platform) ───────────────────────────────
-if(MOHA_STANDALONE AND NOT MSVC)
+if(AGENTTY_STANDALONE AND NOT MSVC)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # Fold libstdc++ and libgcc into the binary so it runs on machines
         # with a different distro / ABI version. libc stays dynamic — a
         # fully-static glibc binary breaks the NSS resolver (DNS, /etc/
         # nsswitch) and getpwuid_r at runtime. For 100%-static, opt into
-        # MOHA_FULLY_STATIC and build with a musl toolchain.
-        target_link_options(moha PRIVATE
+        # AGENTTY_FULLY_STATIC and build with a musl toolchain.
+        target_link_options(agentty PRIVATE
             -static-libstdc++ -static-libgcc)
-        if(MOHA_FULLY_STATIC)
-            target_link_options(moha PRIVATE -static)
+        if(AGENTTY_FULLY_STATIC)
+            target_link_options(agentty PRIVATE -static)
         endif()
         # Static OpenSSL pulls in libdl and libpthread (both already
         # implicit) plus libz (compression) for some builds. Add libz
         # defensively; harmless when not needed.
         find_library(ZLIB_STATIC NAMES libz.a z)
         if(ZLIB_STATIC)
-            target_link_libraries(moha PRIVATE ${ZLIB_STATIC})
+            target_link_libraries(agentty PRIVATE ${ZLIB_STATIC})
         endif()
     elseif(APPLE)
         # macOS doesn't allow truly-static system frameworks (libSystem
@@ -477,22 +480,22 @@ endif()
 
 # Diagnostic: print a one-liner at configure time so contributors know
 # what they're building. Helps catch the "I forgot the flag" case.
-if(MOHA_STANDALONE)
-    message(STATUS "moha: STANDALONE build — third-party deps statically linked.")
-    if(MOHA_STANDALONE_OPENSSL_FALLBACK)
+if(AGENTTY_STANDALONE)
+    message(STATUS "agentty: STANDALONE build — third-party deps statically linked.")
+    if(AGENTTY_STANDALONE_OPENSSL_FALLBACK)
         message(WARNING
-            "moha: STANDALONE requested OpenSSL static libs (.a) but only the "
+            "agentty: STANDALONE requested OpenSSL static libs (.a) but only the "
             "shared library was found — the binary will still depend on libssl/"
             "libcrypto at runtime. To get a fully standalone exe, install the "
             "static OpenSSL package (Alpine: openssl-libs-static; Arch AUR: "
             "openssl-static; Fedora: openssl-static; or build from source).")
     endif()
-elseif(MOHA_STATIC_RUNTIME AND MSVC)
-    message(STATUS "moha: static MSVC runtime (/MT).")
+elseif(AGENTTY_STATIC_RUNTIME AND MSVC)
+    message(STATUS "agentty: static MSVC runtime (/MT).")
 endif()
 
 if(MSVC)
-    target_compile_options(moha PRIVATE
+    target_compile_options(agentty PRIVATE
         /W4
         /utf-8                 # treat source and exec charsets as UTF-8
         /std:c++latest         # opt into C++26 library bits beyond /std:c++23
@@ -521,15 +524,15 @@ if(MSVC)
             /GS-               #  no stack-buffer cookies — TUI, not a daemon
             /GR                #  keep RTTI (context.hpp uses typeid)
             /fp:fast           #  relax FP strictness — no errno / reassociation
-            $<$<STREQUAL:${MOHA_ARCH},avx2>:/arch:AVX2>    # Haswell+ / Zen1+
-            $<$<STREQUAL:${MOHA_ARCH},avx>:/arch:AVX>      # Sandy/Ivy Bridge
+            $<$<STREQUAL:${AGENTTY_ARCH},avx2>:/arch:AVX2>    # Haswell+ / Zen1+
+            $<$<STREQUAL:${AGENTTY_ARCH},avx>:/arch:AVX>      # Sandy/Ivy Bridge
             # MSVC has no /arch:SSE2 (it's the default on x64) or /arch:native;
             # both map to "no flag" — the default x64 codegen already assumes
             # SSE2. `native` on MSVC degrades to the default baseline.
             /Qpar              #  enable auto-parallelizer for hot loops
         >
     )
-    target_link_options(moha PRIVATE
+    target_link_options(agentty PRIVATE
         $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:
             /LTCG              # link-time codegen (consumes /GL .obj files)
             /OPT:REF           # remove unreferenced functions/data
@@ -538,14 +541,14 @@ if(MSVC)
             /DEBUG:NONE        # no PDB in Release
         >
     )
-    target_compile_definitions(moha PRIVATE
+    target_compile_definitions(agentty PRIVATE
         _CRT_SECURE_NO_WARNINGS
         NOMINMAX
         WIN32_LEAN_AND_MEAN
         $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:NDEBUG>
     )
 else()
-    target_compile_options(moha PRIVATE
+    target_compile_options(agentty PRIVATE
         -Wall -Wextra -Wpedantic
         -Wno-deprecated-declarations
         # Designated init like `TextElement{.content=…, .style=…}` is the
@@ -558,7 +561,7 @@ else()
     # of designated-initialized aggregates (maya's Element{TextElement{...}} pattern).
     # The warnings escape -isystem because they fire during late optimization.
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_compile_options(moha PRIVATE -Wno-maybe-uninitialized)
+        target_compile_options(agentty PRIVATE -Wno-maybe-uninitialized)
     endif()
 
     # macOS SDK + GCC: <mach/port.h> uses `_Static_assert` (C keyword) in
@@ -566,7 +569,7 @@ else()
     # subprocess.cpp via <spawn.h>). Alias the C spelling to its C++
     # equivalent so the SDK headers parse under GCC's C++ frontend.
     if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_compile_definitions(moha PRIVATE
+        target_compile_definitions(agentty PRIVATE
             _Static_assert=static_assert)
     endif()
 endif()
@@ -579,58 +582,58 @@ if(MSVC)
         COMPILE_FLAGS "/Zc:preprocessor- /DNGHTTP2_STATICLIB")
 endif()
 
-# Opt-in sanitizer build: `cmake -B build-san -DMOHA_SANITIZE=address,undefined`.
+# Opt-in sanitizer build: `cmake -B build-san -DAGENTTY_SANITIZE=address,undefined`.
 # Separate from CMAKE_BUILD_TYPE so CI / contributors can flip it without
 # redefining the whole toolchain.
-set(MOHA_SANITIZE "" CACHE STRING
-    "Comma-separated sanitizers for moha (e.g. address,undefined or thread). Empty to disable.")
-if(MOHA_SANITIZE AND NOT MSVC)
-    message(STATUS "moha: building with -fsanitize=${MOHA_SANITIZE}")
-    target_compile_options(moha PRIVATE
-        -fsanitize=${MOHA_SANITIZE} -fno-omit-frame-pointer -g)
-    target_link_options(moha PRIVATE -fsanitize=${MOHA_SANITIZE})
+set(AGENTTY_SANITIZE "" CACHE STRING
+    "Comma-separated sanitizers for agentty (e.g. address,undefined or thread). Empty to disable.")
+if(AGENTTY_SANITIZE AND NOT MSVC)
+    message(STATUS "agentty: building with -fsanitize=${AGENTTY_SANITIZE}")
+    target_compile_options(agentty PRIVATE
+        -fsanitize=${AGENTTY_SANITIZE} -fno-omit-frame-pointer -g)
+    target_link_options(agentty PRIVATE -fsanitize=${AGENTTY_SANITIZE})
 endif()
 
 # ── Profile-guided optimization (opt-in, two phases) ────────────────────
-# Phase 1: `cmake -B build-pgogen -DMOHA_PGO=generate` → build + run the
+# Phase 1: `cmake -B build-pgogen -DAGENTTY_PGO=generate` → build + run the
 #          app through a realistic workload (a couple of chat turns + tool
 #          calls is enough; the counters are written on exit).
-# Phase 2: `cmake -B build-pgouse -DMOHA_PGO=use` → rebuild using the
+# Phase 2: `cmake -B build-pgouse -DAGENTTY_PGO=use` → rebuild using the
 #          counters — typical gain on streaming + layout hot paths is
 #          8–12% wall-clock, 3–6% binary size on MSVC/GCC/Clang.
 # The profile data directory is kept out of build/ so switching generators
 # or blowing away build/ doesn't lose your collected profile.
-set(MOHA_PGO "" CACHE STRING
+set(AGENTTY_PGO "" CACHE STRING
     "Profile-guided optimization: 'generate', 'use', or empty.")
-set(MOHA_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo-data" CACHE PATH
+set(AGENTTY_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo-data" CACHE PATH
     "Directory where PGO profile counters live across generate/use phases.")
-if(MOHA_PGO)
-    file(MAKE_DIRECTORY "${MOHA_PGO_DIR}")
+if(AGENTTY_PGO)
+    file(MAKE_DIRECTORY "${AGENTTY_PGO_DIR}")
     if(MSVC)
-        if(MOHA_PGO STREQUAL "generate")
-            target_link_options(moha PRIVATE "/GENPROFILE:PGD=${MOHA_PGO_DIR}/moha.pgd")
-        elseif(MOHA_PGO STREQUAL "use")
-            target_link_options(moha PRIVATE "/USEPROFILE:PGD=${MOHA_PGO_DIR}/moha.pgd")
+        if(AGENTTY_PGO STREQUAL "generate")
+            target_link_options(agentty PRIVATE "/GENPROFILE:PGD=${AGENTTY_PGO_DIR}/agentty.pgd")
+        elseif(AGENTTY_PGO STREQUAL "use")
+            target_link_options(agentty PRIVATE "/USEPROFILE:PGD=${AGENTTY_PGO_DIR}/agentty.pgd")
         endif()
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        if(MOHA_PGO STREQUAL "generate")
-            target_compile_options(moha PRIVATE -fprofile-instr-generate)
-            target_link_options(moha PRIVATE -fprofile-instr-generate)
-        elseif(MOHA_PGO STREQUAL "use")
-            # Expect `llvm-profdata merge -output=moha.profdata ${MOHA_PGO_DIR}/*.profraw`
+        if(AGENTTY_PGO STREQUAL "generate")
+            target_compile_options(agentty PRIVATE -fprofile-instr-generate)
+            target_link_options(agentty PRIVATE -fprofile-instr-generate)
+        elseif(AGENTTY_PGO STREQUAL "use")
+            # Expect `llvm-profdata merge -output=agentty.profdata ${AGENTTY_PGO_DIR}/*.profraw`
             # to be run between the two builds.
-            target_compile_options(moha PRIVATE "-fprofile-instr-use=${MOHA_PGO_DIR}/moha.profdata")
-            target_link_options(moha PRIVATE "-fprofile-instr-use=${MOHA_PGO_DIR}/moha.profdata")
+            target_compile_options(agentty PRIVATE "-fprofile-instr-use=${AGENTTY_PGO_DIR}/agentty.profdata")
+            target_link_options(agentty PRIVATE "-fprofile-instr-use=${AGENTTY_PGO_DIR}/agentty.profdata")
         endif()
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        if(MOHA_PGO STREQUAL "generate")
-            target_compile_options(moha PRIVATE "-fprofile-generate=${MOHA_PGO_DIR}")
-            target_link_options(moha PRIVATE "-fprofile-generate=${MOHA_PGO_DIR}")
-        elseif(MOHA_PGO STREQUAL "use")
-            target_compile_options(moha PRIVATE
-                "-fprofile-use=${MOHA_PGO_DIR}" -fprofile-correction)
-            target_link_options(moha PRIVATE "-fprofile-use=${MOHA_PGO_DIR}")
+        if(AGENTTY_PGO STREQUAL "generate")
+            target_compile_options(agentty PRIVATE "-fprofile-generate=${AGENTTY_PGO_DIR}")
+            target_link_options(agentty PRIVATE "-fprofile-generate=${AGENTTY_PGO_DIR}")
+        elseif(AGENTTY_PGO STREQUAL "use")
+            target_compile_options(agentty PRIVATE
+                "-fprofile-use=${AGENTTY_PGO_DIR}" -fprofile-correction)
+            target_link_options(agentty PRIVATE "-fprofile-use=${AGENTTY_PGO_DIR}")
         endif()
     endif()
-    message(STATUS "moha: PGO phase = ${MOHA_PGO} (data dir: ${MOHA_PGO_DIR})")
+    message(STATUS "agentty: PGO phase = ${AGENTTY_PGO} (data dir: ${AGENTTY_PGO_DIR})")
 endif()

@@ -1,12 +1,12 @@
-#include "moha/runtime/app/program.hpp"
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/runtime/login.hpp"
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/auth/auth.hpp"
+#include "agentty/runtime/app/program.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/login.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/auth/auth.hpp"
 
 #include <vector>
 
-namespace moha::app {
+namespace agentty::app {
 
 namespace {
 std::vector<ModelInfo> seed_models() {
@@ -46,7 +46,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // No credentials installed yet → main() invoked install() with an
     // empty header. Open the login modal so the user can authenticate
     // without leaving the TUI; subscribe.cpp routes all input there
-    // until they finish (or Esc out, leaving moha unauth'd — they'll
+    // until they finish (or Esc out, leaving agentty unauth'd — they'll
     // hit a stream error on first send and can /login from the palette).
     if (deps().auth_header.empty())
         m.ui.login = ui::login::Picking{};
@@ -71,4 +71,4 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }
 
-} // namespace moha::app
+} // namespace agentty::app

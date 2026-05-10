@@ -1,14 +1,14 @@
 # Authentication
 
-moha supports two authentication methods for the Claude API: **OAuth** (Claude.ai login) and **API key**. OAuth reuses Claude Code's OAuth client, so users with a Pro/Max subscription can authenticate without separate API billing.
+agentty supports two authentication methods for the Claude API: **OAuth** (Claude.ai login) and **API key**. OAuth reuses Claude Code's OAuth client, so users with a Pro/Max subscription can authenticate without separate API billing.
 
 ## Quick Start
 
 ```bash
-moha login          # Interactive login (OAuth or API key)
-moha status         # Show current auth status
-moha logout         # Remove saved credentials
-moha -k sk-ant-...  # One-off API-key override for this session
+agentty login          # Interactive login (OAuth or API key)
+agentty status         # Show current auth status
+agentty logout         # Remove saved credentials
+agentty -k sk-ant-...  # One-off API-key override for this session
 ```
 
 CLI flags:
@@ -28,7 +28,7 @@ Subcommand dispatch lives in `src/main.cpp:1400-1435`.
 Uses OAuth 2.0 Authorization Code with PKCE (S256). The token is sent as
 `Authorization: Bearer <token>` and enables Pro/Max subscription billing.
 
-**OAuth client config** (`include/moha/auth.hpp:26-34`, `OAuthConfig`):
+**OAuth client config** (`include/agentty/auth.hpp:26-34`, `OAuthConfig`):
 
 | Field | Value |
 |---|---|
@@ -53,8 +53,8 @@ priority order:
 1. **`-k` / `--key`** — CLI flag, API key for a single session
 2. **`ANTHROPIC_API_KEY`** env var — API key
 3. **`CLAUDE_CODE_OAUTH_TOKEN`** env var — OAuth token (reuse Claude Code's auth)
-4. **Credentials file** — `~/.config/moha/credentials.json`
-   (or `$XDG_CONFIG_HOME/moha/credentials.json`)
+4. **Credentials file** — `~/.config/agentty/credentials.json`
+   (or `$XDG_CONFIG_HOME/agentty/credentials.json`)
 
 If a stored OAuth token is expired and a refresh token is present, `resolve()`
 refreshes inline before returning. If the refresh fails (or there is no refresh
@@ -63,7 +63,7 @@ authenticated" message.
 
 ## Credentials File
 
-**Path:** `~/.config/moha/credentials.json` (mode `0600`, set via
+**Path:** `~/.config/agentty/credentials.json` (mode `0600`, set via
 `restrict_perms()` → `chmod` on POSIX; best-effort on Windows).
 
 ```json
@@ -84,26 +84,26 @@ then `$USERPROFILE/.config` on Windows. The directory is created on first read
 
 ## TLS / Certificate Trust
 
-`auth::apply_tls_options(curl)` is called on every libcurl handle moha creates
+`auth::apply_tls_options(curl)` is called on every libcurl handle agentty creates
 (`src/auth.cpp:75-88`). It honours:
 
 | Env var | Effect |
 |---|---|
 | `CURL_CA_BUNDLE` | `CURLOPT_CAINFO = $CURL_CA_BUNDLE` |
 | `SSL_CERT_FILE` | Same, used only if `CURL_CA_BUNDLE` is unset |
-| `MOHA_INSECURE=1` | Disables `SSL_VERIFYPEER` and `SSL_VERIFYHOST` (debug only) |
+| `AGENTTY_INSECURE=1` | Disables `SSL_VERIFYPEER` and `SSL_VERIFYHOST` (debug only) |
 
 Both `CURL_CA_BUNDLE` and `SSL_CERT_FILE` are commonly set by Nix, certain
-corporate VPN proxies, and tools like `mitmproxy`. `MOHA_INSECURE` should never
+corporate VPN proxies, and tools like `mitmproxy`. `AGENTTY_INSECURE` should never
 be set against a real Anthropic endpoint.
 
 ## OAuth PKCE Flow
 
-The interactive login (`moha login` → option 1) implements Authorization Code
+The interactive login (`agentty login` → option 1) implements Authorization Code
 with PKCE (`src/auth.cpp:409-478`, `cmd_login()`):
 
 ```
-┌─ moha ────────────────────────────────────────────────────┐
+┌─ agentty ────────────────────────────────────────────────────┐
 │                                                           │
 │  1. verifier  = random_urlsafe(128)                       │
 │  2. challenge = base64url_no_pad(SHA-256(verifier))       │
@@ -123,7 +123,7 @@ with PKCE (`src/auth.cpp:409-478`, `cmd_login()`):
 └───────────────────────────┬───────────────────────────────┘
                             │ user pastes "<code>#<state>"
                             ▼
-┌─ moha ────────────────────────────────────────────────────┐
+┌─ agentty ────────────────────────────────────────────────────┐
 │                                                           │
 │  6. exchange_code() splits on '#', keeps the code half    │
 │     (src/auth.cpp:299-319)                                │
@@ -139,7 +139,7 @@ with PKCE (`src/auth.cpp:409-478`, `cmd_login()`):
 │                                                           │
 │  8. Receive: { access_token, refresh_token, expires_in }  │
 │  9. expires_at_ms = now_ms() + expires_in * 1000          │
-│ 10. save_credentials() → ~/.config/moha/credentials.json  │
+│ 10. save_credentials() → ~/.config/agentty/credentials.json  │
 │                                                           │
 └───────────────────────────────────────────────────────────┘
 ```
@@ -164,16 +164,16 @@ grant_type=refresh_token
 ```
 
 The response provides a new `access_token` and `expires_in`, and optionally a
-new `refresh_token`. moha persists the refreshed values to disk and continues.
+new `refresh_token`. agentty persists the refreshed values to disk and continues.
 
 There is no in-flight refresh during a streaming request — if the token expires
-mid-conversation, the server returns 401 and the user must restart moha (which
+mid-conversation, the server returns 401 and the user must restart agentty (which
 will refresh on the next startup).
 
 ## How Auth Headers Are Attached
 
 The `anthropic::Request` struct carries the resolved auth header
-(`include/moha/anthropic.hpp:21-31`):
+(`include/agentty/anthropic.hpp:21-31`):
 
 ```cpp
 struct Request {
@@ -246,16 +246,16 @@ API-key requests skip this entirely: `body["system"] = req.system_prompt;` (a pl
 ## Error Handling
 
 Authentication failures (HTTP 401/403) bubble up as a `StreamError` from
-`run_stream_sync()` and surface in the TUI. The user must run `moha login`
+`run_stream_sync()` and surface in the TUI. The user must run `agentty login`
 again (or fix the env var). They are **not** automatically retried — there's no
-recovery moha can do for a bad/revoked token mid-stream.
+recovery agentty can do for a bad/revoked token mid-stream.
 
 Network errors and overload (5xx) within a single request are surfaced as
 `StreamError` events to the UI loop, which is responsible for any retry policy.
 
 ## Data Structures
 
-### `Credentials` (`include/moha/auth.hpp:13-23`)
+### `Credentials` (`include/agentty/auth.hpp:13-23`)
 
 ```cpp
 enum class Method { None, ApiKey, OAuth };
@@ -277,12 +277,12 @@ struct Credentials {
 JSON disk format uses `"expires_at"` as the key for the `expires_at_ms` field
 (historical naming — value is still milliseconds).
 
-### `OAuthConfig` (`include/moha/auth.hpp:26-34`)
+### `OAuthConfig` (`include/agentty/auth.hpp:26-34`)
 
 A `struct` of `static constexpr const char*` constants for the OAuth client.
 Not instantiated — accessed as `OAuthConfig::client_id`, etc.
 
-### `TokenResponse` (`include/moha/auth.hpp:56-62`)
+### `TokenResponse` (`include/agentty/auth.hpp:56-62`)
 
 Result of `exchange_code()` and `refresh_access_token()`:
 
@@ -320,7 +320,7 @@ main()                                                    (src/main.cpp:1400)
   │
   ├─ persistence::load_settings(), apply --model override
   │
-  └─ maya::run<MohaApp>()                                 — TUI event loop
+  └─ maya::run<AgenttyApp>()                                 — TUI event loop
         │
         └─ user submits message
               │
@@ -341,8 +341,8 @@ main()                                                    (src/main.cpp:1400)
 
 | File | Purpose |
 |---|---|
-| `include/moha/auth.hpp` | Public types: `Method`, `Style`, `Credentials`, `OAuthConfig`, `TokenResponse`; function declarations |
+| `include/agentty/auth.hpp` | Public types: `Method`, `Style`, `Credentials`, `OAuthConfig`, `TokenResponse`; function declarations |
 | `src/auth.cpp` | All auth logic: paths, TLS opts, load/save/clear, PKCE helpers, token exchange/refresh, `resolve()`, login/logout/status subcommands |
-| `include/moha/anthropic.hpp` | `Request` struct (carries `auth_header` + `auth_style`), `run_stream_sync()` |
+| `include/agentty/anthropic.hpp` | `Request` struct (carries `auth_header` + `auth_style`), `run_stream_sync()` |
 | `src/anthropic.cpp` | Attaches auth headers, rewrites system prompt with billing block for OAuth |
 | `src/main.cpp` | CLI arg parsing, subcommand dispatch, calls `auth::resolve()`, wires `Credentials` into each `Request` |

@@ -4,7 +4,7 @@
 // ExecutingTool. Kept out of update.cpp so the reducer orchestrator stays
 // easy to read.
 
-#include "moha/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -14,19 +14,19 @@
 
 #include <maya/core/overload.hpp>
 
-#include "moha/provider/error_class.hpp"
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/runtime/app/deps.hpp"
-#include "moha/runtime/mem.hpp"
-#include "moha/runtime/view/cache.hpp"
-#include "moha/tool/spec.hpp"
-#include "moha/tool/util/partial_json.hpp"
+#include "agentty/provider/error_class.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/mem.hpp"
+#include "agentty/runtime/view/cache.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/util/partial_json.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 using json = nlohmann::json;
-using moha::tools::util::sniff_string;
-using moha::tools::util::sniff_string_progressive;
+using agentty::tools::util::sniff_string;
+using agentty::tools::util::sniff_string_progressive;
 using maya::Cmd;
 
 namespace {
@@ -73,7 +73,7 @@ std::optional<std::string> sniff_any(const std::string& raw,
 std::optional<json> try_parse_partial(const std::string& raw) {
     if (raw.empty()) return std::nullopt;
     try {
-        auto closed = moha::tools::util::close_partial_json(raw);
+        auto closed = agentty::tools::util::close_partial_json(raw);
         auto parsed = json::parse(closed, /*cb=*/nullptr, /*allow_exceptions=*/false);
         if (parsed.is_discarded() || !parsed.is_object()) return std::nullopt;
         return parsed;
@@ -289,7 +289,7 @@ void update_stream_preview(ToolUse& tc) {
         // hits, then stop probing (stream_sniff_offset != 0).
         if (tc.stream_sniff_offset == 0) {
             for (auto k : kContentAliases) {
-                if (auto p = moha::tools::util::locate_string_value(
+                if (auto p = agentty::tools::util::locate_string_value(
                         tc.args_streaming, k)) {
                     tc.stream_sniff_offset = *p;
                     break;
@@ -297,7 +297,7 @@ void update_stream_preview(ToolUse& tc) {
             }
         }
         if (tc.stream_sniff_offset != 0) {
-            auto v = moha::tools::util::decode_string_from(
+            auto v = agentty::tools::util::decode_string_from(
                 tc.args_streaming, tc.stream_sniff_offset);
             if (!v.empty()) {
                 if (v.size() > kStreamingPreviewCap) {
@@ -1142,4 +1142,4 @@ Step stream_update(Model m, msg::StreamMsg sm) {
     }, sm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

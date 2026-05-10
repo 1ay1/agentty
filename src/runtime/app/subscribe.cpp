@@ -1,4 +1,4 @@
-#include "moha/runtime/app/subscribe.hpp"
+#include "agentty/runtime/app/subscribe.hpp"
 
 #include <chrono>
 #include <optional>
@@ -6,16 +6,16 @@
 
 #include <maya/terminal/ansi.hpp>
 
-#include "moha/runtime/login.hpp"
-#include "moha/runtime/picker.hpp"
+#include "agentty/runtime/login.hpp"
+#include "agentty/runtime/picker.hpp"
 
-namespace moha::app {
+namespace agentty::app {
 
 using maya::Sub;
 using maya::KeyEvent;
 using maya::CharKey;
 using maya::SpecialKey;
-namespace pick = moha::ui::pick;
+namespace pick = agentty::ui::pick;
 
 namespace {
 
@@ -155,7 +155,7 @@ std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
 // OAuthExchanging consumes only Esc (cancel back to Picking is fine);
 // Failed accepts any key to return to Picking.
 std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
-    using namespace moha::ui::login;
+    using namespace agentty::ui::login;
 
     // Esc always closes — gives the user an out from any sub-state.
     if (std::holds_alternative<SpecialKey>(ev.key)
@@ -339,7 +339,7 @@ Sub<Msg> subscribe(const Model& m) {
         [=, login_state = m.ui.login](const KeyEvent& ev) -> std::optional<Msg> {
             // Login modal owns the whole keyboard — auth is the gating
             // step, no other UI is reachable until the user finishes
-            // (or Escs out, which is allowed but leaves moha unauth'd).
+            // (or Escs out, which is allowed but leaves agentty unauth'd).
             if (in_login)   return on_login(login_state, ev);
             if (in_perm)    return on_permission(ev);
             if (in_cmd)     return on_command_palette(ev);
@@ -391,4 +391,4 @@ Sub<Msg> subscribe(const Model& m) {
     return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub));
 }
 
-} // namespace moha::app
+} // namespace agentty::app

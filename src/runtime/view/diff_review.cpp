@@ -1,4 +1,4 @@
-#include "moha/runtime/view/diff_review.hpp"
+#include "agentty/runtime/view/diff_review.hpp"
 
 #include <algorithm>
 #include <format>
@@ -6,9 +6,9 @@
 
 #include <maya/widget/diff_view.hpp>
 
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 using namespace maya;
 using namespace maya::dsl;
@@ -84,4 +84,4 @@ Element diff_review(const Model& m) {
             ).build();
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

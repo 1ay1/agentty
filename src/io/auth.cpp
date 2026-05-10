@@ -1,8 +1,8 @@
-#include "moha/auth/auth.hpp"
+#include "agentty/auth/auth.hpp"
 
 // OAuth config lives with the provider it belongs to; `using` lets the
 // existing OAuthConfig:: references below stay short.
-#include "moha/provider/anthropic/oauth.hpp"
+#include "agentty/provider/anthropic/oauth.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -27,7 +27,7 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
-#include "moha/io/http.hpp"
+#include "agentty/io/http.hpp"
 
 #ifdef _WIN32
 #  include <io.h>
@@ -39,9 +39,9 @@
 #  include <unistd.h>
 #endif
 
-namespace moha::auth {
+namespace agentty::auth {
 
-using OAuthConfig = moha::provider::anthropic::OAuthConfig;
+using OAuthConfig = agentty::provider::anthropic::OAuthConfig;
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -125,7 +125,7 @@ fs::path config_dir() {
         if (!home || !*home) home = std::getenv("USERPROFILE");
         base = (home && *home) ? fs::path(home) / ".config" : fs::current_path() / ".config";
     }
-    fs::path p = base / "moha";
+    fs::path p = base / "agentty";
     std::error_code ec;
     fs::create_directories(p, ec);
     return p;
@@ -142,7 +142,7 @@ void prewarm_anthropic() {
     static std::atomic<bool> started{false};
     bool expected = false;
     if (!started.compare_exchange_strong(expected, true)) return;
-    const auto& ov = http::moha_api_host_override();
+    const auto& ov = http::agentty_api_host_override();
     http::default_client().prewarm("api.anthropic.com", 443,
                                    ov.active() ? ov.host : std::string{},
                                    ov.active() ? ov.port : uint16_t{0});
@@ -396,10 +396,10 @@ FormPostResult http_post_form(const std::string& url,
     hreq.host   = parsed->host;
     hreq.port   = parsed->port;
     // Air-gapped users tunnel the OAuth host (token exchange + refresh)
-    // through SSH the same way they tunnel the API host — see MOHA_OAUTH_HOST
-    // in include/moha/io/http.hpp.  Without this, OAuth refresh dies on
+    // through SSH the same way they tunnel the API host — see AGENTTY_OAUTH_HOST
+    // in include/agentty/io/http.hpp.  Without this, OAuth refresh dies on
     // getaddrinfo the moment the access token expires mid-session.
-    if (const auto& ov = http::moha_oauth_host_override(); ov.active()) {
+    if (const auto& ov = http::agentty_oauth_host_override(); ov.active()) {
         hreq.dial_host = ov.host;
         hreq.dial_port = ov.port;
     }
@@ -407,7 +407,7 @@ FormPostResult http_post_form(const std::string& url,
     hreq.headers = {
         {"content-type", "application/x-www-form-urlencoded"},
         {"accept",       "application/json"},
-        {"user-agent",   "moha/0.1.0"},
+        {"user-agent",   "agentty/0.1.0"},
     };
     hreq.body = form_urlencode(fields);
     // OAuth token exchange/refresh response is a tiny JSON object
@@ -518,7 +518,7 @@ TokenResult refresh_access_token(const RefreshToken& refresh_token) {
 // ---------------------------------------------------------------------------
 
 // Single-shot mailbox: written by resolve() on the main thread before the
-// TUI is up, read by MohaApp::init() on the same main thread once
+// TUI is up, read by AgenttyApp::init() on the same main thread once
 // maya::run has started. Single-producer / single-consumer, so a plain
 // std::optional is sufficient — no atomics needed.
 namespace {
@@ -597,7 +597,7 @@ void open_browser(const std::string& url) {
 // ---------------------------------------------------------------------------
 
 int cmd_login() {
-    std::cout << "moha — authenticate with Claude\n\n"
+    std::cout << "agentty — authenticate with Claude\n\n"
               << "  1) OAuth via claude.ai (Pro/Max subscription)\n"
               << "  2) Paste an Anthropic API key (sk-ant-...)\n"
               << "\nChoice [1/2]: " << std::flush;
@@ -625,7 +625,7 @@ int cmd_login() {
     OAuthState   state{random_urlsafe(32)};
     std::string  auth_url = oauth_authorize_url(verifier, state);
 
-    std::cout << "\nOpening browser to authorize moha...\n"
+    std::cout << "\nOpening browser to authorize agentty...\n"
               << auth_url << "\n\n";
     open_browser(auth_url);
 
@@ -692,4 +692,4 @@ int cmd_status() {
     return 0;
 }
 
-} // namespace moha::auth
+} // namespace agentty::auth

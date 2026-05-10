@@ -9,7 +9,7 @@ without re-deriving any of the design decisions.
 
 ## Why this exists
 
-moha's UX is supposed to feel like Zed's agent panel running in a terminal.
+agentty's UX is supposed to feel like Zed's agent panel running in a terminal.
 "Like Zed" means the things that make Zed's agent panel coherent:
 
 - Tool calls render as **integrated cards inline with the conversation**, not
@@ -27,7 +27,7 @@ moha's UX is supposed to feel like Zed's agent panel running in a terminal.
 - Failure shifts a card's border from `Round` → `Dashed`, not a red banner
   somewhere unrelated.
 
-The current moha implementation gets only some of this right. The rest of
+The current agentty implementation gets only some of this right. The rest of
 this doc set tells you exactly what to build, in what order, with what
 maya primitives, to close the gap.
 
@@ -56,7 +56,7 @@ if you have.
 
 - **`zed/path/to/file.rs:N`** — refers to `/Users/ayush/projects/zed/crates/...`
 - **`maya/include/maya/foo.hpp:N`** — refers to `maya/include/maya/...`
-- **`src/main.cpp:N`** — refers to moha's source
+- **`src/main.cpp:N`** — refers to agentty's source
 - **TUI constraints** — terminals are monospaced, integer-cell, no
   sub-pixel rendering, no true hover (focus instead). When a Zed pattern
   doesn't translate, the doc names the substitution.
@@ -67,8 +67,8 @@ if you have.
 
 These docs were written by reading the actual sources:
 
-- **maya** at `/Users/ayush/projects/moha/maya/` (in-tree git submodule)
-- **moha** at `/Users/ayush/projects/moha/`
+- **maya** at `/Users/ayush/projects/agentty/maya/` (in-tree git submodule)
+- **agentty** at `/Users/ayush/projects/agentty/`
 - **Zed** at `/Users/ayush/projects/zed/`, primarily `crates/agent_ui/` and
   `assets/keymaps/default-macos.json`
 

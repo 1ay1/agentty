@@ -1,17 +1,17 @@
-#include "moha/runtime/view/composer.hpp"
+#include "agentty/runtime/view/composer.hpp"
 
 #include <algorithm>
 #include <cstdio>
 
-#include "moha/runtime/composer_attachment.hpp"
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 namespace {
 
-// Map moha runtime state → widget State enum. Pure data translation;
+// Map agentty runtime state → widget State enum. Pure data translation;
 // the widget owns all visual decisions (border color, prompt boldness,
 // placeholder text, height pin).
 maya::Composer::State composer_state(const Model& m) {
@@ -23,21 +23,21 @@ maya::Composer::State composer_state(const Model& m) {
 
 // Walk the composer text, replacing each placeholder token with a
 // human-readable chip caption ("[Pasted text · 412 lines · 14 KB]" /
-// "[@src/auth/login.cpp]"). Translate the moha-space cursor into
-// view-space simultaneously: any moha cursor position is — by the
+// "[@src/auth/login.cpp]"). Translate the agentty-space cursor into
+// view-space simultaneously: any agentty cursor position is — by the
 // chip-aware navigation in update/composer.cpp — always at a chip
 // boundary, never inside a token, so the mapping is well-defined.
 struct DisplayText {
     std::string text;
     int         cursor = 0;
 };
-DisplayText render_chips(std::string_view src, int moha_cursor,
+DisplayText render_chips(std::string_view src, int agentty_cursor,
                          const std::vector<Attachment>& attachments) {
     DisplayText out;
     out.text.reserve(src.size());
     int i = 0;
     int n = static_cast<int>(src.size());
-    int cur = std::clamp(moha_cursor, 0, n);
+    int cur = std::clamp(agentty_cursor, 0, n);
     while (i < n) {
         if (i == cur) out.cursor = static_cast<int>(out.text.size());
         if (static_cast<unsigned char>(src[i]) == 0x01) {
@@ -159,4 +159,4 @@ maya::Composer::Config composer_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

@@ -1,21 +1,21 @@
-#include "moha/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <ranges>
 #include <utility>
 
-#include "moha/auth/auth.hpp"
-#include "moha/runtime/app/deps.hpp"
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/io/http.hpp"
-#include "moha/provider/anthropic/transport.hpp"
-#include "moha/tool/registry.hpp"
-#include "moha/tool/spec.hpp"
-#include "moha/tool/tool.hpp"
-#include "moha/runtime/view/helpers.hpp"
+#include "agentty/auth/auth.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/io/http.hpp"
+#include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/tool/registry.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/tool.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 
-namespace moha::app::cmd {
+namespace agentty::app::cmd {
 
 using maya::Cmd;
 
@@ -65,7 +65,7 @@ Cmd<Msg> launch_stream(Model& m) {
     // with a fresh ctx if the user typed and submitted a new message in
     // the meantime, which means we silently null out the *new* turn's
     // cancel token. Result: Esc on the new turn does nothing, the user
-    // can't cancel anymore, and "moha gets stuck — nothing works".
+    // can't cancel anymore, and "agentty gets stuck — nothing works".
     auto cancel_for_guard = req.cancel;
 
     return Cmd<Msg>::task([req = std::move(req), cancel_for_guard]
@@ -118,7 +118,7 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
             // the UI as bytes arrive. RAII scope guarantees the sink is
             // cleared even if the tool throws, so the next tool run can't
             // inherit a stale dispatch lambda.
-            moha::tools::progress::Scope progress_scope{
+            agentty::tools::progress::Scope progress_scope{
                 [dispatch, id](std::string_view snapshot) {
                     dispatch(ToolExecProgress{id, std::string{snapshot}});
                 }};
@@ -156,7 +156,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // calls in one turn they all start Pending; maya's BG worker pool
     // runs Task cmds on independent threads, so any set of tools we
     // dispatch in this tick runs concurrently. `is_parallel_safe`
-    // (moha/tool/effects.hpp) encodes the capability rule: Pure /
+    // (agentty/tool/effects.hpp) encodes the capability rule: Pure /
     // ReadFs / Net compose freely; WriteFs and Exec demand exclusive
     // access. We accumulate `active_effects` across the sweep so each
     // candidate is checked against *everything* already running AND
@@ -371,4 +371,4 @@ Cmd<Msg> refresh_oauth(std::string refresh_token) {
         });
 }
 
-} // namespace moha::app::cmd
+} // namespace agentty::app::cmd

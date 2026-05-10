@@ -341,7 +341,7 @@ constructor, getters/setters, and `operator Element() const`.
 
 ### `tool_call.hpp` — the generic card
 
-This is the foundation. Already used in moha. Header label, status icon
+This is the foundation. Already used in agentty. Header label, status icon
 + color, optional content, auto-collapse logic.
 
 ```cpp
@@ -466,7 +466,7 @@ that yourself; see `11_navigation.md`).
 
 ### `scrollable.hpp`
 
-A viewport. Wrap the message stream in this. Currently moha doesn't —
+A viewport. Wrap the message stream in this. Currently agentty doesn't —
 this is one of the gaps.
 
 ```cpp
@@ -525,7 +525,7 @@ struct App {
     static auto subscribe(const Model&) -> Sub<Msg>;
 };
 
-int main() { maya::run<App>({.title = "moha", .mode = Mode::Fullscreen}); }
+int main() { maya::run<App>({.title = "agentty", .mode = Mode::Fullscreen}); }
 ```
 
 ### Cmd<Msg>
@@ -587,7 +587,7 @@ struct RunConfig {
 enum class Mode { Inline, Fullscreen };
 ```
 
-**For moha**: `Mode::Fullscreen` while in the agent panel (alt screen,
+**For agentty**: `Mode::Fullscreen` while in the agent panel (alt screen,
 diff-rendered). `Mode::Inline` would be appropriate for a ":one-shot"
 command but isn't what we want for the panel.
 

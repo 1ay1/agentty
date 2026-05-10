@@ -4,8 +4,8 @@
 // Both walk m.d.current.messages because a ToolCallId is only locally
 // unique within a turn — we don't index them.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <chrono>
 #include <utility>
@@ -13,10 +13,10 @@
 #include <maya/core/overload.hpp>
 #include <nlohmann/json.hpp>
 
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/tool/spec.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/tool/spec.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 using json = nlohmann::json;
 
@@ -234,9 +234,9 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         },
         [&](PermissionApproveAlways) -> Step {
             // MVP: same as Approve. Sticky grants TBD.
-            return moha::app::update(std::move(m), Msg{PermissionApprove{}});
+            return agentty::app::update(std::move(m), Msg{PermissionApprove{}});
         },
     }, tm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

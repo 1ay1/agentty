@@ -1,6 +1,6 @@
-#include "moha/tool/util/subprocess.hpp"
-#include "moha/tool/registry.hpp"
-#include "moha/tool/util/utf8.hpp"
+#include "agentty/tool/util/subprocess.hpp"
+#include "agentty/tool/registry.hpp"
+#include "agentty/tool/util/utf8.hpp"
 
 #include <algorithm>
 #include <array>
@@ -33,7 +33,7 @@
 extern char** environ;
 #endif
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 namespace {
 
@@ -699,4 +699,4 @@ std::string run_argv(const std::vector<std::string>& argv,
     return legacy_format(run_argv_s(argv, max_bytes, timeout), timeout);
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util

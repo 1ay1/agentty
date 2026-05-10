@@ -1,4 +1,4 @@
-#include "moha/tool/util/fuzzy_match.hpp"
+#include "agentty/tool/util/fuzzy_match.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Shared line scanner.
@@ -528,4 +528,4 @@ FuzzyMatch fuzzy_find(std::string_view file,
     return {false, 0, 0, 0, {}, 0};
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util

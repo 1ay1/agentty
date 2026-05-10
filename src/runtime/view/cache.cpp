@@ -1,9 +1,9 @@
-#include "moha/runtime/view/cache.hpp"
+#include "agentty/runtime/view/cache.hpp"
 
 #include <cstddef>
 #include <string>
 
-namespace moha::ui {
+namespace agentty::ui {
 
 std::string ViewCache::make_key_(const ThreadId& tid, const MessageId& mid) {
     // tid + ':' + mid. Both are hex-shaped strings; the separator means
@@ -51,4 +51,4 @@ void ViewCache::set_capacity(std::size_t max_entries) noexcept {
     cap_ = (max_entries == 0) ? 1 : max_entries;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

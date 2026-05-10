@@ -1,15 +1,15 @@
-#include "moha/runtime/app/deps.hpp"
+#include "agentty/runtime/app/deps.hpp"
 
 #include <stdexcept>
 
-namespace moha::app {
+namespace agentty::app {
 
 namespace {
 Deps* g_deps = nullptr;
 }
 
 const Deps& deps() {
-    if (!g_deps) throw std::logic_error("moha::app::deps() called before install_deps()");
+    if (!g_deps) throw std::logic_error("agentty::app::deps() called before install_deps()");
     return *g_deps;
 }
 
@@ -25,4 +25,4 @@ void update_auth(std::string header, auth::Style style) {
     g_deps->auth_style  = style;
 }
 
-} // namespace moha::app
+} // namespace agentty::app

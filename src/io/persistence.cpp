@@ -1,4 +1,4 @@
-#include "moha/io/persistence.hpp"
+#include "agentty/io/persistence.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -15,10 +15,10 @@
 
 #include <nlohmann/json.hpp>
 
-#include "moha/tool/util/utf8.hpp"
-#include "moha/util/base64.hpp"
+#include "agentty/tool/util/utf8.hpp"
+#include "agentty/util/base64.hpp"
 
-namespace moha::persistence {
+namespace agentty::persistence {
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -66,7 +66,7 @@ fs::path data_dir() {
     const char* home = std::getenv("USERPROFILE");
     if (!home) home = std::getenv("HOME");
     fs::path p = home ? fs::path(home) : fs::current_path();
-    p /= ".moha";
+    p /= ".agentty";
     std::error_code ec;
     fs::create_directories(p, ec);
     return p;
@@ -435,7 +435,7 @@ std::vector<Thread> load_all_threads() {
             // visible to anyone watching stderr; programmatic callers
             // who want a strict load can use load_thread_file directly.
             std::fprintf(stderr,
-                "moha: skipping %s — %s\n",
+                "agentty: skipping %s — %s\n",
                 e.path().string().c_str(),
                 loaded.error().render().c_str());
         }
@@ -522,9 +522,9 @@ std::string title_from_first_message(std::string_view text) {
     return t;
 }
 
-} // namespace moha::persistence
+} // namespace agentty::persistence
 
-namespace moha {
+namespace agentty {
 
 // Per-Message stable identity. Generated at Message default-construction
 // (see Message::id in conversation.hpp). The cache key (thread_id,
@@ -547,4 +547,4 @@ MessageId new_message_id() {
     return MessageId{oss.str()};
 }
 
-} // namespace moha
+} // namespace agentty

@@ -29,7 +29,7 @@ References:
 The top row of the panel. Compact, single-line, monochromatic.
 
 ```
- ◆ moha · my-thread-name           ●  Streaming · 3.2s     gpt-4 ▾  ⚡ ◯  History  ?
+ ◆ agentty · my-thread-name           ●  Streaming · 3.2s     gpt-4 ▾  ⚡ ◯  History  ?
 ```
 
 Read left-to-right:
@@ -37,7 +37,7 @@ Read left-to-right:
 | Slot | Content | Notes |
 |---|---|---|
 | Logo / agent mark | `◆` (or whatever glyph) | Color: `text` (171, 178, 191) |
-| App name | `moha` | Bold |
+| App name | `agentty` | Bold |
 | Separator | `·` (middle dot, U+00B7) | Dim |
 | Thread title | `my-thread-name` | Truncate middle if > 40 chars |
 | Spacer | — | pushes status right |
@@ -54,11 +54,11 @@ Layout:
 ```cpp
 Element views::chrome(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     return (h(
         text(" \xe2\x97\x86 ") | Style{}.with_fg(tokens::fg::text),
-        text("moha") | Bold,
+        text("agentty") | Bold,
         text("  \xc2\xb7  ") | Dim,
         text(truncate_middle(m.current.title, 40))
             | Style{}.with_fg(tokens::fg::text),
@@ -101,7 +101,7 @@ The streaming phase pulses the spinner glyph (cycling through
 ```cpp
 Element views::phase_indicator(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     auto [glyph, color, label] = phase_visual(m.phase, m.tick_index);
     return h(
@@ -148,7 +148,7 @@ implement:
 ```cpp
 Element views::model_popover(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     std::vector<Element> rows;
     auto& models = m.available_models;
@@ -238,7 +238,7 @@ Layout:
 ```cpp
 Element views::history_route(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     auto& h = *m.history_view;
 
@@ -323,7 +323,7 @@ is overkill until thread count gets large.
 ### History store
 
 ```cpp
-namespace moha {
+namespace agentty {
 
 struct ThreadSummary {
     std::string id;
@@ -340,10 +340,10 @@ struct HistoryView {
     ScrollState scroll;
 };
 
-} // namespace moha
+} // namespace agentty
 ```
 
-Persist threads to `~/.config/moha/threads/<workspace_hash>/`. The
+Persist threads to `~/.config/agentty/threads/<workspace_hash>/`. The
 `HistoryView` is loaded on demand (when route opens). Keep the file
 list in memory after first load and refresh on `StreamFinished` (so
 the current thread's stats are up-to-date).
@@ -513,7 +513,7 @@ Implementation:
 - `↑`/`↓` move highlight
 - `Enter` activates the row's editor (popup for select, toggle
   flips, input opens overlay text input)
-- Settings are persisted to `~/.config/moha/settings.json` on every
+- Settings are persisted to `~/.config/agentty/settings.json` on every
   change (debounced 500ms).
 
 For the initial rebuild, **defer settings**. Hardcode reasonable
@@ -525,25 +525,25 @@ route once defaults are stable.
 A single-row bar at the very bottom of the panel.
 
 ```
- ↵ Send · /help · ◆ moha 0.3.0                 cwd: ~/projects/moha
+ ↵ Send · /help · ◆ agentty 0.3.0                 cwd: ~/projects/agentty
 ```
 
 | Slot | Content |
 |---|---|
 | Hint area (left) | Context-sensitive key hint (changes per route / focus) |
-| App version (right) | `moha <version>` |
+| App version (right) | `agentty <version>` |
 | Working directory (far right) | `cwd: <path>` (Dim) |
 
 ```cpp
 Element views::status_bar(const Model& m) {
     using namespace maya::dsl;
-    using moha::tokens;
+    using agentty::tokens;
 
     return (h(
         text(" "),
         views::context_hint(m) | Dim,
         spacer(),
-        text("moha " MOHA_VERSION) | Dim,
+        text("agentty " AGENTTY_VERSION) | Dim,
         text("    "),
         text("cwd: " + abbreviate_home(m.cwd)) | Dim,
         text(" ")

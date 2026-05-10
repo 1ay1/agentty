@@ -1,13 +1,13 @@
-#include "moha/runtime/view/status_bar/phase_chip.hpp"
+#include "agentty/runtime/view/status_bar/phase_chip.hpp"
 
 #include <chrono>
 #include <string>
 #include <string_view>
 
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 namespace {
 
@@ -60,4 +60,4 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
     return cfg;
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

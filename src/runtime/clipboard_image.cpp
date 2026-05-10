@@ -1,4 +1,4 @@
-#include "moha/runtime/clipboard_image.hpp"
+#include "agentty/runtime/clipboard_image.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -7,16 +7,16 @@
 #include <string_view>
 
 #if defined(_WIN32)
-  #define MOHA_POPEN  ::_popen
-  #define MOHA_PCLOSE ::_pclose
-  #define MOHA_POPEN_MODE "rb"
+  #define AGENTTY_POPEN  ::_popen
+  #define AGENTTY_PCLOSE ::_pclose
+  #define AGENTTY_POPEN_MODE "rb"
 #else
-  #define MOHA_POPEN  ::popen
-  #define MOHA_PCLOSE ::pclose
-  #define MOHA_POPEN_MODE "r"
+  #define AGENTTY_POPEN  ::popen
+  #define AGENTTY_PCLOSE ::pclose
+  #define AGENTTY_POPEN_MODE "r"
 #endif
 
-namespace moha {
+namespace agentty {
 
 namespace {
 
@@ -35,7 +35,7 @@ struct CaptureResult {
 
 CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     CaptureResult r;
-    FILE* fp = MOHA_POPEN(cmd, MOHA_POPEN_MODE);
+    FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
     if (!fp) return r;
     r.bytes.reserve(std::min<std::size_t>(cap, 256 * 1024));
     char buf[8192];
@@ -46,7 +46,7 @@ CaptureResult popen_capture(const char* cmd, std::size_t cap) {
         if (n == 0) break;
         r.bytes.append(buf, n);
     }
-    r.status = MOHA_PCLOSE(fp);
+    r.status = AGENTTY_PCLOSE(fp);
     return r;
 }
 
@@ -231,7 +231,7 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
     // osascript fallback — slower (~150-300 ms) but always available.
     auto r = popen_capture(
         "set -e; "
-        "f=$(mktemp -t moha-clip).png; "
+        "f=$(mktemp -t agentty-clip).png; "
         "trap 'rm -f \"$f\"' EXIT; "
         "osascript -e 'set png to (the clipboard as «class PNGf»)' "
         "          -e 'set fh to open for access POSIX file \"'\"$f\"'\" "
@@ -262,4 +262,4 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
 #endif
 }
 
-} // namespace moha
+} // namespace agentty

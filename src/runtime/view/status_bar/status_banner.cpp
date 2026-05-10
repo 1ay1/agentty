@@ -1,6 +1,6 @@
-#include "moha/runtime/view/status_bar/status_banner.hpp"
+#include "agentty/runtime/view/status_bar/status_banner.hpp"
 
-namespace moha::ui {
+namespace agentty::ui {
 
 // Notifications now ride on the ShortcutRow (see shortcut_row.cpp): the
 // shortcut row swaps its keybindings for a banner-style notification
@@ -14,4 +14,4 @@ maya::StatusBanner::Config status_banner_config(const Model& /*m*/) {
     return {};
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

@@ -9,7 +9,7 @@
 // the typed state machine is what guarantees we never read OAuthCode
 // fields from an ApiKeyInput modal, etc.
 
-#include "moha/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
 
 #include <chrono>
 #include <utility>
@@ -17,16 +17,16 @@
 
 #include <maya/core/overload.hpp>
 
-#include "moha/auth/auth.hpp"
-#include "moha/runtime/app/cmd_factory.hpp"
-#include "moha/runtime/app/deps.hpp"
-#include "moha/runtime/view/helpers.hpp"
+#include "agentty/auth/auth.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
 using maya::Cmd;
 using maya::overload;
-namespace login = moha::ui::login;
+namespace login = agentty::ui::login;
 
 namespace {
 
@@ -34,7 +34,7 @@ namespace {
 // point so OAuth and ApiKey paths can't drift — both end here.
 void install_and_close(Model& m, auth::Credentials creds) {
     auth::save_credentials(creds);
-    moha::app::update_auth(auth::header_value(creds), auth::style(creds));
+    agentty::app::update_auth(auth::header_value(creds), auth::style(creds));
     m.ui.login = login::Closed{};
     m.s.status = "logged in";
     m.s.status_until = std::chrono::steady_clock::now()
@@ -247,7 +247,7 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
     }};
     auth::save_credentials(creds);
-    moha::app::update_auth(auth::header_value(creds), auth::style(creds));
+    agentty::app::update_auth(auth::header_value(creds), auth::style(creds));
 
     auto toast_cmd = set_status_toast(m, "OAuth token refreshed",
                                       std::chrono::seconds{3});
@@ -291,4 +291,4 @@ Step login_update(Model m, msg::LoginMsg lm) {
     }, lm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

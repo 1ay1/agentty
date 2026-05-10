@@ -1,8 +1,8 @@
-#include "moha/tool/spec.hpp"
-#include "moha/tool/tools.hpp"
-#include "moha/tool/util/arg_reader.hpp"
-#include "moha/tool/util/fs_helpers.hpp"
-#include "moha/tool/util/tool_args.hpp"
+#include "agentty/tool/spec.hpp"
+#include "agentty/tool/tools.hpp"
+#include "agentty/tool/util/arg_reader.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/tool_args.hpp"
 
 #include <filesystem>
 #include <format>
@@ -14,7 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace moha::tools {
+namespace agentty::tools {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -35,7 +35,7 @@ namespace {
 // cached via cache_control on the last message's last block), so the
 // model just refers to it. A 5K-token re-read collapses to ~25 tokens.
 //
-// Cache is process-global, mutex-protected. A fresh moha process starts
+// Cache is process-global, mutex-protected. A fresh agentty process starts
 // empty (the natural session boundary). Edit/Write that mutate a file
 // also bump its mtime, so the cache self-invalidates without any
 // invalidation hooks. Different (offset, limit) requests are tracked
@@ -278,4 +278,4 @@ ToolDef tool_read() {
     return t;
 }
 
-} // namespace moha::tools
+} // namespace agentty::tools

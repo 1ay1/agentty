@@ -1,15 +1,15 @@
-#include "moha/runtime/view/pickers.hpp"
+#include "agentty/runtime/view/pickers.hpp"
 
 #include <algorithm>
 #include <vector>
 
 #include <maya/widget/plan_view.hpp>
 
-#include "moha/runtime/view/helpers.hpp"
-#include "moha/runtime/view/palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/palette.hpp"
 
 // All sizing here is responsive — the public maya layout does the
-// math, never moha. Each picker is a `vstack()` that just declares
+// math, never agentty. Each picker is a `vstack()` that just declares
 // its `min_width`; the Overlay widget exposes a terminal-wide
 // bg-vstack as the picker's parent and default align_items=Stretch
 // makes the picker truly grow to fill that parent. On an 80-col
@@ -20,9 +20,9 @@
 // Per-row truncation rides on `text(...) | clip` (TextWrap::TruncateEnd):
 // maya measures the column it allocated to the text, returns a
 // truncated-with-ellipsis single line if the natural content
-// overflows. moha never recomputes column widths — that's maya's job.
+// overflows. agentty never recomputes column widths — that's maya's job.
 
-namespace moha::ui {
+namespace agentty::ui {
 
 using namespace maya;
 using namespace maya::dsl;
@@ -216,7 +216,7 @@ Element mention_palette(const Model& m) {
             // truncated-with-ellipsis single line if the column is
             // narrower than the natural content. Combined with the
             // outer percent/min/max sizing the rows naturally adapt
-            // to terminal width without moha doing any column math.
+            // to terminal width without agentty doing any column math.
             rows.push_back(h(prefix,
                 text(std::string{name},
                      sel ? fg_bold(fg) : fg_of(fg)) | clip,
@@ -325,4 +325,4 @@ Element todo_modal(const Model& m) {
                        std::move(rows));
 }
 
-} // namespace moha::ui
+} // namespace agentty::ui

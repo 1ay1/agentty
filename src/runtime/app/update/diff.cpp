@@ -4,18 +4,18 @@
 // once. Emits status toasts via set_status_toast on the no-change paths
 // so empty-state Enter doesn't feel silent.
 
-#include "moha/runtime/app/update/internal.hpp"
-#include "moha/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
-#include "moha/runtime/picker.hpp"
+#include "agentty/runtime/picker.hpp"
 
-namespace moha::app::detail {
+namespace agentty::app::detail {
 
-namespace pick = moha::ui::pick;
+namespace pick = agentty::ui::pick;
 using maya::overload;
 
 Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
@@ -116,4 +116,4 @@ Step diff_review_update(Model m, msg::DiffReviewMsg dm) {
     }, dm);
 }
 
-} // namespace moha::app::detail
+} // namespace agentty::app::detail

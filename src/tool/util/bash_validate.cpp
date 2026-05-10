@@ -1,11 +1,11 @@
-#include "moha/tool/util/bash_validate.hpp"
+#include "agentty/tool/util/bash_validate.hpp"
 
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-namespace moha::tools::util {
+namespace agentty::tools::util {
 
 namespace {
 
@@ -124,4 +124,4 @@ std::string validate_bash_command(std::string_view cmd) {
     return {};
 }
 
-} // namespace moha::tools::util
+} // namespace agentty::tools::util
