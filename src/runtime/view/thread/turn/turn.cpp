@@ -6,6 +6,7 @@
 #include <string>
 #include <utility>
 
+#include <maya/element/builder.hpp>
 #include <maya/widget/markdown.hpp>
 
 #include "agentty/domain/catalog.hpp"
@@ -173,6 +174,40 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     return cfg;
 }
 
+// Wrap a heap-stable `shared_ptr<Element>` in a content-keyed
+// ComponentElement. The wrapper's render lambda captures the
+// shared_ptr by value, so per-frame copies of the wrapper (which
+// maya::Conversation::build() does when push_back-ing into its
+// rows vector) just bump the refcount instead of deep-copying the
+// underlying BoxElement / vector / string tree.
+//
+// The non-empty `cache_id` makes maya's cross-frame component cache
+// match by content identity rather than ComponentElement pointer.
+// The wrapper itself is freshly constructed each call (different
+// address, different generation), but the cache_id is stable, so
+// every copy through every container hits the same cached layout
+// + render result. Steady-state cost for a settled turn collapses
+// from "deep tree copy + recursive layout + recursive paint" to
+// "shared_ptr bump + one cache lookup".
+static maya::Element wrap_settled_turn(std::shared_ptr<maya::Element> sp,
+                                       const ThreadId& tid,
+                                       const MessageId& mid) {
+    // dsl::component returns a builder; convert to Element so we can
+    // reach the ComponentElement variant alternative and stamp the
+    // cache_id directly.
+    maya::Element e = maya::dsl::component(
+        [sp = std::move(sp)](int /*w*/, int /*h*/) -> maya::Element {
+            return *sp;
+        });
+    auto& comp = std::get<maya::ComponentElement>(e.inner);
+    comp.cache_id.reserve(tid.value.size() + 1 + mid.value.size() + 5);
+    comp.cache_id = "turn:";
+    comp.cache_id += tid.value;
+    comp.cache_id += ':';
+    comp.cache_id += mid.value;
+    return e;
+}
+
 maya::Conversation::PreBuilt turn_element(const Message& msg,
                                           std::size_t msg_idx,
                                           int turn_num, const Model& m,
@@ -186,14 +221,24 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // has appended a successor message, which by construction means the
     // turn fully resolved (text final, all tools terminal, any
     // permission prompt closed). The Element is therefore safe to
-    // memoize for the lifetime of the cache entry. Same agent_session
-    // pattern as `m.frozen + list_ref`: build once per turn lifetime,
-    // render-by-reference forever after.
+    // memoize for the lifetime of the cache entry.
+    //
+    // The cached Element is held via shared_ptr; on retrieval we hand
+    // back a thin ComponentElement wrapper carrying that shared_ptr
+    // and a stable cache_id derived from (thread, message). The
+    // wrapper passes through downstream containers (PreBuilt vectors,
+    // Conversation::build's rows vector) at refcount-bump cost, and
+    // maya's content-keyed render cache reuses the laid-out result
+    // across frames. This is what closes the "build once, render-by-
+    // reference forever" gap that the per-frame deep-copy of the
+    // cached Element used to leave open.
     const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        if (slot.element && slot.element_continuation == continuation)
-            return {*slot.element, continuation};
+        if (slot.element && slot.element_continuation == continuation) {
+            return {wrap_settled_turn(slot.element, m.d.current.id, msg.id),
+                    continuation};
+        }
     }
     // Miss (or live turn): build Config (this hits the Config cache for
     // settled turns regardless), then run Turn::build() and stash.
@@ -201,8 +246,10 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     auto built = maya::Turn{std::move(cfg)}.build();
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        slot.element = std::make_shared<maya::Element>(built);
+        slot.element = std::make_shared<maya::Element>(std::move(built));
         slot.element_continuation = continuation;
+        return {wrap_settled_turn(slot.element, m.d.current.id, msg.id),
+                continuation};
     }
     return {std::move(built), continuation};
 }
