@@ -6,7 +6,6 @@
 #include <string>
 #include <utility>
 
-#include <maya/element/builder.hpp>
 #include <maya/widget/markdown.hpp>
 
 #include "agentty/domain/catalog.hpp"
@@ -192,20 +191,17 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 static maya::Element wrap_settled_turn(std::shared_ptr<maya::Element> sp,
                                        const ThreadId& tid,
                                        const MessageId& mid) {
-    // dsl::component returns a builder; convert to Element so we can
-    // reach the ComponentElement variant alternative and stamp the
-    // cache_id directly.
-    maya::Element e = maya::dsl::component(
+    std::string id;
+    id.reserve(5 + tid.value.size() + 1 + mid.value.size());
+    id = "turn:";
+    id += tid.value;
+    id += ':';
+    id += mid.value;
+    return maya::dsl::component(
         [sp = std::move(sp)](int /*w*/, int /*h*/) -> maya::Element {
             return *sp;
-        });
-    auto& comp = std::get<maya::ComponentElement>(e.inner);
-    comp.cache_id.reserve(tid.value.size() + 1 + mid.value.size() + 5);
-    comp.cache_id = "turn:";
-    comp.cache_id += tid.value;
-    comp.cache_id += ':';
-    comp.cache_id += mid.value;
-    return e;
+        })
+        .cache_id(std::move(id));
 }
 
 maya::Conversation::PreBuilt turn_element(const Message& msg,
