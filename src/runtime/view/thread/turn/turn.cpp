@@ -173,37 +173,6 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     return cfg;
 }
 
-// Wrap a heap-stable `shared_ptr<Element>` in a content-keyed
-// ComponentElement. The wrapper's render lambda captures the
-// shared_ptr by value, so per-frame copies of the wrapper (which
-// maya::Conversation::build() does when push_back-ing into its
-// rows vector) just bump the refcount instead of deep-copying the
-// underlying BoxElement / vector / string tree.
-//
-// The non-empty `cache_id` makes maya's cross-frame component cache
-// match by content identity rather than ComponentElement pointer.
-// The wrapper itself is freshly constructed each call (different
-// address, different generation), but the cache_id is stable, so
-// every copy through every container hits the same cached layout
-// + render result. Steady-state cost for a settled turn collapses
-// from "deep tree copy + recursive layout + recursive paint" to
-// "shared_ptr bump + one cache lookup".
-static maya::Element wrap_settled_turn(std::shared_ptr<maya::Element> sp,
-                                       const ThreadId& tid,
-                                       const MessageId& mid) {
-    std::string id;
-    id.reserve(5 + tid.value.size() + 1 + mid.value.size());
-    id = "turn:";
-    id += tid.value;
-    id += ':';
-    id += mid.value;
-    return maya::dsl::component(
-        [sp = std::move(sp)](int /*w*/, int /*h*/) -> maya::Element {
-            return *sp;
-        })
-        .cache_id(std::move(id));
-}
-
 maya::Conversation::PreBuilt turn_element(const Message& msg,
                                           std::size_t msg_idx,
                                           int turn_num, const Model& m,
@@ -219,21 +188,17 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // permission prompt closed). The Element is therefore safe to
     // memoize for the lifetime of the cache entry.
     //
-    // The cached Element is held via shared_ptr; on retrieval we hand
-    // back a thin ComponentElement wrapper carrying that shared_ptr
-    // and a stable cache_id derived from (thread, message). The
-    // wrapper passes through downstream containers (PreBuilt vectors,
-    // Conversation::build's rows vector) at refcount-bump cost, and
-    // maya's content-keyed render cache reuses the laid-out result
-    // across frames. This is what closes the "build once, render-by-
-    // reference forever" gap that the per-frame deep-copy of the
-    // cached Element used to leave open.
+    // The cached Element is held via shared_ptr. We hand the
+    // shared_ptr straight to maya — Element has an implicit
+    // converting constructor from shared_ptr<const Element> that
+    // keeps the renderer's cross-frame work bounded automatically.
+    // No cache identity strings, no helper wrappers; the host just
+    // hands maya what it already has.
     const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.element && slot.element_continuation == continuation) {
-            return {wrap_settled_turn(slot.element, m.d.current.id, msg.id),
-                    continuation};
+            return {slot.element, continuation};
         }
     }
     // Miss (or live turn): build Config (this hits the Config cache for
@@ -244,8 +209,7 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         slot.element = std::make_shared<maya::Element>(std::move(built));
         slot.element_continuation = continuation;
-        return {wrap_settled_turn(slot.element, m.d.current.id, msg.id),
-                continuation};
+        return {slot.element, continuation};
     }
     return {std::move(built), continuation};
 }
