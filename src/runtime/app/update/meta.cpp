@@ -31,6 +31,46 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             if (!m.s.is_idle() || m.s.compacting) return done(std::move(m));
             if (m.d.current.messages.empty()) return done(std::move(m));
 
+            // Pre-trim guard: when CompactContext fires because the
+            // mid-turn ceiling check tripped, the conversation is
+            // already near (or over) context-max. The summarization
+            // request itself includes the full message history, so
+            // without trimming it would hit the same context-length
+            // wall the trigger was trying to avoid. Drop the oldest
+            // messages until the estimate fits a hard ceiling (~65%
+            // of context-max, leaving ~35% headroom for the synth
+            // prompt + the summary response itself). The dropped
+            // turns are exactly the ones whose content is least
+            // load-bearing for "resume the task" — earliest
+            // exploratory tool calls — and the summary will be told
+            // (by virtue of seeing only the recent state) to focus
+            // on what's left.
+            if (m.s.context_max > 0) {
+                int compact_ceiling = static_cast<int>(
+                    static_cast<double>(m.s.context_max) * 0.65);
+                // Drop one message at a time from the front. Cheap because
+                // the messages vector is small (low hundreds of entries on
+                // any realistic session) and we only fall into this branch
+                // when we've genuinely overrun.
+                while (estimate_prefix_tokens(m.d.current) > compact_ceiling
+                       && m.d.current.messages.size() > 1) {
+                    m.d.current.messages.erase(m.d.current.messages.begin());
+                }
+                // The first surviving message may now be an Assistant
+                // (we erased a User from in front of it), which makes
+                // an invalid wire — Anthropic requires the message
+                // sequence to start with a User. Drop leading
+                // Assistants until we hit a User or run out.
+                while (!m.d.current.messages.empty()
+                       && m.d.current.messages.front().role == Role::Assistant) {
+                    m.d.current.messages.erase(m.d.current.messages.begin());
+                }
+                // Empty after trim is fine — the synth user prompt below
+                // becomes the only message and the model summarises from
+                // whatever context fits in the system prompt (effectively
+                // a "fresh start" notice). Better than wedging.
+            }
+
             // Synthetic User message asking the model to summarise.
             // Mirrors Claude Code's `mm8` summary prompt (binary near
             // offset 134600). The schema (Task / State / Discoveries /

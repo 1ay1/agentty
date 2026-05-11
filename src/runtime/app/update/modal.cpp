@@ -165,8 +165,18 @@ Step submit_message(Model m) {
     int threshold = (m.s.context_max > 0)
         ? static_cast<int>(static_cast<double>(m.s.context_max) * 0.80)
         : 0;
+    // Use the larger of the lagging `tokens_in` signal (set from the
+    // prior turn's StreamUsage event) and a local estimate computed from
+    // the actual message content. `tokens_in` is unreliable as a
+    // proactive trigger: it reflects the request that *just completed*,
+    // so a turn whose tool calls grew the transcript by 80k chars
+    // (~22k tokens) since the last usage event will see `tokens_in`
+    // still report the pre-growth size and skip compaction here even
+    // though the next request will exceed the window. The local
+    // estimate (bytes / 3.5 + ~1500 per image) catches that case.
+    int est = estimate_prefix_tokens(m.d.current);
     if (threshold > 0
-        && m.s.tokens_in > threshold
+        && std::max(m.s.tokens_in, est) > threshold
         && !m.d.current.messages.empty()) {
         m.ui.composer.queued.push_back(drain_composer(m));
         // Reuse the CompactContext reducer arm so the path is one

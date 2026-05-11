@@ -254,6 +254,41 @@ struct Thread {
     std::chrono::system_clock::time_point updated_at = std::chrono::system_clock::now();
 };
 
+// Local estimate of the prefix size (in tokens) that the NEXT request to
+// the model would carry, computed from `thread.messages` directly. Used
+// by the auto-compaction trigger as a *proactive* check before launching
+// a stream — `Session::tokens_in` is a lagging signal (updated from the
+// PRIOR turn's StreamUsage event), so a turn with heavy tool outputs can
+// push the next request past context-max with no warning otherwise.
+//
+// Estimate is bytes / 3.5, with an additive ~1500-token charge per image
+// attachment (Anthropic's image content blocks tokenize to a fixed cost
+// independent of byte size). Conservative: code prose averages ~3.3 bytes
+// per token and tool-call JSON envelopes are usually under that, so 3.5
+// errs slightly toward over-counting which is the safe direction here —
+// triggering compaction one turn early costs one round trip; missing the
+// trigger costs the whole session ("no coming back").
+[[nodiscard]] inline int estimate_prefix_tokens(const Thread& t) noexcept {
+    constexpr double kBytesPerToken    = 3.5;
+    constexpr int    kTokensPerImage   = 1500;
+    std::size_t bytes = 0;
+    int images = 0;
+    for (const auto& m : t.messages) {
+        bytes += m.text.size();
+        bytes += m.streaming_text.size();
+        bytes += m.pending_stream.size();
+        images += static_cast<int>(m.images.size());
+        for (const auto& tc : m.tool_calls) {
+            bytes += tc.name.value.size();
+            bytes += tc.args_streaming.size();
+            bytes += tc.output().size();
+            bytes += tc.progress_text().size();
+        }
+    }
+    auto from_bytes = static_cast<int>(static_cast<double>(bytes) / kBytesPerToken);
+    return from_bytes + images * kTokensPerImage;
+}
+
 struct PendingPermission {
     ToolCallId  id;
     ToolName    tool_name;

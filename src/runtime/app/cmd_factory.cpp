@@ -251,6 +251,46 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             return tc.is_terminal();
         });
         if (has_results) {
+            // Mid-turn context-ceiling check. The submit_message auto-
+            // compact only fires when the user submits a fresh turn —
+            // it doesn't see the sub-turn relaunches that a multi-tool
+            // assistant turn fires here. A single turn that runs 10
+            // tool calls (each returning 25k chars) grows the
+            // transcript by ~70k tokens before any submit; the next
+            // sub-turn request can exceed context-max with no warning
+            // and the API hard-rejects, wedging the session ("no
+            // coming back"). The estimate from message content is
+            // proactive — it sees the post-tool-execution state that
+            // tokens_in won't reflect until the next StreamUsage event
+            // arrives. Ceiling is 90% (vs submit's 80%) so the normal
+            // path wins for ordinary sub-turns and this only fires
+            // when we're actually about to overrun.
+            if (m.s.context_max > 0 && !m.s.compacting) {
+                int est = estimate_prefix_tokens(m.d.current);
+                int ceiling = static_cast<int>(
+                    static_cast<double>(m.s.context_max) * 0.90);
+                if (est > ceiling) {
+                    // Abort the sub-turn, drop to Idle, defer CompactContext
+                    // to the next reducer pass (the CompactContext arm
+                    // requires Idle and rejects otherwise). The user sees
+                    // the compaction land and can re-prompt — better than
+                    // an opaque "context_length_exceeded" 4xx that leaves
+                    // the conversation unrecoverable.
+                    auto ctx_disc = take_active_ctx(std::move(m.s.phase));
+                    (void)ctx_disc;
+                    m.s.phase        = phase::Idle{};
+                    m.s.status       = "context limit reached \xe2\x80\x94 "
+                                       "compacting before continuing\xe2\x80\xa6";
+                    m.s.status_until = std::chrono::steady_clock::now()
+                                       + std::chrono::seconds{6};
+                    cmds.push_back(Cmd<Msg>::task(
+                        [](std::function<void(Msg)> dispatch) {
+                            dispatch(CompactContext{});
+                        }));
+                    return Cmd<Msg>::batch(std::move(cmds));
+                }
+            }
+
             // Tool results are going back to the model — a fresh sub-turn
             // is about to start on the same assistant message. This is a
             // natural slice point: tool-heavy turns can grow the transcript
