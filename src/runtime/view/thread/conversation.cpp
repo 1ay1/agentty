@@ -17,7 +17,26 @@ maya::Conversation::Config conversation_config(const Model& m) {
     // turn numbering by reading the running turn count that maybe_virtualize
     // maintains alongside thread_view_start — O(1), regardless of how
     // many turns the session has accumulated.
-    const std::size_t total = m.d.current.messages.size();
+    //
+    // During compaction the messages vector ends with two synthetic
+    // entries: the "summarise per spec" User prompt and an Assistant
+    // placeholder receiving the streamed summary. Both are
+    // bookkeeping the user shouldn't see — rendering them visibly
+    // would (a) show the long synthetic prompt as a fake user turn,
+    // (b) stream the model's summary in real time as if the
+    // assistant were answering a normal question, and then (c) jump
+    // to a much shorter post-compact conversation when the swap
+    // happens. The status banner already conveys "compacting
+    // context…"; clipping `total` to the pre-synth count keeps the
+    // visible conversation in its pre-compact shape until the swap
+    // lands, so the user only ever sees the boundary divider appear,
+    // not the compaction process itself.
+    std::size_t total = m.d.current.messages.size();
+    if (m.s.compacting
+        && m.s.compact_pre_synth_count > 0
+        && m.s.compact_pre_synth_count <= total) {
+        total = m.s.compact_pre_synth_count;
+    }
     const std::size_t start = static_cast<std::size_t>(
         std::clamp(m.ui.thread_view_start, 0, static_cast<int>(total)));
     int turn = 1 + m.ui.thread_view_start_turn;

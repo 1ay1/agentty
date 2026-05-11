@@ -142,31 +142,23 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     cfg.checkpoint_above = (msg.role == Role::User && msg.checkpoint_id.has_value());
     cfg.checkpoint_color = warn;
 
-    // Compact-boundary turn: visually distinct so the user sees that
-    // "everything above this line was summarised". Reuses the standard
-    // Turn frame so it docks cleanly into the conversation flow but
-    // overrides the speaker chrome — dim rail, "≡" glyph, "Conversation
-    // compacted" label. The body strips the synthetic prefix/suffix
-    // sentences (continuation directive, "session is being continued"
-    // preamble) so the user sees only the summary content itself; the
-    // model still receives the full text on the wire because the body
-    // string isn't mutated.
+    // Compact-boundary turn: a thin one-line divider only. The
+    // summary body itself can be many KB / dozens of rows when the
+    // model is verbose, and rendering it inline would (a) push the
+    // preserved-tail and any subsequent assistant turn off-screen
+    // immediately after compaction lands and (b) tempt the user to
+    // read it (it's prose written for the model, not for them). The
+    // model still receives the full summary text on the wire because
+    // msg.text isn't mutated; the view just elides it. CC does the
+    // same — its `compact_boundary` transcript line type renders as
+    // chrome, not content (binary near offset 114920224).
     if (msg.is_compact_summary) {
         cfg.glyph      = "\xe2\x89\xa1";              // ≡
         cfg.label      = "Conversation compacted";
         cfg.rail_color = muted;
-        constexpr std::string_view kSummaryHeader = "Summary:\n";
-        constexpr std::string_view kContinuationTail =
-            "\n\nContinue the work";
-        std::string body_text = msg.text;
-        if (auto h = body_text.find(kSummaryHeader); h != std::string::npos) {
-            body_text.erase(0, h + kSummaryHeader.size());
-        }
-        if (auto t = body_text.rfind(kContinuationTail); t != std::string::npos) {
-            body_text.erase(t);
-        }
-        cfg.body.emplace_back(maya::Turn::PlainText{
-            .content = std::move(body_text), .color = muted});
+        // Empty body → the Turn frame collapses to just the header
+        // row + bottom rule, ~2 rows total. The user sees a clear
+        // divider where the boundary is and nothing more.
         if (can_cache) {
             auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
             slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
