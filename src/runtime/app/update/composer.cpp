@@ -556,6 +556,37 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // a binary clipboard) — nothing to do.
             if (e.text.empty()) return done(std::move(m));
 
+            // Normalize line endings: some terminals (and ssh tty cooked
+            // mode) translate \n → \r in bracketed paste so the bytes
+            // look like the user pressed Enter at every line. Maya's
+            // word_wrap splits on \n only, so leaving \r in the body
+            // collapses the whole paste into one logical line that
+            // wraps based on width — visible as a giant single-row
+            // user message with stray rendering, *not* the line-by-line
+            // render the user expects. Canvas::write_text skips \r as
+            // a control char so the cells don't get the carriage-return
+            // byte either; without this normalization the paste both
+            // looks wrong AND throws the parent layout off (the layout
+            // sees one wrapped line, but the cached/measured height
+            // mismatch leaves visible gaps between the user turn and
+            // the assistant turn). Strip stray \r and convert \r-only
+            // / \r\n to \n; pure-\n input is unchanged.
+            {
+                std::string norm;
+                norm.reserve(e.text.size());
+                for (std::size_t i = 0; i < e.text.size(); ++i) {
+                    char c = e.text[i];
+                    if (c == '\r') {
+                        norm.push_back('\n');
+                        if (i + 1 < e.text.size() && e.text[i + 1] == '\n')
+                            ++i;
+                    } else {
+                        norm.push_back(c);
+                    }
+                }
+                e.text = std::move(norm);
+            }
+
             // Always-chip: every paste, regardless of size, becomes
             // an Attachment + inline placeholder. Single-line pastes
             // get a preview caption ("Pasted: hello world") so they

@@ -186,10 +186,18 @@ std::string expand(std::string_view text,
                     if (!out.empty() && (out.size() < 2 || out[out.size() - 2] != '\n'))
                         out.push_back('\n');
                     out.append(render_attachment_body(attachments[idx]));
+                    // Ensure the body ends on its own line so following
+                    // content doesn't run into it.
                     if (out.empty() || out.back() != '\n') out.push_back('\n');
-                    out.push_back('\n');
                 }
                 i += len;
+                // Add a blank-line separator ONLY when more content
+                // (text or another chip) follows this placeholder.
+                // Without this guard a paste-as-only-message ends with
+                // a trailing \n\n that renders as ghost blank rows
+                // below the body — visible as `┃` / `┃` rows at the
+                // bottom of the user-turn box.
+                if (i < text.size()) out.push_back('\n');
                 continue;
             }
             // Stray sentinel byte (corrupted or user-typed control
