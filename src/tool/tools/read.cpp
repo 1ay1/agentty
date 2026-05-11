@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <format>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -65,11 +66,128 @@ struct ReadCache {
     return c;
 }
 
+// Files at-or-over this size whose Read call didn't pin an explicit
+// offset/end_line get returned as an OUTLINE instead of full content —
+// function / class / heading lines with line numbers, plus a one-line
+// instruction to use start_line/end_line for the section the model
+// actually wants. Matches Zed's `AUTO_OUTLINE_SIZE` (crates/agent/src/
+// outline.rs). The token saving on a 5000-line source file is
+// 10-20x: an outline is typically 30-80 line annotations instead of
+// 5000 lines of code body. Cap at 32 KiB (vs Zed's 16) because
+// agentty's tool-output budget is generous enough to carry slightly
+// bigger code excerpts before the cost dominates; tuned conservatively
+// — if the user wants the full body, the chip-style display_description
+// + explicit start_line=1 / end_line=N escapes the outline path.
+constexpr std::size_t kAutoOutlineSize = 32 * 1024;
+
+// Detect a top-level declaration line. Single regex covers C / C++ /
+// Rust / Go / Java / Python / JS / TS / shell / markdown so we don't
+// pay per-language detection cost on every file. The pattern is:
+//
+//   - optional leading whitespace
+//   - one of the construct keywords (fn / def / class / struct / enum
+//     / impl / trait / interface / namespace / template / module /
+//     function / export / async / public / private / protected /
+//     static / void / inline / const / let / var) OR a markdown
+//     heading marker
+//   - followed by content
+//
+// Then: the visible identifier is the FIRST captured group of word
+// characters following the keyword (or the whole heading text for
+// markdown). This is a heuristic — false positives are acceptable
+// (the model just gets a slightly noisier outline) but false
+// negatives mean missing a function, which is worse, so the regex
+// errs toward inclusion.
+[[nodiscard]] inline const std::regex& outline_pattern() {
+    static const std::regex re(
+        R"(^(\s*)((?:#{1,6}\s+\S.*$)|)"
+        R"((?:(?:pub\s+|public\s+|private\s+|protected\s+|static\s+|)"
+        R"(inline\s+|virtual\s+|async\s+|export\s+|export\s+default\s+|)"
+        R"(extern(?:\s+"[^"]*")?\s+|template\s*<[^>]*>\s*)*)"
+        R"((?:fn|def|class|struct|enum|impl|trait|interface|namespace|)"
+        R"(function|module|component|service|directive)\b[^=]*)|)"
+        R"((?:const|let|var)\s+\w+\s*(?:=|:)|)"
+        R"(\w+\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>)|)"
+        R"((?:[\w:~<>\[\]&*\s,]+\s+)?\w+\s*\([^)]*\)\s*(?:const\s*)?\{?\s*$))",
+        std::regex::ECMAScript | std::regex::optimize);
+    return re;
+}
+
+// Build the outline of `content`. Returns a multi-line string with
+// "[L<n>] <trimmed-line>" per matched line. Caps at `max_entries` to
+// keep huge files (10k+ matches) from blowing the budget.
+[[nodiscard]] std::string render_outline(std::string_view content) {
+    constexpr std::size_t kMaxEntries = 250;
+    std::string out;
+    out.reserve(content.size() / 16);
+    int line_no = 0;
+    std::size_t line_start = 0;
+    std::size_t emitted = 0;
+    auto emit_line = [&](std::string_view line) {
+        if (emitted >= kMaxEntries) return;
+        // Trim leading whitespace for the displayed annotation —
+        // line numbers carry the indentation info, and the model
+        // just needs the symbol name + signature.
+        std::size_t l = 0;
+        while (l < line.size() && (line[l] == ' ' || line[l] == '\t')) ++l;
+        auto trimmed = line.substr(l);
+        // Trim trailing whitespace too — common in raw source.
+        while (!trimmed.empty() && (trimmed.back() == ' '
+                                    || trimmed.back() == '\t'
+                                    || trimmed.back() == '\r')) {
+            trimmed.remove_suffix(1);
+        }
+        if (trimmed.empty()) return;
+        std::format_to(std::back_inserter(out), "[L{}] {}\n",
+                       line_no, trimmed);
+        ++emitted;
+    };
+    const auto& re = outline_pattern();
+    for (std::size_t i = 0; i <= content.size(); ++i) {
+        if (i == content.size() || content[i] == '\n') {
+            ++line_no;
+            auto line = content.substr(line_start,
+                                        i - line_start);
+            // Strip trailing \r so CRLF files match correctly.
+            if (!line.empty() && line.back() == '\r')
+                line.remove_suffix(1);
+            // Skip blank lines and the cheap-rejection
+            // continuation cases (lines starting with closing
+            // braces / brackets / etc. — they never declare
+            // anything we want to outline).
+            if (!line.empty()) {
+                char c0 = line.front();
+                bool maybe = (c0 != '}' && c0 != ')' && c0 != ']'
+                              && c0 != ';' && c0 != '/');
+                if (maybe) {
+                    std::cmatch m;
+                    if (std::regex_match(line.data(),
+                                          line.data() + line.size(),
+                                          m, re)) {
+                        emit_line(line);
+                    }
+                }
+            }
+            line_start = i + 1;
+        }
+    }
+    if (emitted >= kMaxEntries) {
+        out += std::format("\n[outline truncated at {} entries; "
+                           "use start_line/end_line to read specific "
+                           "regions]\n", kMaxEntries);
+    }
+    return out;
+}
+
 struct ReadArgs {
     util::NormalizedPath path;
     int offset;
     int limit;
     std::string display_description;
+    // Set when the caller didn't specify any line range — the
+    // outline branch is gated on this so an explicit "read this
+    // 100-line range" never collapses to a structural overview.
+    bool no_explicit_range = true;
 };
 
 std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
@@ -90,11 +208,20 @@ std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
         if (end_line >= offset) limit = end_line - offset + 1;
     }
     if (limit <= 0) limit = 2000;
+    // Did the caller pin an explicit range? `start_line` is the Zed
+    // alias for `offset` so include it. Outline path is gated on this:
+    // if the model asked for specific lines, give them exactly those
+    // lines.
+    bool explicit_range = ar.has("offset")
+                       || ar.has("limit")
+                       || ar.has("start_line")
+                       || ar.has("end_line");
     return ReadArgs{
         std::move(*wp),
         offset,
         limit,
         ar.str("display_description", ""),
+        /*no_explicit_range=*/ !explicit_range,
     };
 }
 
@@ -167,6 +294,58 @@ ExecResult run_read(const ReadArgs& a) {
     // Single open, single read. Then one linear scan builds the slice
     // AND counts lines in one pass.
     auto content = util::read_file(p);
+
+    // Auto-outline for big files. When the caller didn't pin an
+    // explicit (offset, limit) AND the file is bigger than
+    // kAutoOutlineSize, return a symbol outline instead of dumping
+    // the full body. Massively cuts context use on big-codebase
+    // exploration — a 5000-line file collapses to ~50 lines of
+    // [L<n>] <signature>, and the model uses start_line / end_line
+    // in a follow-up read to fetch the regions that matter. Pattern
+    // mirrors Zed's read_file_tool / outline.rs. Skipped on small
+    // files where the body itself is cheap enough that an extra
+    // round-trip is the worse trade.
+    if (a.no_explicit_range && content.size() > kAutoOutlineSize) {
+        std::string outline = render_outline(content);
+        if (!outline.empty()) {
+            std::size_t kib = content.size() / 1024;
+            std::string out = std::format(
+                "SUCCESS: File outline retrieved. This file is {} KiB "
+                "and was returned as a structural overview instead "
+                "of full content to save context.\n\n"
+                "IMPORTANT: Do NOT retry this call without a line "
+                "range \xe2\x80\x94 you'll get the same outline back. "
+                "Use start_line / end_line (or offset / limit) on a "
+                "follow-up read to fetch the section you want.\n\n"
+                "# Outline of {}\n\n{}\n"
+                "NEXT STEPS: to read a specific symbol's body, call "
+                "read again with this path plus start_line and "
+                "end_line covering the lines around the symbol "
+                "(e.g. for `[L120] fn foo()`, try start_line=120, "
+                "end_line=180).",
+                kib, a.path.string(), outline);
+            if (!a.display_description.empty())
+                out = a.display_description + "\n\n" + out;
+
+            // Still record the read in the staleness cache so a
+            // re-read of the same (path, offset=1, limit=2000) tuple
+            // collapses to the unchanged-sentinel. The outline body
+            // is what the prior tool_result held; the model "refers
+            // to that" exactly the same way as for a full read.
+            if (current_mtime.time_since_epoch().count() != 0) {
+                std::error_code canon_ec;
+                auto canon = fs::weakly_canonical(p, canon_ec);
+                if (!canon_ec) {
+                    ReadCacheKey key{canon.string(), a.offset, a.limit};
+                    std::lock_guard lk{read_cache().mu};
+                    read_cache().seen[std::move(key)] = current_mtime;
+                }
+            }
+            return ToolOutput{std::move(out), std::nullopt};
+        }
+        // Empty outline (no recognisable definitions — README, log
+        // file, JSON dump) falls through to the normal slicing path.
+    }
     std::string out;
     // Reserve the full content size on small files (one big alloc, no
     // resize) and cap at 1 MiB on larger files where the slice is
@@ -255,10 +434,13 @@ ToolDef tool_read() {
     constexpr const auto& kSpec = spec::require<"read">();
     t.name = ToolName{std::string{kSpec.name}};
     t.description = "Read a file from the filesystem. Returns up to 2000 lines "
-                    "starting at an optional offset. For large files, page via "
-                    "offset/limit (or start_line/end_line) rather than reading "
-                    "whole. Include a brief `display_description` so the user "
-                    "sees why you're reading.";
+                    "starting at an optional offset. For files over 32 KiB, "
+                    "reading without an explicit line range returns a SYMBOL "
+                    "OUTLINE (function / class / heading names with line "
+                    "numbers) instead of the full content; use start_line + "
+                    "end_line (or offset + limit) on a follow-up read to "
+                    "fetch the specific section you want. Include a brief "
+                    "`display_description` so the user sees why you're reading.";
     t.input_schema = json{
         {"type", "object"},
         {"required", {"path"}},
