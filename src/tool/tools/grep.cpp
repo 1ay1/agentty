@@ -39,6 +39,14 @@ constexpr std::size_t kMaxFileBytes = 8 * 1024 * 1024;
 constexpr int         kPerPage      = 20;
 constexpr int         kContext      = 2;
 constexpr int         kMaxScanned   = 500;
+// Hard total-output cap on the rendered match body. Hit when long
+// lines or wide context spans inflate the per-match block size past
+// what kPerPage controls — a 2-line context around 800-char lines
+// produces ~5KB per match and 20 matches blow past 50KB. CC's grep
+// caps at 20k chars total (binary near offset 80359109); matching
+// that keeps a single Grep call from filling 10% of context_max
+// with one tool result.
+constexpr std::size_t kMaxOutputBytes = 20'000;
 // Past 8 worker threads disk bandwidth saturates on consumer SSDs and we
 // start losing to lock contention on the result-merge step. NVMe systems
 // could push higher, but the diminishing-returns curve flattens hard.
@@ -302,8 +310,9 @@ ExecResult run_ripgrep(const GrepArgs& a) {
         << " file" << (files.size() == 1 ? "" : "s") << ".\n\n";
 
     int shown = 0, skipped = 0;
+    bool size_capped = false;
     for (auto& f : files) {
-        if (shown >= kPerPage) break;
+        if (shown >= kPerPage || size_capped) break;
         // Group consecutive line numbers into blocks (rg pre-merges via -C).
         struct Block { int s, e; std::vector<const LineRow*> rows; int matches; };
         std::vector<Block> blocks;
@@ -325,6 +334,10 @@ ExecResult run_ripgrep(const GrepArgs& a) {
                 continue;
             }
             if (shown >= kPerPage) break;
+            if (static_cast<std::size_t>(out.tellp()) >= kMaxOutputBytes) {
+                size_capped = true;
+                break;
+            }
             if (!emitted_header) {
                 out << "## Matches in " << f.path << "\n\n";
                 emitted_header = true;
@@ -334,6 +347,10 @@ ExecResult run_ripgrep(const GrepArgs& a) {
             out << "```\n\n";
             shown += b.matches;
         }
+    }
+    if (size_capped) {
+        out << "[output capped at " << kMaxOutputBytes
+            << " bytes — narrow the pattern or use offset to page]\n\n";
     }
 
     int remaining = total_matches - (a.offset + shown);
@@ -473,9 +490,14 @@ ExecResult run_builtin(const GrepArgs& a) {
         << " file" << (files_with_hits == 1 ? "" : "s") << ".\n\n";
 
     int shown = 0, skipped = 0;
+    bool size_capped = false;
     for (const auto& h : hits) {
         if (h.path.empty()) continue;
-        if (shown >= kPerPage) break;
+        if (shown >= kPerPage || size_capped) break;
+        if (static_cast<std::size_t>(out.tellp()) >= kMaxOutputBytes) {
+            size_capped = true;
+            break;
+        }
 
         auto lines = offsets_to_lines(h.content, h.match_offsets);
 
@@ -536,6 +558,10 @@ ExecResult run_builtin(const GrepArgs& a) {
     }
 
     int remaining = total - (a.offset + shown);
+    if (size_capped) {
+        out << "[output capped at " << kMaxOutputBytes
+            << " bytes — narrow the pattern or use offset to page]\n\n";
+    }
     if (remaining > 0) {
         out << "Showing matches " << (a.offset + 1) << "-"
             << (a.offset + shown) << " of " << total

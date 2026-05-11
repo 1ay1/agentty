@@ -59,8 +59,15 @@ std::expected<WebFetchArgs, ToolError> parse_web_fetch_args(const json& j) {
     };
 }
 
-// Cap the response body so a chatty server can't blow the model's context.
-constexpr size_t kMaxFetchBytes = 200'000;
+// Cap the response body so a chatty server can't blow the model's
+// context. 20 KB matches the per-tool budget CC keeps for Grep
+// (binary near offset 80359109) and is enough for a typical README,
+// API doc page, or short article. A long-form article that needs
+// more than 20 KB is almost certainly chrome (nav, ads, sidebars,
+// inline scripts) which the model wouldn't benefit from anyway.
+// Previous cap was 200 KB — a single fetch could swallow ~28 % of a
+// 200 K-token context window in one tool call.
+constexpr size_t kMaxFetchBytes = 20'000;
 
 // Parse https://host[:port]/path. http:// is rejected at the arg-validation
 // layer above (TLS-only), but we still need to handle the `:port` suffix and
@@ -134,7 +141,7 @@ ExecResult run_web_fetch(const WebFetchArgs& a) {
     out << "HTTP " << r->status;
     if (!content_type.empty()) out << " (" << content_type << ")";
     out << "\n\n" << body;
-    if (truncated) out << "\n[body truncated at 200KB]";
+    if (truncated) out << "\n[body truncated at 20KB]";
     std::string s = out.str();
     if (!a.display_description.empty())
         s = a.display_description + "\n\n" + s;

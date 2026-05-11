@@ -186,6 +186,26 @@ struct StreamState {
     // launch of the compaction stream); StreamError on a compaction
     // turn clears it without applying.
     bool compacting = false;
+    // Snapshot of `messages.size()` taken at CompactContext kickoff,
+    // BEFORE the synthetic "summarise per spec" User + Assistant
+    // placeholder were appended. The compaction-finalize handler in
+    // stream.cpp uses it to recover the original (post-pre-trim)
+    // message vector — the slice [0, compact_pre_synth_count) is the
+    // history that got summarised, and the tail of that slice is what
+    // we preserve verbatim post-compact so the conversation continues
+    // with continuity (UI keeps scroll/cache, model keeps the recent
+    // turn structure). Reset to 0 at compaction completion.
+    std::size_t compact_pre_synth_count = 0;
+    // Rapid-refill breaker. When auto-compaction fires within
+    // `kRapidRefillTurns` assistant turns of the previous one,
+    // `recent_compacts` increments; on a quieter cycle it resets.
+    // Crossing `kRapidRefillCount` flips `autocompact_disabled` so
+    // we stop thrashing — the user sees a status toast suggesting
+    // they reduce a too-large tool output. Mirrors Claude Code's
+    // `LC7=3 / qP8=3 / VC7=3` triple (binary near offset 112623088).
+    int recent_compacts = 0;
+    int turns_since_last_compact = 1000000;   // effectively ∞ at startup
+    bool autocompact_disabled = false;
     // True between `init()` kicking off the background OAuth refresh
     // and `TokenRefreshed` landing. While set, `submit_message` queues
     // the user's text into `composer.queued` instead of dispatching a

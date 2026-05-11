@@ -449,14 +449,24 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
 
     // Compaction completion. The CompactContext handler appended a
     // synthetic User "summarise per spec" message + Assistant
-    // placeholder; the assistant has now produced the summary text in
-    // that placeholder. Replace the entire messages vector with a
-    // single User message holding the summary, drop tools-handling /
-    // queue-drain (no tool_use should have come back, and queued
-    // messages naturally fire on the next user turn), and short-circuit
-    // out of the rest of finalize_turn so we don't run the
-    // kick_pending_tools / truncation-retry / queue-drain that the
-    // normal path needs.
+    // placeholder to messages[0..compact_pre_synth_count); the
+    // assistant has now produced the summary text in that placeholder.
+    //
+    // CC-style stitching (mirrors Claude Code's `T5_` / `iU9` reactive
+    // compact, binary near offset 77409806):
+    //   1. Lift the summary text out of the trailing assistant.
+    //   2. Drop the synth user + assistant placeholder.
+    //   3. From the original prefix [0, compact_pre_synth_count),
+    //      preserve a TAIL of the most recent turn-groups verbatim
+    //      (typically the last 1-2 user→assistant pairs). The user's
+    //      most recent work stays on screen and the model keeps an
+    //      anchor for "where we left off".
+    //   4. Build the final messages vector as
+    //      [summary_msg(is_compact_summary=true), ...preserved_tail].
+    //   5. Reset thread_view_start to 0 so the view shows the new
+    //      (much shorter) conversation in full — without this the
+    //      user-visible window stays anchored at the now-out-of-bounds
+    //      pre-compact offset and the conversation appears empty.
     if (m.s.compacting) {
         std::string summary;
         if (!m.d.current.messages.empty()
@@ -466,15 +476,9 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                 last.streaming_text += last.pending_stream;
                 last.pending_stream.clear();
             }
-            // Prefer streaming_text (in-flight) merged with text (settled);
-            // either may be the live target depending on whether
-            // message_stop had time to commit.
             summary = std::move(last.text);
             if (!last.streaming_text.empty()) summary += last.streaming_text;
         }
-        // Strip <summary>...</summary> wrapper if the model honoured it
-        // — keeps the persisted body clean. Falls back to the whole
-        // assistant text if the wrapper is missing.
         constexpr std::string_view kOpen = "<summary>";
         constexpr std::string_view kClose = "</summary>";
         if (auto a_pos = summary.find(kOpen); a_pos != std::string::npos) {
@@ -484,36 +488,119 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                 summary = summary.substr(body, b_pos - body);
             }
         }
-        // Trim leading / trailing whitespace.
         auto is_space = [](char c) { return c==' '||c=='\t'||c=='\n'||c=='\r'; };
         while (!summary.empty() && is_space(summary.front())) summary.erase(summary.begin());
         while (!summary.empty() && is_space(summary.back()))  summary.pop_back();
         if (summary.empty()) summary = "[compaction produced no text]";
 
-        Message replacement;
-        replacement.role = Role::User;
-        replacement.text = "Conversation continuation summary (prior history "
-                           "compacted to save context):\n\n" + summary;
-        // Compaction has just dropped every prior turn's `tool_calls[].
-        // output` along with their text bodies — megabytes to hundreds
-        // of megabytes on a long session. The view cache still holds
-        // the pre-built Element trees, but they're keyed by
-        // (thread_id, message_id) and the replacement message has a
-        // fresh MessageId, so cache lookups for it miss cleanly — no
-        // stale Element returned for what used to be msg_idx 0. The
-        // old entries are orphans that LRU pushes out as the next
-        // ~32 cache accesses fill the slots. We still nudge the
-        // allocator to return pages because the freed strings (tool
-        // outputs) aren't held by the cache after the orphans drain.
+        // Preserve a recent tail from the original prefix. Walk
+        // backwards over [0, compact_pre_synth_count) collecting
+        // complete turn-groups (a User followed by 0+ Assistants up
+        // to the next User). Stop once we have either:
+        //   • 2 turn-groups, OR
+        //   • a token estimate ≥ 25% of context_max (don't preserve
+        //     so much that we re-trip compaction on the next turn).
+        // The tail must START with a User to satisfy Anthropic's
+        // wire-format requirement that the message sequence after
+        // the summary's User leads with an Assistant or another User
+        // — easiest enforced by always anchoring on a User boundary.
+        std::vector<Message> preserved_tail;
+        const std::size_t prefix_n = std::min(
+            m.s.compact_pre_synth_count, m.d.current.messages.size());
+        if (prefix_n > 0) {
+            std::size_t groups = 0;
+            std::size_t bytes  = 0;
+            const std::size_t kMaxBytes = (m.s.context_max > 0)
+                ? static_cast<std::size_t>(m.s.context_max) * 3   // ~25% of ctx in token-bytes
+                : 200000;
+            constexpr std::size_t kMaxGroups = 2;
+            for (std::size_t i = prefix_n; i-- > 0;) {
+                bytes += m.d.current.messages[i].text.size();
+                for (const auto& tc : m.d.current.messages[i].tool_calls) {
+                    bytes += tc.output().size();
+                }
+                if (m.d.current.messages[i].role == Role::User) {
+                    ++groups;
+                    if (groups >= kMaxGroups || bytes >= kMaxBytes) {
+                        preserved_tail.assign(
+                            std::make_move_iterator(m.d.current.messages.begin()
+                                + static_cast<std::ptrdiff_t>(i)),
+                            std::make_move_iterator(m.d.current.messages.begin()
+                                + static_cast<std::ptrdiff_t>(prefix_n)));
+                        break;
+                    }
+                }
+                if (i == 0 && groups > 0) {
+                    preserved_tail.assign(
+                        std::make_move_iterator(m.d.current.messages.begin()),
+                        std::make_move_iterator(m.d.current.messages.begin()
+                            + static_cast<std::ptrdiff_t>(prefix_n)));
+                }
+            }
+        }
+
+        Message summary_msg;
+        summary_msg.role = Role::User;
+        summary_msg.is_compact_summary = true;
+        // Continuation directive at the end of the body is the same
+        // trick CC uses (`Continue the conversation from where it
+        // left off without asking the user any further questions...`,
+        // binary near offset 77409806) — without it the model often
+        // replies with a "let me recap what we were doing" preamble
+        // that wastes the first turn after compaction.
+        summary_msg.text = "This session is being continued from a previous "
+                           "conversation that ran out of context. The summary "
+                           "below covers the earlier portion of the "
+                           "conversation; recent messages are preserved "
+                           "verbatim after this summary.\n\nSummary:\n"
+                         + summary
+                         + "\n\nContinue the work from where it left off "
+                           "without re-acknowledging this summary or recapping "
+                           "what was happening. Pick up the last task as if "
+                           "the break never happened.";
+
         m.d.current.messages.clear();
-        m.d.current.messages.push_back(std::move(replacement));
+        m.d.current.messages.push_back(std::move(summary_msg));
+        for (auto& msg : preserved_tail) {
+            m.d.current.messages.push_back(std::move(msg));
+        }
         m.d.current.updated_at = std::chrono::system_clock::now();
 
+        // Reset the view's slicing window. thread_view_start was
+        // anchored at some offset into the OLD long conversation;
+        // after compaction the new conversation is much shorter, so
+        // the old offset would either point past the end (rendering
+        // nothing — the user's "UI resets and next turns are not
+        // visible" bug) or skip the summary itself.
+        m.ui.thread_view_start      = 0;
+        m.ui.thread_view_start_turn = 0;
+        m.ui.thread_scroll          = 0;
+
+        // Rapid-refill breaker bookkeeping. If this compact landed
+        // within `kRapidRefillTurns` assistant turns of the previous
+        // one, it counts toward the breaker; otherwise the streak
+        // resets. Crossing `kRapidRefillCount` flips the disable
+        // flag so the auto-trigger in modal.cpp stops firing.
+        constexpr int kRapidRefillTurns = 3;
+        constexpr int kRapidRefillCount = 3;
+        if (m.s.turns_since_last_compact <= kRapidRefillTurns) {
+            ++m.s.recent_compacts;
+        } else {
+            m.s.recent_compacts = 1;
+        }
+        m.s.turns_since_last_compact = 0;
+        if (m.s.recent_compacts >= kRapidRefillCount) {
+            m.s.autocompact_disabled = true;
+        }
+
+        m.s.compact_pre_synth_count = 0;
         m.s.compacting    = false;
         m.s.phase         = phase::Idle{};
         m.s.tokens_in     = 0;
         m.s.tokens_out    = 0;
-        m.s.status        = "context compacted";
+        m.s.status        = m.s.autocompact_disabled
+            ? "auto-compact disabled (rapid refill); use /compact manually"
+            : "context compacted";
         auto now_ts = std::chrono::steady_clock::now();
         m.s.status_until  = now_ts + std::chrono::seconds{4};
         deps().save_thread(m.d.current);
@@ -670,6 +757,22 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             m.s.status = "retrying (upstream cut off)…";
             return cmd::launch_stream(m);
         }
+    }
+
+    // Bump the rapid-refill breaker's turn counter on every settled
+    // assistant turn (whether or not a compact happened this round).
+    // The compact-finalize branch above resets it to 0; non-compact
+    // turns increment it, so a quiet stretch eventually re-arms
+    // auto-compaction by letting `recent_compacts` reset on the next
+    // trigger. Cap at INT_MAX/2 to avoid overflow on very long sessions.
+    if (m.s.turns_since_last_compact < 1000000) ++m.s.turns_since_last_compact;
+    if (m.s.autocompact_disabled
+        && m.s.turns_since_last_compact > 10) {
+        // Long quiet stretch — re-enable auto-compact. The user has
+        // either stopped triggering huge tool outputs or the
+        // conversation naturally drifted away from the thrash trigger.
+        m.s.autocompact_disabled = false;
+        m.s.recent_compacts      = 0;
     }
 
     deps().save_thread(m.d.current);

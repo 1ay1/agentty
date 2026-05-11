@@ -9,7 +9,10 @@
 #include "agentty/tool/util/tool_args.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -199,13 +202,89 @@ ExecResult run_bash(const BashArgs& a) {
     // workspace via `cd` / absolute paths / shell tricks. The user's
     // declared `cd` arg is already workspace-checked above; this is
     // the runtime layer that catches what the body does.
-    auto r = util::sandbox::run_shell_command(effective, 30000, std::chrono::seconds{tmo_s});
+    // In-memory capture cap. We capture up to 8 MiB so a long build
+    // log isn't silently truncated to nothing — the spill-to-disk
+    // logic below decides what gets surfaced to the model. 8 MiB
+    // matches CC's `Z25=8388608` ring-buffer cap (binary near offset
+    // 80370160). The model still only ever SEES `kModelPreviewBytes`
+    // of preview text in its context; the rest sits in the tmp file
+    // for an explicit Read if the model wants the full output.
+    constexpr std::size_t kCaptureCap       = 8u * 1024u * 1024u;
+    constexpr std::size_t kModelPreviewBytes = 30000;
+    constexpr std::size_t kSpillPreviewHead = 2000;   // first 2 KB
+    constexpr std::size_t kSpillPreviewTail = 1000;   // last 1 KB
+    auto r = util::sandbox::run_shell_command(effective, kCaptureCap,
+                                              std::chrono::seconds{tmo_s});
     // Sanitize before any of the formatting branches below see r.output —
     // see strip_ansi_escapes' rationale.  We do this here (not deeper in
     // the subprocess layer) because bash output is the only path that
     // routinely carries TTY escapes; other tools that capture subprocess
     // output produce structured data we wouldn't want to munge.
     r.output = strip_ansi_escapes(r.output);
+
+    // Spill-to-disk for outputs over kModelPreviewBytes. We write the
+    // FULL captured output to a temp file and replace r.output with a
+    // <persisted-output> envelope that carries a head + tail preview
+    // and the path. The model sees a fixed ~3 KB cost in context
+    // regardless of the real output size; if it needs the rest it
+    // can `Read` the spill file. Mirrors Claude Code's b3H/vIH
+    // formatter (binary near offset 80372971).
+    std::string spill_path;
+    std::size_t spill_total = 0;
+    if (r.output.size() > kModelPreviewBytes) {
+        spill_total = r.output.size();
+        try {
+            namespace fs = std::filesystem;
+            auto dir = fs::temp_directory_path() / "agentty-bash";
+            std::error_code ec;
+            fs::create_directories(dir, ec);
+            // Random suffix avoids collisions on parallel bash calls.
+            std::random_device rd;
+            std::mt19937_64 gen(rd());
+            char name[32];
+            std::snprintf(name, sizeof(name), "out-%016llx.txt",
+                          static_cast<unsigned long long>(gen()));
+            auto path = dir / name;
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            if (f) {
+                f.write(r.output.data(),
+                        static_cast<std::streamsize>(r.output.size()));
+                f.close();
+                spill_path = path.string();
+            }
+        } catch (...) {
+            // Fall through with empty spill_path — the envelope will
+            // still emit the preview without the file reference.
+        }
+        // Build the head + (optional) tail preview envelope.
+        std::string head = r.output.substr(0, kSpillPreviewHead);
+        std::string tail;
+        if (r.output.size() > kSpillPreviewHead + kSpillPreviewTail + 100) {
+            tail = r.output.substr(r.output.size() - kSpillPreviewTail);
+        }
+        std::ostringstream env;
+        env << "<persisted-output>\n";
+        env << "Output too large (" << (spill_total / 1024) << " KB total). ";
+        if (!spill_path.empty()) {
+            env << "Full output saved to: " << spill_path
+                << "\n\nIf you need bytes past the preview, use the read tool "
+                   "on that path with offset/limit.\n\n";
+        } else {
+            env << "(spill file unavailable; output truncated.)\n\n";
+        }
+        env << "Preview (first " << kSpillPreviewHead << " bytes):\n"
+            << head;
+        if (!tail.empty()) {
+            env << "\n\n... [" << (spill_total - kSpillPreviewHead - kSpillPreviewTail)
+                << " bytes elided] ...\n\n"
+                << "Tail (last " << kSpillPreviewTail << " bytes):\n"
+                << tail;
+        }
+        env << "\n</persisted-output>";
+        r.output    = std::move(env).str();
+        r.truncated = false;   // spilled, not lost
+    }
+
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
 
@@ -244,7 +323,7 @@ ExecResult run_bash(const BashArgs& a) {
         out << fence(r.output);
     }
     if (r.truncated)
-        out << "\n\n[output truncated at 30000 bytes]";
+        out << "\n\n[output truncated at " << kCaptureCap << " bytes]";
     // Elapsed is useful for planning follow-ups; omit for anything
     // under 500 ms to keep output tidy.
     if (elapsed_ms >= 500)

@@ -140,6 +140,7 @@ static json message_to_json(const Message& m) {
     // Persist the per-message error so reopening a thread shows which
     // turn died and why. UTF-8 scrubbed for the same reason as `text`.
     if (m.error) j["error"] = tools::util::to_valid_utf8(*m.error);
+    if (m.is_compact_summary) j["is_compact_summary"] = true;
     return j;
 }
 
@@ -248,6 +249,10 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
                 DeserializeErrorKind::InvalidValue, "messages[*].checkpoint_id",
                 "expected string"});
         m.checkpoint_id = CheckpointId{cp.get<std::string>()};
+    }
+    if (j.contains("is_compact_summary")) {
+        const auto& v = j["is_compact_summary"];
+        if (v.is_boolean()) m.is_compact_summary = v.get<bool>();
     }
     if (j.contains("images")) {
         const auto& arr = j["images"];

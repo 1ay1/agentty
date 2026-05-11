@@ -162,8 +162,27 @@ Step submit_message(Model m) {
     //
     // Falls back to no-trigger when context_max is unset / zero (a
     // freshly-constructed Model before model selection has run).
-    int threshold = (m.s.context_max > 0)
-        ? static_cast<int>(static_cast<double>(m.s.context_max) * 0.80)
+    // autocompact_disabled is set by the rapid-refill breaker in
+    // stream.cpp when three compacts in a row land within three
+    // assistant turns of each other. Skipping the auto-trigger here
+    // avoids the compact→fill→compact thrash that surfaces on a
+    // huge tool output the model keeps re-reading. The user can
+    // still trigger compaction manually via /compact.
+    //
+    // Threshold = `context_max - kOutputReserve - kCompactSlack`,
+    // mirroring Claude Code's `OP8=13000` autocompact-buffer (binary
+    // near offset 112623088). The earlier 80 % constant left ~40 K
+    // tokens (200 K window) on the table indefinitely — the user
+    // would feel "context full" at 160 K when the model could safely
+    // run to ~187 K. Reserving an output budget (`kOutputReserve`)
+    // for the model's reply + a small slack (`kCompactSlack`) for
+    // the round-trip is the correct framing: trigger only when the
+    // NEXT request couldn't fit its own response, not at an
+    // arbitrary fraction of the window.
+    constexpr int kOutputReserve = 13000;
+    constexpr int kCompactSlack  = 4000;
+    int threshold = (m.s.context_max > 0 && !m.s.autocompact_disabled)
+        ? std::max(0, m.s.context_max - kOutputReserve - kCompactSlack)
         : 0;
     // Use the larger of the lagging `tokens_in` signal (set from the
     // prior turn's StreamUsage event) and a local estimate computed from

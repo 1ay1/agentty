@@ -71,6 +71,16 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 // a "fresh start" notice). Better than wedging.
             }
 
+            // Snapshot the post-trim message count so the
+            // compaction-finalize path in stream.cpp can recover the
+            // original slice [0, compact_pre_synth_count). The synthetic
+            // summarisation prompt + assistant placeholder appended
+            // below are bookkeeping that doesn't belong in the
+            // post-compact conversation; preserving the slice lets us
+            // keep a recent-tail of real turns verbatim so the UI
+            // doesn't reset to a single message.
+            m.s.compact_pre_synth_count = m.d.current.messages.size();
+
             // Synthetic User message asking the model to summarise.
             // Mirrors Claude Code's `mm8` summary prompt (binary near
             // offset 134600). The schema (Task / State / Discoveries /

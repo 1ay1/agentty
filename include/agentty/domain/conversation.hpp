@@ -244,6 +244,15 @@ struct Message {
     // reason render distinctly. Status-bar banner reads
     // `m.s.status`; this field is the per-message inline copy.
     std::optional<std::string> error;
+    // True for the synthetic User message that holds the compaction
+    // summary at the head of a post-compact conversation. The view
+    // renders a "Conversation compacted" divider above this message
+    // (instead of the normal speaker rail) so the boundary is visible
+    // in the transcript. The wire payload is unchanged — it goes to
+    // the model as a normal User message carrying the summary text.
+    // Mirrors Claude Code's `isCompactSummary` field on the synthesised
+    // post-compact message (binary near offset 92759504).
+    bool is_compact_summary = false;
 };
 
 struct Thread {
