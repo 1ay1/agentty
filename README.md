@@ -27,7 +27,7 @@ Same OAuth (Pro/Max) and `ANTHROPIC_API_KEY` flows as `claude-code`. Switch betw
 
 ## Install
 
-**Prebuilt binary** — fully-static musl build, drop on any Linux of the matching arch and run:
+**Prebuilt binaries** (Linux) — fully-static musl builds, drop and run:
 
 ```bash
 # x86_64
@@ -39,16 +39,20 @@ curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linu
 
 Verify integrity with [`SHA256SUMS`](https://github.com/1ay1/agentty/releases/latest) on the release page.
 
-**From source**:
+**From source** (Linux, macOS, Windows):
 
 ```bash
 git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty
 cmake -B build && cmake --build build
-./build/agentty
+./build/agentty      # Linux/macOS
+.\build\Release\agentty.exe   # Windows
 ```
 
-GCC 14+ / Clang 18+, CMake 3.28+. Auth happens in-app on first launch.
+- **Linux/macOS**: GCC 14+ / Clang 18+, CMake 3.28+
+- **Windows**: MSVC 14.40+ (VS 2022 17.10+), CMake 3.28+
+
+Auth happens in-app on first launch.
 
 ## Getting started
 
@@ -198,7 +202,7 @@ Stubbed honestly:
 - **Checkpoint restore** — `CheckpointId` + per-message marker exist; `RestoreCheckpoint` currently surfaces "not implemented yet" and does nothing.
 - **Diff review pane** — modal renders, but `pending_changes` isn't populated by any tool yet, so review/accept/reject toast "no pending changes".
 
-Linux gets daily smoke testing. macOS + Windows code paths exist (`#ifdef` branches throughout, `posix_spawn` for POSIX, `CreateProcessW` for Windows, `fdatasync`/`fsync` switched per OS); CI for those platforms is next.
+All three platforms (Linux, macOS, Windows) are actively tested. Prebuilt release binaries are currently Linux-only; macOS and Windows users build from source.
 
 File terminal-rendering bugs with `$TERM`, your terminal emulator name, and a screenshot. Code-path bugs welcome too — paste the relevant block and `git rev-parse HEAD`.
 
