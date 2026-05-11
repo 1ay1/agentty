@@ -461,6 +461,19 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
             -static-libstdc++ -static-libgcc)
         if(AGENTTY_FULLY_STATIC)
             target_link_options(agentty PRIVATE -static)
+            # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
+            # OpenSSL's SSL_connect (cert-chain verification) plus
+            # nghttp2 session init plus the local autos in dial_tcp
+            # overruns 128 KiB on long chains, surfacing as a random
+            # SIGSEGV in the prewarm thread on the musl-static release
+            # binary (the glibc-dynamic dev build never hits it).
+            # PT_GNU_STACK p_memsz is what musl reads to size every
+            # pthread_create — bumping it via -z stack-size fixes the
+            # detached prewarm thread, the grep tool's worker pool, and
+            # any pthread created inside statically-linked third-party
+            # libs we don't control. 8 MiB matches glibc's default so
+            # the musl-static and glibc-dynamic builds behave the same.
+            target_link_options(agentty PRIVATE -Wl,-z,stack-size=8388608)
         endif()
         # Static OpenSSL pulls in libdl and libpthread (both already
         # implicit) plus libz (compression) for some builds. Add libz

@@ -66,6 +66,8 @@ static void sock_set_nonblock(socket_t s) {
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
 #  include <poll.h>
+#  include <pthread.h>
+#  include <signal.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
 #  include <unistd.h>
@@ -1512,6 +1514,16 @@ void Client::prewarm(std::string host, uint16_t port,
     std::thread([this,
                  host = std::move(host), port,
                  dial_host = std::move(dial_host), dial_port]() mutable {
+#if !defined(_WIN32)
+        // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
+        // main thread's handlers instead of being delivered here mid
+        // SSL_connect. On glibc this is belt-and-suspenders; on musl-
+        // static builds a stray signal during OpenSSL's cert-chain walk
+        // is one of the candidate causes of the airgap segfault.
+        sigset_t all;
+        sigfillset(&all);
+        pthread_sigmask(SIG_BLOCK, &all, nullptr);
+#endif
         Endpoint ep{ std::move(host), port,
                      std::move(dial_host), dial_port };
         auto r = dial_new(ep, Timeouts{}, /*cancel=*/nullptr);
