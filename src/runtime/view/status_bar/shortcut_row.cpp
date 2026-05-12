@@ -53,14 +53,18 @@ maya::ShortcutRow::Config shortcut_row_config(const Model& m) {
         return cfg;
     }
 
+    // Per-key colors signal what each binding does at a glance, instead
+    // of seven identical cyan keys reading as a colored noise band.
+    // Pickers (palette/threads/todo/models) share cyan — they all open
+    // an overlay; profile/new/quit get distinct semantic colors.
     cfg.bindings = {
-        {.key="^K",    .label="palette", .key_color=highlight, .priority=10},
-        {.key="^J",    .label="threads", .key_color=highlight, .priority=10},
-        {.key="^T",    .label="todo",    .key_color=highlight, .priority=10},
-        {.key="S-Tab", .label="profile", .key_color=highlight, .priority=4},
-        {.key="^/",    .label="models",  .key_color=highlight, .priority=4},
-        {.key="^N",    .label="new",     .key_color=success,   .priority=10},
-        {.key="^C",    .label="quit",    .key_color=danger,    .priority=10},
+        {.key="^K",    .label="palette", .key_color=code_path,       .priority=10}, // cyan — actions surface
+        {.key="^J",    .label="threads", .key_color=role_info,       .priority=10}, // blue — navigation
+        {.key="^T",    .label="todo",    .key_color=status_warn,     .priority=10}, // yellow — planning
+        {.key="S-Tab", .label="profile", .key_color=role_brand,      .priority=4},  // magenta — identity
+        {.key="^/",    .label="models",  .key_color=role_brand_alt,  .priority=4},  // bright magenta — model id
+        {.key="^N",    .label="new",     .key_color=status_ok,       .priority=10}, // green — create
+        {.key="^C",    .label="quit",    .key_color=status_error,    .priority=10}, // red — destructive
     };
     return cfg;
 }

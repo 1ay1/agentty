@@ -49,16 +49,26 @@ struct SpeakerStyle {
 
 SpeakerStyle speaker_style_for(Role role, const Model& m) {
     if (role == Role::User) {
-        return {highlight, "\xe2\x9d\xaf", "You"};                   // ❯
+        // User rail is `role_brand` (magenta) — distinct from code-reference
+        // cyan and matching the composer's accent color when has-text, so
+        // the user's typed message visually flows into their turn header.
+        return {role_brand, "\xe2\x9d\xaf", "You"};                  // ❯
     }
     const auto& id = m.d.model_id.value;
     const auto caps = ModelCapabilities::from_id(id);
     maya::Color c;
     std::string label;
-    if      (caps.is_opus())   { c = accent;    label = "Opus";   }
-    else if (caps.is_sonnet()) { c = info;      label = "Sonnet"; }
-    else if (caps.is_haiku())  { c = success;   label = "Haiku";  }
-    else                       { c = highlight; label = id;       }
+    // Model rails use ROLE colors (persistent identity), never status
+    // colors. Opus is the bright-magenta variant so it's visually
+    // distinguishable from the user-turn magenta (same hue family,
+    // different intensity — flagship gets the brighter shade). Haiku
+    // used to render in `success` (green) which collided with the ✓
+    // done icon; bright_cyan keeps the "fast/agile" feel without the
+    // status collision.
+    if      (caps.is_opus())   { c = role_brand_alt; label = "Opus";   } // bright_magenta
+    else if (caps.is_sonnet()) { c = role_info;      label = "Sonnet"; } // blue
+    else if (caps.is_haiku())  { c = code_path;      label = "Haiku";  } // bright_cyan
+    else                       { c = highlight;      label = id;       } // cyan (fallback)
     for (std::size_t i = 0; i + 2 < id.size(); ++i) {
         char ch = id[i];
         if (ch >= '0' && ch <= '9') {

@@ -37,17 +37,29 @@ std::string tool_display_name(const std::string& n) {
 }
 
 // Tool category — semantic grouping for color + stats badge.
-//   inspect (read/grep/glob/list/find/diag/web)  → info
-//   mutate  (edit/write)                          → accent
-//   execute (bash)                                → success
-//   plan    (todo)                                → warn
-//   vcs     (git_*)                               → highlight
+// Compressed tonal scheme so a long sequence of inspect-class tools reads
+// as a calm gray list, and the meaningful actions (edit/write/bash) stand
+// out as the saturated rows. Status-axis colors (green/red/yellow) are
+// reserved for the ✓/✗/⊘ icons and the breathing border — never used as
+// category, so green doesn't mean "execute" AND "ok" simultaneously.
+//
+// Every tool gets a bright, saturated category hue so the header row
+// ("✓ Name detail") carries real color across the entire timeline,
+// not just the saturated minority. The chrome inside the tool body
+// (line gutter, pipe, elision marker) reads in the same hue — the
+// tool's color identity carries top-to-bottom.
+//
+//   inspect (read/grep/glob/list/find/diag/web)  → code_path (bright cyan, "code refs")
+//   execute (bash)                                → code_text (cyan, "active")
+//   mutate  (edit/write)                          → role_brand (magenta)
+//   vcs     (git_*)                               → role_info (blue, "context-shift")
+//   plan    (todo)                                → status_warn (yellow, planning)
 maya::Color tool_category_color(const std::string& n) {
-    if (n == "edit" || n == "write")  return accent;
-    if (n == "bash")                  return success;
-    if (n == "todo")                  return warn;
-    if (n.rfind("git_", 0) == 0)      return highlight;
-    return info;
+    if (n == "edit" || n == "write")  return role_brand;
+    if (n == "bash")                  return code_text;
+    if (n == "todo")                  return status_warn;
+    if (n.rfind("git_", 0) == 0)      return role_info;
+    return code_path;
 }
 
 std::string_view tool_category_label(const std::string& n) {

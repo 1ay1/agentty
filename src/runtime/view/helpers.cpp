@@ -13,10 +13,15 @@
 namespace agentty::ui {
 
 maya::Color profile_color(Profile p) noexcept {
+    // Each profile gets a distinct, saturated identity hue. Minimal used
+    // to render in `muted` (gray) which left it feeling like an absence
+    // of state rather than a deliberate choice — bright_cyan claims an
+    // identity for it without colliding with Write (magenta) or Ask
+    // (blue). All three profile chips now carry a real color.
     switch (p) {
-        case Profile::Write:   return accent;
-        case Profile::Ask:     return info;
-        case Profile::Minimal: return muted;
+        case Profile::Write:   return role_brand;   // magenta
+        case Profile::Ask:     return role_info;    // blue
+        case Profile::Minimal: return code_path;    // bright_cyan
     }
     return fg;
 }

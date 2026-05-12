@@ -10,6 +10,17 @@
 namespace agentty::ui {
 
 // ── Semantic palette (named ANSI only — terminal theme wins) ──────────────
+//
+// Two layers below: legacy "brand" names (back-compat with existing widget
+// configs) and a new token layer organised by axis. The discipline is
+// "one hue = one axis": status colors (green/yellow/red) ONLY mean status
+// (ok/warn/error), code-reference cyan ONLY means "filesystem path or
+// code identifier," brand magenta ONLY means agentty identity (Write
+// profile, queue chips), info blue ONLY means information / context-shift
+// (threads, vcs). Tool categories compress to a tonal palette so a long
+// run of inspect-class tools reads as a calm gray list, with magenta
+// edits and cyan bashes standing out as the meaningful actions.
+//
 // `fg` is the primary body-text color. ANSI 7 ("white") renders as a mid-
 // gray in most modern terminal themes (Catppuccin, Solarized, One Dark,
 // Gruvbox) — readable, but not the brightest the terminal offers. Prose
@@ -25,6 +36,28 @@ inline constexpr auto success     = maya::Color::green();     // accepted / runn
 inline constexpr auto warn        = maya::Color::yellow();    // pending / amber
 inline constexpr auto danger      = maya::Color::red();       // errors / rejected
 inline constexpr auto highlight   = maya::Color::cyan();      // command palette / mentions
+
+// ── Token layer (axis-disciplined). Prefer these in new code. ────────────
+
+// Text hierarchy — three tiers from primary prose down to chrome.
+inline constexpr auto text_primary   = maya::Color::bright_white();  // prose, headlines
+inline constexpr auto text_secondary = maya::Color::white();         // mid-tone metadata (inspect tools, neutral chrome)
+inline constexpr auto text_tertiary  = maya::Color::bright_black();  // footers, hints, blanks
+
+// Status — severity / outcome ONLY. Never a category color.
+inline constexpr auto status_ok      = maya::Color::bright_green();
+inline constexpr auto status_info    = maya::Color::bright_blue();
+inline constexpr auto status_warn    = maya::Color::bright_yellow();
+inline constexpr auto status_error   = maya::Color::bright_red();
+
+// Code references — file paths, identifiers, command args.
+inline constexpr auto code_path      = maya::Color::bright_cyan();   // file paths, identifiers
+inline constexpr auto code_text      = maya::Color::cyan();          // code-block body content
+
+// Role / identity — persistent identifier colors. One hue per role.
+inline constexpr auto role_brand     = maya::Color::magenta();          // agentty brand, Write profile, queue chips
+inline constexpr auto role_brand_alt = maya::Color::bright_magenta();   // queued-message chips, alt brand
+inline constexpr auto role_info      = maya::Color::blue();             // Ask profile, threads, vcs context
 
 // ── Style presets — terminal default fg unless overridden ─────────────────
 inline maya::Style dim()    { return maya::Style{}.with_dim(); }

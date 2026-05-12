@@ -6,6 +6,7 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
 namespace agentty::ui {
 
@@ -84,14 +85,24 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     const auto& n = tc.name.value;
     maya::ToolBodyPreview::Config out;
 
-    // ── Edit: parse hunks from args. (Stays EditDiff regardless of
-    //    failure — the diff is the user's mental model of "what we tried
-    //    to change," even when application failed.)
+    // Chrome (line-number gutter, pipe separator, elision marker) reads
+    // in the tool's category color so the body's structure visually
+    // matches the header NAME color. Body content itself stays
+    // text_tertiary (dim) so the colored chrome frames it without
+    // competing with prose.
+    out.chrome_color = tool_category_color(n);
+
+    // ── Edit: EditDiff (per-hunk +/- coloring owned by maya).
+    //    show_all is set — the user wants to see EVERY changed line,
+    //    not a "first 6 + last 2 per side, ⋯ N more" preview. Edits
+    //    are the action the user is verifying; eliding any of them
+    //    defeats the purpose of showing the diff.
     if (n == "edit" && tc.args.is_object()) {
         if (auto it = tc.args.find("edits");
             it != tc.args.end() && it->is_array() && !it->empty())
         {
             out.kind = Kind::EditDiff;
+            out.show_all = true;
             out.hunks.reserve(it->size());
             for (const auto& e : *it) {
                 if (!e.is_object()) continue;
@@ -101,13 +112,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             }
             return out;
         }
-        // Top-level legacy single-edit shape.
         auto ot = safe_arg(tc.args, "old_text");
         if (ot.empty()) ot = safe_arg(tc.args, "old_string");
         auto nt = safe_arg(tc.args, "new_text");
         if (nt.empty()) nt = safe_arg(tc.args, "new_string");
         if (!ot.empty() || !nt.empty()) {
             out.kind = Kind::EditDiff;
+            out.show_all = true;
             out.hunks.push_back({std::move(ot), std::move(nt)});
         }
         return out;
@@ -121,11 +132,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    on failure (instead of routing to Kind::Failure) so the timeline
     //    card border + status icon carry the failure signal and the body
     //    stays calm — agent_session.cpp's "no double-flagging" discipline.
+    // ── Bash / diagnostics: BashOutput (tail-oriented, with `· exit N`
+    //    on failure).
     if (n == "bash" || n == "diagnostics") {
         if (tc.is_running() && !tc.progress_text().empty()) {
             out.kind = Kind::BashOutput;
             out.text = tc.progress_text();
-            out.text_color = fg;
+            out.text_color = text_tertiary;
             out.is_streaming = true;
             return out;
         }
@@ -134,43 +147,44 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             if (!stripped.empty()) {
                 out.kind = Kind::BashOutput;
                 out.text = std::move(stripped);
-                out.text_color = fg;
+                out.text_color = text_tertiary;
                 out.failed = tc.is_failed();
             }
             return out;
         }
-        return out;   // pending/approved with no body — render nothing
+        return out;
     }
 
     // ── Write: FileWrite (subtle "+" prefix + lines/bytes footer). Keeps
     //    the byte-count signal that's the whole reason a Write event has
     //    a body — the path is in the timeline header.
+    // ── Write: line-numbered body + lines/bytes footer.
+    //    show_all is set so the full new-file content is rendered (no
+    //    "⋯ N more" elision); the user wants to see exactly what was
+    //    written.
     if (n == "write") {
         auto content = safe_arg(tc.args, "content");
         if (!content.empty()) {
             out.kind = Kind::FileWrite;
             out.text = std::move(content);
-            out.text_color = fg;
+            out.text_color = text_tertiary;
             out.show_footer_stats = true;
-            // While args are streaming and the model hasn't started
-            // emitting `content` yet, BashOutput's empty-streaming path
-            // applies here too — but FileWrite renders nothing for
-            // empty text by default and the header spinner suffices.
+            out.show_all = true;
         } else if (tc.is_running()) {
             out.kind = Kind::FileWrite;
-            out.text_color = fg;
+            out.text_color = text_tertiary;
             out.is_streaming = true;
         }
         return out;
     }
 
-    // ── git_diff: per-line +/-/@@ coloring. Stays GitDiff.
+    // ── git_diff: per-line +/-/@@ coloring (GitDiff owns the palette).
     if (n == "git_diff" && tc.is_done()) {
         const auto& body = tc.output();
         if (!body.empty() && body != "no changes") {
             out.kind = Kind::GitDiff;
             out.text = body;
-            out.text_color = fg;
+            out.text_color = text_tertiary;
         }
         return out;
     }
@@ -187,7 +201,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         if (!body.empty()) {
             out.kind = Kind::FileRead;
             out.text = body;
-            out.text_color = fg;
+            out.text_color = text_tertiary;    // bright cyan — file content rendered as code
             if (grep_hits) {
                 if (auto path = read_path_arg(tc.args); !path.empty()) {
                     if (auto it = grep_hits->find(path); it != grep_hits->end())
@@ -206,14 +220,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         // path below.
     }
 
-    // ── web_fetch: Json (self-sniffs and falls back to CodeBlock when
-    //    the body isn't JSON, so it's safe as the unconditional pick).
+    // ── web_fetch: Json (pretty-printed key/value).
     if (n == "web_fetch" && tc.is_done()) {
         const auto& body = tc.output();
         if (!body.empty()) {
             out.kind = Kind::Json;
             out.text = body;
-            out.text_color = fg;
+            out.text_color = text_tertiary;
         }
         return out;
     }
@@ -224,6 +237,14 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    the raw `path:line:text` shape that maya::Kind::GrepMatches
     //    parses, so it stays on CodeBlock here. (The cross-tool grep_hits
     //    index above still picks up the line anchors for FileRead.)
+    //
+    //    Body renders in `text_secondary` (legible mid-gray, ANSI 7)
+    //    across all kinds — the category color lives on the header NAME
+    //    where it carries the visual identity; making bodies colorful
+    //    too creates noise and competes with the prose-style markdown
+    //    above the tool group. Tool metadata (name / detail / elapsed)
+    //    stays bright; tool output recedes to subordinate gray.
+    // ── Generic line-oriented tools: CodeBlock head+tail preview.
     if ((n == "grep" || n == "glob" || n == "list_dir"
          || n == "web_search"
          || n == "git_status" || n == "git_log" || n == "git_commit")
@@ -232,22 +253,21 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         if (!tc.output().empty()) {
             out.kind = Kind::CodeBlock;
             out.text = tc.output();
-            out.text_color = fg;
+            out.text_color = text_tertiary;
         }
         return out;
     }
 
-    // ── Failure fallback for everything else: surface stderr as red.
-    //    Routed AFTER per-tool Kinds so bash/write/etc. can use their
-    //    own kind even on failure (preventing double-flagging against
-    //    the card's red border + status icon).
+    // ── Failure fallback. Chrome flips to red so the body chrome
+    //    matches the card's failure cue; body content stays dim.
     if (tc.is_failed() && !tc.output().empty()) {
         out.kind = Kind::Failure;
         out.text = tc.output();
+        out.chrome_color = status_error;
         return out;
     }
 
-    // ── Todo: parse items + statuses.
+    // ── Todo: structured checkbox list (TodoList owns the icons).
     if (n == "todo" && tc.args.is_object()) {
         if (auto it = tc.args.find("todos");
             it != tc.args.end() && it->is_array() && !it->empty())

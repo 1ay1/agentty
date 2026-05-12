@@ -12,7 +12,7 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     mb.set_compact(true);
 
     maya::WelcomeScreen::Config cfg;
-    cfg.sigil_color = accent;
+    cfg.sigil_color = role_brand_alt;                   // bright_magenta flagship sigil
     cfg.tagline     = "a calm middleware between you and the model";
     cfg.model_badge    = mb.build();
     cfg.profile_label  = std::string{profile_label(m.d.profile)};
@@ -27,10 +27,14 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     cfg.starters_title = {};
     cfg.starters       = {};
     cfg.hint_intro     = "type to begin";
-    cfg.hints          = {{"^K", " palette", highlight},
-                          {"^J", " threads", highlight},
-                          {"^N", " new",     success}};
-    cfg.accent_color   = accent;
+    // Hint chips use distinct hues so the row reads as a small
+    // keyboard map rather than three identical colored buttons.
+    // palette=cyan (action surface), threads=blue (navigation),
+    // new=green (creative/positive action).
+    cfg.hints          = {{"^K", " palette", code_path},
+                          {"^J", " threads", role_info},
+                          {"^N", " new",     status_ok}};
+    cfg.accent_color   = role_brand;
     cfg.text_color     = fg;
     return cfg;
 }
