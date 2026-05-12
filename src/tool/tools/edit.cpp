@@ -346,7 +346,6 @@ ExecResult run_edit(const EditArgs& a) {
 
     std::string original = util::read_file(p);
     std::string updated  = original;
-    int total_replacements = 0;
 
     // Apply in order. If any edit fails, report which one and abort — we'd
     // rather surface a precise error than leave the file half-transformed.
@@ -362,7 +361,6 @@ ExecResult run_edit(const EditArgs& a) {
                 return std::unexpected(ToolError::ambiguous(std::move(ctx)));
             return std::unexpected(ToolError::no_match(std::move(ctx)));
         }
-        total_replacements += n;
     }
 
     if (original == updated)
