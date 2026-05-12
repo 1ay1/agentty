@@ -986,6 +986,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
         },
         [&](StreamFinished e) -> Step {
             auto cmd = finalize_turn(m, e.stop_reason);
+            // Streaming has settled. If the post-finalize phase is Idle,
+            // arm a force-redraw for the next user input — the terminal
+            // may have committed transient composer/footer cells into
+            // scrollback during streaming, and the next keystroke is
+            // when we clean that up (see UI::needs_force_redraw doc).
+            if (m.s.is_idle()) m.ui.needs_force_redraw = true;
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {

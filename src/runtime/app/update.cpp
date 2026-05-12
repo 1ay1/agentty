@@ -32,8 +32,36 @@ namespace agentty::app {
 using maya::Cmd;
 using maya::overload;
 
+// Returns true when `msg` is a USER-INPUT-driven message — composer
+// keystrokes, picker/palette navigation, login flow, diff-review
+// actions, todo edits. False for Tick (animation frame), StreamMsg
+// (network events), and ToolMsg (background tool worker results).
+// The needs_force_redraw consumer below uses this to fire the redraw
+// only on the *first user input* after streaming settled, not on
+// every Tick that lands between.
+[[nodiscard]] static bool is_user_input(const Msg& m) noexcept {
+    return std::holds_alternative<msg::ComposerMsg>(m)
+        || std::holds_alternative<msg::ModelPickerMsg>(m)
+        || std::holds_alternative<msg::ThreadListMsg>(m)
+        || std::holds_alternative<msg::CommandPaletteMsg>(m)
+        || std::holds_alternative<msg::MentionPaletteMsg>(m)
+        || std::holds_alternative<msg::SymbolPaletteMsg>(m)
+        || std::holds_alternative<msg::TodoMsg>(m)
+        || std::holds_alternative<msg::LoginMsg>(m)
+        || std::holds_alternative<msg::DiffReviewMsg>(m);
+}
+
 std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
-    return std::visit(overload{
+    // Consume the needs_force_redraw flag: when streaming settled and
+    // this Msg is the first user input since, batch a Cmd::force_redraw
+    // alongside the normal Cmd. The redraw fires AFTER the regular
+    // reducer's effects so any model changes from the input land in
+    // the full repaint. Tick / Stream / Tool messages don't consume
+    // the flag — those are background events the user didn't trigger.
+    const bool fire_redraw = m.ui.needs_force_redraw && is_user_input(msg);
+    if (fire_redraw) m.ui.needs_force_redraw = false;
+
+    auto step = std::visit(overload{
         [&](msg::ComposerMsg cm)       { return detail::composer_update     (std::move(m), std::move(cm)); },
         [&](msg::StreamMsg sm)         { return detail::stream_update       (std::move(m), std::move(sm)); },
         [&](msg::ToolMsg tm)           { return detail::tool_update         (std::move(m), std::move(tm)); },
@@ -47,6 +75,15 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](msg::DiffReviewMsg dm)     { return detail::diff_review_update  (std::move(m), std::move(dm)); },
         [&](msg::MetaMsg mm)           { return detail::meta_update         (std::move(m), std::move(mm)); },
     }, msg);
+
+    if (fire_redraw) {
+        std::vector<Cmd<Msg>> batched;
+        batched.reserve(2);
+        batched.push_back(std::move(step.second));
+        batched.push_back(Cmd<Msg>::force_redraw());
+        step.second = Cmd<Msg>::batch(std::move(batched));
+    }
+    return step;
 }
 
 } // namespace agentty::app

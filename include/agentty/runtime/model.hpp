@@ -135,6 +135,19 @@ struct Model {
         // thread switch (same lifecycle as thread_view_start).
         int                 thread_view_start_turn = 0;
 
+        // Set when streaming settles (phase → Idle) and cleared at the
+        // top of update() when the next non-Tick user-input Msg arrives.
+        // While true, that update returns an extra Cmd::force_redraw
+        // that collapses maya's coherence state to Divergent — the next
+        // render emits the full live frame fresh from the cursor's
+        // current position, pushing the OLD live-frame rows (which may
+        // include transient composer cells committed to scrollback
+        // during streaming) up into the terminal's native scrollback
+        // and writing a clean NEW live frame into the viewport. Same
+        // effect as a SIGWINCH-triggered handle_resize, but triggered
+        // on first user input instead of resize.
+        bool                  needs_force_redraw = false;
+
         // Per-(thread, msg) render cache. View code reads + writes
         // through this — markdown rendering and per-turn Element
         // building both memoize here. The reducer evicts entries on
