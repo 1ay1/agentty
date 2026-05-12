@@ -69,16 +69,53 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
     else if (caps.is_sonnet()) { c = role_info;      label = "Sonnet"; } // blue
     else if (caps.is_haiku())  { c = code_path;      label = "Haiku";  } // bright_cyan
     else                       { c = highlight;      label = id;       } // cyan (fallback)
+    // Extract a short version run like "4-5" → "4.5" from model ids.
+    // Reject segments longer than 2 digits so date suffixes (8-digit
+    // YYYYMMDD on ids like "claude-sonnet-4-20250514") don't get
+    // displayed as `Sonnet 4.20250514`. Segments are 1–2 digits
+    // joined by `-`/`.`; once a 3-digit run appears we stop the
+    // version at the boundary before it (so `4-5-20250514` → `4.5`,
+    // `4-20250514` → `4` only).
     for (std::size_t i = 0; i + 2 < id.size(); ++i) {
         char ch = id[i];
         if (ch >= '0' && ch <= '9') {
             char delim = id[i + 1];
             if ((delim == '-' || delim == '.') && id[i + 2] >= '0' && id[i + 2] <= '9') {
-                std::size_t end = i + 3;
-                while (end < id.size() && id[end] >= '0' && id[end] <= '9') ++end;
-                auto ver = id.substr(i, end - i);
-                for (auto& v : ver) if (v == '-') v = '.';
-                label += " " + ver;
+                std::size_t cursor = i;
+                std::string ver;
+                // Read 1–2 digits for the first segment.
+                {
+                    std::size_t start = cursor;
+                    while (cursor < id.size() && id[cursor] >= '0' && id[cursor] <= '9'
+                           && (cursor - start) < 2)
+                        ++cursor;
+                    ver.append(id, start, cursor - start);
+                    // If more digits follow than 2, this is a date — bail.
+                    if (cursor < id.size() && id[cursor] >= '0' && id[cursor] <= '9')
+                        goto have_ver;
+                }
+                // Optional further segments, each 1–2 digits.
+                while (cursor + 1 < id.size()
+                       && (id[cursor] == '-' || id[cursor] == '.')
+                       && id[cursor + 1] >= '0' && id[cursor + 1] <= '9')
+                {
+                    std::size_t sep_pos = cursor;
+                    std::size_t start   = cursor + 1;
+                    std::size_t end     = start;
+                    while (end < id.size() && id[end] >= '0' && id[end] <= '9'
+                           && (end - start) < 2)
+                        ++end;
+                    // If more than 2 digits in this segment, it's a date —
+                    // stop BEFORE the separator so the prior version stands.
+                    if (end < id.size() && id[end] >= '0' && id[end] <= '9') break;
+                    ver += '.';
+                    ver.append(id, start, end - start);
+                    cursor = end;
+                    (void)sep_pos;
+                }
+              have_ver:
+                if (!ver.empty())
+                    label += " " + ver;
                 break;
             }
         }
