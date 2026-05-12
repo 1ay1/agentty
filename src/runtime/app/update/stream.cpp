@@ -986,12 +986,21 @@ Step stream_update(Model m, msg::StreamMsg sm) {
         },
         [&](StreamFinished e) -> Step {
             auto cmd = finalize_turn(m, e.stop_reason);
-            // Streaming has settled. If the post-finalize phase is Idle,
-            // arm a force-redraw for the next user input — the terminal
-            // may have committed transient composer/footer cells into
-            // scrollback during streaming, and the next keystroke is
-            // when we clean that up (see UI::needs_force_redraw doc).
-            if (m.s.is_idle()) m.ui.needs_force_redraw = true;
+            // 69688c5 used to set m.ui.needs_force_redraw here to clean
+            // up transient composer/footer cells committed to scrollback
+            // during streaming. Disabled experimentally: the cache-
+            // aliasing and stale-cell-leak classes that produced those
+            // ghosts have since been closed by 88516a6 (weak_ptr-keyed
+            // cache_id), c07f249/489347b (full canvas.clear() per
+            // frame), and B10 (bounded clear). The force_redraw was
+            // also causing a "composer rushes to terminal-bottom on
+            // first keypress" symptom — when the user scrolled during
+            // streaming and the live frame ended up mid-viewport,
+            // force_redraw's fresh serialize+trailing-newlines path
+            // extended the frame downward, leaving a duplicate at the
+            // old position. The flag plumbing remains so this is one
+            // line away from re-enabling if regressions appear.
+            (void)e;
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {
