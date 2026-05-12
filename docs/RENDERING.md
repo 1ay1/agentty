@@ -475,8 +475,11 @@ Owned-by-widget behaviour:
   only the per-burst rate accumulator resets on `StreamStarted`.
 - `StatusBanner` — empty `text` renders a 1-cell blank placeholder so
   the row count stays fixed regardless of toast presence.
-- `ShortcutRow` — priority-sorted dropping (`S-Tab` and `^/` go first
-  on narrow widths) and key-only mode below `label_min_width`.
+- `ShortcutRow` — greedy width-fit: sheds labels in priority-ascending
+  order first (so `S-Tab profile` and `^/ models` lose their labels
+  before the higher-priority bindings do), then sheds whole bindings
+  in the same order. The last surviving binding is never dropped, so
+  notifications surfaced through this row always stay visible.
 
 The activity row's width-adaptive logic (drop breadcrumb < 130, drop
 token stream < 110, drop ctx bar < 55) lives in `StatusBar::build()`,

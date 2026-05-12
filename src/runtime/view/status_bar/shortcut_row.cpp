@@ -8,9 +8,7 @@ namespace agentty::ui {
 
 maya::ShortcutRow::Config shortcut_row_config(const Model& m) {
     maya::ShortcutRow::Config cfg;
-    cfg.label_min_width = 110;
-    cfg.full_min_width  = 55;
-    cfg.text_color      = fg;
+    cfg.text_color = fg;
 
     // Notification takeover: when there's an active status message, the
     // shortcut row doubles as the notification slot — keybindings are
@@ -34,10 +32,10 @@ maya::ShortcutRow::Config shortcut_row_config(const Model& m) {
         // banner glyph into `key` (bold-colored) and the message text
         // into `label` (dim) — visually aligns with the StatusBanner
         // treatment (▎⚠ <text>) without needing a custom widget.
-        // Priority is high and full_min_width is collapsed so the
-        // notification is never dropped on narrow terminals — losing a
-        // notification because the window is small would be the worst
-        // failure mode of this widget.
+        // It's the only binding in the row, so the greedy-fit logic
+        // in ShortcutRow keeps it visible (the last surviving binding
+        // is never dropped) — losing a notification because the window
+        // is small would be the worst failure mode of this widget.
         //
         // Queue-depth is intentionally NOT shown here: the composer's
         // own right-hand strip already renders "❚ N queued" whenever
@@ -52,7 +50,6 @@ maya::ShortcutRow::Config shortcut_row_config(const Model& m) {
              .key_color = is_error ? danger : maya::Color::bright_black(),
              .priority  = 1000},
         };
-        cfg.full_min_width = 0;     // never drop the notification
         return cfg;
     }
 

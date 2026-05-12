@@ -38,7 +38,8 @@ excludes time-to-first-token (TTFT).  Both reset on every
 
 ## Sparkline ring buffer
 
-`rate_history` is a cheap fixed-size ring buffer (`kRateSamples = 12`,
+`rate_history` is a cheap fixed-size ring buffer (`kRateSamples = 16`,
+sized to match the status-bar sparkline width so every cell is live data,
 sampled every ~500 ms) that the `Tick` handler appends to.  The status
 bar renders those samples as a row of ▁▂▃▄▅▆▇█ glyphs next to the
 numeric rate, giving the user:

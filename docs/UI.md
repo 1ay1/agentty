@@ -602,15 +602,16 @@ struct ShortcutRow::Binding {
 
 struct ShortcutRow::Config {
     std::vector<Binding> bindings;
-    int label_min_width = 110;     // < this drops labels (key-only)
-    int full_min_width  = 55;      // < this drops lower-priority half
     Color text_color = Color::bright_white();
 };
 ```
 
 Helix / Lazygit / k9s style: bold key in default fg, dim label, no
-chip background. Drops less-important bindings on narrow widths
-(priority-sorted) and drops labels entirely below `label_min_width`.
+chip background. Greedy-fit width adaptation: starts with every
+binding labelled, then sheds labels in priority-ascending order
+until the row fits the available width; if still over budget,
+sheds whole bindings in the same order. The last remaining binding
+is never dropped.
 
 Adapter: `status_bar/shortcut_row.cpp::shortcut_row_config(m)`.
 
