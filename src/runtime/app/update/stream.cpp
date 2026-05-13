@@ -986,21 +986,17 @@ Step stream_update(Model m, msg::StreamMsg sm) {
         },
         [&](StreamFinished e) -> Step {
             auto cmd = finalize_turn(m, e.stop_reason);
-            // 69688c5 used to set m.ui.needs_force_redraw here to clean
-            // up transient composer/footer cells committed to scrollback
-            // during streaming. Disabled experimentally: the cache-
-            // aliasing and stale-cell-leak classes that produced those
-            // ghosts have since been closed by 88516a6 (weak_ptr-keyed
-            // cache_id), c07f249/489347b (full canvas.clear() per
-            // frame), and B10 (bounded clear). The force_redraw was
-            // also causing a "composer rushes to terminal-bottom on
-            // first keypress" symptom — when the user scrolled during
-            // streaming and the live frame ended up mid-viewport,
-            // force_redraw's fresh serialize+trailing-newlines path
-            // extended the frame downward, leaving a duplicate at the
-            // old position. The flag plumbing remains so this is one
-            // line away from re-enabling if regressions appear.
-            (void)e;
+            // Streaming has settled. Arm force_redraw on the next user
+            // input so the diff path's stale prev_cells gets refreshed
+            // (cells committed to terminal scrollback during streaming
+            // can leave prev_cells out of sync with the wire, surfacing
+            // as ghosts on subsequent diffs). With maya's force_redraw
+            // now using the SOFT in-place redraw path
+            // (cursor_up + serialize + \x1b[J instead of the old
+            // \x1b[2J + serialize-from-cursor + trailing-\r\n's), the
+            // composer stays at its current viewport row instead of
+            // rushing to terminal-bottom.
+            if (m.s.is_idle()) m.ui.needs_force_redraw = true;
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {
