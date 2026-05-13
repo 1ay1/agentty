@@ -89,7 +89,7 @@ struct ComposerHistoryNext {};
 // paste (Ctrl+Shift+V) only carries UTF-8 text — for an image-on-
 // clipboard path the reducer shells out to wl-paste / xclip /
 // pngpaste / PowerShell to capture the raw PNG bytes. See
-// runtime/clipboard_image.{hpp,cpp}.
+// io/clipboard.{hpp,cpp}.
 struct ComposerImagePasteFromClipboard {};
 
 // ── Streaming from provider ──────────────────────────────────────────────

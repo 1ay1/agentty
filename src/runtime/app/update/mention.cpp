@@ -16,6 +16,7 @@
 
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
+#include "agentty/workspace/files.hpp"
 
 namespace agentty::app::detail {
 

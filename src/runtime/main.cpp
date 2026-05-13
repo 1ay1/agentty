@@ -39,7 +39,7 @@
 
 #include <maya/maya.hpp>
 
-#include "agentty/runtime/airgap.hpp"
+#include "agentty/airgap/airgap.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"

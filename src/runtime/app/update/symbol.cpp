@@ -13,6 +13,7 @@
 
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/symbol_palette.hpp"
+#include "agentty/workspace/symbols.hpp"
 
 namespace agentty::app::detail {
 

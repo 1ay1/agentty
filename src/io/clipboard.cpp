@@ -1,4 +1,4 @@
-#include "agentty/runtime/clipboard_image.hpp"
+#include "agentty/io/clipboard.hpp"
 
 #include <algorithm>
 #include <cstdio>

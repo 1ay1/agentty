@@ -17,11 +17,13 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/app/update/internal.hpp"
-#include "agentty/runtime/clipboard_image.hpp"
+#include "agentty/io/clipboard.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
 #include "agentty/runtime/symbol_palette.hpp"
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/symbols.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
 namespace agentty::app::detail {

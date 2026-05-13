@@ -6,26 +6,18 @@
 // chip we attach on select carries all three so submit-time expansion
 // can splice an excerpt of the file around the declaration.
 //
-// The candidate set is built once per process by walking the
-// workspace and applying a small set of language regex patterns
-// (find_definition tool's pattern set, in lighter form). The walk
-// runs synchronously the first time `#` is hit; subsequent opens
-// reuse the cached vector. Workspaces with thousands of source files
-// take ~1 second on first open — visible but bounded; the user gets
-// a "scanning workspace…" message until the walk finishes.
+// The workspace scanner that produces SymbolEntry (and the filter
+// helper) live in `workspace/symbols.hpp`; this header is
+// UI-state-only and re-imports SymbolEntry for the Open variant's
+// vector.
 
-#include <cstdint>
 #include <string>
 #include <variant>
 #include <vector>
 
-namespace agentty {
+#include "agentty/workspace/symbols.hpp"  // SymbolEntry
 
-struct SymbolEntry {
-    std::string name;        // identifier, e.g. "submit_message"
-    std::string path;        // workspace-relative file path
-    int         line_number = 0;  // 1-based
-};
+namespace agentty {
 
 namespace symbol_palette {
 
@@ -46,18 +38,5 @@ using SymbolPaletteState = std::variant<symbol_palette::Closed, symbol_palette::
 }
 [[nodiscard]] inline       symbol_palette::Open* symbol_palette_opened(SymbolPaletteState& s)       noexcept { return std::get_if<symbol_palette::Open>(&s); }
 [[nodiscard]] inline const symbol_palette::Open* symbol_palette_opened(const SymbolPaletteState& s) noexcept { return std::get_if<symbol_palette::Open>(&s); }
-
-// Walk the workspace once, return all definitions matched by the
-// language regex set. Cached per-process: first call walks the
-// disk; subsequent calls return the cached vector by const-ref. Cap
-// at `cap` entries to bound the picker's working set on huge repos.
-[[nodiscard]] const std::vector<SymbolEntry>&
-list_workspace_symbols(std::size_t cap = 50000);
-
-// Case-insensitive substring filter on the symbol NAME (not path).
-// Returns indices into `entries` so the dispatcher resolves the
-// cursor → (name, path, line) using the same view the picker rendered.
-[[nodiscard]] std::vector<std::size_t>
-filter_symbols(const std::vector<SymbolEntry>& entries, std::string_view query);
 
 } // namespace agentty

@@ -7,6 +7,8 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/symbols.hpp"
 
 // All sizing here is responsive — the public maya layout does the
 // math, never agentty. Each picker is a `vstack()` that just declares

@@ -287,19 +287,37 @@ endif()
 
 # ── Source groups, by domain ──────────────────────────────────────────────
 # The header tree under include/agentty/ mirrors this grouping one-for-one:
-#   domain/   — pure value types (no I/O, no UI). Headers only.
-#   io/       — sockets, TLS, HTTP/2, OAuth, on-disk persistence.
-#   provider/ — wire-format adapters for upstream LLM APIs.
-#   diff/     — unified-diff parser used by the edit tool & review modal.
-#   tool/     — the agent's capability surface: registry + per-tool impls.
-#   runtime/  — the Elm-style app: model, update, subscriptions, view tree.
+#   domain/    — pure value types (no I/O, no UI). Headers only.
+#   io/        — sockets, TLS, HTTP/2, OAuth, on-disk persistence, OS
+#                clipboard. Anything that talks to the kernel or the
+#                wire and isn't tied to a specific provider.
+#   provider/  — wire-format adapters for upstream LLM APIs.
+#   diff/      — unified-diff parser used by the edit tool & review modal.
+#   tool/      — the agent's capability surface: registry + per-tool impls.
+#   workspace/ — pure-I/O scanners over the active workspace root (file
+#                enumeration for @mention, symbol enumeration for #).
+#                Consumed by the runtime's pickers but separate from the
+#                UI state they feed.
+#   airgap/    — the `agentty airgap` CLI subcommand (exec's into ssh,
+#                never returns).  Not part of the maya runtime.
+#   runtime/   — the Elm-style app: model, update, subscriptions, view tree.
 
 set(AGENTTY_IO_SOURCES
     src/io/http.cpp
     src/io/tls.cpp
     src/io/auth.cpp
     src/io/persistence.cpp
+    src/io/clipboard.cpp
     src/util/base64.cpp
+)
+
+set(AGENTTY_WORKSPACE_SOURCES
+    src/workspace/files.cpp
+    src/workspace/symbols.cpp
+)
+
+set(AGENTTY_AIRGAP_SOURCES
+    src/airgap/airgap.cpp
 )
 
 set(AGENTTY_PROVIDER_SOURCES
@@ -339,11 +357,7 @@ set(AGENTTY_TOOL_SOURCES
 # Everything except the entry point — so tests can link the same runtime
 # without fighting main().
 set(AGENTTY_RUNTIME_NOMAIN_SOURCES
-    src/runtime/airgap.cpp
-    src/runtime/clipboard_image.cpp
     src/runtime/composer_attachment.cpp
-    src/runtime/mention_palette.cpp
-    src/runtime/symbol_palette.cpp
     src/runtime/app/deps.cpp
     src/runtime/app/init.cpp
     src/runtime/app/cmd_factory.cpp
@@ -396,6 +410,8 @@ set(AGENTTY_RUNTIME_SOURCES
 
 add_executable(agentty
     ${AGENTTY_IO_SOURCES}
+    ${AGENTTY_WORKSPACE_SOURCES}
+    ${AGENTTY_AIRGAP_SOURCES}
     ${AGENTTY_PROVIDER_SOURCES}
     ${AGENTTY_DIFF_SOURCES}
     ${AGENTTY_TOOL_SOURCES}
