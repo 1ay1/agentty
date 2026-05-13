@@ -261,6 +261,59 @@ void apply_history_entry(ComposerState& cs, const std::string& text) {
     if (text.find('\n') != std::string::npos) cs.expanded = true;
 }
 
+// Smart-paste from the OS clipboard. Image first, then text, in that
+// order — image's failure message ("no image on clipboard") is the
+// least useful diagnostic for a user who copied text from a browser
+// and pressed Ctrl+V, so we silently fall through. The text fallback
+// piggybacks on the existing ComposerPaste reducer arm so the same
+// always-chip / line-normalisation rules apply as for native
+// bracketed-paste sequences.
+//
+// Used by:
+//   • Ctrl+V / Alt+V          (subscribe.cpp → ComposerImagePasteFromClipboard)
+//   • Empty bracketed paste   (ComposerPaste arm with e.text.empty())
+//
+// All three routes through this one helper so the behaviour is
+// identical no matter which trigger fired.
+Step smart_paste_from_clipboard(Model m) {
+    std::string img_err;
+    if (auto img = read_clipboard_image(&img_err)) {
+        begin_edit(m.ui.composer);
+        Attachment att;
+        att.kind       = Attachment::Kind::Image;
+        att.path       = "<clipboard>";
+        att.media_type = std::move(img->media_type);
+        att.byte_count = img->bytes.size();
+        att.body       = std::move(img->bytes);
+        std::size_t idx = m.ui.composer.attachments.size();
+        m.ui.composer.attachments.push_back(std::move(att));
+        auto placeholder = attachment::make_placeholder(idx);
+        m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
+        m.ui.composer.cursor += static_cast<int>(placeholder.size());
+        m.ui.composer.expanded = true;
+        return done(std::move(m));
+    }
+
+    // No image — try text. Re-enter the ComposerPaste arm with the
+    // captured text so we get newline normalisation + always-chip
+    // treatment for free (same path bracketed paste takes).
+    std::string txt_err;
+    if (auto txt = read_clipboard_text(&txt_err); txt && !txt->empty()) {
+        return composer_update(std::move(m), ComposerPaste{std::move(*txt)});
+    }
+
+    // Both failed — pick the more informative error. read_clipboard_image
+    // tends to produce a precise reason ("could not open Windows
+    // clipboard", "clipboard has no image (no PNG/DIBV5/...)"), whereas
+    // the text path's "clipboard has no text" is generic. Prefer
+    // whichever has actual content.
+    std::string err = !txt_err.empty() ? std::move(txt_err)
+                    : !img_err.empty() ? std::move(img_err)
+                    : std::string{"clipboard is empty"};
+    auto cmd = set_status_toast(m, std::move(err), std::chrono::seconds{6});
+    return {std::move(m), std::move(cmd)};
+}
+
 } // namespace
 
 using maya::overload;
@@ -475,39 +528,26 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
         },
         [&](ComposerImagePasteFromClipboard) -> Step {
             // Bracketed paste delivers UTF-8 text only; for an image-
-            // on-clipboard the only working path on a vanilla terminal
-            // is to ASK the OS clipboard for its image content via a
-            // platform tool. read_clipboard_image() shells out (see
-            // clipboard_image.cpp for the per-OS commands) and returns
-            // the raw bytes + sniffed media-type. Sync because the
-            // helpers all exit immediately on a no-image clipboard;
-            // worst-case is ~200 ms when osascript / PowerShell is on
-            // the path.
-            std::string err;
-            auto img = read_clipboard_image(&err);
-            if (!img) {
-                auto cmd = set_status_toast(m,
-                    err.empty() ? std::string{"no image on clipboard"}
-                                : std::move(err),
-                    std::chrono::seconds{6});
-                return {std::move(m), std::move(cmd)};
-            }
-            begin_edit(m.ui.composer);
-            Attachment att;
-            att.kind       = Attachment::Kind::Image;
-            att.path       = "<clipboard>";
-            att.media_type = std::move(img->media_type);
-            att.byte_count = img->bytes.size();
-            att.body       = std::move(img->bytes);
-            std::size_t idx = m.ui.composer.attachments.size();
-            m.ui.composer.attachments.push_back(std::move(att));
-            auto placeholder = attachment::make_placeholder(idx);
-            m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
-            m.ui.composer.cursor += static_cast<int>(placeholder.size());
-            m.ui.composer.expanded = true;
-            return done(std::move(m));
+            // on-clipboard we ask the OS clipboard directly (see
+            // io/clipboard.cpp for the per-OS implementation). Sync —
+            // the helpers exit immediately on a no-image clipboard.
+            // Same code path as the Alt+V trigger and the empty-
+            // bracketed-paste detection (Windows Terminal swallows
+            // Ctrl+V, our two fallbacks land here).
+            return smart_paste_from_clipboard(std::move(m));
         },
         [&](ComposerPaste& e) -> Step {
+            // Empty bracketed paste → Windows Terminal signature for
+            // "user hit Ctrl+V but the clipboard has no text content".
+            // The terminal swallows Ctrl+V to run its own paste action;
+            // when CF_UNICODETEXT is absent (e.g. clipboard holds an
+            // image from Win+Shift+S), the action sends `\x1b[200~
+            // \x1b[201~` with nothing in between. Route it through the
+            // same path Alt+V uses so the user gets the image without
+            // having to learn an alternate shortcut.
+            if (e.text.empty())
+                return smart_paste_from_clipboard(std::move(m));
+
             // Bracketed-paste of raw image bytes — vanishingly rare
             // (most terminals scrub binary out of paste), but Kitty
             // and Wezterm with `--allow-passthrough`-style options

@@ -39,31 +39,16 @@ namespace {
 // the read boundary — magic-byte sniff still works on the prefix.
 constexpr std::size_t kCap = 8 * 1024 * 1024;
 
-// Run a shell command and capture binary stdout up to `cap` bytes.
-// Returns the bytes plus the wait-status. status==-1 means popen
-// failed outright (rare — fork/exec issues).
+// CaptureResult is used by every platform — wrap() takes one, the POSIX
+// helpers populate it via popen, and the Win32 path constructs it
+// directly from clipboard bytes. Keep it outside the platform guard.
 struct CaptureResult {
     std::string bytes;
     int         status = -1;
 };
 
-CaptureResult popen_capture(const char* cmd, std::size_t cap) {
-    CaptureResult r;
-    FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
-    if (!fp) return r;
-    r.bytes.reserve(std::min<std::size_t>(cap, 256 * 1024));
-    char buf[8192];
-    while (r.bytes.size() < cap) {
-        std::size_t avail = cap - r.bytes.size();
-        std::size_t want  = avail < sizeof(buf) ? avail : sizeof(buf);
-        std::size_t n = std::fread(buf, 1, want, fp);
-        if (n == 0) break;
-        r.bytes.append(buf, n);
-    }
-    r.status = AGENTTY_PCLOSE(fp);
-    return r;
-}
-
+// sniff_image_type is used by wrap() on every platform — keep it
+// outside the POSIX guard.
 const char* sniff_image_type(std::string_view bytes) {
     auto u = [&](std::size_t i){ return static_cast<unsigned char>(bytes[i]); };
     if (bytes.size() >= 8 && u(0) == 0x89 && u(1) == 0x50 && u(2) == 0x4E
@@ -82,17 +67,35 @@ const char* sniff_image_type(std::string_view bytes) {
     return nullptr;
 }
 
+// The popen + tool-detection helpers below are only used on POSIX /
+// macOS. On Windows the clipboard read goes through the Win32 API
+// directly and these would trip -Wunused-function.
+#if !defined(_WIN32)
+
+// Run a shell command and capture binary stdout up to `cap` bytes.
+// Returns the bytes plus the wait-status. status==-1 means popen
+// failed outright (rare — fork/exec issues).
+CaptureResult popen_capture(const char* cmd, std::size_t cap) {
+    CaptureResult r;
+    FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
+    if (!fp) return r;
+    r.bytes.reserve(std::min<std::size_t>(cap, 256 * 1024));
+    char buf[8192];
+    while (r.bytes.size() < cap) {
+        std::size_t avail = cap - r.bytes.size();
+        std::size_t want  = avail < sizeof(buf) ? avail : sizeof(buf);
+        std::size_t n = std::fread(buf, 1, want, fp);
+        if (n == 0) break;
+        r.bytes.append(buf, n);
+    }
+    r.status = AGENTTY_PCLOSE(fp);
+    return r;
+}
+
 bool tool_in_path(const char* name) {
-#if defined(_WIN32)
-    // `where` is the Windows analogue of `command -v`.
-    std::string cmd = "where ";
-    cmd += name;
-    cmd += " >NUL 2>&1";
-#else
     std::string cmd = "command -v ";
     cmd += name;
     cmd += " >/dev/null 2>&1";
-#endif
     return std::system(cmd.c_str()) == 0;
 }
 
@@ -113,9 +116,6 @@ const char* pick_clipboard_image_type(std::string_view types) {
         "image/tiff",
     };
     for (const char* p : prefs) {
-        // Substring match is fine — the listing is one MIME per
-        // line, and "image/jpeg" never appears as a substring of a
-        // longer image MIME we care about.
         if (types.find(p) != std::string_view::npos) return p;
     }
     return nullptr;
@@ -124,12 +124,10 @@ const char* pick_clipboard_image_type(std::string_view types) {
 bool clipboard_has_qt_image_only(std::string_view types) {
     if (types.find("application/x-qt-image") == std::string_view::npos)
         return false;
-    // Treat Qt-image as the only image-class advertisement when no
-    // standard image/* type is also present. Some Qt apps publish
-    // both (image/png + application/x-qt-image), in which case the
-    // png path picks it up and we never reach this branch.
     return pick_clipboard_image_type(types) == nullptr;
 }
+
+#endif // !_WIN32
 
 std::optional<ClipboardImage> wrap(CaptureResult r) {
     if (r.status != 0 || r.bytes.empty()) return std::nullopt;
@@ -303,60 +301,9 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         }
     }
 
-    // (b) DIB fallback: the standard "Win+Shift+S / Snipping Tool /
-    //     PrintScreen" path. Re-attach a BITMAPFILEHEADER so the bytes
-    //     are a complete BMP file, then re-encode through GDI+ to PNG
-    //     (Anthropic's image API doesn't accept BMP).
-
-    const UINT dib_fmt =
-          ::IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5
-        : ::IsClipboardFormatAvailable(CF_DIB)   ? CF_DIB
-        : 0u;
-    if (dib_fmt == 0)
-        return fail("clipboard has no image (no PNG/DIB/DIBV5 format present)");
-
-    HANDLE h = ::GetClipboardData(dib_fmt);
-    if (!h)
-        return fail("GetClipboardData returned NULL");
-
-    auto* dib = static_cast<const BYTE*>(::GlobalLock(h));
-    const SIZE_T dib_size = dib ? ::GlobalSize(h) : 0;
-    struct UnlockGuard {
-        HANDLE h;
-        ~UnlockGuard() { if (h) ::GlobalUnlock(h); }
-    } unlock_guard{h};
-    if (!dib || dib_size < sizeof(BITMAPINFOHEADER))
-        return fail("clipboard DIB header is malformed");
-
-    // Compute where the pixel array starts inside the DIB block. For a
-    // file-on-disk BMP this is BITMAPFILEHEADER.bfOffBits; here we have
-    // to derive it from the info-header + optional palette / bitfield
-    // masks. Getting this wrong shifts the pixels and GDI+ either rejects
-    // the stream or produces a mangled image.
-    const auto* hdr = reinterpret_cast<const BITMAPINFOHEADER*>(dib);
-    DWORD palette_bytes = 0;
-    if (hdr->biBitCount <= 8) {
-        const DWORD n = hdr->biClrUsed ? hdr->biClrUsed
-                                       : (1u << hdr->biBitCount);
-        palette_bytes = n * sizeof(RGBQUAD);
-    } else if (hdr->biCompression == BI_BITFIELDS) {
-        palette_bytes = 3 * sizeof(DWORD);
-    }
-    const DWORD pixels_offset =
-        static_cast<DWORD>(sizeof(BITMAPFILEHEADER))
-      + hdr->biSize + palette_bytes;
-
-    std::string bmp;
-    bmp.resize(sizeof(BITMAPFILEHEADER) + dib_size);
-    BITMAPFILEHEADER bfh{};
-    bfh.bfType    = 0x4D42; // 'BM'
-    bfh.bfSize    = static_cast<DWORD>(bmp.size());
-    bfh.bfOffBits = pixels_offset;
-    std::memcpy(bmp.data(), &bfh, sizeof(bfh));
-    std::memcpy(bmp.data() + sizeof(bfh), dib, dib_size);
-
-    // GDI+ initialise per-call. A process-wide startup at main() would
-    // shave ~1 ms but adds a lifecycle the rest of the app doesn't need.
+    // GDI+ scope: shared across (b) DIB path and (c) CF_BITMAP fallback.
+    // Per-call startup; a process-wide token would shave ~1 ms but adds
+    // lifecycle the rest of the app doesn't need.
     Gdiplus::GdiplusStartupInput gdi_in;
     ULONG_PTR gdi_token = 0;
     if (Gdiplus::GdiplusStartup(&gdi_token, &gdi_in, nullptr) != Gdiplus::Ok)
@@ -366,76 +313,238 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         ~GdiGuard() { Gdiplus::GdiplusShutdown(tok); }
     } gdi_guard{gdi_token};
 
-    IStream* bmp_stream = ::SHCreateMemStream(
-        reinterpret_cast<const BYTE*>(bmp.data()),
-        static_cast<UINT>(bmp.size()));
-    if (!bmp_stream)
-        return fail("SHCreateMemStream(bmp) failed");
-    struct StreamGuard {
-        IStream* s;
-        ~StreamGuard() { if (s) s->Release(); }
-    } bmp_guard{bmp_stream};
+    // Lazy-found PNG encoder CLSID. There's no GetEncoderByMime helper —
+    // walk the codec list once and remember the result for both paths.
+    auto find_png_encoder = [&](CLSID& out) -> bool {
+        UINT num = 0, sz = 0;
+        Gdiplus::GetImageEncodersSize(&num, &sz);
+        if (num == 0 || sz == 0) return false;
+        std::vector<BYTE> buf(sz);
+        auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buf.data());
+        Gdiplus::GetImageEncoders(num, sz, codecs);
+        for (UINT i = 0; i < num; ++i) {
+            if (std::wcscmp(codecs[i].MimeType, L"image/png") == 0) {
+                out = codecs[i].Clsid;
+                return true;
+            }
+        }
+        return false;
+    };
 
-    std::unique_ptr<Gdiplus::Bitmap> bitmap{
-        Gdiplus::Bitmap::FromStream(bmp_stream)};
-    if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok)
-        return fail("GDI+ could not decode clipboard DIB");
+    // Encode a GDI+ Bitmap to PNG bytes via an in-memory IStream.
+    auto encode_to_png = [&](Gdiplus::Bitmap& bitmap,
+                             std::string& out_bytes,
+                             std::string& out_err) -> bool
+    {
+        CLSID png_clsid{};
+        if (!find_png_encoder(png_clsid)) {
+            out_err = "GDI+ PNG encoder not registered on this system";
+            return false;
+        }
+        IStream* out_stream = ::SHCreateMemStream(nullptr, 0);
+        if (!out_stream) { out_err = "SHCreateMemStream(out) failed"; return false; }
+        struct StreamRelease { IStream* s; ~StreamRelease(){ if(s) s->Release(); } } sg{out_stream};
 
-    // Locate the PNG encoder. Iterating the codec list is the standard
-    // GDI+ idiom (there is no GetEncoderByMime helper).
-    UINT num_codecs = 0, codec_buf_size = 0;
-    Gdiplus::GetImageEncodersSize(&num_codecs, &codec_buf_size);
-    if (num_codecs == 0 || codec_buf_size == 0)
-        return fail("GDI+ image encoders not available");
-    std::vector<BYTE> codec_buf(codec_buf_size);
-    auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(codec_buf.data());
-    Gdiplus::GetImageEncoders(num_codecs, codec_buf_size, codecs);
-    CLSID png_clsid{};
-    bool found_png = false;
-    for (UINT i = 0; i < num_codecs; ++i) {
-        if (std::wcscmp(codecs[i].MimeType, L"image/png") == 0) {
-            png_clsid  = codecs[i].Clsid;
-            found_png  = true;
-            break;
+        if (bitmap.Save(out_stream, &png_clsid, nullptr) != Gdiplus::Ok) {
+            out_err = "GDI+ PNG encode failed";
+            return false;
+        }
+        STATSTG stat{};
+        if (out_stream->Stat(&stat, STATFLAG_NONAME) != S_OK) {
+            out_err = "PNG stream Stat failed";
+            return false;
+        }
+        const auto png_size = static_cast<std::size_t>(stat.cbSize.QuadPart);
+        if (png_size == 0 || png_size > kCap) {
+            out_err = "PNG output size out of range";
+            return false;
+        }
+        LARGE_INTEGER zero{};
+        out_stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+        out_bytes.assign(png_size, '\0');
+        ULONG bytes_read = 0;
+        if (out_stream->Read(out_bytes.data(),
+                             static_cast<ULONG>(png_size),
+                             &bytes_read) != S_OK) {
+            out_err = "PNG stream Read failed";
+            return false;
+        }
+        out_bytes.resize(bytes_read);
+        return true;
+    };
+
+    // (b) DIB fallback: the standard "Win+Shift+S / Snipping Tool /
+    //     PrintScreen" path. Re-attach a BITMAPFILEHEADER so the bytes
+    //     are a complete BMP file, then re-encode through GDI+ to PNG
+    //     (Anthropic's image API doesn't accept BMP).
+
+    if (const UINT dib_fmt =
+              ::IsClipboardFormatAvailable(CF_DIBV5) ? CF_DIBV5
+            : ::IsClipboardFormatAvailable(CF_DIB)   ? CF_DIB
+            : 0u;
+        dib_fmt != 0)
+    {
+        HANDLE dh = ::GetClipboardData(dib_fmt);
+        if (dh) {
+            auto* dib = static_cast<const BYTE*>(::GlobalLock(dh));
+            const SIZE_T dib_size = dib ? ::GlobalSize(dh) : 0;
+            struct UnlockGuard {
+                HANDLE h;
+                ~UnlockGuard() { if (h) ::GlobalUnlock(h); }
+            } unlock_guard{dh};
+            if (dib && dib_size >= sizeof(BITMAPINFOHEADER)) {
+                // Compute where the pixel array starts inside the DIB
+                // block. The hairy bit: bitfield masks only appear as a
+                // separate trailing block when the header is the V3
+                // BITMAPINFOHEADER (size 40). V4 (108) and V5 (124)
+                // store the masks INLINE, so adding 12 bytes shifts
+                // every pixel of a modern Win+Shift+S screenshot —
+                // Snipping Tool writes CF_DIBV5 with
+                // biCompression=BI_BITFIELDS, which is exactly the case
+                // the previous code mis-handled.
+                const auto* hdr = reinterpret_cast<const BITMAPINFOHEADER*>(dib);
+                DWORD masks_bytes = 0;
+                if (hdr->biSize == sizeof(BITMAPINFOHEADER)) {
+                    if (hdr->biCompression == BI_BITFIELDS)
+                        masks_bytes = 3 * sizeof(DWORD);
+                    else if (hdr->biCompression == 6 /* BI_ALPHABITFIELDS */)
+                        masks_bytes = 4 * sizeof(DWORD);
+                }
+                DWORD palette_bytes = 0;
+                if (hdr->biBitCount <= 8) {
+                    const DWORD n = hdr->biClrUsed ? hdr->biClrUsed
+                                                   : (1u << hdr->biBitCount);
+                    palette_bytes = n * sizeof(RGBQUAD);
+                }
+                const DWORD pixels_offset =
+                    static_cast<DWORD>(sizeof(BITMAPFILEHEADER))
+                  + hdr->biSize + masks_bytes + palette_bytes;
+
+                std::string bmp;
+                bmp.resize(sizeof(BITMAPFILEHEADER) + dib_size);
+                BITMAPFILEHEADER bfh{};
+                bfh.bfType    = 0x4D42; // 'BM'
+                bfh.bfSize    = static_cast<DWORD>(bmp.size());
+                bfh.bfOffBits = pixels_offset;
+                std::memcpy(bmp.data(), &bfh, sizeof(bfh));
+                std::memcpy(bmp.data() + sizeof(bfh), dib, dib_size);
+
+                IStream* bmp_stream = ::SHCreateMemStream(
+                    reinterpret_cast<const BYTE*>(bmp.data()),
+                    static_cast<UINT>(bmp.size()));
+                if (bmp_stream) {
+                    struct StreamRelease { IStream* s; ~StreamRelease(){ if(s) s->Release(); } } bg{bmp_stream};
+                    std::unique_ptr<Gdiplus::Bitmap> bitmap{
+                        Gdiplus::Bitmap::FromStream(bmp_stream)};
+                    if (bitmap && bitmap->GetLastStatus() == Gdiplus::Ok) {
+                        std::string png_bytes, enc_err;
+                        if (encode_to_png(*bitmap, png_bytes, enc_err)) {
+                            if (auto img = wrap(CaptureResult{std::move(png_bytes), 0}))
+                                return img;
+                        }
+                    }
+                }
+            }
+        }
+        // Fall through to CF_BITMAP — some sources publish a malformed
+        // DIB but a valid HBITMAP for the same pixels.
+    }
+
+    // (c) CF_BITMAP fallback: a few apps only register an HBITMAP, even
+    //     though Windows is supposed to auto-synthesize CF_DIB from it.
+    //     FromHBITMAP does the offset math for us.
+    if (::IsClipboardFormatAvailable(CF_BITMAP)) {
+        if (auto hbm = static_cast<HBITMAP>(::GetClipboardData(CF_BITMAP)); hbm) {
+            std::unique_ptr<Gdiplus::Bitmap> bitmap{
+                Gdiplus::Bitmap::FromHBITMAP(hbm, nullptr)};
+            if (bitmap && bitmap->GetLastStatus() == Gdiplus::Ok) {
+                std::string png_bytes, enc_err;
+                if (encode_to_png(*bitmap, png_bytes, enc_err)) {
+                    if (auto img = wrap(CaptureResult{std::move(png_bytes), 0}))
+                        return img;
+                }
+                return fail_owned("CF_BITMAP path failed: " +
+                                  (enc_err.empty() ? std::string{"PNG sniff failed"} : enc_err));
+            }
         }
     }
-    if (!found_png)
-        return fail("GDI+ PNG encoder not registered on this system");
 
-    IStream* out_stream = ::SHCreateMemStream(nullptr, 0);
-    if (!out_stream)
-        return fail("SHCreateMemStream(out) failed");
-    struct StreamGuard2 {
-        IStream* s;
-        ~StreamGuard2() { if (s) s->Release(); }
-    } out_guard{out_stream};
-
-    if (bitmap->Save(out_stream, &png_clsid, nullptr) != Gdiplus::Ok)
-        return fail("GDI+ PNG encode failed");
-
-    // Drain the IStream into a std::string. Stat() gives the size,
-    // Seek() rewinds, Read() copies — standard COM stream dance.
-    STATSTG stat{};
-    if (out_stream->Stat(&stat, STATFLAG_NONAME) != S_OK)
-        return fail("PNG stream Stat failed");
-    const auto png_size = static_cast<std::size_t>(stat.cbSize.QuadPart);
-    if (png_size == 0 || png_size > kCap)
-        return fail("PNG output size out of range");
-    LARGE_INTEGER zero{};
-    out_stream->Seek(zero, STREAM_SEEK_SET, nullptr);
-    std::string png_bytes(png_size, '\0');
-    ULONG bytes_read = 0;
-    if (out_stream->Read(png_bytes.data(),
-                         static_cast<ULONG>(png_size),
-                         &bytes_read) != S_OK)
-        return fail("PNG stream Read failed");
-    png_bytes.resize(bytes_read);
-
-    if (auto img = wrap(CaptureResult{std::move(png_bytes), 0}))
-        return img;
-    return fail("clipboard image decoded but produced invalid PNG");
+    return fail("clipboard has no image (no PNG/DIBV5/DIB/CF_BITMAP format present)");
 #else
     return fail("clipboard image read not implemented on this platform");
+#endif
+}
+
+// ===========================================================================
+// read_clipboard_text — plain text variant for the smart-paste path
+// ===========================================================================
+
+std::optional<std::string> read_clipboard_text(std::string* error_out) {
+    auto fail = [&](const char* msg) -> std::optional<std::string> {
+        if (error_out) *error_out = msg;
+        return std::nullopt;
+    };
+
+#if defined(__linux__)
+    bool wayland = false;
+    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
+        wayland = std::string_view{st} == "wayland";
+    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+
+    if (wayland && tool_in_path("wl-paste")) {
+        auto r = popen_capture("wl-paste --no-newline 2>/dev/null", kCap);
+        if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
+    }
+    if (tool_in_path("xclip")) {
+        auto r = popen_capture(
+            "xclip -selection clipboard -o 2>/dev/null", kCap);
+        if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
+    }
+    return fail("clipboard has no text");
+
+#elif defined(__APPLE__)
+    auto r = popen_capture("pbpaste 2>/dev/null", kCap);
+    if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
+    return fail("clipboard has no text");
+
+#elif defined(_WIN32)
+    if (!::OpenClipboard(nullptr))
+        return fail("could not open Windows clipboard");
+    struct ClipGuard {
+        ~ClipGuard() { ::CloseClipboard(); }
+    } clip_guard;
+
+    // CF_UNICODETEXT first — modern apps write Unicode. CF_TEXT is the
+    // legacy fallback (system-codepage), but Windows auto-synthesises
+    // it from CF_UNICODETEXT and vice-versa, so checking UNICODETEXT
+    // alone covers nearly everything.
+    if (::IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+        if (HANDLE h = ::GetClipboardData(CF_UNICODETEXT); h) {
+            auto* wide = static_cast<const wchar_t*>(::GlobalLock(h));
+            struct UnlockGuard {
+                HANDLE h;
+                ~UnlockGuard() { if (h) ::GlobalUnlock(h); }
+            } unlock_guard{h};
+            if (!wide) return fail("GlobalLock(CF_UNICODETEXT) failed");
+
+            // wcslen — clipboard text is NUL-terminated by the
+            // Windows clipboard contract.
+            const int wide_len = static_cast<int>(std::wcslen(wide));
+            if (wide_len == 0) return fail("clipboard text is empty");
+
+            const int utf8_len = ::WideCharToMultiByte(
+                CP_UTF8, 0, wide, wide_len, nullptr, 0, nullptr, nullptr);
+            if (utf8_len <= 0) return fail("UTF-8 conversion failed");
+            std::string out(static_cast<std::size_t>(utf8_len), '\0');
+            ::WideCharToMultiByte(CP_UTF8, 0, wide, wide_len,
+                                  out.data(), utf8_len, nullptr, nullptr);
+            return out;
+        }
+    }
+    return fail("clipboard has no text");
+
+#else
+    return fail("clipboard text read not implemented on this platform");
 #endif
 }
 

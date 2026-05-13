@@ -50,4 +50,19 @@ struct ClipboardImage {
 [[nodiscard]] std::optional<ClipboardImage>
 read_clipboard_image(std::string* error_out = nullptr);
 
+/// Read plain UTF-8 text from the system clipboard. Used by the
+/// composer's "smart paste" path: when Ctrl+V / Ctrl+Shift+V arrive
+/// via a trigger that didn't already carry bracketed-paste content
+/// (Windows Terminal swallows Ctrl+V and emits nothing on an
+/// image-only clipboard; the user's Alt+V fallback also goes through
+/// the same path), the composer asks the OS clipboard for whatever
+/// it has — image first, text second — so the same shortcut "just
+/// works" regardless of clipboard contents.
+///
+/// Returns nullopt if the clipboard has no text or the platform tool
+/// is missing; writes a diagnostic to `*error_out` for the toast
+/// path.
+[[nodiscard]] std::optional<std::string>
+read_clipboard_text(std::string* error_out = nullptr);
+
 } // namespace agentty

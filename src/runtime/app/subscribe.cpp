@@ -298,13 +298,29 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
                                          : Msg{ComposerUndo{}};
                 case U'y': return ComposerRedo{};
                 case U'v':
-                    // Ctrl+V → image paste from clipboard. The terminal's
-                    // bracketed-paste (Ctrl+Shift+V) delivers UTF-8 only;
-                    // for binary clipboard content we shell out to wl-paste
-                    // / xclip / pngpaste / PowerShell from the reducer arm.
+                    // Ctrl+V → image paste from clipboard. On Linux/macOS
+                    // this reaches us as raw 0x16 because the terminal
+                    // emulator forwards Ctrl-letter codes. On Windows
+                    // Terminal Ctrl+V is bound to the terminal's own
+                    // "paste" action by default, so this keystroke is
+                    // swallowed before it ever hits agentty — that's
+                    // why we also accept Alt+V below and detect empty
+                    // bracketed-paste in update/composer.cpp.
                     return ComposerImagePasteFromClipboard{};
                 default: break;
             }
+        }
+        // Alt+V → image paste from clipboard, alternate trigger that
+        // every terminal (Windows Terminal included) passes through
+        // to the application. Same Msg as Ctrl+V; the reducer arm
+        // doesn't care which key fired it.
+        if (ev.mods.alt && !ev.mods.ctrl) {
+            char32_t c = ck->codepoint;
+            // Alt+V arrives as ESC v → CharKey{'v'} + mods.alt. Some
+            // terminals upcase the codepoint when Shift is also held;
+            // both V and v should fire.
+            if (c == U'v' || c == U'V')
+                return ComposerImagePasteFromClipboard{};
         }
         if (ck->codepoint >= 0x20) return ComposerCharInput{ck->codepoint};
     }
