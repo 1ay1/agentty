@@ -434,7 +434,13 @@ if(WIN32)
     # shell32  — already needed by existing code paths
     # winmm    — timeBeginPeriod / timeEndPeriod in main.cpp (the
     #            `#pragma comment(lib, "winmm.lib")` only works on MSVC).
-    target_link_libraries(agentty PRIVATE ws2_32 crypt32 shell32 winmm)
+    # user32   — OpenClipboard / GetClipboardData (clipboard image paste)
+    # gdi32    — DIB / BITMAPFILEHEADER consumers used in the same path
+    # gdiplus  — DIB → PNG re-encoding for clipboard images
+    # shlwapi  — SHCreateMemStream backing GDI+'s decode / encode
+    target_link_libraries(agentty PRIVATE
+        ws2_32 crypt32 shell32 winmm
+        user32 gdi32 gdiplus shlwapi)
     # Static OpenSSL on Windows additionally pulls in these system libs
     # (used by libcrypto's CSP / certificate APIs). Innocuous in dynamic
     # builds — the linker dedupes — but required when AGENTTY_STANDALONE=ON.
