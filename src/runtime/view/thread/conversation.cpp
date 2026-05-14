@@ -84,11 +84,10 @@ maya::Conversation::Config conversation_config(const Model& m) {
     // (a) the absence of a following assistant turn and (b) the
     // composer's `❚ N queued` chip.
     //
-    // msg_idx values are taken from one-past-the-end of the message
-    // vector so the Element-cache predicate
-    // (`msg_idx + 1 < messages.size()`) is structurally false — no
-    // cache entries are written for synthetic turns, so a queue that
-    // mutates between frames doesn't leave stale hits.
+    // `synthetic = true` opts these per-frame Message instances out of
+    // the Element cache. Each call default-constructs the Message with
+    // a fresh MessageId, so caching them would only fill the LRU with
+    // garbage entries.
     if (!m.ui.composer.queued.empty()) {
         auto now = std::chrono::system_clock::now();
         for (std::size_t qi = 0; qi < m.ui.composer.queued.size(); ++qi) {
@@ -97,7 +96,8 @@ maya::Conversation::Config conversation_config(const Model& m) {
             synthetic.text      = m.ui.composer.queued[qi];
             synthetic.timestamp = now;
             cfg.built_turns.push_back(turn_element(synthetic, total + qi,
-                                                   turn, m, false));
+                                                   turn, m, /*continuation=*/false,
+                                                   /*synthetic=*/true));
             ++turn;
         }
     }

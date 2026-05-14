@@ -176,6 +176,46 @@ std::string format_turn_meta(const Message& msg, int turn_num,
     return meta;
 }
 
+// ── Cache predicate. A turn is cacheable once its content is resolved:
+//    no in-flight streaming, every tool call terminal, no pending
+//    permission still targeting one of this message's tool calls.
+//
+//    The previous predicate (`msg_idx + 1 < messages.size()`) was a
+//    structural sufficient condition — agentty only appends the next
+//    message once the current turn settles — but the last turn in the
+//    list satisfied "resolved" the moment streaming ended yet stayed
+//    uncached until a successor arrived. On the post-streaming /
+//    pre-next-prompt window the user types into the composer; every
+//    keystroke re-runs `agent_timeline_config` + `Turn::build()` +
+//    `AgentTimeline::build()` for the entire just-finished turn,
+//    which dominates the per-frame budget on a turn with several
+//    tool cards. Switching to a content-based predicate caches the
+//    last turn as soon as it's terminal.
+[[nodiscard]] bool is_turn_resolved(const Message& msg, const Model& m) {
+    if (!msg.streaming_text.empty()) return false;
+    for (const auto& tc : msg.tool_calls) {
+        if (!tc.is_terminal()) return false;
+        if (m.d.pending_permission && m.d.pending_permission->id == tc.id)
+            return false;
+    }
+    // An Assistant message with no text and no tool_calls is the
+    // pre-streaming placeholder that agentty appends the moment a user
+    // submits, before the first delta arrives. All three "is settled"
+    // signals trivially hold for it (no streaming, no live tools, no
+    // pending permission), but caching it now freezes an empty body in
+    // view_cache[(thread, msg.id)].element — and msg.id is stable
+    // across the stream, so after StreamFinished moves streaming_text →
+    // text the cache hit serves the stale empty Element back forever.
+    // Require positive evidence of content for Assistants; User messages
+    // are always populated at append time so they're unaffected.
+    if (msg.role == Role::Assistant
+        && msg.text.empty() && msg.tool_calls.empty())
+    {
+        return false;
+    }
+    return true;
+}
+
 // ── Compute the assistant turn's wall-clock elapsed: from previous
 //    user message timestamp to this one.
 std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
@@ -196,22 +236,25 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 
 maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m,
-                               bool continuation) {
-    // Settled-turn cache.  A message that has a successor in the messages
-    // vector is by construction fully resolved — agentty only appends a new
-    // message once the current turn's text is final, all tools terminal,
-    // and any permission prompt resolved.  Reusing the prior frame's
-    // built Config skips per-frame rebuilding of the turn header, the
-    // entire agent_timeline (every tool card), and the permission /
-    // markdown wiring.
+                               bool continuation, bool synthetic) {
+    // Resolved-turn cache. A turn is cacheable once its content can no
+    // longer change: streaming over, every tool call terminal, no
+    // pending permission still pointing at it. Reusing the prior
+    // frame's built Config skips per-frame rebuilding of the turn
+    // header, the entire agent_timeline (every tool card), and the
+    // permission / markdown wiring.
+    //
+    // `synthetic` turns (queued-message previews) carry a fresh
+    // MessageId each frame, so caching them would only thrash the LRU.
     //
     // Note: this only caches the CONFIG. Even with this cache, a callsite
     // that does `Turn{cfg}.build()` per frame still pays the Element
     // reconstruction cost (every tool card laid out into glyphs, every
     // markdown block re-emitted). For the per-frame fast path, callers
     // should use `turn_element()` below instead — that caches the BUILT
-    // Element and skips Turn::build() entirely on settled turns.
-    const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
+    // Element and skips Turn::build() entirely on resolved turns.
+    (void)msg_idx;
+    const bool can_cache = !synthetic && is_turn_resolved(msg, m);
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.cfg && slot.cfg->continuation == continuation) return *slot.cfg;
@@ -289,17 +332,18 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 maya::Conversation::PreBuilt turn_element(const Message& msg,
                                           std::size_t msg_idx,
                                           int turn_num, const Model& m,
-                                          bool continuation) {
-    // Settled-turn fast path: serve the BUILT Element from cache so a
+                                          bool continuation, bool synthetic) {
+    // Resolved-turn fast path: serve the BUILT Element from cache so a
     // long session doesn't re-run Turn::build() for every visible turn
     // every frame. The build itself laid out the agent_timeline + every
     // tool card + markdown body + permission rows into the inline-frame
     // glyph stream — that's the dominant cost on a long thread, NOT
-    // building the Config. Settled (`msg_idx + 1 < total`) means agentty
-    // has appended a successor message, which by construction means the
-    // turn fully resolved (text final, all tools terminal, any
-    // permission prompt closed). The Element is therefore safe to
-    // memoize for the lifetime of the cache entry.
+    // building the Config. A turn is resolved when streaming is over,
+    // every tool call is terminal, and no pending permission still
+    // points at one of its tool calls — at which point its rendered
+    // form can't change until a structural model edit (compaction /
+    // tool re-execute) replaces the Message itself (and therefore its
+    // id, our cache key).
     //
     // The cached Element is held via shared_ptr. We hand the
     // shared_ptr straight to maya — Element has an implicit
@@ -307,7 +351,7 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // keeps the renderer's cross-frame work bounded automatically.
     // No cache identity strings, no helper wrappers; the host just
     // hands maya what it already has.
-    const bool can_cache = (msg_idx + 1 < m.d.current.messages.size());
+    const bool can_cache = !synthetic && is_turn_resolved(msg, m);
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.element && slot.element_continuation == continuation) {
@@ -315,8 +359,8 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
         }
     }
     // Miss (or live turn): build Config (this hits the Config cache for
-    // settled turns regardless), then run Turn::build() and stash.
-    auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation);
+    // resolved turns regardless), then run Turn::build() and stash.
+    auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation, synthetic);
     auto built = maya::Turn{std::move(cfg)}.build();
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);

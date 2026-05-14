@@ -13,15 +13,26 @@ namespace agentty::ui {
 // then suppresses its header (glyph + label + meta) and the
 // Conversation widget skips the inter-turn divider, so consecutive
 // assistant messages from one agent action visually flow as one block.
+//
+// `synthetic = true` marks the per-frame queued-message preview turns
+// the conversation adapter manufactures from `composer.queued[]`.
+// Those messages carry a fresh `MessageId` each frame, so caching
+// them would only fill the LRU with garbage entries; the flag short-
+// circuits the cache write path.
 [[nodiscard]] maya::Turn::Config turn_config(const Message& msg,
                                              std::size_t msg_idx,
                                              int turn_num,
                                              const Model& m,
-                                             bool continuation = false);
+                                             bool continuation = false,
+                                             bool synthetic    = false);
 
-// Build (or return cached) Element for a single turn. Settled turns —
-// those whose `msg_idx + 1 < messages.size()` — go through the
-// (thread, msg_idx) → Element cache; live turns rebuild every frame.
+// Build (or return cached) Element for a single turn. A turn is cached
+// once its content is resolved: no in-flight streaming, all tool calls
+// terminal, no pending permission targeting it. This is strictly
+// broader than the previous "has a successor in messages[]" gate, so
+// the just-ended last turn benefits from the cache immediately rather
+// than having to wait for the next user message to be appended.
+//
 // Use this in preference to `turn_config()` + manual `Turn{cfg}.build()`
 // at the conversation layer: the cached Element skips the entire
 // per-frame Turn::build() reconstruction (agent_timeline + every tool
@@ -32,6 +43,7 @@ namespace agentty::ui {
                                                         std::size_t msg_idx,
                                                         int turn_num,
                                                         const Model& m,
-                                                        bool continuation = false);
+                                                        bool continuation = false,
+                                                        bool synthetic    = false);
 
 } // namespace agentty::ui
