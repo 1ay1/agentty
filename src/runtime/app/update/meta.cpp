@@ -260,6 +260,17 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return {std::move(m), Cmd<Msg>::quit()};
         },
         [&](NoOp) -> Step { return done(std::move(m)); },
+        [&](RedrawScreen) -> Step {
+            // Drop the renderer's cell cache and repaint the visible
+            // viewport in place. Useful as a recovery hatch when
+            // something external corrupts the terminal (a stray
+            // subprocess writing to fd 1, a tmux pane swap, etc.) and
+            // as a debug knob during development. Cheaper than a
+            // resize-style \x1b[2J wipe — see maya's
+            // `inline-redraw-paths.md` for the case (B) soft redraw
+            // this rides on.
+            return {std::move(m), Cmd<Msg>::force_redraw()};
+        },
         [&](ClearStatus& e) -> Step {
             // No-op if the user (or another handler) wrote a newer
             // status since this cleaner was scheduled — stamps won't

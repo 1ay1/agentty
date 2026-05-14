@@ -197,6 +197,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case '/':           return OpenModelPicker{};
                 case 'j': case 'J': return OpenThreadList{};
                 case 'k': case 'K': return OpenCommandPalette{};
+                case 'l': case 'L': return RedrawScreen{};
                 case 'r': case 'R': return OpenDiffReview{};
                 case 'n': case 'N': return NewThread{};
                 case 't': case 'T': return OpenTodoModal{};

@@ -332,6 +332,13 @@ struct ToggleToolExpanded { ToolCallId id; };
 struct Tick {};
 struct Quit {};
 struct NoOp {};
+// User-triggered "drop the renderer's cell cache and repaint from
+// scratch". Bound to Ctrl-L (universal terminal redraw convention).
+// Dispatches `Cmd::force_redraw()`, which mirrors the SIGWINCH
+// coherence-collapse — no scrollback wipe, just an in-place rebuild
+// of `prev_cells` from the current canvas. Doubles as a debug hatch
+// when something visibly desyncs.
+struct RedrawScreen {};
 // Delayed sentinel that clears `m.s.status` iff it hasn't been
 // overwritten since the toast was scheduled. `stamp` is the value
 // `m.s.status_until` had at schedule time; if the reducer has since
@@ -401,7 +408,7 @@ using DiffReviewMsg = std::variant<
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint,
     ScrollThread, ToggleToolExpanded,
-    Tick, Quit, NoOp, ClearStatus>;
+    Tick, Quit, NoOp, ClearStatus, RedrawScreen>;
 
 } // namespace msg
 
