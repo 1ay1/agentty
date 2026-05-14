@@ -58,16 +58,42 @@ namespace {
 //      render in 4-8 rows where the estimate's `min(nl, 10)` could
 //      easily reach 14.
 //
-// Replacing the estimate with a small constant per dropped message
-// guarantees safety regardless of terminal width, content composition,
-// or tool-body rendering choices. The exact rows-per-message-rendered
-// vary widely (1 row for a continuation with empty body up to dozens
-// for a tool-heavy turn), but the LOWER bound — header row plus one row
-// of body or inter-turn separator — is reliably ≥ 1.  A value of 2 here
-// matches the conservative `ROWS_PER_DROP_LOWER` used in
-// agent_session.cpp's frozen-elements trim, and stays at-or-below
-// almost any plausible real rendered height.
-constexpr int kRowsPerDroppedMessageLower = 2;
+// The true lower bound on "rows of dropped messages still living in the
+// live frame" is 0, not 2. Here's why:
+//
+// By the time maybe_virtualize fires, many of those messages have ALREADY
+// scrolled into the terminal's native scrollback via the natural \r\n
+// overflow inside compose_inline_frame. Whatever cells the renderer
+// emitted into the bottom rows of the viewport got pushed up and out
+// over many prior frames. The LIVE-FRAME residue of the dropped
+// messages is the small fraction that hadn't yet scrolled out — could
+// be a few rows, could be zero (if all of them had already overflowed).
+//
+// A captured profile of an 800-row session showed `maybe_virtualize`
+// drop 8 messages while content_rows shrank only 5 rows on the next
+// render — so the per-message live-frame residue averaged 0.6. With
+// `kRowsPerDroppedMessageLower = 2` we committed `8*2 = 16` rows, an
+// 11-row over-commit. That's the renderer "forgetting" 11 rows that
+// were still on-screen as immutable scrollback — exactly the ghosting
+// failure mode the comment block above describes. Symptom on screen:
+// stale border fragments and blank rectangles surviving past the
+// scroll-up boundary, appearing 2-3 turns into a long streaming
+// session (right around when virtualize first fires).
+//
+// Setting this to 0 hands maya a guaranteed lower bound and pushes the
+// alignment fixup onto compose_inline_frame's natural shrink path: it
+// sees content_rows decreased from N to (N - actual_dropped), emits
+// the diff for the surviving rows (which all shifted up in the canvas),
+// and clears the abandoned bottom via \x1b[J. Cost: one heavy frame per
+// virtualize event (~term_h * cols bytes of re-emitted cells). Win:
+// no over-commit, no scrollback ghosting.
+//
+// `prev_cells` does NOT shrink with this discipline — it grows with
+// the cumulative content_rows of the whole streaming session. For a
+// 200-turn conversation that's ~1-2 MB of resident memory; the diff
+// path's updatable_start clamp keeps per-frame compose cost bounded
+// to the viewport regardless of how tall prev_cells gets.
+constexpr int kRowsPerDroppedMessageLower = 0;
 
 } // namespace
 
