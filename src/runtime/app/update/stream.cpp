@@ -986,17 +986,26 @@ Step stream_update(Model m, msg::StreamMsg sm) {
         },
         [&](StreamFinished e) -> Step {
             auto cmd = finalize_turn(m, e.stop_reason);
-            // Streaming has settled. Arm force_redraw on the next user
-            // input so the diff path's stale prev_cells gets refreshed
-            // (cells committed to terminal scrollback during streaming
-            // can leave prev_cells out of sync with the wire, surfacing
-            // as ghosts on subsequent diffs). With maya's force_redraw
-            // now using the SOFT in-place redraw path
-            // (cursor_up + serialize + \x1b[J instead of the old
-            // \x1b[2J + serialize-from-cursor + trailing-\r\n's), the
-            // composer stays at its current viewport row instead of
-            // rushing to terminal-bottom.
-            if (m.s.is_idle()) m.ui.needs_force_redraw = true;
+            // No force_redraw arming. The previous version armed
+            // needs_force_redraw here so the next user input would
+            // trigger maya's case-(B) soft redraw — meant to flush
+            // any prev_cells/wire desync left by streaming. That
+            // desync's only real source was the shrink path's
+            // \r\n\x1b[2K loop scrolling at viewport bottom, which is
+            // now a single \x1b[J in maya/src/render/serialize.cpp;
+            // prev_cells stays in sync with the wire on its own.
+            //
+            // Re-arming case (B) on every first keypress was actively
+            // harmful: when the shrink left the cursor mid-viewport
+            // (cursor at content_rows - 1 < term_h - 1), case (B)
+            // pulled the cursor back to viewport bottom, shifting the
+            // canvas-to-buffer mapping by the same delta. The first
+            // re-emitted row landed one buffer row below its original
+            // streaming position, so the original row stayed stranded
+            // in scrollback as a duplicate of the row right at viewport
+            // top. With the arming gone, the keypress takes the normal
+            // diff path and the composer stays where the shrink left
+            // it (no "pull down," no duplicate).
             return {std::move(m), std::move(cmd)};
         },
         [&](StreamError& e) -> Step {

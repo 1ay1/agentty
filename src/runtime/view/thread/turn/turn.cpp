@@ -23,19 +23,61 @@ namespace {
 //    agentty — strictly because cross-frame cache state lives in the
 //    StreamingMarkdown widget instance, which we keep alive across
 //    frames so its block cache survives.
+//
+//    Single rendering path: the StreamingMarkdown widget is used for
+//    live AND settled messages. The widget's pre-finish output (prefix
+//    ComponentElement + tail Element wrapped in vstack.gap(1)) has a
+//    slightly different total height than the one-shot maya::markdown()
+//    parser's output (flat blocks under the same vstack wrapper but no
+//    ComponentElement seam). Swapping between them at StreamFinished
+//    shifted the canvas by ~3 rows, which propagated through the per-row
+//    diff and left the composer at a different terminal row — visible
+//    as "composer pulled down + duplicate composer above it on the
+//    first keypress."
+//
+//    Staying on the streaming widget keeps the height stable across the
+//    streaming → idle transition. set_content with byte-identical bytes
+//    is an internal no-op; build() returns cached_build_ when nothing
+//    has dirtied, so the per-frame cost is the same as the finalized
+//    path. The tail re-parses on each frame for finalized messages too,
+//    but that's a single inline parse on the last few bytes — cheap.
 maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
-    if (msg.text.empty()) {
-        if (!cache.streaming)
-            cache.streaming = std::make_shared<maya::StreamingMarkdown>();
-        cache.streaming->set_content(msg.streaming_text);
-        return cache.streaming->build();
-    }
-    if (!cache.finalized) {
-        cache.finalized = std::make_shared<maya::Element>(maya::markdown(msg.text));
-        cache.streaming.reset();
-    }
-    return *cache.finalized;
+
+    if (!cache.streaming)
+        cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+
+    // msg.streaming_text grows during streaming; on StreamFinished
+    // its bytes are std::move'd into msg.text. Feed whichever holds
+    // the content. Byte-equality between the moved-into msg.text and
+    // the widget's accumulated source_ makes set_content's fast-path
+    // a no-op, so the transition costs nothing.
+    const std::string& source =
+        msg.text.empty() ? msg.streaming_text : msg.text;
+    cache.streaming->set_content(source);
+
+    // Settled message → commit any trailing tail to the prefix's
+    // block list. Necessary because find_block_boundary only commits
+    // a fenced code block once its closing ``` is followed by a
+    // newline; messages that end at the closing backticks (the
+    // common case for Claude responses ending with a code example)
+    // leave the last block stuck in the tail forever, rendered via
+    // render_tail's inline path instead of the canonical
+    // md_block_to_element. The two paths take the same border /
+    // padding builder but feed it slightly different code strings
+    // (render_tail's extractor vs the parser's stripping rules), so
+    // their painted cells aren't byte-identical. Once that turn
+    // settles and the renderer's cache_id-keyed cell blit picks up
+    // the render_tail output, the layout quirk is locked in until a
+    // resize invalidates the cache by width — which is exactly the
+    // "code block border at the wrong column" symptom we saw.
+    //
+    // finish() is idempotent (no-op once committed_ == source_.size()),
+    // so calling it every frame for a settled message is cheap.
+    if (!msg.text.empty())
+        cache.streaming->finish();
+
+    return cache.streaming->build();
 }
 
 // ── Per-speaker visual identity: rail color + glyph + display name.
