@@ -93,6 +93,24 @@ struct TurnConfigCache {
     // built_turns path without re-deriving it.
     std::shared_ptr<maya::Element>            element;
     bool                                      element_continuation = false;
+    // Render-key stamp from Message::compute_render_key() at the
+    // moment `element` was inserted. The cache predicate compares
+    // this against the live message's current key on every hit; any
+    // mutation that bumps the key (tool card toggled expanded, a
+    // late progress chunk appended, a tool transitioned
+    // Pending→Running→Done, an inline error attached) forces a
+    // rebuild. Without this check the cached Element silently
+    // disagreed with the model after such mutations — the user
+    // pressed the expand-toggle binding and nothing happened
+    // because turn_element kept handing maya back the pre-toggle
+    // Element.
+    std::uint64_t                             element_render_key = 0;
+    // Render-key stamp for the cached Config (turn_config cache
+    // entry). Same role as element_render_key but for the
+    // Turn::Config slot: the Config carries the full agent_timeline
+    // tool-card list and the markdown body element, so any
+    // key-relevant mutation must invalidate it too.
+    std::uint64_t                             cfg_render_key     = 0;
 };
 
 // LRU-bounded render cache. Both the markdown render and the turn-config

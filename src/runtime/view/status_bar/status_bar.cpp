@@ -4,7 +4,6 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/status_bar/model_badge.hpp"
 #include "agentty/runtime/view/status_bar/phase_chip.hpp"
-#include "agentty/runtime/view/status_bar/shortcut_row.hpp"
 #include "agentty/runtime/view/status_bar/status_banner.hpp"
 #include "agentty/runtime/view/status_bar/title_chip.hpp"
 #include "agentty/runtime/view/status_bar/token_stream_sparkline.hpp"
@@ -22,7 +21,11 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     cfg.model_badge   = model_badge_config(m).build();
     cfg.context       = context_gauge_config(m);
     cfg.status_banner = status_banner_config(m);
-    cfg.shortcuts     = shortcut_row_config(m);
+    // Shortcuts row retired — the welcome screen carries the full
+    // keybinding map. While a thread is active the user has already
+    // internalised the bindings, and the status bar's middle row
+    // doubles as the toast slot for transient notifications (retry,
+    // cancel, compact, error) which is more useful real estate.
 
     // Streaming pushes the breadcrumb threshold up so the live
     // sparkline + tok/s readout has room to breathe without elbowing

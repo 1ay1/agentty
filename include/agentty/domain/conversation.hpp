@@ -253,6 +253,30 @@ struct Message {
     // Mirrors Claude Code's `isCompactSummary` field on the synthesised
     // post-compact message (binary near offset 92759504).
     bool is_compact_summary = false;
+
+    // FNV-1a over the fields that turn_element / turn_config consume
+    // when building the rendered Element. The view cache stamps the
+    // built Element with this key at insert time and re-checks it on
+    // every hit; any mutation that changes a key-relevant field
+    // (toggle expanded, tool output appended, status changed, error
+    // attached, body bytes changed) bumps the key and forces a rebuild
+    // instead of silently serving a stale cached Element back.
+    //
+    // Keep this in sync with the actual reads in
+    // src/runtime/view/thread/turn/turn.cpp.
+    [[nodiscard]] std::uint64_t compute_render_key() const {
+        std::uint64_t k = 1469598103934665603ULL;
+        auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
+        mix(static_cast<std::uint64_t>(role));
+        mix(text.size());
+        mix(streaming_text.size());
+        mix(images.size());
+        mix(tool_calls.size());
+        for (const auto& tc : tool_calls) mix(tc.compute_render_key());
+        mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent
+        mix(is_compact_summary ? 1ULL : 0ULL);
+        return k;
+    }
 };
 
 struct Thread {

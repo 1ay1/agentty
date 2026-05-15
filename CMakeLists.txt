@@ -393,7 +393,6 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/status_bar/token_stream_sparkline.cpp
     src/runtime/view/status_bar/context_gauge.cpp
     src/runtime/view/status_bar/status_banner.cpp
-    src/runtime/view/status_bar/shortcut_row.cpp
     src/runtime/view/status_bar/model_badge.cpp
     src/runtime/view/status_bar/status_bar.cpp
     src/runtime/view/changes_strip.cpp

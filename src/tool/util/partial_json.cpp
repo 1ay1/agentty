@@ -236,4 +236,26 @@ sniff_string_progressive(std::string_view raw, std::string_view key) {
     return decode_string_from(raw, *off);
 }
 
+bool
+ended_inside_string(std::string_view raw) noexcept {
+    // Same state machine as close_partial_json's main loop, minus the
+    // emit buffer. We only need the final `in_string` flag.
+    bool in_string = false;
+    bool escape    = false;
+    for (char c : raw) {
+        if (in_string) {
+            if (escape)         { escape = false; continue; }
+            if (c == '\\')      { escape = true;  continue; }
+            if (c == '"')       { in_string = false; continue; }
+            continue;
+        }
+        if (c == '"') in_string = true;
+    }
+    // A trailing lone `\` at the very edge of a string is also a
+    // half-finished value (close_partial_json drops it before
+    // synthesising the `"`); treat it as "ended inside" so callers
+    // refuse the salvage just the same.
+    return in_string;
+}
+
 } // namespace agentty::tools::util

@@ -34,7 +34,18 @@
 //     `"` or end-of-buffer. Mirrors sniff_string_progressive's tail but
 //     skips the prefix-walk so the caller can reuse a cached offset.
 //
-// All three are safe on empty / malformed input.
+//   ended_inside_string(raw)
+//     true iff `raw` stops while a JSON string value is still open
+//     (last `"` was an opener, no matching closer yet). The companion
+//     to close_partial_json: that function SYNTHESISES a closing `"`
+//     when this predicate would be true, producing valid JSON whose
+//     last string is truncated at an arbitrary byte boundary. Callers
+//     that would dispatch a tool on the parsed result (`write` /
+//     `edit` content, `bash` command) must refuse here, otherwise
+//     the tool runs against a half-written body. See Finding 3 in
+//     docs/corruption-analysis.md.
+//
+// All four are safe on empty / malformed input.
 
 #include <optional>
 #include <string>
@@ -62,5 +73,16 @@ locate_string_value(std::string_view raw, std::string_view key);
 // locate_string_value on a prefix of the same buffer.
 [[nodiscard]] std::string
 decode_string_from(std::string_view raw, std::size_t offset);
+
+// Returns true iff `raw` ends with an unterminated JSON string —
+// equivalently, iff `close_partial_json(raw)` would synthesise a
+// closing `"`. Cheap single-pass scan of the buffer mirroring the
+// same in_string/escape state machine used by `close_partial_json`;
+// no allocation, O(raw.size()). Used by salvage paths in the SSE
+// reducer to detect args truncated mid-string-value (which would
+// otherwise parse successfully against the synthesised quote and
+// silently run a tool with a half-written body).
+[[nodiscard]] bool
+ended_inside_string(std::string_view raw) noexcept;
 
 } // namespace agentty::tools::util

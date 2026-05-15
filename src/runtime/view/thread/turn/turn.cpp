@@ -255,9 +255,13 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     // Element and skips Turn::build() entirely on resolved turns.
     (void)msg_idx;
     const bool can_cache = !synthetic && is_turn_resolved(msg, m);
+    const std::uint64_t render_key = can_cache ? msg.compute_render_key() : 0ULL;
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        if (slot.cfg && slot.cfg->continuation == continuation) return *slot.cfg;
+        if (slot.cfg
+            && slot.cfg->continuation == continuation
+            && slot.cfg_render_key == render_key)
+            return *slot.cfg;
     }
 
     auto style = speaker_style_for(msg.role, m);
@@ -294,6 +298,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         if (can_cache) {
             auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
             slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
+            slot.cfg_render_key = render_key;
         }
         return cfg;
     }
@@ -325,6 +330,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
+        slot.cfg_render_key = render_key;
     }
     return cfg;
 }
@@ -352,9 +358,12 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // No cache identity strings, no helper wrappers; the host just
     // hands maya what it already has.
     const bool can_cache = !synthetic && is_turn_resolved(msg, m);
+    const std::uint64_t render_key = can_cache ? msg.compute_render_key() : 0ULL;
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        if (slot.element && slot.element_continuation == continuation) {
+        if (slot.element
+            && slot.element_continuation == continuation
+            && slot.element_render_key == render_key) {
             return {slot.element, continuation};
         }
     }
@@ -366,6 +375,7 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         slot.element = std::make_shared<maya::Element>(std::move(built));
         slot.element_continuation = continuation;
+        slot.element_render_key   = render_key;
         return {slot.element, continuation};
     }
     return {std::move(built), continuation};

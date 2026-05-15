@@ -413,6 +413,22 @@ bool guard_truncated_tool_args(ToolUse& tc) {
 }
 
 json salvage_args(const ToolUse& tc) {
+    // Refuse salvage when the wire stopped mid-string. close_partial_json
+    // would synthesise a closing `"` and produce a parseable object whose
+    // last string value is truncated at an arbitrary byte boundary;
+    // dispatching `write`/`edit`/`bash` on that silently corrupts the
+    // target file or runs a half-typed command. The caller's parse-failed
+    // path (`StreamToolUseEnd`) already has the right shape — we just
+    // need to keep it from accepting a synthesised-quote salvage. See
+    // Finding 3 in docs/corruption-analysis.md.
+    //
+    // Path-only tools (read, list_dir, glob) would also be affected but
+    // their values are tiny and rarely truncated mid-string in practice;
+    // applying the rule uniformly keeps the policy reviewable in one
+    // place at the cost of a few false refusals on degenerate streams.
+    if (agentty::tools::util::ended_inside_string(tc.args_streaming)) {
+        return json::object();
+    }
     if (auto parsed = try_parse_partial(tc.args_streaming)) {
         if (!parsed->empty()) return *parsed;
     }
@@ -508,6 +524,18 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         std::vector<Message> preserved_tail;
         const std::size_t prefix_n = std::min(
             m.s.compact_pre_synth_count, m.d.current.messages.size());
+        // Count of pre-compact assistant turns in the slice we're
+        // about to summarise. Used below (after the rebuild) to seed
+        // `thread_view_start_turn` so post-compact turn numbering
+        // continues from where the user left off instead of resetting
+        // to 1. Walked here while the original prefix is still intact
+        // in m.d.current.messages — the rebuild a few lines down
+        // replaces this vector with [summary, ...preserved_tail].
+        int summarised_assistants = 0;
+        for (std::size_t i = 0; i < prefix_n; ++i) {
+            if (m.d.current.messages[i].role == Role::Assistant)
+                ++summarised_assistants;
+        }
         if (prefix_n > 0) {
             std::size_t groups = 0;
             std::size_t bytes  = 0;
@@ -592,8 +620,26 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // the old offset would either point past the end (rendering
         // nothing — the user's "UI resets and next turns are not
         // visible" bug) or skip the summary itself.
+        //
+        // Turn numbering continuity (Finding 4 in
+        // docs/corruption-analysis.md): conversation.cpp seeds the
+        // visible-range turn counter from `thread_view_start_turn`.
+        // Without adjustment, the post-compact transcript restarts
+        // at "turn 1" — a visible discontinuity from the "turn N"
+        // the user was just looking at. We seed it with the number
+        // of assistants folded into the summary (those in the
+        // pre-compact prefix minus those preserved verbatim in the
+        // tail) so the first surviving Assistant displays its
+        // pre-compact absolute turn number.
+        int preserved_assistants = 0;
+        for (const auto& mm : preserved_tail) {
+            if (mm.role == Role::Assistant) ++preserved_assistants;
+        }
+        const int folded_assistants =
+            std::max(0, summarised_assistants - preserved_assistants
+                            + m.ui.thread_view_start_turn);
         m.ui.thread_view_start      = 0;
-        m.ui.thread_view_start_turn = 0;
+        m.ui.thread_view_start_turn = folded_assistants;
         m.ui.thread_scroll          = 0;
 
         // Rapid-refill breaker bookkeeping. If this compact landed
@@ -678,9 +724,28 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                         tc.mark_args_dirty();
                     } else {
                         auto now = std::chrono::steady_clock::now();
+                        // Distinguish "never closed" (parse failed AND no
+                        // mid-string truncation) from "truncated mid-string"
+                        // (salvage_args refused because close_partial_json
+                        // would have synthesised a closing quote on a
+                        // half-written value). The model needs the
+                        // mid-string story to know its file body never
+                        // finished arriving, not just "args malformed".
+                        const bool mid_string =
+                            agentty::tools::util::ended_inside_string(
+                                tc.args_streaming);
                         tc.status = ToolUse::Failed{
                             tc.started_at(), now,
-                            std::string{"tool args never closed: "} + ex.what()};
+                            mid_string
+                                ? std::string{"tool args truncated "
+                                    "mid-string \u2014 the wire cut off "
+                                    "inside a string value (likely "
+                                    "`content` / `command` / `new_text`), "
+                                    "so the body is incomplete and the "
+                                    "call was refused. Re-emit the tool "
+                                    "with the full payload."}
+                                : std::string{"tool args never closed: "}
+                                    + ex.what()};
                     }
                 }
             }
@@ -954,11 +1019,30 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         // Parse failed — typically an SSE cutoff mid-content.
                         // Salvage whatever scalar fields we can so the tool
                         // still has a shot at running instead of nuking the
-                        // whole turn.
+                        // whole turn.  salvage_args refuses to salvage when
+                        // the wire stopped mid-string (Finding 3) since
+                        // close_partial_json would synthesise a closing
+                        // quote on a half-written body — in that case we
+                        // surface a clear truncated-mid-string failure
+                        // instead of "invalid tool arguments".
+                        const bool mid_string =
+                            agentty::tools::util::ended_inside_string(
+                                tc.args_streaming);
                         auto salvaged = salvage_args(tc);
                         if (!salvaged.empty()) {
                             tc.args = std::move(salvaged);
                             tc.mark_args_dirty();
+                            std::string{}.swap(tc.args_streaming);
+                        } else if (mid_string) {
+                            auto now = std::chrono::steady_clock::now();
+                            tc.status = ToolUse::Failed{
+                                tc.started_at(), now,
+                                "tool args truncated mid-string \u2014 the "
+                                "wire cut off inside a string value (likely "
+                                "`content` / `command` / `new_text`), so "
+                                "the body is incomplete and the call was "
+                                "refused. Re-emit the tool with the full "
+                                "payload."};
                             std::string{}.swap(tc.args_streaming);
                         } else {
                             auto now = std::chrono::steady_clock::now();
@@ -1070,7 +1154,28 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // what we do next (retry or terminal). Drain the smoothing
             // buffer first so the error path preserves every received
             // byte even if the Tick pacer hadn't revealed it yet.
+            //
+            // `prepended_into_committed_text` records the corruption-
+            // adjacent case the renderer cares about: a multi-sub-turn
+            // assistant message where `last->text` was ALREADY non-empty
+            // before this error, and we just appended more bytes onto
+            // it. StreamingMarkdown's `set_content` had been fed the
+            // prior streaming_text alone; the new content does NOT have
+            // that as a prefix, so the next frame's `set_content` hits
+            // the replace path, calls `clear()`, and re-emits the body
+            // through fresh block parsing. The inline-tail layout and
+            // the committed-block layout of the same bytes have
+            // different per-block heights, which shifts content_rows.
+            // Live frame repaints correctly via the diff; rows that
+            // already overflowed into native scrollback retain the
+            // OLD layout — visible as duplicated / missing / fragmented
+            // border rows at the scrollback↔viewport seam. Force a
+            // Divergent transition on the next render so the full
+            // repaint resolves the seam (scrollback wipe is acceptable
+            // — a stream error has already disturbed the user's flow).
+            // See docs/corruption-analysis.md Finding 2.
             Message* last = nullptr;
+            bool prepended_into_committed_text = false;
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 last = &m.d.current.messages.back();
@@ -1080,7 +1185,10 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
                 if (!last->streaming_text.empty()) {
                     if (last->text.empty()) last->text = std::move(last->streaming_text);
-                    else                    last->text += std::move(last->streaming_text);
+                    else                  {
+                        prepended_into_committed_text = true;
+                        last->text += std::move(last->streaming_text);
+                    }
                     std::string{}.swap(last->streaming_text);
                 }
             }
@@ -1145,8 +1253,16 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 Message placeholder;
                 placeholder.role = Role::Assistant;
                 m.d.current.messages.push_back(std::move(placeholder));
-                return {std::move(m),
-                    Cmd<Msg>::after(delay, Msg{RetryStream{}})};
+                auto retry_cmd = Cmd<Msg>::after(delay, Msg{RetryStream{}});
+                if (prepended_into_committed_text) {
+                    // Resolve the scrollback↔viewport seam mismatch
+                    // before the retry stream starts feeding new
+                    // deltas through StreamingMarkdown.
+                    return {std::move(m),
+                        Cmd<Msg>::batch(std::move(retry_cmd),
+                                        Cmd<Msg>::force_redraw())};
+                }
+                return {std::move(m), std::move(retry_cmd)};
             }
 
             // Terminal path — discard the source ctx and drop to Idle.
@@ -1208,10 +1324,22 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     klass == provider::ErrorClass::Cancelled ? 3 : 6};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;
-                return {std::move(m), Cmd<Msg>::after(
+                auto status_cmd = Cmd<Msg>::after(
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
-                    Msg{ClearStatus{stamp}})};
+                    Msg{ClearStatus{stamp}});
+                if (prepended_into_committed_text) {
+                    // Terminal-path counterpart of the retry-path fix
+                    // above: the message body just grew by prepend, so
+                    // StreamingMarkdown will re-parse from scratch on
+                    // the next set_content and the scrollback tail
+                    // disagrees with the new live frame. Force a full
+                    // repaint on the next render.
+                    return {std::move(m),
+                        Cmd<Msg>::batch(std::move(status_cmd),
+                                        Cmd<Msg>::force_redraw())};
+                }
+                return {std::move(m), std::move(status_cmd)};
             }
         },
         [&](RetryStream) -> Step {

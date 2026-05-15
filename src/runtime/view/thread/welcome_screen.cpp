@@ -27,13 +27,19 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     cfg.starters_title = {};
     cfg.starters       = {};
     cfg.hint_intro     = "type to begin";
-    // Hint chips use distinct hues so the row reads as a small
-    // keyboard map rather than three identical colored buttons.
-    // palette=cyan (action surface), threads=blue (navigation),
-    // new=green (creative/positive action).
-    cfg.hints          = {{"^K", " palette", code_path},
-                          {"^J", " threads", role_info},
-                          {"^N", " new",     status_ok}};
+    // Full keybinding map (was previously in the bottom status bar's
+    // ShortcutRow, which has been retired — the status row now serves
+    // as a high-visibility toast slot instead). Per-key colors signal
+    // what each binding does at a glance: pickers (palette/threads/
+    // todo/models) share their action-surface hue, profile/new/quit
+    // get distinct semantic colors.
+    cfg.hints          = {{"^K",    " palette", code_path},      // cyan — actions
+                          {"^J",    " threads", role_info},      // blue — navigation
+                          {"^T",    " todo",    warn},           // yellow — planning
+                          {"S-Tab", " profile", role_brand},     // magenta — identity
+                          {"^/",    " models",  role_brand_alt}, // bright magenta
+                          {"^N",    " new",     success},        // green — create
+                          {"^C",    " quit",    danger}};        // red — destructive
     cfg.accent_color   = role_brand;
     cfg.text_color     = fg;
     return cfg;
