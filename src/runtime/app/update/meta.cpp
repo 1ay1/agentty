@@ -261,14 +261,45 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](NoOp) -> Step { return done(std::move(m)); },
         [&](RedrawScreen) -> Step {
-            // Drop the renderer's cell cache and repaint the visible
-            // viewport in place. Useful as a recovery hatch when
-            // something external corrupts the terminal (a stray
-            // subprocess writing to fd 1, a tmux pane swap, etc.) and
-            // as a debug knob during development. Cheaper than a
-            // resize-style \x1b[2J wipe — see maya's
-            // `inline-redraw-paths.md` for the case (B) soft redraw
-            // this rides on.
+            // Ctrl-L → viewport-only soft redraw.
+            //
+            // Drops maya's renderer cell cache (force_redraw zeroes
+            // prev_rows on the active InlineFrameState) and on the
+            // next compose triggers serialize.cpp's case-(B) path:
+            // cursor_up + re-serialize the last `term_h` rows +
+            // \x1b[J. Net effect: every cell inside the live viewport
+            // is rewritten from the canvas, wiping any ghost glyphs
+            // a half-written frame or stray subprocess output left
+            // behind. Cheap; preserves scrollback; preserves cursor
+            // position relative to the viewport (no "composer jumps
+            // to the bottom" jolt).
+            //
+            // ── SCOPE ─────────────────────────────────────────────────
+            //
+            // This hotkey fixes viewport corruption ONLY. Scrollback
+            // rows that have already overflowed the terminal viewport
+            // are owned by the terminal emulator and cannot be
+            // repainted by an inline-mode application without also
+            // overwriting any non-agentty content above the frame.
+            // The hard contract lives at
+            // maya/src/render/serialize.cpp’s case-(B) emit — see
+            // the SCOPE CONTRACT comment there for the full rationale.
+            //
+            // If the user's scrollback is mangled (a stray subprocess
+            // wrote past agentty, a tmux pane swap got confused,
+            // bytes were dropped during a resize), Ctrl-L will not
+            // help. The right recoveries in that situation are:
+            //   • The terminal emulator's own redraw hotkey — most
+            //     terminals bind their Ctrl-L to a full repaint of
+            //     the emulator's local cell grid, which IS able to
+            //     reach scrollback rows.
+            //   • Resizing the terminal window by even one cell —
+            //     maya treats a resize as a coherence-collapse,
+            //     routing the next render through the Divergent
+            //     path which DOES emit \x1b[2J\x1b[3J\x1b[H. That
+            //     sequence wipes the host's scrollback too, so it's
+            //     deliberately gated on a resize and not bound to a
+            //     keystroke.
             return {std::move(m), Cmd<Msg>::force_redraw()};
         },
         [&](ClearStatus& e) -> Step {

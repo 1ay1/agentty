@@ -22,8 +22,8 @@ namespace {
 
 // When advancing thread_view_start past kSliceChunk old messages, we tell
 // maya's inline renderer how many rows of prev_cells to commit to the
-// terminal's native scrollback (Cmd::commit_scrollback →
-// Runtime::commit_inline_prefix → InlineFrameState::commit_prefix).
+// terminal's native scrollback (Cmd::commit_scrollback_overflow →
+// Runtime::commit_inline_overflow).
 //
 // The discipline is asymmetric:
 //
@@ -41,59 +41,45 @@ namespace {
 //                  in the maya repo for the same discipline applied to a
 //                  pre-rendered `frozen` element list.)
 //
-// So the value passed to commit_scrollback MUST be a conservative LOWER
+// So any value passed to commit_scrollback MUST be a conservative LOWER
 // BOUND on the actual rendered rows of messages
 // [old_thread_view_start, new_thread_view_start). It must never exceed
 // the actual height.
 //
-// The previous implementation tried a content-aware estimate
-// (`estimate_message_rows`) using a hardcoded `kEstWidth = 100` and
-// per-byte arithmetic on `msg.text`. Two paths over-committed:
+// History — estimates that failed:
 //
-//   1. Terminal wider than 100 columns: text wraps to fewer rows than
-//      `bytes / 96 + 1` predicts.
-//   2. UTF-8 multi-byte content: byte-count overstates display width.
-//   3. Elided tool body previews: the maya::ToolBodyPreview kinds
-//      (BashOutput tail-only, FileRead head-only, GrepMatches grouped)
-//      render in 4-8 rows where the estimate's `min(nl, 10)` could
-//      easily reach 14.
+//   1. `estimate_message_rows` (`kEstWidth = 100`, per-byte arithmetic
+//      on `msg.text`). Over-committed at width > 100, on UTF-8
+//      multi-byte content, and on elided tool-body previews.
 //
-// The true lower bound on "rows of dropped messages still living in the
-// live frame" is 0, not 2. Here's why:
+//   2. `kRowsPerDroppedMessageLower = 2`. A captured profile of an
+//      800-row session showed `maybe_virtualize` drop 8 messages while
+//      content_rows shrank only 5 rows on the next render —
+//      per-message live-frame residue averaged 0.6. Committing 8*2=16
+//      rows over-committed by 11, ghosting border fragments and blank
+//      rectangles into native scrollback 2–3 turns into long streaming
+//      sessions.
 //
-// By the time maybe_virtualize fires, many of those messages have ALREADY
-// scrolled into the terminal's native scrollback via the natural \r\n
-// overflow inside compose_inline_frame. Whatever cells the renderer
-// emitted into the bottom rows of the viewport got pushed up and out
-// over many prior frames. The LIVE-FRAME residue of the dropped
-// messages is the small fraction that hadn't yet scrolled out — could
-// be a few rows, could be zero (if all of them had already overflowed).
+//   3. `kRowsPerDroppedMessageLower = 0`. Provably safe (zero is always
+//      a valid under-bound), but leaves prev_cells growing
+//      monotonically with the cumulative content_rows of the whole
+//      session — ~1–2 MB resident for a 200-turn conversation, plus a
+//      memmove cost the moment a non-zero commit finally happens.
 //
-// A captured profile of an 800-row session showed `maybe_virtualize`
-// drop 8 messages while content_rows shrank only 5 rows on the next
-// render — so the per-message live-frame residue averaged 0.6. With
-// `kRowsPerDroppedMessageLower = 2` we committed `8*2 = 16` rows, an
-// 11-row over-commit. That's the renderer "forgetting" 11 rows that
-// were still on-screen as immutable scrollback — exactly the ghosting
-// failure mode the comment block above describes. Symptom on screen:
-// stale border fragments and blank rectangles surviving past the
-// scroll-up boundary, appearing 2-3 turns into a long streaming
-// session (right around when virtualize first fires).
+// Current discipline: ask maya to commit every row that's PROVABLY
+// already overflowed the viewport. The renderer knows two numbers we
+// don't (prev_rows from the last compose and term_h); their difference
+// `max(0, prev_rows - term_h)` is an exact lower bound on rows that
+// have already been scrolled into native scrollback as immutable
+// cells (the bottom term_h rows of prev_cells are everything still on
+// screen; everything above them overflowed). Maya computes the
+// number itself; agentty just signals "please commit what's safe."
 //
-// Setting this to 0 hands maya a guaranteed lower bound and pushes the
-// alignment fixup onto compose_inline_frame's natural shrink path: it
-// sees content_rows decreased from N to (N - actual_dropped), emits
-// the diff for the surviving rows (which all shifted up in the canvas),
-// and clears the abandoned bottom via \x1b[J. Cost: one heavy frame per
-// virtualize event (~term_h * cols bytes of re-emitted cells). Win:
-// no over-commit, no scrollback ghosting.
-//
-// `prev_cells` does NOT shrink with this discipline — it grows with
-// the cumulative content_rows of the whole streaming session. For a
-// 200-turn conversation that's ~1-2 MB of resident memory; the diff
-// path's updatable_start clamp keeps per-frame compose cost bounded
-// to the viewport regardless of how tall prev_cells gets.
-constexpr int kRowsPerDroppedMessageLower = 0;
+// Result: prev_cells stays bounded to roughly term_h rows in
+// steady-state for the inline session, the natural shrink path in
+// compose_inline_frame still handles the residue of dropped messages
+// that hadn't yet scrolled out, and there's no estimator to drift
+// from reality on a future content-mix change.
 
 } // namespace
 
@@ -112,8 +98,7 @@ maya::Cmd<Msg> maybe_virtualize(Model& m) {
     }
     m.ui.thread_view_start      += kSliceChunk;
     m.ui.thread_view_start_turn += committed_turns;
-    const int committed_rows = kSliceChunk * kRowsPerDroppedMessageLower;
-    return Cmd<Msg>::commit_scrollback(committed_rows);
+    return Cmd<Msg>::commit_scrollback_overflow();
 }
 
 Step submit_message(Model m) {
