@@ -177,25 +177,39 @@ struct StreamState {
     int tokens_in   = 0;
     int tokens_out  = 0;
     int context_max = 200000;
-    // True while a compaction round is in flight: the synthetic
-    // "summarise per spec" user message has been appended and the
-    // assistant is producing the summary. StreamFinished's compaction
-    // branch reads this flag, replaces messages with a single
-    // compacted-summary user message, and resets it. Invariant: only
-    // ever true when phase != Idle (the transition is paired with the
-    // launch of the compaction stream); StreamError on a compaction
-    // turn clears it without applying.
+    // True while a compaction round is in flight: the request that
+    // includes the synthesised "summarise per spec" prompt has been
+    // dispatched and the assistant is streaming its summary into the
+    // off-transcript `compaction_buffer` below. StreamFinished's
+    // compaction branch reads this flag, lifts the summary out of the
+    // buffer, pushes a Thread::CompactionRecord describing the
+    // [0, compaction_target_index) prefix, and resets the flag.
+    // StreamError during compaction clears the flag and discards the
+    // buffer; `messages` is untouched in EITHER outcome. Invariant:
+    // only ever true when phase != Idle (the transition is paired
+    // with the launch of the compaction stream).
     bool compacting = false;
-    // Snapshot of `messages.size()` taken at CompactContext kickoff,
-    // BEFORE the synthetic "summarise per spec" User + Assistant
-    // placeholder were appended. The compaction-finalize handler in
-    // stream.cpp uses it to recover the original (post-pre-trim)
-    // message vector — the slice [0, compact_pre_synth_count) is the
-    // history that got summarised, and the tail of that slice is what
-    // we preserve verbatim post-compact so the conversation continues
-    // with continuity (UI keeps scroll/cache, model keeps the recent
-    // turn structure). Reset to 0 at compaction completion.
-    std::size_t compact_pre_synth_count = 0;
+    // Snapshot of `messages.size()` taken at CompactContext kickoff.
+    // The compaction-finalize handler stamps this onto the new
+    // Thread::CompactionRecord as `up_to_index` so wire payloads for
+    // future requests know exactly which prefix the summary replaces.
+    // Reset to 0 on completion (success OR error).
+    //
+    // This used to be called `compact_pre_synth_count` back when the
+    // synthetic summarisation prompt + assistant placeholder were
+    // appended to `messages` and the finalizer needed to recover the
+    // pre-synth slice. Compaction no longer touches `messages`, so the
+    // field's only remaining role is to remember the boundary; the
+    // name now reflects that.
+    std::size_t compaction_target_index = 0;
+    // Off-transcript sink for the compaction stream's text deltas.
+    // Stream handlers redirect `StreamTextDelta` into this buffer
+    // instead of `messages.back().pending_stream` whenever
+    // `compacting` is true, so the summarisation reply never
+    // contaminates the user-visible transcript. Drained + cleared
+    // at StreamFinished (on success: parsed into the new
+    // CompactionRecord) or StreamError (on failure: discarded).
+    std::string compaction_buffer;
     // Rapid-refill breaker. When auto-compaction fires within
     // `kRapidRefillTurns` assistant turns of the previous one,
     // `recent_compacts` increments; on a quieter cycle it resets.

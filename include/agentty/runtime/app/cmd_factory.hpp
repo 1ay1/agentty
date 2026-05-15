@@ -16,6 +16,22 @@ namespace agentty::app::cmd {
 // token to abort the in-flight stream.
 [[nodiscard]] maya::Cmd<Msg> launch_stream(Model& m);
 
+// What the model actually sees on the next request: applies any
+// Thread::CompactionRecord substitution (latest record's summary
+// replaces messages[0..up_to_index) on the wire). Mirrors what
+// launch_stream's normal-turn branch ships. Callers use this when
+// they need to reason about the wire payload size or shape — the
+// auto-compaction triggers in particular need to estimate the
+// COMPACTED prefix, not the raw transcript, otherwise they re-fire
+// immediately after every compaction.
+[[nodiscard]] std::vector<Message> wire_messages_for(const Thread& t);
+
+// Bytes-based prefix token estimate computed against the wire view
+// (i.e. with compaction substitution applied). Same approximation as
+// `estimate_prefix_tokens(Thread)` but the right denominator for
+// auto-compaction logic and the context-gauge.
+[[nodiscard]] int estimate_wire_tokens(const Thread& t);
+
 [[nodiscard]] maya::Cmd<Msg> run_tool(ToolCallId id,
                                       ToolName tool_name,
                                       nlohmann::json args);

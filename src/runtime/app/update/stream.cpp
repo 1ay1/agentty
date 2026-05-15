@@ -464,38 +464,25 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // below (or in kick_pending_tools) drive whether active() flips off.
     if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
 
-    // Compaction completion. The CompactContext handler appended a
-    // synthetic User "summarise per spec" message + Assistant
-    // placeholder to messages[0..compact_pre_synth_count); the
-    // assistant has now produced the summary text in that placeholder.
+    // Compaction completion. The compaction stream wrote its summary
+    // text into `m.s.compaction_buffer` (NOT into messages — the
+    // transcript is immutable across compaction events). Now:
+    //   1. Lift the summary text out of the buffer.
+    //   2. Strip <summary>…</summary> tags / trim whitespace.
+    //   3. Push a Thread::CompactionRecord describing
+    //      [0, compaction_target_index) so future wire payloads
+    //      built by `cmd_factory::wire_messages_for` substitute the
+    //      summary for the raw prefix.
     //
-    // CC-style stitching (mirrors Claude Code's `T5_` / `iU9` reactive
-    // compact, binary near offset 77409806):
-    //   1. Lift the summary text out of the trailing assistant.
-    //   2. Drop the synth user + assistant placeholder.
-    //   3. From the original prefix [0, compact_pre_synth_count),
-    //      preserve a TAIL of the most recent turn-groups verbatim
-    //      (typically the last 1-2 user→assistant pairs). The user's
-    //      most recent work stays on screen and the model keeps an
-    //      anchor for "where we left off".
-    //   4. Build the final messages vector as
-    //      [summary_msg(is_compact_summary=true), ...preserved_tail].
-    //   5. Reset thread_view_start to 0 so the view shows the new
-    //      (much shorter) conversation in full — without this the
-    //      user-visible window stays anchored at the now-out-of-bounds
-    //      pre-compact offset and the conversation appears empty.
+    // The user-visible transcript stays exactly as it was before
+    // CompactContext fired. No swap, no "reset to a shorter conversation",
+    // no thread_view_start fiddling. The only UI signal is the status
+    // banner flipping to "context compacted" and a divider the view
+    // draws between messages[up_to_index-1] and messages[up_to_index].
     if (m.s.compacting) {
-        std::string summary;
-        if (!m.d.current.messages.empty()
-            && m.d.current.messages.back().role == Role::Assistant) {
-            auto& last = m.d.current.messages.back();
-            if (!last.pending_stream.empty()) {
-                last.streaming_text += last.pending_stream;
-                last.pending_stream.clear();
-            }
-            summary = std::move(last.text);
-            if (!last.streaming_text.empty()) summary += last.streaming_text;
-        }
+        std::string summary = std::move(m.s.compaction_buffer);
+        m.s.compaction_buffer.clear();
+
         constexpr std::string_view kOpen = "<summary>";
         constexpr std::string_view kClose = "</summary>";
         if (auto a_pos = summary.find(kOpen); a_pos != std::string::npos) {
@@ -510,137 +497,21 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         while (!summary.empty() && is_space(summary.back()))  summary.pop_back();
         if (summary.empty()) summary = "[compaction produced no text]";
 
-        // Preserve a recent tail from the original prefix. Walk
-        // backwards over [0, compact_pre_synth_count) collecting
-        // complete turn-groups (a User followed by 0+ Assistants up
-        // to the next User). Stop once we have either:
-        //   • 2 turn-groups, OR
-        //   • a token estimate ≥ 25% of context_max (don't preserve
-        //     so much that we re-trip compaction on the next turn).
-        // The tail must START with a User to satisfy Anthropic's
-        // wire-format requirement that the message sequence after
-        // the summary's User leads with an Assistant or another User
-        // — easiest enforced by always anchoring on a User boundary.
-        std::vector<Message> preserved_tail;
-        const std::size_t prefix_n = std::min(
-            m.s.compact_pre_synth_count, m.d.current.messages.size());
-        // Count of pre-compact assistant turns in the slice we're
-        // about to summarise. Used below (after the rebuild) to seed
-        // `thread_view_start_turn` so post-compact turn numbering
-        // continues from where the user left off instead of resetting
-        // to 1. Walked here while the original prefix is still intact
-        // in m.d.current.messages — the rebuild a few lines down
-        // replaces this vector with [summary, ...preserved_tail].
-        int summarised_assistants = 0;
-        for (std::size_t i = 0; i < prefix_n; ++i) {
-            if (m.d.current.messages[i].role == Role::Assistant)
-                ++summarised_assistants;
-        }
-        if (prefix_n > 0) {
-            std::size_t groups = 0;
-            std::size_t bytes  = 0;
-            const std::size_t kMaxBytes = (m.s.context_max > 0)
-                ? static_cast<std::size_t>(m.s.context_max) * 3   // ~25% of ctx in token-bytes
-                : 200000;
-            constexpr std::size_t kMaxGroups = 2;
-            for (std::size_t i = prefix_n; i-- > 0;) {
-                bytes += m.d.current.messages[i].text.size();
-                for (const auto& tc : m.d.current.messages[i].tool_calls) {
-                    bytes += tc.output().size();
-                }
-                if (m.d.current.messages[i].role == Role::User) {
-                    ++groups;
-                    if (groups >= kMaxGroups || bytes >= kMaxBytes) {
-                        preserved_tail.assign(
-                            std::make_move_iterator(m.d.current.messages.begin()
-                                + static_cast<std::ptrdiff_t>(i)),
-                            std::make_move_iterator(m.d.current.messages.begin()
-                                + static_cast<std::ptrdiff_t>(prefix_n)));
-                        break;
-                    }
-                }
-                if (i == 0 && groups > 0) {
-                    preserved_tail.assign(
-                        std::make_move_iterator(m.d.current.messages.begin()),
-                        std::make_move_iterator(m.d.current.messages.begin()
-                            + static_cast<std::ptrdiff_t>(prefix_n)));
-                }
-            }
-        }
-
-        Message summary_msg;
-        summary_msg.role = Role::User;
-        summary_msg.is_compact_summary = true;
-        // Continuation directive at the end of the body is the same
-        // trick CC uses (`Continue the conversation from where it
-        // left off without asking the user any further questions...`,
-        // binary near offset 77409806) — without it the model often
-        // replies with a "let me recap what we were doing" preamble
-        // that wastes the first turn after compaction.
-        summary_msg.text = "This session is being continued from a previous "
-                           "conversation that ran out of context. The summary "
-                           "below covers the earlier portion of the "
-                           "conversation; recent messages are preserved "
-                           "verbatim after this summary.\n\nSummary:\n"
-                         + summary
-                         + "\n\nContinue the work from where it left off "
-                           "without re-acknowledging this summary or recapping "
-                           "what was happening. Pick up the last task as if "
-                           "the break never happened.";
-
-        m.d.current.messages.clear();
-        m.d.current.messages.push_back(std::move(summary_msg));
-        for (auto& msg : preserved_tail) {
-            m.d.current.messages.push_back(std::move(msg));
-        }
+        // Clamp the target index to the current transcript size in
+        // case messages were queued/submitted during compaction
+        // (queue-on-compact path drains AFTER this branch runs, but a
+        // future code path could in principle land messages earlier).
+        // The invariant we care about: up_to_index never exceeds
+        // messages.size() so the wire-substitution helper stays
+        // well-defined.
+        const std::size_t up_to = std::min(m.s.compaction_target_index,
+                                           m.d.current.messages.size());
+        Thread::CompactionRecord rec;
+        rec.up_to_index = up_to;
+        rec.summary     = std::move(summary);
+        rec.created_at  = std::chrono::system_clock::now();
+        m.d.current.compactions.push_back(std::move(rec));
         m.d.current.updated_at = std::chrono::system_clock::now();
-
-        // Purge view_cache entries belonging to pre-compaction messages
-        // that didn't survive into preserved_tail. The cache is keyed
-        // by (thread_id, message_id) and message ids are stable across
-        // the move into preserved_tail, so we hand retain_messages the
-        // live set computed from the post-compact vector. Without this
-        // the dropped entries sit in the 32-slot LRU on a quiet thread
-        // (the post-compact conversation is typically 3-5 messages,
-        // not enough turn-over to push the pre-compact Element trees
-        // out organically) and keep the underlying tool_call output
-        // strings alive even after `release_to_kernel()` below — the
-        // very thing release_to_kernel is trying to give back.
-        {
-            std::unordered_set<std::string> live;
-            live.reserve(m.d.current.messages.size());
-            for (const auto& msg : m.d.current.messages)
-                live.insert(msg.id.value);
-            m.ui.view_cache.retain_messages(m.d.current.id, live);
-        }
-
-        // Reset the view's slicing window. thread_view_start was
-        // anchored at some offset into the OLD long conversation;
-        // after compaction the new conversation is much shorter, so
-        // the old offset would either point past the end (rendering
-        // nothing — the user's "UI resets and next turns are not
-        // visible" bug) or skip the summary itself.
-        //
-        // Turn numbering continuity (Finding 4 in
-        // docs/corruption-analysis.md): conversation.cpp seeds the
-        // visible-range turn counter from `thread_view_start_turn`.
-        // Without adjustment, the post-compact transcript restarts
-        // at "turn 1" — a visible discontinuity from the "turn N"
-        // the user was just looking at. We seed it with the number
-        // of assistants folded into the summary (those in the
-        // pre-compact prefix minus those preserved verbatim in the
-        // tail) so the first surviving Assistant displays its
-        // pre-compact absolute turn number.
-        int preserved_assistants = 0;
-        for (const auto& mm : preserved_tail) {
-            if (mm.role == Role::Assistant) ++preserved_assistants;
-        }
-        const int folded_assistants =
-            std::max(0, summarised_assistants - preserved_assistants
-                            + m.ui.thread_view_start_turn);
-        m.ui.thread_view_start      = 0;
-        m.ui.thread_view_start_turn = folded_assistants;
-        m.ui.thread_scroll          = 0;
 
         // Rapid-refill breaker bookkeeping. If this compact landed
         // within `kRapidRefillTurns` assistant turns of the previous
@@ -659,30 +530,53 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             m.s.autocompact_disabled = true;
         }
 
-        m.s.compact_pre_synth_count = 0;
+        m.s.compaction_target_index = 0;
         m.s.compacting    = false;
         m.s.phase         = phase::Idle{};
-        m.s.tokens_in     = 0;
-        m.s.tokens_out    = 0;
-        m.s.status        = m.s.autocompact_disabled
-            ? "auto-compact disabled (rapid refill); use /compact manually"
-            : "context compacted";
+        // tokens_in / tokens_out are intentionally NOT touched: the
+        // StreamUsage handler skipped writes during compaction, so
+        // these still hold the values from the last real (non-
+        // compaction) turn. Resetting them to 0 would produce a
+        // visible flicker on the context gauge between this point
+        // and the next StreamUsage event.
+        // Smooth UX: when a user message is queued behind compaction,
+        // it's about to fire below — the user will immediately see
+        // their request go out, so a "context compacted" toast is
+        // noise on top of their answer streaming in. Skip it entirely.
+        // Only surface the rapid-refill disable warning (it's actionable
+        // info: tells the user to run /compact manually next time)
+        // and only show "context compacted" when there's no queued
+        // work and the user might still be looking at the spinner.
+        // Even then, keep it brief (1.5s) instead of the prior 4s
+        // dwell that competed for attention with the next thing the
+        // user actually wants to read.
+        const bool queued_about_to_fire = !m.ui.composer.queued.empty();
         auto now_ts = std::chrono::steady_clock::now();
-        m.s.status_until  = now_ts + std::chrono::seconds{4};
+        if (m.s.autocompact_disabled) {
+            m.s.status        = "auto-compact disabled (rapid refill); use /compact manually";
+            m.s.status_until  = now_ts + std::chrono::seconds{6};
+        } else if (queued_about_to_fire) {
+            // Silent path — the queued message becomes the next visible
+            // event in the UI, no toast needed.
+            m.s.status.clear();
+            m.s.status_until = {};
+        } else {
+            m.s.status        = "context compacted";
+            m.s.status_until  = now_ts + std::chrono::milliseconds{1500};
+        }
         deps().save_thread(m.d.current);
-        // Hand the freshly-freed arenas back to the OS. On glibc malloc
-        // (the common Linux case) the dropped tool-output strings would
-        // otherwise sit on the free list indefinitely — the user sees
-        // "context compacted" but their RSS doesn't budge, which makes
-        // the feature feel broken on the only metric they can observe.
-        // No-op on musl / macOS / Windows; eager on mimalloc.
+        // Hand the freshly-freed arenas back to the OS. Less to free
+        // now that we don't drop tool outputs — the only freed bytes
+        // are the compaction stream's input/output buffers — but
+        // still cheap and keeps the historical "compact → RSS dips"
+        // user signal alive on glibc. No-op on musl/macOS/Windows.
         release_to_kernel();
 
         // Drain any messages the user queued during compaction. Same
         // shape as the post-StreamFinished drain at the end of this
         // function, but tailored: we're already Idle, no pending tools
         // to kick.
-        if (!m.ui.composer.queued.empty()) {
+        if (queued_about_to_fire) {
             auto& head = m.ui.composer.queued.front();
             m.ui.composer.text        = std::move(head.text);
             m.ui.composer.attachments = std::move(head.attachments);
@@ -692,9 +586,11 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             m = std::move(mm);
             return sub_cmd;
         }
+        if (m.s.status.empty()) return Cmd<Msg>::none();
         auto stamp = m.s.status_until;
-        return Cmd<Msg>::after(std::chrono::seconds{4}
-                               + std::chrono::milliseconds{50},
+        auto ttl_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            m.s.status_until - now_ts);
+        return Cmd<Msg>::after(ttl_ms + std::chrono::milliseconds{50},
                                Msg{ClearStatus{stamp}});
     }
     bool any_truncated = false;
@@ -876,6 +772,59 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         m = std::move(mm);
         return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
     }
+
+    // Post-turn idle auto-compaction.
+    //
+    // The turn finished, no pending tools, no queued messages. This
+    // is the natural pause moment — the user is reading the model's
+    // output, not typing. If the wire estimate is over the threshold
+    // (~80% of context_max with output-reserve headroom), kick off
+    // compaction in the background. By the time the user types their
+    // next message, the wire view has been replaced with a summary
+    // and the next request goes out at a fraction of the size.
+    //
+    // Threshold mirrors the old submit-time formula
+    // (context_max - kOutputReserve - kCompactSlack) since the
+    // intent is the same: "is the NEXT turn at risk of hitting the
+    // ceiling?" The difference is WHEN we check — we check at the
+    // post-turn idle boundary, not at submit — so the compaction
+    // round happens while the user is reading, not blocking them.
+    //
+    // Soft-trim on the normal-turn path already handles "the next
+    // request would overflow" by silently dropping oldest raw turns,
+    // so this trigger is purely a quality optimisation: summary >
+    // truncation. If compaction fails (rate-limited, network drop)
+    // the user still gets through their next turn via soft-trim.
+    if (m.s.is_idle()
+        && !m.s.compacting
+        && !m.s.autocompact_disabled
+        && m.s.context_max > 0
+        && m.ui.composer.queued.empty()
+        && !m.d.current.messages.empty()) {
+        constexpr int kOutputReserve = 13000;
+        constexpr int kCompactSlack  = 4000;
+        const int threshold = std::max(0,
+            m.s.context_max - kOutputReserve - kCompactSlack);
+        const int est = cmd::estimate_wire_tokens(m.d.current);
+        if (std::max(m.s.tokens_in, est) > threshold) {
+            // Dispatch CompactContext as an async Msg so it goes
+            // through the same reducer arm /compact uses; that arm
+            // is the single source of truth for compaction kickoff
+            // (target_index capture, buffer clear, phase transition).
+            // The user sees the banner flip to "compacting context…"
+            // while they're reading; their next submit (when they
+            // get to it) either lands after compaction finishes
+            // (queueing for max ~1-2 turn-times) OR Esc-cancels
+            // compaction and fires immediately.
+            auto compact_cmd = Cmd<Msg>::task(
+                [](std::function<void(Msg)> dispatch) {
+                    dispatch(CompactContext{});
+                });
+            return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                std::move(kp), std::move(compact_cmd)});
+        }
+    }
+
     return kp;
 }
 
@@ -928,6 +877,21 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         a->first_delta_at = now;
                     a->live_delta_bytes += e.text.size();
                 }
+            }
+            // Compaction routing: during a compaction stream the
+            // transcript has no synthetic Assistant placeholder to
+            // stream into — the summary lives off-transcript in
+            // `m.s.compaction_buffer` and only ever surfaces as a
+            // CompactionRecord at finalize_turn. Route every byte
+            // there instead of into messages.back(), with the same
+            // per-stream byte cap so a runaway summary can't OOM.
+            if (m.s.compacting) {
+                if (m.s.compaction_buffer.size() < kMaxStreamingBytes) {
+                    const auto room = kMaxStreamingBytes - m.s.compaction_buffer.size();
+                    if (e.text.size() <= room) m.s.compaction_buffer += e.text;
+                    else m.s.compaction_buffer.append(e.text, 0, room);
+                }
+                return done(std::move(m));
             }
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
@@ -1068,6 +1032,20 @@ Step stream_update(Model m, msg::StreamMsg sm) {
         [&](StreamUsage& e) -> Step {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
+            // Suppress token writes during compaction. The compaction
+            // stream's `input_tokens` reflects the SUMMARISATION request
+            // (full prefix + the verbose summarisation prompt) and its
+            // `output_tokens` reflects the model's summary length —
+            // neither belongs in the user-facing context gauge or the
+            // "tokens generated" counter. Without this guard the gauge
+            // briefly jumps to the wire-payload size mid-compaction and
+            // resets to 0 in finalize_turn, producing a visible flicker
+            // on the status bar. The PRIOR turn's values are still on
+            // m.s.tokens_in/out from before compaction started; leaving
+            // them in place gives a more honest "what's the model
+            // actually carrying right now" reading until the next real
+            // turn settles.
+            if (m.s.compacting) return done(std::move(m));
             // `input_tokens` from Anthropic is the FULL prefix for this
             // request, NOT the delta. Accumulating across turns triple-counted
             // by turn 5. Replace, don't add. Cache fields are excluded from
@@ -1129,24 +1107,111 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (m.s.in_scheduled()) return done(std::move(m));
 
             // Compaction failed mid-flight (rate limit, network drop,
-            // etc.). Pop the synthetic User "summarise per spec" + the
-            // assistant placeholder we appended in the CompactContext
-            // handler, restoring the conversation to the state the user
-            // saw before they hit "Compact context". Then let the
-            // normal error path finish (it'll surface "transient —
-            // retrying…" or terminal text). Without this rewind, a
-            // failed compaction leaves the summary prompt + a partially-
-            // streamed assistant reply permanently in the transcript.
+            // etc.). Compaction is wire-only — nothing was ever pushed
+            // into `messages` — so we don't have to rewind any transcript
+            // state. Either retry on a backoff (transient / rate-limit
+            // with budget remaining) or surface a clear actionable toast
+            // and return to Idle. Either way the user-visible transcript
+            // is identical to its pre-compaction shape because it was
+            // never mutated.
+            //
+            // Workflow protection: retry transparently on transient and
+            // rate-limit failures so a flaky network doesn't force the
+            // user to babysit /compact. The summarisation request is
+            // stateless from the server's POV — every retry rebuilds
+            // the same wire payload from the immutable transcript — so
+            // there's nothing to corrupt across attempts. On terminal
+            // failure (auth, content filter, retry budget exhausted)
+            // we drop to Idle, clear the buffer, and rely on the
+            // launch_stream soft-trim to keep subsequent NORMAL turns
+            // working even though compaction couldn't finish. The
+            // user can re-invoke /compact later when conditions improve.
             if (m.s.compacting) {
-                m.s.compacting = false;
-                if (m.d.current.messages.size() >= 2
-                    && m.d.current.messages.back().role == Role::Assistant) {
-                    m.d.current.messages.pop_back();
-                    if (!m.d.current.messages.empty()
-                        && m.d.current.messages.back().role == Role::User) {
-                        m.d.current.messages.pop_back();
-                    }
+                if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
+
+                auto klass = provider::classify(e.message);
+                if (m.s.in_stall_fired()
+                    && klass == provider::ErrorClass::Cancelled) {
+                    klass = provider::ErrorClass::Transient;
                 }
+
+                const phase::Active* cctx = active_ctx(m.s.phase);
+                int prior = cctx ? cctx->transient_retries : 0;
+                const bool can_retry_compact =
+                    cctx
+                    && (klass == provider::ErrorClass::Transient
+                        || klass == provider::ErrorClass::RateLimit)
+                    && prior < provider::kMaxRetries;
+
+                if (can_retry_compact) {
+                    std::chrono::milliseconds delay;
+                    if (e.retry_after.has_value()) {
+                        auto s = e.retry_after->count();
+                        if (s < 1) s = 1;
+                        if (s > 120) s = 120;
+                        delay = std::chrono::seconds(s);
+                    } else {
+                        delay = provider::backoff_with_jitter(klass, prior);
+                    }
+                    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                        delay + std::chrono::milliseconds{999}).count();
+                    // Keep the user-facing wording calm: "context
+                    // compacting" is already on the banner; we just
+                    // append the retry hint so the user knows the
+                    // operation is still alive, not silently wedged.
+                    m.s.status = "compacting — retrying in " + std::to_string(secs) + "s";
+                    m.s.status_until = std::chrono::steady_clock::now()
+                                     + delay + std::chrono::milliseconds{1500};
+                    // Reset only the streamed bytes — keep `compacting`
+                    // and `compaction_target_index` so launch_stream
+                    // rebuilds the same compaction request shape on
+                    // RetryStream.
+                    m.s.compaction_buffer.clear();
+                    auto ctx = take_active_ctx(std::move(m.s.phase)).value();
+                    ctx.transient_retries = prior + 1;
+                    ctx.retry             = retry::Scheduled{};
+                    m.s.phase = phase::Streaming{std::move(ctx)};
+                    return {std::move(m),
+                            Cmd<Msg>::after(delay, Msg{RetryStream{}})};
+                }
+
+                // Terminal compaction failure. Drop everything compaction-
+                // related and surface ONE clear toast. Soft-trim on the
+                // normal-turn path keeps the agent working at reduced
+                // wire size; the user can /compact again later.
+                m.s.compacting              = false;
+                m.s.compaction_target_index = 0;
+                m.s.compaction_buffer.clear();
+                m.s.phase = phase::Idle{};
+                m.s.status = (klass == provider::ErrorClass::Cancelled)
+                    ? "compaction cancelled"
+                    : ("compaction failed: " + e.message
+                       + " — retry with /compact");
+                auto now = std::chrono::steady_clock::now();
+                auto ttl = std::chrono::seconds{
+                    klass == provider::ErrorClass::Cancelled ? 3 : 8};
+                m.s.status_until = now + ttl;
+                auto stamp = m.s.status_until;
+                auto status_cmd = Cmd<Msg>::after(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
+                        + std::chrono::milliseconds{50},
+                    Msg{ClearStatus{stamp}});
+                // Drain queued messages even though compaction failed —
+                // launch_stream's soft-trim will fit them onto the
+                // wire. Better to give the user their reply than to
+                // leave their typing stuck behind a dead compaction.
+                if (!m.ui.composer.queued.empty()) {
+                    auto& head = m.ui.composer.queued.front();
+                    m.ui.composer.text        = std::move(head.text);
+                    m.ui.composer.attachments = std::move(head.attachments);
+                    m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
+                    m.ui.composer.queued.erase(m.ui.composer.queued.begin());
+                    auto [mm, sub_cmd] = submit_message(std::move(m));
+                    m = std::move(mm);
+                    return {std::move(m), Cmd<Msg>::batch(
+                        std::move(status_cmd), std::move(sub_cmd))};
+                }
+                return {std::move(m), std::move(status_cmd)};
             }
 
             // Worker thread is unwinding; drop the token so the next turn
@@ -1362,19 +1427,23 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // Esc — full synchronous teardown.
             if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
 
-            // Compaction-cancel: pop the synthetic "summarise per spec"
-            // user message + the assistant placeholder so the transcript
-            // returns to its pre-compaction shape.
+            // Compaction-cancel: nothing was ever appended to the
+            // transcript, so we just discard the off-transcript buffer
+            // and clear the in-flight flag. The user sees their full
+            // pre-compaction transcript stay intact.
+            //
+            // Workflow protection: a message queued behind the
+            // cancelled compaction would otherwise sit dormant until
+            // the user manually re-submits something. Drain it here
+            // so cancellation feels like "keep going without compacting"
+            // rather than "freeze my whole session." launch_stream's
+            // soft-trim will fit the wire payload even though we
+            // skipped the summarisation.
+            const bool was_compacting = m.s.compacting;
             if (m.s.compacting) {
-                m.s.compacting = false;
-                if (!m.d.current.messages.empty()
-                    && m.d.current.messages.back().role == Role::Assistant) {
-                    m.d.current.messages.pop_back();
-                }
-                if (!m.d.current.messages.empty()
-                    && m.d.current.messages.back().role == Role::User) {
-                    m.d.current.messages.pop_back();
-                }
+                m.s.compacting              = false;
+                m.s.compaction_target_index = 0;
+                m.s.compaction_buffer.clear();
             }
 
             // Salvage partial assistant work and finalise in-flight tool calls.
@@ -1410,10 +1479,32 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 auto ttl = std::chrono::seconds{3};
                 m.s.status_until = now + ttl;
                 auto stamp = m.s.status_until;
-                return {std::move(m), Cmd<Msg>::after(
+                auto status_cmd = Cmd<Msg>::after(
                     std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
                         + std::chrono::milliseconds{50},
-                    Msg{ClearStatus{stamp}})};
+                    Msg{ClearStatus{stamp}});
+                // If the user cancelled a COMPACTION (not a normal
+                // turn) and had queued work behind it, fire that
+                // queued message immediately. Cancelling a normal
+                // turn leaves the queue alone because the user just
+                // killed their own in-flight request — they probably
+                // want to type something different next, not have the
+                // queue automatically drain. Compaction was a side
+                // operation the user didn't ask for in the first
+                // place; killing it shouldn't penalise their actual
+                // request.
+                if (was_compacting && !m.ui.composer.queued.empty()) {
+                    auto& head = m.ui.composer.queued.front();
+                    m.ui.composer.text        = std::move(head.text);
+                    m.ui.composer.attachments = std::move(head.attachments);
+                    m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
+                    m.ui.composer.queued.erase(m.ui.composer.queued.begin());
+                    auto [mm, sub_cmd] = submit_message(std::move(m));
+                    m = std::move(mm);
+                    return {std::move(m), Cmd<Msg>::batch(
+                        std::move(status_cmd), std::move(sub_cmd))};
+                }
+                return {std::move(m), std::move(status_cmd)};
             }
         },
     }, sm);

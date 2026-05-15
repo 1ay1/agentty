@@ -19,30 +19,311 @@ namespace agentty::app::cmd {
 
 using maya::Cmd;
 
+namespace {
+
+// Body of the synthetic summarisation prompt. Identical text to what
+// CompactContext used to push directly into `messages` — we hoist it
+// here so the compaction wire payload can build it without polluting
+// the transcript. Mirrors Claude Code's `mm8` summary prompt (binary
+// near offset 134600). The schema (Task / State / Discoveries / Next
+// Steps / Context-to-Preserve) is deliberately verbose: it nudges the
+// model to write a recoverable summary instead of a one-paragraph
+// précis that loses operationally-load-bearing details.
+constexpr std::string_view kCompactionSummaryPrompt =
+    "You have been working on the task described above but have "
+    "not yet completed it. Write a continuation summary that "
+    "will allow you (or another instance of yourself) to resume "
+    "work efficiently in a future context window where the "
+    "conversation history will be replaced with this summary. "
+    "Your summary should be structured, concise, and actionable. "
+    "Include:\n"
+    "1. Task Overview\n"
+    "  The user's core request and success criteria\n"
+    "  Any clarifications or constraints they specified\n"
+    "2. Current State\n"
+    "  What has been completed so far\n"
+    "  Files created, modified, or analyzed (with paths if relevant)\n"
+    "  Key outputs or artifacts produced\n"
+    "3. Important Discoveries\n"
+    "  Technical constraints or requirements uncovered\n"
+    "  Decisions made and their rationale\n"
+    "  Errors encountered and how they were resolved\n"
+    "  What approaches were tried that didn't work (and why)\n"
+    "4. Next Steps\n"
+    "  Specific actions needed to complete the task\n"
+    "  Any blockers or open questions to resolve\n"
+    "  Priority order if multiple steps remain\n"
+    "5. Context to Preserve\n"
+    "  User preferences or style requirements\n"
+    "  Domain-specific details that aren't obvious\n"
+    "  Any promises made to the user\n"
+    "Be concise but complete \xe2\x80\x94 err on the side of "
+    "including information that would prevent duplicate work or "
+    "repeated mistakes. Write in a way that enables immediate "
+    "resumption of the task. Do not call any tools; just write "
+    "the summary text. Wrap the summary in <summary></summary> "
+    "tags.";
+
+// Body prefix wrapping the model's summary text into a synthetic User
+// message that goes on the wire in place of [0, up_to_index). The
+// trailing "Continue…" directive (CC trick, binary near offset
+// 77409806) suppresses the model's tendency to start with a "let me
+// recap what we were doing" preamble.
+std::string wrap_summary_as_user_text(const std::string& summary) {
+    return "This session is being continued from a previous "
+           "conversation that ran out of context. The summary "
+           "below covers the earlier portion of the "
+           "conversation; recent messages are preserved "
+           "verbatim after this summary.\n\nSummary:\n"
+         + summary
+         + "\n\nContinue the work from where it left off "
+           "without re-acknowledging this summary or recapping "
+           "what was happening. Pick up the last task as if "
+           "the break never happened.";
+}
+
+// Bytes-based prefix token estimate over an arbitrary wire view
+// (NOT a Thread). Used internally by the soft-trim path; matches the
+// approximation that public estimate_wire_tokens / estimate_prefix_tokens
+// use so all three agree on "is this payload too big."
+int estimate_messages_tokens(const std::vector<Message>& v) {
+    constexpr double kBytesPerToken  = 3.5;
+    constexpr int    kTokensPerImage = 1500;
+    std::size_t bytes = 0;
+    int images = 0;
+    for (const auto& m : v) {
+        bytes += m.text.size();
+        bytes += m.streaming_text.size();
+        bytes += m.pending_stream.size();
+        images += static_cast<int>(m.images.size());
+        for (const auto& tc : m.tool_calls) {
+            bytes += tc.name.value.size();
+            bytes += tc.args_streaming.size();
+            bytes += tc.output().size();
+            bytes += tc.progress_text().size();
+        }
+    }
+    return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
+         + images * kTokensPerImage;
+}
+
+// Adaptive soft-trim: drop oldest entries from a wire view until its
+// estimated token cost fits a ceiling. Preserves the leading entry
+// (typically the compaction-summary synth user OR the first real
+// user turn) so the model retains task-rooting context, and ensures
+// the result still starts with a User per Anthropic's wire rule.
+//
+// This is the workflow-protection knob. When the model is mid-tool-
+// burst and the transcript has grown past context_max, we DON'T yank
+// the agent into a compaction round (which would surface as "your
+// agent got stopped"). We just trim the oldest raw turns off the
+// wire payload and let the loop continue. Compaction is then a
+// strictly-better optimisation the user can run at their leisure;
+// the agent never observes a wedge.
+//
+// The trim is REVERSIBLE: nothing about the transcript or any
+// CompactionRecord is mutated. Two requests apart with different
+// soft-trim ceilings produce different wire payloads from the same
+// source state. The next user turn that submits with more context
+// available will send a fatter prefix automatically.
+void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling) {
+    if (ceiling <= 0 || v.size() <= 1) return;
+    // Sentinel: the leading entry stays put. Trim from index 1 forward
+    // until we fit. If we run out of trimmable entries we send what
+    // we have — the upstream will hard-reject with a clear error,
+    // which is strictly better than the in-tool-burst yank.
+    while (estimate_messages_tokens(v) > ceiling && v.size() > 1) {
+        v.erase(v.begin() + 1);
+    }
+    // Drop any leading Assistants exposed by the trim — the wire
+    // must start with a User. (If [0] was a compaction-summary user,
+    // it remains; if it was a real first-user-turn and we never
+    // touched [0], we're already fine. The pathological case is
+    // when [0] gets dropped by a future change — defensive guard.)
+    while (!v.empty() && v.front().role == Role::Assistant) {
+        v.erase(v.begin());
+    }
+}
+
+
+// Normal-turn wire payload: if the thread has compaction records,
+// replace the prefix [0, latest.up_to_index) with one synthetic User
+// message carrying the summary. Tail [latest.up_to_index..end) goes
+// verbatim, preserving the user's recent work as anchor for the model.
+// No compactions → the transcript ships as-is.
+//
+// Anthropic wire requirement: the messages array must start with a
+// User. The synthetic summary IS a User, and if it's absent the first
+// real message at index 0 has historically been a User too (the user's
+// initial prompt), so the invariant holds either way.
+std::vector<Message> wire_messages_for_impl(const Thread& t) {
+    if (t.compactions.empty()) return t.messages;
+    const auto& rec = t.compactions.back();
+    if (rec.up_to_index == 0 || rec.up_to_index > t.messages.size()) {
+        return t.messages;  // defensive: malformed record → send raw transcript
+    }
+    std::vector<Message> out;
+    out.reserve(1 + (t.messages.size() - rec.up_to_index));
+    Message summary_msg;
+    summary_msg.role = Role::User;
+    summary_msg.is_compact_summary = true;   // tag for any downstream code that still keys on it
+    summary_msg.text = wrap_summary_as_user_text(rec.summary);
+    out.push_back(std::move(summary_msg));
+    for (std::size_t i = rec.up_to_index; i < t.messages.size(); ++i) {
+        out.push_back(t.messages[i]);
+    }
+    return out;
+}
+
+// Compaction-kickoff wire payload: send the prefix the user wants to
+// summarise (with any prior compactions already applied so we don't
+// re-send already-summarised turns raw), followed by the summarisation
+// prompt as a synthetic User turn. The model's reply IS the summary;
+// it streams into `m.s.compaction_buffer` rather than into `messages`.
+//
+// `context_max` is consulted to keep the request itself from blowing
+// the context window — we trim the OLDEST raw turns of the prefix
+// (preserving the leading User-wire-shape, never trimming a synthetic
+// summary already at the head) until the estimate fits ~65% of the
+// window, leaving headroom for the prompt + the summary response.
+std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_max) {
+    // Start from the already-compaction-substituted view so stacked
+    // compactions don't double-count the summarised prefix.
+    std::vector<Message> base = wire_messages_for_impl(t);
+
+    // Trim from the front until we fit ~65% of context_max. Token
+    // estimate uses the same approximation as estimate_prefix_tokens
+    // (bytes / 3.5 + images), inlined here against an arbitrary
+    // vector instead of a Thread.
+    auto estimate = [](const std::vector<Message>& v) -> int {
+        constexpr double kBytesPerToken  = 3.5;
+        constexpr int    kTokensPerImage = 1500;
+        std::size_t bytes = 0;
+        int images = 0;
+        for (const auto& m : v) {
+            bytes += m.text.size();
+            bytes += m.streaming_text.size();
+            bytes += m.pending_stream.size();
+            images += static_cast<int>(m.images.size());
+            for (const auto& tc : m.tool_calls) {
+                bytes += tc.name.value.size();
+                bytes += tc.args_streaming.size();
+                bytes += tc.output().size();
+                bytes += tc.progress_text().size();
+            }
+        }
+        return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
+             + images * kTokensPerImage;
+    };
+
+    if (context_max > 0) {
+        const int ceiling = static_cast<int>(static_cast<double>(context_max) * 0.65);
+        while (estimate(base) > ceiling && base.size() > 1) {
+            base.erase(base.begin());
+        }
+        // Drop any leading Assistants exposed by the trim — Anthropic
+        // requires the wire to start with a User.
+        while (!base.empty() && base.front().role == Role::Assistant) {
+            base.erase(base.begin());
+        }
+    }
+
+    // Append the synthetic summarisation prompt as the trailing User.
+    Message synth;
+    synth.role = Role::User;
+    synth.text = std::string{kCompactionSummaryPrompt};
+    base.push_back(std::move(synth));
+    return base;
+}
+
+} // namespace
+
+std::vector<Message> wire_messages_for(const Thread& t) {
+    return wire_messages_for_impl(t);
+}
+
+int estimate_wire_tokens(const Thread& t) {
+    // Same bytes/3.5 + ~1500-per-image approximation as
+    // estimate_prefix_tokens(Thread), but against the wire view so
+    // any compaction summary substitution is accounted for. Auto-
+    // compaction triggers MUST use this; using the raw-transcript
+    // estimate would re-fire compaction immediately after every
+    // round because the user-visible transcript never shrinks.
+    constexpr double kBytesPerToken  = 3.5;
+    constexpr int    kTokensPerImage = 1500;
+    auto wire = wire_messages_for_impl(t);
+    std::size_t bytes = 0;
+    int images = 0;
+    for (const auto& m : wire) {
+        bytes += m.text.size();
+        bytes += m.streaming_text.size();
+        bytes += m.pending_stream.size();
+        images += static_cast<int>(m.images.size());
+        for (const auto& tc : m.tool_calls) {
+            bytes += tc.name.value.size();
+            bytes += tc.args_streaming.size();
+            bytes += tc.output().size();
+            bytes += tc.progress_text().size();
+        }
+    }
+    return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
+         + images * kTokensPerImage;
+}
+
 Cmd<Msg> launch_stream(Model& m) {
     provider::Request req;
     req.model         = m.d.model_id.value;
     req.system_prompt = provider::anthropic::default_system_prompt();
-    req.messages      = m.d.current.messages;
 
-    // All tools, every profile. Gating is the policy layer's job
-    // (`tool::DynamicDispatch::needs_permission`, called from
-    // `kick_pending_tools`) — it inspects the tool's effects against
-    // the active profile and decides Allow vs Prompt:
-    //   Write   → all Allow  (autonomous)
-    //   Ask     → ReadFs/Pure Allow; WriteFs/Exec/Net Prompt
-    //   Minimal → only Pure Allow; everything else Prompt
-    // Hiding tools from the wire here used to be the gate, but it
-    // conflicted with what users expect from "Ask": that the model
-    // can attempt anything, the *user* approves per-call. With the
-    // filter in place, Ask just made write/edit/bash invisible (no
-    // prompt could ever fire because the model never called them) and
-    // Minimal sent zero tools at all (model became chat-only). The
-    // policy layer is exhaustively static_asserted in policy.hpp; let
-    // it own the decision so the three profiles read as users expect.
-    for (const auto& t : tools::registry()) {
-        req.tools.push_back({t.name.value, t.description, t.input_schema,
-                             t.eager_input_streaming});
+    // Wire payload diverges on compaction kickoff:
+    //   normal turn  → wire_messages_for(thread) substitutes any
+    //                  prior compaction summary in place of its
+    //                  covered prefix.
+    //   compaction   → wire_messages_for_compaction(thread, ctx_max)
+    //                  appends the synthetic summarisation prompt and
+    //                  trims the raw prefix to fit context_max. Tools
+    //                  are omitted from the wire so the model can only
+    //                  reply with text — a tool_use during compaction
+    //                  would have nowhere to land (we don't surface
+    //                  the synthetic turn in the UI).
+    if (m.s.compacting) {
+        req.messages = wire_messages_for_compaction(m.d.current, m.s.context_max);
+        // req.tools left empty — summarisation is text-only.
+    } else {
+        req.messages = wire_messages_for_impl(m.d.current);
+        // Adaptive soft-trim: if the wire view is still over the
+        // window (no compactions yet, or the latest one is stale
+        // and the user has run many turns since), drop oldest raw
+        // turns from the wire until it fits ~95% of context_max.
+        // The transcript is NOT mutated — this only shapes what
+        // ships on THIS request. Lets the agent keep working past
+        // the threshold without yanking it for compaction; the
+        // user can run /compact at their leisure for a strictly
+        // better summary-based shape on subsequent turns.
+        if (m.s.context_max > 0) {
+            const int soft_ceiling = static_cast<int>(
+                static_cast<double>(m.s.context_max) * 0.95);
+            soft_trim_to_ceiling(req.messages, soft_ceiling);
+        }
+        // All tools, every profile. Gating is the policy layer's job
+        // (`tool::DynamicDispatch::needs_permission`, called from
+        // `kick_pending_tools`) — it inspects the tool's effects against
+        // the active profile and decides Allow vs Prompt:
+        //   Write   → all Allow  (autonomous)
+        //   Ask     → ReadFs/Pure Allow; WriteFs/Exec/Net Prompt
+        //   Minimal → only Pure Allow; everything else Prompt
+        // Hiding tools from the wire here used to be the gate, but it
+        // conflicted with what users expect from "Ask": that the model
+        // can attempt anything, the *user* approves per-call. With the
+        // filter in place, Ask just made write/edit/bash invisible (no
+        // prompt could ever fire because the model never called them) and
+        // Minimal sent zero tools at all (model became chat-only). The
+        // policy layer is exhaustively static_asserted in policy.hpp; let
+        // it own the decision so the three profiles read as users expect.
+        for (const auto& t : tools::registry()) {
+            req.tools.push_back({t.name.value, t.description, t.input_schema,
+                                 t.eager_input_streaming});
+        }
     }
     req.auth_header = deps().auth_header;
     req.auth_style  = deps().auth_style;
@@ -251,45 +532,25 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             return tc.is_terminal();
         });
         if (has_results) {
-            // Mid-turn context-ceiling check. The submit_message auto-
-            // compact only fires when the user submits a fresh turn —
-            // it doesn't see the sub-turn relaunches that a multi-tool
-            // assistant turn fires here. A single turn that runs 10
-            // tool calls (each returning 25k chars) grows the
-            // transcript by ~70k tokens before any submit; the next
-            // sub-turn request can exceed context-max with no warning
-            // and the API hard-rejects, wedging the session ("no
-            // coming back"). The estimate from message content is
-            // proactive — it sees the post-tool-execution state that
-            // tokens_in won't reflect until the next StreamUsage event
-            // arrives. Ceiling is 90% (vs submit's 80%) so the normal
-            // path wins for ordinary sub-turns and this only fires
-            // when we're actually about to overrun.
-            if (m.s.context_max > 0 && !m.s.compacting) {
-                int est = estimate_prefix_tokens(m.d.current);
-                int ceiling = static_cast<int>(
-                    static_cast<double>(m.s.context_max) * 0.90);
-                if (est > ceiling) {
-                    // Abort the sub-turn, drop to Idle, defer CompactContext
-                    // to the next reducer pass (the CompactContext arm
-                    // requires Idle and rejects otherwise). The user sees
-                    // the compaction land and can re-prompt — better than
-                    // an opaque "context_length_exceeded" 4xx that leaves
-                    // the conversation unrecoverable.
-                    auto ctx_disc = take_active_ctx(std::move(m.s.phase));
-                    (void)ctx_disc;
-                    m.s.phase        = phase::Idle{};
-                    m.s.status       = "context limit reached \xe2\x80\x94 "
-                                       "compacting before continuing\xe2\x80\xa6";
-                    m.s.status_until = std::chrono::steady_clock::now()
-                                       + std::chrono::seconds{6};
-                    cmds.push_back(Cmd<Msg>::task(
-                        [](std::function<void(Msg)> dispatch) {
-                            dispatch(CompactContext{});
-                        }));
-                    return Cmd<Msg>::batch(std::move(cmds));
-                }
-            }
+            // Used to: abort the sub-turn and force a compaction round
+            // when the prefix estimate crossed 90% of context_max,
+            // surfacing as a user-visible "context limit reached —
+            // compacting before continuing…" toast that yanked the
+            // agent out of a multi-tool burst. That broke workflow
+            // hard: the user's agent loop would just *stop* mid-task
+            // while the model rewrote a summary.
+            //
+            // Now: launch_stream's soft-trim on the normal-turn path
+            // drops oldest raw turns from the wire view until it fits
+            // ~95% of context_max, transparently. The agent keeps
+            // running. Compaction becomes a strictly-better optimisation
+            // (summary > truncation) the user can invoke at their
+            // leisure via /compact, or the auto-trigger picks up on
+            // the NEXT user submit. Workflow uninterrupted.
+            //
+            // The trim is wire-only: the transcript stays whole, the
+            // dropped turns reappear on subsequent requests if context
+            // frees up (e.g. after a manual compact).
 
             // Tool results are going back to the model — a fresh sub-turn
             // is about to start on the same assistant message. This is a

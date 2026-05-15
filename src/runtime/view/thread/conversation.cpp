@@ -3,10 +3,35 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <unordered_set>
 
+#include <maya/widget/turn.hpp>
+
+#include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
 namespace agentty::ui {
+
+namespace {
+
+// Synthetic divider rendered in place of an absent "compact summary
+// message". Identical chrome to the legacy `is_compact_summary`-on-
+// Message branch in turn.cpp (≡ + "Conversation compacted" on a
+// muted rail), surfaced as its own PreBuilt entry between the
+// pre- and post-compaction turns. Marks the boundary the model no
+// longer sees in raw form, without taking a Message slot of its own.
+maya::Conversation::PreBuilt compaction_divider_prebuilt() {
+    maya::Turn::Config cfg;
+    cfg.glyph      = "\xe2\x89\xa1";              // ≡
+    cfg.label      = "Conversation compacted";
+    cfg.rail_color = muted;
+    return maya::Conversation::PreBuilt{
+        .element      = maya::Turn{std::move(cfg)}.build(),
+        .continuation = false,
+    };
+}
+
+} // namespace
 
 maya::Conversation::Config conversation_config(const Model& m) {
     maya::Conversation::Config cfg;
@@ -17,28 +42,31 @@ maya::Conversation::Config conversation_config(const Model& m) {
     // maintains alongside thread_view_start — O(1), regardless of how
     // many turns the session has accumulated.
     //
-    // During compaction the messages vector ends with two synthetic
-    // entries: the "summarise per spec" User prompt and an Assistant
-    // placeholder receiving the streamed summary. Both are
-    // bookkeeping the user shouldn't see — rendering them visibly
-    // would (a) show the long synthetic prompt as a fake user turn,
-    // (b) stream the model's summary in real time as if the
-    // assistant were answering a normal question, and then (c) jump
-    // to a much shorter post-compact conversation when the swap
-    // happens. The status banner already conveys "compacting
-    // context…"; clipping `total` to the pre-synth count keeps the
-    // visible conversation in its pre-compact shape until the swap
-    // lands, so the user only ever sees the boundary divider appear,
-    // not the compaction process itself.
-    std::size_t total = m.d.current.messages.size();
-    if (m.s.compacting
-        && m.s.compact_pre_synth_count > 0
-        && m.s.compact_pre_synth_count <= total) {
-        total = m.s.compact_pre_synth_count;
-    }
+    // Compaction does NOT alter what's drawn here. It's a wire-only
+    // event: the model's view of history collapses to a summary +
+    // recent-tail when the next request goes out (handled in
+    // `cmd_factory::wire_messages_for`), but the user keeps seeing
+    // every turn they ever had. The only visible signal of compaction
+    // is the ≡ divider injected below at each CompactionRecord's
+    // boundary index — chrome, not content.
+    const std::size_t total = m.d.current.messages.size();
     const std::size_t start = static_cast<std::size_t>(
         std::clamp(m.ui.thread_view_start, 0, static_cast<int>(total)));
     int turn = 1 + m.ui.thread_view_start_turn;
+
+    // Set of message indices that should be PRECEDED by a compaction
+    // divider in the rendered conversation. Built from the thread's
+    // CompactionRecord list. `up_to_index` is "covers messages[0..N)"
+    // — the divider therefore sits immediately before messages[N], i.e.
+    // exactly at index N. Skip records whose boundary is 0 (no turns to
+    // mark off) or beyond `total` (defensive against malformed loads).
+    std::unordered_set<std::size_t> divider_at;
+    divider_at.reserve(m.d.current.compactions.size());
+    for (const auto& rec : m.d.current.compactions) {
+        if (rec.up_to_index > 0 && rec.up_to_index <= total) {
+            divider_at.insert(rec.up_to_index);
+        }
+    }
 
     // Use the agent_session-style fast path: emit pre-built turn
     // Elements via maya::Conversation's `built_turns` field. Settled
@@ -51,8 +79,13 @@ maya::Conversation::Config conversation_config(const Model& m) {
     // long session. Mirrors what the agent_session example achieves
     // with `m.frozen` + `list_ref(...)`: build once per turn lifetime,
     // render-by-reference forever after.
-    cfg.built_turns.reserve(total - start + m.ui.composer.queued.size());
+    cfg.built_turns.reserve(total - start
+                            + m.ui.composer.queued.size()
+                            + divider_at.size());
     for (std::size_t i = start; i < total; ++i) {
+        if (divider_at.contains(i)) {
+            cfg.built_turns.push_back(compaction_divider_prebuilt());
+        }
         const auto& msg = m.d.current.messages[i];
         // Continuation: a 2nd+ Assistant in a same-speaker run. The Turn
         // widget suppresses its header on continuations and the

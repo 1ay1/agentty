@@ -195,65 +195,21 @@ Step submit_message(Model m) {
         return done(std::move(m));
     }
 
-    // Auto-compaction trigger. Threshold is **80% of the active
-    // model's context window** — Sonnet's 200k → trips at 160k, the
-    // 1M-token Sonnet variants → trip at 800k, future models scale
-    // automatically. m.s.context_max is set on model selection from
-    // ui::context_max_for_model(); a 20% safety margin gives the
-    // compaction round + the user's queued message room to fit
-    // before the actual ceiling.
+    // No auto-compaction on submit. Earlier versions queued the
+    // user's message and fired a synchronous compaction round before
+    // releasing it — user hits Enter, sees nothing for 30-60 s,
+    // then their message finally goes out. That was an unacceptable
+    // workflow break.
     //
-    // Inspired by Claude Code 2.1.119's BetaToolRunner.compactionControl
-    // (binary near offset 134600), but its hardcoded 1e5 default was
-    // wrong-direction-pessimistic for Anthropic's bigger models — for
-    // a 200k context it would compact at 50%, throwing away half the
-    // window's worth of accumulated context for no reason. Scaling
-    // with the model fixes that.
-    //
-    // Falls back to no-trigger when context_max is unset / zero (a
-    // freshly-constructed Model before model selection has run).
-    // autocompact_disabled is set by the rapid-refill breaker in
-    // stream.cpp when three compacts in a row land within three
-    // assistant turns of each other. Skipping the auto-trigger here
-    // avoids the compact→fill→compact thrash that surfaces on a
-    // huge tool output the model keeps re-reading. The user can
-    // still trigger compaction manually via /compact.
-    //
-    // Threshold = `context_max - kOutputReserve - kCompactSlack`,
-    // mirroring Claude Code's `OP8=13000` autocompact-buffer (binary
-    // near offset 112623088). The earlier 80 % constant left ~40 K
-    // tokens (200 K window) on the table indefinitely — the user
-    // would feel "context full" at 160 K when the model could safely
-    // run to ~187 K. Reserving an output budget (`kOutputReserve`)
-    // for the model's reply + a small slack (`kCompactSlack`) for
-    // the round-trip is the correct framing: trigger only when the
-    // NEXT request couldn't fit its own response, not at an
-    // arbitrary fraction of the window.
-    constexpr int kOutputReserve = 13000;
-    constexpr int kCompactSlack  = 4000;
-    int threshold = (m.s.context_max > 0 && !m.s.autocompact_disabled)
-        ? std::max(0, m.s.context_max - kOutputReserve - kCompactSlack)
-        : 0;
-    // Use the larger of the lagging `tokens_in` signal (set from the
-    // prior turn's StreamUsage event) and a local estimate computed from
-    // the actual message content. `tokens_in` is unreliable as a
-    // proactive trigger: it reflects the request that *just completed*,
-    // so a turn whose tool calls grew the transcript by 80k chars
-    // (~22k tokens) since the last usage event will see `tokens_in`
-    // still report the pre-growth size and skip compaction here even
-    // though the next request will exceed the window. The local
-    // estimate (bytes / 3.5 + ~1500 per image) catches that case.
-    int est = estimate_prefix_tokens(m.d.current);
-    if (threshold > 0
-        && std::max(m.s.tokens_in, est) > threshold
-        && !m.d.current.messages.empty()) {
-        m.ui.composer.queued.push_back(drain_composer(m));
-        // Reuse the CompactContext reducer arm so the path is one
-        // place: it appends the synthetic prompt + placeholder, sets
-        // m.s.compacting, and launches the stream. finalize_turn's
-        // compaction branch drains m.ui.composer.queued post-compact.
-        return agentty::app::update(std::move(m), Msg{CompactContext{}});
-    }
+    // The new shape: `launch_stream` soft-trims the wire payload to
+    // fit ~95% of context_max on every normal turn, so submits NEVER
+    // need to wait on compaction to be safe. The user's message goes
+    // out immediately. A background auto-compact may still fire at
+    // the next post-turn idle boundary (see `maybe_autocompact_after_turn`
+    // in finalize_turn) — that's the right moment because the user
+    // is reading the model's output, not typing, and the compaction
+    // happens without blocking anything they're trying to do. The
+    // /compact slash command also stays available for manual control.
 
     Message user;
     user.role = Role::User;

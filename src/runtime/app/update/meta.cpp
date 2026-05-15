@@ -26,112 +26,27 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // Refuse if a turn is already in flight or compaction is
             // already running — the next CompactContext lands cleanly
             // on Idle. Refuse on an empty thread (nothing to compact).
-            // Refuse if last message is a streaming assistant
-            // placeholder (would corrupt mid-turn state).
             if (!m.s.is_idle() || m.s.compacting) return done(std::move(m));
             if (m.d.current.messages.empty()) return done(std::move(m));
 
-            // Pre-trim guard: when CompactContext fires because the
-            // mid-turn ceiling check tripped, the conversation is
-            // already near (or over) context-max. The summarization
-            // request itself includes the full message history, so
-            // without trimming it would hit the same context-length
-            // wall the trigger was trying to avoid. Drop the oldest
-            // messages until the estimate fits a hard ceiling (~65%
-            // of context-max, leaving ~35% headroom for the synth
-            // prompt + the summary response itself). The dropped
-            // turns are exactly the ones whose content is least
-            // load-bearing for "resume the task" — earliest
-            // exploratory tool calls — and the summary will be told
-            // (by virtue of seeing only the recent state) to focus
-            // on what's left.
-            if (m.s.context_max > 0) {
-                int compact_ceiling = static_cast<int>(
-                    static_cast<double>(m.s.context_max) * 0.65);
-                // Drop one message at a time from the front. Cheap because
-                // the messages vector is small (low hundreds of entries on
-                // any realistic session) and we only fall into this branch
-                // when we've genuinely overrun.
-                while (estimate_prefix_tokens(m.d.current) > compact_ceiling
-                       && m.d.current.messages.size() > 1) {
-                    m.d.current.messages.erase(m.d.current.messages.begin());
-                }
-                // The first surviving message may now be an Assistant
-                // (we erased a User from in front of it), which makes
-                // an invalid wire — Anthropic requires the message
-                // sequence to start with a User. Drop leading
-                // Assistants until we hit a User or run out.
-                while (!m.d.current.messages.empty()
-                       && m.d.current.messages.front().role == Role::Assistant) {
-                    m.d.current.messages.erase(m.d.current.messages.begin());
-                }
-                // Empty after trim is fine — the synth user prompt below
-                // becomes the only message and the model summarises from
-                // whatever context fits in the system prompt (effectively
-                // a "fresh start" notice). Better than wedging.
-            }
-
-            // Snapshot the post-trim message count so the
-            // compaction-finalize path in stream.cpp can recover the
-            // original slice [0, compact_pre_synth_count). The synthetic
-            // summarisation prompt + assistant placeholder appended
-            // below are bookkeeping that doesn't belong in the
-            // post-compact conversation; preserving the slice lets us
-            // keep a recent-tail of real turns verbatim so the UI
-            // doesn't reset to a single message.
-            m.s.compact_pre_synth_count = m.d.current.messages.size();
-
-            // Synthetic User message asking the model to summarise.
-            // Mirrors Claude Code's `mm8` summary prompt (binary near
-            // offset 134600). The schema (Task / State / Discoveries /
-            // Next Steps / Context-to-Preserve) is deliberately verbose
-            // — it nudges the model to write a recoverable summary
-            // rather than a one-paragraph précis that loses
-            // operationally-load-bearing details.
-            Message synth;
-            synth.role = Role::User;
-            synth.text =
-                "You have been working on the task described above but have "
-                "not yet completed it. Write a continuation summary that "
-                "will allow you (or another instance of yourself) to resume "
-                "work efficiently in a future context window where the "
-                "conversation history will be replaced with this summary. "
-                "Your summary should be structured, concise, and actionable. "
-                "Include:\n"
-                "1. Task Overview\n"
-                "  The user's core request and success criteria\n"
-                "  Any clarifications or constraints they specified\n"
-                "2. Current State\n"
-                "  What has been completed so far\n"
-                "  Files created, modified, or analyzed (with paths if relevant)\n"
-                "  Key outputs or artifacts produced\n"
-                "3. Important Discoveries\n"
-                "  Technical constraints or requirements uncovered\n"
-                "  Decisions made and their rationale\n"
-                "  Errors encountered and how they were resolved\n"
-                "  What approaches were tried that didn't work (and why)\n"
-                "4. Next Steps\n"
-                "  Specific actions needed to complete the task\n"
-                "  Any blockers or open questions to resolve\n"
-                "  Priority order if multiple steps remain\n"
-                "5. Context to Preserve\n"
-                "  User preferences or style requirements\n"
-                "  Domain-specific details that aren't obvious\n"
-                "  Any promises made to the user\n"
-                "Be concise but complete \xe2\x80\x94 err on the side of "
-                "including information that would prevent duplicate work or "
-                "repeated mistakes. Write in a way that enables immediate "
-                "resumption of the task. Do not call any tools; just write "
-                "the summary text. Wrap the summary in <summary></summary> "
-                "tags.";
-            m.d.current.messages.push_back(std::move(synth));
-
-            // Assistant placeholder + fresh phase::Active matching the
-            // standard submit path so the existing stream-event pipeline
-            // (deltas, finished, error) doesn't need a second code path.
-            Message placeholder;
-            placeholder.role = Role::Assistant;
-            m.d.current.messages.push_back(std::move(placeholder));
+            // Compaction is wire-only: we never mutate the transcript.
+            // The summarisation prompt is built and trimmed on the fly
+            // by `cmd_factory::wire_messages_for_compaction` (which
+            // consults `m.s.context_max` and drops oldest turns until
+            // the request fits ~65% of the window). The streamed reply
+            // lands in `m.s.compaction_buffer`, not in `messages`.
+            // The user keeps seeing every turn they ever had — the
+            // status banner is the only UI signal that compaction is
+            // happening.
+            //
+            // `compaction_target_index` is the boundary the resulting
+            // CompactionRecord will cover: "replace [0, this) with the
+            // summary on future wire payloads." Captured at kickoff so
+            // turns submitted by the user during compaction (queued
+            // via the queue-on-compact path) don't get retroactively
+            // folded into a summary they weren't part of.
+            m.s.compaction_target_index = m.d.current.messages.size();
+            m.s.compaction_buffer.clear();
 
             auto now = std::chrono::steady_clock::now();
             phase::Active ctx;

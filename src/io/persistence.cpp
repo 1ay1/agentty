@@ -360,6 +360,41 @@ static std::expected<Thread, DeserializeError> parse_thread(const json& j) {
         if (!msg) return std::unexpected(std::move(msg).error());
         t.messages.push_back(std::move(*msg));
     }
+    // Compactions: optional. Missing on threads from before the feature
+    // existed and on threads that simply haven't been compacted yet —
+    // both indistinguishable from on-disk and both correctly default to
+    // an empty vector. Per-field tolerance is intentional: a malformed
+    // record (e.g. negative `up_to_index`) is skipped rather than
+    // failing the whole load, because the wire-substitution helper
+    // already validates `up_to_index <= messages.size()` and gracefully
+    // falls back to "no compaction" when it doesn't — worst case the
+    // user re-compacts manually, vs. losing the entire thread.
+    if (j.contains("compactions") && j["compactions"].is_array()) {
+        for (const auto& cj : j["compactions"]) {
+            if (!cj.is_object()) continue;
+            Thread::CompactionRecord rec;
+            if (cj.contains("up_to_index") && cj["up_to_index"].is_number_integer()) {
+                auto v = cj["up_to_index"].get<long long>();
+                if (v < 0) continue;
+                rec.up_to_index = static_cast<std::size_t>(v);
+            } else {
+                continue;
+            }
+            if (cj.contains("summary") && cj["summary"].is_string()) {
+                rec.summary = cj["summary"].get<std::string>();
+            }
+            if (cj.contains("created_at") && cj["created_at"].is_number_integer()) {
+                rec.created_at = std::chrono::system_clock::time_point{
+                    std::chrono::seconds{cj["created_at"].get<int64_t>()}};
+            }
+            // Discard records whose boundary doesn't fit the loaded
+            // transcript — typically only happens when a save was
+            // interrupted mid-compaction.
+            if (rec.up_to_index <= t.messages.size()) {
+                t.compactions.push_back(std::move(rec));
+            }
+        }
+    }
     return t;
 }
 
@@ -516,6 +551,26 @@ void save_thread(const Thread& t) {
     json msgs = json::array();
     for (const auto& m : t.messages) msgs.push_back(message_to_json(m));
     j["messages"] = std::move(msgs);
+    // Wire-only compaction records. Persisting these lets a reloaded
+    // thread keep sending the SAME wire payload it was sending before
+    // shutdown — if the user compacted at turn 40 then closed the app,
+    // the next request after reload still summarises the [0, 40) prefix
+    // instead of resending all 40 raw turns and blowing context. Empty
+    // for threads that have never been compacted (the common case);
+    // older on-disk threads predate the field and parse_thread defaults
+    // it to empty, so upgrade is transparent.
+    if (!t.compactions.empty()) {
+        json comps = json::array();
+        for (const auto& c : t.compactions) {
+            json cj;
+            cj["up_to_index"] = c.up_to_index;
+            cj["summary"]     = tools::util::to_valid_utf8(c.summary);
+            cj["created_at"]  = std::chrono::duration_cast<std::chrono::seconds>(
+                                    c.created_at.time_since_epoch()).count();
+            comps.push_back(std::move(cj));
+        }
+        j["compactions"] = std::move(comps);
+    }
     // dump() throws type_error.316 on non-UTF-8 bytes. Scrubbing in
     // message_to_json should have caught everything, but swallow the
     // exception as a belt-and-suspenders guard against future regressions —
