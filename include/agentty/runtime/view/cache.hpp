@@ -57,6 +57,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <maya/widget/turn.hpp>
 
@@ -124,13 +125,30 @@ public:
     [[nodiscard]] TurnConfigCache& turn_config(const ThreadId& tid,
                                                const MessageId& mid);
 
+    // Drop every entry under `tid` whose MessageId isn't in `live`.
+    // Use after compaction (which clears most of `messages` while
+    // keeping the preserved tail's MessageIds intact) so the dropped
+    // pre-compact entries don't sit in the LRU consuming heap until
+    // pushed out by new accesses. The post-compact conversation is
+    // typically 3-5 messages; without this call, the 32-slot LRU
+    // would refill only as new turns arrive, holding pre-compact
+    // Element trees indefinitely on a quiet session.
+    //
+    // Entries belonging to OTHER threads (different `tid`) are left
+    // alone — those are still reachable when the user switches back,
+    // and the LRU bounds their total footprint independently.
+    void retain_messages(const ThreadId& tid,
+                         const std::unordered_set<std::string>& live);
+
     // Override the LRU cap. Capacity 0 is treated as 1 (must hold the
-    // current touch). Note: there's no manual evict_* path anymore —
-    // stale entries get pushed out by LRU as the new thread / new
-    // post-compaction messages access fresh keys. With the cap at 32
-    // and a few MiB worst-case per entry, the transient memory
-    // footprint during a thread switch is bounded at ~tens of MiB
-    // until the new thread's accesses reclaim those slots.
+    // current touch). Aside from the targeted retain_messages() above
+    // (called once per compaction to drop entries for messages that
+    // didn't survive), there's no manual evict_* path — stale entries
+    // get pushed out by LRU as the new thread / new post-compaction
+    // messages access fresh keys. With the cap at 32 and a few MiB
+    // worst-case per entry, the transient memory footprint during a
+    // thread switch is bounded at ~tens of MiB until the new thread's
+    // accesses reclaim those slots.
     void set_capacity(std::size_t max_entries) noexcept;
 
 private:

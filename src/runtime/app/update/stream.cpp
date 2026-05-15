@@ -10,6 +10,7 @@
 #include <chrono>
 #include <ranges>
 #include <span>
+#include <unordered_set>
 #include <utility>
 
 #include <maya/core/overload.hpp>
@@ -565,6 +566,25 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             m.d.current.messages.push_back(std::move(msg));
         }
         m.d.current.updated_at = std::chrono::system_clock::now();
+
+        // Purge view_cache entries belonging to pre-compaction messages
+        // that didn't survive into preserved_tail. The cache is keyed
+        // by (thread_id, message_id) and message ids are stable across
+        // the move into preserved_tail, so we hand retain_messages the
+        // live set computed from the post-compact vector. Without this
+        // the dropped entries sit in the 32-slot LRU on a quiet thread
+        // (the post-compact conversation is typically 3-5 messages,
+        // not enough turn-over to push the pre-compact Element trees
+        // out organically) and keep the underlying tool_call output
+        // strings alive even after `release_to_kernel()` below — the
+        // very thing release_to_kernel is trying to give back.
+        {
+            std::unordered_set<std::string> live;
+            live.reserve(m.d.current.messages.size());
+            for (const auto& msg : m.d.current.messages)
+                live.insert(msg.id.value);
+            m.ui.view_cache.retain_messages(m.d.current.id, live);
+        }
 
         // Reset the view's slicing window. thread_view_start was
         // anchored at some offset into the OLD long conversation;

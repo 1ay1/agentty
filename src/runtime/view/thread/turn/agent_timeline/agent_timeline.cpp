@@ -69,6 +69,38 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
                    : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
                                       : std::string{"\xe2\x80\xa6"};
         }
+        // Per-event cache key for terminal tools. Once a tool reaches
+        // a terminal state (Done / Failed / Rejected) inside an
+        // otherwise-unresolved turn (because some sibling is still
+        // Running), the turn itself can't be cached at the
+        // Turn::Config / Element level — is_turn_resolved gates on
+        // ALL tools being terminal. But individual terminal tool
+        // cards ARE byte-stable across frames, so giving each one a
+        // content-stable cache_id lets maya's content-keyed component
+        // cache blit those cards' cells directly and skip
+        // ToolBodyPreview's per-frame layout walk. On a turn with 5
+        // done tools and 1 slow running tool, every idle frame now
+        // pays for layout of the running card only.
+        //
+        // Active tools (Pending / Running / Approved) don't get a
+        // cache_id — their card carries a live spinner glyph in the
+        // status icon. The widget gates on terminal-only inside the
+        // cache wrapper as defensive depth, but skipping the field
+        // here keeps the intent explicit at the call site.
+        //
+        // Key shape: `tool:<wire-id>` — the wire-side tool_use id is
+        // assigned by the model when the tool block opens, persists
+        // across the entire turn, and is unique within the running
+        // process. No need to include thread_id (a different
+        // conversation can't see this Element tree). Including the
+        // event's terminal status as a suffix would force a fresh
+        // cache entry on the Pending→Done edge — not needed,
+        // because we only set the field when terminal, so the very
+        // first frame after the transition is the cache populate.
+        std::string event_cache_id;
+        if (tc.is_terminal())
+            event_cache_id = std::string{"tool:"} + tc.id.value;
+
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
             .detail          = std::move(detail),
@@ -76,6 +108,7 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
             .body            = tool_body_preview_config(tc, &grep_hits),
+            .cache_id        = std::move(event_cache_id),
         });
     }
 
