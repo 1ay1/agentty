@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <string_view>
 #include <maya/widget/conversation.hpp>
 #include <maya/widget/turn.hpp>
 #include "agentty/runtime/model.hpp"
@@ -24,7 +25,8 @@ namespace agentty::ui {
                                              int turn_num,
                                              const Model& m,
                                              bool continuation = false,
-                                             bool synthetic    = false);
+                                             bool synthetic    = false,
+                                             std::string_view meta_override = {});
 
 // Build (or return cached) Element for a single turn. A turn is cached
 // once its content is resolved: no in-flight streaming, all tool calls
@@ -44,6 +46,7 @@ namespace agentty::ui {
                                                         int turn_num,
                                                         const Model& m,
                                                         bool continuation = false,
-                                                        bool synthetic    = false);
+                                                        bool synthetic    = false,
+                                                        std::string_view meta_override = {});
 
 } // namespace agentty::ui

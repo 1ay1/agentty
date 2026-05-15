@@ -67,6 +67,34 @@ struct ComposerPaste { std::string text; };
 // recall, the items are gone (same as Claude Code's behaviour).
 struct ComposerRecallQueued {};
 
+// Per-item queue editor. The bigger sibling of ComposerRecallQueued:
+// rather than drain-all, these let the user cycle THROUGH the queued
+// items, load one at a time into the composer, edit it, and submit
+// (which re-queues at the tail — the existing flow). Bound to Alt+↑ /
+// Alt+↓ / Alt+Backspace.
+//
+//   Alt+↑  ComposerQueuePeekPrev  — load the previous queued item into
+//                                    the composer for editing. On the
+//                                    first press, the live draft is
+//                                    snapshotted into composer.draft_save
+//                                    so the round-trip back is non-
+//                                    destructive (same idea as history
+//                                    walk). The item stays in the queue
+//                                    while being peeked; submitting
+//                                    removes it from the queue and re-
+//                                    queues the edited version at the
+//                                    tail.
+//   Alt+↓  ComposerQueuePeekNext  — load the next queued item; at the
+//                                    end of the queue, restore the
+//                                    live draft and exit peek mode.
+//   Alt+Backspace (on empty composer with no peek active)
+//          ComposerQueuePopLast   — pop the most recently queued item
+//                                    off the tail entirely. Undo for an
+//                                    accidental queue submit.
+struct ComposerQueuePeekPrev {};
+struct ComposerQueuePeekNext {};
+struct ComposerQueuePopLast {};
+
 // Word-wise cursor jumps (Ctrl+Left / Ctrl+Right). Word boundaries
 // are whitespace runs; chip placeholders count as a single word.
 struct ComposerCursorWordLeft {};
@@ -360,7 +388,8 @@ using ComposerMsg = std::variant<
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
-    ComposerPaste, ComposerRecallQueued>;
+    ComposerPaste, ComposerRecallQueued,
+    ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 
 using StreamMsg = std::variant<
     StreamStarted, StreamTextDelta,

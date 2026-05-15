@@ -62,6 +62,7 @@ void push_undo(ComposerState& cs) {
 void reset_history(ComposerState& cs) {
     cs.history_idx = -1;
     cs.draft_save.reset();
+    cs.draft_save_attachments.clear();
 }
 
 void begin_edit(ComposerState& cs) {
@@ -243,22 +244,31 @@ ImagePasteResult sniff_image_paste(std::string_view text) {
 // don't deduplicate (a user who typed "y" three times to retry
 // expects all three to be visitable — the editing context for each
 // was different even if the text was the same).
-std::vector<const std::string*> previous_user_texts(const Model& m) {
-    std::vector<const std::string*> out;
+//
+// Returns refs to (text, attachments). Each User message persists its
+// text in chip-form (placeholders + `attachments` vector); restoring
+// both keeps the round-trip non-destructive — a recalled message
+// renders as chips, edits like chips, and re-submits as chips.
+struct HistoryEntryRef {
+    const std::string*             text;
+    const std::vector<Attachment>* attachments;
+};
+std::vector<HistoryEntryRef> previous_user_texts(const Model& m) {
+    std::vector<HistoryEntryRef> out;
     out.reserve(m.d.current.messages.size() / 2);
     for (auto it = m.d.current.messages.rbegin();
          it != m.d.current.messages.rend(); ++it) {
         if (it->role == Role::User && !it->text.empty())
-            out.push_back(&it->text);
+            out.push_back({&it->text, &it->attachments});
     }
     return out;
 }
 
-void apply_history_entry(ComposerState& cs, const std::string& text) {
-    cs.text   = text;
-    cs.cursor = static_cast<int>(text.size());
-    cs.attachments.clear();
-    if (text.find('\n') != std::string::npos) cs.expanded = true;
+void apply_history_entry(ComposerState& cs, const HistoryEntryRef& entry) {
+    cs.text        = *entry.text;
+    cs.attachments = *entry.attachments;
+    cs.cursor      = static_cast<int>(cs.text.size());
+    if (cs.text.find('\n') != std::string::npos) cs.expanded = true;
 }
 
 // Smart-paste from the OS clipboard. Image first, then text, in that
@@ -499,7 +509,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.draft_save = m.ui.composer.text;
             }
             m.ui.composer.history_idx = next_idx;
-            apply_history_entry(m.ui.composer, *texts[
+            apply_history_entry(m.ui.composer, texts[
                 static_cast<std::size_t>(next_idx)]);
             // History walk does NOT push undo: ↑↓ alone are
             // non-destructive (they leave draft_save intact). Once
@@ -522,7 +532,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.history_idx = next_idx;
             if (next_idx < static_cast<int>(texts.size())) {
                 apply_history_entry(m.ui.composer,
-                                    *texts[static_cast<std::size_t>(next_idx)]);
+                                    texts[static_cast<std::size_t>(next_idx)]);
             }
             return done(std::move(m));
         },
@@ -670,10 +680,40 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // Multi-line queued items keep their newlines so a paste
             // that became a queued message survives the recall
             // round-trip.
-            std::string recalled;
+            //
+            // Each queued slot may carry its own attachments[] with
+            // 0-based placeholder indices in its text. We merge the
+            // attachment vectors and rewrite each slot's placeholders
+            // to point at the new (merged) indices as we concatenate.
+            std::string             recalled;
+            std::vector<Attachment> merged_atts;
+            auto append_with_remap = [&](std::string_view text,
+                                         std::vector<Attachment>& atts) {
+                // base = index where this slot's attachments will
+                // land in merged_atts after we push them.
+                std::size_t base = merged_atts.size();
+                for (std::size_t i = 0; i < text.size(); ) {
+                    if (static_cast<unsigned char>(text[i]) == attachment::kSentinel) {
+                        auto len = attachment::placeholder_len_at(text, i);
+                        if (len > 0) {
+                            auto local_idx = attachment::placeholder_index(text, i);
+                            // Drop placeholders that don't resolve
+                            // (corruption / stale index) — same
+                            // defensive policy as attachment::expand.
+                            if (local_idx < atts.size())
+                                recalled += attachment::make_placeholder(base + local_idx);
+                            i += len;
+                            continue;
+                        }
+                    }
+                    recalled.push_back(text[i++]);
+                }
+                for (auto& a : atts) merged_atts.push_back(std::move(a));
+            };
             for (std::size_t i = 0; i < m.ui.composer.queued.size(); ++i) {
                 if (i > 0) recalled.push_back('\n');
-                recalled += m.ui.composer.queued[i];
+                append_with_remap(m.ui.composer.queued[i].text,
+                                  m.ui.composer.queued[i].attachments);
             }
             // Cursor lands at the boundary between recalled text and
             // the user's pre-existing composer input — exactly where
@@ -683,13 +723,17 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // after, else end-of-recalled.)
             int boundary = static_cast<int>(recalled.size());
             if (!m.ui.composer.text.empty()) {
+                // The user's pre-existing composer text might ALSO
+                // carry placeholders into composer.attachments; merge
+                // those last and remap before splicing.
                 recalled.push_back('\n');
                 ++boundary;
-                recalled += m.ui.composer.text;
+                append_with_remap(m.ui.composer.text, m.ui.composer.attachments);
             }
             begin_edit(m.ui.composer);
-            m.ui.composer.text   = std::move(recalled);
-            m.ui.composer.cursor = boundary;
+            m.ui.composer.text        = std::move(recalled);
+            m.ui.composer.attachments = std::move(merged_atts);
+            m.ui.composer.cursor      = boundary;
             // Multi-line content → flip expanded so the composer's
             // `expanded` cap (16 rows) takes effect, not the 8-row
             // unexpanded cap. Same trigger as ComposerPaste.
@@ -701,6 +745,114 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // trade-off as Claude Code — keeps the data model simple
             // (no "soft-deleted, recallable" intermediate state).
             m.ui.composer.queued.clear();
+            return done(std::move(m));
+        },
+        [&](ComposerQueuePeekPrev) -> Step {
+            // Alt+↑ — step further INTO the queue. Order: queue[last]
+            // (most-recently queued, closest to "the one I just
+            // typed") → queue[last-1] → … → queue[0]. So the first
+            // press loads the tail item, which is what the user
+            // usually wants when correcting a typo in their last
+            // queued message.
+            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            // Mutually exclusive with history walking — abandon any
+            // history pick. (The composer text on screen WAS the
+            // history pick; saving it would conflate it with the
+            // live draft. Drop it.)
+            if (m.ui.composer.history_idx >= 0) {
+                m.ui.composer.history_idx = -1;
+                m.ui.composer.draft_save.reset();
+                m.ui.composer.draft_save_attachments.clear();
+            }
+            int n = static_cast<int>(m.ui.composer.queued.size());
+            int next_idx;
+            if (m.ui.composer.queue_peek_idx < 0) {
+                // First press — snapshot the live draft (text +
+                // attachments) and start at the tail. Both fields
+                // are restored if the user walks back past the tail
+                // with Alt+↓.
+                m.ui.composer.draft_save             = m.ui.composer.text;
+                m.ui.composer.draft_save_attachments = m.ui.composer.attachments;
+                next_idx = n - 1;
+            } else {
+                // Already peeking — commit the user's edits back into
+                // the queue slot they came from before moving on.
+                // Without this, Alt+↑ → type → Alt+↑ would silently
+                // discard the typed correction.
+                m.ui.composer.queued[m.ui.composer.queue_peek_idx].text =
+                    std::move(m.ui.composer.text);
+                m.ui.composer.queued[m.ui.composer.queue_peek_idx].attachments =
+                    std::move(m.ui.composer.attachments);
+                next_idx = m.ui.composer.queue_peek_idx - 1;
+                if (next_idx < 0) next_idx = 0;   // clamp, no wrap
+            }
+            m.ui.composer.queue_peek_idx = next_idx;
+            // Move the slot into the live composer (we'll write it
+            // back on the next cycle / submit).
+            m.ui.composer.text        =
+                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].text;
+            m.ui.composer.attachments =
+                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].attachments;
+            m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+            // Peek doesn't snapshot undo (round-trip non-destructive).
+            // Multi-line peeked content → honour expanded cap.
+            if (m.ui.composer.text.find('\n') != std::string::npos)
+                m.ui.composer.expanded = true;
+            return done(std::move(m));
+        },
+        [&](ComposerQueuePeekNext) -> Step {
+            // Alt+↓ — walk back OUT of the queue toward the live draft.
+            // No-op when not peeking.
+            if (m.ui.composer.queue_peek_idx < 0) return done(std::move(m));
+            int n = static_cast<int>(m.ui.composer.queued.size());
+            // Commit the current edit back into its slot first.
+            if (m.ui.composer.queue_peek_idx < n) {
+                m.ui.composer.queued[m.ui.composer.queue_peek_idx].text =
+                    std::move(m.ui.composer.text);
+                m.ui.composer.queued[m.ui.composer.queue_peek_idx].attachments =
+                    std::move(m.ui.composer.attachments);
+            }
+            int next_idx = m.ui.composer.queue_peek_idx + 1;
+            if (next_idx >= n) {
+                // Walked past the tail — restore the live draft
+                // (text + chips) and leave peek mode.
+                m.ui.composer.queue_peek_idx = -1;
+                m.ui.composer.text        = m.ui.composer.draft_save.value_or(std::string{});
+                m.ui.composer.attachments = std::move(m.ui.composer.draft_save_attachments);
+                m.ui.composer.draft_save_attachments.clear();
+                m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+                m.ui.composer.draft_save.reset();
+                return done(std::move(m));
+            }
+            m.ui.composer.queue_peek_idx = next_idx;
+            m.ui.composer.text        =
+                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].text;
+            m.ui.composer.attachments =
+                m.ui.composer.queued[static_cast<std::size_t>(next_idx)].attachments;
+            m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+            if (m.ui.composer.text.find('\n') != std::string::npos)
+                m.ui.composer.expanded = true;
+            return done(std::move(m));
+        },
+        [&](ComposerQueuePopLast) -> Step {
+            // Alt+Backspace on an empty composer with no peek active
+            // — "undo queue": remove the most recently queued item.
+            // Useful when you've fired off a message you immediately
+            // regret while the agent is still busy. The popped bytes
+            // are dropped (not restored to the composer) so this is a
+            // pure delete, mirroring how a real Backspace deletes
+            // characters. If you want to edit it instead, Alt+↑.
+            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            m.ui.composer.queued.pop_back();
+            // If the peek index pointed at or past the dropped tail,
+            // invalidate it. (Subscribe gates this Msg on
+            // queue_peek_idx == -1, but be defensive.)
+            int n = static_cast<int>(m.ui.composer.queued.size());
+            if (m.ui.composer.queue_peek_idx >= n) {
+                m.ui.composer.queue_peek_idx = -1;
+                m.ui.composer.draft_save.reset();
+                m.ui.composer.draft_save_attachments.clear();
+            }
             return done(std::move(m));
         },
     }, cm);

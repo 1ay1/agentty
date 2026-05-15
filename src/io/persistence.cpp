@@ -141,6 +141,34 @@ static json message_to_json(const Message& m) {
     // turn died and why. UTF-8 scrubbed for the same reason as `text`.
     if (m.error) j["error"] = tools::util::to_valid_utf8(*m.error);
     if (m.is_compact_summary) j["is_compact_summary"] = true;
+    // Non-image attachments (Paste / FileRef / Symbol). Persisted so a
+    // reloaded thread can rebuild its wire payload — the user's `text`
+    // carries chip placeholders, and the model only sees real content
+    // after `attachment::expand(...)` splices the bodies back in at
+    // request-build time. Body bytes are base64-encoded since pasted
+    // text can contain anything (NULs, lone surrogates, control bytes
+    // that the UTF-8 scrub would otherwise mangle).
+    if (!m.attachments.empty()) {
+        json atts = json::array();
+        for (const auto& a : m.attachments) {
+            json e;
+            switch (a.kind) {
+                case Attachment::Kind::Paste:   e["kind"] = "paste";   break;
+                case Attachment::Kind::FileRef: e["kind"] = "fileref"; break;
+                case Attachment::Kind::Symbol:  e["kind"] = "symbol";  break;
+                case Attachment::Kind::Image:   e["kind"] = "image";   break;
+            }
+            e["body"]        = util::base64_encode(a.body);
+            if (!a.path.empty())       e["path"]        = a.path;
+            if (!a.media_type.empty()) e["media_type"] = a.media_type;
+            if (!a.name.empty())       e["name"]        = a.name;
+            if (a.line_number > 0)     e["line_number"] = a.line_number;
+            e["line_count"] = a.line_count;
+            e["byte_count"] = a.byte_count;
+            atts.push_back(std::move(e));
+        }
+        j["attachments"] = std::move(atts);
+    }
     return j;
 }
 
@@ -269,6 +297,31 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
             // Drop entries that decode to nothing — corrupted base64
             // shouldn't kill the whole thread load.
             if (!img.bytes.empty()) m.images.push_back(std::move(img));
+        }
+    }
+    if (j.contains("attachments")) {
+        const auto& arr = j["attachments"];
+        if (!arr.is_array())
+            return std::unexpected(DeserializeError{
+                DeserializeErrorKind::InvalidValue, "messages[*].attachments",
+                "expected array"});
+        for (const auto& e : arr) {
+            if (!e.is_object()) continue;
+            Attachment a;
+            auto kind = e.value("kind", std::string{"paste"});
+            if      (kind == "paste")   a.kind = Attachment::Kind::Paste;
+            else if (kind == "fileref") a.kind = Attachment::Kind::FileRef;
+            else if (kind == "symbol")  a.kind = Attachment::Kind::Symbol;
+            else if (kind == "image")   a.kind = Attachment::Kind::Image;
+            else                        a.kind = Attachment::Kind::Paste;
+            a.body        = util::base64_decode(e.value("body", std::string{}));
+            a.path        = e.value("path", std::string{});
+            a.media_type  = e.value("media_type", std::string{});
+            a.name        = e.value("name", std::string{});
+            a.line_number = e.value("line_number", 0);
+            a.line_count  = e.value("line_count", std::size_t{0});
+            a.byte_count  = e.value("byte_count", std::size_t{0});
+            m.attachments.push_back(std::move(a));
         }
     }
     return m;

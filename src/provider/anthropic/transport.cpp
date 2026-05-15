@@ -21,6 +21,7 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/util/base64.hpp"
 
@@ -872,7 +873,17 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
             if (has_text) {
                 if (block_emitted++ > 0) out.push_back(',');
                 const bool last_block = (block_emitted == blocks);
-                write_text_block(out, scrub_utf8(m.text), do_pin && last_block);
+                // Expand chip placeholders (\x01ATT:N\x01) into
+                // their attachment bodies so the model sees the
+                // literal pasted text / file contents. The
+                // transcript renderer keeps the chip form for the
+                // user; only the wire payload sees the full bytes.
+                // No-op when m.attachments is empty (no expansion
+                // needed and no allocation either).
+                std::string wire_text = m.attachments.empty()
+                    ? m.text
+                    : attachment::expand(m.text, m.attachments);
+                write_text_block(out, scrub_utf8(wire_text), do_pin && last_block);
             }
             if (has_tools) {
                 for (const auto& tc : m.tool_calls) {

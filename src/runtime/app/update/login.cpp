@@ -258,7 +258,10 @@ Step token_refreshed(Model m, auth::TokenResult result) {
     // batch its Cmd alongside the toast so the user's first turn fires
     // the moment fresh creds are live.
     if (m.s.is_idle() && !m.ui.composer.queued.empty()) {
-        m.ui.composer.text = m.ui.composer.queued.front();
+        auto& head = m.ui.composer.queued.front();
+        m.ui.composer.text        = std::move(head.text);
+        m.ui.composer.attachments = std::move(head.attachments);
+        m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);

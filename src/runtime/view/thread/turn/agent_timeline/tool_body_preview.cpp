@@ -164,12 +164,23 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    written.
     if (n == "write") {
         auto content = safe_arg(tc.args, "content");
+        const bool streaming_now = !tc.is_terminal();
         if (!content.empty()) {
             out.kind = Kind::FileWrite;
             out.text = std::move(content);
             out.text_color = text_tertiary;
             out.show_footer_stats = true;
-            out.show_all = true;
+            // During streaming the body grows every ~120 ms — `show_all`
+            // would make the card height balloon row-by-row as deltas
+            // arrive, and any rows already pushed to native scrollback
+            // disagree with the next live re-render (rails fragment,
+            // comments from later lines bleed onto earlier rows in the
+            // viewport). Pin the streaming preview to a head+tail window
+            // so the card stays a fixed height for the whole stream;
+            // expand to `show_all` only when the tool is terminal and
+            // the body is final.
+            out.show_all     = !streaming_now;
+            out.is_streaming = streaming_now;
         } else if (tc.is_running()) {
             out.kind = Kind::FileWrite;
             out.text_color = text_tertiary;

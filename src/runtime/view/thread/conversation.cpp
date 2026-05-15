@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstddef>
 
-#include "agentty/runtime/view/thread/activity_indicator.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
 namespace agentty::ui {
@@ -92,17 +91,36 @@ maya::Conversation::Config conversation_config(const Model& m) {
         auto now = std::chrono::system_clock::now();
         for (std::size_t qi = 0; qi < m.ui.composer.queued.size(); ++qi) {
             Message synthetic;
-            synthetic.role      = Role::User;
-            synthetic.text      = m.ui.composer.queued[qi];
-            synthetic.timestamp = now;
+            synthetic.role        = Role::User;
+            synthetic.text        = m.ui.composer.queued[qi].text;
+            // Copy (not move) — the model owns its queue; this is a
+            // per-frame preview. The chip-substitution path in
+            // turn.cpp's User-body builder reads `msg.attachments`
+            // to caption each placeholder.
+            synthetic.attachments = m.ui.composer.queued[qi].attachments;
+            synthetic.timestamp   = now;
+            // Per-item meta strip so the user can tell WHICH queued
+            // message is which when cycling with Alt+↑/Alt+↓ —
+            // otherwise the preview turns are indistinguishable from
+            // each other and from a real prior turn. The active peek
+            // gets a leading marker so the eye lands on it.
+            std::string meta = "queued #" + std::to_string(qi + 1)
+                             + " / "     + std::to_string(m.ui.composer.queued.size());
+            if (static_cast<int>(qi) == m.ui.composer.queue_peek_idx)
+                meta = "\xe2\x9c\x8e editing — " + meta;   // ✎
             cfg.built_turns.push_back(turn_element(synthetic, total + qi,
                                                    turn, m, /*continuation=*/false,
-                                                   /*synthetic=*/true));
+                                                   /*synthetic=*/true,
+                                                   /*meta_override=*/meta));
             ++turn;
         }
     }
 
-    cfg.in_flight = activity_indicator_config(m);
+    // No in-thread activity indicator: the status-bar PhaseChip
+    // already shows the live phase verb + elapsed time from the same
+    // m.s.phase source, so a second copy under the assistant turn was
+    // pure redundancy (and competed for the eye with the chip).
+    cfg.in_flight = std::nullopt;
     return cfg;
 }
 

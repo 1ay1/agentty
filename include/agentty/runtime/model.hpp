@@ -32,10 +32,22 @@ namespace agentty {
 // ============================================================================
 
 struct ComposerState {
+    /// One queued, not-yet-sent message. Carries the same `text` +
+    /// `attachments` pair the live composer does so a paste / @file
+    /// chip that got queued (because the agent was busy) survives
+    /// recall and resend as a chip rather than getting linearised
+    /// into an inline blob the moment it left the composer. The
+    /// fields here name-mirror ComposerState's text+attachments so a
+    /// queue cycle is a structural swap, not a one-way collapse.
+    struct QueuedMessage {
+        std::string             text;
+        std::vector<Attachment> attachments;
+    };
+
     std::string text;
     int  cursor   = 0;
     bool expanded = false;
-    std::vector<std::string> queued;
+    std::vector<QueuedMessage> queued;
     /// Long pastes and @file picks live here as out-of-band bodies; the
     /// composer text holds a placeholder token (\x01ATT:N\x01) per
     /// attachment so cursor math and word-wrap stay plain-string.
@@ -73,6 +85,32 @@ struct ComposerState {
     /// from history, treating it as their new draft.
     int                        history_idx = -1;
     std::optional<std::string> draft_save;
+    /// Companion to `draft_save`: the live draft's attachments[]
+    /// captured at the same moment so a queue-peek round-trip
+    /// (Alt+↑ … Alt+↓ past the tail) restores chips too, not just
+    /// the text. Empty if there were no live attachments at the
+    /// time of the snapshot, OR if the snapshot is for a history
+    /// walk (history items never carry attachments — they're
+    /// rendered turns whose chips were collapsed at submit time on
+    /// previous schemas). Cleared together with `draft_save`.
+    std::vector<Attachment>    draft_save_attachments;
+
+    /// Per-item queue peek (Alt+↑ / Alt+↓). Mutually exclusive with
+    /// history_idx — you're either walking past USER messages or
+    /// editing a pending QUEUED one, never both.
+    ///   queue_peek_idx == -1 → not peeking; composer holds the live
+    ///                           draft (or history pick).
+    ///   queue_peek_idx >=  0 → composer is showing
+    ///                           m.ui.composer.queued[queue_peek_idx]
+    ///                           for in-place editing. Submit removes
+    ///                           that index from the queue and re-
+    ///                           queues the edited bytes at the tail;
+    ///                           Esc / Alt+↓ past the end restores the
+    ///                           live draft from draft_save.
+    /// Any text-mutating op while peeking is normal editing of the
+    /// peeked item — only the queue slot is treated as the new
+    /// pending content on submit.
+    int                        queue_peek_idx = -1;
 };
 
 // Todo picker carries its own item list — separate concern from the

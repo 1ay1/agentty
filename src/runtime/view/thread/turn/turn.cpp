@@ -9,6 +9,7 @@
 #include <maya/widget/markdown.hpp>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -236,7 +237,8 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 
 maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m,
-                               bool continuation, bool synthetic) {
+                               bool continuation, bool synthetic,
+                               std::string_view meta_override) {
     // Resolved-turn cache. A turn is cacheable once its content can no
     // longer change: streaming over, every tool call terminal, no
     // pending permission still pointing at it. Reusing the prior
@@ -275,6 +277,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                           msg.role == Role::Assistant
                               ? assistant_elapsed(msg, m)
                               : std::nullopt);
+    if (!meta_override.empty()) cfg.meta = std::string{meta_override};
     cfg.checkpoint_above = (msg.role == Role::User && msg.checkpoint_id.has_value());
     cfg.checkpoint_color = warn;
 
@@ -304,7 +307,40 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     }
 
     if (msg.role == Role::User) {
-        cfg.body.emplace_back(maya::Turn::PlainText{.content = msg.text, .color = fg});
+        // Substitute chip placeholders (\x01ATT:N\x01) with their
+        // human-readable captions so a 400-line paste renders as
+        // "[Pasted text · 412 lines · 14 KB]" in the transcript
+        // instead of inlining the whole body. The wire still sees
+        // the full bytes — the transport calls attachment::expand()
+        // at request-build time. Image placeholders consult
+        // msg.attachments (which still holds an entry per image with
+        // path/media_type/byte_count populated even after the bytes
+        // were lifted onto msg.images), so the same chip label
+        // formula used in the composer applies here verbatim.
+        std::string display;
+        if (msg.attachments.empty()) {
+            display = msg.text;
+        } else {
+            display.reserve(msg.text.size());
+            std::size_t i = 0;
+            while (i < msg.text.size()) {
+                if (static_cast<unsigned char>(msg.text[i]) == attachment::kSentinel) {
+                    auto len = attachment::placeholder_len_at(msg.text, i);
+                    if (len > 0) {
+                        auto idx = attachment::placeholder_index(msg.text, i);
+                        if (idx < msg.attachments.size()) {
+                            display.push_back('[');
+                            display.append(attachment::chip_label(msg.attachments[idx]));
+                            display.push_back(']');
+                        }
+                        i += len;
+                        continue;
+                    }
+                }
+                display.push_back(msg.text[i++]);
+            }
+        }
+        cfg.body.emplace_back(maya::Turn::PlainText{.content = std::move(display), .color = fg});
     } else if (msg.role == Role::Assistant) {
         const bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
         if (has_body) {
@@ -338,7 +374,8 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 maya::Conversation::PreBuilt turn_element(const Message& msg,
                                           std::size_t msg_idx,
                                           int turn_num, const Model& m,
-                                          bool continuation, bool synthetic) {
+                                          bool continuation, bool synthetic,
+                                          std::string_view meta_override) {
     // Resolved-turn fast path: serve the BUILT Element from cache so a
     // long session doesn't re-run Turn::build() for every visible turn
     // every frame. The build itself laid out the agent_timeline + every
@@ -369,7 +406,8 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     }
     // Miss (or live turn): build Config (this hits the Config cache for
     // resolved turns regardless), then run Turn::build() and stash.
-    auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation, synthetic);
+    auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation, synthetic,
+                           meta_override);
     auto built = maya::Turn{std::move(cfg)}.build();
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);

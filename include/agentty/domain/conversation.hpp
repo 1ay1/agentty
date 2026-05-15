@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/domain/id.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
 
 namespace agentty {
 
@@ -216,6 +217,19 @@ struct Message {
     /// markers in `text` so the rendered prose still anchors the
     /// images visually.
     std::vector<ImageContent> images;
+    /// Non-image attachments (Paste / FileRef / Symbol) preserved
+    /// from the composer at submit time. `text` retains the chip-
+    /// form placeholders (`\x01ATT:N\x01`); the renderer substitutes
+    /// each placeholder with `attachment::chip_label(...)` so the
+    /// transcript shows a compact pill instead of inlining a 400-
+    /// line paste, and the transport calls `attachment::expand(...)`
+    /// to splice the full body back in when serialising the wire
+    /// payload. Image attachments are NOT stored here — their bytes
+    /// ride on `images` above and are sent as Anthropic image
+    /// content blocks; the chip in `text` still renders as a pill
+    /// in the transcript via a chip-label substitution from the
+    /// corresponding ImageContent's path.
+    std::vector<Attachment>   attachments;
     std::string streaming_text;
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,
@@ -271,6 +285,17 @@ struct Message {
         mix(text.size());
         mix(streaming_text.size());
         mix(images.size());
+        mix(attachments.size());
+        for (const auto& a : attachments) {
+            // Body bytes don't change after submit; mixing size is
+            // enough to invalidate the render cache on a hypothetical
+            // future edit and cheap enough to keep here.
+            mix(static_cast<std::uint64_t>(a.kind));
+            mix(a.body.size());
+            mix(a.path.size());
+            mix(a.name.size());
+            mix(static_cast<std::uint64_t>(a.line_count));
+        }
         mix(tool_calls.size());
         for (const auto& tc : tool_calls) mix(tc.compute_render_key());
         mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent

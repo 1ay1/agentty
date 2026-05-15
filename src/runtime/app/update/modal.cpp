@@ -118,10 +118,24 @@ Step submit_message(Model m) {
     // now, attachments vector becomes empty" semantics so a Recall
     // (Up arrow) of a queued item never resurrects a placeholder
     // pointing at a dropped index.
+    // Drain composer.text + composer.attachments into a chip-form
+    // payload — the placeholders STAY in the text and the attachment
+    // bodies travel separately. Used by:
+    //   • the queue-on-busy / queue-on-compact paths (queued items
+    //     keep their chips so recall + resend renders as a chip too,
+    //     not a linearised blob);
+    //   • the actual submit path below (the new Message gets the
+    //     same chip-form text and the attachments are moved onto
+    //     `Message.attachments`).
+    //
+    // The transport calls `attachment::expand(...)` at request-build
+    // time to splice the bodies back in so the model still sees
+    // literal pasted bytes / file contents — the only thing that
+    // changes is what the user sees in the rendered transcript.
     auto drain_composer = [](Model& mm) {
-        std::string out = mm.ui.composer.attachments.empty()
-            ? std::exchange(mm.ui.composer.text, {})
-            : attachment::expand(mm.ui.composer.text, mm.ui.composer.attachments);
+        ComposerState::QueuedMessage out;
+        out.text        = std::exchange(mm.ui.composer.text, {});
+        out.attachments = std::exchange(mm.ui.composer.attachments, {});
         mm.ui.composer.text.clear();
         mm.ui.composer.attachments.clear();
         mm.ui.composer.cursor = 0;
@@ -133,8 +147,33 @@ Step submit_message(Model m) {
         mm.ui.composer.redo_stack.clear();
         mm.ui.composer.history_idx = -1;
         mm.ui.composer.draft_save.reset();
+        mm.ui.composer.queue_peek_idx = -1;
         return out;
     };
+
+    // Peeked-item submission: the user pressed Alt+↑ to load a queued
+    // item, possibly edited it, and submitted. We remove the ORIGINAL
+    // slot from the queue now; the drain-into-queued path below (when
+    // the agent is still busy) will push the edited bytes back onto
+    // the tail. If the agent is idle (rare — user would have to peek
+    // while the agent was busy, then have it finish before they hit
+    // Enter), the edited bytes go straight to the wire and the queue
+    // just shrinks by one.
+    if (m.ui.composer.queue_peek_idx >= 0
+        && m.ui.composer.queue_peek_idx
+               < static_cast<int>(m.ui.composer.queued.size())) {
+        m.ui.composer.queued.erase(
+            m.ui.composer.queued.begin() + m.ui.composer.queue_peek_idx);
+        // draft_save (if any) is the live draft the user was typing
+        // before they pressed Alt+↑. They've explicitly committed the
+        // peeked item by submitting it, so the saved draft is now
+        // homeless — drop it. (drain_composer clears the field too,
+        // but only after we've decided to drain; doing it here keeps
+        // the bail-out paths above tidy.)
+        m.ui.composer.draft_save.reset();
+        m.ui.composer.draft_save_attachments.clear();
+        m.ui.composer.queue_peek_idx = -1;
+    }
 
     // Belt-and-suspenders: queue if any non-Idle phase is in flight.
     // The bare check (Streaming || ExecutingTool) was correct in
@@ -218,24 +257,62 @@ Step submit_message(Model m) {
 
     Message user;
     user.role = Role::User;
-    // Image attachments need to reach the wire as image content
-    // blocks, NOT as the "[image: ...]" prose marker that
-    // attachment::expand emits. Lift the bytes off the composer
-    // BEFORE drain — drain still emits the marker into user.text so
-    // surrounding prose stays anchored, but the actual bytes ride on
-    // user.images and the transport flattens them into Anthropic's
-    // image block format.
-    for (auto& att : m.ui.composer.attachments) {
+    // Drain composer → chip-form text + attachments. Image
+    // attachments must reach the wire as Anthropic image content
+    // blocks (NOT as the "[image: ...]" prose marker); we lift
+    // their bytes onto user.images here and DROP them from
+    // attachments so the on-Message attachments vector only
+    // contains the kinds the wire expander handles textually
+    // (Paste / FileRef / Symbol). The chip placeholder for the
+    // image stays in user.text — the renderer treats a placeholder
+    // pointing past attachments[] as an Image chip and consults
+    // user.images[] for the caption.
+    auto drained = drain_composer(m);
+    // Image attachments: their bytes get lifted to `user.images` so
+    // the transport can encode them as Anthropic image content
+    // blocks. We KEEP the Attachment entry in `drained.attachments`
+    // — just with `body` moved out — so placeholder indices in
+    // `user.text` remain valid (a paste followed by an @file by an
+    // image would have placeholders 0, 1, 2; renumbering after erase
+    // would desynchronise the text with the vector). The wire
+    // expander emits a textual marker for kind==Image; the renderer
+    // surfaces the same chip caption it would for any other kind.
+    for (auto& att : drained.attachments) {
         if (att.kind == Attachment::Kind::Image) {
             ImageContent img;
-            img.media_type = std::move(att.media_type);
+            img.media_type = att.media_type;     // copy: path/type stays on Attachment
             img.bytes      = std::move(att.body);
             user.images.push_back(std::move(img));
         }
     }
-    user.text = drain_composer(m);
-    if (m.d.current.title.empty())
-        m.d.current.title = deps().title_from(user.text);
+    user.text        = std::move(drained.text);
+    user.attachments = std::move(drained.attachments);
+    if (m.d.current.title.empty()) {
+        // Title generation should see human-readable text, not raw
+        // chip placeholders. Build a plain-text view of the user's
+        // message: each `\x01ATT:N\x01` becomes `[<chip-label>]`,
+        // matching what the user sees in the rendered turn.
+        std::string title_src;
+        title_src.reserve(user.text.size());
+        std::size_t i = 0;
+        while (i < user.text.size()) {
+            if (static_cast<unsigned char>(user.text[i]) == attachment::kSentinel) {
+                auto len = attachment::placeholder_len_at(user.text, i);
+                if (len > 0) {
+                    auto idx = attachment::placeholder_index(user.text, i);
+                    if (idx < user.attachments.size()) {
+                        title_src.push_back('[');
+                        title_src.append(attachment::chip_label(user.attachments[idx]));
+                        title_src.push_back(']');
+                    }
+                    i += len;
+                    continue;
+                }
+            }
+            title_src.push_back(user.text[i++]);
+        }
+        m.d.current.title = deps().title_from(title_src);
+    }
     m.d.current.messages.push_back(std::move(user));
 
     Message placeholder;

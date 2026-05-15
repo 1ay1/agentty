@@ -683,7 +683,10 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // function, but tailored: we're already Idle, no pending tools
         // to kick.
         if (!m.ui.composer.queued.empty()) {
-            m.ui.composer.text = m.ui.composer.queued.front();
+            auto& head = m.ui.composer.queued.front();
+            m.ui.composer.text        = std::move(head.text);
+            m.ui.composer.attachments = std::move(head.attachments);
+            m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
             m.ui.composer.queued.erase(m.ui.composer.queued.begin());
             auto [mm, sub_cmd] = submit_message(std::move(m));
             m = std::move(mm);
@@ -864,7 +867,10 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     auto kp = cmd::kick_pending_tools(m);
 
     if (m.s.is_idle() && !m.ui.composer.queued.empty()) {
-        m.ui.composer.text = m.ui.composer.queued.front();
+        auto& head = m.ui.composer.queued.front();
+        m.ui.composer.text        = std::move(head.text);
+        m.ui.composer.attachments = std::move(head.attachments);
+        m.ui.composer.cursor      = static_cast<int>(m.ui.composer.text.size());
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);

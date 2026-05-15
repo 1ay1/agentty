@@ -222,6 +222,7 @@ struct ComposerKeyState {
     bool has_queued;
     bool in_history;     // walking over prior user messages — ↓ has meaning
     bool has_history;    // any prior user turns exist at all — ↑ has meaning
+    bool in_queue_peek;  // editing a queued item in place (Alt+↑/↓ cycle)
 };
 
 std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
@@ -240,7 +241,14 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
                 return (ev.mods.shift || ev.mods.alt)
                        ? Msg{ComposerNewline{}}
                        : Msg{ComposerEnter{}};
-            case SpecialKey::Backspace: return ComposerBackspace{};
+            case SpecialKey::Backspace:
+                // Alt+Backspace on an empty composer with nothing peeked
+                // — "undo queue": drop the most recently queued message.
+                // Useful when you fire-and-forget into the queue and
+                // immediately regret it while the agent's still busy.
+                if (ev.mods.alt && s.text_empty && s.has_queued && !s.in_queue_peek)
+                    return Msg{ComposerQueuePopLast{}};
+                return ComposerBackspace{};
             case SpecialKey::Left:
                 // Ctrl+Left = jump-by-word. Mirrors readline / every
                 // text editor. Plain Left is per-character (chip-aware).
@@ -252,6 +260,13 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             case SpecialKey::Home:      return ComposerCursorHome{};
             case SpecialKey::End:       return ComposerCursorEnd{};
             case SpecialKey::Up:
+                // Alt+↑ — per-item queue editor. Takes precedence over
+                // every other ↑ binding so it works mid-edit (e.g. you
+                // typed half a thought, realized you want to fix the
+                // queued one first — Alt+↑ still gets you there
+                // without having to clear the composer first).
+                if (ev.mods.alt && s.has_queued)
+                    return Msg{ComposerQueuePeekPrev{}};
                 // ↑ priorities, in order:
                 //   1. queue non-empty AND composer empty → recall queue
                 //      (Claude Code's "Press up to edit queued
@@ -269,6 +284,11 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
                 if (s.text_empty && s.has_history) return ComposerHistoryPrev{};
                 return std::nullopt;
             case SpecialKey::Down:
+                // Alt+↓ — walk back OUT of the per-item queue peek
+                // toward the live draft. Only meaningful while peeking;
+                // outside that, falls through.
+                if (ev.mods.alt && s.in_queue_peek)
+                    return Msg{ComposerQueuePeekNext{}};
                 // ↓ only has meaning while walking history — it walks
                 // back toward the live draft. Outside the walk it
                 // falls through.
@@ -350,6 +370,7 @@ Sub<Msg> subscribe(const Model& m) {
         !m.ui.composer.queued.empty(),
         m.ui.composer.history_idx >= 0,
         has_history,
+        m.ui.composer.queue_peek_idx >= 0,
     };
 
     auto key_sub = Sub<Msg>::on_key(
