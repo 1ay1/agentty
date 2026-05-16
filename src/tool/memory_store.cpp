@@ -26,6 +26,13 @@
 #include <sstream>
 #include <system_error>
 #include <unordered_map>
+#include <vector>
+
+#ifndef _WIN32
+#  include <pwd.h>
+#  include <sys/types.h>
+#  include <unistd.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -48,8 +55,60 @@ std::mutex& store_mu() {
     if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
 #if defined(_WIN32)
     if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
+#else
+    // HOME can legitimately be unset (cron, systemd units with
+    // ProtectHome=, containers launched without --env HOME). Fall
+    // back to the password database for the current uid — every
+    // POSIX system has a real home for every login uid.
+    if (::geteuid() != 0 || std::getenv("SUDO_USER") == nullptr) {
+        // getpwuid_r is the thread-safe variant; bound the buffer at
+        // 16 KiB, more than any sane pw_dir + login name + shell.
+        std::vector<char> buf(4096);
+        struct passwd  pw{};
+        struct passwd* result = nullptr;
+        for (;;) {
+            int e = ::getpwuid_r(::geteuid(), &pw, buf.data(), buf.size(), &result);
+            if (e == 0) break;
+            if (e == ERANGE && buf.size() < (1u << 16)) {
+                buf.resize(buf.size() * 2);
+                continue;
+            }
+            result = nullptr;
+            break;
+        }
+        if (result && result->pw_dir && *result->pw_dir)
+            return fs::path{result->pw_dir};
+    }
 #endif
     return {};
+}
+
+// True if `dir` already exists and is writable by us, OR doesn't exist
+// yet but its first existing ancestor is writable (so create_directories
+// will succeed). False on root='/' for any non-root user, on a path
+// inside a read-only mount, etc. The check is best-effort — a TOCTOU
+// race between this and the actual write is harmless: the writer's own
+// errno surfaces if the race lands the wrong way.
+[[nodiscard]] bool dir_path_writable(const fs::path& dir) noexcept {
+#ifdef _WIN32
+    // ::access(W_OK) on Windows is famously unreliable for directory
+    // ACL checks. Defer to the write itself — return true and let the
+    // failure path produce the real Windows error message. The fall-
+    // back logic below is only there for POSIX hosts that mount /
+    // read-only or run as nobody.
+    (void)dir;
+    return true;
+#else
+    std::error_code ec;
+    fs::path probe = dir;
+    while (!probe.empty() && !fs::exists(probe, ec)) {
+        auto parent = probe.parent_path();
+        if (parent == probe) break;            // can't ascend past root
+        probe = parent;
+    }
+    if (probe.empty()) return false;
+    return ::access(probe.c_str(), W_OK) == 0;
+#endif
 }
 
 // Generate an 8-char hex id. `random_device` is seeded once per
@@ -245,8 +304,19 @@ fs::path path_for(Scope s) {
     }
     // Scope::Project — anchored on the workspace root so subprocess
     // calls that cd around don't shift where memory lives.
+    //
+    // Degenerate-root guard: if workspace_root() couldn't resolve a
+    // real cwd at startup it falls back to fs::path{"/"}, and a
+    // remember call would then try to mkdir /.agentty — fails with
+    // EACCES for any non-root user and surfaces the unhelpful
+    // "failed to create directory '/.agentty': Permission denied"
+    // error. Treat root=="/" and other unwritable roots as if no
+    // project scope is available; the append-time fallback below
+    // redirects to user scope so the user's request still succeeds.
     const auto& root = util::workspace_root();
     if (root.empty()) return {};
+    if (root == fs::path{"/"}) return {};
+    if (!dir_path_writable(root / ".agentty")) return {};
     return root / ".agentty" / "memory.jsonl";
 }
 
@@ -278,11 +348,36 @@ AppendResult append(Scope s, std::string_view text) {
     r.scope = s;
     r.text  = std::move(body);
 
-    const auto p = path_for(s);
+    auto p = path_for(s);
+    Scope actual_scope = s;
+    if (p.empty() && s == Scope::Project) {
+        // Project scope unavailable (root==/, unwritable, or unset).
+        // Transparently fall back to user scope so the user's request
+        // is fulfilled; surface the redirect in `note` so the caller
+        // can see what happened.
+        auto fallback = path_for(Scope::User);
+        if (!fallback.empty()) {
+            p = std::move(fallback);
+            actual_scope = Scope::User;
+            r.scope = Scope::User;
+            std::string add = "project scope unavailable (workspace root '"
+                            + util::workspace_root().string()
+                            + "' is not writable); stored under user scope instead";
+            if (res.note.empty()) res.note = std::move(add);
+            else { res.note += "; "; res.note += add; }
+        }
+    }
     if (p.empty()) {
-        res.error = "remember: can't resolve "
+        res.error = "remember: can't resolve a writable "
                   + std::string{to_string(s)}
-                  + " memory path (HOME / workspace_root unset)";
+                  + " memory path. ";
+        if (s == Scope::User) {
+            res.error += "HOME is unset and getpwuid_r returned no home directory.";
+        } else {
+            res.error += "Workspace root '" + util::workspace_root().string()
+                       + "' is not writable, and the user-scope fallback was "
+                       + "also unresolvable (HOME unset).";
+        }
         return res;
     }
 
@@ -326,7 +421,7 @@ AppendResult append(Scope s, std::string_view text) {
         return res;
     }
     res.id = r.id;
-    bump_cache(s);
+    bump_cache(actual_scope);
     return res;
 }
 
