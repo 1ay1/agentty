@@ -882,8 +882,22 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
                 if (!e.text.empty()) {
-                    if (a->first_delta_at.time_since_epoch().count() == 0)
+                    if (a->first_delta_at.time_since_epoch().count() == 0) {
                         a->first_delta_at = now;
+                        // First real byte of this stream attempt —
+                        // the connection demonstrably works. Reset
+                        // the retry budget so a later mid-stream
+                        // failure gets a fresh ladder instead of
+                        // inheriting whatever attempts the prior
+                        // (now-succeeded) connect-time retries
+                        // consumed. Without this, an opus turn that
+                        // survived 2 transient connect failures and
+                        // then hit a mid-stream stall 90 s in could
+                        // only retry once before being marked
+                        // terminal — even though the wire-level
+                        // health was perfect for 90 s of streaming.
+                        a->transient_retries = 0;
+                    }
                     a->live_delta_bytes += e.text.size();
                 }
             }
@@ -917,6 +931,39 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (e.text.size() <= room) msg.pending_stream += e.text;
                     else                       msg.pending_stream.append(e.text, 0, room);
                 }
+                // First-byte inline reveal. The Tick pacer is
+                // responsible for the steady fill animation, but its
+                // cadence (33 ms on DEC-2026 terminals, 100 ms on
+                // plain xterm / Apple Terminal / tmux-without-sync)
+                // adds that much latency to the very first paint of
+                // every turn. Reveal a small head slice synchronously
+                // here so time-to-first-paint is bounded by SSE
+                // arrival, not by tick cadence. The pacer takes over
+                // for the rest — this just unblocks the renderer for
+                // the leading edge.
+                //
+                // Gated on streaming_text being empty so we only fire
+                // once per assistant message; subsequent deltas flow
+                // through the pacer unchanged.
+                if (msg.streaming_text.empty() && !msg.pending_stream.empty()) {
+                    constexpr std::size_t kFirstReveal = 256;
+                    std::size_t n = std::min(kFirstReveal, msg.pending_stream.size());
+                    // UTF-8 safety — same rule as the Tick pacer.
+                    // Bound the continuation walk at 3 bytes so a
+                    // malformed buffer can't push us through the
+                    // whole pending_stream.
+                    {
+                        std::size_t walked = 0;
+                        while (n < msg.pending_stream.size()
+                               && walked < 3
+                               && (static_cast<unsigned char>(msg.pending_stream[n]) & 0xC0) == 0x80) {
+                            ++n;
+                            ++walked;
+                        }
+                    }
+                    msg.streaming_text.append(msg.pending_stream, 0, n);
+                    msg.pending_stream.erase(0, n);
+                }
             }
             return done(std::move(m));
         },
@@ -948,8 +995,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
                 if (!e.partial_json.empty()) {
-                    if (a->first_delta_at.time_since_epoch().count() == 0)
+                    if (a->first_delta_at.time_since_epoch().count() == 0) {
                         a->first_delta_at = now;
+                        // See StreamTextDelta — same rationale.
+                        a->transient_retries = 0;
+                    }
                     a->live_delta_bytes += e.partial_json.size();
                 }
             }

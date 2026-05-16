@@ -93,19 +93,71 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // big server bursts (Anthropic's content_block_delta can carry
             // 50-100+ chars at once) reveal smoothly at cursor pace
             // instead of jumping in.
+            //
+            // Frame-rate-independent: the reveal rate is bytes/second,
+            // not bytes/tick. On a 30 fps tick we drip ~kBytesPerSec/30
+            // per tick; on a 10 fps tick (non-DEC-2026 terminals) we
+            // drip 3× as much per tick. The user-perceived fill speed
+            // is identical across terminal capabilities — previously,
+            // Apple Terminal / plain xterm / tmux-without-sync paid a
+            // 3× latency tax because the 100 ms tick AND the per-tick
+            // cap compounded.
+            //
+            // Burst-flush: when more than kBurstFlushBytes are pending,
+            // the smoother is no longer hiding chunky paints — it's
+            // making the user stare at a stalled cursor. Drain the
+            // whole backlog in one tick. The fill animation is only
+            // worth preserving while the wire is keeping up; once it
+            // gets ahead by a paragraph or more, the latency cost
+            // dominates the aesthetic benefit.
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant)
             {
                 auto& msg = m.d.current.messages.back();
                 if (!msg.pending_stream.empty()) {
-                    constexpr std::size_t kDripMin = 32;
-                    constexpr std::size_t kDripMax = 256;
-                    std::size_t drip = std::clamp(
-                        msg.pending_stream.size() / 8, kDripMin, kDripMax);
-                    drip = std::min(drip, msg.pending_stream.size());
-                    while (drip < msg.pending_stream.size() &&
-                           (static_cast<unsigned char>(msg.pending_stream[drip]) & 0xC0) == 0x80) {
-                        ++drip;
+                    // ~32 KB/s reveal rate. At 30 fps that's ~1 KB per
+                    // tick on a steady fill, well above any plausible
+                    // sustained model emission rate, so the pacer only
+                    // engages on bursts. At 10 fps it's ~3 KB per tick,
+                    // same wall-clock fill speed.
+                    constexpr float kBytesPerSec     = 32768.0f;
+                    constexpr std::size_t kDripMin   = 64;
+                    // Burst-flush threshold. Anthropic batches code
+                    // blocks heavily — a small function body arrives
+                    // in a single content_block_delta of 2–4 KB. The
+                    // prior threshold (2 KB) tripped on every such
+                    // delta, defeating the pacer for code-heavy
+                    // responses (most of them). 8 KB still bounds the
+                    // visual stall — at 32 KB/s reveal that's a
+                    // quarter-second of catch-up — while letting
+                    // routine code-block deltas flow through the
+                    // smoother instead of dumping in one tick.
+                    constexpr std::size_t kBurstFlushBytes = 8192;
+
+                    std::size_t drip;
+                    if (msg.pending_stream.size() >= kBurstFlushBytes) {
+                        // Backlog dominates — flush it all this tick.
+                        drip = msg.pending_stream.size();
+                    } else {
+                        auto target = static_cast<std::size_t>(
+                            kBytesPerSec * dt);
+                        drip = std::max(target, kDripMin);
+                        drip = std::min(drip, msg.pending_stream.size());
+                    }
+                    // UTF-8 safety: don't split a multi-byte codepoint
+                    // at the drip boundary. Walk forward to the next
+                    // leading byte; bounded by the 4-byte max UTF-8
+                    // sequence length so a buffer of malformed
+                    // continuation bytes can't drag us through the
+                    // whole pending_stream.
+                    {
+                        std::size_t walked = 0;
+                        while (drip < msg.pending_stream.size()
+                               && walked < 3
+                               && (static_cast<unsigned char>(msg.pending_stream[drip]) & 0xC0) == 0x80) {
+                            ++drip;
+                            ++walked;
+                        }
                     }
                     msg.streaming_text.append(msg.pending_stream, 0, drip);
                     msg.pending_stream.erase(0, drip);

@@ -667,10 +667,19 @@ std::string make_user_id() {
 // advance which are the pin-eligible ones.
 namespace {
 
+// True whenever an assistant message carries ANY tool_calls. Anthropic
+// requires that every `tool_use` block be followed by a matching
+// `tool_result` in the next message — sending the tool_use without its
+// pair returns HTTP 400 ("`tool_use` ids were found without
+// `tool_result` blocks immediately after") and, because the broken
+// transcript is replayed on every subsequent turn, the session
+// becomes wedged. We therefore emit the follow-up user turn whenever
+// there's a tool_use to pair, even if some of them are still in a
+// non-terminal state (Pending / Approved / Running). The non-terminal
+// branches get a synthesized placeholder result downstream so the wire
+// stays valid; the in-memory ToolUse status is left untouched.
 [[nodiscard]] inline bool is_assistant_with_results(const Message& m) noexcept {
-    if (m.role != Role::Assistant || m.tool_calls.empty()) return false;
-    for (const auto& tc : m.tool_calls) if (tc.is_terminal()) return true;
-    return false;
+    return m.role == Role::Assistant && !m.tool_calls.empty();
 }
 
 void json_write_escaped_string(std::string& out, std::string_view s) {
@@ -791,15 +800,30 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     bool first = true;
     json_write_field(out, "type", "tool_result", first);
     json_write_field(out, "tool_use_id", tc.id.value, first);
+    // Non-terminal tools (Pending / Approved / Running) carry no
+    // output yet. We still MUST emit a tool_result for them — see
+    // is_assistant_with_results above for the wire-shape rationale —
+    // so synthesize an `is_error: true` placeholder. Marking it as an
+    // error tells the model the call didn't actually produce a result,
+    // which is the truthful read of "the previous turn died before
+    // this tool finished." Empty Done output stays as the historical
+    // "(no output)" placeholder (not an error) for tools that
+    // legitimately produced nothing.
     auto raw_output = tc.output();
     std::string scrubbed;
-    if (raw_output.empty()) {
+    const bool non_terminal = !tc.is_terminal();
+    if (non_terminal) {
+        json_write_field(out, "content",
+            "(tool call did not complete \u2014 previous turn ended before this tool produced a result)",
+            first);
+    } else if (raw_output.empty()) {
         json_write_field(out, "content", "(no output)", first);
     } else {
         scrubbed = scrub_utf8(raw_output);
         json_write_field(out, "content", scrubbed, first);
     }
-    json_write_bool_field(out, "is_error", tc.is_failed() || tc.is_rejected(), first);
+    const bool is_error = non_terminal || tc.is_failed() || tc.is_rejected();
+    json_write_bool_field(out, "is_error", is_error, first);
     if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
     out.push_back('}');
 }
@@ -898,16 +922,19 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
         }
 
         // ── Tool-result follow-up (synthetic User turn) ──
+        // Emit one tool_result per tool_use, terminal or not. The
+        // wire shape Anthropic enforces is pairwise (every tool_use
+        // id must appear as a tool_use_id in the next message), so
+        // we cannot selectively drop the non-terminal ones — that's
+        // exactly what triggered the HTTP 400 loop.
         if (is_assistant_with_results(m)) {
             const int my_idx   = emitted;
             const bool do_pin  = pinning_for(my_idx);
             emit_msg_open();
             out.append(R"({"role":"user","content":[)");
-            int total_results = 0;
-            for (const auto& tc : m.tool_calls) if (tc.is_terminal()) ++total_results;
+            const int total_results = static_cast<int>(m.tool_calls.size());
             int result_emitted = 0;
             for (const auto& tc : m.tool_calls) {
-                if (!tc.is_terminal()) continue;
                 if (result_emitted++ > 0) out.push_back(',');
                 const bool last_block = (result_emitted == total_results);
                 write_tool_result_block(out, tc, do_pin && last_block);

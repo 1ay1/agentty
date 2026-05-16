@@ -55,28 +55,42 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // a no-op, so the transition costs nothing.
     const std::string& source =
         msg.text.empty() ? msg.streaming_text : msg.text;
-    cache.streaming->set_content(source);
 
-    // Settled message → commit any trailing tail to the prefix's
-    // block list. Necessary because find_block_boundary only commits
-    // a fenced code block once its closing ``` is followed by a
-    // newline; messages that end at the closing backticks (the
-    // common case for Claude responses ending with a code example)
-    // leave the last block stuck in the tail forever, rendered via
-    // render_tail's inline path instead of the canonical
-    // md_block_to_element. The two paths take the same border /
-    // padding builder but feed it slightly different code strings
-    // (render_tail's extractor vs the parser's stripping rules), so
-    // their painted cells aren't byte-identical. Once that turn
-    // settles and the renderer's cache_id-keyed cell blit picks up
-    // the render_tail output, the layout quirk is locked in until a
-    // resize invalidates the cache by width — which is exactly the
-    // "code block border at the wrong column" symptom we saw.
-    //
-    // finish() is idempotent (no-op once committed_ == source_.size()),
-    // so calling it every frame for a settled message is cheap.
-    if (!msg.text.empty())
-        cache.streaming->finish();
+    // Settled-message fast path. Once a message has settled
+    // (msg.text is final, streaming_text empty) the source bytes are
+    // immutable for the rest of the session. set_content's equal-
+    // content check still costs O(source.size()) memcmp every frame;
+    // on a long thread with many visible turns that adds up. Skip
+    // the call entirely once we've fed the final bytes through once.
+    const bool settled = !msg.text.empty() && msg.streaming_text.empty();
+    const bool already_settled_into_cache =
+        settled && cache.last_settled_size == source.size();
+    if (!already_settled_into_cache) {
+        cache.streaming->set_content(source);
+
+        // Settled message → commit any trailing tail to the prefix's
+        // block list. Necessary because find_block_boundary only commits
+        // a fenced code block once its closing ``` is followed by a
+        // newline; messages that end at the closing backticks (the
+        // common case for Claude responses ending with a code example)
+        // leave the last block stuck in the tail forever, rendered via
+        // render_tail's inline path instead of the canonical
+        // md_block_to_element. The two paths take the same border /
+        // padding builder but feed it slightly different code strings
+        // (render_tail's extractor vs the parser's stripping rules), so
+        // their painted cells aren't byte-identical. Once that turn
+        // settles and the renderer's cache_id-keyed cell blit picks up
+        // the render_tail output, the layout quirk is locked in until a
+        // resize invalidates the cache by width — which is exactly the
+        // "code block border at the wrong column" symptom we saw.
+        //
+        // finish() is idempotent (no-op once committed_ == source_.size()),
+        // so calling it every frame for a settled message is cheap.
+        if (settled) {
+            cache.streaming->finish();
+            cache.last_settled_size = source.size();
+        }
+    }
 
     return cache.streaming->build();
 }

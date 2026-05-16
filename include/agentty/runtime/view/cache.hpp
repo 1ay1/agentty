@@ -73,6 +73,17 @@ namespace agentty::ui {
 struct MessageMdCache {
     std::shared_ptr<maya::Element>            finalized;
     std::shared_ptr<maya::StreamingMarkdown>  streaming;
+    // Size of the last source string fed into `streaming` once the
+    // message settled (text non-empty, no more streaming_text). Once
+    // this matches msg.text.size() we can skip the per-frame
+    // set_content() / finish() round-trip entirely — set_content's
+    // equal-content fast path is already a no-op, but it still pays
+    // an O(text.size()) memcmp on every frame for every visible
+    // settled turn. On a 50-turn × 2 KB conversation that's ~100 KB
+    // of memcmp per keystroke, multiplied by the maya frame rate.
+    // SIZE_MAX is the "not yet settled" sentinel.
+    std::size_t                               last_settled_size =
+        static_cast<std::size_t>(-1);
 };
 
 struct TurnConfigCache {
