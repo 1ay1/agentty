@@ -92,34 +92,66 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     // competing with prose.
     out.chrome_color = tool_category_color(n);
 
-    // ── Edit: EditDiff (per-hunk +/- coloring owned by maya).
-    //    show_all is set — the user wants to see EVERY changed line,
-    //    not a "first 6 + last 2 per side, ⋯ N more" preview. Edits
-    //    are the action the user is verifying; eliding any of them
-    //    defeats the purpose of showing the diff.
-    if (n == "edit" && tc.args.is_object()) {
-        if (auto it = tc.args.find("edits");
-            it != tc.args.end() && it->is_array() && !it->empty())
-        {
-            out.kind = Kind::EditDiff;
-            out.show_all = true;
-            out.hunks.reserve(it->size());
-            for (const auto& e : *it) {
-                if (!e.is_object()) continue;
-                auto ot = e.value("old_text", e.value("old_string", std::string{}));
-                auto nt = e.value("new_text", e.value("new_string", std::string{}));
+    // ── Edit
+    //
+    //  Two rendering paths, picked by what data we have:
+    //
+    //  (a) FENCE-PARSE — for terminal-state edits, pull the diff
+    //      payload out of the ```diff … ``` block the edit tool writes
+    //      into its output text. Routes through Kind::GitDiff for
+    //      interleaved −/+ coloring + line anchors.
+    //
+    //  (b) ARGS-ECHO — streaming / pre-run, no diff exists yet:
+    //      synthesize a Kind::EditDiff from `tc.args.edits[*]`. The
+    //      file's `before` content isn't reachable from the view so
+    //      this is the best preview we can offer until execution
+    //      lands.
+    if (n == "edit") {
+        if (tc.is_terminal() && !tc.is_failed()) {
+            // Pull the diff payload out of the ```diff … ``` fence in the
+            // tool's output. Falls back to EditDiff-from-args if the fence
+            // isn't found (older threads, custom tool wrappers).
+            const auto& body = tc.output();
+            constexpr std::string_view kOpen = "```diff\n";
+            constexpr std::string_view kClose = "\n```";
+            auto a = body.find(kOpen);
+            if (a != std::string::npos) {
+                a += kOpen.size();
+                auto b = body.find(kClose, a);
+                if (b == std::string::npos) b = body.size();
+                out.kind = Kind::GitDiff;
+                out.text = body.substr(a, b - a);
+                out.text_color = text_tertiary;
+                out.show_all = true;
+                return out;
+            }
+            // Fence missing — fall through to args-based EditDiff below.
+        }
+
+        if (tc.args.is_object()) {
+            if (auto it = tc.args.find("edits");
+                it != tc.args.end() && it->is_array() && !it->empty())
+            {
+                out.kind = Kind::EditDiff;
+                out.show_all = true;
+                out.hunks.reserve(it->size());
+                for (const auto& e : *it) {
+                    if (!e.is_object()) continue;
+                    auto ot = e.value("old_text", e.value("old_string", std::string{}));
+                    auto nt = e.value("new_text", e.value("new_string", std::string{}));
+                    out.hunks.push_back({std::move(ot), std::move(nt)});
+                }
+                return out;
+            }
+            auto ot = safe_arg(tc.args, "old_text");
+            if (ot.empty()) ot = safe_arg(tc.args, "old_string");
+            auto nt = safe_arg(tc.args, "new_text");
+            if (nt.empty()) nt = safe_arg(tc.args, "new_string");
+            if (!ot.empty() || !nt.empty()) {
+                out.kind = Kind::EditDiff;
+                out.show_all = true;
                 out.hunks.push_back({std::move(ot), std::move(nt)});
             }
-            return out;
-        }
-        auto ot = safe_arg(tc.args, "old_text");
-        if (ot.empty()) ot = safe_arg(tc.args, "old_string");
-        auto nt = safe_arg(tc.args, "new_text");
-        if (nt.empty()) nt = safe_arg(tc.args, "new_string");
-        if (!ot.empty() || !nt.empty()) {
-            out.kind = Kind::EditDiff;
-            out.show_all = true;
-            out.hunks.push_back({std::move(ot), std::move(nt)});
         }
         return out;
     }
