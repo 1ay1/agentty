@@ -107,6 +107,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //      this is the best preview we can offer until execution
     //      lands.
     if (n == "edit") {
+        const bool streaming_now = !tc.is_terminal();
         if (tc.is_terminal() && !tc.is_failed()) {
             // Pull the diff payload out of the ```diff … ``` fence in the
             // tool's output. Falls back to EditDiff-from-args if the fence
@@ -129,11 +130,20 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         }
 
         if (tc.args.is_object()) {
+            // Mirror Write's discipline: while the edit is streaming, the
+            // hunks grow line-by-line (each `edits[i].new_text` delta
+            // arrives mid-token), which would balloon the card height on
+            // every frame and fragment any rows already pushed to native
+            // scrollback. Pin the streaming preview to the tail window
+            // (show_all=false → maya's tail_only renderer shows just the
+            // last N lines per hunk side); expand to show_all only once
+            // the tool has settled and the body is final.
             if (auto it = tc.args.find("edits");
                 it != tc.args.end() && it->is_array() && !it->empty())
             {
                 out.kind = Kind::EditDiff;
-                out.show_all = true;
+                out.show_all     = !streaming_now;
+                out.is_streaming = streaming_now;
                 out.hunks.reserve(it->size());
                 for (const auto& e : *it) {
                     if (!e.is_object()) continue;
@@ -149,7 +159,8 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             if (nt.empty()) nt = safe_arg(tc.args, "new_string");
             if (!ot.empty() || !nt.empty()) {
                 out.kind = Kind::EditDiff;
-                out.show_all = true;
+                out.show_all     = !streaming_now;
+                out.is_streaming = streaming_now;
                 out.hunks.push_back({std::move(ot), std::move(nt)});
             }
         }
