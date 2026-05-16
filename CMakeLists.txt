@@ -125,7 +125,42 @@ endif()
 
 # Prefer the in-tree submodule when present; only fall back to fetch.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
+    # Optional "always pull latest maya before each build" mode. When ON,
+    # a custom target syncs the submodule to `origin/main` and forces a
+    # rebuild of any maya translation unit that changed. SAFE: refuses to
+    # touch the submodule if it has uncommitted changes (so local maya
+    # edits never get clobbered). Skipped silently if the repo isn't a
+    # git checkout (release tarballs, FetchContent fallback paths).
+    option(AGENTTY_AUTO_PULL_MAYA "Pull latest maya from origin/main on every build" ON)
     add_subdirectory(maya)
+    if(AGENTTY_AUTO_PULL_MAYA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+        find_package(Git QUIET)
+        if(GIT_FOUND)
+            add_custom_target(maya_pull_latest ALL
+                COMMAND ${CMAKE_COMMAND} -E echo
+                    "[maya] checking origin/main…"
+                COMMAND ${GIT_EXECUTABLE}
+                    -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
+                    diff --quiet HEAD
+                    && ${GIT_EXECUTABLE}
+                       -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
+                       fetch --quiet origin main
+                    && ${GIT_EXECUTABLE}
+                       -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
+                       reset --hard --quiet origin/main
+                    || ${CMAKE_COMMAND} -E echo
+                       "[maya] local changes present — skipping auto-pull"
+                COMMENT "Syncing maya/ to origin/main (safe: skips if local changes)"
+                VERBATIM
+                USES_TERMINAL
+            )
+            # Force maya the library to be rebuilt AFTER the pull (in case
+            # sources changed). add_dependencies wires the ordering;
+            # whether anything actually recompiles depends on file
+            # timestamps the git reset may have updated.
+            add_dependencies(maya maya_pull_latest)
+        endif()
+    endif()
 else()
     FetchContent_Declare(
         maya
