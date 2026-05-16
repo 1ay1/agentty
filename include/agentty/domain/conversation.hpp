@@ -16,7 +16,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agentty/diff/diff.hpp"
 #include "agentty/domain/id.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 
@@ -102,28 +101,6 @@ struct ToolUse {
     std::size_t    stream_sniff_size   = 0;
     Status         status   = Pending{};
     bool           expanded = true;
-
-    // Structured filesystem change attached to terminal-state file-
-    // mutating tools (edit, write). Populated by the dispatcher from
-    // ToolOutput::change when a tool returns one — see
-    // src/runtime/app/cmd_factory.cpp::run_tool. Three uses:
-    //
-    //   1. Body rendering: the view prefers this over re-parsing the
-    //      \`\`\`diff fence in `output()` text — same Kind::GitDiff
-    //      rendering, but driven by structured hunks with real line
-    //      numbers, surrounding context, and an undamaged round-trip.
-    //   2. Diff-review pane: when present, the tool's hunks are
-    //      appended to `m.d.pending_changes` so the user can walk /
-    //      accept / reject per-hunk via ^D. `apply_accepted()` then
-    //      rewrites the file using `original_contents` + selected
-    //      hunks if any are rejected.
-    //   3. Persistence: serialized on the ToolUse so a re-opened
-    //      thread keeps its diff state (including any pending review
-    //      that hadn't been resolved at save time).
-    //
-    // `std::nullopt` is the common case — most tool calls aren't
-    // file mutations and never carry a change.
-    std::optional<FileChange> file_change;
 
     // ── State predicates ─────────────────────────────────────────────────
     [[nodiscard]] bool is_pending()  const noexcept { return std::holds_alternative<Pending>(status);  }

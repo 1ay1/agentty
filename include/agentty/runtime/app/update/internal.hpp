@@ -82,14 +82,8 @@ maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
 // `finalize_turn`. The stream_update reducer below uses them.)
 
 // ── update/tool.cpp helpers ──────────────────────────────────────────────
-// `change` is forwarded from ToolExecOutput — file-mutating tools (edit,
-// write) attach a structured FileChange alongside their text. The handler
-// stashes it on the matching ToolUse and appends the file's hunks to
-// m.d.pending_changes so the diff-review pane can review per-hunk. Non-
-// file tools always pass std::nullopt here.
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::expected<std::string, tools::ToolError>&& result,
-                       std::optional<FileChange>&& change);
+                       std::expected<std::string, tools::ToolError>&& result);
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 
