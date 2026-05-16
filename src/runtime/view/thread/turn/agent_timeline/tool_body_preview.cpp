@@ -256,6 +256,22 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             out.kind = Kind::FileRead;
             out.text = body;
             out.text_color = text_tertiary;    // bright cyan — file content rendered as code
+            // Anchor the gutter to the real source line numbers the tool
+            // returned, not 1. The read tool accepts both `offset` and the
+            // Zed-style alias `start_line` (see tools/read.cpp
+            // parse_args); either lands in the args JSON verbatim. When
+            // neither is set the file was read from the top, so the
+            // default start_line=1 in the widget Config is already right.
+            if (tc.args.is_object()) {
+                for (auto k : {"start_line", "offset"}) {
+                    if (auto it = tc.args.find(k);
+                        it != tc.args.end() && it->is_number_integer())
+                    {
+                        int v = it->get<int>();
+                        if (v >= 1) { out.start_line = v; break; }
+                    }
+                }
+            }
             if (grep_hits) {
                 if (auto path = read_path_arg(tc.args); !path.empty()) {
                     if (auto it = grep_hits->find(path); it != grep_hits->end())
