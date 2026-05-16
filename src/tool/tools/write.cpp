@@ -148,10 +148,37 @@ ExecResult run_write(const WriteArgs& a) {
     std::string original;
     std::error_code ec;
     bool exists = fs::exists(p, ec);
+
+    // Refuse to overwrite a directory — fs::is_regular_file is false for
+    // dirs, but the existing branch only fires inside `if (exists)`, so
+    // a model trying to write to `./src/` (with trailing slash, or just a
+    // confused path) would skip the check and land in write_file's open(),
+    // which fails with a less specific EISDIR. Catch it here with a typed
+    // error and an actionable hint.
+    if (exists && fs::is_directory(p, ec))
+        return std::unexpected(ToolError::not_a_file(
+            "'" + a.path.string() + "' is a directory — write needs a file "
+            "path. Append the target filename to the path."));
+
+    // Parent must exist and be a directory. We auto-create missing
+    // parents in write_file(), but if a *file* sits where the parent
+    // dir should be (e.g. user typed `src/main.cpp/extra.cpp`), the
+    // create_directories call fails with a cryptic message; surface
+    // it as a typed error before we even open the temp file.
+    auto parent = p.parent_path();
+    if (!parent.empty() && fs::exists(parent, ec)
+     && !fs::is_directory(parent, ec))
+        return std::unexpected(ToolError::not_a_directory(
+            "parent of '" + a.path.string() + "' exists but is not a "
+            "directory ('" + parent.string() + "' is a file). Pick a "
+            "different path or remove the conflicting file first."));
+
     uintmax_t original_size = 0;
     if (exists) {
         if (!fs::is_regular_file(p, ec))
-            return std::unexpected(ToolError::not_a_file("not a regular file: " + a.path.string()));
+            return std::unexpected(ToolError::not_a_file(
+                "not a regular file: " + a.path.string()
+                + " (special file / device / socket?)"));
         original_size = fs::file_size(p, ec);
         if (ec) original_size = 0;
         // Mirror the cap on the existing-file side. A user can have a 1 GB

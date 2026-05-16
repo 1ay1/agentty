@@ -335,14 +335,40 @@ int apply_one(std::string& buf, const OneEdit& e,
 ExecResult run_edit(const EditArgs& a) {
     const auto& p = a.path.path();
     std::error_code ec;
-    if (!fs::exists(p, ec))
-        return std::unexpected(ToolError::not_found("file not found: "
-            + a.path.string()
-            + ". Run `list_dir` on the parent directory or `glob` by name "
-              "to verify."));
+    if (!fs::exists(p, ec)) {
+        // If the *parent* doesn't exist either, the model probably typed
+        // a stale or wrong path — say so explicitly so it stops retrying
+        // the same edit on a phantom file. If the parent exists, suggest
+        // `write` (the canonical "create new file" tool).
+        auto parent = p.parent_path();
+        bool parent_ok = !parent.empty() && fs::exists(parent, ec);
+        if (!parent_ok)
+            return std::unexpected(ToolError::not_found(
+                "file not found: " + a.path.string()
+                + " (parent directory doesn't exist either). "
+                  "Re-check the path — try `list_dir` on a directory you "
+                  "know exists, or `glob` by filename."));
+        return std::unexpected(ToolError::not_found(
+            "file not found: " + a.path.string()
+            + ". To create a new file use the `write` tool; "
+              "`edit` only modifies existing files."));
+    }
     if (!fs::is_regular_file(p, ec))
         return std::unexpected(ToolError::not_a_file(
-            "not a regular file: " + a.path.string()));
+            "not a regular file: " + a.path.string()
+            + " (is it a directory or symlink to one?)"));
+
+    // Refuse binary files. Edit's whole contract is line-oriented text
+    // substitution; trying to run fuzzy_find on a 10 MB ELF blob is
+    // both slow and meaningless, and any successful splice would just
+    // corrupt the file. is_binary_file looks for NUL in the first 512 B
+    // — cheap and catches every real-world binary.
+    if (util::is_binary_file(p))
+        return std::unexpected(ToolError::binary(
+            "refusing to edit binary file: " + a.path.string()
+            + " (contains NUL bytes — likely an image, archive, or compiled "
+              "artifact). If this is a text file with a stray NUL, use "
+              "`write` to rewrite it whole."));
 
     std::string original = util::read_file(p);
     std::string updated  = original;
@@ -365,7 +391,8 @@ ExecResult run_edit(const EditArgs& a) {
 
     if (original == updated)
         return ToolOutput{"No edits were made — all old_text / new_text pairs "
-                          "produced identical content.", std::nullopt};
+                          "produced identical content (file unchanged on "
+                          "disk).", std::nullopt};
 
     auto change = diff::compute(a.path.string(), original, updated);
     if (auto werr = util::write_file(p, updated); !werr.empty())
