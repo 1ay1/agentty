@@ -291,6 +291,46 @@ std::string tool_timeline_detail(const ToolUse& tc) {
     }
     if (n == "git_diff" || n == "git_log" || n == "git_status")
         return path_pp.empty() ? std::string{"."} : path_pp;
+    if (n == "remember") {
+        auto text = safe("text");
+        if (text.empty()) return "\xe2\x80\xa6";
+        if (auto nl = text.find('\n'); nl != std::string::npos)
+            text = text.substr(0, nl) + " \xe2\x80\xa6";
+        auto scope = safe("scope");
+        if (scope.empty()) scope = "project";
+        std::string detail = "[" + scope + "] " + text;
+        if (tc.is_done()) {
+            const auto& out = tc.output();
+            if (auto p = out.find("id="); p != std::string::npos) {
+                auto end = out.find_first_of(")\n ", p + 3);
+                if (end != std::string::npos && end - (p + 3) <= 16)
+                    detail += "  \xc2\xb7  " + out.substr(p + 3, end - p - 3);
+            }
+        }
+        return detail;
+    }
+    if (n == "forget") {
+        auto id = safe("id");
+        auto sub = safe("substring");
+        std::string detail = !id.empty() ? ("id=" + id)
+                            : !sub.empty() ? ("\xe2\x80\x9c" + sub + "\xe2\x80\x9d")
+                            : std::string{"\xe2\x80\xa6"};
+        if (auto nl = detail.find('\n'); nl != std::string::npos)
+            detail = detail.substr(0, nl) + " \xe2\x80\xa6";
+        if (tc.is_done()) {
+            const auto& out = tc.output();
+            if (out.starts_with("Forgot ")) {
+                auto sp = out.find(' ', 7);
+                if (sp != std::string::npos) {
+                    auto count = out.substr(7, sp - 7);
+                    detail += "  \xc2\xb7  " + count + " removed";
+                }
+            } else if (out.starts_with("No memory matched")) {
+                detail += "  \xc2\xb7  no match";
+            }
+        }
+        return detail;
+    }
     if (n == "todo") {
         if (tc.args.is_object()) {
             auto it = tc.args.find("todos");
