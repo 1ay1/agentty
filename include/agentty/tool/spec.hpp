@@ -149,6 +149,8 @@ enum class Kind : std::uint8_t {
     GitDiff,
     GitLog,
     GitCommit,
+    Remember,
+    Forget,
 };
 
 inline constexpr std::array kCatalog = {
@@ -169,6 +171,13 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},  // diffs can be big; bigger budget
     ToolSpec{"git_log",         Kind::GitLog,         {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30},   0,      ToolSpec::TruncStrategy::Head},   // pre-commit hooks can be slow; output stays small
+    // Memory tools — append/remove records in ~/.agentty/memory.jsonl (user)
+    // or <workspace>/.agentty/memory.jsonl (project). Loaded back into the
+    // system prompt under <learned-memory> on every turn. Tiny IO footprint,
+    // bounded by the file caps in src/tool/memory_store.cpp; output is one
+    // confirmation line, never large.
+    ToolSpec{"remember",        Kind::Remember,       {Effect::WriteFs},                    false,   detail::sec{5},    2000,   ToolSpec::TruncStrategy::Head},
+    ToolSpec{"forget",          Kind::Forget,         {Effect::WriteFs},                    false,   detail::sec{5},    2000,   ToolSpec::TruncStrategy::Head},
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
@@ -247,6 +256,7 @@ consteval bool kinds_bijective() {
         Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition,
         Kind::Diagnostics, Kind::GitStatus, Kind::GitDiff,
         Kind::GitLog, Kind::GitCommit,
+        Kind::Remember, Kind::Forget,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto k : kAll) {

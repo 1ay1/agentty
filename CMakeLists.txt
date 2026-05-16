@@ -387,6 +387,9 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/tools/find_definition.cpp
     src/tool/tools/diagnostics.cpp
     src/tool/tools/git.cpp
+    src/tool/tools/remember.cpp
+    src/tool/tools/forget.cpp
+    src/tool/memory_store.cpp
 )
 
 # Everything except the entry point — so tests can link the same runtime

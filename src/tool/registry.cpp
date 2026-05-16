@@ -104,6 +104,12 @@ std::vector<ToolDef> build_registry() {
     r.push_back(tool_git_diff());
     r.push_back(tool_git_log());
     r.push_back(tool_git_commit());
+    // Memory tools — listed last so the model's recall bias stays
+    // on the working tools (read/edit/bash/…). The system-prompt
+    // <memory-tools> block is what actually drives "remember when
+    // asked"; ordering here is cosmetic for the wire payload.
+    r.push_back(tool_remember());
+    r.push_back(tool_forget());
     return r;
 }
 

@@ -154,6 +154,15 @@ std::string_view missing_required_field(std::string_view tool_name,
         case K::GitCommit:
             if (!is_nonempty_string("message")) return "message";
             return {};
+        case K::Remember:
+            // remember requires the `text` body. `scope` is optional.
+            if (!is_nonempty_string("text")) return "text";
+            return {};
+        case K::Forget:
+            // forget accepts either `id` or `substring` — the tool's
+            // own parser surfaces the "need one of" error with a richer
+            // message than this guard could, so don't gate here.
+            return {};
         // `path` is nice-to-have but not strictly required for these
         // (list_dir/glob default to cwd; read without path is already
         // a tool error — surfacing it from the tool itself preserves

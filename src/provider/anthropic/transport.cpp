@@ -1,5 +1,7 @@
 #include "agentty/provider/anthropic/transport.hpp"
 
+#include "agentty/tool/memory_store.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdarg>
@@ -1036,7 +1038,14 @@ namespace {
     std::string project = read_memory_cached(std::filesystem::path{"CLAUDE.md"});
     std::string local   = read_memory_cached(std::filesystem::path{"CLAUDE.local.md"});
 
-    if (user.empty() && project.empty() && local.empty()) return {};
+    // Agent-authored memory (written by the `remember` tool, removed by
+    // `forget`). Loaded as tail-N from the per-scope JSONL stores so the
+    // prompt stays bounded even if the on-disk files grow.
+    auto learned_user    = tools::memory::load_recent_user();
+    auto learned_project = tools::memory::load_recent_project();
+
+    if (user.empty() && project.empty() && local.empty()
+        && learned_user.empty() && learned_project.empty()) return {};
 
     std::ostringstream m;
     m << "\n\n<memory>\n"
@@ -1046,6 +1055,17 @@ namespace {
     if (!user.empty())    m << "<user-memory>\n"    << user    << "\n</user-memory>\n";
     if (!project.empty()) m << "<project-memory>\n" << project << "\n</project-memory>\n";
     if (!local.empty())   m << "<local-memory>\n"   << local   << "\n</local-memory>\n";
+    auto emit_learned = [&](const char* tag, const std::vector<tools::memory::Record>& rs) {
+        if (rs.empty()) return;
+        m << "<learned-memory scope=\"" << tag << "\">\n"
+          << "Facts you previously stored via the `remember` tool. Each "
+             "line is prefixed with the record id — pass that id to "
+             "`forget` if the fact is no longer true.\n";
+        for (const auto& r : rs) m << tools::memory::render_for_prompt(r) << "\n";
+        m << "</learned-memory>\n";
+    };
+    emit_learned("user",    learned_user);
+    emit_learned("project", learned_project);
     m << "</memory>";
     return m.str();
 }
@@ -1151,7 +1171,33 @@ std::string default_system_prompt() {
     oss << "</environment>\n\n"
         << "<shell-notes>\n"
         << shell_hint << "\n"
-        << "</shell-notes>\n";
+        << "</shell-notes>\n\n"
+        << "<memory-tools>\n"
+        << "  - If the user asks you to remember something — \"remember "
+        << "that...\", \"don't forget X\", \"keep in mind Y\", \"from now "
+        << "on...\", \"always do Z\" — you MUST call the `remember` tool. "
+        << "Do not just acknowledge in prose; the prose disappears at the "
+        << "end of the session, but `remember` persists to "
+        << "~/.agentty/memory.jsonl (scope=user) or "
+        << "<workspace>/.agentty/memory.jsonl (scope=project) and is "
+        << "reloaded into your system prompt on every future turn.\n"
+        << "  - Default scope is `project` (this codebase only). Use "
+        << "scope=`user` when the fact is about the user themselves "
+        << "(\"I prefer fish shell\", \"my name is...\", \"I use vim\") "
+        << "and applies across every project.\n"
+        << "  - Keep each remembered fact short and self-contained: one "
+        << "sentence the future-you can act on without re-reading the "
+        << "current conversation.\n"
+        << "  - If the user asks you to forget something (\"forget X\", "
+        << "\"that's no longer true\", \"drop the memory about Y\"), call "
+        << "`forget` with either the record id (shown as `[id]` prefix "
+        << "in the <learned-memory> block above) or a substring that "
+        << "uniquely identifies the fact.\n"
+        << "  - Do NOT call `remember` proactively for things the user "
+        << "didn't ask you to remember. Don't store transient state "
+        << "(current file you're editing, today's build error). Store "
+        << "durable preferences and project conventions.\n"
+        << "</memory-tools>\n";
     // Append CLAUDE.md tiers (User + Project + Local) when present.
     // Lives at the END of the prompt so the always-on rules above
     // anchor first; user-authored memory then layers on top.

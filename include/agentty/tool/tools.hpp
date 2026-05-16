@@ -25,5 +25,7 @@ namespace agentty::tools {
 [[nodiscard]] ToolDef tool_git_diff();
 [[nodiscard]] ToolDef tool_git_log();
 [[nodiscard]] ToolDef tool_git_commit();
+[[nodiscard]] ToolDef tool_remember();
+[[nodiscard]] ToolDef tool_forget();
 
 } // namespace agentty::tools

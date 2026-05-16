@@ -12,6 +12,11 @@ compile_commands.json
 .env
 credentials.json
 
+# Per-project agent memory — personal scratchpad written by the
+# `remember` tool, gitignored on principle (use a checked-in AGENTTY.md
+# / CLAUDE.md for team-shared project context instead).
+.agentty/
+
 # Release artifacts (uploaded to GitHub releases, not committed)
 agentty-linux-*
 SHA256SUMS
