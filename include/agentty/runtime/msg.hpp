@@ -215,9 +215,16 @@ struct RetryStream {};
 // flag. Reducer dispatches via `std::visit` (or the `if (e.result)` short
 // form for the common case); the typed `ToolError::kind` flows all the way
 // to the view, where it could drive different rendering per category.
+//
+// `change` is the structured filesystem mutation a file-touching tool
+// (edit / write) returns alongside its text. `std::nullopt` for every
+// other tool. Reducer stashes it on the matching ToolUse and appends
+// the hunks to m.d.pending_changes so the diff-review pane (^D) can
+// walk / accept / reject per-hunk.
 struct ToolExecOutput {
     ToolCallId id;
     std::expected<std::string, tools::ToolError> result;
+    std::optional<FileChange> change;
 };
 // Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can

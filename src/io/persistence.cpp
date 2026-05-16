@@ -118,6 +118,38 @@ static json message_to_json(const Message& m) {
         t["args"] = tc.args;
         t["output"] = tools::util::to_valid_utf8(tc.output()); // empty unless terminal
         t["status"] = std::string{tc.status_name()};
+        // Structured FileChange for edit/write tools. Stored on the
+        // ToolUse so reopening a thread keeps the per-hunk review
+        // state (Pending/Accepted/Rejected). The original/new content
+        // blobs are the biggest fields here — a 5000-line file edit
+        // doubles into the JSON — but they're needed to replay
+        // `diff::apply_accepted` after a per-hunk reject decision on
+        // a re-opened thread. Skipped entirely for tools that don't
+        // mutate the filesystem.
+        if (tc.file_change) {
+            const auto& fc = *tc.file_change;
+            json fcj;
+            fcj["path"]              = fc.path;
+            fcj["added"]             = fc.added;
+            fcj["removed"]           = fc.removed;
+            fcj["original_contents"] = tools::util::to_valid_utf8(fc.original_contents);
+            fcj["new_contents"]      = tools::util::to_valid_utf8(fc.new_contents);
+            json hs = json::array();
+            for (const auto& h : fc.hunks) {
+                json hj;
+                hj["old_start"] = h.old_start;
+                hj["old_len"]   = h.old_len;
+                hj["new_start"] = h.new_start;
+                hj["new_len"]   = h.new_len;
+                hj["patch"]     = tools::util::to_valid_utf8(h.patch);
+                hj["status"]    = h.status == Hunk::Status::Accepted ? "accepted"
+                                 : h.status == Hunk::Status::Rejected ? "rejected"
+                                                                      : "pending";
+                hs.push_back(std::move(hj));
+            }
+            fcj["hunks"] = std::move(hs);
+            t["file_change"] = std::move(fcj);
+        }
         tcs.push_back(std::move(t));
     }
     j["tool_calls"] = std::move(tcs);
@@ -267,6 +299,50 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
             auto status = parse_tool_status(status_tag, std::move(output));
             if (!status) return std::unexpected(std::move(status).error());
             tc.status = std::move(*status);
+            // file_change — structured diff data, present only for
+            // edit/write tool calls in threads saved by builds that
+            // had this field. Older threads silently skip; the view
+            // falls back to parsing the ```diff fence out of
+            // tc.output() the way it always did. Per-field tolerance
+            // is intentional — a malformed hunk is just skipped, not
+            // failure-of-thread-load — because losing diff-review
+            // state on one tool call is better than losing the
+            // entire thread.
+            if (auto fcit = t.find("file_change");
+                fcit != t.end() && fcit->is_object())
+            {
+                FileChange fc;
+                fc.path              = fcit->value("path", std::string{});
+                fc.added             = fcit->value("added", 0);
+                fc.removed           = fcit->value("removed", 0);
+                fc.original_contents = fcit->value("original_contents", std::string{});
+                fc.new_contents      = fcit->value("new_contents", std::string{});
+                if (auto hit = fcit->find("hunks");
+                    hit != fcit->end() && hit->is_array())
+                {
+                    for (const auto& hj : *hit) {
+                        if (!hj.is_object()) continue;
+                        Hunk h;
+                        h.old_start = hj.value("old_start", 0);
+                        h.old_len   = hj.value("old_len",   0);
+                        h.new_start = hj.value("new_start", 0);
+                        h.new_len   = hj.value("new_len",   0);
+                        h.patch     = hj.value("patch", std::string{});
+                        auto st = hj.value("status", std::string{"pending"});
+                        h.status = st == "accepted" ? Hunk::Status::Accepted
+                                 : st == "rejected" ? Hunk::Status::Rejected
+                                                    : Hunk::Status::Pending;
+                        fc.hunks.push_back(std::move(h));
+                    }
+                }
+                // Defer pushing to m.d.pending_changes — that's a
+                // session-scope decision the reducer makes (a re-
+                // opened thread shouldn't auto-resurrect a review
+                // pane the user dismissed before close). The struct
+                // stays on tc.file_change for the body renderer; the
+                // user can re-open the pane to revisit if they want.
+                tc.file_change = std::move(fc);
+            }
             m.tool_calls.push_back(std::move(tc));
         }
     }

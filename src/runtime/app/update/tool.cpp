@@ -60,7 +60,8 @@ void release_streaming_buffers(ToolUse& tc) {
 } // namespace
 
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::expected<std::string, tools::ToolError>&& result) {
+                       std::expected<std::string, tools::ToolError>&& result,
+                       std::optional<FileChange>&& change) {
     for (auto& msg : m.d.current.messages)
         for (auto& tc : msg.tool_calls)
             if (tc.id == id) {
@@ -92,6 +93,30 @@ void apply_tool_output(Model& m, const ToolCallId& id,
                     // the future, when the view branches on category.
                     tc.status = ToolUse::Failed{started, now,
                         clamp_output(result.error().render())};
+                }
+                // Stash structured FileChange (edit/write only) and
+                // queue it for diff-review. Two stores:
+                //   * tc.file_change — used by the view to render the
+                //     Edit card body as Kind::GitDiff with real hunks /
+                //     line numbers without re-parsing the embedded
+                //     ```diff fence in tc.output().
+                //   * m.d.pending_changes — user-facing review queue.
+                //     The diff-review modal (^D) walks this; per-hunk
+                //     Accept/Reject mutates the Hunk::Status, and
+                //     RejectHunk / RejectAllChanges replays
+                //     diff::apply_accepted to rewrite the file on disk.
+                //
+                // Multi-edit semantics: each terminal tool call is
+                // appended as its own pending entry. Multiple edits to
+                // the same file land as separate entries; the user
+                // reviews them in chronological order. The chronologically
+                // first entry's `original_contents` is the true pre-state;
+                // intermediate ones reflect state after earlier edits in
+                // the same turn. RejectAll reverts to the earliest pre-
+                // state, individual rejects are best-effort.
+                if (change) {
+                    tc.file_change = *change;
+                    m.d.pending_changes.push_back(std::move(*change));
                 }
                 release_streaming_buffers(tc);
             }
@@ -200,7 +225,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                             }
                         }
             }
-            apply_tool_output(m, e.id, std::move(e.result));
+            apply_tool_output(m, e.id, std::move(e.result), std::move(e.change));
             auto cmd = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(cmd)};
         },

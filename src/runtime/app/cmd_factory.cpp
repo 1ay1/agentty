@@ -406,10 +406,13 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
             try {
                 auto result = tool::DynamicDispatch::execute(name.value, args);
                 if (result) {
-                    dispatch(ToolExecOutput{id, std::move(result->text)});
+                    auto change = std::move(result->change);
+                    dispatch(ToolExecOutput{id, std::move(result->text),
+                                            std::move(change)});
                 } else {
                     dispatch(ToolExecOutput{id,
-                        std::unexpected(std::move(result).error())});
+                        std::unexpected(std::move(result).error()),
+                        std::nullopt});
                 }
             } catch (const std::exception& e) {
                 // DynamicDispatch already catches tool exceptions, but guard
@@ -417,10 +420,12 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
                 // the tool never gets stuck in Running with no terminal Msg.
                 dispatch(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown(
-                        std::string{"dispatch error: "} + e.what()))});
+                        std::string{"dispatch error: "} + e.what())),
+                    std::nullopt});
             } catch (...) {
                 dispatch(ToolExecOutput{id, std::unexpected(
-                    tools::ToolError::unknown("dispatch error: unknown exception"))});
+                    tools::ToolError::unknown("dispatch error: unknown exception")),
+                    std::nullopt});
             }
         });
 }
@@ -429,6 +434,21 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     if (m.d.current.messages.empty()) return Cmd<Msg>::none();
     auto& last = m.d.current.messages.back();
     if (last.role != Role::Assistant) return Cmd<Msg>::none();
+
+    // Bail early if the session is already Idle. This is the
+    // late-arrival window: a tool worker thread can return a
+    // ToolExecOutput AFTER the user has cancelled (Esc → phase=Idle)
+    // or after StreamError dropped to Idle. In those cases there's
+    // no in-flight request to attach a sub-turn to, no ctx to take,
+    // and the result has nowhere to go. Pre-guard means we don't
+    // tumble into the take_active_ctx(...).value() sites below with
+    // an empty optional source and abort the process with
+    // bad_optional_access.
+    //
+    // Tools that were Pending/Approved at cancel-time are already
+    // marked Failed/Rejected by CancelStream's teardown loop, so
+    // there's nothing left to advance anyway.
+    if (m.s.is_idle()) return Cmd<Msg>::none();
 
     std::vector<Cmd<Msg>> cmds;
     bool any_pending = false;
