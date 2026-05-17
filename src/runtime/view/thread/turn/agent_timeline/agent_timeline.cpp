@@ -69,47 +69,26 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
                    : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
                                       : std::string{"\xe2\x80\xa6"};
         }
-        // Per-event cache key for terminal tools. Once a tool reaches
-        // a terminal state (Done / Failed / Rejected) inside an
-        // otherwise-unresolved turn (because some sibling is still
-        // Running), the turn itself can't be cached at the
-        // Turn::Config / Element level — is_turn_resolved gates on
-        // ALL tools being terminal. But individual terminal tool
-        // cards ARE byte-stable across frames, so giving each one a
-        // content-stable cache_id lets maya's content-keyed component
-        // cache blit those cards' cells directly and skip
-        // ToolBodyPreview's per-frame layout walk. On a turn with 5
-        // done tools and 1 slow running tool, every idle frame now
-        // pays for layout of the running card only.
+        // Per-event cache_id disabled.
         //
-        // Active tools (Pending / Running / Approved) don't get a
-        // cache_id — their card carries a live spinner glyph in the
-        // status icon. The widget gates on terminal-only inside the
-        // cache wrapper as defensive depth, but skipping the field
-        // here keeps the intent explicit at the call site.
+        // Setting cache_id on terminal tool events activates maya's
+        // ComponentElement-keyed cell blit in the inline-frame compose
+        // pipeline. In the live agentty session that path produces
+        // scrollback corruption: action-card bodies collapse to their
+        // last line and the left border vanishes (matches the symptom
+        // in maya/tests/test_card_border.cpp, which currently passes
+        // in isolation but reproduces in the live compose loop).
         //
-        // Key shape: `tool:<wire-id>` — the wire-side tool_use id is
-        // assigned by the model when the tool block opens, persists
-        // across the entire turn, and is unique within the running
-        // process. No need to include thread_id (a different
-        // conversation can't see this Element tree). Including the
-        // event's terminal status as a suffix would force a fresh
-        // cache entry on the Pending→Done edge — not needed,
-        // because we only set the field when terminal, so the very
-        // first frame after the transition is the cache populate.
-        // Mix the tool's render key into the cache id so any content-
-        // relevant mutation (output bytes appended in a late chunk after
-        // status flipped terminal, expanded toggled, status transition
-        // from Done→Failed on a late error event) produces a fresh
-        // cache entry instead of blitting stale cells. maya's content-
-        // keyed component cache matches on (cache_id, width) only and
-        // ignores generation, so the cache_id itself has to be the
-        // content identity — otherwise stale cells get blit at the
-        // current row and scroll into permanent scrollback corruption.
+        // The outer turn_element cache (view/cache.hpp) still skips
+        // Turn::build() entirely once is_turn_resolved fires, which
+        // covers the dominant case (turn fully settled, user is
+        // reading). The case we forgo is the in-flight window where
+        // some siblings are Running and others are Done: those Done
+        // cards re-layout every frame until the whole turn settles.
+        // Bounded cost, correct rendering — restore the cache_id once
+        // maya's inline-frame pipeline handles ComponentElement blits
+        // without desyncing prev_cells.
         std::string event_cache_id;
-        if (tc.is_terminal())
-            event_cache_id = std::string{"tool:"} + tc.id.value
-                           + ":" + std::to_string(tc.compute_render_key());
 
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
