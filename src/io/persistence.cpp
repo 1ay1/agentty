@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -613,9 +614,11 @@ void save_settings(const store::Settings& s) {
 
 ThreadId new_id() {
     static std::mt19937_64 rng{std::random_device{}()};
+    static std::mutex      mu;
+    std::lock_guard<std::mutex> lk(mu);
     std::uniform_int_distribution<uint64_t> dist;
     std::ostringstream oss;
-    oss << std::hex << dist(rng);
+    oss << std::hex << std::setw(16) << std::setfill('0') << dist(rng);
     return ThreadId{oss.str()};
 }
 
@@ -655,8 +658,12 @@ MessageId new_message_id() {
     static std::mutex      mu;
     std::lock_guard<std::mutex> lk(mu);
     std::uniform_int_distribution<uint64_t> dist;
+    // Zero-pad to 16 hex digits so every id is fixed width. Variable
+    // width was technically unambiguous given the ":" separator in cache
+    // keys but brittle: a 0x1 roll produced "1", which is a substring of
+    // most other ids. Fixed width also makes persisted ids look uniform.
     std::ostringstream oss;
-    oss << std::hex << dist(rng);
+    oss << std::hex << std::setw(16) << std::setfill('0') << dist(rng);
     return MessageId{oss.str()};
 }
 

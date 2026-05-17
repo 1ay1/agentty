@@ -180,7 +180,15 @@ struct ToolUse {
     [[nodiscard]] std::uint64_t compute_render_key() const {
         std::uint64_t k = 1469598103934665603ULL;
         auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
-        mix(output().size());
+        // Mix bytes of output() (not just size). Size alone would alias
+        // any two same-length outputs onto the same cache_id; a hash
+        // distinguishes them so a hypothetical re-execute path with a
+        // different byte payload can't blit stale cells.
+        const auto& out = output();
+        for (unsigned char c : out) {
+            k = (k ^ static_cast<std::uint64_t>(c)) * 1099511628211ULL;
+        }
+        mix(out.size());
         mix(static_cast<std::uint64_t>(status.index()));
         mix(expanded ? 1ULL : 0ULL);
         return k;

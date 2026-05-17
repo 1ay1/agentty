@@ -73,17 +73,15 @@ namespace agentty::ui {
 struct MessageMdCache {
     std::shared_ptr<maya::Element>            finalized;
     std::shared_ptr<maya::StreamingMarkdown>  streaming;
-    // Size of the last source string fed into `streaming` once the
-    // message settled (text non-empty, no more streaming_text). Once
-    // this matches msg.text.size() we can skip the per-frame
-    // set_content() / finish() round-trip entirely — set_content's
-    // equal-content fast path is already a no-op, but it still pays
-    // an O(text.size()) memcmp on every frame for every visible
-    // settled turn. On a 50-turn × 2 KB conversation that's ~100 KB
-    // of memcmp per keystroke, multiplied by the maya frame rate.
-    // SIZE_MAX is the "not yet settled" sentinel.
+    // (length, FNV-1a hash) of the last source fed into `streaming` after
+    // settle. Once the live msg.text matches both, skip the per-frame
+    // set_content() / finish() round trip — set_content's bytes-equal
+    // fast path is already a no-op but still pays O(text) memcmp every
+    // frame for every visible settled turn. SIZE_MAX in `last_settled_size`
+    // is the "not yet settled" sentinel.
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
+    std::uint64_t                             last_settled_hash = 0;
 };
 
 struct TurnConfigCache {
@@ -122,6 +120,19 @@ struct TurnConfigCache {
     // tool-card list and the markdown body element, so any
     // key-relevant mutation must invalidate it too.
     std::uint64_t                             cfg_render_key     = 0;
+
+    // Cached `turn_num` + `meta_override` at the time `cfg` / `element`
+    // were inserted. Neither participates in compute_render_key (those
+    // are per-Message fields), but both are baked into `cfg.meta` —
+    // virtualization advancing thread_view_start_turn, or a caller
+    // passing a different meta_override, must force a rebuild.
+    int                                       cached_turn_num     = 0;
+    std::string                               cached_meta_override;
+    // Cached model id at insert. speaker_style_for reads m.d.model_id
+    // (current model, not the historical generator) and bakes the
+    // resulting label / rail color into the Config and Element. A
+    // mid-session model switch must therefore invalidate the slot.
+    std::string                               cached_model_id;
 };
 
 // LRU-bounded render cache. Both the markdown render and the turn-config

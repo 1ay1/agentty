@@ -92,9 +92,17 @@ maya::Cmd<Msg> maybe_virtualize(Model& m) {
     // every kSliceChunk turns.
     if (visible <= kViewWindow + kSliceChunk) return Cmd<Msg>::none();
 
+    // Continuations share their run's turn number with conversation_config,
+    // so count only the FIRST assistant of each run here. Counting every
+    // assistant overshoots by (continuations in slice) and bumps the
+    // visible turn label on the messages still in the window.
     int committed_turns = 0;
     for (int i = m.ui.thread_view_start; i < m.ui.thread_view_start + kSliceChunk; ++i) {
-        if (m.d.current.messages[i].role == Role::Assistant) ++committed_turns;
+        const auto& msg = m.d.current.messages[i];
+        if (msg.role != Role::Assistant) continue;
+        const bool continuation = i > 0
+            && m.d.current.messages[i - 1].role == Role::Assistant;
+        if (!continuation) ++committed_turns;
     }
     m.ui.thread_view_start      += kSliceChunk;
     m.ui.thread_view_start_turn += committed_turns;

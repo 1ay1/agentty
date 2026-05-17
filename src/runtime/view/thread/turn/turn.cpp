@@ -20,6 +20,19 @@ namespace agentty::ui {
 
 namespace {
 
+// FNV-1a 64 over a byte range. Used to guard the settled-markdown
+// fast path against in-place same-length mutations of msg.text
+// (no current reducer does this, but a size-only check would
+// silently serve stale Elements if one ever did).
+[[nodiscard]] std::uint64_t fnv1a_64(std::string_view bytes) noexcept {
+    std::uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : bytes) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 // ── Cached markdown render. The ONE Element-returning helper kept in
 //    agentty — strictly because cross-frame cache state lives in the
 //    StreamingMarkdown widget instance, which we keep alive across
@@ -63,8 +76,16 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // on a long thread with many visible turns that adds up. Skip
     // the call entirely once we've fed the final bytes through once.
     const bool settled = !msg.text.empty() && msg.streaming_text.empty();
+    // Size + hash gate. Size alone misses any same-length in-place
+    // rewrite; the hash is computed once per frame at O(source.size())
+    // but the dominant settled-path cost (set_content's full memcmp
+    // against the widget's source_) is avoided when the gate hits.
+    const std::uint64_t source_hash =
+        settled ? fnv1a_64(source) : 0ULL;
     const bool already_settled_into_cache =
-        settled && cache.last_settled_size == source.size();
+        settled
+        && cache.last_settled_size == source.size()
+        && cache.last_settled_hash == source_hash;
     if (!already_settled_into_cache) {
         cache.streaming->set_content(source);
 
@@ -89,6 +110,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         if (settled) {
             cache.streaming->finish();
             cache.last_settled_size = source.size();
+            cache.last_settled_hash = source_hash;
         }
     }
 
@@ -272,11 +294,15 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     (void)msg_idx;
     const bool can_cache = !synthetic && is_turn_resolved(msg, m);
     const std::uint64_t render_key = can_cache ? msg.compute_render_key() : 0ULL;
+    const std::string& model_id_ref = m.d.model_id.value;
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.cfg
             && slot.cfg->continuation == continuation
-            && slot.cfg_render_key == render_key)
+            && slot.cfg_render_key == render_key
+            && slot.cached_turn_num == turn_num
+            && slot.cached_meta_override == meta_override
+            && slot.cached_model_id == model_id_ref)
             return *slot.cfg;
     }
 
@@ -316,6 +342,9 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
             slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
             slot.cfg_render_key = render_key;
+            slot.cached_turn_num = turn_num;
+            slot.cached_meta_override = std::string{meta_override};
+            slot.cached_model_id = model_id_ref;
         }
         return cfg;
     }
@@ -381,6 +410,9 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
         slot.cfg_render_key = render_key;
+        slot.cached_turn_num = turn_num;
+        slot.cached_meta_override = std::string{meta_override};
+        slot.cached_model_id = model_id_ref;
     }
     return cfg;
 }
@@ -410,11 +442,15 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
     // hands maya what it already has.
     const bool can_cache = !synthetic && is_turn_resolved(msg, m);
     const std::uint64_t render_key = can_cache ? msg.compute_render_key() : 0ULL;
+    const std::string& model_id_ref = m.d.model_id.value;
     if (can_cache) {
         auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
         if (slot.element
             && slot.element_continuation == continuation
-            && slot.element_render_key == render_key) {
+            && slot.element_render_key == render_key
+            && slot.cached_turn_num == turn_num
+            && slot.cached_meta_override == meta_override
+            && slot.cached_model_id == model_id_ref) {
             return {slot.element, continuation};
         }
     }
@@ -428,6 +464,9 @@ maya::Conversation::PreBuilt turn_element(const Message& msg,
         slot.element = std::make_shared<maya::Element>(std::move(built));
         slot.element_continuation = continuation;
         slot.element_render_key   = render_key;
+        slot.cached_turn_num      = turn_num;
+        slot.cached_meta_override = std::string{meta_override};
+        slot.cached_model_id      = model_id_ref;
         return {slot.element, continuation};
     }
     return {std::move(built), continuation};
