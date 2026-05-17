@@ -212,10 +212,19 @@ Step login_exchanged(Model m, auth::TokenResult result) {
 
 Step token_refreshed(Model m, auth::TokenResult result) {
     // Background-refresh result. Distinct from login_exchanged: this
-    // path was kicked off by `init()` for a stale-but-refreshable token
-    // on disk, not by a user-driven login flow, so the modal state
-    // doesn't change here.
+    // path was kicked off either by `init()` (stale-but-refreshable
+    // token on disk) or by the StreamError handler reacting to a
+    // mid-session 401 (see stream.cpp, ErrorClass::Auth branch). The
+    // modal state doesn't change here either way; the stream ctx
+    // parked in retry::Scheduled is what tells us we owe a RetryStream.
     m.s.oauth_refresh_in_flight = false;
+
+    // Was a stream parked waiting for this refresh? If so, we either
+    // resume it (success) or tear it down to Idle (failure). Detected
+    // structurally via retry::Scheduled on the active ctx — the only
+    // way the phase reaches that state without a RetryStream already
+    // in flight is the auth-refresh branch in stream.cpp.
+    const bool stream_parked = m.s.in_scheduled();
 
     if (!result) {
         // Refresh failed — surface the typed error in the bottom row.
@@ -225,6 +234,32 @@ Step token_refreshed(Model m, auth::TokenResult result) {
         // status write doesn't get pre-empted.
         std::string text = std::string{"error: token refresh failed: "}
                          + result.error().render();
+
+        // If a stream was parked on this refresh, tear it down: there's
+        // no fresh token coming, so retrying would just 401 again.
+        // Drop to Idle and finalise any in-flight tool calls so the
+        // session is cleanly recoverable via the login modal.
+        if (stream_parked) {
+            auto now = std::chrono::steady_clock::now();
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& last = m.d.current.messages.back();
+                last.error = text;
+                for (auto& tc : last.tool_calls) {
+                    if (!tc.is_terminal()) {
+                        tc.status = ToolUse::Failed{
+                            tc.started_at(), now,
+                            "auth refresh failed"};
+                    }
+                    std::string{}.swap(tc.args_streaming);
+                }
+                if (last.text.empty() && last.tool_calls.empty()) {
+                    m.d.current.messages.pop_back();
+                }
+            }
+            m.s.phase = phase::Idle{};
+        }
+
         auto cmd = set_status_toast(m, std::move(text),
                                     std::chrono::seconds{6});
         // Leave any queued composer text alone — the user can resubmit
@@ -251,6 +286,19 @@ Step token_refreshed(Model m, auth::TokenResult result) {
 
     auto toast_cmd = set_status_toast(m, "OAuth token refreshed",
                                       std::chrono::seconds{3});
+
+    // A stream was parked waiting for this refresh (the StreamError
+    // handler's Auth branch left the phase in Streaming{retry::Scheduled}).
+    // Resume by dispatching RetryStream — the existing RetryStream arm
+    // flips retry back to Fresh and calls launch_stream, which picks
+    // up the freshly-installed bearer from Deps.
+    if (stream_parked) {
+        return {std::move(m),
+            Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                std::move(toast_cmd),
+                Cmd<Msg>::after(std::chrono::milliseconds{0},
+                                Msg{RetryStream{}})})};
+    }
 
     // Drain any text the user queued while the refresh was in flight.
     // Mirrors the stream-finish drain at update/stream.cpp:617 — pull

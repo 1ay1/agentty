@@ -15,6 +15,7 @@
 
 #include <maya/core/overload.hpp>
 
+#include "agentty/auth/auth.hpp"
 #include "agentty/provider/error_class.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -1350,6 +1351,63 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
             const phase::Active* err_ctx = active_ctx(m.s.phase);
             int prior_transient = err_ctx ? err_ctx->transient_retries : 0;
+
+            // ── Auth (401/403): try a one-shot OAuth refresh ─────────
+            // The bearer token expired (or was rotated) mid-session.
+            // Deps still holds the stale header; load creds from disk
+            // to recover the refresh_token, kick off the same
+            // background refresh `init()` uses on startup, and park the
+            // stream ctx in retry::Scheduled. The TokenRefreshed handler
+            // dispatches RetryStream on success (which re-launches with
+            // the freshly-installed bearer) or drops to terminal on
+            // failure, surfacing the existing "run 'agentty login'"
+            // hint exactly as before.
+            //
+            // Gated on err_ctx (can't retry from Idle), !has_committed
+            // (the model already produced visible output — a refresh-
+            // and-retry would duplicate it), and oauth_refresh_in_flight
+            // not already set (avoid stacking refreshes). One refresh
+            // per turn: counted against transient_retries so a server
+            // that keeps returning 401 after a successful refresh
+            // surfaces as terminal rather than looping forever.
+            if (klass == provider::ErrorClass::Auth
+                && err_ctx
+                && !has_committed
+                && !m.s.oauth_refresh_in_flight
+                && prior_transient < provider::kMaxRetries) {
+                std::string refresh_token;
+                if (auto loaded = auth::load_credentials()) {
+                    if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))
+                        refresh_token = o->refresh_token;
+                }
+                if (!refresh_token.empty()) {
+                    // cancel token was already reset at the top of this
+                    // handler; we just rebuild the ctx with bumped
+                    // counters and the Scheduled retry sentinel.
+                    auto ctx = take_active_ctx(std::move(m.s.phase)).value();
+                    ctx.transient_retries = prior_transient + 1;
+                    ctx.retry             = retry::Scheduled{};
+                    m.s.phase = phase::Streaming{std::move(ctx)};
+                    if (last) m.d.current.messages.pop_back();
+                    Message placeholder;
+                    placeholder.role = Role::Assistant;
+                    m.d.current.messages.push_back(std::move(placeholder));
+                    m.s.oauth_refresh_in_flight = true;
+                    m.s.status = "auth expired \xE2\x80\x94 refreshing token\xE2\x80\xA6";
+                    m.s.status_until = {};
+                    auto refresh_cmd = cmd::refresh_oauth(std::move(refresh_token));
+                    if (prepended_into_committed_text) {
+                        return {std::move(m),
+                            Cmd<Msg>::batch(std::move(refresh_cmd),
+                                            Cmd<Msg>::force_redraw())};
+                    }
+                    return {std::move(m), std::move(refresh_cmd)};
+                }
+                // No refresh_token on disk (env-var OAuth, api-key with
+                // a stale Bearer, etc.) — fall through to the terminal
+                // path so the user gets the actionable login hint.
+            }
+
             bool can_retry = (klass == provider::ErrorClass::Transient
                            || klass == provider::ErrorClass::RateLimit)
                           && prior_transient < provider::kMaxRetries
