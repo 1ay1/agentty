@@ -101,27 +101,41 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
         });
     }
 
-    // ── Footer: ✓ DONE / ✗ N FAILED / ⊘ N REJECTED, only when settled.
-    if (done == total && total > 0) {
+    // ── Footer. Present for the entire lifetime of the panel (live and
+    //    settled) so the panel's row count doesn't grow by 1 when the
+    //    last tool transitions to done. Height stability across that
+    //    transition is what keeps panels straddling the scrollback seam
+    //    from leaving rail / border fragments stranded: maya's row diff
+    //    handles in-place row mutations fine, but a height delta on a
+    //    panel that's already partially in native scrollback can't
+    //    rewrite the rows that scrolled off.
+    if (total > 0) {
         int failed = 0, rejected = 0;
         for (const auto& tc : msg.tool_calls) {
             if (tc.is_failed())   ++failed;
             if (tc.is_rejected()) ++rejected;
         }
+        const bool all_done = (done == total);
         maya::AgentTimelineFooter f;
-        f.glyph = "\xe2\x9c\x93";   // ✓
-        f.text  = "done";
-        f.color = success;
-        if (failed > 0) {
-            f.glyph = "\xe2\x9c\x97";           // ✗
-            f.text  = std::to_string(failed) + " failed";
-            f.color = danger;
-        } else if (rejected > 0) {
-            f.glyph = "\xe2\x8a\x98";           // ⊘
-            f.text  = std::to_string(rejected) + " rejected";
-            f.color = warn;
+        if (all_done) {
+            f.glyph = "\xe2\x9c\x93";   // ✓
+            f.text  = "done";
+            f.color = success;
+            if (failed > 0) {
+                f.glyph = "\xe2\x9c\x97";           // ✗
+                f.text  = std::to_string(failed) + " failed";
+                f.color = danger;
+            } else if (rejected > 0) {
+                f.glyph = "\xe2\x8a\x98";           // ⊘
+                f.text  = std::to_string(rejected) + " rejected";
+                f.color = warn;
+            }
+        } else {
+            f.glyph = "\xe2\x97\x8f";   // ●
+            f.text  = "running";
+            f.color = muted;
         }
-        f.summary = std::to_string(total)
+        f.summary = std::to_string(done) + "/" + std::to_string(total)
                   + (total == 1 ? " action   " : " actions   ")
                   + format_duration_compact(total_elapsed);
         cfg.footer = std::move(f);
