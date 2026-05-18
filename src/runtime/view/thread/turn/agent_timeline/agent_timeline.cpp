@@ -69,9 +69,9 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
                    : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
                                       : std::string{"\xe2\x80\xa6"};
         }
-        // Per-event cache_id disabled.
+        // Per-event hash_id disabled.
         //
-        // Setting cache_id on terminal tool events activates maya's
+        // Setting hash_id on terminal tool events activates maya's
         // ComponentElement-keyed cell blit in the inline-frame compose
         // pipeline. In the live agentty session that path produces
         // scrollback corruption: action-card bodies collapse to their
@@ -85,10 +85,10 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
         // reading). The case we forgo is the in-flight window where
         // some siblings are Running and others are Done: those Done
         // cards re-layout every frame until the whole turn settles.
-        // Bounded cost, correct rendering — restore the cache_id once
+        // Bounded cost, correct rendering — restore the hash_id once
         // maya's inline-frame pipeline handles ComponentElement blits
         // without desyncing prev_cells.
-        std::string event_cache_id;
+        maya::CacheId event_hash_id;
 
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
@@ -97,7 +97,7 @@ maya::AgentTimeline::Config agent_timeline_config(const Message& msg,
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
             .body            = tool_body_preview_config(tc, &grep_hits),
-            .cache_id        = std::move(event_cache_id),
+            .hash_id         = event_hash_id,
         });
     }
 
