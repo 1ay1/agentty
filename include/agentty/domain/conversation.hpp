@@ -174,21 +174,23 @@ struct ToolUse {
         return args_dump_cache;
     }
 
-    // FNV-1a over the fields that render_tool_call's output depends on.
-    // The view-side cache (see agentty::ui::tool_card_cache) uses this to
-    // detect whether a terminal-state card can be served from memo.
+    // O(1) render key. Called once per visible tool every frame via
+    // Message::compute_render_key → turn_element/turn_config cache
+    // predicate. Hashing the full output bytes here meant frame time
+    // grew O(total transcript bytes) on long sessions — a few large
+    // Read/Bash outputs and the per-frame cost dominated. Output
+    // bytes are append-only within a (status.index(), output.size())
+    // tuple in practice: Running grows progress_text but is_terminal
+    // is false (we don't cache); Done/Failed land their `output` once
+    // and never mutate it after. A hypothetical re-execute replaces
+    // the whole ToolUse (new ToolCallId, new MessageId-keyed cache
+    // slot) so byte-level disambiguation isn't needed here.
     [[nodiscard]] std::uint64_t compute_render_key() const {
         std::uint64_t k = 1469598103934665603ULL;
         auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
-        // Mix bytes of output() (not just size). Size alone would alias
-        // any two same-length outputs onto the same cache_id; a hash
-        // distinguishes them so a hypothetical re-execute path with a
-        // different byte payload can't blit stale cells.
-        const auto& out = output();
-        for (unsigned char c : out) {
-            k = (k ^ static_cast<std::uint64_t>(c)) * 1099511628211ULL;
-        }
-        mix(out.size());
+        mix(output().size());
+        mix(progress_text().size());
+        mix(args_streaming.size());
         mix(static_cast<std::uint64_t>(status.index()));
         mix(expanded ? 1ULL : 0ULL);
         return k;

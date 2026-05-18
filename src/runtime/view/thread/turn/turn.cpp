@@ -21,19 +21,6 @@ namespace agentty::ui {
 
 namespace {
 
-// FNV-1a 64 over a byte range. Used to guard the settled-markdown
-// fast path against in-place same-length mutations of msg.text
-// (no current reducer does this, but a size-only check would
-// silently serve stale Elements if one ever did).
-[[nodiscard]] std::uint64_t fnv1a_64(std::string_view bytes) noexcept {
-    std::uint64_t h = 1469598103934665603ULL;
-    for (unsigned char c : bytes) {
-        h ^= c;
-        h *= 1099511628211ULL;
-    }
-    return h;
-}
-
 // ── Cached markdown render. The ONE Element-returning helper kept in
 //    agentty — strictly because cross-frame cache state lives in the
 //    StreamingMarkdown widget instance, which we keep alive across
@@ -76,17 +63,18 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // content check still costs O(source.size()) memcmp every frame;
     // on a long thread with many visible turns that adds up. Skip
     // the call entirely once we've fed the final bytes through once.
+    //
+    // Gate is (size + settled-once flag) only. No reducer rewrites
+    // an Assistant's msg.text in place after StreamFinished moves
+    // streaming_text → text; later edits replace the Message
+    // wholesale (new MessageId, new cache slot). Hashing the bytes
+    // every frame to guard against a same-length in-place rewrite
+    // that doesn't exist cost O(text) per visible settled turn per
+    // frame — the dominant per-frame cost on long sessions.
     const bool settled = !msg.text.empty() && msg.streaming_text.empty();
-    // Size + hash gate. Size alone misses any same-length in-place
-    // rewrite; the hash is computed once per frame at O(source.size())
-    // but the dominant settled-path cost (set_content's full memcmp
-    // against the widget's source_) is avoided when the gate hits.
-    const std::uint64_t source_hash =
-        settled ? fnv1a_64(source) : 0ULL;
     const bool already_settled_into_cache =
         settled
-        && cache.last_settled_size == source.size()
-        && cache.last_settled_hash == source_hash;
+        && cache.last_settled_size == source.size();
     if (!already_settled_into_cache) {
         cache.streaming->set_content(source);
 
@@ -111,7 +99,6 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         if (settled) {
             cache.streaming->finish();
             cache.last_settled_size = source.size();
-            cache.last_settled_hash = source_hash;
         }
     }
 

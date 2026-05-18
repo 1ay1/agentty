@@ -73,15 +73,19 @@ namespace agentty::ui {
 struct MessageMdCache {
     std::shared_ptr<maya::Element>            finalized;
     std::shared_ptr<maya::StreamingMarkdown>  streaming;
-    // (length, FNV-1a hash) of the last source fed into `streaming` after
-    // settle. Once the live msg.text matches both, skip the per-frame
-    // set_content() / finish() round trip — set_content's bytes-equal
-    // fast path is already a no-op but still pays O(text) memcmp every
-    // frame for every visible settled turn. SIZE_MAX in `last_settled_size`
+    // Size of the source last fed into `streaming` after settle.
+    // Once a settled msg.text matches it, skip the per-frame
+    // set_content() / finish() round trip — set_content's bytes-
+    // equal fast path is already a no-op but still pays O(text)
+    // memcmp every frame for every visible settled turn. SIZE_MAX
     // is the "not yet settled" sentinel.
+    //
+    // No content hash: msg.text is never rewritten in place after
+    // StreamFinished moves streaming_text → text. Edits replace the
+    // Message wholesale (new MessageId, new cache slot), so size
+    // alone is a sufficient invariant.
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
-    std::uint64_t                             last_settled_hash = 0;
 };
 
 struct TurnConfigCache {
