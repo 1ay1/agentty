@@ -98,6 +98,68 @@ maya::Conversation::Config conversation_config(const Model& m) {
             (i > 0) &&
             (m.d.current.messages[i - 1].role == Role::Assistant);
 
+        // Tool-batch merge: when a serial-tool agent loop produces a
+        // run of consecutive Assistant messages whose only content is
+        // tool_calls (no prose; tool_use → tool_result → tool_use
+        // round-trips), collapse the whole run's tools into the
+        // PRECEDING message's panel so the user sees one ACTIONS card
+        // listing every tool the agent ran, instead of N stacked
+        // 1/1 cards. The wire/protocol shape is untouched — each
+        // Message still goes to the provider as its own assistant
+        // turn — this is a pure view-layer concatenation.
+        //
+        // Detection: walk forward from `i` while the next message is
+        // an Assistant continuation that has tool_calls and no text
+        // (the model produced no prose between tool calls). The
+        // current `msg` is the run's head and keeps its header,
+        // markdown body, and rail; we just append the following
+        // messages' tool_calls into a synthetic copy and skip those
+        // members of the run when the outer loop reaches them.
+        auto is_tool_only_assistant = [](const Message& mm) {
+            return mm.role == Role::Assistant
+                && mm.text.empty()
+                && mm.streaming_text.empty()
+                && !mm.tool_calls.empty();
+        };
+        std::size_t run_end = i + 1;
+        while (run_end < total
+               && m.d.current.messages[run_end].role == Role::Assistant
+               && is_tool_only_assistant(m.d.current.messages[run_end])) {
+            ++run_end;
+        }
+
+        if (run_end > i + 1) {
+            // Build a synthetic merged Message that carries `msg`'s
+            // header identity (id, role, text, timestamp) plus the
+            // union of tool_calls from messages[i..run_end). The
+            // synthetic flag opts out of the per-MessageId Element
+            // cache (the synthetic's tool_calls vector is rebuilt
+            // every frame; caching its built Element keyed on `msg.id`
+            // alone would serve a stale tool list once the run grows).
+            // The freeze-panel snapshot inside turn_config keys on the
+            // tool_calls' render_keys, so once every tool in the run
+            // is terminal the panel Element still freezes correctly.
+            Message merged = msg;
+            merged.tool_calls.reserve(
+                [&]{
+                    std::size_t n = msg.tool_calls.size();
+                    for (std::size_t j = i + 1; j < run_end; ++j)
+                        n += m.d.current.messages[j].tool_calls.size();
+                    return n;
+                }());
+            for (std::size_t j = i + 1; j < run_end; ++j) {
+                const auto& src = m.d.current.messages[j].tool_calls;
+                merged.tool_calls.insert(merged.tool_calls.end(),
+                                         src.begin(), src.end());
+            }
+            cfg.built_turns.push_back(turn_element(
+                merged, i, turn, m, continuation,
+                /*synthetic=*/true));
+            if (msg.role == Role::Assistant && !continuation) ++turn;
+            i = run_end - 1;   // for-loop ++ lands on run_end
+            continue;
+        }
+
         cfg.built_turns.push_back(turn_element(msg, i, turn, m, continuation));
 
         // Increment the user-visible turn number only on the FIRST
