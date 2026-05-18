@@ -3,6 +3,7 @@
 #include "agentty/tool/util/arg_reader.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/tool_args.hpp"
+#include "agentty/domain/refined.hpp"
 
 #include <filesystem>
 #include <format>
@@ -180,14 +181,21 @@ constexpr std::size_t kAutoOutlineSize = 32 * 1024;
 }
 
 struct ReadArgs {
-    util::NormalizedPath path;
-    int offset;
-    int limit;
-    std::string display_description;
+    util::WorkspacePath   path;
+    // Refined storage: `offset` and `limit` carry a type-level proof
+    // that the value is > 0. The arg parser post-coerces malformed
+    // inputs (offset < 1 → 1; limit ≤ 0 → default) before construction,
+    // so try_make is guaranteed to succeed — making the field type a
+    // Positive<int> is the proof that nothing in run_read needs a
+    // re-check. Implicit conversion to `const int&` keeps every call
+    // site unchanged (a.offset, a.limit work as before).
+    domain::Positive<int> offset;
+    domain::Positive<int> limit;
+    std::string           display_description;
     // Set when the caller didn't specify any line range — the
     // outline branch is gated on this so an explicit "read this
     // 100-line range" never collapses to a structural overview.
-    bool no_explicit_range = true;
+    bool                  no_explicit_range = true;
 };
 
 std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
@@ -195,7 +203,7 @@ std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
     auto path_opt = ar.require_str("path");
     if (!path_opt)
         return std::unexpected(ToolError::invalid_args("path required"));
-    auto wp = util::make_workspace_path(*path_opt, "read");
+    auto wp = util::make_workspace_path_checked(*path_opt, "read");
     if (!wp) return std::unexpected(std::move(wp.error()));
     int offset = ar.integer("offset", 1);
     if (offset < 1) offset = 1;
@@ -218,8 +226,11 @@ std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
                        || ar.has("end_line");
     return ReadArgs{
         std::move(*wp),
-        offset,
-        limit,
+        // offset / limit are coerced to be > 0 immediately above, so
+        // try_make is guaranteed to succeed — .value() unwraps the
+        // expected, and the resulting field carries the Positive proof.
+        *domain::Positive<int>::try_make(offset),
+        *domain::Positive<int>::try_make(limit),
         ar.str("display_description", ""),
         /*no_explicit_range=*/ !explicit_range,
     };
@@ -293,7 +304,7 @@ ExecResult run_read(const ReadArgs& a) {
     }
     // Single open, single read. Then one linear scan builds the slice
     // AND counts lines in one pass.
-    auto content = util::read_file(p);
+    auto content = util::read_file(a.path);
 
     // Auto-outline for big files. When the caller didn't pin an
     // explicit (offset, limit) AND the file is bigger than

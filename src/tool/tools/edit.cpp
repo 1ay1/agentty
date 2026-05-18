@@ -30,7 +30,7 @@ struct OneEdit {
 };
 
 struct EditArgs {
-    util::NormalizedPath  path;
+    util::WorkspacePath   path;
     std::vector<OneEdit>  edits;
     std::string           display_description;  // one-line UI summary; optional
 };
@@ -49,7 +49,7 @@ std::expected<EditArgs, ToolError> parse_edit_args(const json& j) {
     auto path_opt = ar.require_str("path");
     if (!path_opt)
         return std::unexpected(ToolError::invalid_args("path required"));
-    auto wp = util::make_workspace_path(*path_opt, "edit");
+    auto wp = util::make_workspace_path_checked(*path_opt, "edit");
     if (!wp) return std::unexpected(std::move(wp.error()));
 
     std::string desc = ar.str("display_description", "");
@@ -370,7 +370,7 @@ ExecResult run_edit(const EditArgs& a) {
               "artifact). If this is a text file with a stray NUL, use "
               "`write` to rewrite it whole."));
 
-    std::string original = util::read_file(p);
+    std::string original = util::read_file(a.path);
     std::string updated  = original;
 
     // Apply in order. If any edit fails, report which one and abort — we'd
@@ -395,7 +395,7 @@ ExecResult run_edit(const EditArgs& a) {
                           "disk).", std::nullopt};
 
     auto change = diff::compute(a.path.string(), original, updated);
-    if (auto werr = util::write_file(p, updated); !werr.empty())
+    if (auto werr = util::write_file(a.path, updated); !werr.empty())
         return std::unexpected(ToolError::io(werr));
 
     std::string unified = diff::render_unified(change);

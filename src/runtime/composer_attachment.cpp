@@ -86,7 +86,15 @@ std::string render_attachment_body(const Attachment& a) {
             namespace fs = std::filesystem;
             fs::path p{a.path};
             if (p.is_relative()) p = tools::util::workspace_root() / p;
-            body = tools::util::read_file(p);
+            // Gate through promote_to_workspace_path: an attachment
+            // whose absolute path escapes the workspace (model fed us
+            // `/etc/passwd` as @file) MUST be refused, not silently
+            // dereferenced. Pre-WorkspacePath, the relative-vs-absolute
+            // branch above let absolute escapees through.
+            tools::util::NormalizedPath np{p.string()};
+            auto wp = tools::util::promote_to_workspace_path(
+                std::move(np), "@file attachment");
+            if (wp) body = tools::util::read_file(*wp);
         }
         std::string out;
         out.reserve(body.size() + a.path.size() + 32);
@@ -118,7 +126,11 @@ std::string render_attachment_body(const Attachment& a) {
             namespace fs = std::filesystem;
             fs::path p{a.path};
             if (p.is_relative()) p = tools::util::workspace_root() / p;
-            body = tools::util::read_file(p);
+            // Same containment gate as the FileRef branch above.
+            tools::util::NormalizedPath np{p.string()};
+            auto wp = tools::util::promote_to_workspace_path(
+                std::move(np), "@symbol attachment");
+            if (wp) body = tools::util::read_file(*wp);
         }
         std::string out;
         out.reserve(a.name.size() + a.path.size() + 64);

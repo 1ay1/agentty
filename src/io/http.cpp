@@ -1,5 +1,6 @@
 #include "agentty/io/http.hpp"
 #include "agentty/io/tls.hpp"
+#include "agentty/util/env.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1368,7 +1369,8 @@ struct Client::Impl {
 Client::Client() : Client(Config{}) {}
 
 Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
-    if (const char* e = std::getenv("AGENTTY_INSECURE"); e && *e == '1')
+    if (const char* e = util::env::get_or_null<util::env::Var::Insecure>();
+        e && *e == '1')
         cfg.insecure = true;
     impl_->cfg = std::move(cfg);
     ensure_net_init();
@@ -1571,17 +1573,20 @@ DialOverride parse_dial_env(const char* var_name) {
 } // namespace
 
 const DialOverride& agentty_api_host_override() {
-    static const DialOverride cached = parse_dial_env("AGENTTY_API_HOST");
+    static const DialOverride cached =
+        parse_dial_env(util::env::name<util::env::Var::ApiHost>().data());
     return cached;
 }
 
 const DialOverride& agentty_oauth_host_override() {
-    static const DialOverride cached = parse_dial_env("AGENTTY_OAUTH_HOST");
+    static const DialOverride cached =
+        parse_dial_env(util::env::name<util::env::Var::OAuthHost>().data());
     return cached;
 }
 
 const DialOverride& agentty_socks_proxy() {
-    static const DialOverride cached = parse_dial_env("AGENTTY_SOCKS_PROXY");
+    static const DialOverride cached =
+        parse_dial_env(util::env::name<util::env::Var::SocksProxy>().data());
     return cached;
 }
 

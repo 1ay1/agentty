@@ -26,6 +26,7 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/env.hpp"
 
 namespace agentty::provider::anthropic {
 
@@ -115,9 +116,9 @@ FILE* debug_log() {
     std::lock_guard<std::mutex> lk(m);
     if (tried) return fp;
     tried = true;
-    const char* on = std::getenv("AGENTTY_DEBUG_API");
-    if (!on || !*on || *on == '0') return nullptr;
-    const char* path = std::getenv("AGENTTY_DEBUG_FILE");
+    const char* on = util::env::get_or_null<util::env::Var::DebugApi>();
+    if (!on || *on == '0') return nullptr;
+    const char* path = util::env::get_or_null<util::env::Var::DebugFile>();
     std::string p = (path && *path) ? std::string{path} : std::string{"agentty-api.log"};
     fp = std::fopen(p.c_str(), "ab");
     return fp;

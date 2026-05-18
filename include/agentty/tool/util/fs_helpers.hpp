@@ -15,14 +15,28 @@ namespace agentty::tools::util {
 
 namespace fs = std::filesystem;
 
+// Forward declarations — WorkspacePath sits below ToolError-using factories.
+class WorkspacePath;
+
 // Read an entire file as a binary blob. Returns "" on open failure (callers
 // that need to distinguish missing vs empty should stat first).
+//
+// Two overloads: the `WorkspacePath` form is the workspace-checked entry
+// the model-facing tools should use; the `fs::path` form is the
+// unchecked escape hatch for paths the runtime owns (credentials,
+// thread persistence, memory store under ~/.agentty/). Routing through
+// a typed parameter keeps the boundary visible at the call site —
+// reviewers can see at a glance which form a tool picked.
 [[nodiscard]] std::string read_file(const fs::path& p);
+[[nodiscard]] std::string read_file(const WorkspacePath& p);
 
 // Write content atomically-ish (truncate + write + flush). Returns the
 // empty string on success, or a human-readable error otherwise. Keeps tool
 // lambdas terse while still forcing callers to surface failures.
+//
+// See `read_file` above for the WorkspacePath vs fs::path overload split.
 [[nodiscard]] std::string write_file(const fs::path& p, std::string_view content);
+[[nodiscard]] std::string write_file(const WorkspacePath& p, std::string_view content);
 
 // Normalise a user-supplied path. Accepts forward slashes on Windows
 // (the model frequently produces them), strips surrounding whitespace and
@@ -74,6 +88,54 @@ void set_workspace_root(fs::path root);
 // `tool_name` only appears in the error message and is purely cosmetic.
 [[nodiscard]] std::expected<struct NormalizedPath, ToolError>
 make_workspace_path(std::string_view raw, std::string_view tool_name);
+
+// ── WorkspacePath ───────────────────────────────────────────
+// A NormalizedPath that carries a *type-level* proof of workspace
+// containment. The only public way to obtain one is through
+// `WorkspacePath::checked` (or the gated builder factories below),
+// which delegate to is_within_workspace(). Once a function accepts
+// `const WorkspacePath&`, reviewers know the containment check has
+// already happened — forgetting it is a compile error, not a missing
+// runtime gate.
+//
+// Today's tools already route every fs path through make_workspace_path
+// before any IO; this type makes that discipline a property of the type
+// system instead of a code-review convention. New fs APIs should accept
+// `WorkspacePath`; only the runtime's own non-workspace paths (under
+// ~/.agentty/ for threads/memory/credentials) bypass it via the
+// `fs::path` overloads of read_file/write_file.
+class WorkspacePath {
+    NormalizedPath inner_;
+    // Private; only the factory friends can mint one. No public ctor =
+    // no way to skip the containment check.
+    explicit WorkspacePath(NormalizedPath n) noexcept : inner_(std::move(n)) {}
+
+    friend std::expected<WorkspacePath, ToolError>
+        make_workspace_path_checked(std::string_view raw,
+                                    std::string_view tool_name);
+    friend std::expected<WorkspacePath, ToolError>
+        promote_to_workspace_path(NormalizedPath p,
+                                  std::string_view tool_name);
+
+public:
+    [[nodiscard]] const fs::path&   path()   const noexcept { return inner_.path(); }
+    [[nodiscard]] std::string       string() const          { return inner_.string(); }
+    [[nodiscard]] bool              empty()  const noexcept { return inner_.empty(); }
+    [[nodiscard]] const NormalizedPath& normalized() const noexcept { return inner_; }
+};
+
+// Workspace-checked factory. Same contract as make_workspace_path but
+// yields a WorkspacePath instead of a NormalizedPath — use this in new
+// code so the gate's success travels with the value.
+[[nodiscard]] std::expected<WorkspacePath, ToolError>
+make_workspace_path_checked(std::string_view raw, std::string_view tool_name);
+
+// Promote an already-normalised path through the containment gate.
+// Useful when the caller composed a NormalizedPath itself (e.g.
+// resolving an attachment path against workspace_root()) and now
+// wants the typed proof.
+[[nodiscard]] std::expected<WorkspacePath, ToolError>
+promote_to_workspace_path(NormalizedPath p, std::string_view tool_name);
 
 // True for directory names we want recursive traversals (grep / glob /
 // list_dir) to skip by default. Keeps the skip list in one place so tools

@@ -350,6 +350,34 @@ make_workspace_path(std::string_view raw, std::string_view tool_name) {
     return p;
 }
 
+// ── WorkspacePath factories ───────────────────────────────────────
+std::expected<WorkspacePath, ToolError>
+make_workspace_path_checked(std::string_view raw, std::string_view tool_name) {
+    auto np = make_workspace_path(raw, tool_name);
+    if (!np) return std::unexpected(std::move(np.error()));
+    return WorkspacePath{std::move(*np)};
+}
+
+std::expected<WorkspacePath, ToolError>
+promote_to_workspace_path(NormalizedPath p, std::string_view tool_name) {
+    if (!is_within_workspace(p.path())) {
+        return std::unexpected(ToolError::out_of_workspace(
+            "tool '" + std::string{tool_name} + "' refused: '"
+            + p.string() + "' is outside the workspace root '"
+            + workspace_root().string() + "'."));
+    }
+    return WorkspacePath{std::move(p)};
+}
+
+// ── Checked read/write delegates ────────────────────────────────
+std::string read_file(const WorkspacePath& p) {
+    return read_file(p.path());
+}
+
+std::string write_file(const WorkspacePath& p, std::string_view content) {
+    return write_file(p.path(), content);
+}
+
 bool should_skip_dir(std::string_view name) noexcept {
     static const std::vector<std::string_view> skip = {
         ".git", "node_modules", "build", "target", "__pycache__",

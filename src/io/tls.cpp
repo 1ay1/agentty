@@ -1,4 +1,5 @@
 #include "agentty/io/tls.hpp"
+#include "agentty/util/env.hpp"
 
 #include <atomic>
 #include <cstdlib>
@@ -255,7 +256,8 @@ SharedCtx& shared() {
         // verifies the trust store) and connections already established
         // against the cached pointer wouldn't migrate to a freshly-built
         // one anyway, so a "live" knob would lie about its scope.
-        if (const char* e = std::getenv("AGENTTY_INSECURE"); e && *e == '1') {
+        if (const char* e = util::env::get_or_null<util::env::Var::Insecure>();
+            e && *e == '1') {
             s->insecure  = build_ctx(true);
             s->verifying = s->insecure;
         } else {

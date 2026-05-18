@@ -387,6 +387,92 @@ static_assert(other_tools_have_bounded_timeout(),
 static_assert(lookup("web_fetch")->max_seconds <= std::chrono::seconds{30},
               "web_fetch overlay timeout must be ≤ http total (30s)");
 
+// ── Truncation strategy correlates with the tool's effect shape ─────────
+// Each TruncStrategy preserves a different slice of the output, and that
+// choice should follow from what the tool DOES — not be set per-row from
+// taste. Pinning the correlation as an invariant catches the "new Exec
+// tool defaulted to Head and now `bash` output is being head-clipped
+// instead of tail-clipped" class of bug at the build, not in a user
+// report.
+//
+//   Effect::Exec        → Tail   (log streams: latest line wins)
+//   Effect::Net         → Head or HeadTail (page body OR search results)
+//   Effect::WriteFs only → Head   (echoes the chunk it wrote, in order)
+//   Pure                → Head   (in-memory state has no "tail" semantics)
+//   ReadFs              → Head or HeadTail  (depends on tool; see below)
+//
+// ReadFs has two legitimate shapes: linear file readers (read, list_dir,
+// glob) prefer Head; search-like tools (grep, find_definition, git_*)
+// prefer HeadTail to keep the "N more matches" / summary tail.
+consteval bool truncation_matches_effect_shape() {
+    for (const auto& s : kCatalog) {
+        // 0 means no cap — strategy doesn't apply, skip.
+        if (s.max_output_chars == 0) continue;
+
+        if (s.effects.has(Effect::Exec)) {
+            if (s.trunc_strategy != ToolSpec::TruncStrategy::Tail) return false;
+            continue;
+        }
+        if (s.effects.has(Effect::Net)) {
+            // Net tools split by use case: fetch-a-page wants Head (the
+            // lede is the lead), search-results wants HeadTail ("N more
+            // results" footer carries signal). Tail makes no sense —
+            // network responses aren't log streams.
+            if (s.trunc_strategy == ToolSpec::TruncStrategy::Tail) return false;
+            continue;
+        }
+        if (s.effects.has(Effect::WriteFs) && !s.effects.has(Effect::ReadFs)) {
+            if (s.trunc_strategy != ToolSpec::TruncStrategy::Head) return false;
+            continue;
+        }
+        // Remaining: pure or read-only-ish tools — both Head and HeadTail
+        // are defensible; just rule out Tail (no tool here is a log
+        // stream).
+        if (s.trunc_strategy == ToolSpec::TruncStrategy::Tail) return false;
+    }
+    return true;
+}
+static_assert(truncation_matches_effect_shape(),
+              "a tool's trunc_strategy doesn't match its effect shape — see "
+              "truncation_matches_effect_shape for the rules");
+
+// Every tool with `max_output_chars > 0` must have a sane minimum so the
+// elision marker (one line, ~30 chars) still leaves room for content.
+consteval bool output_caps_are_sane() {
+    for (const auto& s : kCatalog) {
+        if (s.max_output_chars == 0) continue;
+        if (s.max_output_chars < 1000)       return false;  // floor: leaves room for marker
+        if (s.max_output_chars > 200'000)    return false;  // ceiling: ~50k tokens
+    }
+    return true;
+}
+static_assert(output_caps_are_sane(),
+              "a tool's max_output_chars is outside the sane [1000, 200000] band");
+
+// FGTS (eager_input_streaming) is only meaningful when the tool produces
+// its arguments mid-stream — i.e. for tools whose JSON arg blob is large
+// enough that streaming the open brace early matters. We don't enforce a
+// strict whitelist here (the policy may change as Anthropic rolls models
+// forward), but we DO require that tools tagged eager have at least one
+// effect — a pure no-op tool gaining eager streaming is almost certainly
+// a copy-paste mistake from a heavier neighbour.
+//
+// Exception: `todo` is Pure and intentionally eager because its arg blob
+// (a list of items) is the only thing the model emits and the early-open
+// behaviour lets the UI render the in-progress list while the model is
+// still typing it.
+consteval bool eager_streaming_is_justified() {
+    for (const auto& s : kCatalog) {
+        if (!s.eager_input_streaming) continue;
+        if (s.name == "todo") continue;          // documented exception
+        if (s.effects.empty()) return false;     // pure + eager is suspicious
+    }
+    return true;
+}
+static_assert(eager_streaming_is_justified(),
+              "a pure (effect-less) tool other than `todo` opted into "
+              "eager_input_streaming — review the rationale");
+
 } // namespace proofs
 
 } // namespace agentty::tools::spec

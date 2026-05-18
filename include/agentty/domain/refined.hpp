@@ -20,6 +20,7 @@
 
 #include <concepts>
 #include <expected>
+#include <format>
 #include <ostream>
 #include <string>
 #include <string_view>
@@ -155,3 +156,19 @@ static_assert(!Positive<int>::try_make(0).has_value());
 } // namespace tests
 
 } // namespace agentty::domain
+
+// std::formatter passthrough — a Refined<T,P> formats exactly like T, so
+// existing `std::format("{}", a.offset)` calls keep working when `offset`
+// is upgraded from `int` to `Positive<int>`. Without this, format's
+// reference-taking make_format_args() doesn't see the implicit
+// `operator const T&` and the call fails to compile. Lives at namespace
+// std (the standard mandates that for user-type formatter specialisations).
+template <class T, class P, class CharT>
+struct std::formatter<agentty::domain::Refined<T, P>, CharT>
+    : std::formatter<T, CharT>
+{
+    template <class FormatContext>
+    auto format(const agentty::domain::Refined<T, P>& r, FormatContext& ctx) const {
+        return std::formatter<T, CharT>::format(r.value(), ctx);
+    }
+};

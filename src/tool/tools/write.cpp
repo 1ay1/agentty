@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 namespace {
 
 struct WriteArgs {
-    util::NormalizedPath path;
+    util::WorkspacePath path;
     std::string content;
     std::string display_description;
     std::string coercion_note;  // non-empty when `content` was coerced from non-string
@@ -90,7 +90,7 @@ std::expected<WriteArgs, ToolError> parse_write_args(const json& j) {
     if (!raw)
         return std::unexpected(ToolError::invalid_args(
             std::format("path required (received keys: {})", describe_keys(j))));
-    auto wp = util::make_workspace_path(*raw, "write");
+    auto wp = util::make_workspace_path_checked(*raw, "write");
     if (!wp) return std::unexpected(std::move(wp.error()));
 
     std::string note;
@@ -185,7 +185,7 @@ ExecResult run_write(const WriteArgs& a) {
         // log on disk; we'd otherwise read and diff the whole thing just
         // to overwrite it. Treat oversized targets as "no diff available".
         if (original_size <= kMaxWriteBytes)
-            original = util::read_file(p);
+            original = util::read_file(a.path);
     }
     // No-op short-circuit: an identical rewrite is often the model
     // "confirming" a file state it already reached. Skipping the fs
@@ -201,7 +201,7 @@ ExecResult run_write(const WriteArgs& a) {
         change = diff::compute(a.path.string(), original, a.content);
     else
         change.path = a.path.string();
-    if (auto err = util::write_file(p, a.content); !err.empty())
+    if (auto err = util::write_file(a.path, a.content); !err.empty())
         return std::unexpected(ToolError::io(err));
     std::string prefix;
     if (!a.display_description.empty())

@@ -28,6 +28,7 @@
 #include <openssl/sha.h>
 
 #include "agentty/io/http.hpp"
+#include "agentty/util/env.hpp"
 
 #ifdef _WIN32
 #  include <io.h>
@@ -538,9 +539,10 @@ std::optional<std::string> take_pending_refresh() {
 Credentials resolve(const std::string& cli_api_key) {
     if (!cli_api_key.empty())
         return Credentials{cred::ApiKey{cli_api_key}};
-    if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k)
+    using namespace agentty::util;
+    if (const char* k = env::get_or_null<env::Var::AnthropicApiKey>())
         return Credentials{cred::ApiKey{std::string{k}}};
-    if (const char* t = std::getenv("CLAUDE_CODE_OAUTH_TOKEN"); t && *t)
+    if (const char* t = env::get_or_null<env::Var::ClaudeOAuthToken>())
         return Credentials{cred::OAuth{std::string{t}, "", 0}};
 
     auto loaded = load_credentials();
@@ -669,11 +671,14 @@ int cmd_logout() {
 
 int cmd_status() {
     std::cout << "Credentials file: " << credentials_path().string() << "\n";
-    if (const char* k = std::getenv("ANTHROPIC_API_KEY"); k && *k) {
-        std::cout << "ANTHROPIC_API_KEY: set (will be used, overrides file)\n";
+    using namespace agentty::util;
+    if (env::get_or_null<env::Var::AnthropicApiKey>()) {
+        std::cout << env::name<env::Var::AnthropicApiKey>()
+                  << ": set (will be used, overrides file)\n";
     }
-    if (const char* t = std::getenv("CLAUDE_CODE_OAUTH_TOKEN"); t && *t) {
-        std::cout << "CLAUDE_CODE_OAUTH_TOKEN: set (OAuth via env)\n";
+    if (env::get_or_null<env::Var::ClaudeOAuthToken>()) {
+        std::cout << env::name<env::Var::ClaudeOAuthToken>()
+                  << ": set (OAuth via env)\n";
     }
     auto loaded = load_credentials();
     if (!loaded) { std::cout << "Saved credentials: (none)\n"; return 0; }

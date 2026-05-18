@@ -30,6 +30,7 @@
 // future contributor with a Win32 box to test on.
 
 #include "agentty/airgap/airgap.hpp"
+#include "agentty/util/env.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -301,7 +302,7 @@ std::string sh_squote(std::string_view v) {
     // AGENTTY_AIRGAP_SSH lets the user inject extra flags (`-i`, `-p`, `-J`,
     // or override any of the defaults above with a later `-o ...`).
     // We split on whitespace — primitive but enough for the common case.
-    if (const char* extra = std::getenv("AGENTTY_AIRGAP_SSH"); extra && *extra) {
+    if (const char* extra = util::env::get_or_null<util::env::Var::AirgapSsh>()) {
         std::string buf;
         for (const char* p = extra; ; ++p) {
             if (*p == ' ' || *p == '\t' || *p == '\0') {
