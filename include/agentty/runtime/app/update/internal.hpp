@@ -65,8 +65,37 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason = StopReason::Unsp
 
 // ── update/modal.cpp helpers ─────────────────────────────────────────────
 Step           submit_message(Model m);
-maya::Cmd<Msg> maybe_virtualize(Model& m);
 void           persist_settings(const Model& m);
+
+// ── Frozen-scrollback prefix helpers (frozen.cpp) ────────────────────────
+//
+// freeze_through_prior_turn: walk m.d.current.messages[frozen_through..end)
+// and push built Turn Elements (with leading gaps) into m.ui.frozen,
+// up to (but NOT including) the message at `live_start`. Applies the
+// same tool-batch-merge logic conversation_config used to do at view
+// time, so the frozen visual matches the live visual byte-for-byte.
+//
+// Typical call: at submit_message, freeze through the just-finished
+// agent turn (live_start = messages.size() at the moment the new User
+// is about to be pushed).
+void freeze_through(Model& m, std::size_t live_start);
+
+// rehydrate_frozen: rebuild m.ui.frozen from scratch from the current
+// thread's messages + compaction records. Used on thread switch /
+// thread load — anywhere the messages vector was replaced wholesale.
+// Resets frozen_through and frozen_turn.
+void rehydrate_frozen(Model& m);
+
+// clear_frozen: drop the entire frozen vector and reset counters.
+// For NewThread before a fresh-start submit.
+void clear_frozen(Model& m);
+
+// trim_frozen_if_oversized: when frozen exceeds a soft cap, drop the
+// oldest N entries to keep maya's prev_cells working set bounded.
+// Returns a Cmd::commit_scrollback_overflow() to tell maya to release
+// the cells that have provably overflowed the viewport. No-op if
+// frozen is under the cap.
+maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a
 // Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer

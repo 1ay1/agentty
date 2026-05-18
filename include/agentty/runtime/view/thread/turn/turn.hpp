@@ -28,25 +28,4 @@ namespace agentty::ui {
                                              bool synthetic    = false,
                                              std::string_view meta_override = {});
 
-// Build (or return cached) Element for a single turn. A turn is cached
-// once its content is resolved: no in-flight streaming, all tool calls
-// terminal, no pending permission targeting it. This is strictly
-// broader than the previous "has a successor in messages[]" gate, so
-// the just-ended last turn benefits from the cache immediately rather
-// than having to wait for the next user message to be appended.
-//
-// Use this in preference to `turn_config()` + manual `Turn{cfg}.build()`
-// at the conversation layer: the cached Element skips the entire
-// per-frame Turn::build() reconstruction (agent_timeline + every tool
-// card + markdown body + permission rows), which is the dominant cost
-// on a long session. Mirrors the agent_session example's m.frozen
-// pattern: build once per turn lifetime, render-by-reference after.
-[[nodiscard]] maya::Conversation::PreBuilt turn_element(const Message& msg,
-                                                        std::size_t msg_idx,
-                                                        int turn_num,
-                                                        const Model& m,
-                                                        bool continuation = false,
-                                                        bool synthetic    = false,
-                                                        std::string_view meta_override = {});
-
 } // namespace agentty::ui

@@ -1,13 +1,12 @@
-// Composer-submission, thread-virtualization, and settings-persistence
-// helpers for the update reducer. submit_message is the entry point for
-// ComposerEnter / ComposerSubmit and is also called from finalize_turn when
-// flushing the composer's queued-message buffer, which is why it lives in a
+// Composer-submission and settings-persistence helpers for the update
+// reducer. submit_message is the entry point for ComposerEnter /
+// ComposerSubmit and is also called from finalize_turn when flushing
+// the composer's queued-message buffer, which is why it lives in a
 // shared internal header rather than an anonymous namespace.
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
-#include <algorithm>
 #include <chrono>
 #include <utility>
 
@@ -17,121 +16,6 @@
 #include "agentty/store/store.hpp"
 
 namespace agentty::app::detail {
-
-namespace {
-
-// When advancing thread_view_start past kSliceChunk old messages, we tell
-// maya's inline renderer how many rows of prev_cells to commit to the
-// terminal's native scrollback (Cmd::commit_scrollback_overflow →
-// Runtime::commit_inline_overflow).
-//
-// The discipline is asymmetric:
-//
-//   over-commit  — the renderer "forgets" rows still on screen as
-//                  immutable scrollback; the next frame's diff is
-//                  misaligned, the renderer extends the live region down
-//                  by emitting \r\n at terminal bottom, which scrolls
-//                  rows of NEW content into native scrollback at the top
-//                  → text ghosting in scrollback.
-//
-//   under-commit — prev_cells keeps a few extra rows that no longer
-//                  match the live frame; the next frame's shrink path
-//                  emits cleanly bounded EL erases for the abandoned
-//                  region. Bounded cost, no ghosting. (See agent_session.cpp
-//                  in the maya repo for the same discipline applied to a
-//                  pre-rendered `frozen` element list.)
-//
-// So any value passed to commit_scrollback MUST be a conservative LOWER
-// BOUND on the actual rendered rows of messages
-// [old_thread_view_start, new_thread_view_start). It must never exceed
-// the actual height.
-//
-// History — estimates that failed:
-//
-//   1. `estimate_message_rows` (`kEstWidth = 100`, per-byte arithmetic
-//      on `msg.text`). Over-committed at width > 100, on UTF-8
-//      multi-byte content, and on elided tool-body previews.
-//
-//   2. `kRowsPerDroppedMessageLower = 2`. A captured profile of an
-//      800-row session showed `maybe_virtualize` drop 8 messages while
-//      content_rows shrank only 5 rows on the next render —
-//      per-message live-frame residue averaged 0.6. Committing 8*2=16
-//      rows over-committed by 11, ghosting border fragments and blank
-//      rectangles into native scrollback 2–3 turns into long streaming
-//      sessions.
-//
-//   3. `kRowsPerDroppedMessageLower = 0`. Provably safe (zero is always
-//      a valid under-bound), but leaves prev_cells growing
-//      monotonically with the cumulative content_rows of the whole
-//      session — ~1–2 MB resident for a 200-turn conversation, plus a
-//      memmove cost the moment a non-zero commit finally happens.
-//
-// Current discipline: ask maya to commit every row that's PROVABLY
-// already overflowed the viewport. The renderer knows two numbers we
-// don't (prev_rows from the last compose and term_h); their difference
-// `max(0, prev_rows - term_h)` is an exact lower bound on rows that
-// have already been scrolled into native scrollback as immutable
-// cells (the bottom term_h rows of prev_cells are everything still on
-// screen; everything above them overflowed). Maya computes the
-// number itself; agentty just signals "please commit what's safe."
-//
-// Result: prev_cells stays bounded to roughly term_h rows in
-// steady-state for the inline session, the natural shrink path in
-// compose_inline_frame still handles the residue of dropped messages
-// that hadn't yet scrolled out, and there's no estimator to drift
-// from reality on a future content-mix change.
-
-} // namespace
-
-maya::Cmd<Msg> maybe_virtualize(Model& m) {
-    using maya::Cmd;
-    const int total = static_cast<int>(m.d.current.messages.size());
-    const int visible = total - m.ui.thread_view_start;
-    // Only slice in discrete chunks — a one-per-turn slice would refresh
-    // the visible area every turn, whereas chunking it causes one refresh
-    // every kSliceChunk turns.
-    if (visible <= kViewWindow + kSliceChunk) return Cmd<Msg>::none();
-
-    // Continuations share their run's turn number with conversation_config,
-    // so count only the FIRST assistant of each run here. Counting every
-    // assistant overshoots by (continuations in slice) and bumps the
-    // visible turn label on the messages still in the window.
-    int committed_turns = 0;
-    for (int i = m.ui.thread_view_start; i < m.ui.thread_view_start + kSliceChunk; ++i) {
-        const auto& msg = m.d.current.messages[i];
-        if (msg.role != Role::Assistant) continue;
-        const bool continuation = i > 0
-            && m.d.current.messages[i - 1].role == Role::Assistant;
-        if (!continuation) ++committed_turns;
-    }
-    m.ui.thread_view_start      += kSliceChunk;
-    m.ui.thread_view_start_turn += committed_turns;
-    // Do NOT call commit_scrollback_overflow here. maya commits
-    // max(0, prev_rows - term_h) rows of prev_cells — the rows that
-    // already overflowed the viewport. That count has no relationship
-    // to the rendered height of the messages we just dropped.
-    //
-    // Concrete failure: prev_rows=80, term_h=50 → overflow=30. We
-    // drop 8 messages whose combined rendered height is, say, 20.
-    // maya shifts prev_cells up by 30 rows; the next compose sees
-    // canvas[0..9] = the kept-but-already-scrolled-into-scrollback
-    // rows (because the dropped content was only 20 rows tall, so
-    // 10 of the rows maya treated as "committed" are actually still
-    // logically part of the live tree). The diff finds first_changed=0,
-    // re-emits those 10 rows at viewport top, which then scroll into
-    // native scrollback again as new content arrives below — a second
-    // copy of cells that were already there. That's the scrollback
-    // duplication / ghosting symptom.
-    //
-    // Without the commit, prev_cells stays at the full live-tree
-    // height. compose_inline_frame's shrink path handles the shorter
-    // tree by emitting only the surviving live-viewport rows and
-    // erasing the rest with \x1b[J — no rows are mis-claimed as
-    // scrollback, no duplicates ever land below the live frame. Memory
-    // cost is bounded by max(live_tree_height) × W × 8 bytes — for
-    // kViewWindow=20 turns of typical-height content, well under 1 MB.
-    return Cmd<Msg>::none();
-}
 
 Step submit_message(Model m) {
     using maya::Cmd;
@@ -301,6 +185,21 @@ Step submit_message(Model m) {
         }
         m.d.current.title = deps().title_from(title_src);
     }
+
+    // Freeze everything currently in messages before pushing the new
+    // User. The prior turn (whatever's there now) is fully settled by
+    // construction: submit only proceeds when m.s.is_idle(), so no
+    // tool is running and no stream is in flight. After this call,
+    // m.ui.frozen contains built Elements for messages[0..end), and
+    // m.ui.frozen_through == messages.size(). The freshly-pushed
+    // user + assistant placeholder become the live tail.
+    //
+    // Mirrors the agent_session example's discipline: settled turns
+    // are committed to m.frozen the moment the next thing arrives;
+    // the view renders frozen as list_ref (zero copy) plus a tiny
+    // live tail. Per-frame cost stops growing with session length.
+    freeze_through(m, m.d.current.messages.size());
+
     m.d.current.messages.push_back(std::move(user));
 
     Message placeholder;
@@ -327,11 +226,11 @@ Step submit_message(Model m) {
     m.s.status.clear();
     m.s.status_until  = {};
 
-    auto virt = maybe_virtualize(m);
+    auto trim = trim_frozen_if_oversized(m);
     auto launch = cmd::launch_stream(m);
-    auto cmd = virt.is_none()
+    auto cmd = trim.is_none()
         ? std::move(launch)
-        : Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(virt), std::move(launch)});
+        : Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(trim), std::move(launch)});
     return {std::move(m), std::move(cmd)};
 }
 

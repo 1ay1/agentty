@@ -524,6 +524,13 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         m.d.current.compactions.push_back(std::move(rec));
         m.d.current.updated_at = std::chrono::system_clock::now();
 
+        // A compaction divider must surface in the frozen prefix at
+        // the boundary index. Cheapest correct approach: rebuild
+        // frozen from scratch — compaction is rare (every dozens of
+        // turns) and rebuilding walks at most messages.size() entries,
+        // bounded by the same caps the live transcript uses.
+        rehydrate_frozen(m);
+
         // Rapid-refill breaker bookkeeping. If this compact landed
         // within `kRapidRefillTurns` assistant turns of the previous
         // one, it counts toward the breaker; otherwise the streak
@@ -801,6 +808,17 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         auto [mm, sub_cmd] = submit_message(std::move(m));
         m = std::move(mm);
         return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
+    }
+
+    // Settle freeze. agent_session pushes the assistant Turn into
+    // m.frozen at MessageStop; we do the same — once the stream is
+    // truly idle (no pending tools, no queued message), commit every
+    // message that's settled into m.ui.frozen and let the live tail
+    // shrink to empty. From here the next view() reads the turn out
+    // of frozen via list_ref (zero-copy) and the live tail draws
+    // nothing until the next submit pushes a fresh placeholder.
+    if (m.s.is_idle()) {
+        freeze_through(m, m.d.current.messages.size());
     }
 
     // Post-turn idle auto-compaction.

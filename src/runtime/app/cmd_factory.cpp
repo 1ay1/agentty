@@ -567,24 +567,24 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // dropped turns reappear on subsequent requests if context
             // frees up (e.g. after a manual compact).
 
-            // Tool results are going back to the model — a fresh sub-turn
-            // is about to start on the same assistant message. This is a
-            // natural slice point: tool-heavy turns can grow the transcript
-            // several messages in one logical "turn" from the user's POV,
-            // and the submit_message virtualization hook never sees those.
-            // Slicing here keeps the live canvas bounded even inside a
-            // single long multi-tool assistant turn.
-            auto virt = detail::maybe_virtualize(m);
             // ExecutingTool → Streaming (post-tool sub-turn). Active
             // ctx flows through: cancel token's still alive (the
             // request is still open, sub-turn streams over the same
             // SSE), retry counters preserved.
+            //
+            // Before pushing the next placeholder, freeze the just-
+            // finished assistant Message (with its tool_calls and
+            // text) into m.ui.frozen. This keeps the live tail
+            // bounded to ONE in-flight assistant Message at any
+            // time — matching agent_session's discipline where the
+            // committed scrollback is everything settled and the
+            // live area is exactly one Turn.
+            detail::freeze_through(m, m.d.current.messages.size());
             auto ctx = take_active_ctx(std::move(m.s.phase));
             m.s.phase = phase::Streaming{std::move(ctx).value()};
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
-            if (!virt.is_none()) cmds.push_back(std::move(virt));
             cmds.push_back(launch_stream(m));
         } else {
             // ExecutingTool → Idle (no continuation). Active ctx is

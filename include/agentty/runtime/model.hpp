@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include <maya/element/element.hpp>
+
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/diff/diff.hpp"
@@ -155,56 +157,56 @@ struct Model {
         TodoState           todo;
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
         int                 thread_scroll = 0;
-        // Index of the first message the view should render.  Messages
-        // before this point are committed to the terminal's native
-        // scrollback (maya's InlineFrameState::commit_prefix was called
-        // for their rows).  Advancing this counter + returning
-        // Cmd::commit_scrollback keeps the Yoga/paint cost bounded to the
-        // visible window, not the full transcript.
-        int                 thread_view_start = 0;
-        // Number of finalized assistant messages BEFORE thread_view_start.
-        // The view shows the running turn number ("turn 42") and previously
-        // recomputed it by walking m.d.current.messages from 0 to
-        // thread_view_start every frame — O(thread_view_start), which grows
-        // linearly with the conversation as virtualization advances.
-        // Caching it here makes the per-frame turn-numbering cost O(1)
-        // regardless of how long the session has run.  Mutated only in
-        // maybe_virtualize alongside thread_view_start; resets to 0 on
-        // thread switch (same lifecycle as thread_view_start).
-        int                 thread_view_start_turn = 0;
 
-        // (Removed) `needs_force_redraw` used to arm a Cmd::force_redraw()
-        // on the first user input after streaming settled, on the theory
-        // that it would flush any prev_cells/wire desync left by the
-        // stream's shrink path. The desync's only real source (the
-        // shrink loop's bottom-edge \r\n\x1b[2K) is fixed at the
-        // renderer level (one \x1b[J in maya/src/render/serialize.cpp),
-        // so the comfort firing was actively harmful: it pulled the
-        // cursor up by `wire_cursor_rows` on every first keystroke,
-        // and if anything between stream-end and the keystroke had
-        // moved the on-screen cursor (the user mouse-scrolling inside
-        // the emulator scroll buffer, a tmux pane swap, …) case (B)
-        // landed in scrollback and emitted a duplicate of the
-        // just-finished turn there. Stream finalisation no longer arms
-        // the flag (see update/stream.cpp), update.cpp no longer
-        // consumes it, and the field is gone.
-
-        // Per-(thread, msg) render cache. View code reads + writes
-        // through this — markdown rendering and per-turn Element
-        // building both memoize here. The reducer evicts entries on
-        // thread switch / NewThread / compaction, where the cached
-        // Element trees would otherwise pin the previous turn's UI
-        // forever.
+        // ── Frozen scrollback prefix (agent_session pattern) ───────
         //
-        // Mutable: filling a render cache during view doesn't change
-        // observable Model state (every cache hit returns the same
-        // Element it would have rebuilt from scratch), and the view
-        // path takes `const Model&` by convention. Earlier this lived
-        // as a process-global thread_local map outside Model — the
-        // pointer-equivalence was identical but the reducer was
-        // reaching outside Model to call evict_thread(), which type-
-        // checked but lied about purity. Now every cache mutation is
-        // visible in the returned Model.
+        // Append-only vector of fully-built Element rows that
+        // represent the settled portion of the transcript. The view
+        // passes a borrowed pointer to maya's Conversation widget
+        // via `Config::frozen`, which renders it through `list_ref`
+        // — zero-copy across frames regardless of how large this
+        // grows. Each entry is one row in the conversation:
+        //   • a gap (one-row blank) before each fresh-speaker turn,
+        //   • a built Turn Element for a settled message (or run),
+        //   • a compaction divider for a CompactionRecord boundary.
+        //
+        // The producer is `freeze_through_prior_turn()` (in
+        // src/runtime/app/update/internal.hpp), called from
+        // submit_message at the start of every new user turn. It
+        // walks m.d.current.messages[frozen_through .. end), applies
+        // the same tool-batch-merge logic as conversation_config used
+        // to do at view time, and pushes one Turn Element per visual
+        // unit — dividers and all.
+        //
+        // Cleared (and frozen_through reset) on thread switch /
+        // NewThread / OpenThread; rebuilt by `rehydrate_frozen()`
+        // when a saved thread is loaded.
+        std::vector<maya::Element> frozen;
+
+        // Exclusive upper bound into m.d.current.messages. Every
+        // message with index < frozen_through has already been built
+        // into `frozen` and need not be rendered live. The suffix
+        // [frozen_through .. end) is the live tail — rebuilt every
+        // frame (with the per-Turn shared_ptr Element cache keeping
+        // settled-within-tail messages cheap).
+        std::size_t         frozen_through = 0;
+
+        // Running turn number for the next freshly-frozen Assistant
+        // turn. The live tail reads (frozen_turn + assistant_messages_in_tail)
+        // for its display numbers.
+        int                 frozen_turn = 0;
+
+        // Cross-frame widget state cache. The only consumers now are:
+        //   • StreamingMarkdown — keeps a per-Message widget instance
+        //     alive across frames so its block boundary cache survives
+        //     between live renders.
+        //   • Agent-timeline panel freeze — snapshots the AgentTimeline
+        //     Element once every tool call is terminal, then serves
+        //     that frozen Element until the message gets pushed into
+        //     m.ui.frozen.
+        // No Turn-level Element cache anymore: settled turns live as
+        // raw Element values inside m.ui.frozen, the live tail
+        // rebuilds each frame (bounded by the active turn).
         mutable ui::ViewCache view_cache;
     };
 

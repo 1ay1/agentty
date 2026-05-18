@@ -138,6 +138,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 // reducer no longer reaches into the view cache; this
                 // arm is purely a Model state transition.
                 m.d.current = std::move(*loaded);
+                // The new thread's messages replaced m.d.current
+                // wholesale. Drop any stale frozen Elements (they
+                // referenced the previous thread's view_cache slots)
+                // and rebuild from the loaded transcript so the
+                // entire history appears as immutable scrollback
+                // beneath a fresh empty composer.
+                rehydrate_frozen(m);
                 // Hand the freed pages back to the kernel. glibc malloc
                 // will otherwise hold the released arenas indefinitely;
                 // mimalloc is more eager but still benefits from the
@@ -145,10 +152,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 release_to_kernel();
             }
             m.ui.thread_list = pick::Closed{};
-            // A freshly-loaded thread has no prev-frame correspondence in
-            // the inline buffer — render everything that fits in the window.
-            int total = static_cast<int>(m.d.current.messages.size());
-            m.ui.thread_view_start = std::max(0, total - kViewWindow);
             return done(std::move(m));
         },
         [&](NewThread) -> Step {
@@ -161,6 +164,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             m.d.current = Thread{};
             m.d.current.id = deps().new_thread_id();
             m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
+            clear_frozen(m);
             m.ui.thread_list = pick::Closed{};
             m.ui.command_palette = palette::Closed{};
             m.ui.composer.text.clear();
@@ -170,7 +174,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // wasn't pressed but the request is conceptually
             // abandoned along with the thread).
             m.s.phase = phase::Idle{};
-            m.ui.thread_view_start = 0;
             release_to_kernel();
             return done(std::move(m));
         },

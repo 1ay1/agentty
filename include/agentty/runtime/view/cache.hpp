@@ -89,55 +89,6 @@ struct MessageMdCache {
 };
 
 struct TurnConfigCache {
-    std::shared_ptr<maya::Turn::Config>       cfg;
-    // Pre-built Element for a settled turn. Storing the BUILT
-    // Element (not just the Config) is what keeps a long session's
-    // render time flat: maya::Conversation otherwise calls
-    // `Turn{cfg}.build()` on every visible Config every frame, which
-    // reconstructs the entire turn — header, agent_timeline + every
-    // tool card, markdown body, permission rows. Mirrors the
-    // agent_session example's `m.frozen` pattern (build once per
-    // turn lifetime, render-by-reference forever after).
-    //
-    // Populated lazily: the conversation_config first turn-Config
-    // miss builds the config, the Element-pointer miss then runs
-    // Turn::build() and stashes the result here. Continuation flag
-    // is mirrored alongside so the host can pass through to maya's
-    // built_turns path without re-deriving it.
-    std::shared_ptr<maya::Element>            element;
-    bool                                      element_continuation = false;
-    // Render-key stamp from Message::compute_render_key() at the
-    // moment `element` was inserted. The cache predicate compares
-    // this against the live message's current key on every hit; any
-    // mutation that bumps the key (tool card toggled expanded, a
-    // late progress chunk appended, a tool transitioned
-    // Pending→Running→Done, an inline error attached) forces a
-    // rebuild. Without this check the cached Element silently
-    // disagreed with the model after such mutations — the user
-    // pressed the expand-toggle binding and nothing happened
-    // because turn_element kept handing maya back the pre-toggle
-    // Element.
-    std::uint64_t                             element_render_key = 0;
-    // Render-key stamp for the cached Config (turn_config cache
-    // entry). Same role as element_render_key but for the
-    // Turn::Config slot: the Config carries the full agent_timeline
-    // tool-card list and the markdown body element, so any
-    // key-relevant mutation must invalidate it too.
-    std::uint64_t                             cfg_render_key     = 0;
-
-    // Cached `turn_num` + `meta_override` at the time `cfg` / `element`
-    // were inserted. Neither participates in compute_render_key (those
-    // are per-Message fields), but both are baked into `cfg.meta` —
-    // virtualization advancing thread_view_start_turn, or a caller
-    // passing a different meta_override, must force a rebuild.
-    int                                       cached_turn_num     = 0;
-    std::string                               cached_meta_override;
-    // Cached model id at insert. speaker_style_for reads m.d.model_id
-    // (current model, not the historical generator) and bakes the
-    // resulting label / rail color into the Config and Element. A
-    // mid-session model switch must therefore invalidate the slot.
-    std::string                               cached_model_id;
-
     // Frozen agent_timeline panel Element. Snapshotted the FIRST
     // frame on which every tool_call is terminal and no pending
     // permission targets one of them. From that frame onward the
@@ -145,15 +96,11 @@ struct TurnConfigCache {
     // bypassed and this Element is reused verbatim, even while the
     // rest of the turn is still alive (markdown body streaming).
     //
-    // Why this is separate from `element` above: the full-turn
-    // cache requires the entire message resolved. The Anthropic
-    // pattern of streaming text AFTER tools complete keeps
-    // streaming_text non-empty for the whole post-tool window, so
-    // the full-turn cache stays cold and agent_timeline_config
-    // rebuilds every frame. Footer add, body grow, color flip from
-    // status transition all re-emit rows whose canvas Y maps to
-    // terminal rows already in native scrollback — the corruption
-    // vector. Freezing the panel at terminal-state locks every byte.
+    // This is the ONLY remaining cache slot — the Turn-level Config
+    // and Element caches were removed when the host moved to
+    // agent_session's discipline: settled turns are built ONCE at
+    // freeze time into m.ui.frozen as raw Element values, and the
+    // live tail rebuilds each frame (bounded by the active turn).
     std::shared_ptr<maya::Element>            agent_timeline;
     std::uint64_t                             agent_timeline_key = 0;
     std::string                               agent_timeline_model_id;

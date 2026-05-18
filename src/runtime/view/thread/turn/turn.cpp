@@ -201,46 +201,6 @@ std::string format_turn_meta(const Message& msg, int turn_num,
     return meta;
 }
 
-// ── Cache predicate. A turn is cacheable once its content is resolved:
-//    no in-flight streaming, every tool call terminal, no pending
-//    permission still targeting one of this message's tool calls.
-//
-//    The previous predicate (`msg_idx + 1 < messages.size()`) was a
-//    structural sufficient condition — agentty only appends the next
-//    message once the current turn settles — but the last turn in the
-//    list satisfied "resolved" the moment streaming ended yet stayed
-//    uncached until a successor arrived. On the post-streaming /
-//    pre-next-prompt window the user types into the composer; every
-//    keystroke re-runs `agent_timeline_config` + `Turn::build()` +
-//    `AgentTimeline::build()` for the entire just-finished turn,
-//    which dominates the per-frame budget on a turn with several
-//    tool cards. Switching to a content-based predicate caches the
-//    last turn as soon as it's terminal.
-[[nodiscard]] bool is_turn_resolved(const Message& msg, const Model& m) {
-    if (!msg.streaming_text.empty()) return false;
-    for (const auto& tc : msg.tool_calls) {
-        if (!tc.is_terminal()) return false;
-        if (m.d.pending_permission && m.d.pending_permission->id == tc.id)
-            return false;
-    }
-    // An Assistant message with no text and no tool_calls is the
-    // pre-streaming placeholder that agentty appends the moment a user
-    // submits, before the first delta arrives. All three "is settled"
-    // signals trivially hold for it (no streaming, no live tools, no
-    // pending permission), but caching it now freezes an empty body in
-    // view_cache[(thread, msg.id)].element — and msg.id is stable
-    // across the stream, so after StreamFinished moves streaming_text →
-    // text the cache hit serves the stale empty Element back forever.
-    // Require positive evidence of content for Assistants; User messages
-    // are always populated at append time so they're unaffected.
-    if (msg.role == Role::Assistant
-        && msg.text.empty() && msg.tool_calls.empty())
-    {
-        return false;
-    }
-    return true;
-}
-
 // ── Compute the assistant turn's wall-clock elapsed: from previous
 //    user message timestamp to this one.
 std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
@@ -263,36 +223,14 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                int turn_num, const Model& m,
                                bool continuation, bool synthetic,
                                std::string_view meta_override) {
-    // Resolved-turn cache. A turn is cacheable once its content can no
-    // longer change: streaming over, every tool call terminal, no
-    // pending permission still pointing at it. Reusing the prior
-    // frame's built Config skips per-frame rebuilding of the turn
-    // header, the entire agent_timeline (every tool card), and the
-    // permission / markdown wiring.
-    //
-    // `synthetic` turns (queued-message previews) carry a fresh
-    // MessageId each frame, so caching them would only thrash the LRU.
-    //
-    // Note: this only caches the CONFIG. Even with this cache, a callsite
-    // that does `Turn{cfg}.build()` per frame still pays the Element
-    // reconstruction cost (every tool card laid out into glyphs, every
-    // markdown block re-emitted). For the per-frame fast path, callers
-    // should use `turn_element()` below instead — that caches the BUILT
-    // Element and skips Turn::build() entirely on resolved turns.
+    // agent_session pattern: build a fresh Config every call. Settled
+    // turns get their Element snapshotted into m.ui.frozen at freeze
+    // time and rendered from there; the live tail rebuilds each frame
+    // but is bounded to the in-flight turn. No Config / Element
+    // memoization here. `synthetic` is still consulted further down to
+    // skip the agent_timeline panel-freeze cache for queued previews.
     (void)msg_idx;
-    const bool can_cache = !synthetic && is_turn_resolved(msg, m);
-    const std::uint64_t render_key = can_cache ? msg.compute_render_key() : 0ULL;
     const std::string& model_id_ref = m.d.model_id.value;
-    if (can_cache) {
-        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        if (slot.cfg
-            && slot.cfg->continuation == continuation
-            && slot.cfg_render_key == render_key
-            && slot.cached_turn_num == turn_num
-            && slot.cached_meta_override == meta_override
-            && slot.cached_model_id == model_id_ref)
-            return *slot.cfg;
-    }
 
     auto style = speaker_style_for(msg.role, m);
 
@@ -326,14 +264,6 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         // Empty body → the Turn frame collapses to just the header
         // row + bottom rule, ~2 rows total. The user sees a clear
         // divider where the boundary is and nothing more.
-        if (can_cache) {
-            auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-            slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
-            slot.cfg_render_key = render_key;
-            slot.cached_turn_num = turn_num;
-            slot.cached_meta_override = std::string{meta_override};
-            slot.cached_model_id = model_id_ref;
-        }
         return cfg;
     }
 
@@ -442,6 +372,13 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 mix(static_cast<std::uint64_t>(style.color.b()));
             }
 
+            // Always emplace a pre-built Element into the body slot,
+            // never an AgentTimeline::Config. agent_session pushes
+            // `actions_panel(m, false)` which is `AgentTimeline{cfg}
+            // .build()` — i.e. a built Element value. The Config
+            // variant of BodySlot uses a different code path through
+            // Turn::render_slot and was observably leaving the Turn
+            // header invisible when this was the dominant body slot.
             if (can_freeze_panel) {
                 auto& slot = m.ui.view_cache.turn_config(
                     m.d.current.id, msg.id);
@@ -459,7 +396,8 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 cfg.body.emplace_back(*slot.agent_timeline);
             } else {
                 cfg.body.emplace_back(
-                    agent_timeline_config(msg, m.s.spinner.frame_index(), style.color));
+                    maya::AgentTimeline{agent_timeline_config(
+                        msg, m.s.spinner.frame_index(), style.color)}.build());
             }
             // In-flight permission card under the timeline.
             for (const auto& tc : msg.tool_calls) {
@@ -472,70 +410,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         if (msg.error) cfg.error = *msg.error;
     }
 
-    if (can_cache) {
-        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        slot.cfg = std::make_shared<maya::Turn::Config>(cfg);
-        slot.cfg_render_key = render_key;
-        slot.cached_turn_num = turn_num;
-        slot.cached_meta_override = std::string{meta_override};
-        slot.cached_model_id = model_id_ref;
-    }
     return cfg;
-}
-
-maya::Conversation::PreBuilt turn_element(const Message& msg,
-                                          std::size_t msg_idx,
-                                          int turn_num, const Model& m,
-                                          bool continuation, bool synthetic,
-                                          std::string_view meta_override) {
-    // Resolved-turn fast path: serve the BUILT Element from cache so a
-    // long session doesn't re-run Turn::build() for every visible turn
-    // every frame. The build itself laid out the agent_timeline + every
-    // tool card + markdown body + permission rows into the inline-frame
-    // glyph stream — that's the dominant cost on a long thread, NOT
-    // building the Config. A turn is resolved when streaming is over,
-    // every tool call is terminal, and no pending permission still
-    // points at one of its tool calls — at which point its rendered
-    // form can't change until a structural model edit (compaction /
-    // tool re-execute) replaces the Message itself (and therefore its
-    // id, our cache key).
-    //
-    // The cached Element is held via shared_ptr. We hand the
-    // shared_ptr straight to maya — Element has an implicit
-    // converting constructor from shared_ptr<const Element> that
-    // keeps the renderer's cross-frame work bounded automatically.
-    // No cache identity strings, no helper wrappers; the host just
-    // hands maya what it already has.
-    const bool can_cache = !synthetic && is_turn_resolved(msg, m);
-    const std::uint64_t render_key = can_cache ? msg.compute_render_key() : 0ULL;
-    const std::string& model_id_ref = m.d.model_id.value;
-    if (can_cache) {
-        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        if (slot.element
-            && slot.element_continuation == continuation
-            && slot.element_render_key == render_key
-            && slot.cached_turn_num == turn_num
-            && slot.cached_meta_override == meta_override
-            && slot.cached_model_id == model_id_ref) {
-            return {slot.element, continuation};
-        }
-    }
-    // Miss (or live turn): build Config (this hits the Config cache for
-    // resolved turns regardless), then run Turn::build() and stash.
-    auto cfg = turn_config(msg, msg_idx, turn_num, m, continuation, synthetic,
-                           meta_override);
-    auto built = maya::Turn{std::move(cfg)}.build();
-    if (can_cache) {
-        auto& slot = m.ui.view_cache.turn_config(m.d.current.id, msg.id);
-        slot.element = std::make_shared<maya::Element>(std::move(built));
-        slot.element_continuation = continuation;
-        slot.element_render_key   = render_key;
-        slot.cached_turn_num      = turn_num;
-        slot.cached_meta_override = std::string{meta_override};
-        slot.cached_model_id      = model_id_ref;
-        return {slot.element, continuation};
-    }
-    return {std::move(built), continuation};
 }
 
 } // namespace agentty::ui
