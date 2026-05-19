@@ -571,14 +571,29 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // request is still open, sub-turn streams over the same
             // SSE), retry counters preserved.
             //
-            // Before pushing the next placeholder, freeze the just-
-            // finished assistant Message (with its tool_calls and
-            // text) into m.ui.frozen. This keeps the live tail
-            // bounded to ONE in-flight assistant Message at any
-            // time — matching agent_session's discipline where the
-            // committed scrollback is everything settled and the
-            // live area is exactly one Turn.
-            detail::freeze_through(m, m.d.current.messages.size());
+            // NOTE: previously this branch called
+            //   detail::freeze_through(m, m.d.current.messages.size());
+            // to bound the live tail to one Message per sub-turn,
+            // mirroring agent_session's discipline. The visual
+            // consequence was that every tool sub-turn produced its
+            // OWN bordered AgentTimeline panel, because by the time
+            // the next continuation message arrived in the live tail,
+            // the head had already been frozen as an immutable Element
+            // and the conversation.cpp tool-batch-merge had nothing to
+            // fold it into. N tool sub-turns → N stacked ACTIONS panels.
+            //
+            // Defer the freeze to finalize_turn (stream.cpp:820, gated
+            // on m.s.is_idle()) so the live tail holds the entire
+            // multi-sub-turn assistant span. The merge logic in
+            // build_live_tail / freeze_range then correctly collapses
+            // the run into one panel, and freezing happens once at
+            // true turn completion.
+            //
+            // Cost: live tail grows to N messages for N-tool turns
+            // (typical N ≤ 5). Per-frame view cost is
+            // O(active_sub_turns) instead of O(1) during the in-flight
+            // window; bounded and not user-visible. Frozen size
+            // (the long-session footprint driver) is unchanged.
             auto ctx = take_active_ctx(std::move(m.s.phase));
             m.s.phase = phase::Streaming{std::move(ctx).value()};
             Message placeholder;
