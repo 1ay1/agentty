@@ -7,7 +7,7 @@
 
 **Claude in your terminal. One 9 MB binary. Sandboxed by default. SSH-airgap in one command.**
 
-A drop-in alternative to `claude-code` written in C++26 — no Node, no Python, no Electron, no `npm install`. Same OAuth (Pro/Max) and `ANTHROPIC_API_KEY` flows.
+A drop-in alternative to `claude-code` written in C++26 — no Node, no Python, no Electron, no `npm install`. Signs in with your **Claude Pro/Max OAuth** (or `ANTHROPIC_API_KEY`).
 
 <p align="center">
   <img src="agentty.gif" alt="agentty streaming a turn with a tool call landing inline" />
@@ -64,8 +64,10 @@ agentty
 
 First launch opens an auth modal:
 
-- **API key.** Paste an `sk-ant-…` token. Saved at `~/.config/agentty/credentials.json`, `0600`.
-- **OAuth (Claude Pro/Max).** Opens your browser; the callback writes the token to the same file. agentty picks the right header on relaunch automatically.
+- **OAuth (Claude Pro/Max).** Opens your browser; the callback writes the token to `~/.config/agentty/credentials.json` (`0600`). agentty picks the right header on relaunch automatically.
+- **API key.** Paste an `sk-ant-…` token. Saved to the same file.
+
+OAuth against your existing Pro/Max subscription is the main path — no extra billing, same account you already pay for.
 
 Override order, highest priority first:
 
