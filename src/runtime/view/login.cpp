@@ -167,15 +167,19 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
             fg_of(danger)));
         rows.push_back(text(""));
     }
-    rows.push_back(h(text("  1) ", fg_bold(highlight)),
+    // Numbered items are flush-left to share the column with the header
+    // / description / hint rows. The title sits next to the number badge;
+    // the subtitle continuation indents by exactly the badge width ("1) "
+    // = 3 chars) so it visually hangs under the title, not under the number.
+    rows.push_back(h(text("1) ", fg_bold(highlight)),
                      text("OAuth via claude.ai", fg_bold(fg))).build());
-    rows.push_back(h(text("     ", fg_of(fg)),
+    rows.push_back(h(text("   ", fg_of(fg)),
                      body_text("for Claude Pro / Max subscribers",
                                fg_dim(muted))).build());
     rows.push_back(text(""));
-    rows.push_back(h(text("  2) ", fg_bold(highlight)),
+    rows.push_back(h(text("2) ", fg_bold(highlight)),
                      text("Paste an Anthropic API key", fg_bold(fg))).build());
-    rows.push_back(h(text("     ", fg_of(fg)),
+    rows.push_back(h(text("   ", fg_of(fg)),
                      body_text("starts with sk-ant-…", fg_dim(muted))).build());
     rows.push_back(text(""));
     rows.push_back(key_hints({{"1/2", "choose"}, {"Esc", "close"}}));
