@@ -102,9 +102,24 @@ if [ -z "${SKIP_SUMS:-}" ]; then
     ok "checksum verified"
 fi
 
+# --- detect prior install (so updates announce themselves) -------------------
+prior_version=""
+if [ -x "$bindir/$BIN_NAME" ]; then
+    prior_version=$("$bindir/$BIN_NAME" --version 2>/dev/null | awk '/^agentty / {print $2}')
+fi
+
 chmod +x "$tmp/$asset"
 mv "$tmp/$asset" "$bindir/$BIN_NAME"
-ok "installed $bindir/$BIN_NAME"
+
+new_version=$("$bindir/$BIN_NAME" --version 2>/dev/null | awk '/^agentty / {print $2}')
+
+if [ -n "$prior_version" ] && [ -n "$new_version" ] && [ "$prior_version" != "$new_version" ]; then
+    ok "updated $bindir/$BIN_NAME  $prior_version  →  $new_version"
+elif [ -n "$prior_version" ] && [ "$prior_version" = "$new_version" ]; then
+    ok "already on $new_version (reinstalled $bindir/$BIN_NAME)"
+else
+    ok "installed $bindir/$BIN_NAME${new_version:+ ($new_version)}"
+fi
 
 # --- PATH hint ----------------------------------------------------------------
 case ":$PATH:" in

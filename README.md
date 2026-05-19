@@ -44,16 +44,18 @@ Plus:
 
 ## Install
 
-Pick your channel — every artifact below is published from one tagged release built reproducibly by `scripts/release.sh`. SHA256s are pinned everywhere.
-
-### One-liner (Linux + macOS, any distro)
+One line. Same line to update.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh -o /tmp/agentty-install.sh
-sh /tmp/agentty-install.sh           # installs to /usr/local/bin (root) or ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
 ```
 
-Detects OS + arch, downloads the right binary from the latest release, verifies SHA256, drops it into your prefix. `--prefix ~/.local` and `--version v0.1.0` flags are supported.
+Detects your OS and arch, downloads the right binary from the latest release, verifies SHA256, installs to `/usr/local/bin` (if root) or `~/.local/bin`. **Re-running the same command updates** to the newest release. No `apt`, no `brew`, no version drift.
+
+Flags: `--prefix ~/somewhere`, `--version v0.1.0`. Works on Linux + macOS, x86_64 + aarch64.
+
+<details>
+<summary><b>Distro-native packages</b> — if you'd rather your package manager track it</summary>
 
 ### Debian / Ubuntu
 
@@ -62,80 +64,87 @@ curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_0.1
 sudo dpkg -i agentty_0.1.0_amd64.deb       # or agentty_0.1.0_arm64.deb
 ```
 
+Update: `dpkg -i` the new release's `.deb`.
+
 ### Fedora / RHEL / openSUSE
 
 ```bash
-sudo rpm -i https://github.com/1ay1/agentty/releases/latest/download/agentty-0.1.0-1.x86_64.rpm
-# or aarch64
+sudo rpm -Uvh https://github.com/1ay1/agentty/releases/latest/download/agentty-0.1.0-1.x86_64.rpm
 ```
+
+`-U` is upgrade; works for the first install too. Same command future-proofs the update path.
 
 ### Arch Linux
 
-AUR — builds from the prebuilt static binary, no compilation:
-
 ```bash
-yay -S agentty-bin                    # or paru, etc.
+yay -S agentty-bin                          # or paru, pikaur, etc.
+yay -Syu agentty-bin                        # update
 ```
 
-Or install the local `.pkg.tar.zst` directly from the release page with `sudo pacman -U`.
+Or install the release-page `.pkg.tar.zst` with `sudo pacman -U`.
 
 ### macOS (Homebrew)
 
 ```bash
 brew tap 1ay1/tap
 brew install agentty
+brew upgrade agentty                        # update
 ```
 
-Linux Homebrew users get the prebuilt static binary; macOS builds from source (~1 min with the toolchain Homebrew ships).
+Linux Homebrew gets the prebuilt static binary; macOS builds from source (~1 min).
 
-### Windows
-
-**Scoop** (recommended — no admin, auto-update):
+### Windows (Scoop)
 
 ```powershell
 scoop bucket add 1ay1 https://github.com/1ay1/scoop-bucket
 scoop install agentty
+scoop update agentty                        # update
 ```
 
-**Direct .exe**:
+Direct `.exe`: `curl -L https://github.com/1ay1/agentty/releases/latest/download/agentty-windows-x86_64.exe -o agentty.exe`.
 
-```powershell
-curl -L https://github.com/1ay1/agentty/releases/latest/download/agentty-windows-x86_64.exe -o agentty.exe
-.\agentty.exe
-```
+### Raw static binaries
 
-### Raw binaries
-
-Fully-static, drop and run — no shared library dependencies on Linux:
+Fully-static, no shared-library dependencies. Drop and run, replace on update:
 
 ```bash
-curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-x86_64 -o agentty && chmod +x agentty && ./agentty
-curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-aarch64 -o agentty && chmod +x agentty && ./agentty
+curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-x86_64 -o agentty && chmod +x agentty
+curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-aarch64 -o agentty && chmod +x agentty
 ```
 
 Verify with [`SHA256SUMS`](https://github.com/1ay1/agentty/releases/latest) on the release page.
 
-### From source (Linux, macOS, Windows)
+### From source
 
 ```bash
 git clone --recursive git@github.com:1ay1/agentty.git
-cd agentty
-cmake -B build && cmake --build build -j
+cd agentty && cmake -B build && cmake --build build -j
 ./build/agentty
 ```
 
-Requires GCC 14+ / Clang 18+ / MSVC 14.40+ and CMake 3.28+. Auth happens in-app on first launch.
+Requires GCC 14+ / Clang 18+ / MSVC 14.40+ and CMake 3.28+.
 
-### Cut your own release
+</details>
 
-Every published artifact above is built by one script, no CI:
+<details>
+<summary><b>Cut your own release</b> — maintainer workflow, one script</summary>
+
+Every published artifact is built locally, no CI:
 
 ```bash
-scripts/release.sh                  # build every artifact into dist/
+scripts/bump.sh 0.2.0        # bumps CMakeLists, builds everything, tags, uploads via gh
+```
+
+Under the hood: rewrites `project(agentty VERSION ...)`, commits the bump, builds deb/rpm/pkg.tar.zst/tarball/binaries/homebrew/scoop/AUR manifests via `scripts/release.sh`, tags `vX.Y.Z`, pushes, and `gh release create`s with every artifact attached. Single source of truth: `CMakeLists.txt`.
+
+Or step-by-step:
+
+```bash
+scripts/release.sh                  # build every artifact into dist/, no upload
 scripts/release.sh --tag v0.2.0     # build + tag + upload via gh
 ```
 
-Produces deb, rpm, pkg.tar.zst, source tarball, raw binaries, homebrew formula, scoop manifest, AUR PKGBUILD, and `SHA256SUMS` — all derived from `CMakeLists.txt`'s `project(... VERSION X.Y.Z)` line (single source of truth).
+</details>
 
 ## Quick start
 
