@@ -183,13 +183,7 @@ Accurate one-liner: **statically linked except libc and (usually) OpenSSL.** For
 
 ## Status
 
-Pre-1.0. Core loop, tools, streaming, permission profiles, in-app auth, persistence, sandbox, airgap, and cross-platform subprocess all work and are built daily.
-
-Stubbed honestly:
-- **Checkpoint restore** — `CheckpointId` + per-message marker exist; `RestoreCheckpoint` currently surfaces "not implemented yet" and does nothing.
-- **Diff review pane** — modal renders, but `pending_changes` isn't populated by any tool yet, so review/accept/reject toast "no pending changes".
-
-All three platforms (Linux, macOS, Windows) are actively tested. Prebuilt release binaries are Linux + Windows; macOS users build from source.
+Works on Linux, macOS, and Windows — all three actively tested and built daily. Prebuilt release binaries for Linux (x86_64, aarch64) and Windows (x86_64); macOS builds from source in seconds.
 
 File bugs with `$TERM`, your terminal emulator name, and a screenshot. Code-path bugs welcome too — paste the relevant block and `git rev-parse HEAD`.
 
