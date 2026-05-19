@@ -60,6 +60,10 @@ std::string parent_segment(std::string_view dir) {
 // the widget's auto-scroll-to-selection logic.
 constexpr int kViewportH = 14;
 
+// U+258E LEFT ONE QUARTER BLOCK — thin vertical bar pinned at col 0.
+// Convention every modern editor uses for "current" / "selected" row.
+constexpr const char* kEdgeBar = "\xe2\x96\x8e";
+
 } // namespace
 
 Element model_picker(const Model& m) {
@@ -82,39 +86,36 @@ Element model_picker(const Model& m) {
         for (const auto& mi : m.d.available_models) {
             bool sel    = i == picker->index;
             bool active = mi.id == m.d.model_id;
-            // Two orthogonal affordances:
-            //   • SELECTED (cursor): full-width gray bar + bright_white
-            //     bold text. Transient — follows the user's arrows.
-            //   • ACTIVE (currently in use): a magenta left-edge bar
-            //     (▎) pinned to col 0 of the row. Persistent — marks
-            //     which model is actually live, regardless of cursor.
+            // Two orthogonal affordances, both at col 0 — no bg fill:
+            //   • CURSOR (transient): cyan left bar + bright_white bold
+            //     text. Follows the arrow keys.
+            //   • ACTIVE (persistent): magenta left bar. Marks the model
+            //     currently in use, regardless of cursor.
             //
-            // Together: cursor on the active model shows both (gray bg
-            // + magenta left bar). Cursor on a different model shows
-            // only the gray bg; the magenta bar stays on the active
-            // row so the user can see what they'd be switching FROM.
-            // The previous trailing ✓ sat next to the scrollbar and
-            // read as visual noise; the left bar is the convention
-            // every modern editor (VS Code, Helix, Zed) uses for
-            // "current" affordances and reads instantly.
-            auto edge_bar = active
-                ? text("\xe2\x96\x8e",   // ▎ LEFT ONE QUARTER BLOCK
-                       fg_bold(accent))
-                : text(" ");
+            // When cursor IS on the active row, cursor wins the bar
+            // colour (cyan) but the text stays bright_white bold —
+            // the user already knows it's active because Enter would
+            // be a no-op. When cursor is elsewhere, the magenta bar
+            // stays put so the user sees what they'd be switching FROM.
+            //
+            // No background fill: the heavy gray bar was visually
+            // chunky and competed with the text. A single column of
+            // colour reads instantly and leaves the row legible.
+            auto edge_bar = sel
+                ? text(kEdgeBar, fg_bold(highlight))
+                : active
+                    ? text(kEdgeBar, fg_bold(accent))
+                    : text(" ");
             auto star = mi.favorite ? text(" ★", fg_of(warn)) : text("  ");
-            auto builder = hstack()
-                .width(Dimension::percent(100))
-                .padding(0, 1);
-            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
-            cfg.items.push_back(std::move(builder)(
+            cfg.items.push_back(h(
                 edge_bar,
                 text(" "),
                 text(mi.display_name,
                      sel    ? fg_bold(maya::Color::bright_white())
                      : active ? fg_bold(fg)
-                              : fg_of(muted)) | clip,
-                spacer(),
-                star));
+                              : fg_of(muted)) | clip | grow(1.0f),
+                star
+            ).build());
             ++i;
         }
     }
@@ -152,30 +153,30 @@ Element thread_list(const Model& m) {
         int i = 0;
         for (const auto& t : m.d.threads) {
             bool sel = i == picker->index;
-            // Each row uses hstack().width(100%) so the row genuinely
-            // spans the picker's full cross-axis width — without that,
-            // a plain h(...).build() sizes to its content's natural
-            // width and spacer() has no leftover to grow into (see
-            // messenger.cpp build_header() comment). With explicit
-            // 100% width, spacer() absorbs everything between title
-            // and timestamp, pushing the timestamp flush right.
+            // Selection: cyan left bar at col 0 + bright_white bold
+            // title. No bg fill — keeps the row legible against the
+            // surrounding chrome. Timestamp stays muted; the bar is
+            // doing the cursor work, the timestamp keeps its column.
             //
-            // Selection affordance: gray bar across the whole row
-            // (bg = bright_black) + bright_white bold text. Drops the
-            // › glyph so the row stays column-aligned regardless of
-            // selection state.
-            auto builder = hstack()
-                .width(Dimension::percent(100))
-                .padding(0, 1);
-            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
-            cfg.items.push_back(std::move(builder)(
+            // Row uses hstack().width(100%) so spacer() can absorb
+            // leftover space and push the timestamp flush right (a
+            // plain h(...).build() sizes to natural content width
+            // and spacer() has nothing to grow into — see
+            // messenger.cpp build_header() comment).
+            auto edge_bar = sel
+                ? text(kEdgeBar, fg_bold(highlight))
+                : text(" ");
+            cfg.items.push_back(hstack()
+                .width(Dimension::percent(100))(
+                edge_bar,
+                text(" "),
                 text(t.title.empty() ? "(untitled)" : t.title,
                      sel ? fg_bold(maya::Color::bright_white())
                          : fg_of(muted)) | clip,
                 spacer(),
                 text(timestamp_full(t.updated_at),
-                     sel ? fg_of(maya::Color::bright_white())
-                         : fg_dim(muted))));
+                     sel ? fg_of(fg) : fg_dim(muted)),
+                text(" ")));
             ++i;
         }
     }
@@ -218,18 +219,20 @@ Element command_palette(const Model& m) {
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
             bool sel = i == o->index;
-            auto builder = hstack()
-                .width(Dimension::percent(100))
-                .padding(0, 1);
-            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
-            cfg.items.push_back(std::move(builder)(
+            auto edge_bar = sel
+                ? text(kEdgeBar, fg_bold(highlight))
+                : text(" ");
+            cfg.items.push_back(hstack()
+                .width(Dimension::percent(100))(
+                edge_bar,
+                text(" "),
                 text(std::string{cmd.label},
                      sel ? fg_bold(maya::Color::bright_white())
                          : fg_of(muted)) | clip,
                 spacer(),
                 text(std::string{cmd.description},
-                     sel ? fg_of(maya::Color::bright_white())
-                         : fg_dim(muted)) | clip));
+                     sel ? fg_of(fg) : fg_dim(muted)) | clip,
+                text(" ")));
         }
     }
 
@@ -266,18 +269,20 @@ Element mention_palette(const Model& m) {
             const auto& path = o->files[matches[static_cast<std::size_t>(i)]];
             auto [name, dir] = split_name_dir(path);
             bool sel = i == o->index;
-            auto builder = hstack()
-                .width(Dimension::percent(100))
-                .padding(0, 1);
-            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
-            cfg.items.push_back(std::move(builder)(
+            auto edge_bar = sel
+                ? text(kEdgeBar, fg_bold(highlight))
+                : text(" ");
+            cfg.items.push_back(hstack()
+                .width(Dimension::percent(100))(
+                edge_bar,
+                text(" "),
                 text(std::string{name},
                      sel ? fg_bold(maya::Color::bright_white())
                          : fg_of(fg)) | clip,
                 spacer(),
                 text(parent_segment(dir),
-                     sel ? fg_of(maya::Color::bright_white())
-                         : fg_dim(muted)) | clip));
+                     sel ? fg_of(fg) : fg_dim(muted)) | clip,
+                text(" ")));
         }
     }
 
@@ -325,22 +330,23 @@ Element symbol_palette(const Model& m) {
             bool sel = i == o->index;
             std::string locus = std::string{fname} + ":"
                               + std::to_string(sym.line_number);
-            auto builder = hstack()
-                .width(Dimension::percent(100))
-                .padding(0, 1);
-            if (sel) builder = std::move(builder).bg(maya::Color::bright_black());
-            cfg.items.push_back(std::move(builder)(
+            auto edge_bar = sel
+                ? text(kEdgeBar, fg_bold(highlight))
+                : text(" ");
+            cfg.items.push_back(hstack()
+                .width(Dimension::percent(100))(
+                edge_bar,
+                text(" "),
                 text(sym.name,
                      sel ? fg_bold(maya::Color::bright_white())
                          : fg_of(fg)) | clip,
                 text("  "),
                 text(locus,
-                     sel ? fg_of(maya::Color::bright_white())
-                         : fg_dim(muted)) | clip,
+                     sel ? fg_of(fg) : fg_dim(muted)) | clip,
                 spacer(),
                 text(parent_segment(dir),
-                     sel ? fg_of(maya::Color::bright_white())
-                         : fg_dim(muted)) | clip));
+                     sel ? fg_of(fg) : fg_dim(muted)) | clip,
+                text(" ")));
         }
     }
 
