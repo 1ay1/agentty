@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <maya/core/scroll_state.hpp>
 #include <maya/element/element.hpp>
 
 #include "agentty/domain/catalog.hpp"
@@ -208,6 +209,30 @@ struct Model {
         // raw Element values inside m.ui.frozen, the live tail
         // rebuilds each frame (bounded by the active turn).
         mutable ui::ViewCache view_cache;
+
+        // ── Scroll state for modal pickers ─────────────────────────────
+        //
+        // Storage for the scroll state of each modal picker. The picker
+        // widget (maya::Picker) reads & mutates these via a borrowed
+        // pointer in Picker::Config; the host owns the storage so the
+        // adapter rule holds (maya owns chrome + behavior; agentty owns
+        // model state).
+        //
+        // `mutable` is required because the view function takes
+        // `const Model&` but maya's paint-time writeback mutates
+        // max_y / bar_v_bounds / viewport_bounds. Same logical-const
+        // pattern as view_cache above: filling a render-side cache /
+        // bounds slot doesn't change observable Model behavior.
+        //
+        // Persisted across open→close→open by default. The reducer can
+        // reset `.y = 0` on semantic transitions if desired (e.g. when
+        // the filter query changes the match set).
+        mutable maya::ScrollState model_picker_scroll;
+        mutable maya::ScrollState thread_list_scroll;
+        mutable maya::ScrollState command_palette_scroll;
+        mutable maya::ScrollState mention_palette_scroll;
+        mutable maya::ScrollState symbol_palette_scroll;
+        mutable maya::ScrollState todo_scroll;
     };
 
     Domain      d;

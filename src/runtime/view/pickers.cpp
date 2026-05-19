@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <vector>
 
+#include <maya/widget/picker.hpp>
 #include <maya/widget/plan_view.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
@@ -10,19 +11,16 @@
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 
-// All sizing here is responsive — the public maya layout does the
-// math, never agentty. Each picker is a `vstack()` that just declares
-// its `min_width`; the Overlay widget exposes a terminal-wide
-// bg-vstack as the picker's parent and default align_items=Stretch
-// makes the picker truly grow to fill that parent. On an 80-col
-// terminal you get the floor; on a 200-col terminal the picker
-// fills the available width minus the Overlay's 2-col edge padding.
-// No `width()`, no `max_width`, no percent arithmetic — pure flex.
+// Pure adapter: builds maya::Picker::Config values from Model state. The
+// widget owns every chrome decision — border style, viewport clipping,
+// scrollbar glyph + thumb math, keep-selection-in-view auto-scroll. agentty
+// supplies only the row-level Elements (each picker formats its items
+// differently — favourite stars, timestamps, parent-dir disambiguators)
+// and the typed cursor index.
 //
 // Per-row truncation rides on `text(...) | clip` (TextWrap::TruncateEnd):
-// maya measures the column it allocated to the text, returns a
-// truncated-with-ellipsis single line if the natural content
-// overflows. agentty never recomputes column widths — that's maya's job.
+// maya measures the column it allocated to the row and returns a
+// truncated-with-ellipsis single line if the natural content overflows.
 
 namespace agentty::ui {
 
@@ -56,125 +54,129 @@ std::string parent_segment(std::string_view dir) {
     return out;
 }
 
-// Wrap the rows + the picker's container chrome in a single vstack
-// builder. Single source of truth for the responsive sizing recipe;
-// each picker passes its own min / max / percent + accent color +
-// border title and gets the same shape back.
-struct PickerShape {
-    int   min_w   = 50;   // never narrower (narrow-terminal floor)
-    Color accent  = fg;
-    std::string title;
-};
-
-Element wrap_picker(PickerShape s, std::vector<Element> rows) {
-    // No `width()` and no `max_width()` — default cross-axis Stretch
-    // in the Overlay's bg-vstack lets the picker fill the terminal
-    // (minus the Overlay's 2-col edge padding). min_width keeps the
-    // picker readable on a tiny terminal; rows shrink + clip via
-    // `text(...) | clip` if the terminal is narrower than the
-    // natural row content.
-    return vstack()
-        .padding(1, 2)
-        .min_width(Dimension::fixed(s.min_w))
-        .border(BorderStyle::Round)
-        .border_color(s.accent)
-        .border_text(s.title, BorderTextPos::Top, BorderTextAlign::Center)
-        (rows);
-}
-
-// Visible-row cap. Same value across pickers — keeps the overlay
-// from pushing the composer off the screen. Rows beyond this stay
-// reachable via the cursor; only the rendered slice shifts.
-constexpr int kVisible = 14;
+// Viewport height (rows) for every picker's scrollable list. Single
+// constant so all pickers share the same shape. Items beyond this
+// reachable via the scrollbar; selection always stays visible via
+// the widget's auto-scroll-to-selection logic.
+constexpr int kViewportH = 14;
 
 } // namespace
 
 Element model_picker(const Model& m) {
     auto* picker = pick::opened(m.ui.model_picker);
     if (!picker) return nothing();
-    std::vector<Element> rows;
+
+    Picker::Config cfg;
+    cfg.title      = " Models ";
+    cfg.accent     = accent;
+    cfg.min_width  = 40;
+    cfg.viewport_h = kViewportH;
+    cfg.scroll     = &m.ui.model_picker_scroll;
+    cfg.selected   = picker->index;
+
     if (m.d.available_models.empty()) {
-        rows.push_back(text("  Loading models…", fg_italic(muted)));
+        cfg.items.push_back(text("  Loading models…", fg_italic(muted)));
+    } else {
+        cfg.items.reserve(m.d.available_models.size());
+        int i = 0;
+        for (const auto& mi : m.d.available_models) {
+            bool sel    = i == picker->index;
+            bool active = mi.id == m.d.model_id;
+            auto prefix = sel ? text("› ", fg_bold(accent)) : text("  ");
+            auto star   = mi.favorite ? text("★ ", fg_of(warn)) : text("  ");
+            auto active_mark = active ? text(" ✓", fg_of(success)) : text("");
+            cfg.items.push_back(h(prefix, star,
+                text(mi.display_name,
+                     sel ? fg_bold(fg) : fg_of(muted)) | clip,
+                active_mark).build());
+            ++i;
+        }
     }
-    int i = 0;
-    for (const auto& mi : m.d.available_models) {
-        bool sel    = i == picker->index;
-        bool active = mi.id == m.d.model_id;
-        auto prefix = sel ? text("› ", fg_bold(accent)) : text("  ");
-        auto star   = mi.favorite ? text("★ ", fg_of(warn)) : text("  ");
-        auto active_mark = active ? text(" ✓", fg_of(success)) : text("");
-        rows.push_back(h(prefix, star,
-            text(mi.display_name,
-                 sel ? fg_bold(fg) : fg_of(muted)) | clip,
-            active_mark).build());
-        ++i;
-    }
-    rows.push_back(text(""));
-    rows.push_back(h(
+
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(h(
         text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
         text("Enter", fg_of(fg)), text(" select  ", fg_dim(muted)),
         text("F", fg_of(fg)), text(" favorite  ", fg_dim(muted)),
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
-    return wrap_picker({.min_w = 40,
-                        .accent = accent, .title = " Models "},
-                       std::move(rows));
+
+    return Picker{std::move(cfg)}.build();
 }
 
 Element thread_list(const Model& m) {
     auto* picker = pick::opened(m.ui.thread_list);
     if (!picker) return nothing();
-    std::vector<Element> rows;
+
+    Picker::Config cfg;
+    cfg.title      = " Threads ";
+    cfg.accent     = info;
+    cfg.min_width  = 50;
+    cfg.viewport_h = kViewportH;
+    cfg.scroll     = &m.ui.thread_list_scroll;
+    cfg.selected   = picker->index;
+
     if (m.d.threads.empty()) {
-        rows.push_back(text(
+        cfg.items.push_back(text(
             m.s.threads_loading ? "  Loading conversations…"
                                 : "  No threads yet.",
             fg_italic(muted)));
+    } else {
+        cfg.items.reserve(m.d.threads.size());
+        int i = 0;
+        for (const auto& t : m.d.threads) {
+            bool sel = i == picker->index;
+            auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
+            cfg.items.push_back(h(prefix,
+                text(t.title.empty() ? "(untitled)" : t.title,
+                     sel ? fg_of(fg) : fg_of(muted)) | clip,
+                spacer(),
+                text(timestamp_hh_mm(t.updated_at), fg_dim(muted))
+            ).build());
+            ++i;
+        }
     }
-    int i = 0;
-    for (const auto& t : m.d.threads) {
-        bool sel = i == picker->index;
-        auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
-        rows.push_back(h(prefix,
-            text(t.title.empty() ? "(untitled)" : t.title,
-                 sel ? fg_of(fg) : fg_of(muted)) | clip,
-            spacer(),
-            text(timestamp_hh_mm(t.updated_at), fg_dim(muted))
-        ).build());
-        if (++i > 15) break;
-    }
-    rows.push_back(text(""));
-    rows.push_back(h(
+
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(h(
         text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
         text("Enter", fg_of(fg)), text(" open  ", fg_dim(muted)),
         text("N", fg_of(fg)), text(" new  ", fg_dim(muted)),
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
-    return wrap_picker({.min_w = 50,
-                        .accent = info, .title = " Threads "},
-                       std::move(rows));
+
+    return Picker{std::move(cfg)}.build();
 }
 
 Element command_palette(const Model& m) {
     auto* o = opened(m.ui.command_palette);
     if (!o) return nothing();
 
-    std::vector<Element> rows;
-    rows.push_back(h(text("› ", fg_bold(highlight)),
+    auto matches = filtered_commands(o->query);
+
+    Picker::Config cfg;
+    cfg.title      = " Command Palette ";
+    cfg.accent     = highlight;
+    cfg.min_width  = 50;
+    cfg.viewport_h = kViewportH;
+    cfg.scroll     = &m.ui.command_palette_scroll;
+    cfg.selected   = matches.empty() ? -1 : o->index;
+
+    cfg.header.push_back(h(text("› ", fg_bold(highlight)),
         text(o->query.empty() ? "type to filter…" : o->query,
              o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
-    rows.push_back(sep);
+    cfg.header.push_back(sep);
 
-    auto matches = filtered_commands(o->query);
     if (matches.empty()) {
-        rows.push_back(text("  no matches", fg_italic(muted)));
+        cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {
+        cfg.items.reserve(matches.size());
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
             bool sel = i == o->index;
             auto prefix = sel ? text("› ", fg_bold(highlight)) : text("  ");
-            rows.push_back(h(prefix,
+            cfg.items.push_back(h(prefix,
                 text(std::string{cmd.label},
                      sel ? fg_bold(fg) : fg_of(muted)) | clip,
                 spacer(),
@@ -182,90 +184,96 @@ Element command_palette(const Model& m) {
             ).build());
         }
     }
-    return wrap_picker({.min_w = 50,
-                        .accent = highlight, .title = " Command Palette "},
-                       std::move(rows));
+
+    return Picker{std::move(cfg)}.build();
 }
 
 Element mention_palette(const Model& m) {
     auto* o = mention_opened(m.ui.mention_palette);
     if (!o) return nothing();
 
-    std::vector<Element> rows;
-    rows.push_back(h(text("@", fg_bold(info)),
+    auto matches = filter_files(o->files, o->query);
+
+    Picker::Config cfg;
+    cfg.title      = " Mention File ";
+    cfg.accent     = info;
+    cfg.min_width  = 50;
+    cfg.viewport_h = kViewportH;
+    cfg.scroll     = &m.ui.mention_palette_scroll;
+    cfg.selected   = matches.empty() ? -1 : o->index;
+
+    cfg.header.push_back(h(text("@", fg_bold(info)),
         text(o->query.empty() ? " type to filter files…" : (" " + o->query),
              o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
-    rows.push_back(sep);
+    cfg.header.push_back(sep);
 
-    auto matches = filter_files(o->files, o->query);
     if (o->files.empty()) {
-        rows.push_back(text("  workspace empty (or no readable files)", fg_italic(muted)));
+        cfg.items.push_back(text("  workspace empty (or no readable files)", fg_italic(muted)));
     } else if (matches.empty()) {
-        rows.push_back(text("  no matches", fg_italic(muted)));
+        cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {
-        int total = static_cast<int>(matches.size());
-        int top = 0;
-        if (o->index >= kVisible) top = o->index - kVisible + 1;
-        if (top + kVisible > total) top = std::max(0, total - kVisible);
-        for (int i = top; i < std::min(top + kVisible, total); ++i) {
+        cfg.items.reserve(matches.size());
+        for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& path = o->files[matches[static_cast<std::size_t>(i)]];
             auto [name, dir] = split_name_dir(path);
             bool sel = i == o->index;
             auto prefix = sel ? text("› ", fg_bold(info)) : text("  ");
-            // text(...) | clip uses TextWrap::TruncateEnd — maya
-            // measures the column it gives the text and returns a
-            // truncated-with-ellipsis single line if the column is
-            // narrower than the natural content. Combined with the
-            // outer percent/min/max sizing the rows naturally adapt
-            // to terminal width without agentty doing any column math.
-            rows.push_back(h(prefix,
+            cfg.items.push_back(h(prefix,
                 text(std::string{name},
                      sel ? fg_bold(fg) : fg_of(fg)) | clip,
                 spacer(),
                 text(parent_segment(dir), fg_dim(muted)) | clip
             ).build());
         }
-        if (total > kVisible) {
-            rows.push_back(text(
-                "  " + std::to_string(o->index + 1) + "/" + std::to_string(total),
-                fg_dim(muted)));
-        }
     }
-    return wrap_picker({.min_w = 50,
-                        .accent = info, .title = " Mention File "},
-                       std::move(rows));
+
+    // Position indicator: still useful as a textual N/total anchor even
+    // though the scrollbar shows the same thing visually.
+    if (static_cast<int>(matches.size()) > kViewportH) {
+        cfg.footer.push_back(text(
+            "  " + std::to_string(o->index + 1) + "/"
+                + std::to_string(matches.size()),
+            fg_dim(muted)));
+    }
+
+    return Picker{std::move(cfg)}.build();
 }
 
 Element symbol_palette(const Model& m) {
     auto* o = symbol_palette_opened(m.ui.symbol_palette);
     if (!o) return nothing();
 
-    std::vector<Element> rows;
-    rows.push_back(h(text("#", fg_bold(highlight)),
+    auto matches = filter_symbols(o->entries, o->query);
+
+    Picker::Config cfg;
+    cfg.title      = " Symbol ";
+    cfg.accent     = highlight;
+    cfg.min_width  = 60;
+    cfg.viewport_h = kViewportH;
+    cfg.scroll     = &m.ui.symbol_palette_scroll;
+    cfg.selected   = matches.empty() ? -1 : o->index;
+
+    cfg.header.push_back(h(text("#", fg_bold(highlight)),
         text(o->query.empty() ? " type to filter symbols…" : (" " + o->query),
              o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
-    rows.push_back(sep);
+    cfg.header.push_back(sep);
 
-    auto matches = filter_symbols(o->entries, o->query);
     if (o->entries.empty()) {
-        rows.push_back(text("  no symbols indexed", fg_italic(muted)));
+        cfg.items.push_back(text("  no symbols indexed", fg_italic(muted)));
     } else if (matches.empty()) {
-        rows.push_back(text("  no matches", fg_italic(muted)));
+        cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {
-        int total = static_cast<int>(matches.size());
-        int top = 0;
-        if (o->index >= kVisible) top = o->index - kVisible + 1;
-        if (top + kVisible > total) top = std::max(0, total - kVisible);
-        for (int i = top; i < std::min(top + kVisible, total); ++i) {
+        cfg.items.reserve(matches.size());
+        for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& sym = o->entries[matches[static_cast<std::size_t>(i)]];
             auto [fname, dir] = split_name_dir(sym.path);
             bool sel = i == o->index;
             auto prefix = sel ? text("› ", fg_bold(highlight)) : text("  ");
             std::string locus = std::string{fname} + ":"
                               + std::to_string(sym.line_number);
-            rows.push_back(h(prefix,
+            cfg.items.push_back(h(prefix,
                 text(sym.name, sel ? fg_bold(fg) : fg_of(fg)) | clip,
                 text("  "),
                 text(locus, fg_dim(muted)) | clip,
@@ -273,26 +281,39 @@ Element symbol_palette(const Model& m) {
                 text(parent_segment(dir), fg_dim(muted)) | clip
             ).build());
         }
-        if (total > kVisible) {
-            rows.push_back(text(
-                "  " + std::to_string(o->index + 1) + "/" + std::to_string(total),
-                fg_dim(muted)));
-        }
     }
-    return wrap_picker({.min_w = 60,
-                        .accent = highlight, .title = " Symbol "},
-                       std::move(rows));
+
+    if (static_cast<int>(matches.size()) > kViewportH) {
+        cfg.footer.push_back(text(
+            "  " + std::to_string(o->index + 1) + "/"
+                + std::to_string(matches.size()),
+            fg_dim(muted)));
+    }
+
+    return Picker{std::move(cfg)}.build();
 }
 
 Element todo_modal(const Model& m) {
     if (!pick::is_open(m.ui.todo.open)) return nothing();
 
-    std::vector<Element> rows;
+    Picker::Config cfg;
+    cfg.title      = " Plan ";
+    cfg.accent     = info;
+    cfg.min_width  = 45;
+    cfg.viewport_h = kViewportH;
+    cfg.scroll     = &m.ui.todo_scroll;
+    // No selection cursor in the todo modal — read-only. Pass -1
+    // so the auto-scroll-to-selection is a no-op and the user's
+    // manual scroll position is fully respected.
+    cfg.selected   = -1;
 
     if (m.ui.todo.items.empty()) {
-        rows.push_back(text("  No tasks yet.", fg_italic(muted)));
-        rows.push_back(text("  The agent will create tasks as it works.", fg_dim(muted)));
+        cfg.items.push_back(text("  No tasks yet.", fg_italic(muted)));
+        cfg.items.push_back(text("  The agent will create tasks as it works.", fg_dim(muted)));
     } else {
+        // PlanView returns one Element with all tasks. It lives in
+        // the scrollable region so a long task list pages cleanly
+        // when it overflows the viewport.
         maya::PlanView plan;
         for (const auto& item : m.ui.todo.items) {
             maya::TaskStatus ts;
@@ -303,28 +324,26 @@ Element todo_modal(const Model& m) {
             }
             plan.add(item.content, ts);
         }
-        rows.push_back(plan.build());
+        cfg.items.push_back(plan.build());
 
         int total = static_cast<int>(m.ui.todo.items.size());
         int done_count = 0;
         for (const auto& item : m.ui.todo.items)
             if (item.status == TodoStatus::Completed) ++done_count;
-        rows.push_back(text(""));
-        rows.push_back(h(
+        cfg.footer.push_back(text(""));
+        cfg.footer.push_back(h(
             text("  " + std::to_string(done_count) + "/" + std::to_string(total),
                  fg_bold(done_count == total ? success : info)),
             text(" completed", fg_dim(muted))
         ).build());
     }
 
-    rows.push_back(text(""));
-    rows.push_back(h(
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(h(
         text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
     ).build());
 
-    return wrap_picker({.min_w = 45,
-                        .accent = info, .title = " Plan "},
-                       std::move(rows));
+    return Picker{std::move(cfg)}.build();
 }
 
 } // namespace agentty::ui
