@@ -12,6 +12,19 @@ prior knowledge of \cpp{}; we will treat the example as a thing to
 look at, and Chapter~\ref{ch:cpp} will teach you the language behind
 it.
 
+\begin{aside}
+A promise, up front: this book is meant to be \emph{fun}. Terminals
+are strange, beautiful, and full of stories --- about a 1978 hardware
+terminal that refused to die, about programmers who taught text to
+think it was a pixel, about ANSI committees who never imagined their
+bytes would still be in use forty-seven years later. We are going to
+tell those stories \emph{while} we teach you to build with \maya{}.
+If at any point you find yourself bored, you have my permission to
+flip ahead, run the code, break something, and circle back. Books on
+libraries should be played with, not just read.
+\end{aside}
+
+
 \section{What is a terminal? (the honest answer)}
 
 You have almost certainly used a terminal: it is the black-or-dark
@@ -62,6 +75,16 @@ This is unusual in computing and turns out to be very valuable: any
 program that follows the rules will work on every machine you can
 \code{ssh} into, today, forever.
 
+\begin{funfact}
+The VT100 shipped the year \emph{Grease} was in cinemas and the Sony
+Walkman did not yet exist. The escape sequences you will learn in
+Chapter~\ref{ch:ansi} --- the ones that move your cursor and paint
+colour --- predate the mouse, the World Wide Web, USB, and most of
+the people reading this book. When your \code{htop} repaints, it is
+literally speaking 1978 at your screen sixty times a second, and your
+screen is going along with it.
+\end{funfact}
+
 \section{What is a TUI?}
 
 A \textbf{TUI} is a \emph{Text User Interface}: a program that does
@@ -96,6 +119,16 @@ That restriction --- one character per cell --- is the entire reason
 TUIs are smaller, faster, and easier to write than GUIs. There is no
 font engine, no anti-aliasing, no input method editor; just a grid and
 some bytes.
+
+\begin{tryit}
+Open your terminal and run \code{htop} (install it if you do not have
+it: \code{sudo apt install htop} on Debian/Ubuntu, \code{brew install
+htop} on macOS). Resize the window. Watch the columns rearrange in
+perfect grid steps --- never half a character wide. That is the TUI
+rule made visible: characters in, characters out, nothing in between.
+Press \code{q} to quit. You have just used the same kind of program
+you are about to learn to build.
+\end{tryit}
 
 \subsection{Why bother with TUIs in 2025?}
 
@@ -248,6 +281,13 @@ sequences (we will look at the bytes in Chapter~\ref{ch:terminal}),
 manually tracking what is on screen, manually parsing keyboard input,
 and manually re-laying-out everything when the window resizes.
 
+Think of \maya{} as the difference between writing a letter and
+speaking the words yourself. Without a library you are shouting bytes
+into the void: \code{ESC[2J}, \code{ESC[H}, \code{ESC[31m}, ``red
+please, row 1 column 1, clear the screen first''. With \maya{} you
+say \emph{``a red title at the top''} and the library does the
+shouting --- in 1978's dialect, no less --- on your behalf.
+
 With \maya{}, you describe what you \emph{want} on screen as a tree of
 boxes and text, and \maya{} works out the bytes to send. Concretely,
 the work the library does for you is:
@@ -383,6 +423,20 @@ There are many TUI libraries. \code{ncurses} (C, ancient and
 respected), \code{ratatui} (Rust), \code{bubbletea} (Go),
 \code{textual} (Python), \code{ink} (Node.js). Each is good in its
 own way. \maya{} picks three positions that distinguish it.
+
+\begin{mythbust}
+\textbf{Myth:} ``\code{ncurses} is the terminal.''\\
+\textbf{Reality:} \code{ncurses} is a 1980s C library that wraps a
+1970s terminal-capability database (\code{terminfo}) so programs do
+not have to special-case every model of physical terminal. It is
+venerable, it is everywhere, and it is showing its age. Modern
+libraries like \maya{} talk ANSI directly to the emulator and skip
+the \code{terminfo} layer entirely --- because every emulator made
+in the last twenty years already agreed to speak ANSI. The terminal
+is not \code{ncurses}; the terminal is bytes, and \code{ncurses} is
+one way to spell them.
+\end{mythbust}
+
 
 \paragraph{1. Wrong UI code does not compile.}
 Most libraries accept your code happily and let you discover the bug

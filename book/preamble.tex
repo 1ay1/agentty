@@ -150,6 +150,28 @@
   title={Terminal}, fontupper=\ttfamily\small, #1
 }
 
+% ---- Playful boxes: tryit, funfact, aside, mythbust ---------------------
+\newtcolorbox{tryit}[1][]{
+  enhanced, breakable,
+  colback=mayarose!6, colframe=mayarose, fonttitle=\bfseries,
+  title={Try this right now}, #1
+}
+\newtcolorbox{funfact}[1][]{
+  enhanced, breakable,
+  colback=mayaamber!8, colframe=mayaamber, fonttitle=\bfseries,
+  title={Fun fact}, #1
+}
+\newtcolorbox{aside}[1][]{
+  enhanced, breakable,
+  colback=mayalight, colframe=mayagrey, fonttitle=\bfseries\color{mayaink},
+  title={Aside}, #1
+}
+\newtcolorbox{mythbust}[1][]{
+  enhanced, breakable,
+  colback=mayalavender!8, colframe=mayalavender, fonttitle=\bfseries,
+  title={Myth vs.\ reality}, #1
+}
+
 % ---- Misc convenience ---------------------------------------------------
 \newcommand{\maya}{\textsf{maya}}
 \newcommand{\agentty}{\textsf{agentty}}

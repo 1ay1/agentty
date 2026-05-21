@@ -13,6 +13,17 @@ There is nothing magical here. The terminal is one of the simplest
 abstract machines in computing. It has a small alphabet and a small
 list of rules; we will learn both.
 
+\begin{aside}
+The terminal is a great place to be a beginner. Almost nothing in it
+has been redesigned since 1980, which means every weird corner has
+been explained somewhere on the internet, every byte has a name, and
+every decision has a story. By the time you finish this chapter you
+will understand the cursor better than ninety per cent of working
+programmers --- not because the material is hard, but because most
+people never look.
+\end{aside}
+
+
 \section{What is a ``state machine''?}
 \label{sec:term:fsm}
 
@@ -404,6 +415,23 @@ allocation, no construction at startup. We will explain
 \code{string\_view} and \code{constexpr} properly in
 Chapter~\ref{ch:cpp}.
 
+\begin{tryit}
+Open your terminal and paste this in:
+\begin{lstlisting}[style=shell]
+printf '\e[1;31mHello\e[0m, \e[4;94mmaya\e[0m!\n'
+\end{lstlisting}
+You should see ``Hello'' in bold red, a comma, ``maya'' in underlined
+bright blue, an exclamation mark. You have just hand-spoken ANSI to
+the terminal. \code{\textbackslash e} is the shell's spelling of
+byte $0x1B$; \code{[1;31m} is SGR \emph{bold red}; \code{[0m} is
+\emph{reset}. Everything \maya{} eventually does in this layer is
+just more of the same, scaled up and emitted by a library instead of
+by your fingers. Try changing the numbers --- \code{[42m} for green
+background, \code{[3m} for italic, \code{[5m} for blink (if your
+emulator still honours it; most do, embarrassingly).
+\end{tryit}
+
+
 \subsection{Cursor movement and erasing}
 
 A short worked example: print ``A'' at row $3$, column $5$, then
@@ -478,6 +506,18 @@ h} switches to the secondary one (saving the primary), \code{?1049 l}
 switches back. \maya{} programs in fullscreen mode emit the enter
 sequence at startup and the leave sequence at exit, which is why they
 behave the same way.
+
+\begin{funfact}
+The alternate screen is a parlour trick: the terminal does not really
+have ``two screens'', it just stashes one grid of cells in memory and
+paints the other. The first emulator to ship it (xterm, mid-1980s)
+was trying to fix a single recurring annoyance --- people running
+\code{vi}, quitting, and losing their shell history under a wall of
+editing cruft. Forty years later that ``temporary'' fix is universal,
+standardised under a four-digit code in a 1970s protocol, and the
+reason your \code{htop} does not eat your scrollback.
+\end{funfact}
+
 
 \paragraph{Bracketed paste.}
 When the user pastes a chunk of text, the emulator wraps it with the
@@ -588,6 +628,23 @@ sequence carrying \emph{(code point, modifiers)}. No more guessing
 whether \code{0x0D} meant Enter or Ctrl+M; no more 50 ms wait to
 decide if Esc was bare.
 \end{idea}
+
+\begin{tryit}
+If your terminal supports KKP (kitty, WezTerm, foot, Ghostty, recent
+alacritty), try this in your shell:
+\begin{lstlisting}[style=shell]
+printf '\e[>1u' && cat -v
+\end{lstlisting}
+The first \code{printf} turns on KKP disambiguation; \code{cat -v}
+prints each byte you type, with control bytes shown as \code{\^{}X}
+or \code{M-X}. Now press \code{Enter} --- you should see
+\code{\^{}[[13u} instead of just \code{\^{}M}. Press \code{Ctrl+Enter}
+and \code{Ctrl+m} and watch them produce \emph{different} sequences
+for the first time in your life. Press \code{Ctrl-D} to exit, then
+run \code{printf '\textbackslash{}e[<u'} to pop the protocol off,
+or open a fresh terminal.
+\end{tryit}
+
 
 \section{Cooked mode, raw mode, and \code{termios}}
 

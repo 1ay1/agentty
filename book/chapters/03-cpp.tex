@@ -12,6 +12,21 @@ later ones (templates, concepts, variants) lean on earlier ones
 (values, references, classes). When you finish, you will be able to
 read every line of \maya{} source code.
 
+\begin{aside}
+\cpp{} has a reputation. Big, intimidating, three thousand pages of
+standard, occasional surprise undefined behaviour, syntax that looks
+like a cat fell on a keyboard. All true. It is also, in its modern
+form, one of the most expressive languages on the planet --- you can
+teach the compiler your invariants and have it enforce them at build
+time, for zero runtime cost. That is the trick \maya{} pulls in
+every chapter of this book, and this chapter is where you learn the
+vocabulary to read it. We will not cover all of \cpp{}. We will
+cover \emph{maya's slice} of \cpp{}, taught in the order you actually
+need it. Think of it as a phrasebook for a country we are about to
+visit, not a grammar of the whole language.
+\end{aside}
+
+
 \section{What a \cpp{} program is}
 \label{sec:cpp:program}
 
@@ -571,6 +586,21 @@ Widget w{};         // correct, explicit
 \end{lstlisting}
 
 Use braces or empty parentheses where you really mean to construct.
+
+\begin{funfact}
+The name ``most vexing parse'' is not slang --- it is a phrase Scott
+Meyers coined in \emph{Effective STL} (2001) and that the \cpp{}
+community adopted with the affection one reserves for a beloved
+family embarrassment. The grammar prefers the function-declaration
+reading because \cpp{} inherits C's rule that ``if it could be a
+declaration, it is'' --- a rule designed in the 1970s when nobody
+imagined classes with empty parens. \cpp{}11's brace syntax
+(\code{Widget w\{\};}) was added partly to give us a way to say
+``no, I really meant to construct a thing'' that the grammar cannot
+misread. Forty years on, the bug is officially Won't Fix, and the
+workaround is a single curly brace.
+\end{funfact}
+
 
 \subsection{The rule}
 
@@ -1801,6 +1831,20 @@ A fact you need to know about \cpp{}: some operations are
 the program should do when you perform them; the compiler is
 allowed to do \emph{anything}, including silently produce nonsense.
 This is jarring if you come from a safer language.
+
+\begin{funfact}
+The formal standardese for ``what may happen on undefined behaviour''
+is ``the behaviour is undefined''. The community's translation, from
+a 1992 Usenet post by John F.\ Woods, is more colourful: ``the
+compiler may make demons fly out of your nose''. The phrase
+\emph{nasal demons} has stuck for thirty years because it captures
+the one true thing about UB --- the language gives you no guarantee
+at all. Your program might segfault, might silently corrupt memory,
+might work today and break tomorrow when you flip on \code{-O3},
+might even run correctly forever. UB does not mean ``broken''. It
+means ``the standard washed its hands, and so did the compiler''.
+\end{funfact}
+
 
 The most common forms of UB:
 
