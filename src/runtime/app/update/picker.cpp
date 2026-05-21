@@ -114,6 +114,38 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             p->index = (p->index + e.delta + sz) % sz;
             return done(std::move(m));
         },
+        // ── Silent model swap ─────────────────────────────────────────
+        //
+        // ThreadListSelect and NewThread replace m.d.current wholesale
+        // WITHOUT dispatching Cmd::force_redraw. This is deliberate —
+        // do NOT "defensively" add a force_redraw here. History:
+        // commit 8becb88 did exactly that and reverted in 0b24148.
+        //
+        // Why a silent swap is safe:
+        //   Nothing between this reducer and the next render touches
+        //   maya's prev_cells. The shadow hash stays consistent with
+        //   the wire, so the next compose's witness chain succeeds and
+        //   the normal diff path runs. The diff sees old-thread cells
+        //   in prev vs new-thread cells in canvas and emits per-row,
+        //   per-cell-span deltas in place — cursor walks via cursor_up
+        //   / \r within the existing painted region.
+        //
+        // Why force_redraw is WRONG here:
+        //   Cmd::force_redraw demotes Synced → Stale, routing the next
+        //   render through compose case (B). Case (B)'s scroll-to-fit
+        //   branch (scroll_n > 0) emits \n at the viewport bottom
+        //   when the new frame is taller than the old cursor's offset
+        //   from viewport top — each \n there scrolls a row of
+        //   whatever was on screen (old thread tail + host shell
+        //   history above it) up into terminal-owned scrollback,
+        //   permanently. Net effect: visible duplicate / garbage rows
+        //   in scrollback after every thread switch that grows the
+        //   frame.
+        //
+        // The diff path doesn't have this hazard: growth past the
+        // previous bottom scrolls as new content (correct streaming
+        // behavior), and in-place rewrite of existing rows never
+        // emits bottom-edge \n.
         [&](ThreadListSelect) -> Step {
             auto* p = pick::opened(m.ui.thread_list);
             if (p && !m.d.threads.empty()) {
@@ -175,6 +207,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // abandoned along with the thread).
             m.s.phase = phase::Idle{};
             release_to_kernel();
+            // Silent model swap — see ThreadListSelect comment above.
             return done(std::move(m));
         },
         [&](ThreadsLoaded& e) -> Step {
