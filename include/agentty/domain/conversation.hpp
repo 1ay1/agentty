@@ -99,6 +99,19 @@ struct ToolUse {
     // that eliminates the bulk of tail-identical re-renders when the
     // model pauses mid-stream.
     std::size_t    stream_sniff_size   = 0;
+    // Incremental decode cache for the streaming long-string value
+    // (write's `content`, future bash `command` if it grows large, etc).
+    // Walks args_streaming exactly once across the tool's lifetime
+    // instead of re-decoding [stream_sniff_offset, end) on every delta.
+    // Cumulative cost drops from O(N²) to O(N) over the stream.
+    //
+    // stream_decoded_value holds the decoded preview tail (capped — see
+    // kStreamingPreviewCap); the prefix is trimmed once the tail exceeds
+    // 2× cap so memory stays bounded even on 10 MB writes.
+    // stream_decode_through tracks the byte position in args_streaming
+    // we've consumed; the next decode pass resumes there.
+    mutable std::string stream_decoded_value;
+    std::size_t         stream_decode_through = 0;
     Status         status   = Pending{};
     bool           expanded = true;
 

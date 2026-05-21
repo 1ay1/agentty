@@ -229,6 +229,42 @@ decode_string_from(std::string_view raw, std::size_t offset) {
     return out;
 }
 
+bool
+decode_string_append(std::string_view raw,
+                     std::size_t* through,
+                     std::string& out)
+{
+    if (!through || *through >= raw.size()) return false;
+    std::size_t p = *through;
+    // Reserve a guess for the new bytes — most escapes are 1-byte
+    // expansions (`\n` → newline) so raw.size() - p is a tight upper
+    // bound on the decoded growth.
+    if (out.capacity() - out.size() < raw.size() - p)
+        out.reserve(out.size() + (raw.size() - p));
+    while (p < raw.size()) {
+        char c = raw[p];
+        if (c == '\\') {
+            // Half-escape at the buffer edge — stop without consuming
+            // the `\`. Next call (with more bytes) will see the full
+            // escape pair and resume cleanly.
+            if (p + 1 >= raw.size()) break;
+            apply_escape(raw[p + 1], out);
+            p += 2;
+        } else if (c == '"') {
+            // Value closed. Advance past the `"` so future calls
+            // return immediately (idempotent post-close).
+            ++p;
+            *through = p;
+            return true;
+        } else {
+            out.push_back(c);
+            ++p;
+        }
+    }
+    *through = p;
+    return false;
+}
+
 std::optional<std::string>
 sniff_string_progressive(std::string_view raw, std::string_view key) {
     auto off = locate_string_value(raw, key);

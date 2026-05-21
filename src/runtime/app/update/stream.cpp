@@ -310,13 +310,30 @@ void update_stream_preview(ToolUse& tc) {
                 if (auto p = agentty::tools::util::locate_string_value(
                         tc.args_streaming, k)) {
                     tc.stream_sniff_offset = *p;
+                    tc.stream_decode_through = *p;
                     break;
                 }
             }
         }
         if (tc.stream_sniff_offset != 0) {
-            auto v = agentty::tools::util::decode_string_from(
-                tc.args_streaming, tc.stream_sniff_offset);
+            // Incremental decode: each tick consumes only the new bytes
+            // since stream_decode_through, then trims the accumulated
+            // value back to ~2× the preview cap so memory stays bounded
+            // on huge writes. Cumulative cost is O(args_streaming.size())
+            // across the whole stream, not O(N²).
+            agentty::tools::util::decode_string_append(
+                tc.args_streaming,
+                &tc.stream_decode_through,
+                tc.stream_decoded_value);
+            constexpr std::size_t kKeepCap = 2 * kStreamingPreviewCap;
+            if (tc.stream_decoded_value.size() > kKeepCap) {
+                // Trim the head, keep the freshest 2×cap bytes. The
+                // preview only ever displays the trailing cap, so the
+                // head we drop was already invisible.
+                tc.stream_decoded_value.erase(
+                    0, tc.stream_decoded_value.size() - kKeepCap);
+            }
+            const auto& v = tc.stream_decoded_value;
             if (!v.empty()) {
                 if (v.size() > kStreamingPreviewCap) {
                     // Preview shows the tail — the newest bytes are the
@@ -331,7 +348,7 @@ void update_stream_preview(ToolUse& tc) {
                                 kStreamingPreviewCap);
                     set_arg("content", std::move(tail));
                 } else {
-                    set_arg("content", std::move(v));
+                    set_arg("content", v);
                 }
             }
         }

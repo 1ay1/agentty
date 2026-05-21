@@ -74,6 +74,18 @@ locate_string_value(std::string_view raw, std::string_view key);
 [[nodiscard]] std::string
 decode_string_from(std::string_view raw, std::size_t offset);
 
+// Incremental decode — walks raw[*through .. end) once, appending
+// decoded JSON-string bytes to `out` and advancing `*through` past
+// consumed input. Stops at the value's closing `"` (and advances
+// `*through` past it) or at end-of-buffer. Designed for repeated
+// calls as `raw` grows: cumulative work is O(raw.size()) over the
+// stream, vs O(raw.size()²) for naive re-decoding. Returns true iff
+// the closing `"` was seen (i.e. the value is now complete and
+// future calls will be no-ops).
+bool decode_string_append(std::string_view raw,
+                          std::size_t* through,
+                          std::string& out);
+
 // Returns true iff `raw` ends with an unterminated JSON string —
 // equivalently, iff `close_partial_json(raw)` would synthesise a
 // closing `"`. Cheap single-pass scan of the buffer mirroring the

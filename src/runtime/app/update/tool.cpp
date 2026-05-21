@@ -141,8 +141,24 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // for a turn that's already settled into m.ui.frozen
             // silently no-ops here.
             with_live_tool(m, e.id, [&](ToolUse& tc) {
-                if (auto* r = std::get_if<ToolUse::Running>(&tc.status))
+                if (auto* r = std::get_if<ToolUse::Running>(&tc.status)) {
+                    // Cap the stored snapshot: the body preview shows
+                    // the trailing window only, but `tc.progress_text`
+                    // gets COPIED into a ToolBodyPreview Config every
+                    // frame the live timeline is rebuilt. Unbounded
+                    // bash output (e.g. `find /`) would otherwise push
+                    // 100s of KB through that copy each frame and
+                    // visibly stall the UI on long commands. Mirrors
+                    // the write fast path's content cap.
+                    constexpr std::size_t kProgressKeep = 16 * 1024;
+                    if (e.snapshot.size() > kProgressKeep) {
+                        // Keep the tail — newest bytes are the most
+                        // useful confirmation of progress.
+                        e.snapshot.erase(
+                            0, e.snapshot.size() - kProgressKeep);
+                    }
                     r->progress_text = std::move(e.snapshot);
+                }
             });
             return done(std::move(m));
         },
