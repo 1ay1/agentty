@@ -71,6 +71,24 @@ maya::Element compaction_divider_row() {
         && !mm.tool_calls.empty();
 }
 
+// Run-level safety gate: a frozen turn captures an Element snapshot
+// whose hash_id is stamped once and never recomputed. If we freeze a
+// run that still contains a Pending / Approved / Running tool, that
+// tool's status would mutate later (when ToolExecOutput finally
+// lands) but the rendered Element in m.ui.frozen would keep the
+// pre-mutation state forever — visible as a permanently-Running
+// spinner in scrollback. Refuse to freeze any run that isn't fully
+// terminal; the next freeze_through pass picks it up once the live
+// path has settled it.
+bool run_is_freezable(const Model& m, std::size_t from, std::size_t run_end) {
+    for (std::size_t j = from; j < run_end; ++j) {
+        for (const auto& tc : m.d.current.messages[j].tool_calls) {
+            if (!tc.is_terminal()) return false;
+        }
+    }
+    return true;
+}
+
 // Freeze messages[from .. to), pushing built Turn Elements (and any
 // leading gap / compaction divider) into m.ui.frozen. One Turn per
 // speaker-run: a User message is its own Turn; a run of consecutive
@@ -97,14 +115,23 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
 
     std::size_t i = from;
     while (i < to) {
-        if (needs_compaction_divider(i)) {
-            m.ui.frozen.push_back(compaction_divider_row());
-        }
-
         // Run boundary — shared with build_live_tail.
         const std::size_t run_end_global =
             ui::turn_run_end(m.d.current.messages, i);
         const std::size_t run_end = std::min(run_end_global, to);
+
+        // Safety gate: if any tool in this run is not yet terminal,
+        // stop here. frozen_through advances to `i` (the start of
+        // the un-freezable run) so the next freeze_through call
+        // resumes here once the live path has settled it.
+        if (!run_is_freezable(m, i, run_end)) {
+            m.ui.frozen_through = i;
+            return;
+        }
+
+        if (needs_compaction_divider(i)) {
+            m.ui.frozen.push_back(compaction_divider_row());
+        }
 
         // Leading gap: one blank row before every turn except the
         // very first frozen row (avoid a top-of-thread gap).

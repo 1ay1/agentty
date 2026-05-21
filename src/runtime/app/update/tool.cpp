@@ -61,56 +61,60 @@ void release_streaming_buffers(ToolUse& tc) {
 
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result) {
-    for (auto& msg : m.d.current.messages)
-        for (auto& tc : msg.tool_calls)
-            if (tc.id == id) {
-                // Idempotent: a tool already in a terminal state
-                // (Done / Failed / Rejected) keeps that state. Realistic
-                // ways a late ToolExecOutput can land here:
-                //   (a) Wall-clock watchdog force-failed the tool at
-                //       60 s; the worker thread eventually unwound
-                //       seconds/minutes later. The original failure
-                //       reason ("hung") is more useful to the user
-                //       than the late output would be — and overwriting
-                //       could re-arm a turn that's already advanced
-                //       past this tool.
-                //   (b) A duplicate dispatch on the same id (shouldn't
-                //       happen but cheap to defend against).
-                // Either way, dropping the late result keeps history
-                // stable.
-                if (tc.is_terminal()) return;
-                auto now = std::chrono::steady_clock::now();
-                auto started = tc.started_at();
-                if (result) {
-                    tc.status = ToolUse::Done{started, now,
-                        clamp_output(std::move(*result))};
-                } else {
-                    // Render typed error as "[kind] detail" so the category
-                    // is visible in tool-card / history without losing the
-                    // human-readable detail. The model needs only the
-                    // string back; the kind is preserved structurally for
-                    // the future, when the view branches on category.
-                    tc.status = ToolUse::Failed{started, now,
-                        clamp_output(result.error().render())};
-                }
-                release_streaming_buffers(tc);
-            }
+    with_live_tool(m, id, [&](ToolUse& tc) {
+        // Idempotent: a tool already in a terminal state
+        // (Done / Failed / Rejected) keeps that state. Realistic
+        // ways a late ToolExecOutput can land here:
+        //   (a) Wall-clock watchdog force-failed the tool at
+        //       60 s; the worker thread eventually unwound
+        //       seconds/minutes later. The original failure
+        //       reason ("hung") is more useful to the user
+        //       than the late output would be — and overwriting
+        //       could re-arm a turn that's already advanced
+        //       past this tool.
+        //   (b) A duplicate dispatch on the same id (shouldn't
+        //       happen but cheap to defend against).
+        // Either way, dropping the late result keeps history
+        // stable.
+        //
+        // Frozen prefix: with_live_tool already skips messages with
+        // index < frozen_through, so a ToolExecOutput that races a
+        // freeze (turn settled, user submitted again, tool worker
+        // finally returned) silently no-ops here. Without the gate
+        // the mutation would land on a Message whose rendered
+        // Element in m.ui.frozen is immutable — visible as a
+        // permanently-Running spinner in scrollback.
+        if (tc.is_terminal()) return;
+        auto now = std::chrono::steady_clock::now();
+        auto started = tc.started_at();
+        if (result) {
+            tc.status = ToolUse::Done{started, now,
+                clamp_output(std::move(*result))};
+        } else {
+            // Render typed error as "[kind] detail" so the category
+            // is visible in tool-card / history without losing the
+            // human-readable detail. The model needs only the
+            // string back; the kind is preserved structurally for
+            // the future, when the view branches on category.
+            tc.status = ToolUse::Failed{started, now,
+                clamp_output(result.error().render())};
+        }
+        release_streaming_buffers(tc);
+    });
 }
 
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason) {
-    for (auto& msg : m.d.current.messages)
-        for (auto& tc : msg.tool_calls)
-            if (tc.id == id) {
-                auto now = std::chrono::steady_clock::now();
-                if (reason.empty()) {
-                    tc.status = ToolUse::Rejected{now};
-                } else {
-                    tc.status = ToolUse::Failed{tc.started_at(), now,
-                        clamp_output(std::string{reason})};
-                }
-                release_streaming_buffers(tc);
-            }
+    with_live_tool(m, id, [&](ToolUse& tc) {
+        auto now = std::chrono::steady_clock::now();
+        if (reason.empty()) {
+            tc.status = ToolUse::Rejected{now};
+        } else {
+            tc.status = ToolUse::Failed{tc.started_at(), now,
+                clamp_output(std::string{reason})};
+        }
+        release_streaming_buffers(tc);
+    });
 }
 
 // ============================================================================
@@ -133,46 +137,44 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         // ExecutingTool) to re-render. Ignore if the tool has already
         // finalised (a late snapshot racing the terminal ToolExecOutput).
         [&](ToolExecProgress& e) -> Step {
-            for (auto& msg_ : m.d.current.messages)
-                for (auto& tc : msg_.tool_calls)
-                    if (tc.id == e.id) {
-                        if (auto* r = std::get_if<ToolUse::Running>(&tc.status))
-                            r->progress_text = std::move(e.snapshot);
-                    }
+            // Frozen prefix is immutable — a late progress snapshot
+            // for a turn that's already settled into m.ui.frozen
+            // silently no-ops here.
+            with_live_tool(m, e.id, [&](ToolUse& tc) {
+                if (auto* r = std::get_if<ToolUse::Running>(&tc.status))
+                    r->progress_text = std::move(e.snapshot);
+            });
             return done(std::move(m));
         },
 
-        // ── Per-tool wall-clock watchdog ────────────────────────────────
+        // ── Per-tool wall-clock watchdog ──────────────────────────────────
         [&](ToolTimeoutCheck& e) -> Step {
             bool flipped = false;
-            for (auto& msg_ : m.d.current.messages) {
-                for (auto& tc : msg_.tool_calls) {
-                    if (tc.id != e.id) continue;
-                    if (tc.is_terminal())                  continue;
-                    auto now = std::chrono::steady_clock::now();
-                    const auto* sp = tools::spec::lookup(tc.name.value);
-                    auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
-                    std::string reason;
-                    if (tc.is_pending() || tc.is_approved()) {
-                        reason = "tool stayed " + std::string{tc.status_name()}
-                            + " for " + std::to_string(secs.count())
-                            + " s — args probably never finished streaming "
-                            "(transient API error mid-tool_use, or the "
-                            "stream silently exited without a terminal event).";
-                    } else {
-                        reason = "tool execution exceeded "
-                            + std::to_string(secs.count())
-                            + " s wall-clock — likely hung on a blocking "
-                            "syscall (slow/dead filesystem mount, network "
-                            "freeze, or worker deadlock). The tool's worker "
-                            "thread may continue in the background; its "
-                            "result will be discarded if it ever returns.";
-                    }
-                    tc.status = ToolUse::Failed{
-                        tc.started_at(), now, std::move(reason)};
-                    flipped = true;
+            with_live_tool(m, e.id, [&](ToolUse& tc) {
+                if (tc.is_terminal()) return;
+                auto now = std::chrono::steady_clock::now();
+                const auto* sp = tools::spec::lookup(tc.name.value);
+                auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
+                std::string reason;
+                if (tc.is_pending() || tc.is_approved()) {
+                    reason = "tool stayed " + std::string{tc.status_name()}
+                        + " for " + std::to_string(secs.count())
+                        + " s \xe2\x80\x94 args probably never finished streaming "
+                        "(transient API error mid-tool_use, or the "
+                        "stream silently exited without a terminal event).";
+                } else {
+                    reason = "tool execution exceeded "
+                        + std::to_string(secs.count())
+                        + " s wall-clock \xe2\x80\x94 likely hung on a blocking "
+                        "syscall (slow/dead filesystem mount, network "
+                        "freeze, or worker deadlock). The tool's worker "
+                        "thread may continue in the background; its "
+                        "result will be discarded if it ever returns.";
                 }
-            }
+                tc.status = ToolUse::Failed{
+                    tc.started_at(), now, std::move(reason)};
+                flipped = true;
+            });
             if (!flipped) return done(std::move(m));
             auto cmd = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(cmd)};
@@ -209,18 +211,20 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         [&](PermissionApprove) -> Step {
             if (!m.d.pending_permission) return done(std::move(m));
             auto id = m.d.pending_permission->id;
-            for (auto& msg_ : m.d.current.messages)
-                for (auto& tc : msg_.tool_calls)
-                    if (tc.id == id) {
-                        // Mark approval as type state: Pending → Approved.
-                        // kick_pending_tools then treats Approved as
-                        // "permission already granted" and routes through
-                        // the same effect-parallel gate as a non-permissioned
-                        // tool — so if a sibling Read is still running, a
-                        // freshly approved Write/Bash waits for it instead
-                        // of racing.
-                        tc.status = ToolUse::Approved{tc.started_at()};
-                    }
+            // Permission only ever fires against a tool in the live
+            // tail — a frozen turn is by definition past every pending
+            // permission. with_live_tool's frozen-prefix gate is the
+            // structural guarantee of that invariant.
+            with_live_tool(m, id, [&](ToolUse& tc) {
+                // Mark approval as type state: Pending → Approved.
+                // kick_pending_tools then treats Approved as
+                // "permission already granted" and routes through
+                // the same effect-parallel gate as a non-permissioned
+                // tool — so if a sibling Read is still running, a
+                // freshly approved Write/Bash waits for it instead
+                // of racing.
+                tc.status = ToolUse::Approved{tc.started_at()};
+            });
             m.d.pending_permission.reset();
             return {std::move(m), cmd::kick_pending_tools(m)};
         },

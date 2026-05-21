@@ -116,6 +116,36 @@ void apply_tool_output(Model& m, const ToolCallId& id,
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 
+// ── Frozen-prefix immutability gate ──────────────────────────────────────
+//
+// `m.ui.frozen` is an append-only vector of fully-built Element
+// snapshots; their `hash_id` is stamped at freeze time and never
+// recomputed, so any post-freeze mutation of the underlying ToolUse
+// is invisible until thread switch / rehydrate. The five mutation
+// sites that locate a tool by ToolCallId (ToggleToolExpanded,
+// ToolExecOutput / apply_tool_output, ToolExecProgress, ToolTimeoutCheck,
+// PermissionReject / mark_tool_rejected) must therefore refuse to touch
+// any tool whose enclosing message has index < frozen_through.
+//
+// `with_live_tool` is the only way to mutate a tool by id. It searches
+// ONLY the live tail [frozen_through .. end) and returns true iff the
+// mutation ran. A stale id (tool whose turn was already frozen) returns
+// false — caller treats it as a no-op, matching the existing
+// "idempotent on terminal" behaviour of apply_tool_output.
+template <class F>
+bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
+    for (std::size_t i = m.ui.frozen_through;
+         i < m.d.current.messages.size(); ++i) {
+        for (auto& tc : m.d.current.messages[i].tool_calls) {
+            if (tc.id == id) {
+                std::forward<F>(f)(tc);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // ── Per-domain reducers ──────────────────────────────────────────────────
 // One per slice of `Msg`. update.cpp's top-level std::visit dispatches a
 // Msg to the matching reducer below; each reducer has its own visit over

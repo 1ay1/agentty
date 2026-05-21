@@ -838,6 +838,29 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // of frozen via list_ref (zero-copy) and the live tail draws
     // nothing until the next submit pushes a fresh placeholder.
     if (m.s.is_idle()) {
+        // Pre-settle every Assistant message in the live tail before
+        // the Element snapshot is taken. Lazy finish() during view
+        // shifts an assistant's rendered height by ±N rows when the
+        // closing ``` of a code block commits the tail into a prefix
+        // block — if that happens AFTER the freeze, the snapshotted
+        // Element keeps the unsettled layout forever while the rows
+        // already in native scrollback show the unsettled one too,
+        // and the next live render disagrees with both at the
+        // scrollback↔viewport seam. Settling here is the same
+        // discipline as the per-`last` pre-settle above; the loop
+        // covers multi-sub-turn runs (text→tool→text) where every
+        // Assistant in the live tail is about to be frozen.
+        for (std::size_t i = m.ui.frozen_through;
+             i < m.d.current.messages.size(); ++i) {
+            auto& mm = m.d.current.messages[i];
+            if (mm.role != Role::Assistant || mm.text.empty()) continue;
+            auto& cache = m.ui.view_cache.message_md(
+                m.d.current.id, mm.id);
+            if (!cache.streaming)
+                cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+            cache.streaming->set_content(mm.text);
+            cache.streaming->finish();
+        }
         freeze_through(m, m.d.current.messages.size());
     }
 

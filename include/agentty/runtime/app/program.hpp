@@ -69,9 +69,21 @@ struct AgenttyApp {
         };
 
         // ── Domain.
+        //
+        // The frozen prefix — messages[0 .. ui.frozen_through) — is
+        // an immutable archaeology layer (see m.ui.frozen). Its
+        // contribution to the visual is fully captured by the
+        // structural pair (frozen.size(), frozen_turn) which advance
+        // only at freeze instants. Per-message render_keys for the
+        // frozen range cannot change — the with_live_tool gate
+        // refuses to mutate them — so iterating them every frame
+        // would burn CPU for zero signal. Hash only the live tail.
         mix(m.d.current.messages.size());
-        for (const auto& msg : m.d.current.messages) {
-            mix(msg.compute_render_key());
+        mix(static_cast<std::uint64_t>(m.ui.frozen.size()));
+        mix(static_cast<std::uint64_t>(m.ui.frozen_turn));
+        for (std::size_t i = m.ui.frozen_through;
+             i < m.d.current.messages.size(); ++i) {
+            mix(m.d.current.messages[i].compute_render_key());
         }
         mix(static_cast<std::uint64_t>(m.d.profile));
         mix_str(m.d.model_id.value);

@@ -75,9 +75,19 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             return done(std::move(m));
         },
         [&](ToggleToolExpanded& e) -> Step {
-            for (auto& msg_ : m.d.current.messages)
-                for (auto& tc : msg_.tool_calls)
-                    if (tc.id == e.id) tc.expanded = !tc.expanded;
+            // Frozen-prefix gate: a tool whose enclosing message has
+            // already settled into m.ui.frozen has its expanded
+            // state baked into the snapshotted Element — flipping
+            // tc.expanded on a frozen Message would change model
+            // state without ever reaching the canvas (the Element's
+            // hash_id is stamped at freeze time and never
+            // recomputed). with_live_tool refuses the mutation; the
+            // expand key simply no-ops on scrollback turns, which
+            // matches the user's reasonable expectation that
+            // "scrollback is archaeology".
+            with_live_tool(m, e.id, [](ToolUse& tc) {
+                tc.expanded = !tc.expanded;
+            });
             return done(std::move(m));
         },
         [&](Tick) -> Step {
