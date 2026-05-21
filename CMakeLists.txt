@@ -126,31 +126,31 @@ endif()
 # Prefer the in-tree submodule when present; only fall back to fetch.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
     # Optional "always pull latest maya before each build" mode. When ON,
-    # a custom target syncs the submodule to `origin/main` and forces a
+    # a custom target syncs the submodule to `origin/master` and forces a
     # rebuild of any maya translation unit that changed. SAFE: refuses to
     # touch the submodule if it has uncommitted changes (so local maya
     # edits never get clobbered). Skipped silently if the repo isn't a
     # git checkout (release tarballs, FetchContent fallback paths).
-    option(AGENTTY_AUTO_PULL_MAYA "Pull latest maya from origin/main on every build" ON)
+    option(AGENTTY_AUTO_PULL_MAYA "Pull latest maya from origin/master on every build" ON)
     add_subdirectory(maya)
     if(AGENTTY_AUTO_PULL_MAYA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         find_package(Git QUIET)
         if(GIT_FOUND)
             add_custom_target(maya_pull_latest ALL
                 COMMAND ${CMAKE_COMMAND} -E echo
-                    "[maya] checking origin/main…"
+                    "[maya] checking origin/master…"
                 COMMAND ${GIT_EXECUTABLE}
                     -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
                     diff --quiet HEAD
                     && ${GIT_EXECUTABLE}
                        -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
-                       fetch --quiet origin main
+                       fetch --quiet origin master
                     && ${GIT_EXECUTABLE}
                        -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
-                       reset --hard --quiet origin/main
+                       reset --hard --quiet origin/master
                     || ${CMAKE_COMMAND} -E echo
                        "[maya] local changes present — skipping auto-pull"
-                COMMENT "Syncing maya/ to origin/main (safe: skips if local changes)"
+                COMMENT "Syncing maya/ to origin/master (safe: skips if local changes)"
                 VERBATIM
                 USES_TERMINAL
             )
@@ -165,7 +165,7 @@ else()
     FetchContent_Declare(
         maya
         GIT_REPOSITORY https://github.com/1ay1/maya.git
-        GIT_TAG        main
+        GIT_TAG        master
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(maya)
@@ -473,15 +473,41 @@ target_link_libraries(agentty PRIVATE
     Threads::Threads
 )
 if(AGENTTY_HAS_MIMALLOC)
-    # Prefer static target so operator new/delete routing is linked in the
-    # exe without an accompanying DLL / dylib.
+    # Prefer the static target so operator new/delete routing is linked
+    # into the exe without an accompanying DLL / dylib. BUT: some distros
+    # (Arch's `mimalloc` package as of 2024) ship a stub libmimalloc.a
+    # that exports no symbols — the real allocator lives in the shared
+    # object. Linking against the stub produces hundreds of `undefined
+    # reference to mi_*` errors at LTO link time. Probe the archive size
+    # and fall back to the shared target when it's clearly a stub.
+    set(_agentty_mimalloc_target "")
     if(TARGET mimalloc-static)
-        target_link_libraries(agentty PRIVATE mimalloc-static)
-    else()
-        target_link_libraries(agentty PRIVATE mimalloc)
+        get_target_property(_mi_static_loc mimalloc-static IMPORTED_LOCATION_RELEASE)
+        if(NOT _mi_static_loc)
+            get_target_property(_mi_static_loc mimalloc-static IMPORTED_LOCATION)
+        endif()
+        if(_mi_static_loc AND EXISTS "${_mi_static_loc}")
+            file(SIZE "${_mi_static_loc}" _mi_static_size)
+            # A real mimalloc static archive is ~300 KB+; Arch's stub is
+            # under 32 KB. Use 64 KB as the cutoff.
+            if(_mi_static_size GREATER 65536)
+                set(_agentty_mimalloc_target mimalloc-static)
+            else()
+                message(STATUS "agentty: mimalloc-static archive at ${_mi_static_loc} "
+                              "is a stub (${_mi_static_size} bytes) — using shared mimalloc instead.")
+            endif()
+        endif()
     endif()
-    target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
-    message(STATUS "agentty: mimalloc allocator override enabled.")
+    if(NOT _agentty_mimalloc_target AND TARGET mimalloc)
+        set(_agentty_mimalloc_target mimalloc)
+    endif()
+    if(_agentty_mimalloc_target)
+        target_link_libraries(agentty PRIVATE ${_agentty_mimalloc_target})
+        target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
+        message(STATUS "agentty: mimalloc allocator override enabled (${_agentty_mimalloc_target}).")
+    else()
+        message(WARNING "agentty: mimalloc package found but no usable target — skipping.")
+    endif()
 endif()
 if(WIN32)
     # ws2_32   — Winsock2 (sockets, WSAPoll)
