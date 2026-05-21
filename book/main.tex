@@ -1,0 +1,262 @@
+% main.tex --- The Maya Book
+%
+% Build:   make            (in this directory; uses pdflatex twice)
+% Output:  maya-book.pdf
+%
+% Chapter sources live under chapters/. To rearrange, edit \include lines.
+
+\documentclass[11pt,openany,oneside]{book}
+
+\input{preamble}
+
+\date{}
+
+\begin{document}
+
+\frontmatter
+
+% ----------------------------------------------------------------------
+% Cover page
+% ----------------------------------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\pagecolor{mayaink}
+\color{mayalight}
+\vspace*{2cm}
+
+\begin{center}
+  {\fontsize{12}{14}\selectfont\sffamily\color{mayalavender}
+    \textbf{A C\nolinebreak\hspace{-.05em}\raisebox{.2ex}{\small{++}}26 TERMINAL UI LIBRARY}\par}
+  \vspace{0.4cm}
+  {\fontsize{10}{12}\selectfont\sffamily\color{mayagrey}
+    from ANSI bytes to compile-time UI trees\par}
+\end{center}
+
+\vspace{2.5cm}
+
+\begin{center}
+  {\fontsize{96}{108}\selectfont\sffamily\bfseries\color{mayablue} The}\\[0.1em]
+  {\fontsize{144}{160}\selectfont\sffamily\bfseries\color{mayalight} maya}\\[0.1em]
+  {\fontsize{96}{108}\selectfont\sffamily\bfseries\color{mayablue} Book}
+\end{center}
+
+\vspace{1.8cm}
+
+% Decorative ASCII frame --- the library's own visual language
+\begin{center}
+  \ttfamily\fontsize{11}{14}\selectfont
+  \begin{tabular}{@{}l@{}}
+    \color{mayablue}.--------------------------------------------.\\
+    \color{mayablue}|\color{mayalight}~~a complete tour of the maya library~~~~~~\color{mayablue}|\\
+    \color{mayablue}|\color{mayagrey}~~from the byte up, in modern C++26~~~~~~~~\color{mayablue}|\\
+    \color{mayablue}`--------------------------------------------'
+  \end{tabular}
+\end{center}
+
+\vfill
+
+\begin{center}
+  {\fontsize{10}{12}\selectfont\sffamily\color{mayagrey}
+    a companion volume to the \textsf{\textbf{agentty}} sources\par}
+  \vspace{0.4em}
+  {\fontsize{9}{11}\selectfont\sffamily\color{mayagrey}
+    written from the real headers, not the docs\par}
+\end{center}
+
+\vspace*{1cm}
+\end{titlepage}
+\nopagecolor
+\color{black}
+
+% ----------------------------------------------------------------------
+% Half-title / abstract
+% ----------------------------------------------------------------------
+\thispagestyle{empty}
+\vspace*{\fill}
+\begin{center}
+\begin{minipage}{0.78\textwidth}
+\small\itshape
+This book is a deep guide to \maya{}, the header-mostly \cpp{}26
+terminal-UI library that powers \agentty. We start with the terminal
+as a machine, work up through the \cpp{} language features \maya{}
+relies on, and then walk every layer of the library --- the DSL,
+elements, the layout engine, the SIMD-accelerated renderer, the
+signal graph, the Elm-style runtime, and the widget catalogue. Each
+chapter ends with a working program.
+
+\medskip
+
+Everything in this book is grounded in the actual source under
+\file{maya/}. Where the code disagrees with the prose, the code wins
+--- report the mismatch as a bug.
+\end{minipage}
+\end{center}
+\vspace*{\fill}
+\clearpage
+
+% ----------------------------------------------------------------------
+% Preface
+% ----------------------------------------------------------------------
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+
+\section*{Who this book is for}
+
+You have probably opened a terminal today. You have probably also
+used a program that draws into it --- \code{htop}, \code{vim}, a git
+client, a music player, a chat tool. This book is for the reader who
+wants to write such programs themselves, in modern \cpp{}, and who
+wants to understand every layer between the keystroke and the
+flickering glyph.
+
+It assumes nothing. You do not need to have written a TUI before. You
+do not need to know \cpp{}26. You do not need to know what a pty is,
+or what an ANSI escape sequence is, or why anyone would put a
+compile-time string inside a type. Each of those is introduced from
+zero, with the smallest example that makes the idea concrete, and
+then connected to the place in \maya{}'s source where you will see
+it again.
+
+If you already know \cpp{}26 fluently and just want the \maya{}
+tour, you can skim Chapter~\ref{ch:cpp}. Everyone else: read in
+order. The book is a rope ladder; each rung sits on the one below
+it.
+
+\section*{What you will be able to do by the end}
+
+Four concrete things, in this order:
+
+\begin{enumerate}[leftmargin=*]
+  \item Read the bytes flowing between a program and a terminal,
+    and write a TUI ``Hello, red world'' in plain \cpp{} with no
+    library at all (Chapter~\ref{ch:terminal}).
+  \item Read every line of every \maya{} header --- templates,
+    NTTPs, concepts, variants, \code{constexpr} chains --- and know
+    what each construct is doing (Chapter~\ref{ch:cpp}).
+  \item Build a non-trivial \maya{} program of your own, from a
+    \code{Program} struct through a \code{view} function to a
+    \code{Cmd<Msg>} effect, and trust that the compile-time checks
+    catch the impossible states (Parts II and IV).
+  \item Open the SIMD diff loop, the signal graph, the layout
+    engine, or the inline-mode witness chain and follow what each
+    one is doing on its own terms (Part III).
+\end{enumerate}
+
+That is the contract. If a chapter does not move you closer to one
+of those four outcomes, file an issue.
+
+\section*{How the book is shaped}
+
+Four parts, mirroring four levels of zoom.
+
+\paragraph{Part I --- Foundations.} The terminal as a state machine
+speaking bytes; the \cpp{} language features \maya{} relies on. The
+output of Part I is a reader who can run the examples and read the
+headers.
+
+\paragraph{Part II --- Architecture.} The Elm-style runtime
+(\code{init}/\code{update}/\code{view}/\code{subscribe}), the
+compile-time DSL that produces UI descriptions, the in-memory
+\code{Element} tree, and the flexbox layout engine that places
+them. The output of Part II is a reader who can build apps.
+
+\paragraph{Part III --- Rendering.} Cells and canvases, SIMD-accelerated
+frame diffing, the ANSI byte serialiser, and \maya{}'s unusual inline
+mode that lives inside your scrollback instead of taking over the
+terminal. The output of Part III is a reader who understands why
+\maya{} feels fast.
+
+\paragraph{Part IV --- Reactivity, runtime, and widgets.} The signal
+graph that powers fine-grained reactivity, the input parser, the
+full \code{Cmd}/\code{Sub} effect algebra, the catalogue of widgets,
+and how to package and ship a binary built on \maya{}. The output
+of Part IV is a reader who can ship.
+
+\section*{How to read the boxes}
+
+Five coloured boxes recur throughout. They are signposts; you can
+read the book without them, but they tell you what the prose around
+them is doing.
+
+\begin{idea}
+\textbf{Idea} (blue). One sentence summarising the key intuition of
+the surrounding section. If you skim, read these.
+\end{idea}
+
+\begin{theory}
+\textbf{Theory} (purple). The background concept from computer
+science or programming-language theory behind what we just
+explained. Skippable on first read; useful on second.
+\end{theory}
+
+\begin{warning}
+\textbf{Pitfall} (amber). A mistake people new to the material
+commonly make, and how to avoid it.
+\end{warning}
+
+\begin{recap}
+\textbf{Recap} (green). A two-or-three-sentence summary of the
+section just finished.
+\end{recap}
+
+\begin{terminalbox}
+\textbf{Terminal} (black). Literal bytes or output, the way the
+terminal sees or shows them.
+\end{terminalbox}
+
+Code in monospace with a coloured rule on the left is \cpp{} (or
+occasionally shell). Lines are numbered. Long examples are split
+into pieces and each piece is decoded after.
+
+\section*{A note on accuracy}
+
+Every code fragment in this book is either copied from \maya{}'s
+headers or paraphrased from them. Where we simplify --- to keep an
+example short, or to elide an implementation detail not yet
+introduced --- we say so and name the file where the real version
+lives. Read the book with the source open in another window;
+that is the intended posture.
+
+\bigskip
+
+\noindent The chapters that follow assume nothing and explain
+everything. Let us begin with the terminal.
+
+\clearpage
+
+\tableofcontents
+
+\mainmatter
+
+% ---- Part I: Foundations -----------------------------------------------
+\part{Foundations}
+\include{chapters/01-introduction}
+\include{chapters/02-terminal}
+\include{chapters/03-cpp}
+
+% ---- Part II: Architecture ---------------------------------------------
+\part{Architecture}
+\include{chapters/04-elm}
+\include{chapters/05-dsl}
+\include{chapters/06-elements}
+\include{chapters/07-layout}
+
+% ---- Part III: Rendering -----------------------------------------------
+\part{Rendering}
+\include{chapters/08-canvas}
+\include{chapters/09-simd}
+\include{chapters/10-ansi}
+\include{chapters/11-inline}
+
+% ---- Part IV: Reactivity, runtime, widgets -----------------------------
+\part{Reactivity, runtime, and widgets}
+\include{chapters/12-signals}
+\include{chapters/13-events}
+\include{chapters/14-cmdsub}
+\include{chapters/15-widgets}
+\include{chapters/16-build}
+
+\backmatter
+\include{chapters/99-colophon}
+
+\end{document}

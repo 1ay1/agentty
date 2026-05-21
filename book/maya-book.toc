@@ -1,3 +1,8 @@
+\contentsline {chapter}{Preface}{ii}{chapter*.1}%
+\contentsline {paragraph}{Part I --- Foundations.}{ii}{Item.4}%
+\contentsline {paragraph}{Part II --- Architecture.}{iii}{Item.4}%
+\contentsline {paragraph}{Part III --- Rendering.}{iii}{Item.4}%
+\contentsline {paragraph}{Part IV --- Reactivity, runtime, and widgets.}{iii}{Item.4}%
 \contentsline {part}{I\hspace {1em}Foundations}{1}{part.1}%
 \contentsline {chapter}{\numberline {1}Hello, maya}{2}{chapter.1}%
 \contentsline {section}{\numberline {1.1}What is a terminal? (the honest answer)}{2}{section.1.1}%
@@ -403,4 +408,4 @@
 \contentsline {subsection}{\numberline {16.7.2}Rendering looks corrupted}{160}{subsection.16.7.2}%
 \contentsline {subsection}{\numberline {16.7.3}Slow rendering}{160}{subsection.16.7.3}%
 \contentsline {section}{\numberline {16.8}Going further}{160}{section.16.8}%
-\contentsline {chapter}{Colophon}{162}{chapter*.2}%
+\contentsline {chapter}{Colophon}{162}{chapter*.3}%

@@ -1,0 +1,74 @@
+\chapter*{Colophon}
+\addcontentsline{toc}{chapter}{Colophon}
+
+This book was produced from the \agentty{} repository using
+\code{pdflatex} on Arch Linux. The body is set in Latin Modern Roman;
+code listings use Latin Modern Mono; section headings use Latin Modern
+Sans. Colours throughout come from a small palette --- \textcolor{mayablue}{blue},
+\textcolor{mayalavender}{lavender}, \textcolor{mayagreen}{green},
+\textcolor{mayarose}{rose}, \textcolor{mayaamber}{amber} --- carrying
+consistent meaning across boxes and code highlights.
+
+The four parts mirror four levels of zoom: foundations, architecture,
+rendering, and reactivity. Each chapter is its own \code{.tex} file
+under \file{chapters/}, included from \file{main.tex}. Re-ordering,
+extending, or shortening the book is a matter of editing
+\code{\textbackslash{}include} lines and re-running \code{make}.
+
+The illustrative code snippets are simplified for exposition. Where
+the simplification could matter --- the bit layout of a packed cell,
+the exact arms of the \code{Cmd<Msg>} variant, the loop body of the
+SIMD differ --- the prose points at the file and section in \maya{}
+where the real version lives. The real version always wins.
+
+\medskip
+
+\textit{If a passage in this book disagrees with the source, the
+source is right. Please file an issue against the \agentty{}
+repository so we can fix the book.}
+
+\medskip
+
+\noindent Source layout for the book:
+
+\begin{verbatim}
+book/
+  main.tex           -- root document, includes everything
+  preamble.tex       -- packages, colours, code styles, boxes
+  Makefile           -- `make` builds maya-book.pdf
+  chapters/
+    01-introduction.tex   -- Hello, maya
+    02-terminal.tex       -- The terminal as a state machine
+    03-cpp.tex            -- Modern C++ you need
+    04-elm.tex            -- The Elm loop and algebraic effects
+    05-dsl.tex            -- The compile-time DSL
+    06-elements.tex       -- Elements, style, colour, border
+    07-layout.tex         -- Flexbox in integers
+    08-canvas.tex         -- The canvas and packed cells
+    09-simd.tex           -- SIMD frame diffing
+    10-ansi.tex           -- ANSI serialisation and the writer
+    11-inline.tex         -- Inline mode and the witness chain
+    12-signals.tex        -- Signals, computeds, effects
+    13-events.tex         -- Events, focus, input parsing
+    14-cmdsub.tex         -- Cmd, Sub, and the runtime
+    15-widgets.tex        -- The widget catalogue
+    16-build.tex          -- Building, packaging, shipping
+    99-colophon.tex       -- this page
+\end{verbatim}
+
+\medskip
+
+\noindent To rebuild from scratch:
+
+\begin{verbatim}
+cd book/
+make             # runs pdflatex twice, regenerates maya-book.pdf
+\end{verbatim}
+
+\vfill
+
+\begin{center}
+\small\itshape
+Written for anyone who has ever opened a terminal and wondered
+what was on the other end of the wire.
+\end{center}

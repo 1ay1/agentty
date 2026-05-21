@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.11)  21 MAY 2026 22:51
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026/Arch Linux) (preloaded format=pdflatex 2026.4.11)  21 MAY 2026 22:57
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -785,7 +785,7 @@ File: lstlang1.sty 2025/11/14 1.11b listings language file
 (/usr/share/texmf-dist/tex/latex/listings/lstmisc.sty
 File: lstmisc.sty 2025/11/14 1.11b (Carsten Heinz)
 ))
-LaTeX Font Info:    Trying to load font information for T1+lmr on input line 24
+LaTeX Font Info:    Trying to load font information for T1+lmr on input line 14
 .
 
 (/usr/share/texmf-dist/tex/latex/lm/t1lmr.fd
@@ -805,31 +805,31 @@ File: l3backend-pdftex.def 2025-10-09 L3 backend support: PDF output (pdfTeX)
 (./chapters/99-colophon.aux))
 \openout1 = `maya-book.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Info: Redefining \microtypecontext on input line 24.
-Package microtype Info: Applying patch `item' on input line 24.
-Package microtype Info: Applying patch `toc' on input line 24.
-Package microtype Info: Applying patch `eqnum' on input line 24.
-Package microtype Info: Applying patch `footnote' on input line 24.
-Package microtype Info: Applying patch `verbatim' on input line 24.
-LaTeX Info: Redefining \microtypesetup on input line 24.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 14.
+LaTeX Font Info:    ... okay on input line 14.
+LaTeX Info: Redefining \microtypecontext on input line 14.
+Package microtype Info: Applying patch `item' on input line 14.
+Package microtype Info: Applying patch `toc' on input line 14.
+Package microtype Info: Applying patch `eqnum' on input line 14.
+Package microtype Info: Applying patch `footnote' on input line 14.
+Package microtype Info: Applying patch `verbatim' on input line 14.
+LaTeX Info: Redefining \microtypesetup on input line 14.
 Package microtype Info: Generating PDF output.
 Package microtype Info: Character protrusion enabled (level 2).
 Package microtype Info: Using default protrusion set `alltext'.
@@ -901,7 +901,7 @@ Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 4
 File: epstopdf-sys.cfg 2010/07/13 v1.3 Configuration of (r)epstopdf for TeX Liv
 e
 ))
-Package hyperref Info: Link coloring ON on input line 24.
+Package hyperref Info: Link coloring ON on input line 14.
 
 (./maya-book.out) (./maya-book.out)
 \@outlinefile=\write4
@@ -911,7 +911,7 @@ Package hyperref Info: Link coloring ON on input line 24.
 Package caption Info: Begin \AtBeginDocument code.
 Package caption Info: End \AtBeginDocument code.
 LaTeX Font Info:    Trying to load font information for T1+lmss on input line 2
-8.
+9.
 
 (/usr/share/texmf-dist/tex/latex/lm/t1lmss.fd
 File: t1lmss.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
@@ -920,37 +920,48 @@ Package microtype Info: Loading generic protrusion settings for font family
 (microtype)             `lmss' (encoding: T1).
 (microtype)             For optimal results, create family-specific settings.
 (microtype)             See the microtype manual for details.
-LaTeX Font Info:    Trying to load font information for OT1+lmr on input line 2
+LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 4
+8.
+
+(/usr/share/texmf-dist/tex/latex/lm/t1lmtt.fd
+File: t1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
+)
+Package microtype Info: Loading generic protrusion settings for font family
+(microtype)             `lmtt' (encoding: T1).
+(microtype)             For optimal results, create family-specific settings.
+(microtype)             See the microtype manual for details.
+LaTeX Font Info:    Calculating math sizes for size <11> on input line 48.
+LaTeX Font Info:    Trying to load font information for OT1+lmr on input line 4
 8.
 
 (/usr/share/texmf-dist/tex/latex/lm/ot1lmr.fd
 File: ot1lmr.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
-LaTeX Font Info:    Trying to load font information for OML+lmm on input line 2
+LaTeX Font Info:    Trying to load font information for OML+lmm on input line 4
 8.
 
 (/usr/share/texmf-dist/tex/latex/lm/omllmm.fd
 File: omllmm.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
 LaTeX Font Info:    Trying to load font information for OMS+lmsy on input line 
-28.
+48.
 
 (/usr/share/texmf-dist/tex/latex/lm/omslmsy.fd
 File: omslmsy.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
 LaTeX Font Info:    Trying to load font information for OMX+lmex on input line 
-28.
+48.
 
 (/usr/share/texmf-dist/tex/latex/lm/omxlmex.fd
 File: omxlmex.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
 )
 LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <12> on input line 28.
+(Font)              <11> on input line 48.
 LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <8> on input line 28.
+(Font)              <7.69997> on input line 48.
 LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <6> on input line 28.
-LaTeX Font Info:    Trying to load font information for U+msa on input line 28.
+(Font)              <5.5> on input line 48.
+LaTeX Font Info:    Trying to load font information for U+msa on input line 48.
 
 
 (/usr/share/texmf-dist/tex/latex/amsfonts/umsa.fd
@@ -959,7 +970,7 @@ File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 (/usr/share/texmf-dist/tex/latex/microtype/mt-msa.cfg
 File: mt-msa.cfg 2006/02/04 v1.1 microtype config. file: AMS symbols (a) (RS)
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 28.
+LaTeX Font Info:    Trying to load font information for U+msb on input line 48.
 
 
 (/usr/share/texmf-dist/tex/latex/amsfonts/umsb.fd
@@ -974,35 +985,40 @@ File: mt-msb.cfg 2005/06/01 v1.0 microtype config. file: AMS symbols (b) (RS)
 {/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map}{/usr/share/texmf-dist/fonts
 /enc/dvips/lm/lm-ec.enc}]
 LaTeX Font Info:    Font shape `T1/lmss/m/it' in size <10> not available
-(Font)              Font shape `T1/lmss/m/sl' tried instead on input line 34.
+(Font)              Font shape `T1/lmss/m/sl' tried instead on input line 79.
 LaTeX Font Info:    External font `lmex10' loaded for size
-(Font)              <10.95> on input line 44.
+(Font)              <10.95> on input line 92.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <8> on input line 92.
+LaTeX Font Info:    External font `lmex10' loaded for size
+(Font)              <6> on input line 92.
 
 pdfTeX warning (ext4): destination with the same identifier (name{page.i}) has 
 been already used, duplicate ignored
 <to be read again> 
                    \relax 
-l.47 \clearpage
-                [1] (./maya-book.toc [2
+l.95 \clearpage
+                [1] [2
 
 
 ]
-LaTeX Font Info:    Trying to load font information for T1+lmtt on input line 9
-0.
+LaTeX Font Info:    Font shape `T1/lmtt/bx/n' in size <10> not available
+(Font)              Font shape `T1/lmtt/b/n' tried instead on input line 203.
 
-(/usr/share/texmf-dist/tex/latex/lm/t1lmtt.fd
-File: t1lmtt.fd 2015/05/01 v1.6.1 Font defs for Latin Modern
-)
-Package microtype Info: Loading generic protrusion settings for font family
-(microtype)             `lmtt' (encoding: T1).
-(microtype)             For optimal results, create family-specific settings.
-(microtype)             See the microtype manual for details.
- [3] [4] [5] [6] [7] [8] [9]
-[10] [11])
+Underfull \hbox (badness 10000) in paragraph at lines 203--205
+[]\T1/lmtt/b/n/10 Terminal \T1/lmtt/m/n/10 (black). Literal bytes or output, th
+e way the terminal sees or shows
+ []
+
+[3] [4] (./maya-book.toc [5
+
+
+] [6] [7] [8] [9] [10] [11] [12] [13] [14])
 \tf@toc=\write5
 \openout5 = `maya-book.toc'.
 
- [12] [1
+ [15]
+[1
 
 
 ]
@@ -1035,8 +1051,6 @@ LaTeX Font Info:    External font `lmex10' loaded for size
 LaTeX Font Info:    External font `lmex10' loaded for size
 (Font)              <5> on input line 446.
  [8]
-LaTeX Font Info:    Font shape `T1/lmtt/bx/n' in size <10> not available
-(Font)              Font shape `T1/lmtt/b/n' tried instead on input line 510.
 LaTeX Font Info:    Font shape `T1/lmtt/bx/n' in size <10.95> not available
 (Font)              Font shape `T1/lmtt/b/n' tried instead on input line 527.
  [9] [10]
@@ -1501,37 +1515,36 @@ LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
 Package rerunfilecheck Info: File `maya-book.out' has not changed.
-(rerunfilecheck)             Checksum: 0C95B6BD0CA5D4437FC97F784A08B625;73796.
+(rerunfilecheck)             Checksum: AC3AE6AA930517AD3266FC88D6B54543;73876.
  ) 
 Here is how much of TeX's memory you used:
- 37678 strings out of 469515
- 687372 string characters out of 5470807
- 1717240 words of memory out of 5000000
- 62170 multiletter control sequences out of 15000+600000
- 794787 words of font info for 399 fonts, out of 8000000 for 9000
+ 37758 strings out of 469515
+ 688589 string characters out of 5470807
+ 1717442 words of memory out of 5000000
+ 62211 multiletter control sequences out of 15000+600000
+ 814233 words of font info for 429 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
  103i,14n,111p,1001b,2070s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/share/texmf-dist/fonts/type1/public/lm/lmbx10.pfb></usr/share/texmf-dis
 t/fonts/type1/public/lm/lmbx12.pfb></usr/share/texmf-dist/fonts/type1/public/lm
 /lmbxi10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmmi10.pfb></usr/shar
 e/texmf-dist/fonts/type1/public/lm/lmmi8.pfb></usr/share/texmf-dist/fonts/type1
-/public/lm/lmr10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmr12.pfb></u
-sr/share/texmf-dist/fonts/type1/public/lm/lmr8.pfb></usr/share/texmf-dist/fonts
-/type1/public/lm/lmri10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmri12
-.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmss10.pfb></usr/share/texmf-
-dist/fonts/type1/public/lm/lmss12.pfb></usr/share/texmf-dist/fonts/type1/public
-/lm/lmssbo10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmssbx10.pfb></us
-r/share/texmf-dist/fonts/type1/public/lm/lmsso10.pfb></usr/share/texmf-dist/fon
-ts/type1/public/lm/lmsy10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmsy
-8.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmsy9.pfb></usr/share/texmf-
-dist/fonts/type1/public/lm/lmtk10.pfb></usr/share/texmf-dist/fonts/type1/public
-/lm/lmtt10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtt8.pfb></usr/sha
-re/texmf-dist/fonts/type1/public/lm/lmtt9.pfb></usr/share/texmf-dist/fonts/type
-1/public/lm/lmtti10.pfb>
-Output written on maya-book.pdf (175 pages, 1129380 bytes).
+/public/lm/lmr10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmr8.pfb></us
+r/share/texmf-dist/fonts/type1/public/lm/lmri10.pfb></usr/share/texmf-dist/font
+s/type1/public/lm/lmss10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmss9
+.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmssbo10.pfb></usr/share/texm
+f-dist/fonts/type1/public/lm/lmssbx10.pfb></usr/share/texmf-dist/fonts/type1/pu
+blic/lm/lmsso10.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmsy10.pfb></u
+sr/share/texmf-dist/fonts/type1/public/lm/lmsy8.pfb></usr/share/texmf-dist/font
+s/type1/public/lm/lmsy9.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtk10
+.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtt10.pfb></usr/share/texmf-
+dist/fonts/type1/public/lm/lmtt12.pfb></usr/share/texmf-dist/fonts/type1/public
+/lm/lmtt8.pfb></usr/share/texmf-dist/fonts/type1/public/lm/lmtt9.pfb></usr/shar
+e/texmf-dist/fonts/type1/public/lm/lmtti10.pfb>
+Output written on maya-book.pdf (178 pages, 1121753 bytes).
 PDF statistics:
- 5793 PDF objects out of 6186 (max. 8388607)
- 5510 compressed objects within 56 object streams
- 3002 named destinations out of 3580 (max. 500000)
- 95885 words of extra memory for PDF output out of 106986 (max. 10000000)
+ 5813 PDF objects out of 6186 (max. 8388607)
+ 5529 compressed objects within 56 object streams
+ 3010 named destinations out of 3580 (max. 500000)
+ 108693 words of extra memory for PDF output out of 128383 (max. 10000000)
 
