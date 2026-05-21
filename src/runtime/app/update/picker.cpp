@@ -116,7 +116,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         },
         [&](ThreadListSelect) -> Step {
             auto* p = pick::opened(m.ui.thread_list);
-            Cmd<Msg> cmd = Cmd<Msg>::none();
             if (p && !m.d.threads.empty()) {
                 // Picker entries are metadata-only skeletons (see
                 // load_all_threads); full message bodies are read off
@@ -151,19 +150,9 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 // mimalloc is more eager but still benefits from the
                 // explicit collect at this known free-point.
                 release_to_kernel();
-                // Soft full-repaint after the wholesale model swap.
-                // prev_cells still mirrors the previous thread's frame;
-                // without this, compose's per-row diff emits a delta
-                // from old-thread cells to new-thread cells in place,
-                // which on a frame-height change scrolls fragments of
-                // the old thread up into host scrollback. force_redraw
-                // routes the next paint through case (B) so the new
-                // thread paints fresh in the live region with no
-                // diff against stale shadow.
-                cmd = Cmd<Msg>::force_redraw();
             }
             m.ui.thread_list = pick::Closed{};
-            return {std::move(m), std::move(cmd)};
+            return done(std::move(m));
         },
         [&](NewThread) -> Step {
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
@@ -186,11 +175,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // abandoned along with the thread).
             m.s.phase = phase::Idle{};
             release_to_kernel();
-            // Soft repaint — same rationale as ThreadListSelect: the
-            // model swapped wholesale, prev_cells no longer matches
-            // the canvas. Repaint the live frame in place; host
-            // scrollback above is preserved.
-            return {std::move(m), Cmd<Msg>::force_redraw()};
+            return done(std::move(m));
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
