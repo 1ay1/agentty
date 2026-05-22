@@ -449,86 +449,20 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
         // bytes) per frame to O(1) blit per panel.
         cfg.body.emplace_back(slot.agent_timeline);
     } else {
-        std::uint64_t live_key = 1469598103934665603ULL;
-        auto mixlive = [&](std::uint64_t v) {
-            live_key = (live_key ^ v) * 1099511628211ULL;
-        };
-        mixlive(tool_calls.size());
-        // Bucketed render-key per tool. compute_render_key() mixes
-        // raw byte sizes of output/progress/args_streaming, so a
-        // streaming Write/Edit (args_streaming grows by every SSE
-        // delta) or a Read (output lands in one big chunk) invalidates
-        // the live cache on every byte change. At 30 fps with deltas
-        // arriving every ~30ms, that's a full agent_timeline rebuild
-        // every frame — which deep-copies every tool's output() /
-        // args into a fresh ToolBodyPreview::Config (O(total bytes)).
-        //
-        // Bucket the size fields to 1 KiB granularity for the live
-        // cache only. The settled panel cache still uses the exact
-        // compute_render_key(), so the final settled Element is
-        // byte-accurate; the live preview just updates in 1 KiB
-        // jumps during the stream, which is invisible to humans.
-        constexpr std::uint64_t kLiveByteBucket = 1024;
-        for (const auto& tc : tool_calls) {
-            std::uint64_t k = 1469598103934665603ULL;
-            auto mixk = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
-            mixk(tc.output().size() / kLiveByteBucket);
-            mixk(tc.progress_text().size() / kLiveByteBucket);
-            mixk(tc.args_streaming.size() / kLiveByteBucket);
-            mixk(static_cast<std::uint64_t>(tc.status.index()));
-            mixk(tc.expanded ? 1ULL : 0ULL);
-            mixlive(k);
-        }
-        mixlive(static_cast<std::uint64_t>(style.color.r()));
-        mixlive(static_cast<std::uint64_t>(style.color.g()));
-        mixlive(static_cast<std::uint64_t>(style.color.b()));
-        for (char c : model_id_ref)
-            mixlive(static_cast<std::uint64_t>(
-                static_cast<unsigned char>(c)));
-        // Coarse elapsed bucket of any non-terminal tool, so the live
-        // duration cell actually ticks. Without this the cached
-        // AgentTimeline Element is reused frame-to-frame and the
-        // elapsed string is frozen at the value it had on first build.
-        // 500ms buckets keep the displayed value within a perceptibly-
-        // live cadence while bounding the rebuild rate to ≤2/sec per
-        // running tool. Earlier this was 100ms (10/sec) which on long
-        // turns with many settled tool outputs paid O(total_output_bytes)
-        // in count_lines + tool_body deep-copy per rebuild — a 250KB
-        // settled-output panel rebuilding 10×/sec saturated a core.
-        for (const auto& tc : tool_calls) {
-            if (tc.is_terminal()) continue;
-            const auto secs = tool_elapsed(tc);
-            const std::uint64_t bucket =
-                static_cast<std::uint64_t>(secs * 2.0f);
-            mixlive(bucket);
-        }
-
-        auto& slot = m.ui.view_cache.turn_config(
-            m.d.current.id, anchor_msg_id);
-        if (slot.live_agent_timeline_key != live_key) {
-            for (auto& el : slot.live_agent_timeline) el.reset();
-            slot.live_agent_timeline_key = live_key;
-        }
+        // agent_session pattern: build the live actions panel fresh
+        // every frame. No shared_ptr cache, no bucketed live_key, no
+        // spinner-bucket array. The cell-cache identity flip class
+        // of bug (live↔frozen carrier race, spinner-bucket race)
+        // disappears entirely — there is one carrier per panel,
+        // born inside this function, dropped when cfg.body goes out
+        // of scope. Steady-state cost is one AgentTimeline deep-copy
+        // per visible in-flight panel per frame; the body bytes are
+        // bounded by the in-flight tool count, not the whole settled
+        // transcript (settled panels live in m.ui.frozen and skip
+        // this branch entirely).
         const int frame = m.s.spinner.frame_index();
-        const std::size_t bucket = static_cast<std::size_t>(
-            ((frame % 10) + 10) % 10);
-        if (!slot.live_agent_timeline[bucket]) {
-            auto built = maya::AgentTimeline{agent_timeline_config(
-                tool_calls, frame, style.color)}.build();
-            slot.live_agent_timeline[bucket] =
-                std::make_shared<maya::Element>(std::move(built));
-        }
-        // Pass the shared_ptr (not a deref'd copy) so maya wraps it in
-        // a ComponentElement keyed on the control block. The renderer's
-        // hash-keyed cell cache then blits the panel as a single rect
-        // every frame instead of walking the whole AgentTimeline
-        // sub-tree (~hundreds to thousands of LayoutNodes per panel
-        // during in-flight runs). The shared_ptr's control block is
-        // stable for as long as live_key is unchanged; when live_key
-        // shifts (1 KiB output bucket, status, spinner bucket, model
-        // id) the slot is reset and the next paint mints a fresh
-        // control block → fresh cache slot → recapture.
-        cfg.body.emplace_back(slot.live_agent_timeline[bucket]);
+        cfg.body.emplace_back(maya::AgentTimeline{
+            agent_timeline_config(tool_calls, frame, style.color)}.build());
     }
     // In-flight permission card under the timeline.
     for (const auto& tc : tool_calls) {

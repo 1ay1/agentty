@@ -138,24 +138,6 @@ struct TurnConfigCache {
     std::shared_ptr<maya::Element>            agent_timeline;
     std::uint64_t                             agent_timeline_key = 0;
     std::string                               agent_timeline_model_id;
-
-    // Live (active) agent_timeline cache. Keyed on
-    // (content_key, spinner_frame_bucket) where content_key digests
-    // the same fields agent_timeline_config consumes (statuses,
-    // bodies, name/detail) and spinner_frame_bucket = frame % 10
-    // (the spinner repeats every 10 frames). On a steady-state active
-    // panel — content stable, spinner cycling — after the first 10
-    // unique frames each subsequent paint hits cache and skips the
-    // AgentTimeline rebuild + body preview layout walk entirely.
-    //
-    // We keep ONE Element per bucket in a small ring so all 10 spinner
-    // phases stay warm; without that the cache invalidates every tick
-    // and the only thing saved is the very-frequent case where two
-    // adjacent ticks happened to map to the same bucket (rare).
-    static constexpr std::size_t kLiveBuckets = 10;
-    std::array<std::shared_ptr<maya::Element>, kLiveBuckets>
-                                              live_agent_timeline{};
-    std::uint64_t                             live_agent_timeline_key = 0;
 };
 
 // LRU-bounded render cache. Both the markdown render and the turn-config
