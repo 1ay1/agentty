@@ -197,6 +197,22 @@ struct Model {
         // for its display numbers.
         int                 frozen_turn = 0;
 
+        // One-shot hint to maya's run loop: "the next view() result
+        // contains a heavy frozen scrollback that hasn't been painted
+        // yet on this thread; please pre-warm the component cache
+        // before the wire-bound render." Set after rehydrate_frozen()
+        // populates m.ui.frozen on thread swap; cleared by the reducer
+        // step that produced the post-warmup model (so warmup fires
+        // exactly once per swap).
+        //
+        // Maya's run<P> loop detects this via the optional Program
+        // hook `static bool needs_warmup(const Model&)` — see app.hpp
+        // detail::HasNeedsWarmup. When true, an off-wire warmup_render
+        // populates the hash-keyed component cache so the user-visible
+        // render hits the cell-blit fast path: converts 80–660 ms cold
+        // paint to <1 ms warm paint on tool-heavy thread resume.
+        bool                needs_warmup_render = false;
+
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
         //     alive across frames so its block boundary cache survives

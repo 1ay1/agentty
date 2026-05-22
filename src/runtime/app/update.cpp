@@ -39,6 +39,21 @@ using maya::overload;
 // causing the scrollback-duplication symptom it was meant to prevent).
 
 std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
+    // One-shot warmup flag: set by ThreadLoaded, consumed by maya's
+    // run loop on the very next render(). Clear on every subsequent
+    // reducer step so a later thread load sees a clean false→true
+    // edge (maya's loop only fires warmup_render on rising edges).
+    // The ThreadLoaded handler in picker.cpp will set it back true
+    // for its own swap before this clear-by-next-step path runs.
+    const bool is_thread_load = std::visit([](const auto& x) {
+        using T = std::decay_t<decltype(x)>;
+        if constexpr (std::is_same_v<T, msg::ThreadListMsg>) {
+            return std::holds_alternative<::agentty::ThreadLoaded>(x);
+        }
+        return false;
+    }, msg);
+    if (!is_thread_load) m.ui.needs_warmup_render = false;
+
     auto step = std::visit(overload{
         [&](msg::ComposerMsg cm)       { return detail::composer_update     (std::move(m), std::move(cm)); },
         [&](msg::StreamMsg sm)         { return detail::stream_update       (std::move(m), std::move(sm)); },
