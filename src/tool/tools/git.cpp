@@ -110,7 +110,7 @@ ExecResult run_git_status(const GitStatusArgs& a) {
     std::string output = std::move(*out);
     if (output.empty()) output = "working tree clean";
     if (!a.display_description.empty())
-        output = a.display_description + "\n\n" + output;
+        output = a.display_description + "\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -172,7 +172,7 @@ ExecResult run_git_diff(const GitDiffArgs& a) {
     std::string output = std::move(*out);
     if (output.empty()) return ToolOutput{"no changes", std::nullopt};
     if (!a.display_description.empty())
-        output = a.display_description + "\n\n" + output;
+        output = a.display_description + "\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -252,7 +252,7 @@ ExecResult run_git_log(const GitLogArgs& a) {
     std::string output = std::move(*out);
     if (output.empty()) return ToolOutput{"no commits", std::nullopt};
     if (!a.display_description.empty())
-        output = a.display_description + "\n\n" + output;
+        output = a.display_description + "\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
@@ -370,7 +370,7 @@ ExecResult run_git_commit(const GitCommitArgs& a) {
     }
     std::string output = std::move(r.output);
     if (!a.display_description.empty())
-        output = a.display_description + "\n\n" + output;
+        output = a.display_description + "\n" + output;
     return ToolOutput{std::move(output), std::nullopt};
 }
 
