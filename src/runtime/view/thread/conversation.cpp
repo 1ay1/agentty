@@ -19,16 +19,19 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string_view>
 #include <utility>
 
 #include <maya/dsl.hpp>
 #include <maya/widget/activity_indicator.hpp>
 #include <maya/widget/conversation.hpp>
+#include <maya/widget/permission.hpp>
 #include <maya/widget/turn.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
+#include "agentty/runtime/view/thread/turn/permission.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
 namespace agentty::ui {
@@ -98,7 +101,7 @@ void build_live_tail(const Model& m, int& running_turn,
             //    assistant Turn body until the first text/tool/etc.
             //    slot lands, then content replaces it.
             auto cfg = turn_config_for_assistant_run(
-                i, run_end, turn_num, m, /*synthetic=*/false);
+                i, run_end, turn_num, m);
             // Reserve an indicator-height slot for the WHOLE active
             // phase. When the tail is an empty placeholder we paint
             // the breathing "thinking…" widget; once real content
@@ -166,8 +169,7 @@ void build_live_tail(const Model& m, int& running_turn,
         } else {
             // User (or other non-Assistant) head: single-message Turn.
             auto cfg = turn_config(head, i, turn_num, m,
-                                   /*continuation=*/false,
-                                   /*synthetic=*/true);
+                                   /*continuation=*/false);
             out.push_back(maya::Turn{std::move(cfg)}.build());
             // User turns do not bump running_turn — the running count
             // is over Assistant turns (matches frozen.cpp's policy).
@@ -200,11 +202,37 @@ void build_queued_previews(const Model& m, int& running_turn,
         out.push_back(gap_row());
         auto cfg = turn_config(synthetic, base_idx + qi, running_turn, m,
                                /*continuation=*/false,
-                               /*synthetic=*/true,
                                /*meta_override=*/meta);
         out.push_back(maya::Turn{std::move(cfg)}.build());
         ++running_turn;
     }
+}
+
+// Locate the live ToolUse a pending_permission is targeting. Walks
+// the unfrozen tail (the only place a tool can still be pre-terminal).
+const ToolUse* find_pending_tool(const Model& m) {
+    if (!m.d.pending_permission) return nullptr;
+    const auto& pp_id = m.d.pending_permission->id;
+    const auto& msgs  = m.d.current.messages;
+    for (std::size_t i = m.ui.frozen_through; i < msgs.size(); ++i) {
+        for (const auto& tc : msgs[i].tool_calls) {
+            if (tc.id == pp_id) return &tc;
+        }
+    }
+    return nullptr;
+}
+
+// Build the Permission card Element. Floats as its own live_tail row
+// below the active assistant Turn (agent_session shape) instead of
+// being injected as a Turn body slot — keeps the panel height stable
+// when permission appears/disappears. Returns nullopt when the
+// pending permission has no matching live ToolUse (corner case during
+// run-end races); caller skips the push.
+std::optional<maya::Element> build_permission_row(const Model& m) {
+    const ToolUse* tc = find_pending_tool(m);
+    if (!tc) return std::nullopt;
+    return maya::Permission{inline_permission_config(
+        *m.d.pending_permission, *tc)}.build();
 }
 
 } // namespace
@@ -225,6 +253,16 @@ maya::Conversation::Config conversation_config(const Model& m) {
     int running_turn = m.ui.frozen_turn + 1;
     build_live_tail(m, running_turn, cfg.live_tail);
     build_queued_previews(m, running_turn, cfg.live_tail);
+
+    // Pending permission floats as its own live_tail row below the
+    // active assistant Turn (agent_session pattern). Keeps the
+    // assistant panel height stable when the prompt appears/disappears,
+    // and gives the card the same outer border treatment as in
+    // agent_session.
+    if (m.d.pending_permission) {
+        if (auto e = build_permission_row(m))
+            cfg.live_tail.push_back(std::move(*e));
+    }
 
     // Optional shape probe. Set AGENTTY_VIEW_PROF=1 to log every
     // conversation_config invocation's frozen/live_tail sizes plus
