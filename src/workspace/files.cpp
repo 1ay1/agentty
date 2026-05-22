@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -249,44 +250,56 @@ struct Scored {
 } // namespace
 
 std::vector<std::string> list_workspace_files(std::size_t cap) {
-    std::vector<std::string> out;
-    out.reserve(std::min<std::size_t>(cap, 1024));
-    const auto& root = tools::util::workspace_root();
-    if (root.empty()) return out;
+    // Cached for the process lifetime. The walk is ~5000 paths through a
+    // recursive_directory_iterator and ran on every `@` keystroke in the
+    // composer, producing visible lag on large repos. Mirrors the
+    // list_workspace_symbols() discipline: workspaces don't change shape
+    // often inside a single agentty session, and the user pays the cost
+    // once on first open rather than on every palette pop. The `cap`
+    // arg is honoured on the first call; subsequent calls return the
+    // already-built vector regardless of the requested cap (the picker
+    // tolerates a smaller-than-requested list).
+    static std::once_flag once;
+    static std::vector<std::string> cached;
+    std::call_once(once, [cap]{
+        cached.reserve(std::min<std::size_t>(cap, 1024));
+        const auto& root = tools::util::workspace_root();
+        if (root.empty()) return;
 
-    std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(
-             root, fs::directory_options::skip_permission_denied, ec);
-         it != fs::recursive_directory_iterator() && out.size() < cap;
-         it.increment(ec)) {
-        if (ec) { ec.clear(); continue; }
-        const auto& entry = *it;
-        auto fn = entry.path().filename().string();
-        const bool is_dir = entry.is_directory(ec);
+        std::error_code ec;
+        for (auto it = fs::recursive_directory_iterator(
+                 root, fs::directory_options::skip_permission_denied, ec);
+             it != fs::recursive_directory_iterator() && cached.size() < cap;
+             it.increment(ec)) {
+            if (ec) { ec.clear(); continue; }
+            const auto& entry = *it;
+            auto fn = entry.path().filename().string();
+            const bool is_dir = entry.is_directory(ec);
 
-        // Same skip rules as list_dir.cpp's recursive walker — keep
-        // node_modules / build / .git / __pycache__ / etc. out of the
-        // candidate set. Otherwise the picker would be drowned in
-        // generated artefacts.
-        if (is_dir && tools::util::should_skip_dir(fn)) {
-            it.disable_recursion_pending();
-            continue;
+            // Same skip rules as list_dir.cpp's recursive walker — keep
+            // node_modules / build / .git / __pycache__ / etc. out of the
+            // candidate set. Otherwise the picker would be drowned in
+            // generated artefacts.
+            if (is_dir && tools::util::should_skip_dir(fn)) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (is_dir) continue;
+            if (!entry.is_regular_file(ec)) continue;
+
+            // Workspace-relative paths read better in the picker UI and
+            // round-trip cleanly through the FileRef chip caption.
+            std::error_code rec;
+            auto rel = fs::relative(entry.path(), root, rec);
+            cached.push_back(rec ? entry.path().string() : rel.string());
         }
-        if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
-            it.disable_recursion_pending();
-            continue;
-        }
-        if (is_dir) continue;
-        if (!entry.is_regular_file(ec)) continue;
-
-        // Workspace-relative paths read better in the picker UI and
-        // round-trip cleanly through the FileRef chip caption.
-        std::error_code rec;
-        auto rel = fs::relative(entry.path(), root, rec);
-        out.push_back(rec ? entry.path().string() : rel.string());
-    }
-    std::sort(out.begin(), out.end());
-    return out;
+        std::sort(cached.begin(), cached.end());
+    });
+    return cached;
 }
 
 std::vector<std::size_t>
