@@ -99,10 +99,15 @@ void build_live_tail(const Model& m, int& running_turn,
             //    slot lands, then content replaces it.
             auto cfg = turn_config_for_assistant_run(
                 i, run_end, turn_num, m, /*synthetic=*/false);
-            // Show indicator when active and the LAST sub-turn in this
-            // run is an empty placeholder — covers both the initial
-            // pre-first-delta window and the post-tool continuation
-            // before the next sub-turn's bytes arrive.
+            // Reserve an indicator-height slot for the WHOLE active
+            // phase. When the tail is an empty placeholder we paint
+            // the breathing "thinking…" widget; once real content
+            // arrives we swap to a same-height invisible spacer so
+            // the live-tail row count stays constant. Without this,
+            // first-byte / first-tool flips the slot from 2 rows to 0,
+            // Thread's trailing spacer can't absorb the shrink when
+            // the transcript already fills the viewport, and Composer
+            // jumps up by the indicator's height.
             const Message& tail = m.d.current.messages[run_end - 1];
             const bool tail_is_empty_placeholder =
                 tail.role == Role::Assistant
@@ -110,7 +115,8 @@ void build_live_tail(const Model& m, int& running_turn,
                 && tail.streaming_text.empty()
                 && tail.pending_stream.empty()
                 && tail.tool_calls.empty();
-            const bool show_indicator = m.s.active() && tail_is_empty_placeholder;
+            const bool reserve_slot   = m.s.active();
+            const bool show_indicator = reserve_slot && tail_is_empty_placeholder;
             if (show_indicator) {
                 using namespace maya::dsl;
                 maya::ActivityIndicator::Config ind;
@@ -145,6 +151,14 @@ void build_live_tail(const Model& m, int& running_turn,
 
                 cfg.body.emplace_back(
                     maya::ActivityIndicator{std::move(ind)}.build());
+            } else if (reserve_slot) {
+                // Invisible 2-row spacer that mirrors the
+                // ActivityIndicator's natural height (one blank row +
+                // one content row, see activity_indicator.hpp's
+                // `v(blank(), h(parts))`). Keeps body height stable
+                // across the indicator↔content transition.
+                using namespace maya::dsl;
+                cfg.body.emplace_back(v(text(""), text("")).build());
             }
             out.push_back(maya::Turn{std::move(cfg)}.build());
             ++running_turn;

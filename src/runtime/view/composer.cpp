@@ -156,11 +156,15 @@ maya::Composer::Config composer_config(const Model& m) {
     cfg.profile         = {.label = std::string{profile_label(m.d.profile)},
                            .color = profile_color(m.d.profile)};
     cfg.expanded        = m.ui.composer.expanded;
-    // Body floor is always 1 row — the composer collapses to a single
-    // line when empty, regardless of stream state. Mid-stream repaint
-    // cost on the empty↔first-char transition is accepted in exchange
-    // for a tighter idle/streaming silhouette.
-    cfg.min_body_rows   = 1;
+    // Pin to 2 rows so transient height changes (empty↔first-char,
+    // 1-line→42-line wrap, placeholder swap on phase change) cannot
+    // reshape the outer AppLayout vstack mid-stream. With the floor at
+    // 1, every keystroke that pushes the composer into a second wrapped
+    // row shifts the Thread above it by one canvas-Y, triggering a
+    // full-viewport row-diff repaint — the flicker users see during
+    // streaming. 2 rows costs one blank row of vertical space when idle
+    // and eliminates the bob.
+    cfg.min_body_rows   = 2;
     return cfg;
 }
 
