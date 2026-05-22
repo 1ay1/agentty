@@ -1,0 +1,129 @@
+\chapter{Stores and global state}
+\label{ch:stores}
+
+\begin{aside}
+Some state belongs to a widget. Other state is global: the
+logged-in user, the current theme, the open documents. \maya{}
+calls these stores, and gives them lifetimes that match an
+application, not a widget tree.
+\end{aside}
+
+\section{What a store is}
+
+A store is a bundle of signals exposed via a typed handle.
+Multiple widgets can read and write the same store.
+
+\begin{lstlisting}
+struct ThemeStore {
+    Signal<std::string> name;
+    Signal<Color> accent;
+};
+
+auto theme = ctx.make_store<ThemeStore>(
+    "dark", "#FF6432"
+);
+\end{lstlisting}
+
+The store lives at root scope --- accessible from any widget.
+
+\section{Dependency injection}
+
+A widget accepts the store as a constructor argument:
+
+\begin{lstlisting}
+auto title_bar = [&] {
+    auto name = ctx.get(theme->name);
+    return text("Theme: " + name);
+};
+\end{lstlisting}
+
+This is dependency injection by passing references. No
+global singletons.
+
+\section{Context propagation}
+
+For deep trees, passing stores everywhere is verbose. The
+context system propagates:
+
+\begin{lstlisting}
+ctx.provide(theme);          // at root
+auto t = ctx.consume<ThemeStore>();  // deep child
+\end{lstlisting}
+
+Equivalent to React's Context API.
+
+\section{Actions and reducers}
+
+For complex stores, encapsulate writes behind actions:
+
+\begin{lstlisting}
+class DocumentStore {
+    Signal<std::vector<Doc>> docs;
+public:
+    void add(Doc d) {
+        auto v = ctx.get(docs);
+        v.push_back(d);
+        ctx.set(docs, v);
+    }
+    void remove(int i) { /* ... */ }
+};
+\end{lstlisting}
+
+Widgets call actions; the store maintains invariants.
+
+\section{Selectors}
+
+A selector is a memoised derivation:
+
+\begin{lstlisting}
+auto unread_count = memo([&] {
+    auto docs = ctx.get(docs);
+    return std::count_if(docs.begin(), docs.end(),
+                         [](auto& d) { return !d.read; });
+});
+\end{lstlisting}
+
+Widgets that need just the count subscribe to the selector,
+not the full docs list. Re-renders only when count changes.
+
+\section{Persistence}
+
+Stores often need to persist across runs. \maya{} provides:
+
+\begin{lstlisting}
+ctx.persist(theme, "theme.json");
+\end{lstlisting}
+
+The runtime serialises the store on change and reloads on
+startup.
+
+\section{Time travel}
+
+A store with history allows undo/redo:
+
+\begin{lstlisting}
+auto history = HistoricStore(store);
+history.undo();
+\end{lstlisting}
+
+Each action pushes a snapshot; undo pops.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Stores: bundles of signals at root scope.
+  \item Inject via constructor or context.
+  \item Actions encapsulate writes.
+  \item Selectors memoise derivations.
+  \item Persist to file; history for undo.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a theme store and switch themes at runtime.
+  \item Add a document store with actions for add/remove.
+  \item Persist your store to disk and reload on startup.
+\end{enumerate}

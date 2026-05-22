@@ -1,0 +1,72 @@
+\chapter{Open source: contributing to maya}
+\label{ch:contributing}
+
+\begin{aside}
+\maya{} is open source. Contributions large and small are
+welcome. This chapter is the orientation.
+\end{aside}
+
+\section{Where the code lives}
+
+The \code{maya/} subdirectory of the repo. Header files
+under \code{maya/include/maya/}. Tests under
+\code{maya/tests/}.
+
+\section{Building}
+
+\begin{lstlisting}
+cmake -B build
+cmake --build build -j10
+ctest --test-dir build
+\end{lstlisting}
+
+A C++26-capable compiler is required.
+
+\section{Issues and PRs}
+
+\begin{itemize}[leftmargin=*]
+  \item Bugs: file an issue with reproduction steps.
+  \item Features: discuss in an issue before
+    implementation.
+  \item Pull requests: keep them focused, one concern per
+    PR.
+\end{itemize}
+
+\section{Style}
+
+British spelling. Short paragraphs in docs. Code style
+matches the existing.
+
+\section{Tests}
+
+Every change needs a test. Snapshots for output;
+unit tests for logic; integration tests for flows.
+
+\section{Documentation}
+
+The book is in \code{book/}. Edits welcome. Existing-
+chapter expansions and new chapters both add value.
+
+\section{Code of conduct}
+
+Be respectful. Disagree without disagreeing. Newcomers are
+welcome.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Build with cmake; test with ctest.
+  \item Issues before features.
+  \item British spelling; short paragraphs.
+  \item Tests required; docs welcome.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Fix a small typo somewhere and open a PR.
+  \item Add a test for an existing widget.
+  \item Add a paragraph to a chapter in this book.
+\end{enumerate}

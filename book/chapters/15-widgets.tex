@@ -1,0 +1,265 @@
+\chapter{The widget catalogue}
+\label{ch:widgets}
+
+The chapters so far described the engine. This chapter is a tour of
+the cabin: the 69 widgets \maya{} ships under
+\file{maya/include/maya/widget/}. We will not document every one ---
+that is what \file{docs/13-widgets.md} and \file{docs/11-api-reference.md}
+are for. Instead, we group them, explain the common interface, and
+build a real composite UI to show how they cooperate.
+
+\section{The widget contract}
+
+A \maya{} widget is, by convention, a struct with:
+
+\begin{itemize}[leftmargin=*]
+  \item A \code{Config} struct of inputs (state to render).
+  \item A free function \code{build(Config) -> Element} or a method
+    \code{operator Element() const}.
+  \item Optionally, a free \code{handle(Event\&, Config\&) ->
+    std::optional<Msg>} for interactive widgets.
+  \item Optionally, sub-widget-specific helper functions.
+\end{itemize}
+
+The widget never owns model state. It transforms a \code{Config}
+into an \code{Element}. The host owns the state, threads it through
+the widget on each render, and feeds events back. This is the same
+discipline as \code{Program::view} but applied per-widget.
+
+\section{Categories}
+
+The widgets fall into five rough groups.
+
+\subsection{Data display}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{LineChart} --- a sparkline or full chart over time.
+  \item \code{BarChart} --- horizontal or vertical bars.
+  \item \code{Gauge} --- a circular percentage indicator.
+  \item \code{Sparkline} --- a one-line trend indicator.
+  \item \code{Heatmap} --- 2-D coloured grid for matrix data.
+  \item \code{FlameChart} --- profiling-style stacked bars.
+  \item \code{Waterfall} --- streaming spectrum or timing view.
+  \item \code{TokenStream} --- the LLM ``tokens arriving live'' view.
+  \item \code{ContextWindow} --- token budget bar.
+  \item \code{GitGraph} --- commit tree.
+\end{itemize}
+
+These take ranges (\code{std::span<double>}, \code{std::vector<Sample>})
+and produce a rectangular widget. Many use the canvas API
+(Chapter~\ref{ch:canvas}) directly for sub-cell graphics (braille
+characters, half-blocks).
+
+\subsection{Input}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Input} --- single-line text field.
+  \item \code{Textarea} --- multi-line editor with word wrap.
+  \item \code{Select} --- single-choice dropdown.
+  \item \code{Slider} --- numeric range picker.
+  \item \code{Checkbox} --- boolean toggle.
+  \item \code{Radio} --- mutually-exclusive choices.
+  \item \code{Button} --- clickable rectangle.
+  \item \code{Menu} --- vertical list of choices.
+  \item \code{CommandPalette} --- a Ctrl-K style fuzzy launcher.
+\end{itemize}
+
+These widgets follow the \emph{controlled} pattern: their state
+lives outside, in your model, and they receive it via \code{Config}.
+On a relevant key, they return a \code{Msg} (or, in the quick-tool
+API, mutate a signal).
+
+\subsection{Layout helpers}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Table} --- rows and columns with sort indicators.
+  \item \code{Tabs} --- horizontal tab strip + content area.
+  \item \code{Tree} --- collapsible hierarchical view.
+  \item \code{Scrollable} --- viewport over a too-tall child.
+  \item \code{Modal} --- a floating dialog with backdrop.
+  \item \code{Popup} --- a small contextual overlay.
+  \item \code{Toast} --- a transient banner.
+  \item \code{Disclosure} --- expand/collapse panel.
+  \item \code{Divider} --- horizontal or vertical line.
+  \item \code{Breadcrumb} --- path navigation crumbs.
+\end{itemize}
+
+\subsection{Display}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Markdown} --- a real (small) markdown renderer.
+  \item \code{InlineDiff} --- single-line +/- diff view.
+  \item \code{DiffView} --- multi-line diff with syntax highlight.
+  \item \code{Badge} --- coloured pill (status, tag).
+  \item \code{Spinner} --- animated activity indicator.
+  \item \code{ProgressBar} --- discrete or continuous.
+  \item \code{Calendar} --- month view.
+  \item \code{Canvas} --- imperative drawing surface.
+  \item \code{Image} --- iTerm2 / Kitty graphics protocol.
+  \item \code{LogViewer} --- scrolling log tail.
+\end{itemize}
+
+\subsection{Agent UI (the \agentty{} family)}
+
+Several widgets are designed for agentic chat UIs:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ToolCall}, \code{BashTool}, \code{ReadTool},
+    \code{EditTool}, \code{WriteTool}, \code{FetchTool} --- a
+    purpose-built card per tool kind.
+  \item \code{Message}, \code{ThinkingBlock}, \code{StreamingCursor}.
+  \item \code{ActivityBar}, \code{PermissionPrompt},
+    \code{ModelBadge}, \code{CostTracker}.
+  \item \code{GitStatus}, \code{FileChanges},
+    \code{SystemBanner}, \code{ErrorBlock},
+    \code{TurnDivider}, \code{ConversationView}, \code{PlanView},
+    \code{ApiUsage}.
+\end{itemize}
+
+These are not part of any TUI orthodoxy --- they were built because
+\agentty{} needed them. Their existence shows what the engine can
+sustain. Their source is a worked tour of using the layout engine,
+signals, and canvas together.
+
+\section{Anatomy of a widget: \code{Input}}
+
+Let us look at one widget in enough depth that you can read the
+others. \code{Input} (file \file{widget/input.hpp}) is a single-line
+text field.
+
+\subsection{Configuration}
+
+\begin{lstlisting}
+struct InputConfig {
+    std::string value;                  // current text
+    int         cursor_pos = 0;          // character index
+    std::string placeholder;             // dimmed text when empty
+    int         max_length = 0;          // 0 = no limit
+    bool        password = false;        // show as bullets
+    Style       text_style{};            // optional override
+    int         width = -1;              // -1 = grow
+};
+\end{lstlisting}
+
+State out, view in.
+
+\subsection{Building the element}
+
+\begin{lstlisting}
+Element input(const InputConfig& cfg);
+
+inline Element input(const InputConfig& cfg) {
+    auto display = cfg.value.empty()
+        ? text(cfg.placeholder) | Dim
+        : text(cfg.password ? std::string(cfg.value.size(), '*') : cfg.value);
+
+    // The cursor block: a highlighted cell at cursor_pos.
+    // (Real implementation handles word boundaries, scroll, etc.)
+    return h(display);
+}
+\end{lstlisting}
+
+The real implementation is fancier --- it scrolls horizontally when
+the value exceeds the box width, it tracks the cursor as a separate
+overlay, it respects bracketed paste. But the shape is: take
+\code{Config}, return \code{Element}.
+
+\subsection{Handling input}
+
+\begin{lstlisting}
+struct InputEvent {
+    enum class Kind { Edited, Submitted, Cancelled };
+    Kind        kind;
+    std::string new_value;
+    int         new_cursor;
+};
+
+std::optional<InputEvent> handle_input(const Event& ev, InputConfig& cfg);
+\end{lstlisting}
+
+The host calls \code{handle\_input(ev, my\_cfg)}. If the event is
+relevant, the widget mutates \code{cfg} and returns an
+\code{InputEvent} the host can translate into its own \code{Msg}.
+If irrelevant, returns \code{nullopt}.
+
+This pattern --- \code{handle(event, config) -> optional<event\_out>}
+--- repeats across every interactive widget.
+
+\section{Composing widgets}
+
+A real screen is many widgets:
+
+\begin{lstlisting}
+auto chat_screen(const Model& m) -> Element {
+    return v(
+        h(
+            // sidebar
+            v(
+                t<"Threads"> | Bold,
+                map(m.threads, [](const auto& t) {
+                    return text(t.title);
+                })
+            ) | width(20) | border_<Single>,
+
+            // main conversation
+            v(
+                map(m.messages, [](const auto& msg) {
+                    return message(MessageConfig{
+                        .role  = msg.role,
+                        .body  = msg.body,
+                        .time  = msg.time
+                    });
+                })
+            ) | grow_<1> | scrollable
+        ) | grow_<1>,
+
+        // composer at the bottom
+        input(InputConfig{
+            .value       = m.draft,
+            .cursor_pos  = m.draft_cursor,
+            .placeholder = "Message...",
+        }) | border_<Round> | pad<0, 1>
+    );
+}
+\end{lstlisting}
+
+Each widget is a small function; the screen is composition. The
+host's \code{update} routes events to whichever widget should
+receive them, mutates the relevant config, returns the new model.
+
+\section{Where the polish lives}
+
+If you skim widget source files, you will notice they are mostly
+\emph{boring}. Most of the implementation is layout, theming, and
+small DSL chains. The interesting bits are concentrated in a few
+widgets that exercise the canvas API (charts, sparklines,
+heatmaps), the markdown renderer (a full incremental parser), and
+the \code{Tool*} family (which model rich agent UIs).
+
+The lesson: \maya{} is engineered so that adding a widget is a
+short job. Picking a widget's name, defining a \code{Config},
+writing a \code{build} function. The library you call once you have
+read this book.
+
+\begin{recap}
+\maya{}'s widgets are small structs: a \code{Config} of inputs, a
+\code{build} function returning \code{Element}, an optional
+\code{handle} for events. They never own model state. The
+catalogue spans data display, input, layout, display, and an
+agent-UI family inherited from \agentty{}. The same pattern --- a
+function from value to element --- scales from \code{Badge} to
+\code{ConversationView}.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Pick a widget you've never used. Read its header. Build a
+    standalone example that drives it.
+  \item Implement your own widget: a \code{Stopwatch} that takes a
+    duration and renders \code{MM:SS.mmm}. Use the canvas API for
+    a thick-stroked clock face.
+  \item Read \file{maya/include/maya/widget/markdown.hpp}.
+    Understand how it streams markdown incrementally without
+    re-parsing the whole document on every keystroke.
+\end{enumerate}

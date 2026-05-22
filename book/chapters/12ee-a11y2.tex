@@ -1,0 +1,93 @@
+\chapter{Accessibility in the terminal}
+\label{ch:a11y2}
+
+\begin{aside}
+Accessibility in TUIs is harder than GUIs because screen
+readers don't see ANSI escapes. The mitigations are: keyboard-
+only navigation, semantic labels, high contrast, and avoiding
+flicker.
+\end{aside}
+
+\section{Screen reader compatibility}
+
+Most TUI screen readers (BRLTTY, Speakup) treat the screen
+as plain text. They can't follow ANSI movement; they read
+the current row when the cursor moves.
+
+The implication: organise your UI so that reading rows
+top-to-bottom makes sense. Don't rely on visual proximity
+across columns.
+
+\section{Keyboard-only}
+
+Every action must have a keyboard path. Mouse is a
+convenience; not a requirement. \maya{} enforces this for
+its built-in widgets; custom widgets must follow.
+
+\section{Focus order}
+
+Tab cycles through focusable elements. The order should
+follow reading order (top-to-bottom, left-to-right) by
+default. Override only when content order disagrees with
+intent.
+
+\section{Labels}
+
+A text input with a visible label next to it is fine for
+sighted users. For screen readers, the relationship is
+implicit. Make it explicit:
+
+\begin{lstlisting}
+auto field = text_input(value)
+           | accessible_label("Email");
+\end{lstlisting}
+
+The label is reported when focus enters.
+
+\section{Live regions}
+
+Updates that the user needs to know about (notifications,
+status changes) should be announced. \maya{}'s
+\code{live\_region} marks an element so screen readers
+announce its content changes.
+
+\section{Reduced motion}
+
+Respect \code{PREFERS\_REDUCED\_MOTION} or an in-app
+setting. Disable animations.
+
+\section{High contrast}
+
+Provide a high-contrast theme. The default themes meet AA
+contrast (4.5:1); a dedicated AAA theme is a useful add.
+
+\section{Avoiding flicker}
+
+Sub-frame artefacts (blink-off, mid-frame redraw) trigger
+seizures in some users. Use synchronised output (DEC 2026)
+when available. Avoid rapid colour changes.
+
+\section{NO\_COLOR}
+
+Respect \code{NO\_COLOR} for users with colour vision
+deficiency or screen-reader compatibility.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Reading order = logical order.
+  \item Every action has a keyboard path.
+  \item Labels explicit, not implicit.
+  \item Live regions announce updates.
+  \item Reduced motion, high contrast, \code{NO\_COLOR}.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Audit your app: every action keyboard-reachable?
+  \item Add accessible labels to every input.
+  \item Mark a status area as a live region.
+\end{enumerate}

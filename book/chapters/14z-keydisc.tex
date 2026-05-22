@@ -1,0 +1,65 @@
+\chapter{Patterns: keyboard discoverability}
+\label{ch:keydisc}
+
+\begin{aside}
+A keyboard-driven app is fast once you know it. Discovering
+the keys is the hurdle. Several patterns help.
+\end{aside}
+
+\section{Help screen}
+
+The catalogue. F1 or \code{?}. Lists every binding.
+
+\section{Footer hints}
+
+A status bar at the bottom shows context-relevant keys:
+
+\begin{lstlisting}
+[Tab] next  [Enter] open  [/] search  [?] help
+\end{lstlisting}
+
+The list changes by context. Common in mc, midnight
+commander, mutt.
+
+\section{Hover tooltips}
+
+Hovering a button shows its keybinding in a tooltip.
+
+\section{Visible accelerators}
+
+Some apps underline the key in the label:
+
+\begin{lstlisting}
+[F]ile  [E]dit  [V]iew
+\end{lstlisting}
+
+Pressing F activates the menu.
+
+\section{Cheatsheet overlay}
+
+Press a leader key (Space) and a transient overlay shows
+the next key options. Useful for deep keymaps.
+
+\section{Tour mode}
+
+A first-run tutorial that highlights each key as it
+teaches. Skip-friendly.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Help screen, footer, tooltip, accelerator,
+    cheatsheet, tour.
+  \item Layer them: don't pick one.
+  \item Make discovery cheap.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a footer hint to one screen.
+  \item Build a leader-key cheatsheet.
+  \item Write a tour for new users.
+\end{enumerate}

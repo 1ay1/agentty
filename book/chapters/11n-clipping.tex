@@ -1,0 +1,152 @@
+\chapter{Clipping and overflow}
+\label{ch:clipping}
+
+\begin{aside}
+A widget that doesn't fit shouldn't break the screen. Layout
+gives every element a rectangle; clipping enforces it. The
+question is what to do with what didn't fit.
+\end{aside}
+
+\section{The clip rectangle}
+
+Each element receives a clip rectangle from its parent. The
+painter respects it: any \code{put(x, y, cell)} outside the
+clip is dropped, not drawn.
+
+\begin{lstlisting}
+void Painter::put(int x, int y, Cell c) {
+    if (!clip_.contains(x, y)) return;
+    back_(x, y) = c;
+}
+\end{lstlisting}
+
+The check is one comparison and one branch. Modern CPUs do
+this in roughly half a cycle.
+
+\section{Overflow strategies}
+
+A child too wide or tall for its parent can be handled in
+five ways:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Truncate.} Drop what doesn't fit. Default.
+  \item \textbf{Ellipsis.} Drop and append \code{...} to the
+    last visible cell.
+  \item \textbf{Scroll.} Keep all content, attach a viewport
+    with scroll position.
+  \item \textbf{Wrap.} Break onto a new row.
+  \item \textbf{Resize parent.} Grow the parent. Usually
+    impossible (the parent has its own constraints).
+\end{itemize}
+
+\maya{} exposes these as element modifiers:
+
+\begin{lstlisting}
+auto t = text("very long line of stuff")
+       | overflow(Overflow::Ellipsis)
+       | width(20);
+\end{lstlisting}
+
+\section{Ellipsis details}
+
+The ellipsis is a single cell containing \code{U+2026}
+HORIZONTAL ELLIPSIS (or three dots in ASCII fallback). The
+last visible cell becomes the ellipsis; if the text is itself
+shorter than the width, no ellipsis is drawn.
+
+A subtle case: the cell before the ellipsis might be a wide
+character whose trailing slot would now be visible without
+its head. \maya{} extends the truncation by one to avoid
+half-wide-cell artifacts.
+
+\section{Wrap}
+
+Wrap mode pushes overflow onto subsequent rows. The element
+grows in height (subject to its height constraint).
+
+The word-boundary detection is grapheme-aware: never break
+inside a grapheme cluster, prefer to break at spaces, break
+mid-word only if no break opportunity exists in the row.
+
+\section{Nested clip}
+
+When an element draws a child, the child's clip is the
+intersection of its allocated rect and the parent's clip. So
+a list inside a clipped panel never paints outside the panel
+even if its rows logically extend beyond.
+
+\begin{lstlisting}
+Rect child_clip = clip_.intersect(child_rect);
+\end{lstlisting}
+
+The intersection is two min and two max operations.
+
+\section{Scroll and clip}
+
+A scrollable region has a viewport (the visible rectangle) and
+a content size (often larger). The clip is the viewport; the
+content is painted at a translated origin so the visible
+portion lands inside the clip.
+
+The trick: paint as if the content were at $(0, -\text{scroll}_y)$
+relative to the viewport. Cells with $y < 0$ are clipped;
+cells with $y \geq \text{viewport.h}$ are clipped. The middle
+is shown.
+
+\section{Clip and animation}
+
+A sliding-in panel can be implemented with clipping. Draw the
+panel at its final position; animate the parent's clip
+rectangle to grow from empty to the full panel size. The
+illusion is a wipe-in.
+
+\maya{}'s reveal widget uses this pattern.
+
+\section{Cell-perfect alignment}
+
+A common bug: clip rectangle off by one. The right edge of a
+border is included or excluded depending on convention. \maya{}
+uses inclusive-exclusive: \code{Rect\{x, y, x+w, y+h\}} where
+\code{x+w} is one past the last visible column.
+
+This is the same convention as STL ranges. The arithmetic for
+width is just \code{x2 - x1}.
+
+\section{Debug overlay}
+
+A debug build can enable a clip-rectangle overlay: every
+element's clip is outlined in a thin tint. This is useful for
+spotting layout bugs (an element drawing outside where you
+thought it should).
+
+\maya{} ships such an overlay behind a flag. Toggle with a
+keybind.
+
+\begin{tryit}
+Enable the clip overlay in your app and toggle a panel that
+shows/hides. Watch the rectangles update as layout reflows.
+\end{tryit}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Every element has a clip rectangle; writes outside
+    are dropped.
+  \item Five strategies for overflow: truncate, ellipsis,
+    scroll, wrap, resize-parent.
+  \item Nested clips intersect.
+  \item Wide cells need careful truncation.
+  \item Debug overlay helps diagnose layout bugs.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a card with a long title. Compare truncate,
+    ellipsis, and wrap. Which feels best?
+  \item Resize the terminal small and confirm no element
+    paints outside its rect.
+  \item Implement a debug clip overlay; bind it to F12.
+\end{enumerate}

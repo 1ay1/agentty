@@ -1,0 +1,69 @@
+\chapter{Appendix: signal API reference}
+\label{ch:signalref}
+
+\begin{aside}
+The signal API in one place. For lookup.
+\end{aside}
+
+\section{Creation}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{signal(value)}: creates a signal.
+  \item \code{lazy\_signal(fn)}: signal computed on first
+    read.
+  \item \code{root\_signal(value)}: signal owned by root.
+  \item \code{computed\_signal(fn)}: alias for memo.
+\end{itemize}
+
+\section{Access}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ctx.get(sig)}: read; tracks dep if in effect.
+  \item \code{ctx.peek(sig)}: read without tracking.
+  \item \code{ctx.set(sig, v)}: write.
+  \item \code{ctx.update(sig, fn)}: read-modify-write.
+\end{itemize}
+
+\section{Memo and effects}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{memo(fn)}: cached derivation.
+  \item \code{effect(fn)}: side-effect on change.
+  \item \code{async\_effect(coro)}: async variant.
+  \item \code{effect\_throttled(ms, fn)}: rate-limited.
+  \item \code{effect\_debounced(ms, fn)}: delayed.
+\end{itemize}
+
+\section{Batching}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ctx.batch(fn)}: coalesce updates.
+  \item \code{ctx.transaction(fn)}: alias.
+\end{itemize}
+
+\section{Lifecycle}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ctx.on\_mount(w, fn)}: widget mount.
+  \item \code{ctx.on\_unmount(w, fn)}: widget unmount.
+  \item \code{ctx.cleanup(fn)}: owner cleanup.
+\end{itemize}
+
+\section{Inspection}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ctx.dump\_signals()}: list all.
+  \item \code{ctx.dump\_graph(path)}: graphviz dump.
+  \item \code{ctx.trace\_signals(true)}: log updates.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Three creation patterns, four access patterns.
+  \item Memo + effect variants.
+  \item Batch for coalescing.
+  \item Inspection helpers for debugging.
+\end{itemize}
+\end{recap}

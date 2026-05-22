@@ -1,0 +1,188 @@
+\chapter{Mouse encoding and SGR mode}
+\label{ch:mouse}
+
+\begin{aside}
+Mouse support in terminals is a stack of three encodings, each
+fixing the previous. \maya{} requests the newest, falls back to
+the next, and exposes a clean event type regardless of which
+arrived on the wire.
+\end{aside}
+
+\section{Three encodings}
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{X10 encoding (1984).} Three bytes after the
+    \code{ESC [ M} prefix: button + 32, column + 32, row + 32.
+    Coordinates capped at 223 (255 minus the 32 offset).
+  \item \textbf{UTF-8 encoding.} Same as X10 but coordinates
+    encoded as UTF-8, so larger terminals work. Hard to parse
+    reliably.
+  \item \textbf{SGR encoding (1995, widely adopted ~2008).}
+    \code{ESC [ < button ; column ; row M} or \code{m} (the
+    final letter is \code{M} for press, \code{m} for release).
+    Coordinates are decimal text; no limit.
+\end{enumerate}
+
+\maya{} requests SGR (\code{ESC [ ? 1006 h}) and falls back to
+X10 only if the terminal rejects it. SGR parsing is simple text
+parsing; X10 parsing must handle the 223-cap edge.
+
+\section{Modes}
+
+Mouse modes control \emph{which} events the terminal sends:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{? 1000 h}: button press and release only.
+  \item \code{? 1002 h}: above + drag (motion with button held).
+  \item \code{? 1003 h}: all motion, even without buttons.
+\end{itemize}
+
+\code{1003} is expensive on the wire --- a moving mouse fires
+events as fast as the terminal can read them. Use \code{1002} for
+most apps; reserve \code{1003} for hover-driven UIs.
+
+\maya{} defaults to \code{1002} and offers a flag for
+\code{1003}.
+
+\section{Decoding}
+
+A press of button 1 at column 10, row 5 in SGR mode arrives as:
+
+\begin{lstlisting}
+ESC [ < 0 ; 10 ; 5 M
+\end{lstlisting}
+
+The button code is a small integer with bit flags for shift,
+alt, and control modifiers:
+
+\begin{itemize}[leftmargin=*]
+  \item Bits 0--1: button (00 = left, 01 = middle, 10 = right,
+    11 = release).
+  \item Bit 2: shift.
+  \item Bit 3: alt.
+  \item Bit 4: control.
+  \item Bit 5: motion.
+  \item Bit 6: scroll (wheel up = 64, wheel down = 65, side =
+    66, 67).
+\end{itemize}
+
+\maya{}'s decoder normalises into a \code{MouseEvent}:
+
+\begin{lstlisting}
+struct MouseEvent {
+    int x, y;
+    enum Kind { Press, Release, Motion, Wheel } kind;
+    enum Button { Left, Middle, Right, None } button;
+    int wheel_delta;   // +1 up, -1 down, 0 otherwise
+    bool shift, alt, ctrl;
+};
+\end{lstlisting}
+
+\section{Drag tracking}
+
+Drag is a press followed by motion events with the button bit
+still set, followed by release. \maya{} maintains a small state
+machine to attach the held-down button to motion events.
+
+\section{Coordinate system}
+
+Mouse coordinates are 1-based, like the cursor. \maya{}
+converts to 0-based internally and clips to the canvas.
+
+A click outside the canvas (between resize and renderer
+catching up) is reported but the dispatch silently drops it.
+
+\section{Hit-testing}
+
+The event arrives with absolute coordinates. The dispatcher
+walks the element tree and asks ``which element owns this
+column and row?''.
+
+This is a tree walk with bounding-box check at each node. For
+deep trees this could be slow, but typical TUIs are shallow (a
+few dozen elements visible at once). The walk is
+sub-microsecond.
+
+The hit element receives the event; if it does not consume it,
+the event bubbles to the parent.
+
+\section{Modifiers}
+
+Shift-click, Ctrl-click, Alt-click come through as a normal
+click event with the corresponding modifier bit. Apps can use
+them for ``open in new tab'' style actions.
+
+Some terminals intercept Ctrl-click for their own purposes
+(open URL, jump to definition). \maya{} cannot prevent this.
+
+\section{Mouse and selection}
+
+The terminal's built-in selection (drag to highlight, copy
+with right-click) is suppressed when \maya{} enables mouse
+mode. To allow selection, hold Shift in most terminals --- the
+modifier reroutes the drag to the terminal instead of the
+application.
+
+\begin{tryit}
+Run a \maya{} app and try to copy text by drag. Nothing
+happens. Hold Shift and drag --- the terminal selection
+activates. This is documented in xterm but rarely advertised.
+\end{tryit}
+
+\section{Restoring on exit}
+
+On exit, \maya{} disables all mouse modes:
+
+\begin{lstlisting}
+ESC [ ? 1006 l
+ESC [ ? 1003 l
+ESC [ ? 1002 l
+ESC [ ? 1000 l
+\end{lstlisting}
+
+Forgetting any one leaves the next program in the terminal
+seeing mouse events it does not understand.
+
+\section{Touch and trackpad}
+
+Trackpads emit mouse events. Scroll gestures arrive as wheel
+events. Pinch and rotate do not have a standard escape encoding
+and are not reported.
+
+iTerm2's ``modifiers as keys'' option converts trackpad pinch
+into key sequences. \maya{} sees those as keys, not mouse.
+
+\section{Mouse-less fallback}
+
+Every mouse-driven feature in \maya{} has a keyboard
+equivalent. The reason: SSH over a flaky link drops mouse
+events more readily than keys, and screen readers do not
+synthesise mouse.
+
+A button widget is clickable \emph{and} focusable: enter
+activates it.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item SGR mode is the modern encoding; request it.
+  \item \code{1002} for press+drag; \code{1003} for hover.
+  \item Decode bits give modifiers and motion flags.
+  \item Hit-test by walking the element tree.
+  \item Hold Shift to fall back to terminal selection.
+  \item Always restore on exit.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Log every mouse event to a side panel. Move and
+    click around; watch the events.
+  \item Build a draggable widget: pick-up on press, follow
+    on drag, drop on release.
+  \item Add a hover effect to a button using mode
+    \code{1003}. Measure the wire bandwidth as you wiggle
+    the mouse.
+\end{enumerate}

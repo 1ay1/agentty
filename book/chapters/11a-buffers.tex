@@ -1,0 +1,232 @@
+\chapter{Front and back buffers}
+\label{ch:buffers}
+
+\begin{aside}
+Double-buffering is older than computers. A scribe writing on
+parchment kept a wax tablet for drafts; the parchment only saw the
+final version. \maya{} does the same with terminal cells: drafts
+land on the back buffer, the final version flushes to the screen.
+\end{aside}
+
+The canvas in Chapter~\ref{ch:canvas} introduced packed cells. This
+chapter looks at why \maya{} keeps \emph{two} canvases instead of
+one, and what each is for.
+
+\section{The problem with one buffer}
+
+Imagine the renderer only had a single grid. To redraw the screen
+after a state change, it would have to:
+
+\begin{enumerate}[leftmargin=*]
+  \item Clear the grid.
+  \item Walk the element tree and paint into it.
+  \item Emit ANSI for every cell, because there is nothing to
+    diff against.
+\end{enumerate}
+
+Step three is the killer. A modest 200x60 terminal has 12,000
+cells. At roughly 20 bytes of ANSI per cell (cursor move, SGR set,
+glyph, reset) that is 240 KB of output per frame. At 60 frames per
+second that is 14 MB/s of escape codes flowing through the pty.
+Most terminals choke long before that.
+
+\section{Two buffers, one diff}
+
+With two buffers, the renderer paints into the \emph{back} buffer
+and compares it to the \emph{front}. Only cells that differ become
+ANSI output. A typing animation in a text field touches one cell;
+the resulting frame is roughly 30 bytes of ANSI, not 240 KB.
+
+\begin{lstlisting}
+class Renderer {
+    Canvas front_;   // what the screen currently shows
+    Canvas back_;    // what we want it to show
+    // ...
+};
+\end{lstlisting}
+
+The diff loop is the subject of Chapter~\ref{ch:simd}. Here we focus on
+the \emph{lifecycle} of the two buffers around a frame.
+
+\section{Frame lifecycle}
+
+A frame in \maya{} proceeds in five steps:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Resize check.} If the terminal was resized, both
+    buffers are reallocated to the new size. The front is filled
+    with a sentinel cell that cannot equal any real cell, forcing
+    the next diff to redraw everything.
+  \item \textbf{Clear back.} The back buffer is filled with the
+    default cell (space, default fg/bg).
+  \item \textbf{Paint.} The element tree is walked depth-first and
+    each element writes into the back buffer.
+  \item \textbf{Diff and emit.} The two buffers are compared; for
+    each differing run, ANSI is emitted.
+  \item \textbf{Swap.} The back becomes the new front. The next
+    frame begins.
+\end{enumerate}
+
+The swap is logical, not physical: \maya{} does not memcpy. It
+swaps pointers (or, equivalently, swaps the role of two storage
+slots). Memcpy of 12,000 cells $\times$ 8 bytes = 96 KB per swap
+would dwarf the diff savings.
+
+\section{Sentinel cells}
+
+\begin{idea}
+\textbf{Sentinel.} A value that cannot occur in normal use, used
+to mark a slot as ``not yet computed'' or ``needs full redraw''.
+\end{idea}
+
+After resize, \maya{} fills the front buffer with a sentinel cell
+whose width field is set to 3 --- impossible for any real cell
+(widths are 0, 1, or 2). The diff sees every back cell as different
+and redraws the whole screen.
+
+The same trick handles the very first frame: the constructor
+initialises the front to sentinels, so the first diff is a full
+paint.
+
+\section{Why not triple-buffer?}
+
+Some GUI frameworks triple-buffer: while one buffer is on screen,
+another is being painted, and a third is being diffed. The aim is
+to never block the paint thread on the screen.
+
+\maya{} does not need this. Painting and emitting happen on the
+same thread, and the terminal is the slow link, not the CPU. Two
+buffers are enough.
+
+\begin{funfact}
+Triple-buffering shows up in OpenGL as \code{GL\_TRIPLE\_BUFFER}
+and in Wayland as the \code{wl\_surface} commit protocol. The
+terminal world skipped straight from no buffering (telexes,
+printing terminals) to double-buffering (curses, 1980).
+\end{funfact}
+
+\section{Cell-level write barriers}
+
+Painting into the back buffer is a write. \maya{}'s painter
+exposes a small API:
+
+\begin{lstlisting}
+void put(int x, int y, Cell c);
+void put_str(int x, int y, std::string_view s, Style st);
+void fill(Rect r, Cell c);
+\end{lstlisting}
+
+There are no random writes outside this API. The reason is
+clipping: every \code{put} checks bounds against the current
+clip rectangle. If an element draws outside its allotted space
+the write is silently dropped. Without this, a misbehaving
+element could corrupt its neighbours.
+
+\begin{warning}
+The clip rectangle is per-element, set by the layout engine
+before paint. If you ever write your own paint method (custom
+widget), you must respect it. \maya{}'s built-in elements do
+this for you.
+\end{warning}
+
+\section{Damage tracking}
+
+The diff in Chapter~\ref{ch:simd} is the simplest form of damage
+tracking: compare every cell. Other libraries (notch, blessed)
+maintain explicit damage rectangles --- ``cells x1..x2, y1..y2
+changed''.
+
+\maya{} chose full-grid diff because:
+
+\begin{itemize}[leftmargin=*]
+  \item It is simpler. No bookkeeping at write time.
+  \item It is SIMD-friendly: the inner loop is a wide
+    \code{vpcmpeqq} over 4 or 8 cells at a time.
+  \item For typical TUI sizes (under 30,000 cells) the diff is
+    sub-millisecond on any laptop made since 2015.
+\end{itemize}
+
+The trade-off is that explicit damage rectangles let you skip
+\emph{painting} entire regions, not just emitting. \maya{} pays
+the paint cost every frame and trusts the diff to keep the wire
+quiet.
+
+\section{Buffer ownership}
+
+Both buffers are owned by the \code{Renderer}. The element tree
+borrows a painter handle for the duration of a frame but never
+sees the canvas storage directly.
+
+\begin{lstlisting}
+class Painter {
+    Canvas& back_;
+    Rect    clip_;
+public:
+    void put(int x, int y, Cell c);
+    // ...
+};
+\end{lstlisting}
+
+This makes ownership obvious and makes the painter cheap to
+construct (one reference, one rect). Elements never need to
+allocate during paint.
+
+\section{Allocation strategy}
+
+A canvas is a flat \code{std::vector<uint64\_t>} of size
+\code{width * height}. Resizes use \code{vector::assign} which
+amortises to one allocation per resize burst. Steady-state has
+zero allocations during paint or diff.
+
+\begin{tryit}
+Run any \maya{} program and resize the terminal aggressively
+with the mouse. The redraw is smooth because each resize is
+one allocation and one full-screen redraw, not a flood of
+per-cell operations.
+\end{tryit}
+
+\section{What you do not buffer}
+
+The cursor position is not buffered. Neither is the title bar.
+Neither are bell, hyperlinks (the URL string itself; the slot
+in the cell is), or mouse cursor mode.
+
+These are emitted directly at the end of each frame:
+
+\begin{lstlisting}
+emit("\x1b]0;" + new_title + "\x07");  // OSC 0
+emit(cursor_move(cx, cy));
+\end{lstlisting}
+
+The reason: there is only one of each, and they are tiny. A
+buffer for state with one slot is just a variable.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Two buffers let \maya{} send only changes, not full
+    frames.
+  \item The back is the draft, the front is the screen.
+  \item Resize seeds the front with sentinels so the next diff
+    redraws everything.
+  \item The clip rectangle is the only write barrier; elements
+    cannot scribble outside their box.
+  \item Cursor and title are unbuffered: one slot needs no
+    buffer.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a counter to your app that prints
+    \code{frame N: K cells changed} on every frame. K is the
+    output of the diff. Type into a text field and watch K
+    stay small.
+  \item Force a full redraw by writing the sentinel into the
+    front buffer (you will need to expose a debug method).
+    Confirm the next frame's K equals the screen area.
+  \item Time the paint phase (back buffer write) and the
+    diff phase separately. Which is dominant in your app?
+\end{enumerate}

@@ -1,0 +1,81 @@
+\chapter{The signal-graph debugger}
+\label{ch:signaldbg}
+
+\begin{aside}
+A regression like ``why does this widget re-render every
+frame'' is solved by examining the dependency graph. The
+signal debugger is the tool.
+\end{aside}
+
+\section{Inspecting signals}
+
+\begin{lstlisting}
+ctx.dump_signals();
+// signal:user_id (ver 5) subs: 3
+// signal:theme (ver 1) subs: 12
+// ...
+\end{lstlisting}
+
+The dump lists every signal with version and subscriber
+count.
+
+\section{Tracing updates}
+
+A trace flag records every set:
+
+\begin{lstlisting}
+ctx.set_trace_signals(true);
+\end{lstlisting}
+
+Each \code{set} logs to the trace file with stack trace.
+The log shows ``who set what when''.
+
+\section{Visualising the graph}
+
+\code{ctx.dump\_graph(path)} writes graphviz dot format.
+Render to PNG with \code{dot -Tpng}; eyeball the graph.
+
+\section{Find re-render culprits}
+
+When something re-renders too often, find the signal that
+ticks too often:
+
+\begin{itemize}[leftmargin=*]
+  \item Filter signals by update rate.
+  \item Inspect their subscribers.
+  \item Identify which effect is wasteful.
+\end{itemize}
+
+\section{Replay}
+
+Record an input sequence; replay with the debugger
+attached. Step through the signal updates frame by frame.
+
+\section{Breakpoints}
+
+Set a breakpoint on a signal update:
+
+\begin{lstlisting}
+ctx.break_on_set(user_id);
+\end{lstlisting}
+
+The next set fires the debugger.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Dump signals to see versions and sub counts.
+  \item Trace updates to find culprits.
+  \item Visualise the graph with graphviz.
+  \item Breakpoints on specific signals.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Dump your app's signal graph.
+  \item Find a wasteful re-render path.
+  \item Set a breakpoint on a critical signal.
+\end{enumerate}

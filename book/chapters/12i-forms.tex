@@ -1,0 +1,139 @@
+\chapter{Forms and input validation}
+\label{ch:forms}
+
+\begin{aside}
+A form is a list of inputs whose values must satisfy some
+constraints before the user can submit. The constraints become
+visible feedback; the inputs need shared state.
+\end{aside}
+
+\section{The form model}
+
+A form is a struct of signals:
+
+\begin{lstlisting}
+struct LoginForm {
+    Signal<std::string> username;
+    Signal<std::string> password;
+    Signal<std::string> error;
+};
+\end{lstlisting}
+
+Inputs bind to fields; validation runs on change.
+
+\section{Validation rules}
+
+A rule is a function from value to optional error message:
+
+\begin{lstlisting}
+auto required(std::string_view v)
+    -> std::optional<std::string>
+{
+    if (v.empty()) return "required";
+    return std::nullopt;
+}
+
+auto min_length(int n) {
+    return [n](std::string_view v)
+        -> std::optional<std::string>
+    {
+        return v.size() >= n
+             ? std::nullopt
+             : std::optional<std::string>("too short");
+    };
+}
+\end{lstlisting}
+
+\section{Composing rules}
+
+Multiple rules per field:
+
+\begin{lstlisting}
+auto validate_password = [&](std::string_view v) {
+    if (auto e = required(v)) return e;
+    if (auto e = min_length(8)(v)) return e;
+    return std::optional<std::string>{};
+};
+\end{lstlisting}
+
+\section{Showing errors}
+
+Bind error display to the field's validation result:
+
+\begin{lstlisting}
+auto password_field = column(
+    text_input(form.password),
+    text(validate_password(ctx.get(form.password)).value_or(""))
+        | fg<theme::error>
+);
+\end{lstlisting}
+
+The error appears beneath the field, in red.
+
+\section{Submit gating}
+
+The submit button is disabled until all fields pass:
+
+\begin{lstlisting}
+auto can_submit = memo([&] {
+    return !validate_username(ctx.get(form.username))
+        && !validate_password(ctx.get(form.password));
+});
+
+auto button = ctx.get(can_submit)
+    ? submit_button()
+    : submit_button() | disabled;
+\end{lstlisting}
+
+\section{Async validation}
+
+Some validations need a server check (``username taken''):
+
+\begin{lstlisting}
+ctx.async_effect([&]() -> Task<void> {
+    auto u = ctx.get(form.username);
+    auto avail = co_await check_available(u);
+    ctx.set(username_error,
+        avail ? "" : "taken");
+});
+\end{lstlisting}
+
+Debounce to avoid flooding the server.
+
+\section{Form-level errors}
+
+Errors that don't belong to a single field (login failed)
+live in a top-level error signal, shown above the form.
+
+\section{Reset and dirty tracking}
+
+Track which fields the user has touched; show errors only
+after touch (don't shout at an empty fresh form).
+
+\begin{lstlisting}
+struct Field {
+    Signal<std::string> value;
+    Signal<bool> touched;
+};
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Form = struct of signals.
+  \item Rules return optional error messages.
+  \item Submit gated on validation passing.
+  \item Async validation for server checks.
+  \item Touch tracking to avoid premature errors.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a login form with username and password.
+  \item Add an async ``username available'' check.
+  \item Implement touch tracking so errors appear only
+    after blur.
+\end{enumerate}

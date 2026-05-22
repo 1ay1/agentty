@@ -1,0 +1,123 @@
+\chapter{Render trees and reconciliation}
+\label{ch:reconcile}
+
+\begin{aside}
+The element tree is rebuilt every frame. Naively that means
+every cell repaints. The reconciler keeps the rebuild logical
+but the paint physical: same content, same cells, no churn.
+\end{aside}
+
+\section{The naive approach}
+
+Build a new tree. Throw away the old. Paint from scratch.
+Correct but wasteful: every frame is a full repaint.
+
+\section{Reconciliation}
+
+The reconciler compares old and new trees and computes the
+minimum set of operations to transform one into the other.
+Operations:
+
+\begin{itemize}[leftmargin=*]
+  \item Same element kind and props: reuse.
+  \item Same kind, changed props: update props.
+  \item Different kind: replace.
+  \item Subtree added: mount.
+  \item Subtree removed: unmount.
+\end{itemize}
+
+\maya{} does not do full diff-style reconciliation. Instead,
+it rebuilds and paints into the back buffer; the canvas diff
+(Chapter~\ref{ch:diffloop}) does the equivalent at cell level.
+
+\section{Why no element-level diff}
+
+\maya{}'s elements are cheap to construct (no allocations
+when arena-backed). Painting a redundant element costs the
+same as marking it ``unchanged''. The cell-level diff is
+where the saving lies.
+
+React reconciles because the DOM is expensive to touch.
+\maya{}'s ``DOM'' is a 2-D byte array; touching it costs
+one store.
+
+\section{Keys}
+
+The exception: lists with stable identity. A list of items
+that reorder need keys so the renderer matches them across
+frames:
+
+\begin{lstlisting}
+list_for_each(items, [](Item& it) {
+    return row(...).key(it.id);
+});
+\end{lstlisting}
+
+The key tells the runtime ``this is the same row as last
+frame'', preserving cursor focus, animation state, and any
+per-element scratch.
+
+Without keys, a reorder looks like ``everything changed''
+to the focus and animation systems.
+
+\section{Stateful widgets}
+
+A text input has internal state (cursor position, selection,
+undo stack). When the tree rebuilds, the widget's state must
+survive.
+
+\maya{} keys widget instances by tree path: ``root > column
+> input[2]''. Same path on the next frame returns the same
+state instance.
+
+\section{Path collisions}
+
+If two children have the same kind and no key, their paths
+collide. Re-orders confuse the state mapping. \maya{} warns
+in debug builds and asks for explicit keys.
+
+\section{Mounting and unmounting}
+
+A widget that appears (mounted) gets a chance to initialise
+(register effects, start animations). A widget that
+disappears (unmounted) gets a chance to clean up.
+
+\maya{}'s lifecycle hooks:
+
+\begin{lstlisting}
+ctx.on_mount(my_widget, [&] { ... });
+ctx.on_unmount(my_widget, [&] { ... });
+\end{lstlisting}
+
+The runtime walks the tree, compares with last frame's set,
+and calls hooks for new and missing widgets.
+
+\section{Effect lifetimes}
+
+Effects registered inside a widget live as long as the
+widget. Unmount drops the effect. This prevents leaks (no
+dangling effect firing on a destroyed widget).
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item \maya{} rebuilds the element tree per frame.
+  \item Cell-level diff (not element-level) saves work.
+  \item Keys identify list rows across frames.
+  \item Widget state survives via tree-path identity.
+  \item Mount/unmount hooks bound effect lifetimes.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a list that reorders. Compare with and
+    without keys; observe what happens to focus and
+    animations.
+  \item Add a mount/unmount log; watch widgets appear and
+    disappear as panels toggle.
+  \item Find a state leak by mounting a widget repeatedly
+    and watching memory. Fix with proper unmount.
+\end{enumerate}

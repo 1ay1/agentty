@@ -1,0 +1,131 @@
+\chapter{Lists, virtualisation, and infinite scroll}
+\label{ch:lists}
+
+\begin{aside}
+A list with a million items must not paint a million rows.
+Virtualisation is the trick: render only what's visible, fake
+the rest with scroll offsets.
+\end{aside}
+
+\section{The viewport}
+
+A list has a viewport (visible rows) and a content (total
+rows). When content is larger than viewport, scrolling moves
+a sliding window.
+
+\begin{lstlisting}
+class VirtualList {
+    int viewport_height;
+    int total_rows;
+    int scroll_top;
+public:
+    int first_visible() { return scroll_top; }
+    int last_visible() {
+        return scroll_top + viewport_height;
+    }
+};
+\end{lstlisting}
+
+Only rows in $[\text{first}, \text{last})$ are rendered.
+
+\section{Row height}
+
+Fixed-height rows make the math trivial: row $i$ is at $i
+\times h$. Variable heights need a prefix sum or a
+binary-searchable accumulator.
+
+\maya{}'s list defaults to fixed height; variable-height
+needs a measure callback per row.
+
+\section{Item factory}
+
+The list takes a factory that returns the element for an
+index:
+
+\begin{lstlisting}
+list(total_rows, [](int i) {
+    return text("row " + std::to_string(i));
+});
+\end{lstlisting}
+
+The list calls the factory only for visible rows.
+
+\section{Scroll position}
+
+A scroll signal drives the viewport:
+
+\begin{lstlisting}
+auto scroll = signal(0);
+auto list = virtual_list(items, scroll);
+\end{lstlisting}
+
+Keyboard handlers update the signal: \code{j} increments,
+\code{k} decrements, page-down jumps by viewport.
+
+\section{Smooth scrolling}
+
+Snapping to the next row feels abrupt. Smooth scrolling
+animates the scroll signal:
+
+\begin{lstlisting}
+animate_to(scroll, target, 150ms);
+\end{lstlisting}
+
+The viewport slides over a tween instead of jumping.
+
+\section{Infinite scroll}
+
+When the user scrolls near the bottom, fetch more items:
+
+\begin{lstlisting}
+ctx.effect([&] {
+    if (ctx.get(scroll) > total_rows - viewport - 10) {
+        load_more();
+    }
+});
+\end{lstlisting}
+
+\code{load\_more} appends to the items signal; the list
+extends.
+
+\section{Sticky headers}
+
+A scrolling list with section headers can pin the current
+section's header to the top:
+
+\begin{lstlisting}
+auto pinned_header = memo([&] {
+    return section_at(ctx.get(scroll));
+});
+\end{lstlisting}
+
+Render the pinned header above the viewport.
+
+\section{Lazy loading}
+
+Items don't need to be in memory --- a windowed data
+source fetches as the viewport approaches. \maya{} provides
+\code{LazyList} that calls a fetch callback for unloaded
+ranges.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Render only visible rows.
+  \item Fixed height: trivial math; variable: prefix sums.
+  \item Scroll signal drives the viewport.
+  \item Smooth scroll animates; infinite scroll fetches on
+    edge.
+  \item Sticky headers via memo on scroll position.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a list of 100,000 rows. Confirm only ~50 are
+    rendered at a time.
+  \item Add smooth scroll with a 150 ms tween.
+  \item Implement infinite scroll for a paginated API.
+\end{enumerate}

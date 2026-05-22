@@ -1,0 +1,172 @@
+\chapter{Hyperlinks and OSC-8}
+\label{ch:hyperlinks}
+
+\begin{aside}
+Click a URL in your terminal and a browser opens. The feature is
+ten years old and still feels magical. The mechanism is one
+escape sequence.
+\end{aside}
+
+\section{The OSC-8 escape}
+
+A hyperlink wraps a stretch of cells with two escapes:
+
+\begin{lstlisting}
+ESC ] 8 ; ; https://example.com BEL
+clickable text
+ESC ] 8 ; ; BEL
+\end{lstlisting}
+
+The terminal renders the inner text normally (no underline, no
+colour change) but stores the URL as metadata on those cells.
+Click (or Ctrl-click on some terminals) opens the URL.
+
+\section{Per-cell links}
+
+In \maya{}'s packed cell, a link slot points into a side table
+of URLs. Many cells can share one entry (a 50-character link
+takes 50 cells, one URL slot). The slot is 14 bits, so up to
+16,383 distinct URLs per frame, which is generous.
+
+The diff treats the link slot as part of the cell: a cell whose
+URL changed but whose text didn't still emits.
+
+\section{Element wrapper}
+
+\begin{lstlisting}
+auto link = hyperlink("https://example.com",
+                     text("docs"));
+\end{lstlisting}
+
+The wrapper applies the URL to every cell its child paints. It
+does not add visual styling --- you can underline if you want
+the user to see it:
+
+\begin{lstlisting}
+auto link = hyperlink("https://example.com",
+                     text("docs") | underline)
+          | fg<theme::accent>;
+\end{lstlisting}
+
+\section{Detection at runtime}
+
+OSC-8 is silently ignored by terminals that don't support it,
+so emitting is always safe. The text shows; clicking does
+nothing. \maya{} does not bother with capability detection.
+
+\section{Multi-line links}
+
+A link can span multiple lines. The terminal joins consecutive
+cells with the same URL into one clickable region. Wrap a
+multi-line block in one \code{hyperlink} call and it works.
+
+\section{IDs for grouping}
+
+OSC-8 supports an ID parameter: cells with the same ID share a
+hover/click target. This is useful when the same logical link
+appears in multiple places (e.g., a file path repeated in a
+search-results view):
+
+\begin{lstlisting}
+ESC ] 8 ; id=42 ; file:///etc/passwd BEL
+\end{lstlisting}
+
+Hovering one instance highlights all instances with the same
+ID. \maya{} accepts an optional \code{id} argument to
+\code{hyperlink}.
+
+\section{File and special schemes}
+
+\code{file://}, \code{mailto:}, \code{ssh:}, \code{tel:},
+\code{magnet:} --- terminals delegate to the OS to handle the
+scheme. \maya{} does no special-casing; you emit the URL and
+let the click handler do its job.
+
+\section{Security}
+
+A URL the user sees is not always the URL the link points to:
+
+\begin{lstlisting}
+hyperlink("https://malicious.example",
+         text("https://google.com"));
+\end{lstlisting}
+
+The cell shows ``https://google.com'' but clicks open the
+malicious site. Some terminals (iTerm2) show a tooltip with
+the real URL on hover; many don't.
+
+\maya{} does not validate or guard against this. The
+application must decide whether to trust its sources (your own
+formatted strings are fine; user-supplied URLs need care).
+
+\begin{warning}
+Echoing untrusted URLs is a phishing vector. If your app
+prints URLs from external data (a chat client, an RSS reader),
+either strip the OSC-8 metadata or display the visible text
+identical to the URL.
+\end{warning}
+
+\section{Performance}
+
+OSC-8 is on the wire as plain ASCII. Each link adds 30--80
+bytes of escape per emission. Frequent re-emissions (animated
+panels with hovers) get expensive.
+
+\maya{}'s style cache (see Chapter~\ref{ch:diffloop}) tracks the
+last-emitted link and skips redundant resets. Sequential cells
+with the same URL emit one open, one close, regardless of
+length.
+
+\section{Terminal support}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Supported:} iTerm2, Wezterm, Kitty, foot,
+    Ghostty, recent xterm (with flag), modern gnome-terminal.
+  \item \textbf{Not supported:} Apple Terminal, old xterm,
+    tmux without passthrough.
+\end{itemize}
+
+\section{tmux passthrough}
+
+tmux strips OSC-8 by default. Enable passthrough with:
+
+\begin{lstlisting}
+set -g allow-passthrough on
+\end{lstlisting}
+
+Then links emitted inside a pane reach the outer terminal.
+Without this, links are silently dropped at the tmux boundary.
+
+\section{Beyond URLs: app actions}
+
+Some terminals offer the convention of \code{file:///path:line}
+to jump to a file at a specific line. iTerm2 and Wezterm
+support this. \maya{} treats it as an opaque URL; the
+terminal does the parsing.
+
+You can use this to wire ``open file at line'' actions
+into your app's output, useful for compiler-error displays.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item OSC-8 wraps cells with metadata; clicking opens.
+  \item \maya{} stores the link in the packed cell.
+  \item No visual styling unless you add it.
+  \item IDs group multi-instance links.
+  \item Be careful echoing untrusted URLs.
+  \item tmux needs passthrough configured.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Print a list of URLs in your app, each as a clickable
+    link. Confirm clicking opens your browser.
+  \item Build a search-result list where every line is a
+    clickable \code{file:///path:line} link.
+  \item Stress test: 1000 unique links on screen. Measure
+    redraw size.
+\end{enumerate}

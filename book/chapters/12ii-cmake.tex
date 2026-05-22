@@ -1,0 +1,102 @@
+\chapter{Build system: CMake tour}
+\label{ch:cmake}
+
+\begin{aside}
+\maya{} is header-mostly. Linking it is one line of CMake; the
+rest of the file is about your app.
+\end{aside}
+
+\section{Minimal CMakeLists}
+
+\begin{lstlisting}
+cmake_minimum_required(VERSION 3.28)
+project(myapp CXX)
+set(CMAKE_CXX_STANDARD 26)
+add_subdirectory(maya)
+add_executable(myapp main.cpp)
+target_link_libraries(myapp PRIVATE maya)
+\end{lstlisting}
+
+That's the whole file. \maya{} is a CMake target you
+\code{add\_subdirectory} into.
+
+\section{Compile flags}
+
+\maya{} requires:
+
+\begin{itemize}[leftmargin=*]
+  \item C++26 (\code{-std=c++2c} or \code{-std=c++26}).
+  \item Concepts support.
+  \item \code{constexpr} string literals.
+\end{itemize}
+
+GCC 14+ or Clang 18+ supplies these.
+
+\section{Build types}
+
+CMake offers Debug, Release, RelWithDebInfo, MinSizeRel.
+For development, RelWithDebInfo gives speed plus debug
+symbols.
+
+\section{Sanitisers}
+
+Wire ASan and UBSan via flags:
+
+\begin{lstlisting}
+target_compile_options(myapp PRIVATE
+  -fsanitize=address,undefined)
+target_link_options(myapp PRIVATE
+  -fsanitize=address,undefined)
+\end{lstlisting}
+
+Catches memory bugs and undefined behaviour at runtime.
+
+\section{Ninja}
+
+\begin{lstlisting}
+cmake -B build -G Ninja
+ninja -C build
+\end{lstlisting}
+
+Ninja is faster than Make for incremental builds.
+
+\section{Cross-compilation}
+
+A toolchain file specifies the cross compiler. Example for
+ARM Linux:
+
+\begin{lstlisting}
+set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
+set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
+\end{lstlisting}
+
+\section{Distribution}
+
+For a binary release, link statically (\code{-static}) and
+strip symbols (\code{strip myapp}). The result runs on any
+glibc-compatible system of the same architecture.
+
+\section{Packaging}
+
+CPack generates DEB, RPM, ZIP, etc. from your CMake
+project. One \code{cpack -G DEB} produces a deb file.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item \maya{} is one \code{add\_subdirectory} away.
+  \item C++26-capable compiler required.
+  \item Sanitisers via flag flip.
+  \item Ninja for fast incremental builds.
+  \item CPack for distribution packages.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add ASan to your build; fix any warnings.
+  \item Switch from Make to Ninja; observe build time.
+  \item Generate a deb package via CPack.
+\end{enumerate}

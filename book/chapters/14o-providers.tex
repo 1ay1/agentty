@@ -1,0 +1,68 @@
+\chapter{Patterns: providers and contexts}
+\label{ch:providers}
+
+\begin{aside}
+Some state is needed by many widgets but only one source.
+Theme, locale, current user, authentication token. Providers
+make it ambient.
+\end{aside}
+
+\section{The provider}
+
+\begin{lstlisting}
+class ThemeProvider {
+    Signal<Theme> theme;
+public:
+    Element provide(Element child) {
+        return with_context<ThemeProvider>(*this, child);
+    }
+};
+\end{lstlisting}
+
+A wrapper that injects itself into the context.
+
+\section{The consumer}
+
+\begin{lstlisting}
+auto styled = [&] {
+    auto& theme = ctx.consume<ThemeProvider>();
+    return text("Hello") | fg(theme.colour);
+};
+\end{lstlisting}
+
+The consumer looks up the provider in the context stack.
+
+\section{Multiple providers}
+
+Multiple providers stack at the root:
+
+\begin{lstlisting}
+auto root = theme_provider.provide(
+           locale_provider.provide(
+           user_provider.provide(
+              main_app()
+           )));
+\end{lstlisting}
+
+\section{Scoped overrides}
+
+A subtree can override a provider by providing a different
+one mid-tree. The inner provider shadows the outer.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Providers inject ambient state.
+  \item Consumers look up via type.
+  \item Subtrees can override.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a theme provider.
+  \item Consume from a deep widget.
+  \item Override the theme in a subtree.
+\end{enumerate}

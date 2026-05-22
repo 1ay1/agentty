@@ -1,0 +1,123 @@
+\chapter{Appendix: build recipes}
+\label{ch:buildrecipes}
+
+\begin{aside}
+CMake snippets you'll copy more than once.
+\end{aside}
+
+\section{Minimal project}
+
+\begin{lstlisting}
+cmake_minimum_required(VERSION 3.28)
+project(myapp CXX)
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_subdirectory(maya)
+add_executable(myapp main.cpp)
+target_link_libraries(myapp PRIVATE maya)
+\end{lstlisting}
+
+\section{With tests}
+
+\begin{lstlisting}
+enable_testing()
+add_subdirectory(tests)
+\end{lstlisting}
+
+In \code{tests/CMakeLists.txt}:
+
+\begin{lstlisting}
+add_executable(myapp_tests test_main.cpp)
+target_link_libraries(myapp_tests PRIVATE
+    myapp_lib doctest::doctest)
+add_test(NAME unit COMMAND myapp_tests)
+\end{lstlisting}
+
+\section{Library + executable}
+
+\begin{lstlisting}
+add_library(myapp_lib STATIC
+    src/widget.cpp src/store.cpp)
+target_link_libraries(myapp_lib PUBLIC maya)
+target_include_directories(myapp_lib PUBLIC include)
+
+add_executable(myapp src/main.cpp)
+target_link_libraries(myapp PRIVATE myapp_lib)
+\end{lstlisting}
+
+The library is unit-testable; the executable is thin.
+
+\section{Sanitisers}
+
+\begin{lstlisting}
+option(SANITIZE "Enable ASan+UBSan" OFF)
+if(SANITIZE)
+    add_compile_options(
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer)
+    add_link_options(
+        -fsanitize=address,undefined)
+endif()
+\end{lstlisting}
+
+\section{Release flags}
+
+\begin{lstlisting}
+set(CMAKE_CXX_FLAGS_RELEASE
+    "-O3 -DNDEBUG -march=native -flto")
+\end{lstlisting}
+
+\section{Static build}
+
+\begin{lstlisting}
+target_link_options(myapp PRIVATE -static)
+\end{lstlisting}
+
+Not portable to all toolchains; check first.
+
+\section{Generate version header}
+
+\begin{lstlisting}
+configure_file(
+    config.h.in
+    ${CMAKE_BINARY_DIR}/config.h
+)
+target_include_directories(myapp PRIVATE
+    ${CMAKE_BINARY_DIR})
+\end{lstlisting}
+
+In \code{config.h.in}:
+
+\begin{lstlisting}
+#define MYAPP_VERSION "@PROJECT_VERSION@"
+\end{lstlisting}
+
+\section{Install}
+
+\begin{lstlisting}
+install(TARGETS myapp DESTINATION bin)
+install(FILES README.md
+    DESTINATION share/doc/myapp)
+\end{lstlisting}
+
+\section{CPack}
+
+\begin{lstlisting}
+set(CPACK_GENERATOR "DEB;TGZ")
+set(CPACK_PACKAGE_VERSION "1.0.0")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "you@example")
+include(CPack)
+\end{lstlisting}
+
+Run \code{cpack} after \code{cmake --build}.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Snippets you'll reuse.
+  \item Library + executable for testability.
+  \item Sanitisers behind an option.
+  \item CPack for distribution.
+\end{itemize}
+\end{recap}

@@ -1,0 +1,69 @@
+\chapter{Future of TUI: input}
+\label{ch:future_input}
+
+\begin{aside}
+Input has lagged output. The keyboard sends bytes
+ambiguously; the mouse lost half its bits to compatibility.
+CSI-u and the Kitty protocol promise better.
+\end{aside}
+
+\section{What CSI-u solves}
+
+\begin{itemize}[leftmargin=*]
+  \item Unique codes per key.
+  \item Modifier-only events (shift held alone).
+  \item Distinct press vs release.
+  \item Repeat events.
+\end{itemize}
+
+\section{What's still missing}
+
+\begin{itemize}[leftmargin=*]
+  \item Touch gestures (pinch, rotate).
+  \item Tablet/stylus input.
+  \item Voice or transcription input.
+  \item Eye tracking.
+\end{itemize}
+
+These are unlikely to land in terminal protocols soon ---
+they belong to the OS, not the terminal.
+
+\section{Multi-modal future}
+
+A terminal that supports clicks plus keyboard plus
+graphics could host much richer UIs than today's. The
+limit is what protocols the community agrees on.
+
+\section{Compose and IME}
+
+Current IME flows are good. CJK input works. Improvements
+here would be incremental.
+
+\section{Accessibility}
+
+Screen reader integration in terminals is poor. A
+standardised ``announce this'' protocol would help.
+
+\section{What \maya{} can do}
+
+When new input protocols land, expose them. The internal
+event types are open for extension.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item CSI-u solves keyboard ambiguity.
+  \item Touch and stylus unlikely to come to terminals
+    soon.
+  \item A11y in terminals is the next frontier.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Test CSI-u in your terminal; identify
+    untrackable keys.
+  \item Try a terminal screen reader; observe gaps.
+\end{enumerate}

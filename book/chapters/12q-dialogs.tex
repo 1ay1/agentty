@@ -1,0 +1,98 @@
+\chapter{Dialogs and modals}
+\label{ch:dialogs}
+
+\begin{aside}
+A dialog is a focused interaction that interrupts everything
+else. Done well, it asks one question and gets out of the
+way. Done badly, it stacks five deep and nobody knows where
+they are.
+\end{aside}
+
+\section{The contract}
+
+A dialog:
+
+\begin{itemize}[leftmargin=*]
+  \item Takes focus.
+  \item Dims the background.
+  \item Returns a result (yes/no/cancel, or a value).
+  \item Closes on result or escape.
+\end{itemize}
+
+\section{The API}
+
+\begin{lstlisting}
+auto result = co_await ctx.dialog(
+    confirm_dialog("Delete file?")
+);
+if (result == ConfirmResult::Yes) {
+    delete_file();
+}
+\end{lstlisting}
+
+The dialog is async --- the calling code awaits its result.
+
+\section{Built-in dialogs}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{confirm\_dialog(message)}: Yes/No.
+  \item \code{alert\_dialog(message)}: OK.
+  \item \code{prompt\_dialog(message, default)}: text input.
+  \item \code{select\_dialog(options)}: pick one of many.
+\end{itemize}
+
+\section{Custom dialogs}
+
+For complex flows, build your own:
+
+\begin{lstlisting}
+class MyDialog : public Dialog<MyResult> {
+public:
+    Element render() override { ... }
+    void on_key(KeyEvent) override { ... }
+};
+\end{lstlisting}
+
+The dialog framework handles focus and dismissal; your
+class handles content and result.
+
+\section{Stacking}
+
+Dialogs can stack but it's a smell. \maya{} caps the stack
+at 3 by default; further pushes warn.
+
+\section{Dimming}
+
+The background dims by halving the brightness of every
+visible cell. \maya{} implements this in a post-paint pass
+over the area outside the dialog.
+
+\section{Escape key behaviour}
+
+Escape on a confirm dialog returns ``cancel''. Escape on a
+prompt returns nullopt. Configurable.
+
+\section{Animations}
+
+A dialog can animate in (fade, scale, slide). Subtle ones
+work; flashy ones distract.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Dialog = focused, async, returns a result.
+  \item Built-in: confirm, alert, prompt, select.
+  \item Custom via subclass.
+  \item Dim the background.
+  \item Cap stacking.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a confirm-before-delete flow.
+  \item Create a multi-step prompt (name, then email).
+  \item Animate a dialog in and out.
+\end{enumerate}

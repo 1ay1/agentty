@@ -1,0 +1,55 @@
+\chapter{Patterns: empty states}
+\label{ch:empty}
+
+\begin{aside}
+What does your app show when the list is empty, the search
+returns nothing, the user just started? Empty states deserve
+design attention.
+\end{aside}
+
+\section{Three types}
+
+\begin{itemize}[leftmargin=*]
+  \item First use: ``Welcome! Try adding a thing.''
+  \item Empty result: ``No matches for X. Try a different
+    query.''
+  \item Cleared: ``All done. Nothing to do here.''
+\end{itemize}
+
+Each calls for different copy.
+
+\section{Visual}
+
+A centred message. Maybe an ASCII illustration. A primary
+action button.
+
+\section{Don't show emptiness}
+
+If the area is too small for a message, just leave it
+blank with a hint elsewhere. Don't waste cells screaming
+``empty''.
+
+\section{Encouraging action}
+
+The empty state often suggests what to do next: ``Click
+here to add'', ``Press / to search''. The user is not
+stuck.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Different copy for first-use, empty result,
+    cleared.
+  \item Suggest the next action.
+  \item Don't shout emptiness; small visuals.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Identify every list in your app; design its
+    empty state.
+  \item Add empty-state messages.
+\end{enumerate}

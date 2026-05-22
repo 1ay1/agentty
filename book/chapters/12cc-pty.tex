@@ -1,0 +1,110 @@
+\chapter{Subprocess and PTY embedding}
+\label{ch:pty}
+
+\begin{aside}
+Sometimes your TUI is a wrapper around another program.
+A git-front-end runs git. A debugger driver runs gdb. The
+inner program may itself be a TUI; you need a pseudo-
+terminal.
+\end{aside}
+
+\section{Pipes vs PTYs}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pipe.} One-way byte stream; no terminal
+    semantics. The child sees pipe, may behave differently
+    (no colour, no line editing).
+  \item \textbf{PTY.} Bidirectional; mimics a terminal. The
+    child sees a terminal and uses ANSI normally.
+\end{itemize}
+
+For TUI children, use a PTY.
+
+\section{Opening a PTY}
+
+\begin{lstlisting}
+int master, slave;
+char name[64];
+openpty(&master, &slave, name, nullptr, nullptr);
+
+pid_t pid = fork();
+if (pid == 0) {
+    setsid();
+    dup2(slave, 0);
+    dup2(slave, 1);
+    dup2(slave, 2);
+    close(master);
+    execlp("git", "git", "log", nullptr);
+}
+close(slave);
+\end{lstlisting}
+
+The master fd is for the parent; the slave is the child's
+controlling terminal.
+
+\section{Reading from the master}
+
+The child writes ANSI; the parent reads bytes and parses.
+\maya{} provides a \code{TerminalView} widget that
+maintains a virtual screen and renders it:
+
+\begin{lstlisting}
+auto term = terminal_view(master_fd);
+\end{lstlisting}
+
+\section{Writing to the child}
+
+Keystrokes go to the master:
+
+\begin{lstlisting}
+on_key([&](KeyEvent ev) {
+    auto bytes = encode_key(ev);
+    write(master_fd, bytes.data(), bytes.size());
+});
+\end{lstlisting}
+
+\section{Size propagation}
+
+\code{TIOCSWINSZ} on the master notifies the child of size.
+Call it whenever the parent terminal resizes.
+
+\section{The parser}
+
+A virtual terminal parser interprets ANSI: maintains a
+cell grid, cursor, scrollback. Open-source options:
+\code{libvterm}, \code{libtmt}, \code{wezterm}'s
+vt-parser. \maya{} can wrap any of these.
+
+\section{Scrollback}
+
+The virtual terminal keeps the last N rows in scrollback.
+The widget shows the visible viewport plus scroll
+controls.
+
+\section{Embedded vs spawned}
+
+Embedded: the child renders inside your TUI's screen.
+Spawned: the child takes over the terminal until it
+exits, then your TUI resumes. Use spawned for ``run my
+editor for the user to edit a file''.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item PTY for TUI children; pipe for plain programs.
+  \item Open with \code{openpty}; fork, exec, dup2.
+  \item Virtual terminal parser to render the child.
+  \item Propagate resize with \code{TIOCSWINSZ}.
+  \item Embedded vs spawned trade-off.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a terminal-view widget running \code{bash}
+    inside your app.
+  \item Propagate resize correctly.
+  \item Add scrollback with mouse-wheel scroll.
+\end{enumerate}

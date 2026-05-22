@@ -1,0 +1,72 @@
+\chapter{Background sync and offline state}
+\label{ch:offline}
+
+\begin{aside}
+A chat app should work on the train. A todo app should save
+when the network drops. Offline-first design treats the
+network as eventual, not required.
+\end{aside}
+
+\section{Local state first}
+
+Every change writes to local storage immediately. The
+UI reflects local state. Sync to the server is a
+background concern.
+
+\section{Sync queue}
+
+Pending changes queue. When online, drain to the server in
+order. When offline, the queue grows.
+
+\section{Conflict resolution}
+
+If two devices change the same record offline, sync brings
+a conflict. Strategies:
+
+\begin{itemize}[leftmargin=*]
+  \item Last-write-wins (LWW): simple, lossy.
+  \item Operational transform: complex, lossless.
+  \item CRDT: complex, formally correct.
+  \item Manual merge: user resolves.
+\end{itemize}
+
+\section{Visibility}
+
+The user should see sync state:
+
+\begin{itemize}[leftmargin=*]
+  \item ``Synced'' or check mark when complete.
+  \item ``Syncing...'' during a sync.
+  \item ``Pending'' for queued items.
+  \item ``Conflict'' for items needing resolution.
+\end{itemize}
+
+\section{Background fetch}
+
+When online, periodically fetch updates from the server.
+Merge with local state.
+
+\section{Push notifications}
+
+For instant updates, a WebSocket or server-sent events.
+Falls back to polling when unavailable.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Local first; sync second.
+  \item Queue pending changes.
+  \item Conflict resolution: LWW, OT, CRDT, manual.
+  \item Show sync state in the UI.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Implement local-first writes with a sync queue.
+  \item Add sync state indicators.
+  \item Try LWW conflict resolution; observe data loss
+    scenarios.
+\end{enumerate}

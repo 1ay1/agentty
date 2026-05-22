@@ -1,0 +1,157 @@
+\chapter{Z-order and overlays}
+\label{ch:zorder}
+
+\begin{aside}
+Most UI is flat. A modal dialog, a tooltip, a context menu ---
+these need to sit \emph{above} everything else. The terminal
+has no Z buffer, so we paint in the right order.
+\end{aside}
+
+\section{Painter's algorithm}
+
+The classic 2-D approach: paint back-to-front. Whatever paints
+last wins the cell. \maya{} renders the element tree depth-
+first, and overlays are appended after the main tree.
+
+\section{Overlay registration}
+
+An overlay is registered with the renderer:
+
+\begin{lstlisting}
+ctx.show_overlay(modal_dialog());
+\end{lstlisting}
+
+The renderer keeps a list of active overlays and paints each
+after the main tree, in the order they were added.
+
+A modal dialog typically covers the screen with a dim
+backdrop and a centred panel. The backdrop is itself an
+element with semi-transparent style; for terminals without
+alpha, ``dim'' means using a darker background colour for
+visible cells.
+
+\section{Dismissing overlays}
+
+An overlay is dismissed by removing it from the list. Common
+triggers:
+
+\begin{itemize}[leftmargin=*]
+  \item Escape key (binds to the focused overlay).
+  \item Click outside the overlay's content rectangle.
+  \item A button inside the overlay (Cancel, OK).
+\end{itemize}
+
+The escape-key binding is automatic for modal overlays. The
+focus stack pushes the overlay on show and pops on dismiss.
+
+\section{Focus and Z-order}
+
+Overlays steal focus. The element below cannot receive key
+events until the overlay closes. \maya{} stacks focus contexts:
+
+\begin{lstlisting}
+ctx.push_focus_scope();
+ctx.show_overlay(...);
+// when overlay closes:
+ctx.pop_focus_scope();
+\end{lstlisting}
+
+Inside the overlay, tab cycles within the overlay only. The
+outer UI is dimmed visually but not interactive.
+
+\section{Tooltips}
+
+A tooltip is a non-modal overlay tied to a target. It does not
+take focus; it does not block input. It vanishes on hover-out
+or after a timeout.
+
+\begin{lstlisting}
+auto btn = button("Save")
+         | tooltip("Ctrl-S also saves");
+\end{lstlisting}
+
+The tooltip element registers a hover handler; on hover-in it
+shows after a delay, on hover-out it hides.
+
+\section{Context menus}
+
+A context menu (right-click) is a modal overlay positioned at
+the cursor location. Selecting an item or pressing escape
+dismisses it.
+
+\begin{lstlisting}
+on_right_click = [&](int x, int y) {
+    ctx.show_overlay(
+        context_menu(items, x, y)
+    );
+};
+\end{lstlisting}
+
+The menu element renders at the absolute position, clipped to
+the screen edges (so a right-click near the bottom flips the
+menu upward).
+
+\section{Toast notifications}
+
+A toast is a transient overlay that appears, lingers, fades.
+\maya{}'s toast widget animates in from a corner, holds for 3
+seconds, animates out. It does not block input.
+
+\section{The overlay stack}
+
+Multiple overlays can stack: a context menu inside a modal
+dialog inside a tooltip-bearing main app. \maya{} paints them
+in registration order; the latest is on top.
+
+Dismissing the top reveals the next; the focus and key
+dispatch follow.
+
+\section{Implementation: portals}
+
+In React-like systems, overlays are ``portals'' --- their
+JSX lives in the component tree but their rendering escapes
+to a different DOM root. \maya{}'s analogue:
+
+\begin{lstlisting}
+auto card = ...
+auto popup = portal(
+    panel("Hello") | absolute_position(x, y)
+);
+auto root = column(card, popup);
+\end{lstlisting}
+
+The portal node tells the renderer ``my subtree paints last,
+not inline''.
+
+\section{Z-stacking for inline images}
+
+Inline images (Chapter~\ref{ch:images}) sit at a fixed Z layer
+defined by the terminal. They cannot be overlaid by cell
+paint; their placement is at terminal level, above all cells.
+
+If you need a modal dialog \emph{above} an inline image, the
+terminal protocol controls that. Kitty's protocol has
+Z-index parameters; iTerm2's does not.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Painter's algorithm: back-to-front, last wins.
+  \item Overlays are appended after the main tree.
+  \item Modal overlays push focus scope; non-modal don't.
+  \item Tooltips, context menus, toasts are special-case
+    overlays.
+  \item Inline images sit at their own Z layer.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a confirmation dialog as a modal overlay.
+    Bind escape to cancel, enter to confirm.
+  \item Add tooltips to your buttons. Tune the show delay.
+  \item Stack a context menu inside a modal. Confirm both
+    can be dismissed in the right order.
+\end{enumerate}

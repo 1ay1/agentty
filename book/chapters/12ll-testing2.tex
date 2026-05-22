@@ -1,0 +1,97 @@
+\chapter{Testing strategies for TUIs}
+\label{ch:testing2}
+
+\begin{aside}
+A TUI is hard to test because the output is bytes flowing
+through a pty. Three layers help: unit, snapshot, integration.
+Each catches a different class of bug.
+\end{aside}
+
+\section{Unit tests}
+
+Pure logic: signal updates, reducers, formatters. No
+rendering. Standard \cpp{} unit-test frameworks (Catch2,
+doctest, GoogleTest).
+
+\begin{lstlisting}
+TEST_CASE("counter increments") {
+    auto c = signal(0);
+    increment(c);
+    REQUIRE(get(c) == 1);
+}
+\end{lstlisting}
+
+\section{Snapshot tests}
+
+See Chapter~\ref{ch:snapshot}. Render to a string backend,
+compare against a golden.
+
+\section{Integration tests}
+
+Drive the full app with simulated input:
+
+\begin{lstlisting}
+TEST_CASE("login flow") {
+    auto app = TestApp();
+    app.type("alice");
+    app.tab();
+    app.type("secret");
+    app.enter();
+    REQUIRE(app.is_on("/home"));
+}
+\end{lstlisting}
+
+The harness sends keys, advances the clock, awaits idle,
+then asserts on state.
+
+\section{Property tests}
+
+Random input streams to verify invariants:
+
+\begin{lstlisting}
+PROPERTY("never crashes on random keys") {
+    auto app = TestApp();
+    auto keys = arbitrary_key_sequence();
+    for (auto k : keys) app.send(k);
+    REQUIRE(!app.crashed());
+}
+\end{lstlisting}
+
+Rapidcheck, hypothesis. Find edge cases humans miss.
+
+\section{Fuzzing}
+
+libFuzzer or AFL drive your input parser with random
+bytes. Catches buffer overruns and parser bugs.
+
+\section{Visual regression}
+
+CI captures screenshots; compare pixel-by-pixel. Only
+useful when running in a fixed terminal emulator.
+
+\section{Coverage}
+
+\code{gcov} or \code{lcov} measure which lines run.
+Target 80\%+ coverage of business logic; lower for
+boilerplate is acceptable.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Unit for logic, snapshot for output, integration
+    for flows.
+  \item Property tests for randomness.
+  \item Fuzz the input parser.
+  \item Coverage as a guide, not a goal.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a unit test, a snapshot test, and an
+    integration test for one feature.
+  \item Add a property test that exercises random keys.
+  \item Measure coverage; identify untested paths.
+\end{enumerate}

@@ -1,0 +1,65 @@
+\chapter{Patterns: render budgets}
+\label{ch:renderbudget}
+
+\begin{aside}
+For an app to feel snappy, each render must finish in time.
+A budget per phase makes the target explicit.
+\end{aside}
+
+\section{Per-phase budget}
+
+For a 60 Hz target (16.7 ms total):
+
+\begin{itemize}[leftmargin=*]
+  \item Layout: 1 ms.
+  \item Paint: 2 ms.
+  \item Diff: 1 ms.
+  \item Emit + write: 1 ms.
+  \item Application code: 11 ms.
+\end{itemize}
+
+Most apps have plenty of headroom.
+
+\section{Measuring}
+
+The trace facility (Chapter~\ref{ch:tracing}) gives per-phase
+numbers. Compare against budget.
+
+\section{Going over}
+
+A frame that exceeds budget delays the next. Repeated
+overruns produce visible lag.
+
+\section{Recovery}
+
+If a frame takes too long, the next frame fires
+immediately (no wait). The loop catches up. Brief
+overruns are invisible; sustained overruns are felt.
+
+\section{Adaptive quality}
+
+For complex apps, drop quality when over budget:
+
+\begin{itemize}[leftmargin=*]
+  \item Lower animation frame rate.
+  \item Defer non-essential rendering.
+  \item Simplify expensive widgets.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Budget per phase.
+  \item Trace and compare.
+  \item Adaptive quality for overflow.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Set budgets for your app's phases.
+  \item Trace and identify overruns.
+  \item Add adaptive quality where useful.
+\end{enumerate}

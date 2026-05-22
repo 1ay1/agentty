@@ -1,0 +1,108 @@
+\chapter{Menus and command palettes}
+\label{ch:menus}
+
+\begin{aside}
+A menu is a list with actions. A command palette is a menu
+with search. Both are how power users navigate without
+hunting for buttons.
+\end{aside}
+
+\section{Menu structure}
+
+\begin{lstlisting}
+struct MenuItem {
+    std::string label;
+    std::string shortcut;       // optional
+    std::function<void()> action;
+    bool separator;
+    bool disabled;
+};
+\end{lstlisting}
+
+A vertical list with the label on the left and the shortcut
+on the right.
+
+\section{Keyboard navigation}
+
+Up/down moves the highlight; Enter activates. Letter
+shortcuts (the first letter of each item) jump to the
+matching item.
+
+For nested menus, Right opens the submenu; Left closes.
+
+\section{Command palette}
+
+A modal overlay with a search box and a filtered list of
+commands:
+
+\begin{lstlisting}
+auto palette = modal(column(
+    text_input(query),
+    virtual_list(
+        filtered_commands(ctx.get(query)),
+        [&](int i) { return command_row(...); }
+    )
+));
+\end{lstlisting}
+
+Trigger with Ctrl-P or Ctrl-Shift-P. Escape dismisses.
+
+\section{Fuzzy matching}
+
+The filter is fuzzy: ``op fl'' matches ``open file''. \maya{}
+ships a fuzzy matcher (subset of the algorithm in
+\code{fzf}).
+
+\begin{lstlisting}
+int fuzzy_score(std::string_view query, std::string_view target);
+\end{lstlisting}
+
+Higher score = better match. Sort by descending score.
+
+\section{Recent commands}
+
+A small history of recently invoked commands ranks them
+higher in the palette. Persist across sessions.
+
+\section{Argument prompts}
+
+Some commands need arguments (open which file, rename to
+what?). The palette can chain: pick command, then prompt
+for argument.
+
+\section{Context-aware commands}
+
+The available commands depend on context: the current
+view's verbs. Pass the context to the palette:
+
+\begin{lstlisting}
+auto commands = ctx.get(current_view).commands();
+\end{lstlisting}
+
+\section{Keyboard chords}
+
+Multi-key bindings (\code{g d} for ``go to definition'') need
+a chord buffer. After the first key, the runtime enters a
+``waiting'' state; the next key resolves or times out.
+
+\maya{}'s key binding system supports chords.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Menu = list of items with actions.
+  \item Palette = menu with fuzzy search.
+  \item Recent commands ranked higher.
+  \item Argument prompts via chaining.
+  \item Chords for multi-key bindings.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a command palette with 20 commands.
+  \item Add fuzzy search and ranking by recency.
+  \item Implement a chord binding for two-key sequences.
+\end{enumerate}

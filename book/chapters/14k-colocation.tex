@@ -1,0 +1,67 @@
+\chapter{Patterns: state colocation}
+\label{ch:colocation}
+
+\begin{aside}
+The closer state lives to where it's used, the easier to
+reason about. Hoist only when sharing demands it.
+\end{aside}
+
+\section{The rule}
+
+State lives at the lowest scope where it's read. Two
+widgets need it? Hoist to common parent. Five widgets in
+disjoint subtrees? Hoist to root (store).
+
+\section{Component-local}
+
+A counter widget owns its count. Other widgets shouldn't
+need to know:
+
+\begin{lstlisting}
+auto counter = [&] {
+    auto count = signal(0);
+    return column(
+        text(std::to_string(ctx.get(count))),
+        button("+", [&] {...})
+    );
+};
+\end{lstlisting}
+
+\section{Sibling sharing}
+
+Two siblings share state via the parent:
+
+\begin{lstlisting}
+auto parent = [&] {
+    auto shared = signal(0);
+    return row(producer(shared), consumer(shared));
+};
+\end{lstlisting}
+
+\section{Tree-wide}
+
+A store at root scope; consumers anywhere read.
+
+\section{The path test}
+
+If a piece of state is passed through three or more layers
+of components without being touched, lift to a store.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Local first; hoist only when needed.
+  \item Sharing siblings via common parent.
+  \item Wide sharing via store.
+  \item Prop drilling > 3 layers = lift.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Find a signal in your app that's too high.
+    Lower it.
+  \item Find prop drilling. Lift to a store.
+\end{enumerate}

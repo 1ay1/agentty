@@ -1,0 +1,231 @@
+\chapter{Unicode width and grapheme clusters}
+\label{ch:width}
+
+\begin{aside}
+``How many columns does this character take?'' has no general
+answer in Unicode. \maya{} ships a width table compiled from the
+Unicode East Asian Width property and adjusts at runtime to match
+what your terminal actually does.
+\end{aside}
+
+\section{The width problem}
+
+A terminal cell is a fixed-pitch square. Most Latin characters
+fill one cell. Some characters fill two: CJK ideographs, full-
+width punctuation, most emoji. Some characters fill zero: combining
+marks (diacritics layered onto a previous cell), zero-width
+joiners, variation selectors.
+
+If the renderer's idea of width does not match the terminal's,
+columns drift. After one wrong-width character, the rest of the
+line is offset by a column. Run a screen of mixed CJK and emoji on
+a terminal with the wrong width table and the result is a smear.
+
+\section{East Asian Width}
+
+The Unicode East Asian Width property assigns each code point one
+of six values:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{F (Fullwidth).} 2 columns. CJK full-width Latin,
+    full-width digits.
+  \item \textbf{W (Wide).} 2 columns. CJK ideographs, most
+    emoji.
+  \item \textbf{H (Halfwidth).} 1 column. CJK half-width katakana.
+  \item \textbf{Na (Narrow).} 1 column. ASCII Latin.
+  \item \textbf{A (Ambiguous).} 1 in most contexts, 2 in CJK
+    fonts. The classic trouble.
+  \item \textbf{N (Neutral).} 1 column. Most Latin scripts.
+\end{itemize}
+
+\maya{}'s table maps each code point to 0, 1, or 2 columns. The
+ambiguous class is the hard one.
+
+\section{Ambiguous characters}
+
+Greek letters, Cyrillic, the box-drawing characters, and many
+mathematical symbols are Ambiguous. A user with a CJK locale and a
+font tuned for it will see them as 2 columns. A user in a Latin
+locale will see them as 1.
+
+\maya{} picks 1 by default and exposes a setting to flip:
+
+\begin{lstlisting}
+maya::set_ambiguous_width(2);  // CJK-locale default
+\end{lstlisting}
+
+The setting is global because it must match the terminal, and a
+terminal has one font.
+
+\begin{warning}
+Setting the wrong ambiguous width is the most common cause of
+``my UI looks broken on \emph{their} machine''. Default to 1 and
+let users opt in via a config flag.
+\end{warning}
+
+\section{Combining marks}
+
+A combining mark (\code{U+0301} COMBINING ACUTE ACCENT, for
+instance) attaches to the preceding base character. The pair
+\code{e + U+0301} renders as ``e-acute'' in one cell. The combining
+mark itself has width 0.
+
+\maya{} tracks the previous base when iterating a string. A
+combining mark appends to that cell's code point but does not
+advance the column.
+
+A canvas cell holds only one code point. To support combining
+marks, \maya{} accumulates the base + marks into a small
+side-table indexed by cell. The diff hashes both base and marks
+when comparing.
+
+\section{Grapheme clusters}
+
+A grapheme cluster is a user-perceived character: a base plus
+all its combining marks, plus zero-width joiners, plus emoji
+sequences. Unicode TR\#29 specifies the boundary rules.
+
+\begin{idea}
+\textbf{Grapheme cluster.} The unit a user thinks of as ``a
+character''. \emph{Not} the same as a code point. \emph{Not} the
+same as a byte. The string ``e-acute'' may be one code point (NFC) or
+two (NFD), but it is always one grapheme.
+\end{idea}
+
+\maya{} uses a compact state-machine implementation of the TR\#29
+rules. Each input code point advances a state; the state
+identifies whether the boundary is between this code point and
+the next. On a boundary, the previous cluster is committed.
+
+Emoji ZWJ sequences (the family emoji, for instance:
+\code{man + ZWJ + woman + ZWJ + girl}) are one cluster.
+Most terminals render them as one wide cell.
+
+\section{Wide cells and the trailing slot}
+
+When \maya{} paints a wide cell at $(x, y)$ it also writes a
+sentinel into $(x+1, y)$ marking it as the trailing half. The
+diff treats the pair as one unit; the painter refuses overlaps
+into the trailing slot.
+
+If layout asks for a width-1 element to overlap a wide cell, the
+wide cell is blanked (replaced with two spaces) and the new cell
+is written. The screen never shows half a wide cell.
+
+\section{Emoji}
+
+Emoji are wide (W) by default. Many have skin-tone modifiers,
+gender modifiers, and ZWJ extensions. The runtime rule is:
+
+\begin{itemize}[leftmargin=*]
+  \item One base emoji + any modifiers + any ZWJ extensions =
+    one cluster, two columns.
+\end{itemize}
+
+The combinatorial expansion is huge (the ``family'' emoji has
+hundreds of valid forms) but they all collapse to two columns.
+\maya{}'s cluster machine handles this without enumeration.
+
+\section{Variation selectors}
+
+\code{U+FE0F} forces emoji presentation; \code{U+FE0E} forces
+text. So \code{U+2603} SNOWMAN can be:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{U+2603 + U+FE0E}: text snowman, 1 column.
+  \item \code{U+2603 + U+FE0F}: emoji snowman, 2 columns.
+  \item \code{U+2603} alone: undefined; usually text.
+\end{itemize}
+
+\maya{} honours the variation selector when present and falls back
+to the East Asian Width category otherwise.
+
+\begin{funfact}
+The snowman, \code{U+2603}, has been in Unicode since 1.1
+(1993). It became an emoji in Unicode 6.0 (2010). Variation
+selector support arrived later still. The little guy has been
+through a lot.
+\end{funfact}
+
+\section{Normalisation}
+
+NFC, NFD, NFKC, NFKD. \maya{} does not normalise input strings
+--- it stores what you give it. But for comparison (in text-input
+caret movement, for instance) you may want NFC.
+
+\maya{} ships \code{nfc(std::u32string\_view)} as an opt-in. It
+is not on the hot path because most application text is already
+NFC (Web browsers normalise; most editors emit NFC).
+
+\section{Bidirectional text}
+
+Right-to-left scripts (Arabic, Hebrew) flow logically left-to-
+right in memory but visually right-to-left. \maya{} does not do
+BiDi at the moment --- it would require a per-line shaping pass
+and a logical-to-visual mapping. If you need BiDi, consider
+\code{libfribidi}.
+
+A simpler workaround for occasional RTL strings: pre-reverse them
+yourself before passing to \maya{}. The result is correct for
+display but loses caret semantics.
+
+\section{Width queries}
+
+\code{maya::width(std::u32string\_view)} returns the column count
+of a string. \code{maya::width(char32\_t)} returns 0, 1, or 2 for
+a single code point.
+
+These are \code{constexpr} since the width table is a
+\code{constexpr} array. You can use them in static asserts:
+
+\begin{lstlisting}
+static_assert(maya::width(U"hello") == 5);
+static_assert(maya::width(U"\u4e2d") == 2);  // U+4E2D
+\end{lstlisting}
+
+\section{The lookup table}
+
+The width table is roughly 4 KB compressed. It is generated from
+\code{EastAsianWidth.txt} (Unicode data file) at build time. The
+generator outputs a sparse representation: ranges of code points
+with their width.
+
+\begin{lstlisting}
+struct Range { char32_t lo, hi; uint8_t w; };
+constexpr Range table[] = {
+  {0x0000, 0x001F, 1},
+  // ...
+  {0x4E00, 0x9FFF, 2},   // CJK Unified Ideographs
+  // ...
+};
+\end{lstlisting}
+
+Lookup is a binary search: \code{O(log N)} where N is roughly
+1000 ranges. Sub-microsecond.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Width is per code point, sometimes per cluster.
+  \item Ambiguous characters need a locale-aware choice.
+  \item Combining marks are width 0; grapheme clusters are the
+    user's ``character''.
+  \item Variation selectors flip text vs emoji presentation.
+  \item Wide cells reserve a trailing zero-width slot.
+  \item \maya{}'s width table is generated, compressed, and
+    \code{constexpr}.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a string like ``hello (U+4E2D)(U+6587) plus a flag emoji''
+    to a text element. Resize the terminal and confirm the
+    columns stay aligned.
+  \item Toggle ambiguous-width and observe Greek and box-
+    drawing characters change column count.
+  \item Build a grapheme-cluster iterator over a string and
+    print each cluster on its own line.
+\end{enumerate}

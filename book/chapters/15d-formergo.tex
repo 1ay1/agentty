@@ -1,0 +1,64 @@
+\chapter{Patterns: form ergonomics}
+\label{ch:formergo}
+
+\begin{aside}
+Forms are where the user gives data and the app gives
+feedback. Good ergonomics: clear labels, sensible validation,
+quick correction.
+\end{aside}
+
+\section{Labels and placeholders}
+
+A label outside the field; a placeholder inside as a hint.
+Placeholders disappear on typing; labels stay.
+
+\section{Validation timing}
+
+\begin{itemize}[leftmargin=*]
+  \item On blur: validate when leaving the field.
+  \item On submit: validate everything at once.
+  \item On change: real-time, but only after first blur.
+\end{itemize}
+
+The on-blur-then-on-change pattern is the most user-friendly:
+no premature errors; live feedback after first attempt.
+
+\section{Error display}
+
+Below the field, in red. Concise, actionable. ``Email
+required'' beats ``This field is required''.
+
+\section{Submit affordance}
+
+The submit button is the goal. Disable it (greyed,
+non-clickable) until valid. Or always enable but show
+errors on attempted submit.
+
+\section{Field ordering}
+
+Logical groups: name first, then contact, then preferences.
+Tab order matches reading order.
+
+\section{Required vs optional}
+
+Mark required fields, not optional. Less visual noise.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Labels outside; placeholders inside.
+  \item Validate on blur and on change.
+  \item Errors are concise.
+  \item Submit button reflects state.
+  \item Mark required, not optional.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Audit your forms; apply the timing pattern.
+  \item Shorten any verbose error messages.
+  \item Mark required fields only.
+\end{enumerate}

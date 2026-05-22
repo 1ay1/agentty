@@ -1,0 +1,83 @@
+\chapter{Lazy initialisation}
+\label{ch:lazy}
+
+\begin{aside}
+Startup is a precious window. Anything you can defer makes
+the app feel snappier. Lazy initialisation pushes work to
+``when needed'', not ``at start''.
+\end{aside}
+
+\section{What to defer}
+
+\begin{itemize}[leftmargin=*]
+  \item Loading large datasets.
+  \item Connecting to network services.
+  \item Compiling regexes.
+  \item Reading large files.
+  \item Initialising plug-ins.
+\end{itemize}
+
+\section{Lazy signals}
+
+A signal whose value is computed on first read:
+
+\begin{lstlisting}
+auto big_data = lazy_signal([&] {
+    return load_from_disk();
+});
+\end{lstlisting}
+
+The load runs when something reads the signal, not at
+declaration.
+
+\section{Lazy widgets}
+
+A tab that isn't shown doesn't need to be rendered. Defer
+its construction:
+
+\begin{lstlisting}
+if (ctx.get(active_tab) == 2) {
+    return analytics_tab();
+}
+\end{lstlisting}
+
+The tab's widgets and signals only exist when active.
+
+\section{Cold start cost}
+
+Lazy means first use is slower. For predictable cold-start
+cost, prefetch in the background after startup completes:
+
+\begin{lstlisting}
+ctx.on_idle([&] {
+    prefetch(big_data);
+});
+\end{lstlisting}
+
+The user sees a fast startup; the background does the
+loading.
+
+\section{Caching}
+
+A lazy value, once computed, caches. Subsequent reads are
+fast. Invalidate via explicit reload.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Defer expensive work past startup.
+  \item Lazy signals; lazy widgets.
+  \item Idle prefetch to smooth first-use latency.
+  \item Cache the result of a lazy compute.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Identify your app's startup hot path; defer
+    something.
+  \item Add an idle prefetch for a heavy resource.
+  \item Measure startup time before and after.
+\end{enumerate}

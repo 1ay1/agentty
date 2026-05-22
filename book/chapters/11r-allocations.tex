@@ -1,0 +1,154 @@
+\chapter{Allocation patterns in the renderer}
+\label{ch:allocations}
+
+\begin{aside}
+The fastest allocation is the one that never happens. The
+renderer's steady state is zero allocations per frame ---
+because every byte of working storage was acquired once at
+startup.
+\end{aside}
+
+\section{Where allocations live}
+
+A frame's working storage:
+
+\begin{itemize}[leftmargin=*]
+  \item Front and back canvases: two \code{vector<uint64\_t>}.
+  \item Emit buffer: one \code{string}.
+  \item Per-element layout scratch: per-tree-walk
+    \code{vector<LayoutInfo>}.
+  \item Side-tables: \code{unordered\_map} for combining
+    marks and link URLs.
+\end{itemize}
+
+All of these grow during the first few frames and stabilise.
+\maya{} reserves typical sizes upfront so the growth happens
+once.
+
+\section{Reserving up front}
+
+\begin{lstlisting}
+front_.reserve(80 * 24);
+back_.reserve(80 * 24);
+emit_buf_.reserve(8192);
+\end{lstlisting}
+
+These are sized for typical TUI dimensions. A larger terminal
+re-allocates; the cost is amortised.
+
+\section{Pool allocation for elements}
+
+The element tree is rebuilt each frame in a memory arena: a
+linear bump allocator backed by a single large slab. The
+slab is reset (pointer rewinds to start) between frames; no
+free, no fragmentation.
+
+\begin{lstlisting}
+class Arena {
+    char* begin_;
+    char* cursor_;
+    char* end_;
+public:
+    void* allocate(size_t n) {
+        if (cursor_ + n > end_) grow();
+        auto* p = cursor_;
+        cursor_ += n;
+        return p;
+    }
+    void reset() { cursor_ = begin_; }
+};
+\end{lstlisting}
+
+A frame's element tree allocates from the arena; reset
+between frames returns all memory at once.
+
+\section{Move semantics}
+
+Element construction returns by value. Without copies the
+construction is cheap; \maya{}'s elements are typically
+under 64 bytes and trivially copyable.
+
+The DSL builders (\code{|}, \code{>>}) take rvalue references
+and chain elements without copying. The result is one
+element built in place.
+
+\section{Avoiding short string allocations}
+
+Small strings (under 16 bytes) live in the string's inline
+storage thanks to SSO. \maya{}'s default \code{Style} names
+and class names are short --- they don't allocate.
+
+For longer strings, \code{string\_view} is used wherever
+ownership is not needed.
+
+\section{Per-frame churn}
+
+What does allocate per frame:
+
+\begin{itemize}[leftmargin=*]
+  \item Element tree (arena, no malloc).
+  \item Layout scratch (reused across frames).
+  \item Emit buffer (reused, capacity stays).
+\end{itemize}
+
+What does not:
+
+\begin{itemize}[leftmargin=*]
+  \item Canvases (allocated once, resized only on terminal
+    resize).
+  \item Side-tables (cleared but storage retained).
+  \item Signal graph (lives across frames).
+\end{itemize}
+
+\section{Measuring}
+
+Tools like \code{heaptrack} or \code{jemalloc}'s profiling
+show per-frame allocations. A well-tuned \maya{} app in
+steady state shows zero \code{malloc} calls per frame after
+warmup.
+
+\begin{tryit}
+Run your app under \code{heaptrack}. Type for 10 seconds.
+Look at the allocations per second --- should be near zero
+after the first few frames.
+\end{tryit}
+
+\section{The arena trade-off}
+
+Bump allocation is fast but indiscriminate: anything in the
+arena's lifetime persists until reset. Per-frame elements
+fit perfectly; per-session state must not go in the arena.
+
+\maya{} keeps signal storage, widget state, and config data
+in regular allocators; only the element tree uses the arena.
+
+\section{When to break the rules}
+
+Per-element animation state with non-trivial destructors
+(timers, callbacks) cannot live in the arena --- the reset
+skips destructors. \maya{} uses regular allocation for these
+and tolerates the cost; they are rare.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Canvases, emit buffer reserved once.
+  \item Element tree in a bump arena, reset per frame.
+  \item Steady state allocates zero from the OS.
+  \item String SSO handles short labels.
+  \item Heavy state (signals, widget state) lives outside
+    the arena.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Profile your app with \code{heaptrack}. Identify
+    the largest per-frame allocator.
+  \item Move one of your widget's per-frame
+    \code{vector<X>} into a reusable scratch buffer.
+  \item Confirm by measurement that the per-frame
+    allocation count drops.
+\end{enumerate}

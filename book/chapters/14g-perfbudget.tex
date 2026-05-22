@@ -1,0 +1,83 @@
+\chapter{Performance budgets per widget}
+\label{ch:perfbudget}
+
+\begin{aside}
+A reference table: how much each widget costs at typical
+sizes. Use to estimate your app's frame budget.
+\end{aside}
+
+\section{Measurement method}
+
+Each widget measured in isolation: render to a string
+backend, time 1000 iterations, divide. Numbers from a
+mid-range laptop (M1 / Ryzen 7).
+
+\section{Layout cost}
+
+\begin{itemize}[leftmargin=*]
+  \item Empty column / row: <1 microsecond.
+  \item 100-element list: ~50 microseconds.
+  \item 1000-element list (no virtualisation): ~500 us.
+  \item Nested grid with 50 cells: ~30 us.
+  \item Virtualised list (50 visible of 10000): ~30 us.
+\end{itemize}
+
+\section{Paint cost}
+
+\begin{itemize}[leftmargin=*]
+  \item Solid background fill: cells / 100 us.
+  \item Text run: chars / 200 us.
+  \item Border: corners + sides; <5 us.
+  \item Image (cached): <10 us.
+  \item Gradient: cells / 50 us.
+\end{itemize}
+
+\section{Diff cost}
+
+\begin{itemize}[leftmargin=*]
+  \item Unchanged 80x24 grid (SIMD): <50 us.
+  \item Fully changed 80x24 grid: ~200 us emit + 50 us diff.
+  \item Typical small update: <10 us.
+\end{itemize}
+
+\section{Signal cost}
+
+\begin{itemize}[leftmargin=*]
+  \item Read: ~10 ns.
+  \item Write with 0 subscribers: ~30 ns.
+  \item Write with 10 subscribers: ~200 ns.
+  \item Memo recomputation: depends on function.
+\end{itemize}
+
+\section{Frame budget}
+
+For 60 Hz: 16 ms. For 30 Hz: 33 ms. Most apps comfortably
+fit in 5 ms of layout + paint + diff + emit.
+
+\section{Big numbers}
+
+To exceed budget on a typical laptop you need either:
+
+\begin{itemize}[leftmargin=*]
+  \item A 500x150 fully-changing grid.
+  \item Tens of thousands of unbatched signal updates.
+  \item Deep nesting (>1000 layers).
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Most operations: microseconds.
+  \item Budget: 5 ms of the 16 ms frame.
+  \item Pathological cases exist but are rare.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Measure each widget in your app.
+  \item Identify the most expensive.
+  \item Optimise or virtualise.
+\end{enumerate}

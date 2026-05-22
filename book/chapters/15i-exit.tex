@@ -1,0 +1,74 @@
+\chapter{Patterns: graceful exit}
+\label{ch:exit}
+
+\begin{aside}
+The user wants to quit. Save unsaved work. Confirm
+destructive intent. Restore the terminal. Then exit.
+\end{aside}
+
+\section{Exit triggers}
+
+\begin{itemize}[leftmargin=*]
+  \item Quit command (Ctrl-Q, :q, menu File>Quit).
+  \item Window close.
+  \item SIGTERM, SIGINT.
+  \item Crash.
+\end{itemize}
+
+\section{Unsaved work}
+
+If state is dirty, prompt: ``Save changes? [yes/no/cancel]''.
+Cancel aborts the exit.
+
+\section{Shutdown sequence}
+
+\begin{enumerate}[leftmargin=*]
+  \item Stop accepting input.
+  \item Save persistent state (atomic).
+  \item Disconnect from external services.
+  \item Cancel background tasks.
+  \item Restore terminal (alt-screen exit, modes off).
+\end{enumerate}
+
+\section{Crash handler}
+
+A SIGSEGV handler that restores the terminal before
+re-raising:
+
+\begin{lstlisting}
+std::signal(SIGSEGV, [](int sig) {
+    backend->shutdown();
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+});
+\end{lstlisting}
+
+\section{Atexit}
+
+Belt and suspenders:
+
+\begin{lstlisting}
+std::atexit([] { backend.shutdown(); });
+\end{lstlisting}
+
+Idempotent so multiple invocations are safe.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Confirm unsaved work.
+  \item Atomic save before exit.
+  \item Restore terminal in all paths.
+  \item Crash handler + atexit.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add an unsaved-work prompt to your quit command.
+  \item Install crash + atexit handlers.
+  \item Test with kill -9 (won't help) and kill -TERM
+    (should clean up).
+\end{enumerate}

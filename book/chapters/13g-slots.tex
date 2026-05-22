@@ -1,0 +1,81 @@
+\chapter{Patterns: render props and slots}
+\label{ch:slots}
+
+\begin{aside}
+Some widgets need to customise their inner rendering. Render
+props (a callback that returns an element) and slots (a named
+inner element) are the two patterns.
+\end{aside}
+
+\section{Render prop}
+
+A widget accepts a callable that returns the inner element:
+
+\begin{lstlisting}
+auto list = virtual_list(items,
+    [](Item& i) { return text(i.name); });
+\end{lstlisting}
+
+The list owns rendering structure; the caller owns row
+content.
+
+\section{Named slots}
+
+A widget accepts named elements:
+
+\begin{lstlisting}
+auto card = Card{}
+    .header(text("Title"))
+    .body(text("Body"))
+    .footer(buttons);
+\end{lstlisting}
+
+Each slot is positioned by the card's layout.
+
+\section{Default slots}
+
+A slot may have a default if unspecified:
+
+\begin{lstlisting}
+auto card = Card{}.body(content);
+// header defaults to empty, footer to empty
+\end{lstlisting}
+
+\section{Composition}
+
+Render props compose with slots: a slot can be a render
+prop that produces an element from data.
+
+\section{When to use which}
+
+\begin{itemize}[leftmargin=*]
+  \item Many similar items (list rows): render prop.
+  \item Fixed structure with varying parts (card,
+    dialog): slots.
+\end{itemize}
+
+\section{Anti-patterns}
+
+\begin{itemize}[leftmargin=*]
+  \item Too many slots: just compose with column.
+  \item Render prop that ignores its argument: just take
+    an Element directly.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Render prop = callback returning element.
+  \item Slots = named child elements.
+  \item Pick based on whether structure or content varies.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Refactor a list to use a render prop.
+  \item Build a card widget with header/body/footer slots.
+  \item Audit your code; identify slot misuse.
+\end{enumerate}

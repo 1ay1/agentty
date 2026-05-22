@@ -1,0 +1,147 @@
+\chapter{Backend abstraction}
+\label{ch:backend}
+
+\begin{aside}
+\maya{} mostly talks to a real terminal. Sometimes it talks to a
+file, a string, or a fake terminal in a unit test. The backend
+abstraction makes the renderer not care.
+\end{aside}
+
+\section{The backend interface}
+
+\begin{lstlisting}
+class Backend {
+public:
+    virtual void write(std::string_view bytes) = 0;
+    virtual Size size() const = 0;
+    virtual Capabilities caps() const = 0;
+    virtual std::optional<Event> poll(Duration) = 0;
+    virtual ~Backend() = default;
+};
+\end{lstlisting}
+
+Four methods. The renderer emits via \code{write}; layout queries
+\code{size}; the colour and protocol selection consults
+\code{caps}; the event loop blocks on \code{poll}.
+
+\section{Real terminal backend}
+
+The default backend wraps fd 0 (stdin) and fd 1 (stdout):
+
+\begin{itemize}[leftmargin=*]
+  \item \code{write} is a thin wrapper over \code{::write(1, ...)}.
+  \item \code{size} calls \code{ioctl(TIOCGWINSZ)}.
+  \item \code{caps} comes from environment detection and
+    runtime queries.
+  \item \code{poll} uses \code{poll(2)} on stdin.
+\end{itemize}
+
+\section{String backend}
+
+For testing, a backend that writes to an in-memory string and
+fakes input:
+
+\begin{lstlisting}
+class StringBackend : public Backend {
+    std::string output;
+    std::queue<Event> events;
+public:
+    void write(std::string_view b) override {
+        output.append(b);
+    }
+    void inject(Event e) { events.push(e); }
+    // ...
+};
+\end{lstlisting}
+
+Tests construct a \code{StringBackend}, inject simulated key
+events, drive the renderer, and assert on the output string.
+
+\section{File backend}
+
+A backend that writes ANSI to a file. Useful for recording
+sessions for later replay:
+
+\begin{lstlisting}
+auto rec = std::make_unique<FileBackend>("session.ansi");
+\end{lstlisting}
+
+Playback is \code{cat session.ansi}; the terminal interprets
+the recorded ANSI. Tools like asciinema do something similar
+with extra timing data.
+
+\section{TTY detection}
+
+If stdout is not a terminal (\code{isatty} returns false), the
+default backend degrades:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{caps} returns minimal (no colour, no mouse).
+  \item \code{size} returns \code{80x24} (a guess).
+  \item Mode switches (alt-screen, mouse) are no-ops.
+\end{itemize}
+
+This lets a TUI tool work in pipes:
+\code{myapp | grep something} produces plain text output.
+
+\section{Multiple backends in one process}
+
+A complex app might want to render to multiple terminals at
+once (a remote-debug feature: ``mirror my screen to a
+support engineer''). Each terminal gets its own renderer with
+its own backend, sharing the element tree.
+
+\maya{} supports this via composition: construct two
+\code{Renderer} objects with different backends. The element
+tree is owned by the application; both renderers walk it.
+
+\section{Networked backends}
+
+A backend that writes to a socket can drive a remote
+terminal. This is what SSH does already (ANSI bytes over the
+wire), but a custom protocol could compress better or carry
+metadata.
+
+\maya{} does not ship a network backend. The interface
+supports it; implementations are application-specific.
+
+\section{Headless rendering}
+
+For documentation generation, render frames to an in-memory
+canvas and dump the canvas as text or HTML. The string
+backend collects the ANSI; a separate post-processor parses
+it back into a grid.
+
+\maya{}'s test suite uses this to verify output without a
+real terminal.
+
+\section{Backend capabilities cache}
+
+\code{caps()} is called many times per frame (every SGR
+emit checks colour mode, for instance). The default backend
+caches the result; the cache is invalidated only on
+explicit refresh.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Backend = write + size + caps + poll.
+  \item Real terminal, string, file, network: same interface.
+  \item Pipe detection produces a degraded backend.
+  \item Multiple backends per process for mirroring.
+  \item Headless backends enable snapshot testing.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Wire a \code{StringBackend} into a unit test.
+    Inject keys and assert on the output.
+  \item Build a file-backend variant that timestamps each
+    write; replay with delays to simulate the original
+    timing.
+  \item Detect pipe vs terminal and run your app in both;
+    confirm the degraded path produces useful output.
+\end{enumerate}

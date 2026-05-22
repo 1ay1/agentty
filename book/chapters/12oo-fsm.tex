@@ -1,0 +1,88 @@
+\chapter{State machines and modes}
+\label{ch:fsm}
+
+\begin{aside}
+A modal app has a small set of modes and explicit transitions
+between them. Drawing the modes as a state machine forces you
+to think about every transition, not just the happy path.
+\end{aside}
+
+\section{The pattern}
+
+\begin{lstlisting}
+enum class Mode { Normal, Insert, Visual, Command };
+auto mode = signal(Mode::Normal);
+
+void on_key(KeyEvent ev) {
+    switch (ctx.get(mode)) {
+        case Mode::Normal:  handle_normal(ev);  break;
+        case Mode::Insert:  handle_insert(ev);  break;
+        // ...
+    }
+}
+\end{lstlisting}
+
+The mode is a signal; each mode has its own dispatcher.
+
+\section{Transitions}
+
+A transition is a mode change plus optional side effects:
+
+\begin{lstlisting}
+void enter_insert(int col) {
+    move_cursor_to(col);
+    ctx.set(mode, Mode::Insert);
+}
+\end{lstlisting}
+
+Enter and exit hooks fire on transition (e.g., save state
+on exit-from-insert).
+
+\section{Hierarchical states}
+
+Some modes have sub-modes. ``Normal mode + waiting for g
+prefix'' is a sub-state of normal. Use nested enums or a
+state stack.
+
+\section{Visual feedback}
+
+The status bar shows the current mode. Cursor shape
+reflects mode (Chapter~\ref{ch:cursor}). The user always
+knows where they are.
+
+\section{Mode-specific keymaps}
+
+Each mode has its own keymap. Switching mode swaps the
+active keymap.
+
+\section{Diagrams}
+
+For complex state machines, draw the diagram and check
+it in. The diagram is the source of truth; the code
+implements it.
+
+\section{Statechart libraries}
+
+For very complex apps, statechart libraries (boost.sml,
+xstate-cpp) encode the machine declaratively. \maya{}
+doesn't bundle one; pick if you need it.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Mode = signal of an enum.
+  \item Each mode has its own dispatcher and keymap.
+  \item Enter/exit hooks for side effects.
+  \item Hierarchical states for sub-modes.
+  \item Visual feedback (status bar, cursor shape).
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a vim-style modal editor.
+  \item Add a sub-mode (g-prefix).
+  \item Draw the state diagram; check it in.
+\end{enumerate}

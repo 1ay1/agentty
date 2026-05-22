@@ -1,0 +1,111 @@
+\chapter{Trees and nested views}
+\label{ch:trees}
+
+\begin{aside}
+A file browser, an outline, a config editor --- all are trees.
+The challenge is rendering only what's expanded and managing
+the user's mental model of nesting depth.
+\end{aside}
+
+\section{The tree model}
+
+\begin{lstlisting}
+struct Node {
+    std::string name;
+    bool expanded;
+    std::vector<Node> children;
+};
+\end{lstlisting}
+
+Expanded nodes show their children indented; collapsed
+nodes hide them.
+
+\section{Flattening}
+
+Rendering walks the tree depth-first, emitting visible rows:
+
+\begin{lstlisting}
+void flatten(Node& n, int depth, std::vector<Row>& out) {
+    out.push_back({n.name, depth, n.expanded});
+    if (n.expanded)
+        for (auto& c : n.children)
+            flatten(c, depth + 1, out);
+}
+\end{lstlisting}
+
+The flat list feeds a virtual list (Chapter~\ref{ch:lists}).
+
+\section{Visual indentation}
+
+Each row indents by depth $\times$ indent step (typically 2
+cells). A turn glyph (\code{|--}) shows the relationship.
+
+\section{Expand and collapse}
+
+Right arrow expands; left collapses; Enter toggles:
+
+\begin{lstlisting}
+on_key(KeyRight, [&] {
+    auto& n = current_node();
+    if (!n.children.empty()) n.expanded = true;
+});
+\end{lstlisting}
+
+\section{Cursor and focus}
+
+A single cursor selects the current node. Arrow keys move:
+
+\begin{itemize}[leftmargin=*]
+  \item Up/down moves to previous/next visible row.
+  \item Left collapses if expanded, else moves to parent.
+  \item Right expands if collapsed, else moves to first
+    child.
+\end{itemize}
+
+\section{Lazy children}
+
+A file browser doesn't read every directory upfront.
+\code{expand} triggers a fetch:
+
+\begin{lstlisting}
+ctx.effect([&] {
+    for (auto& n : nodes)
+        if (n.expanded && n.children.empty())
+            n.children = fetch_children(n.path);
+});
+\end{lstlisting}
+
+\section{Selection across siblings}
+
+For multi-select (file picker), each node carries a
+\code{selected} flag; selection state is a separate signal.
+
+\section{Drag and drop}
+
+Drop a node onto another to reparent. Track the dragged
+node; on release, mutate the tree.
+
+\section{Search}
+
+A search box filters the tree. Matching nodes and their
+ancestors stay visible; non-matching collapse.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Tree = nodes with children + expanded flag.
+  \item Flatten visible nodes into a virtual list.
+  \item Arrow keys traverse and toggle.
+  \item Lazy children for large trees.
+  \item Search filters; matches and ancestors stay.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a file browser starting at \code{/}.
+  \item Implement search that highlights matches.
+  \item Add drag-and-drop reparenting.
+\end{enumerate}

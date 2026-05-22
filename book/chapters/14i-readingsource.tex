@@ -1,0 +1,80 @@
+\chapter{Reading the maya source}
+\label{ch:readingsource}
+
+\begin{aside}
+The library is small enough to read in an afternoon. Here's
+the tour.
+\end{aside}
+
+\section{Layout}
+
+\begin{itemize}[leftmargin=*]
+  \item \file{maya/include/maya/core/}: foundational types.
+  \item \file{maya/include/maya/dsl/}: builders and pipe
+    operators.
+  \item \file{maya/include/maya/element/}: element types.
+  \item \file{maya/include/maya/layout/}: flexbox engine.
+  \item \file{maya/include/maya/render/}: canvas, diff,
+    emit.
+  \item \file{maya/include/maya/runtime/}: signals,
+    effects, loop.
+  \item \file{maya/include/maya/widget/}: catalogue.
+  \item \file{maya/include/maya/term/}: ANSI, input parser.
+\end{itemize}
+
+\section{Reading order}
+
+\begin{enumerate}[leftmargin=*]
+  \item Start with \file{maya/include/maya/maya.hpp}: the
+    umbrella header.
+  \item Skim \file{element/element.hpp}: the base type.
+  \item Read \file{render/canvas.hpp}: packed cells.
+  \item Read \file{render/diff.hpp}: the loop.
+  \item Read \file{runtime/signal.hpp}: reactivity.
+\end{enumerate}
+
+Each is a few hundred lines.
+
+\section{Naming conventions}
+
+\begin{itemize}[leftmargin=*]
+  \item snake\_case for functions and variables.
+  \item CamelCase for types.
+  \item All lowercase for the namespace (\code{maya}).
+  \item Trailing underscore on private members.
+\end{itemize}
+
+\section{Templates vs concepts}
+
+\maya{} uses \cpp{}20 concepts liberally. A function
+constraint says ``this argument must satisfy X''.
+
+\section{Tests}
+
+\file{maya/tests/} mirrors the include layout. Most files
+have a corresponding test.
+
+\section{Examples}
+
+\file{maya/examples/} has small programs demonstrating
+features. Useful as starting points.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Source under \file{maya/include/maya/}.
+  \item Read element \textrightarrow{} canvas
+    \textrightarrow{} diff \textrightarrow{} signal.
+  \item Tests mirror the layout.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Read \file{element/element.hpp} top to bottom.
+  \item Find one widget in \file{widget/} and trace its
+    paint method.
+  \item Run the examples; modify one.
+\end{enumerate}

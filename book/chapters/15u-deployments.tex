@@ -1,0 +1,69 @@
+\chapter{Appendix: deployment scenarios}
+\label{ch:deployments}
+
+\begin{aside}
+The realities of shipping. SSH, kiosk, embedded, container,
+WSL --- each environment has quirks.
+\end{aside}
+
+\section{SSH}
+
+The remote terminal is the user's local terminal. Capabilities
+match the local terminal, mediated by SSH (transparent for
+most things; some private modes drop).
+
+Latency is the user's link RTT. Aim for small frames.
+
+\section{Tmux / screen}
+
+The multiplexer is the layer between you and the user's
+terminal. CSI-u, OSC-8, image protocols may be filtered.
+Document required tmux config (e.g., \code{set -g
+allow-passthrough on}).
+
+\section{Kiosk}
+
+A dedicated machine running one app. Full control over
+the terminal. Use the best capabilities; assume your
+preferred terminal.
+
+\section{Embedded / set-top}
+
+Resource-constrained. Static binary, minimal deps.
+Compile for the target ISA. Test on the actual hardware.
+
+\section{Container}
+
+The terminal is whatever the user attached. Default to
+moderate caps; let env vars override.
+
+\section{WSL}
+
+Windows Subsystem for Linux. Modern Windows Terminal
+supports most features. Old conhost.exe does not.
+
+\section{Cron / non-interactive}
+
+No terminal. \maya{} detects via \code{isatty}; falls
+back to no-op output. Good for tools that double as TUI
+and pipe.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item SSH: small frames; trust the link.
+  \item tmux: passthrough config matters.
+  \item Kiosk: assume the best terminal.
+  \item Embedded: smallest dep set.
+  \item Container, WSL, cron: detect and adapt.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Test your app over SSH to a remote box.
+  \item Run inside tmux; identify what breaks.
+  \item Run with stdout piped to a file.
+\end{enumerate}

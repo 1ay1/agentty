@@ -1,0 +1,194 @@
+\chapter{Keyboard parsing and CSI-u}
+\label{ch:keyboard}
+
+\begin{aside}
+Pressing Ctrl-Shift-K should be distinguishable from Ctrl-K.
+Pressing the dedicated copy key on your keyboard should not look
+like a stream of random letters. The terminal world has been
+working on this since 1984; the answer arrived in 2017.
+\end{aside}
+
+\section{The basic key encoding}
+
+Most keys arrive as their literal character: typing \code{a}
+sends the byte \code{0x61}. Modifiers fold the byte:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Shift:} the shifted character (\code{A}).
+  \item \textbf{Ctrl:} the byte minus 64, masked to 5 bits.
+    \code{Ctrl-A} sends \code{0x01}, \code{Ctrl-C} sends
+    \code{0x03}, etc.
+  \item \textbf{Alt:} the character with an \code{ESC} prefix.
+    \code{Alt-a} sends \code{ESC a} (two bytes).
+\end{itemize}
+
+\section{Function keys and arrows}
+
+These send escape sequences:
+
+\begin{itemize}[leftmargin=*]
+  \item Arrow up: \code{ESC [ A} (or \code{ESC O A} in
+    application mode).
+  \item F1--F4: \code{ESC O P} through \code{ESC O S}.
+  \item F5--F12: \code{ESC [ 15~} through \code{ESC [ 24~}.
+  \item Home, End, PgUp, PgDn: various \code{ESC [ ... ~}.
+\end{itemize}
+
+The variation between terminals here is enormous. \maya{} ships
+a table of known sequences (terminfo-style) and falls back to
+``unknown escape'' for anything else.
+
+\section{The ambiguity problem}
+
+\code{Esc} alone is a real key. \code{Alt-x} also begins with
+\code{ESC}. How does the parser tell them apart?
+
+The convention: if a byte arrives within a short window after
+\code{ESC} (typically 50 ms), it is an \code{Alt-}prefixed key.
+Otherwise it is a bare \code{Esc}.
+
+\maya{} uses a 50 ms timeout. The cost: pressing \code{Esc} adds
+50 ms before it dispatches. Most users do not notice; vim does
+the same.
+
+\section{Ctrl-letter collisions}
+
+\code{Ctrl-I} is \code{Tab}. \code{Ctrl-M} is \code{Enter}.
+\code{Ctrl-[} is \code{Esc}. \code{Ctrl-H} is \code{Backspace}
+on some terminals.
+
+These collisions are not a parser bug --- they are baked into
+ASCII. \code{Ctrl-letter} sends the control character, and
+control characters have their own purposes.
+
+\maya{} reports the byte and the user's keymap decides what to
+do. ``Bind \code{Ctrl-I} to something other than tab'' is not
+possible at the byte layer.
+
+\section{CSI-u: the modern answer}
+
+Paul Evans's CSI-u protocol (2017) gives each key a unique
+encoding:
+
+\begin{lstlisting}
+ESC [ code ; modifiers u
+\end{lstlisting}
+
+Where \code{code} is the Unicode code point of the unshifted
+key and \code{modifiers} is a bitmask (1 = shift, 2 = alt,
+4 = ctrl, 8 = super).
+
+So \code{Ctrl-Shift-K} arrives as \code{ESC [ 107 ; 5 u} ---
+unambiguous, full modifier mask, no collisions.
+
+\maya{} requests CSI-u at startup:
+
+\begin{lstlisting}
+emit("\x1b[>1u");   // enable CSI-u, level 1
+\end{lstlisting}
+
+And on shutdown:
+
+\begin{lstlisting}
+emit("\x1b[<u");    // disable
+\end{lstlisting}
+
+Terminals that don't support CSI-u ignore the request and keep
+sending old-style sequences.
+
+\section{Kitty keyboard protocol}
+
+The Kitty terminal extends CSI-u further: separate codes for
+key press and release, repeat events, alternate-key reporting
+(distinguish \code{a} from \code{shift-a} even though they
+produce the same character), and a more granular modifier set
+(super, hyper, meta, caps lock state).
+
+\maya{} supports Kitty's protocol when detected. The detection
+is a query (\code{ESC [ ? u}) and a parse of the response.
+
+\section{Modifier-only keys}
+
+Holding \code{Shift} alone with no other key does not send
+anything on most terminals. CSI-u level 4 lets it; Kitty's
+protocol supports it.
+
+Modal apps that want to show ``shift is held'' (drag-and-drop
+indicators, for instance) need a CSI-u level 4 terminal or
+must do without.
+
+\section{Paste}
+
+A paste of many characters arrives as fast as the terminal can
+write to the pty. Bracketed paste mode wraps it:
+
+\begin{lstlisting}
+ESC [ 200 ~
+... pasted bytes ...
+ESC [ 201 ~
+\end{lstlisting}
+
+\maya{} requests bracketed paste at startup (\code{ESC [ ?
+2004 h}) and the parser groups the bytes between the brackets
+into a single \code{Paste} event. The app can then handle it
+as one operation, not as a flood of key events.
+
+\begin{warning}
+Without bracketed paste, a pasted shell command can fire
+keybinds in your app. With it, the paste is one event and the
+keybinds are untouched.
+\end{warning}
+
+\section{Composing characters}
+
+On macOS, holding a letter offers accents in a small popup.
+The terminal does not see the popup --- it sees the final
+character once you commit. Composition is OS-level, not
+terminal-level.
+
+For East Asian input methods (IME) the same applies: \maya{}
+sees the committed string, not the candidate window.
+
+\section{Key event type}
+
+\maya{}'s normalised key event:
+
+\begin{lstlisting}
+struct KeyEvent {
+    char32_t code;          // U+0000 for special keys
+    enum Special {
+        None, Up, Down, Left, Right,
+        Home, End, PgUp, PgDn,
+        F1, F2, /* ... */ F12,
+        Enter, Tab, Escape, Backspace, Delete,
+    } special;
+    bool shift, alt, ctrl, super;
+};
+\end{lstlisting}
+
+The dispatcher walks focus order and asks each focused
+element ``do you want this key?''.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Basic keys: literal byte; Ctrl folds, Alt prefixes.
+  \item CSI-u gives every key a unique encoding.
+  \item Bracketed paste groups pasted bytes into one event.
+  \item Modifier-only keys need CSI-u level 4.
+  \item Composition (accents, IME) happens before \maya{}
+    sees anything.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Print every key event to a side panel. Confirm
+    CSI-u shows up by pressing \code{Ctrl-Shift-K}.
+  \item Add a paste handler that inserts the pasted block
+    as a single undo operation.
+  \item Detect bare \code{Esc} vs \code{Alt-x} and tune the
+    timeout. What feels best?
+\end{enumerate}

@@ -1,0 +1,93 @@
+\chapter{Notifications channel and pub/sub}
+\label{ch:pubsub}
+
+\begin{aside}
+Some components need to talk to each other without sharing a
+parent. A publish-subscribe channel lets one component emit
+events the others observe, without coupling.
+\end{aside}
+
+\section{The channel}
+
+\begin{lstlisting}
+template<typename T>
+class Channel {
+    std::vector<std::function<void(const T&)>> subs;
+public:
+    void publish(const T& v) {
+        for (auto& s : subs) s(v);
+    }
+    Subscription subscribe(auto fn) {
+        subs.push_back(fn);
+        return { ... };  // RAII unsubscribe
+    }
+};
+\end{lstlisting}
+
+\section{Typed channels}
+
+A channel carries one payload type. Compile-time
+type-checking prevents wrong-event delivery.
+
+\begin{lstlisting}
+Channel<FileChanged> file_channel;
+Channel<UserLoggedIn> user_channel;
+\end{lstlisting}
+
+\section{Lifetime}
+
+Subscriptions are RAII: the returned handle unsubscribes
+on destruction. A component owns its subscription; when
+the component unmounts, the subscription drops.
+
+\section{Order of delivery}
+
+Subscribers fire in subscription order. For ordering-
+sensitive workflows, this matters.
+
+\section{Async publish}
+
+A publish that wants to defer to next frame uses a
+microtask:
+
+\begin{lstlisting}
+ctx.microtask([&] { file_channel.publish(...); });
+\end{lstlisting}
+
+\section{Channels vs signals}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Signal:} stateful, latest value, eager
+    notification.
+  \item \textbf{Channel:} stateless, every event delivered,
+    discrete.
+\end{itemize}
+
+Signals model state; channels model events.
+
+\section{Global channels}
+
+\maya{} provides built-in channels for common events:
+window resize, focus gained/lost, theme changed. Subscribe
+where useful.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Typed pub/sub channels.
+  \item RAII subscriptions.
+  \item Async publish via microtask.
+  \item Signals for state; channels for events.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a file-changed channel; multiple components
+    listen.
+  \item Replace a global signal with a channel where
+    appropriate.
+  \item Subscribe to the built-in resize channel.
+\end{enumerate}

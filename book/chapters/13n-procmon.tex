@@ -1,0 +1,78 @@
+\chapter{Building a process monitor}
+\label{ch:procmon}
+
+\begin{aside}
+htop, but built in \maya{}. Periodic sampling, sorting,
+filtering, killing processes. A practical second-tier
+example.
+\end{aside}
+
+\section{Sampling}
+
+Every second, parse \code{/proc} on Linux (or \code{ps} on
+others). Build a list of process records.
+
+\begin{lstlisting}
+struct Process {
+    int pid;
+    std::string name;
+    float cpu_pct;
+    int rss_kb;
+    int threads;
+};
+\end{lstlisting}
+
+\section{Display}
+
+A table widget with sortable columns. PID, name, CPU,
+memory, threads.
+
+\section{Sort}
+
+Click a header to sort by that column. Toggle direction
+on second click.
+
+\section{Filter}
+
+A search box at the top filters by name substring.
+
+\section{Kill}
+
+Selected process + \code{K} key sends SIGTERM. A confirm
+dialog before sending SIGKILL.
+
+\section{Refresh rate}
+
+User-configurable: 0.5 s, 1 s, 2 s, 5 s. Faster gives
+fresher data but uses more CPU itself.
+
+\section{Sparkline}
+
+Each row could include a tiny CPU sparkline showing the
+last 60 seconds. Use the spark widget from
+Chapter~\ref{ch:charts}.
+
+\section{Hierarchical view}
+
+A tree view shows parent-child relationships. Group by
+process group.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Periodic sample of /proc.
+  \item Sortable, filterable table.
+  \item Kill with confirmation.
+  \item Configurable refresh rate.
+  \item Optional sparklines per row.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build the table view with five columns.
+  \item Add filter and sort.
+  \item Wire kill with confirm dialog.
+\end{enumerate}

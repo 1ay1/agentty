@@ -1,0 +1,115 @@
+\chapter{Time, timers, and the clock}
+\label{ch:clocks}
+
+\begin{aside}
+A spinner animates by reading the clock. A debounce fires when
+the clock advances past a deadline. Time is a signal --- but a
+peculiar one, because it changes without anyone setting it.
+\end{aside}
+
+\section{The frame clock}
+
+Each frame has a timestamp: the wall-clock time at frame
+start. \code{ctx.now()} returns this; it is constant within
+a frame so all effects see the same time.
+
+The frame clock advances in discrete steps: one tick per
+frame. For 60 Hz that is 16.67 ms between observable values.
+
+\section{Real time vs frame time}
+
+Real time advances continuously. \maya{}'s frame time
+samples it. If you need real time (e.g., for a stopwatch),
+use \code{std::chrono::steady\_clock::now()} directly --- but
+remember that any signal updates must wait for the next
+frame to be visible.
+
+\section{Timers}
+
+\begin{lstlisting}
+auto cancel = ctx.timer(500ms, [&] {
+    ctx.set(notification, "hi");
+});
+\end{lstlisting}
+
+The runtime schedules the callback for \code{now + 500ms}.
+The loop wakes at that deadline (or sooner if other events
+arrive) and fires the callback.
+
+\code{cancel} is a handle; calling it removes the timer
+before firing.
+
+\section{Repeating timers}
+
+For periodic work:
+
+\begin{lstlisting}
+ctx.interval(1s, [&] {
+    ctx.set(seconds, ctx.get(seconds) + 1);
+});
+\end{lstlisting}
+
+The runtime re-schedules after each fire.
+
+\section{Drift}
+
+A simple ``every 1 second'' interval drifts because
+processing the callback takes time. Two strategies:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Next-fire = now + period}: drifts.
+  \item \textbf{Next-fire = last-scheduled + period}: precise.
+\end{itemize}
+
+\maya{} uses the second --- scheduled time advances by
+exactly the period regardless of callback duration.
+
+\section{The clock signal}
+
+For widgets that need a ``time of day'' display:
+
+\begin{lstlisting}
+auto now = ctx.clock_signal(1s);  // updates every second
+\end{lstlisting}
+
+The clock signal is a shared subscriber: many widgets can
+read it, only one timer underlies them.
+
+\section{Time arithmetic}
+
+\code{std::chrono} is \maya{}'s time vocabulary. Durations
+are typed (\code{milliseconds}, \code{seconds}); time points
+are wall vs steady vs system.
+
+For timestamps that need to survive restart (saved state),
+use \code{system\_clock} (gives wall time). For intervals
+and timers, use \code{steady\_clock} (monotonic, immune to
+clock changes).
+
+\section{Time-zones}
+
+Wall-time formatting needs a time zone. \maya{} does not
+include a time-zone library; use \code{std::chrono::zoned\_
+time} or external libs.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Frame clock is constant within a frame.
+  \item Timers and intervals via \code{ctx.timer},
+    \code{ctx.interval}.
+  \item Use steady\_clock for intervals, system\_clock for
+    wall time.
+  \item Clock signals share a timer for many subscribers.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a digital clock widget that updates every
+    second.
+  \item Implement a stopwatch with start/stop/lap.
+  \item Add a 5-second tooltip-hide timer; cancel on hover.
+\end{enumerate}

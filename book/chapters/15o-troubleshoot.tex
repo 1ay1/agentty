@@ -1,0 +1,87 @@
+\chapter{Appendix: troubleshooting}
+\label{ch:troubleshoot}
+
+\begin{aside}
+Common things that go wrong, in checklist form.
+\end{aside}
+
+\section{App won't build}
+
+\begin{itemize}[leftmargin=*]
+  \item Compiler too old. Need GCC 14+ or Clang 18+.
+  \item \code{-std=c++26} or \code{-std=c++2c} missing.
+  \item \code{add\_subdirectory(maya)} forgotten.
+  \item Linker can't find \code{maya} target ---
+    check \code{target\_link\_libraries}.
+\end{itemize}
+
+\section{Screen looks wrong}
+
+\begin{itemize}[leftmargin=*]
+  \item Wrong ambiguous-width setting.
+  \item Terminal font missing glyphs.
+  \item Truecolour requested on a 16-colour terminal.
+  \item Wide cells not handled (font shows half).
+\end{itemize}
+
+\section{App freezes}
+
+\begin{itemize}[leftmargin=*]
+  \item Synchronous I/O on main thread.
+  \item Infinite loop in an effect.
+  \item Deadlock with worker thread.
+\end{itemize}
+
+\section{Memory grows}
+
+\begin{itemize}[leftmargin=*]
+  \item Effect leak: not unmounted.
+  \item Detached effect retained.
+  \item Cache without eviction.
+  \item Long-lived strings in arena (must be trivially
+    destructible).
+\end{itemize}
+
+\section{Crashes on resize}
+
+\begin{itemize}[leftmargin=*]
+  \item Old size cached and stale.
+  \item Element math overflows on weird sizes (0 or 1
+    cell).
+  \item Layout assumes minimum size.
+\end{itemize}
+
+\section{Keys not received}
+
+\begin{itemize}[leftmargin=*]
+  \item Raw mode not enabled.
+  \item Wrong terminal --- some emit different escapes.
+  \item CSI-u disabled by tmux.
+  \item Focus on wrong element.
+\end{itemize}
+
+\section{Mouse not working}
+
+\begin{itemize}[leftmargin=*]
+  \item Mouse mode disabled.
+  \item Terminal doesn't support SGR mode.
+  \item tmux without mouse passthrough.
+\end{itemize}
+
+\section{Colours wrong}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{NO\_COLOR} set.
+  \item Wrong COLORTERM.
+  \item Theme not loaded.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Build: compiler, flags, link.
+  \item Display: width, font, terminal caps.
+  \item Behaviour: threads, effects, lifecycles.
+\end{itemize}
+\end{recap}

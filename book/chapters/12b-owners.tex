@@ -1,0 +1,117 @@
+\chapter{Owners and lifetimes}
+\label{ch:owners}
+
+\begin{aside}
+A signal that outlives its owner is a leak. An effect that
+runs after its widget unmounts is a use-after-free. \maya{}'s
+ownership model is a tree, like the UI itself.
+\end{aside}
+
+\section{The owner tree}
+
+Each signal and effect has an owner --- the lexical scope
+that created it. Owners form a tree rooted at the application
+context.
+
+When an owner is destroyed (widget unmounted, scope exited),
+its owned signals and effects are destroyed too.
+
+\section{Implicit owner}
+
+The current owner is a thread-local set by widget mounting.
+Anything created during the widget's mount call is owned by
+that widget:
+
+\begin{lstlisting}
+ctx.mount(my_widget(), [&] {
+    auto count = signal(0);   // owned by my_widget
+    ctx.effect([&] {          // owned by my_widget
+        log(ctx.get(count));
+    });
+});
+\end{lstlisting}
+
+When \code{my\_widget} unmounts, \code{count} and the
+effect are dropped.
+
+\section{Manual owners}
+
+For long-lived state (app-level singletons), use the root
+owner:
+
+\begin{lstlisting}
+auto user = ctx.root_signal(load_user());
+\end{lstlisting}
+
+\code{user} survives until the application context dies.
+
+\section{Detached effects}
+
+Sometimes you want an effect that outlives its caller (a
+background sync, for instance). \code{ctx.detached\_effect}
+moves ownership to the root.
+
+Use sparingly --- detached effects can leak.
+
+\section{Owner stacks}
+
+Mounting a widget pushes a new owner. Unmounting pops. The
+stack is per-thread; the runtime is single-threaded by
+design.
+
+\section{Strict mode}
+
+In strict mode, creating a signal outside any owner is an
+error. This prevents accidental top-level state that leaks.
+\maya{}'s default is strict.
+
+\section{Disposal callbacks}
+
+Some signals carry external resources (file handles, network
+connections). Register a disposal callback:
+
+\begin{lstlisting}
+auto file = signal_with_dispose(
+    open_file("data"),
+    [](File* f) { close(f); }
+);
+\end{lstlisting}
+
+When the owner dies, the callback runs.
+
+\section{Stable references}
+
+A signal handle (\code{SignalHandle<T>}) is a pointer plus
+generation counter. Reading from a stale handle (signal
+disposed) is a graceful nullopt return, not a crash.
+
+\section{Refcounting alternative}
+
+Some reactive libraries use refcounting (\code{Rc<Signal>}).
+\maya{}'s tree model is simpler: no cycles, predictable
+destruction order, no atomic refcount overhead.
+
+The trade-off: signals cannot be shared between owner
+subtrees without explicit lifting. The lifting helper is
+\code{lift\_to\_root}.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Owners form a tree mirroring the UI.
+  \item Mount pushes owner; unmount pops and disposes.
+  \item Manual root owners for app-level state.
+  \item Detached effects survive their caller; use sparingly.
+  \item Disposal callbacks free external resources.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a widget with internal state. Confirm the
+    state is disposed on unmount.
+  \item Create a root-owned signal for global config.
+  \item Add a disposal callback that closes a file.
+\end{enumerate}

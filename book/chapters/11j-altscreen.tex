@@ -1,0 +1,203 @@
+\chapter{Alt-screen and terminal state}
+\label{ch:altscreen}
+
+\begin{aside}
+The terminal is shared global state. Your TUI is one tenant
+among many. Leaving it in raw mode, with mouse on, on the
+alternate screen, is a sin against the next user.
+\end{aside}
+
+\section{Two screens}
+
+A modern terminal has two text buffers:
+
+\begin{itemize}[leftmargin=*]
+  \item The \textbf{main} screen, where the shell prompt and
+    command output live.
+  \item The \textbf{alternate} screen, a separate scrollback-
+    free buffer for full-screen apps.
+\end{itemize}
+
+Vim, htop, less, tmux --- they all switch to the alternate
+screen, do their work, and switch back. The user's shell
+history is preserved.
+
+\maya{} enters the alternate screen on startup
+(\code{ESC [ ? 1049 h}) and exits on shutdown
+(\code{ESC [ ? 1049 l}).
+
+\section{Why 1049 and not 47}
+
+There are two ``alternate screen'' modes:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{? 47}: just switch buffers.
+  \item \code{? 1049}: save cursor, switch buffers, clear the
+    alternate, restore cursor on exit.
+\end{itemize}
+
+\code{1049} is the modern choice and handles the corner cases
+(cursor position preserved across the switch). \maya{} uses it.
+
+\section{Terminal modes}
+
+A terminal has many modes. Each is set by an escape sequence;
+together they form the ``terminal state''. The relevant ones
+for a TUI:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Raw mode (tcsetattr).} No line buffering, no
+    echo, no signal generation on Ctrl-C. Set via the
+    \code{termios} struct.
+  \item \textbf{Alt screen.} \code{? 1049}.
+  \item \textbf{Mouse mode.} \code{? 1000}, \code{? 1002},
+    \code{? 1003}, \code{? 1006}.
+  \item \textbf{Bracketed paste.} \code{? 2004}.
+  \item \textbf{Cursor visibility.} \code{? 25}.
+  \item \textbf{CSI-u.} \code{> 1 u}.
+  \item \textbf{Focus events.} \code{? 1004}.
+\end{itemize}
+
+\section{The boot bundle}
+
+\maya{} emits a fixed bundle on startup:
+
+\begin{lstlisting}
+ESC [ ? 1049 h       enter alt screen
+ESC [ ? 25   l       hide cursor
+ESC [ ? 1006 h       SGR mouse
+ESC [ ? 1002 h       mouse press+drag
+ESC [ ? 2004 h       bracketed paste
+ESC [ ? 1004 h       focus events
+ESC [ > 1 u          CSI-u
+ESC [ 2 J            clear screen
+ESC [ H              cursor home
+\end{lstlisting}
+
+Order matters: clear after alt-screen, otherwise you cleared
+the main screen. Cursor home so the first frame's positioning
+is predictable.
+
+\section{The shutdown bundle}
+
+The reverse, in reverse order:
+
+\begin{lstlisting}
+ESC [ < u            CSI-u off
+ESC [ ? 1004 l       focus events off
+ESC [ ? 2004 l       bracketed paste off
+ESC [ ? 1002 l       mouse modes off
+ESC [ ? 1006 l
+ESC [ ? 1000 l
+ESC [ ? 25 h         cursor visible
+ESC [ 0 m            reset SGR
+ESC [ ? 1049 l       exit alt screen
+\end{lstlisting}
+
+The SGR reset is important: leaving in red-on-yellow would
+colour the user's shell.
+
+\section{Crash safety}
+
+If the program terminates without running shutdown (signal,
+\code{std::terminate}, hard kill), the terminal is left in
+whatever state. \maya{} mitigates by:
+
+\begin{itemize}[leftmargin=*]
+  \item Installing a \code{std::atexit} hook that emits the
+    shutdown bundle.
+  \item Installing signal handlers for SIGTERM, SIGINT,
+    SIGHUP that emit shutdown and re-raise.
+  \item RAII guards on the \code{Terminal} object that emit
+    shutdown in the destructor.
+\end{itemize}
+
+A \code{kill -9} bypasses all of these. The user can recover
+with \code{reset} or by closing the terminal window.
+
+\section{The reset command}
+
+On Unix, \code{reset} (or \code{stty sane}) resets the
+terminal to a known-good state: cooked mode, echo on, alt
+screen off, all mouse modes off, all colours reset, all
+private modes off.
+
+It is the universal ``unstuck my terminal'' tool. Add a
+mention in your app's docs.
+
+\begin{tryit}
+Run a \maya{} app, suspend with Ctrl-Z, and try to use the
+shell. Mouse clicks fire as escape sequences. Resume with
+\code{fg}, then exit normally. Compare to crashing the app
+mid-run; that needs a \code{reset}.
+\end{tryit}
+
+\section{tmux and screen}
+
+Inside tmux or GNU screen, the terminal you talk to is the
+multiplexer, not the outer terminal. The multiplexer
+forwards the modes selectively. Some modes (CSI-u, focus
+events) are passed through only if you opt in.
+
+\maya{}'s requests are advisory. The multiplexer chooses.
+
+\section{Terminal queries}
+
+You can ask the terminal about its state:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ESC [ 6 n}: report cursor position.
+  \item \code{ESC [ ? 25 6 n}: report cursor position
+    extended (some terminals).
+  \item \code{ESC [ 14 t}: report window size in pixels.
+  \item \code{ESC [ 18 t}: report window size in cells.
+  \item \code{ESC [ > q}: report terminal name.
+\end{itemize}
+
+The replies arrive on stdin like any other input. \maya{}'s
+parser recognises them and routes them to the query handler
+instead of the key dispatch.
+
+Queries are useful for cell-pixel size (for inline image
+sizing) and for detecting the terminal at startup. Use
+sparingly: a query that goes unanswered (terminal does not
+support it) is just dead bytes.
+
+\section{The Da1 query}
+
+\code{ESC [ c} asks ``which terminal are you?''. The reply is
+a sequence like \code{ESC [ ? 1 ; 2 c} where the numbers are
+DEC feature flags.
+
+\maya{} sends Da1 at startup as a smoke test: if no reply
+arrives within 200 ms, the terminal is suspect (a pipe to a
+file, perhaps, not a real terminal). The library falls back
+to non-interactive mode.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Two screens; \maya{} uses the alternate.
+  \item Raw mode plus a dozen private modes form the boot
+    bundle.
+  \item Shutdown is reverse order; SGR reset matters.
+  \item Crash safety via atexit, signals, RAII.
+  \item \code{reset} unsticks anything.
+  \item Queries get replies on stdin; the parser routes
+    them.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Print the Da1 reply for your terminal. Compare to
+    xterm, kitty, alacritty, Apple Terminal.
+  \item Crash your app deliberately (assert, segfault).
+    Confirm the terminal is left usable thanks to the
+    atexit hook.
+  \item Run your app inside tmux. Try CSI-u and confirm it
+    works only after configuring tmux's
+    \code{extended-keys} option.
+\end{enumerate}

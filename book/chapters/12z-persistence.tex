@@ -1,0 +1,83 @@
+\chapter{Persistence and session restore}
+\label{ch:persistence}
+
+\begin{aside}
+Closing your app and reopening should feel like you never
+left. Open tabs, scroll positions, expanded folders, recent
+files --- restore them all.
+\end{aside}
+
+\section{What to persist}
+
+Two categories:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Preferences.} Theme, keymap, layout. User
+    sets explicitly.
+  \item \textbf{Session.} Open documents, cursor positions,
+    scroll, undo history. Implicit.
+\end{itemize}
+
+Both go to disk; loads on startup.
+
+\section{Format}
+
+JSON or TOML for preferences (human-edited). Binary or
+compressed JSON for session (machine-only).
+
+\section{When to save}
+
+\begin{itemize}[leftmargin=*]
+  \item On exit (normal shutdown).
+  \item On a timer (every 5 minutes).
+  \item On crash (signal handler before re-raise).
+  \item Never on every keystroke (too noisy).
+\end{itemize}
+
+\section{Versioning}
+
+A schema version field lets the loader migrate older
+formats:
+
+\begin{lstlisting}
+{ "version": 3, "tabs": [...], ... }
+\end{lstlisting}
+
+The loader reads the version, applies migrations, returns
+the current shape.
+
+\section{Atomic saves}
+
+Write to a temp file, fsync, rename. The on-disk state is
+always either old-complete or new-complete; never partial.
+
+\section{Multiple windows}
+
+If your app supports multiple instances, each needs its own
+session file. Use the PID or a UUID.
+
+\section{Encrypted persistence}
+
+For sensitive state (passwords, tokens), encrypt with a
+key from the OS keychain (libsecret on Linux, Keychain on
+Mac).
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Preferences (human) vs session (machine).
+  \item Save on exit, timer, and crash.
+  \item Version the schema.
+  \item Atomic rename for crash safety.
+  \item OS keychain for secrets.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Persist your app's open tabs.
+  \item Add schema versioning and one migration.
+  \item Implement timer-based autosave.
+\end{enumerate}

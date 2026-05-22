@@ -1,0 +1,69 @@
+\chapter{Concurrency patterns}
+\label{ch:concurrency}
+
+\begin{aside}
+A TUI is mostly single-threaded, but the I/O around it is
+not. Talking to disks, networks, and computations off the
+main thread needs patterns.
+\end{aside}
+
+\section{Single-thread UI}
+
+\maya{}'s render loop runs on one thread. All signal
+access is from this thread.
+
+\section{Worker pool for CPU}
+
+CPU-bound work goes to a pool. Results come back via
+\code{post\_to\_main}.
+
+\section{Reactor for I/O}
+
+I/O-bound work goes to a reactor (\code{poll},
+\code{epoll}, \code{kqueue}). Each fd has a callback that
+runs on the main thread when readable.
+
+\section{Channels for communication}
+
+A multi-producer single-consumer queue is the bridge.
+Workers push results; main pops in batches.
+
+\section{Locking}
+
+For shared mutable state across threads, use a mutex. Hold
+it for short durations. Never hold a mutex across an
+\code{await}.
+
+\section{Async coroutines}
+
+Coroutines structure async work as if it were sync. The
+suspend points are explicit (\code{co\_await}).
+
+\section{Anti-patterns}
+
+\begin{itemize}[leftmargin=*]
+  \item Touching signals from a worker thread.
+  \item Holding a lock during render.
+  \item Blocking the main thread for I/O.
+  \item Spawning a thread per task (use the pool).
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Main thread for UI.
+  \item Pool for CPU work.
+  \item Reactor for I/O.
+  \item Channels and post\_to\_main as bridges.
+  \item Mutex sparingly; never across await.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Move a CPU task to the pool; post result back.
+  \item Add a reactor watcher for a socket.
+  \item Find and fix any worker-thread signal access.
+\end{enumerate}

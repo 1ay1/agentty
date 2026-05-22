@@ -1,0 +1,72 @@
+\chapter{Releasing v1.0}
+\label{ch:v1}
+
+\begin{aside}
+At some point your app is ``done enough'' to call v1. The
+release process is checklist.
+\end{aside}
+
+\section{Checklist}
+
+\begin{itemize}[leftmargin=*]
+  \item Tests pass on every supported platform.
+  \item Documentation updated.
+  \item Changelog written.
+  \item Version bumped in CMake and source.
+  \item Tag the commit.
+  \item Build release binaries.
+  \item Sign and upload.
+  \item Announce.
+\end{itemize}
+
+\section{Tagging}
+
+\begin{lstlisting}
+git tag -a v1.0.0 -m "First stable release"
+git push origin v1.0.0
+\end{lstlisting}
+
+\section{Building releases}
+
+Static, optimised, stripped. Per platform. Container or
+package as needed.
+
+\section{Signing}
+
+GPG-sign tarballs and binaries. Provide sha256 checksums.
+
+\section{Uploading}
+
+GitHub releases, your own server, a package mirror.
+
+\section{Announcing}
+
+\begin{itemize}[leftmargin=*]
+  \item GitHub release notes.
+  \item Blog post.
+  \item Social media / forum.
+  \item Email list (if you have one).
+\end{itemize}
+
+\section{Post-release}
+
+Watch for bug reports. Issue patches as needed. Plan v1.1.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Checklist before tag.
+  \item Sign and checksum.
+  \item Announce in multiple channels.
+  \item Patch quickly.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Draft your v1 checklist.
+  \item Practice the release on a v0.9.
+  \item Plan announcement copy.
+\end{enumerate}

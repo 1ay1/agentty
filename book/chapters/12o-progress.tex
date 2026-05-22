@@ -1,0 +1,124 @@
+\chapter{Progress, spinners, and indicators}
+\label{ch:progress}
+
+\begin{aside}
+Long-running work needs to look like it's running. A bar that
+fills, a spinner that turns, a percentage that climbs --- each
+is a tiny widget with a big perceived impact.
+\end{aside}
+
+\section{Determinate progress}
+
+A bar with known total:
+
+\begin{lstlisting}
+auto bar = progress_bar(percent)
+         | width(30);
+\end{lstlisting}
+
+Renders as ``[\#\#\#\#\#.....]'' with hash for filled and
+dot for unfilled. Subdivisions via half-block characters
+for sub-cell precision.
+
+\section{Unicode block fill}
+
+For smooth bars, eight levels of fill per cell using
+\code{U+2588} (full block) down to \code{U+258F} (left
+eighth block):
+
+\begin{lstlisting}
+constexpr const char* fills[] = {
+    " ", "\u258F", "\u258E", "\u258D",
+    "\u258C", "\u258B", "\u258A", "\u2589",
+    "\u2588"
+};
+\end{lstlisting}
+
+A 30-cell bar at 33\% renders as 9 full blocks plus a
+left-third block, then padding.
+
+\section{Indeterminate spinner}
+
+For unknown duration:
+
+\begin{lstlisting}
+constexpr const char* frames[] = {
+    "|", "/", "-", "\\\\"
+};
+
+auto spinner = animated(100ms, [&] {
+    return text(frames[ctx.frame_index() % 4]);
+});
+\end{lstlisting}
+
+A 100 ms tick gives a 10 Hz spin --- snappy without being
+seizure-inducing.
+
+\section{Braille spinners}
+
+A higher-resolution spinner uses braille dots
+(\code{U+2800}--\code{U+28FF}). Each cell is an 8-dot grid;
+animating which dots are lit gives 8-frame smoothness:
+
+\begin{lstlisting}
+constexpr const char* braille[] = {
+    "\u2807", "\u280F", "\u281F", "\u287F",
+    "\u287B", "\u2879", "\u2878", "\u2810"
+};
+\end{lstlisting}
+
+Looks delightful.
+
+\section{Multi-stage progress}
+
+A job with phases (download, extract, install) shows the
+current phase plus per-phase progress:
+
+\begin{lstlisting}
+auto multi = column(
+    text("Downloading..."),
+    progress_bar(download_pct),
+    text("Extracting..."),
+    progress_bar(extract_pct)
+);
+\end{lstlisting}
+
+\section{Throughput display}
+
+Beyond percent, show rate and ETA:
+
+\begin{lstlisting}
+auto status = text(
+    format("{:.1f} MB/s, ETA {}",
+        rate_mbps, eta)
+);
+\end{lstlisting}
+
+\section{Silent failure}
+
+A spinner that runs forever because the task crashed is the
+worst UX. Wrap the task: on failure, switch to an error
+state.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Block characters for smooth bars.
+  \item ASCII spinners for compatibility; braille for
+    quality.
+  \item Multi-stage for compound jobs.
+  \item Rate and ETA add information.
+  \item Handle failure visibly.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a download widget with bar, rate, ETA.
+  \item Create three spinner styles (ASCII, braille,
+    custom). Pick one.
+  \item Wire a failure path that shows the error and a
+    retry button.
+\end{enumerate}

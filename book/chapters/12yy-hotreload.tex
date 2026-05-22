@@ -1,0 +1,86 @@
+\chapter{Hot reload of UI}
+\label{ch:hotreload}
+
+\begin{aside}
+Editing UI code and seeing it update without restart is a
+huge productivity win. The trick is preserving state across
+the reload.
+\end{aside}
+
+\section{What hot reload is}
+
+The application binary recompiles. The running process
+either:
+
+\begin{itemize}[leftmargin=*]
+  \item Swaps the dynamically-loaded UI module.
+  \item Restarts but restores state from a snapshot.
+\end{itemize}
+
+\section{State-preserving restart}
+
+The simpler approach. On change detection:
+
+\begin{enumerate}[leftmargin=*]
+  \item Serialise state to a file.
+  \item Exec self with a flag.
+  \item New process reads state and resumes.
+\end{enumerate}
+
+The user sees a tiny flicker; state is intact.
+
+\section{Module swap}
+
+The complicated approach. The UI lives in a shared library.
+On change:
+
+\begin{enumerate}[leftmargin=*]
+  \item Compile the new library.
+  \item dlopen the new version.
+  \item Migrate state (rare: it's all signals; same shape
+    usually).
+  \item dlclose the old.
+\end{enumerate}
+
+This requires careful ABI discipline.
+
+\section{Watching the source}
+
+A file watcher (inotify, FSEvents) detects changes. Debounce
+to avoid reloading mid-typing.
+
+\section{Hot reload of just config}
+
+Easier: reload the config file. \maya{} apps that read
+config can hot-reload by re-reading and updating signals.
+
+The UI doesn't need to be aware --- signals drive
+re-render.
+
+\section{Trade-offs}
+
+\begin{itemize}[leftmargin=*]
+  \item State-restart: simpler, slight flicker.
+  \item Module swap: smoother but fragile.
+\end{itemize}
+
+For development iteration, the simpler is enough.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Hot reload: state-restart or module swap.
+  \item State-restart serialises, execs, resumes.
+  \item Module swap dlopens; complex.
+  \item Config hot reload is easy and useful.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add config hot reload to your app.
+  \item Implement state-restart on source change.
+  \item Try module swap; observe the pitfalls.
+\end{enumerate}

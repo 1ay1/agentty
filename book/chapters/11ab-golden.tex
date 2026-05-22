@@ -1,0 +1,116 @@
+\chapter{Render output golden tests}
+\label{ch:golden}
+
+\begin{aside}
+The diff is the contract: same input, same bytes on the wire.
+A golden test pins that contract.
+\end{aside}
+
+\section{Golden vs snapshot}
+
+A snapshot test (see Chapter~\ref{ch:snapshot}) checks the rendered
+canvas. A golden test checks the emitted ANSI byte stream.
+
+Two layers, two tests:
+
+\begin{itemize}[leftmargin=*]
+  \item Snapshot catches ``the screen looks wrong''.
+  \item Golden catches ``the wire bytes changed''.
+\end{itemize}
+
+A refactor of the emit step that produces equivalent-but-
+different ANSI passes snapshot, fails golden. Whether that
+fail is intentional is a judgement call.
+
+\section{Capturing a golden}
+
+\begin{lstlisting}
+TEST_CASE("frame emits expected ANSI") {
+    StringBackend back;
+    Renderer r(back);
+    auto el = my_panel();
+    r.render(el);
+    EXPECT_BYTES_EQ(back.output, "fixtures/panel.ansi");
+}
+\end{lstlisting}
+
+The fixture is a raw ANSI dump.
+
+\section{Diffing ANSI}
+
+A diff between ANSI streams is harder to read than a diff
+between cell grids. \maya{}'s golden helper pretty-prints
+escape sequences:
+
+\begin{lstlisting}
+ESC[?1049h ESC[?25l ESC[H ESC[31mhello ESC[0m
+\end{lstlisting}
+
+becomes:
+
+\begin{lstlisting}
+ENTER_ALT_SCREEN
+HIDE_CURSOR
+CURSOR_HOME
+SGR(fg=red)
+text "hello"
+SGR_RESET
+\end{lstlisting}
+
+Reviewing this in a PR is feasible.
+
+\section{Volatile bytes}
+
+Some bytes vary across runs:
+
+\begin{itemize}[leftmargin=*]
+  \item Cursor position based on terminal size detection.
+  \item Time-based escape sequences (very rare; none in
+    \maya{}).
+  \item Performance-related ANSI like DEC 2026 only
+    when supported.
+\end{itemize}
+
+Goldens use a fixed backend with fixed caps and fixed size
+to avoid this.
+
+\section{What a golden test catches}
+
+\begin{itemize}[leftmargin=*]
+  \item Accidental SGR re-emission (style cache bug).
+  \item Wrong escape syntax (missing semicolon, off
+    parameters).
+  \item Order changes (e.g., cursor move after SGR vs
+    before).
+  \item Whitespace handling.
+\end{itemize}
+
+These are exactly the bugs that survive a snapshot test ---
+the cells look right but the wire is wrong.
+
+\section{Maintaining goldens}
+
+Treat \code{.ansi} files as code. Review changes. When a
+deliberate optimisation changes bytes, update intentionally
+with notes in the commit message.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Golden test pins the wire output.
+  \item Pretty-print ANSI for readable diffs.
+  \item Fix backend caps and size to keep goldens stable.
+  \item Catches bugs snapshots miss.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Capture a golden for your app's first frame.
+  \item Make a perf change that emits the same cells in
+    different byte order. Update golden.
+  \item Verify the pretty-printer correctly decodes every
+    escape your app emits.
+\end{enumerate}

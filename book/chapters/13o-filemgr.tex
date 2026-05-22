@@ -1,0 +1,81 @@
+\chapter{Building a file manager}
+\label{ch:filemgr}
+
+\begin{aside}
+Two-pane file managers (mc, ranger). Navigate with arrows,
+preview on the right. Familiar workflow.
+\end{aside}
+
+\section{Layout}
+
+Two columns. Left is the current directory list. Right is
+a preview of the selected file.
+
+\section{Directory listing}
+
+Read the directory; for each entry produce a row with
+name, size, type, modified time.
+
+\begin{lstlisting}
+std::vector<DirEntry> list_dir(const std::filesystem::path& p);
+\end{lstlisting}
+
+Sort by name (or by other column on user request).
+
+\section{Selection}
+
+A signal holds the selected index. Arrows move; Enter
+opens (cd into directory or open file).
+
+\section{Preview}
+
+The preview shows:
+
+\begin{itemize}[leftmargin=*]
+  \item Text files: first 1000 lines, syntax-highlighted.
+  \item Images: rendered via image protocol.
+  \item Binaries: file type and size.
+  \item Directories: child entry count.
+\end{itemize}
+
+\section{Navigation}
+
+\begin{itemize}[leftmargin=*]
+  \item Up/down: select.
+  \item Enter: open / cd.
+  \item Backspace: cd ..
+  \item / : focus search box.
+  \item D : delete (with confirm).
+  \item R : rename.
+  \item Y : copy.
+  \item X : cut.
+  \item P : paste.
+\end{itemize}
+
+\section{Bookmarks}
+
+User-defined paths quick-jump to: \code{Ctrl-1} through
+\code{Ctrl-9}. Persisted in config.
+
+\section{Hidden files}
+
+Toggle with \code{.}.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Two panes: list + preview.
+  \item Arrows + Enter for navigation.
+  \item Search, delete, rename, copy/cut/paste.
+  \item Bookmarks for jumps.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build the two-pane shell.
+  \item Implement preview for text and images.
+  \item Add bookmarks and the hidden-files toggle.
+\end{enumerate}

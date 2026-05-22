@@ -1,0 +1,145 @@
+\chapter{Title bars and notifications}
+\label{ch:titles}
+
+\begin{aside}
+A long-running TUI deserves a name in the tab bar and the
+ability to nudge the user when something interesting happens.
+Both are one escape away.
+\end{aside}
+
+\section{Setting the title}
+
+\code{ESC ] 0 ; TITLE BEL} sets both the window title and the
+icon title. \code{ESC ] 1 ; TITLE BEL} sets just the icon
+title; \code{ESC ] 2 ; TITLE BEL} sets just the window title.
+
+\maya{}'s \code{set\_title} call uses OSC 0 (both) by default
+because most apps want the same string in both places.
+
+\section{Dynamic titles}
+
+A common pattern: the title reflects the current document or
+state.
+
+\begin{lstlisting}
+ctx.effect([&] {
+    auto path = ctx.get(current_file);
+    auto dirty = ctx.get(is_dirty);
+    maya::set_title(
+        path + (dirty ? " *" : "")
+    );
+});
+\end{lstlisting}
+
+The effect re-runs when either signal changes; the title is
+always in sync.
+
+\section{Title and tab order}
+
+In tmux, the pane title is set via the same escape but
+displayed in the status bar (if configured). In a tabbed
+terminal, the title is the tab label. Setting it changes how
+the user identifies your app among many.
+
+\section{OSC 7: current working directory}
+
+\code{ESC ] 7 ; file://hostname/path BEL} tells the terminal
+the current working directory. Opening a new tab inherits it.
+\maya{} emits OSC 7 on startup and whenever the app's notion
+of cwd changes (file pickers, for example).
+
+\section{OSC 9: notification}
+
+\code{ESC ] 9 ; message BEL} (iTerm2 extension) raises an OS
+notification. The user gets a native popup with your message.
+Supported by iTerm2, Wezterm, Ghostty.
+
+\maya{} provides \code{notify(message)} that emits OSC 9. For
+terminals that don't support it, the escape is silently
+ignored.
+
+\section{Bell}
+
+\code{BEL} (\code{\textbackslash a}, byte \code{0x07}) rings
+the terminal bell. Most terminals show a visual or audible
+indicator. \maya{} exposes \code{bell()} that emits one byte.
+
+Bells are obnoxious if overused. Reserve for ``something
+needs attention now'' moments, not for every notification.
+
+\begin{funfact}
+The bell predates terminals: it was a real bell on a
+teletype, triggered by the same byte. ASCII \code{0x07} is
+literally ``ring the bell''.
+\end{funfact}
+
+\section{Activity indicators}
+
+In tmux, the bell triggers an activity flag on the pane. The
+user sees ``activity'' in their status bar even when looking
+at another pane. Use bells (or OSC 9 notifications) to make
+background work visible.
+
+\section{Window icon}
+
+OSC 1 sets the icon title, which becomes the icon-bar label
+when the window is minimised on traditional X11 setups. Not
+many users see this anymore, but the escape is still there.
+
+\section{Window manipulation}
+
+\code{ESC [ 8 ; H ; W t} resizes the terminal (if the
+terminal allows). \code{ESC [ 14 t} reports pixel size.
+\code{ESC [ 18 t} reports cell size. \code{ESC [ 22 ; 0 t}
+saves the title to a stack; \code{ESC [ 23 ; 0 t} pops.
+
+\maya{} pushes the title on startup and pops on exit, so the
+user's previous title is restored. If a child process (e.g.
+a shell spawned via PTY in your app) changes the title, the
+pop brings it back.
+
+\section{Coloured tabs}
+
+\code{ESC ] 6 ; 1 ; bg ; red ; brightness ; 255 BEL} sets the
+tab colour in iTerm2. Other terminals have their own
+extensions. \maya{} does not abstract these; if you want to
+target a specific terminal, emit its sequence directly.
+
+\section{Progress in the title}
+
+A useful pattern for batch jobs:
+
+\begin{lstlisting}
+ctx.effect([&] {
+    int pct = ctx.get(progress);
+    maya::set_title(
+        "myapp - " + std::to_string(pct) + "%"
+    );
+});
+\end{lstlisting}
+
+The user sees the progress in their tab bar even when the
+app is not focused.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item OSC 0, 1, 2 set the title.
+  \item OSC 7 announces the cwd.
+  \item OSC 9 raises a notification (iTerm2 extension).
+  \item Bell is a one-byte attention prod.
+  \item \maya{} pushes/pops the title around its lifetime.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Bind the title to your app's current state (file
+    name, view, percent complete).
+  \item Add OSC 9 notifications for long-running operations
+    when they complete.
+  \item Push/pop the title from a sub-mode (e.g., entering
+    a settings dialog).
+\end{enumerate}

@@ -1,0 +1,167 @@
+\chapter{Cursor shapes and visibility}
+\label{ch:cursor}
+
+\begin{aside}
+The cursor is a single cell of state that controls how the user
+feels about input. Slow it down and the app feels sluggish.
+Blink it where it shouldn't be and the app feels nervous. Hide
+it when not needed and the screen feels calm.
+\end{aside}
+
+\section{Six shapes}
+
+DECSCUSR (DEC Set Cursor Style, \code{ESC [ N q}) picks the
+shape:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{0} or \code{1}: blinking block (default).
+  \item \code{2}: steady block.
+  \item \code{3}: blinking underline.
+  \item \code{4}: steady underline.
+  \item \code{5}: blinking bar (I-beam).
+  \item \code{6}: steady bar.
+\end{itemize}
+
+\maya{} exposes a \code{set\_cursor\_shape(...)} call. By
+convention, vim-like modal apps use:
+
+\begin{itemize}[leftmargin=*]
+  \item Steady block for normal mode.
+  \item Steady bar for insert mode.
+  \item Steady underline for visual/select mode.
+\end{itemize}
+
+\section{Visibility}
+
+\code{ESC [ ? 25 l} hides; \code{ESC [ ? 25 h} shows. \maya{}'s
+default is hidden, because most TUI screens are not text inputs
+and the cursor would be a distracting artefact.
+
+A text input element shows the cursor when focused and hides
+it otherwise. \maya{} tracks ``the focused input wants the
+cursor at $(x, y)$'' and emits the position at end of frame
+along with the shape and visibility state.
+
+\section{Position}
+
+\code{ESC [ y ; x H} moves the cursor (1-based row and column).
+\maya{} emits this at the end of every frame to position the
+cursor where the focused input wants it, then shows it.
+
+If no input has focus, no position is emitted and the cursor
+stays hidden.
+
+\section{Blink}
+
+The terminal does the blinking; the application has no
+control over the rate. xterm's default is 500 ms half-period.
+
+Some users find blinking distracting. Steady shapes are
+available for them. \maya{} does not enforce a blink/steady
+choice; it follows the application's request.
+
+\begin{funfact}
+The IBM 2741 terminal (1965) had a mechanical cursor: a
+solenoid pushed a small block of metal up to mark the
+typing position. Blinking is a much later invention; early
+CRTs simply held the position.
+\end{funfact}
+
+\section{Cursor and the diff}
+
+The diff in Chapter~\ref{ch:diffloop} emits cursor moves as part
+of run-to-run navigation. After the diff, the cursor is at the
+end of the last run. If the focused input wants it elsewhere,
+one more move is emitted.
+
+For typical UIs this final move is 8 bytes of ANSI. Cheap.
+
+\section{Restoring on exit}
+
+On exit, \maya{} emits \code{ESC [ 0 q} (reset cursor shape)
+and \code{ESC [ ? 25 h} (show). These are part of the
+shutdown ANSI bundle along with alt-screen exit, mouse-mode
+off, and bracketed-paste off.
+
+If the program crashes without running the shutdown, the
+cursor may be left in a strange shape. \maya{} installs a
+\code{std::atexit} hook to be safe; the hook is idempotent.
+
+\begin{warning}
+A crashed app with cursor hidden is hard for users to
+recover from. Always install the show-cursor hook even if
+the rest of cleanup is debatable.
+\end{warning}
+
+\section{Multiple cursors}
+
+The terminal has one cursor. To simulate multiple cursors
+(for column editing, for instance) you must draw them yourself
+as styled cells (reverse video, bold, or a coloured block) and
+let the real cursor sit invisible.
+
+\maya{} provides \code{caret} as an element that draws a fake
+cursor at a logical position. Use it for editor-like UIs that
+need more than one insertion point.
+
+\section{The blink-off frame problem}
+
+Some terminals send a special ``blink off'' redraw every half-
+second to clear the cursor cell. If your diff has been
+disturbed in the cursor cell, the blink-off can leave a stale
+glyph briefly.
+
+DEC 2026 synchronised output fixes this for capable terminals.
+For others, accept the half-second artefact.
+
+\section{Cursor and selection}
+
+When showing a text selection (highlighted range), the cursor
+sits at one end. The selection is drawn as styled cells
+(reverse video, typically); the cursor is the active end.
+
+\maya{}'s text-input widget tracks a head (cursor) and an
+anchor (other end). Drawing the selection is a styled fill of
+the range; positioning the cursor is one move at end of frame.
+
+\section{Cross-terminal behaviour}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{xterm:} all six DECSCUSR shapes work.
+  \item \textbf{Apple Terminal:} only block; bar and underline
+    do nothing.
+  \item \textbf{Windows Terminal:} all six; modern.
+  \item \textbf{tmux:} passes through; depends on the outer
+    terminal.
+  \item \textbf{screen:} mostly passes through; some older
+    versions drop DECSCUSR.
+\end{itemize}
+
+\maya{} sends the request unconditionally. Terminals that
+don't understand it ignore the sequence.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Six DECSCUSR shapes plus a visibility toggle.
+  \item Hidden by default; shown by focused inputs.
+  \item Position is part of end-of-frame ANSI.
+  \item Restore shape and visibility on exit, always.
+  \item Multiple cursors are simulated, not real.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a modal app that switches cursor shape on
+    mode change. Confirm in xterm and in your daily
+    terminal.
+  \item Make the cursor blink rate user-configurable... and
+    discover you cannot, then write that down as a
+    constraint.
+  \item Install a crash test (assert false) and confirm the
+    cursor is restored to a block-and-visible state on the
+    way out.
+\end{enumerate}

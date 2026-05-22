@@ -1,0 +1,295 @@
+\chapter{The canvas and packed cells}
+\label{ch:canvas}
+
+After layout decides where things go, the renderer needs a place to
+paint them. That place is the \textbf{canvas}: a 2-D grid of cells
+representing the terminal screen. \maya{}'s canvas is unusual in two
+ways: each cell is a 64-bit packed integer (not a struct), and the
+canvas is double-buffered (front and back) to support the SIMD diff
+in the next chapter.
+
+\section{What a cell is}
+
+A terminal cell holds:
+
+\begin{itemize}[leftmargin=*]
+  \item A Unicode code point (up to 21 bits).
+  \item A foreground colour, a background colour, and a set of text
+    attributes.
+  \item Optionally, a hyperlink (an OSC-8 URL).
+  \item A width marker: 1 for normal characters, 2 for wide CJK and
+    emoji, 0 for combining marks and the trailing half of a wide
+    cell.
+\end{itemize}
+
+A naive struct would look like:
+
+\begin{lstlisting}
+struct Cell {
+    char32_t cp;        // 4 bytes
+    Color    fg;        // 4 bytes
+    Color    bg;        // 4 bytes
+    uint8_t  attrs;     // 1 byte
+    uint8_t  width;     // 1 byte
+    uint32_t link;      // 4 bytes
+};  // ~18 bytes, padded to 24
+\end{lstlisting}
+
+Two problems. First, that is a lot of memory for an 80x24 grid: 1920
+cells $\times$ 24 bytes = ~46 KiB, and we need two grids
+(double-buffered) = 92 KiB. Second, and more importantly, comparing
+two cells means comparing several fields, which is several
+instructions and several branches.
+
+\section{Packing}
+
+\maya{} packs every cell into a single 64-bit integer:
+
+\begin{lstlisting}
+//  63                                                              0
+// +---------+-------+----------+-----+----------------------------+
+// | width:2 | tag:2 | hyper:14 | sty:16 |     codepoint:30        |
+// +---------+-------+----------+--------+-------------------------+
+\end{lstlisting}
+
+The exact bit layout is in \file{maya/include/maya/render/canvas.hpp};
+the field names and widths above are illustrative. What matters is
+the technique:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Code point} occupies the low bits (Unicode is only
+    21 bits, so 30 is generous).
+  \item \textbf{Style ID} is a 16-bit index into a \code{StylePool}.
+    The pool interns full \code{Style} structs (fg, bg, attrs); the
+    canvas just stores the ID.
+  \item \textbf{Hyperlink ID} likewise indexes a hyperlink pool.
+  \item \textbf{Width marker} and a small tag fill the top.
+\end{itemize}
+
+Two consequences. First, the canvas shrinks to one quarter of the
+naive representation. Second, and crucially: \textbf{cell equality is
+\code{uint64\_t} equality}. One machine instruction. No branches. This
+is the lever \maya{} uses to diff thousands of cells per microsecond
+in the next chapter.
+
+\begin{idea}
+Whenever you find yourself comparing two structs in a hot loop, ask
+whether you can pack them into a single integer. SIMD becomes
+possible the moment your unit of comparison fits in a register lane.
+\end{idea}
+
+\section{The style pool}
+
+The 16-bit style ID is what makes packing work. There are typically
+only a few dozen distinct styles on screen at any time (text colour,
+background, bold, dim, etc.) --- nowhere near the 65536 the ID
+supports. The pool is a simple table of \code{Style} structs plus a
+hash map from \code{Style} to ID:
+
+\begin{lstlisting}
+class StylePool {
+public:
+    StyleId intern(Style s) {
+        auto [it, inserted] = lookup_.try_emplace(s, table_.size());
+        if (inserted) {
+            table_.push_back(s);
+            cache_sgr_.push_back(build_sgr_string(s));
+        }
+        return it->second;
+    }
+
+    const Style&        style(StyleId id) const { return table_[id]; }
+    const std::string&  sgr  (StyleId id) const { return cache_sgr_[id]; }
+
+private:
+    std::vector<Style>      table_;
+    std::vector<std::string> cache_sgr_;     // pre-built SGR per style
+    std::unordered_map<Style, StyleId> lookup_;
+};
+\end{lstlisting}
+
+Two clever bits:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pre-cached SGR.} The first time a \code{Style} is
+    interned, the pool builds the ANSI byte string for it
+    (\code{ESC[1;38;2;100;180;255m} or whatever the style demands).
+    During the render walk, switching style is one \code{memcpy} of
+    the cached SGR --- no formatting, no field comparisons.
+  \item \textbf{Stable IDs across frames.} The pool persists across
+    frames. Frame 2's cells use the same IDs as Frame 1's for the
+    same styles, so cell-level equality (which depends on the ID)
+    still works.
+\end{itemize}
+
+\section{The canvas data structure}
+
+A canvas is two of these grids:
+
+\begin{lstlisting}
+class Canvas {
+    int width_  = 0;
+    int height_ = 0;
+
+    AlignedBuffer front_;   // what's currently on the terminal
+    AlignedBuffer back_;    // what we're drawing next
+
+    StylePool    styles_;
+    HyperlinkPool links_;
+
+    Rect         damage_;   // dirty region for the diff
+    std::vector<Rect> clip_stack_;  // overflow:hidden support
+public:
+    void clear();
+    void set(int x, int y, char32_t cp, StyleId sty);
+    void draw_text(int x, int y, std::string_view utf8, StyleId sty);
+    void flip();   // swap front and back after diff
+    // ...
+};
+\end{lstlisting}
+
+\code{front\_} is what the user is looking at. \code{back\_} is what
+the next frame should look like. Each frame:
+
+\begin{enumerate}[leftmargin=*]
+  \item Clear \code{back\_} (zero-fill, AVX-512 \code{vmovdqu64} when
+    available).
+  \item Walk the element tree; for each visible cell, call
+    \code{back\_.set(x, y, cp, sty)}.
+  \item Diff \code{front\_} against \code{back\_}; emit ANSI for the
+    changed cells.
+  \item Swap roles --- \code{back\_} becomes \code{front\_}.
+\end{enumerate}
+
+This is the classic \emph{double-buffered} pattern.
+
+\subsection{Why 64-byte alignment?}
+
+The \code{AlignedBuffer} class allocates cells aligned to 64-byte
+boundaries (a full CPU cache line). The diff loops in the next chapter
+load 256 bits at a time (AVX2) or 512 bits (AVX-512); unaligned loads
+cost cycles when they cross a cache line. Aligning to 64 bytes
+guarantees the SIMD loads never split a line.
+
+\section{Drawing text}
+
+The text-drawing path looks innocuous but does Unicode work:
+
+\begin{lstlisting}
+void Canvas::draw_text(int x, int y, std::string_view utf8, StyleId sty) {
+    int cx = x;
+    for (char32_t cp : utf8_decode(utf8)) {
+        int w = unicode_width(cp);
+        if (w == 0) {
+            // combining mark - attach to previous cell (skipped for brevity)
+        } else if (w == 1) {
+            set(cx, y, cp, sty);
+            cx += 1;
+        } else if (w == 2) {
+            set(cx,     y, cp, sty, /*width=*/2);
+            set(cx + 1, y, 0,  sty, /*width=*/0);  // trailing half
+            cx += 2;
+        }
+    }
+}
+\end{lstlisting}
+
+The wide-character handling is what keeps CJK and emoji from
+corrupting the layout. The lookup table at
+\file{maya/include/maya/text/unicode\_width\_table.hpp} is generated
+from the Unicode standard's \code{EastAsianWidth.txt} and
+\code{emoji-data.txt} by the script
+\file{maya/scripts/gen\_unicode\_width.py}.
+
+\section{The damage rectangle}
+
+To avoid diffing the entire canvas every frame, \maya{} tracks the
+bounding box of any cell that has been written this frame:
+
+\begin{lstlisting}
+void Canvas::set(int x, int y, char32_t cp, StyleId sty) {
+    back_[y * width_ + x] = pack(cp, sty);
+    damage_ = damage_ | Rect{x, y, 1, 1};   // union the rectangle
+}
+\end{lstlisting}
+
+The diff in the next chapter visits only the cells inside
+\code{damage\_}. If most of the screen is unchanged (the typical
+case for steady-state UIs), the diff is fast in proportion to what
+moved, not in proportion to the screen size.
+
+\subsection{The clip stack}
+
+A box with \code{overflow: Hidden} (a scrollable list, a modal) needs
+its rendering clipped to its rectangle. \maya{} pushes the clip
+rectangle onto a stack and intersects every \code{set()} with the
+current top:
+
+\begin{lstlisting}
+void Canvas::push_clip(Rect r) { clip_stack_.push_back(intersect(top(), r)); }
+void Canvas::pop_clip()        { clip_stack_.pop_back(); }
+\end{lstlisting}
+
+Children that try to draw outside the clip simply have their writes
+silently dropped.
+
+\section{Resize}
+
+When \code{SIGWINCH} fires, the runtime queries the new size and
+calls \code{canvas.resize(w, h)}. The buffers reallocate (preserving
+old contents is unnecessary --- the next frame redraws everything),
+the damage rect is set to the full new screen, and the next paint
+emits ANSI for the whole grid.
+
+\subsection{Shrinking after a wide window}
+
+A neat detail: if the user grows the terminal to 200 cells wide, runs
+the app, then shrinks back to 80 cells, the AlignedBuffer would
+otherwise stay at the wide capacity forever. \maya{} ships
+\code{shrink\_to\_fit\_if\_oversized} that releases capacity when at
+most half of it is in use, to avoid permanent over-allocation but
+also to avoid thrashing the allocator on tiny oscillations.
+
+\section{Putting it together}
+
+A frame, end to end, in pseudocode:
+
+\begin{lstlisting}
+void Renderer::frame(const Element& root) {
+    canvas.clear_back();
+    layout::compute(layout_tree, /*root=*/0, canvas.width());
+    paint_visit(canvas, layout_tree, /*node=*/0);   // fills back_
+
+    std::string ansi;
+    diff(canvas.front(), canvas.back(),
+         canvas.damage(), canvas.styles(), ansi);   // SIMD-accelerated
+    writer.write(ansi);
+
+    canvas.flip();
+}
+\end{lstlisting}
+
+The chapter has set up everything but the diff. That is next.
+
+\begin{recap}
+The canvas is a double-buffered grid of packed 64-bit cells.
+Packing makes cell equality a single integer comparison; the style
+pool interns full \code{Style} structs into 16-bit IDs. A damage
+rectangle limits the next chapter's diff to the changed region.
+Wide characters and clip regions are handled in the same data
+structure.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Open \file{maya/include/maya/render/canvas.hpp} and find the
+    \code{pack()} / \code{unpack()} helpers. Note the bit layout.
+  \item Run an example with wide characters
+    (\file{examples/messenger.cpp}). Notice how alignment stays
+    correct when the text contains emoji.
+  \item Estimate, on the back of an envelope, the byte cost of an
+    80x24 canvas (1920 cells), then double it for the two buffers,
+    then add typical pool sizes. You should land near 32 KiB ---
+    well under L1 cache.
+\end{enumerate}

@@ -1,0 +1,321 @@
+\chapter{Cmd, Sub, and the runtime}
+\label{ch:cmdsub}
+
+Chapter~\ref{ch:elm} introduced \code{Cmd<Msg>} as the type of
+``effects as data.'' This chapter goes deeper: every alternative of
+\code{Cmd}, every alternative of \code{Sub}, how the runtime
+interprets them, and how background work plays with the pure
+\code{update} function.
+
+\section{The full \code{Cmd<Msg>} variant}
+
+\begin{lstlisting}
+template <typename Msg>
+class Cmd {
+public:
+    struct None        {};
+    struct Quit        {};
+    struct Batch       { std::vector<Cmd> cmds; };
+    struct After       { std::chrono::milliseconds delay; Msg msg; };
+    struct SetTitle    { std::string title; };
+    struct WriteClipboard { std::string content; };
+    struct Task        { std::function<void(std::function<void(Msg)>)> run; };
+    struct IsolatedTask { std::function<void(std::function<void(Msg)>)> run; };
+    struct CommitRows  { int rows; };
+    // ... and a few more
+};
+\end{lstlisting}
+
+Each alternative is a small struct. Smart constructors give the
+ergonomic API:
+
+\begin{lstlisting}
+Cmd<Msg> cmd1 = Cmd<Msg>::quit();
+Cmd<Msg> cmd2 = Cmd<Msg>::after(std::chrono::seconds(1), Tick{});
+Cmd<Msg> cmd3 = Cmd<Msg>::write_clipboard("hello");
+Cmd<Msg> cmd4 = Cmd<Msg>::batch({cmd1, cmd2, cmd3});
+\end{lstlisting}
+
+Let us tour each one.
+
+\subsection{\code{None} --- the identity}
+
+The do-nothing effect. Returned by \code{update} when there is no
+side effect to perform. Equivalent to \code{Cmd<Msg>\{\}} (default
+construction).
+
+\subsection{\code{Quit} --- exit the program}
+
+The runtime, on seeing \code{Quit}, breaks out of its main loop,
+restores cooked mode, exits alt-screen, and returns from
+\code{run<P>()}. \code{main} then returns.
+
+\subsection{\code{Batch} --- multiple effects}
+
+\begin{lstlisting}
+Cmd<Msg> save_and_quit = Cmd<Msg>::batch({
+    Cmd<Msg>::write_clipboard(model.text),
+    Cmd<Msg>::quit(),
+});
+\end{lstlisting}
+
+Batched commands are interpreted in order. The runtime walks the
+vector and dispatches each one. There is no concurrency guarantee
+\emph{within} a batch --- \code{Task} commands inside a batch may
+finish in any order.
+
+\subsection{\code{After} --- one-shot timer}
+
+\begin{lstlisting}
+return {model, Cmd<Msg>::after(std::chrono::seconds(3), Hide{})};
+\end{lstlisting}
+
+The runtime schedules a one-shot timer; when it fires, it dispatches
+the \code{Hide\{\}} \code{Msg} into \code{update} as if it had come
+from the user. Useful for toasts (auto-hide after N seconds), debouncing,
+retry backoff.
+
+\subsection{\code{SetTitle} --- set the terminal title}
+
+Writes \code{ESC]0;\emph{title}ESC\textbackslash} to set the
+terminal's window title. Most emulators honour it.
+
+\subsection{\code{WriteClipboard} --- OSC-52 clipboard}
+
+Writes \code{ESC]52;c;\emph{base64}ESC\textbackslash}, the OSC-52
+``set system clipboard'' sequence. Modern emulators (kitty, iTerm2,
+WezTerm) honour it, even over SSH. \maya{} provides a portable
+path that falls back to xclip / pbcopy / clip.exe on terminals
+that do not.
+
+\subsection{\code{Task} --- async work on a shared pool}
+
+The escape hatch for \emph{arbitrary} side effects:
+
+\begin{lstlisting}
+return {model, Cmd<Msg>::task([](auto dispatch) {
+    auto result = http_get("https://example.com/data");
+    dispatch(Loaded{std::move(result)});
+})};
+\end{lstlisting}
+
+The lambda receives a \code{dispatch} callback. It runs on \maya{}'s
+shared, elastic-but-bounded background thread pool. When it calls
+\code{dispatch(msg)}, the runtime feeds \code{msg} into the next
+\code{update} call as if it had come from any other source.
+
+Use \code{Task} for short tasks: HTTP calls, file reads, tiny
+shell-outs. The pool is bounded; if you saturate it, subsequent
+tasks queue.
+
+\subsection{\code{IsolatedTask} --- async work on a dedicated thread}
+
+Same shape as \code{Task}, but each \code{IsolatedTask} gets its own
+detached \code{std::thread}. Use this for work that can wedge
+indefinitely on a blocking syscall: slow filesystem mounts, network
+freezes, sandboxed subprocesses that may hang. A wedged isolated
+task leaks one thread; a wedged \code{Task} would consume a slot in
+the shared pool permanently. The trade is some thread-construction
+overhead per call ($\sim$100-300 microseconds).
+
+\subsection{\code{CommitRows} --- inline-mode scrollback commit}
+
+As described in Chapter~\ref{ch:inline}: tells the inline renderer
+to mark the top \code{n} rows of the current frame as committed to
+scrollback. The next frame starts below them.
+
+\section{The \code{Cmd} functor}
+
+If you build composite UIs, each sub-component has its own
+\code{Msg} type. To embed a child component's \code{Cmd<ChildMsg>}
+into a parent's \code{Cmd<ParentMsg>}, \code{Cmd} provides a
+\code{map} (the categorical-functor \code{fmap}):
+
+\begin{lstlisting}
+Cmd<ChildMsg> child_cmd = child_update(...);
+Cmd<ParentMsg> parent_cmd = child_cmd.map([](ChildMsg cm) -> ParentMsg {
+    return ParentMsg::FromChild{std::move(cm)};
+});
+\end{lstlisting}
+
+\code{map} walks every alternative; for those that carry a \code{Msg}
+(\code{After}, \code{Task}, \code{IsolatedTask}), it wraps the
+inner \code{Msg} with the provided function. The result is a new
+\code{Cmd} the parent runtime can interpret.
+
+This is exactly Elm's \code{Cmd.map}; it is what makes the
+architecture compose to many nested components without leaking
+their message types upward.
+
+\section{The full \code{Sub<Msg>} variant}
+
+Subscriptions describe event sources you want active right now:
+
+\begin{lstlisting}
+template <typename Msg>
+class Sub {
+public:
+    struct Keys     { std::function<std::optional<Msg>(Key)>   f; };
+    struct Mouse    { std::function<std::optional<Msg>(Mouse)> f; };
+    struct Resize   { std::function<std::optional<Msg>(Size)>  f; };
+    struct Paste    { std::function<std::optional<Msg>(std::string)> f; };
+    struct Focus    { std::function<std::optional<Msg>(bool)>  f; };
+    struct Tick     { std::chrono::milliseconds period; std::function<Msg()> f; };
+    struct Batch    { std::vector<Sub> subs; };
+    // ...
+};
+\end{lstlisting}
+
+Each subscription is a function that takes a typed event and
+returns a \code{Msg} (or \code{nullopt} to ignore). The runtime
+samples them on every iteration.
+
+Builders:
+
+\begin{lstlisting}
+auto subs = Sub<Msg>::batch({
+    key_map<Msg>({{'q', Quit{}}, {'r', Refresh{}}}),
+    Sub<Msg>::tick(std::chrono::seconds(1), []{ return Tick{}; }),
+    Sub<Msg>::mouse([](Mouse m) -> std::optional<Msg> {
+        if (m.action == MouseAction::Press)
+            return Click{m.x, m.y};
+        return std::nullopt;
+    }),
+});
+\end{lstlisting}
+
+\code{subscribe} returns this whole tree on every frame, so it can
+\emph{depend on the model}: a help-modal-open model returns
+different keybindings than a help-modal-closed one. The runtime
+re-samples each frame, so changing the subscription set is just
+returning a different \code{Sub} from \code{subscribe}.
+
+\section{The runtime loop, expanded}
+
+Now we can sketch the runtime in full:
+
+\begin{lstlisting}
+template <Program P>
+void run(RunConfig cfg) {
+    auto [model, cmd0] = P::init();
+    Terminal term{cfg.mode};                  // RAII raw mode + alt-screen
+    Writer   writer{term.fd()};
+    Renderer renderer{cfg};
+    EventSource events{term.fd()};
+    BgPool      bg;
+
+    auto interpret = [&](Cmd<typename P::Msg> cmd) {
+        std::visit(overload{
+            [&](Cmd<Msg>::None) {},
+            [&](Cmd<Msg>::Quit) { quit_requested = true; },
+            [&](Cmd<Msg>::Batch& b) {
+                for (auto& c : b.cmds) interpret(std::move(c));
+            },
+            [&](Cmd<Msg>::After& a) {
+                bg.timer(a.delay, [a]{ events.dispatch(a.msg); });
+            },
+            [&](Cmd<Msg>::SetTitle& s) {
+                writer.write(set_title(s.title));
+            },
+            [&](Cmd<Msg>::Task& t) {
+                bg.run([t](auto dispatch) { t.run(dispatch); });
+            },
+            // ... more arms ...
+        }, cmd);
+    };
+
+    interpret(std::move(cmd0));
+
+    while (!quit_requested) {
+        renderer.paint(P::view(model), writer);
+
+        auto subs = P::subscribe(model);
+        Event ev = events.wait();             // poll(2) + wake_fd
+
+        auto msg = match_event(ev, subs);     // produce a Msg via subs
+        if (!msg) continue;                    // event ignored
+
+        auto [next_model, next_cmd] = P::update(std::move(model), *msg);
+        model = std::move(next_model);
+        interpret(std::move(next_cmd));
+    }
+}
+\end{lstlisting}
+
+That is the entire shape. Roughly 70 lines of real code; the
+\maya{} version is longer because it handles error recovery,
+inline-mode redraw, signal-driven dirty checking, and Windows.
+
+\section{Other entry points}
+
+\code{run<P>()} is the canonical entry point. \maya{} provides three
+others for common short-form cases:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{run(event\_fn, render\_fn)} --- the quick-tool form
+    shown in Chapter~\ref{ch:intro}. Internally constructs a
+    trivial \code{Program} that closes over signals.
+  \item \code{live(render\_fn)} --- animated output, no event loop.
+    Useful for progress bars and live monitors. Calls
+    \code{render\_fn(dt)} every frame.
+  \item \code{canvas\_run(setup, event\_fn, paint\_fn)} --- imperative
+    Canvas access. Useful for games, demos, and visualisations
+    where the abstraction of layout is in the way.
+  \item \code{print(element)} --- one-shot, no event loop. Useful
+    for command-line tools that just want a styled banner.
+\end{itemize}
+
+All four lead to the same underlying terminal driver and rendering
+pipeline. The difference is in how state is managed.
+
+\section{Testing a Program without a terminal}
+
+Because \code{Program} is just four pure functions, you can drive
+it without ever opening a terminal:
+
+\begin{lstlisting}
+TEST_CASE("counter goes up on Inc and stays put on Quit") {
+    auto [m0, _0] = Counter::init();
+    REQUIRE(m0.count == 0);
+
+    auto [m1, _1] = Counter::update(m0, Counter::Inc{});
+    REQUIRE(m1.count == 1);
+
+    auto [m2, _2] = Counter::update(m1, Counter::Quit{});
+    REQUIRE(m2.count == 1);   // Quit shouldn't increment
+}
+\end{lstlisting}
+
+You can also assert on the \code{Cmd} that came back:
+
+\begin{lstlisting}
+auto [_, cmd] = Counter::update(m, Counter::Quit{});
+REQUIRE(std::holds_alternative<Cmd<Msg>::Quit>(cmd.inner));
+\end{lstlisting}
+
+This is the testing superpower of effects-as-data: you don't need a
+terminal, you don't need a clipboard, you don't need a network ---
+you just match on the value the function returned.
+
+\begin{recap}
+\code{Cmd<Msg>} is the algebra of effects the runtime knows how to
+perform. \code{Sub<Msg>} is the algebra of event sources the runtime
+samples. Both are sum types with smart constructors and a
+functor-style \code{map}. The runtime is a tiny loop: paint, wait
+for an event, dispatch through the subs to get a \code{Msg}, call
+\code{update}, interpret the returned \code{Cmd}, repeat.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a toast: a \code{Msg} that shows a message, scheduled
+    by \code{Cmd::after} to dispatch a \code{HideToast} after 3
+    seconds.
+  \item Add a \code{Cmd::task} that performs a slow operation
+    (\code{std::this\_thread::sleep\_for(2s)}) and dispatches a
+    \code{Loaded} \code{Msg}. Notice the UI stays responsive.
+  \item Read \file{maya/include/maya/core/cmd.hpp}. Find the
+    \code{map} method on \code{Cmd}. Trace how it walks the
+    variant and rewraps the inner \code{Msg}.
+\end{enumerate}

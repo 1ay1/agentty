@@ -1,0 +1,79 @@
+\chapter{Patterns: derived state}
+\label{ch:derived}
+
+\begin{aside}
+Many UI values are derived from others. Total of a list,
+filtered subset, formatted display string. Memos are the
+tool.
+\end{aside}
+
+\section{Computed values}
+
+\begin{lstlisting}
+auto items = signal<std::vector<Item>>(...);
+auto total = memo([&] {
+    int sum = 0;
+    for (auto& i : ctx.get(items))
+        sum += i.value;
+    return sum;
+});
+\end{lstlisting}
+
+The memo re-runs only when items changes. Other code reads
+the memo as a signal.
+
+\section{Chained memos}
+
+\begin{lstlisting}
+auto items = signal<...>(...);
+auto query = signal<std::string>("");
+auto filtered = memo([&] {
+    return filter(ctx.get(items), ctx.get(query));
+});
+auto count = memo([&] {
+    return ctx.get(filtered).size();
+});
+\end{lstlisting}
+
+A change to query triggers filtered, then count. Effects on
+count fire if and only if count actually changed.
+
+\section{When not to memo}
+
+Cheap computations don't need memoisation. If the function
+is ``return x + 1'', just inline.
+
+The memo machinery costs some bytes per entry; use when
+the computation is non-trivial or the subscribers are many.
+
+\section{Async derived state}
+
+For derivations that need I/O, use an async effect that
+writes to a signal:
+
+\begin{lstlisting}
+ctx.async_effect([&]() -> Task<void> {
+    auto id = ctx.get(user_id);
+    auto data = co_await fetch(id);
+    ctx.set(user_data, data);
+});
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Memo for sync derivations.
+  \item Async effect for I/O-bound derivations.
+  \item Chain memos to layer derivations.
+  \item Don't memo trivia.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Identify three derived values in your app.
+  \item Convert each to a memo.
+  \item Profile before and after.
+\end{enumerate}

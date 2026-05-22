@@ -1,0 +1,199 @@
+\chapter{Inline images and graphics protocols}
+\label{ch:images}
+
+\begin{aside}
+The terminal was always character-cell. Then someone wanted to
+embed a thumbnail in their file browser. Two protocols compete
+to make that work, plus one venerable hack from the 1970s.
+\end{aside}
+
+\section{Three protocols}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Sixel.} DEC's 1980s format: each pixel encoded
+    as a six-bit byte representing a 1x6 column of pixels.
+    Supported by xterm (compile flag), foot, mlterm, Wezterm.
+  \item \textbf{iTerm2.} Image-as-base64 plus a custom escape.
+    Supported by iTerm2 and Wezterm.
+  \item \textbf{Kitty.} A chunked, multi-frame, palette-aware
+    protocol. Supported by Kitty and Wezterm.
+\end{itemize}
+
+\maya{} can use any of the three; the detection sequence picks
+the most capable.
+
+\section{Sixel basics}
+
+A sixel byte encodes six vertically stacked pixels. Bit 0 is
+the top, bit 5 is the bottom. The character is \code{(byte + 63)}
+to put it in the printable ASCII range.
+
+A sixel string looks like:
+
+\begin{lstlisting}
+ESC P 7 ; 1 q "1;1;100;60 #0;2;100;100;100 #0!100? -- $
+\end{lstlisting}
+
+Where:
+\begin{itemize}[leftmargin=*]
+  \item \code{ESC P 7 ; 1 q}: enter sixel mode.
+  \item \code{"1;1;100;60}: aspect and size.
+  \item \code{\#0;2;100;100;100}: define colour 0 as RGB.
+  \item Glyphs are pixel data; \code{!100?} is run-length
+    encoding (100 copies of \code{?}).
+  \item \code{-} starts a new sixel row; \code{\$} carriage
+    return within a row.
+\end{itemize}
+
+It is grim to write by hand. \maya{} ships an encoder.
+
+\section{iTerm2}
+
+The iTerm2 protocol is simpler. Encode the image as base64 and
+wrap:
+
+\begin{lstlisting}
+ESC ] 1337 ; File = inline=1 ; size=BYTES ; name=BASE64NAME :
+       BASE64DATA BEL
+\end{lstlisting}
+
+Decode: the terminal renders the image at the current cursor
+position, scaling to fit cell boundaries or to a specified
+geometry.
+
+This is easier to emit but offers less control: no animation,
+no palette, no chunking.
+
+\section{Kitty protocol}
+
+The Kitty protocol allows everything: chunked transfers (split
+large images across multiple escape sequences), placement IDs
+(modify a placed image later), animations, palette images,
+exact cell-bound placement.
+
+A simple Kitty placement:
+
+\begin{lstlisting}
+ESC _ G a=T,f=32,s=WIDTH,v=HEIGHT,c=COLS,r=ROWS ;
+       BASE64DATA ESC \
+\end{lstlisting}
+
+Where \code{a=T} means ``transmit and display'', \code{f=32}
+is the format (RGBA), and \code{s,v} are the pixel
+dimensions.
+
+\maya{}'s image element wraps this:
+
+\begin{lstlisting}
+auto thumb = image(load("cat.png"))
+           | width(20) | height(10);
+\end{lstlisting}
+
+\section{Cell-pixel sizing}
+
+To place an image at a cell-grid boundary, you need to know
+the terminal's cell size in pixels. \maya{} queries with
+\code{ESC [ 16 t} (cell size) at startup; the reply is
+\code{ESC [ 6 ; H ; W t}.
+
+Without a reply, \maya{} falls back to a heuristic: 8x16 for
+most fonts. Inline images may look off-grid; the user can
+resize or set an explicit cell size in config.
+
+\section{Z-stacking}
+
+Inline images sit on top of cells. When the diff redraws a
+cell that an image overlaps, the image must be re-emitted or
+it will be clipped.
+
+\maya{}'s renderer tracks image placements and re-emits them
+after any frame that touches their region. For a static image
+in a quiet UI, this is one emission. For an image surrounded
+by changing cells, it is more.
+
+\begin{warning}
+Inline images are expensive. A 320x240 image is roughly 80 KB
+of base64 per emission. Frequent re-emission is wire-heavy.
+Place images in stable regions (e.g. fixed-position thumbnail
+panels), not in scrolling areas.
+\end{warning}
+
+\section{Animations and APNG}
+
+The Kitty protocol supports animations with frame chunks and
+timing metadata. \maya{} can emit a multi-frame placement and
+the terminal handles the animation.
+
+The application emits frames; the terminal owns timing. This is
+the opposite of how widget animations work (where \maya{} owns
+timing). The reason: terminal-side animations don't wake the
+application thread, so a spinner does not cost CPU.
+
+\section{The unicode block trick}
+
+For terminals without any image protocol, a low-res
+approximation uses the half-block character \code{U+2580}:
+
+\begin{itemize}[leftmargin=*]
+  \item Foreground colour: the top half of the cell.
+  \item Background colour: the bottom half.
+  \item Glyph: \code{\u{2580}} (upper half block).
+\end{itemize}
+
+Each cell encodes two pixels. A 40x24-cell image is 40x48 pixels.
+
+\maya{}'s \code{block\_image} element uses this. It looks
+chunky but works on any terminal.
+
+\begin{funfact}
+The half-block trick is older than the web; it appeared in
+TRS-80 and Apple II graphics modes via the same characters.
+The terminal world reused the technique with the addition of
+RGB colour.
+\end{funfact}
+
+\section{Image element API}
+
+\begin{lstlisting}
+auto img = image(path_or_buffer)
+         | width(40) | height(12)    // in cells
+         | fit(Fit::Contain);        // or Cover, Stretch
+\end{lstlisting}
+
+The fit modes:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Contain.} Scale to fit, preserve aspect; may
+    leave empty cells.
+  \item \textbf{Cover.} Scale to fill, preserve aspect; may
+    crop.
+  \item \textbf{Stretch.} Distort to fit exactly.
+\end{itemize}
+
+\section{Loading}
+
+\maya{} ships PNG and JPEG decoders. SVG is not built in;
+rasterise to PNG first with a tool. Animated GIF is decoded
+to frames and looped via the protocol.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Sixel, iTerm2, Kitty: three live protocols.
+  \item Cell-pixel sizing via \code{ESC [ 16 t}.
+  \item Re-emit images after diff overlaps.
+  \item Half-block trick for terminals without any protocol.
+  \item Fit modes: Contain, Cover, Stretch.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Detect which image protocol your terminal supports.
+    Display the result in your status bar.
+  \item Build a thumbnail panel for an image directory.
+  \item Toggle between Kitty protocol and the half-block
+    fallback at runtime. Compare visual quality and wire
+    cost.
+\end{enumerate}

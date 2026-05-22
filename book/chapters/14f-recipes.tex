@@ -1,0 +1,90 @@
+\chapter{Recipes: small, complete examples}
+\label{ch:recipes}
+
+\begin{aside}
+A grab bag of useful little programs. Copy and adapt.
+\end{aside}
+
+\section{Centred greeting}
+
+\begin{lstlisting}
+auto greeting = center(text("Hello, world"));
+maya::run(greeting);
+\end{lstlisting}
+
+\section{Counter}
+
+\begin{lstlisting}
+auto count = signal(0);
+auto view = column(
+    text("Count: " + std::to_string(ctx.get(count))),
+    button("+", [&] { ctx.set(count, ctx.get(count) + 1); })
+);
+\end{lstlisting}
+
+\section{Input with live preview}
+
+\begin{lstlisting}
+auto name = signal<std::string>("");
+auto view = column(
+    text_input(name),
+    text("Hello, " + ctx.get(name) + "!")
+);
+\end{lstlisting}
+
+\section{Todo list}
+
+\begin{lstlisting}
+struct Todo { std::string text; bool done; };
+auto todos = signal<std::vector<Todo>>({});
+
+auto view = column(
+    virtual_list(todos, [&](int i, Todo& t) {
+        return row(
+            checkbox(t.done),
+            text(t.text)
+        );
+    }),
+    new_todo_input(...)
+);
+\end{lstlisting}
+
+\section{Stopwatch}
+
+\begin{lstlisting}
+auto elapsed = signal<Duration>(0s);
+ctx.interval(10ms, [&] {
+    elapsed += 10ms;
+});
+auto view = text(format("{:.2f} s", elapsed.count()));
+\end{lstlisting}
+
+\section{File viewer}
+
+\begin{lstlisting}
+auto path = signal<std::string>("");
+auto content = memo([&] {
+    return load_file(ctx.get(path));
+});
+auto view = column(
+    text_input(path),
+    code_block(ctx.get(content)) | scrollable
+);
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Each example fits in a screen of code.
+  \item Composition + signals = a lot of UI quickly.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Type each recipe and run.
+  \item Combine three into one app.
+  \item Build your own recipe.
+\end{enumerate}

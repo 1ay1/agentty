@@ -1,0 +1,135 @@
+\chapter{Effects, schedulers, and microtasks}
+\label{ch:effects}
+
+\begin{aside}
+An effect is the workhorse of reactivity. The scheduler
+decides when each effect runs. Microtasks are the small jobs
+that need to happen ``soon'' but not synchronously.
+\end{aside}
+
+\section{Eager vs deferred}
+
+An effect runs eagerly when its dependencies change. ``Eager''
+in \maya{} means ``before the next frame''. A signal set
+inside an event handler triggers effects after the handler
+returns, before render.
+
+\section{Order of execution}
+
+When multiple effects are dirty, the runtime fires them in
+topological order: an effect that depends on another's output
+runs second.
+
+\maya{} computes this order at registration time using the
+dependency graph. Cycles, if any, break the order; the
+runtime warns.
+
+\section{Microtask queue}
+
+A microtask is a deferred function that runs at the next
+``safe point'' (between event handler and render). Used for:
+
+\begin{itemize}[leftmargin=*]
+  \item Continuations after async work.
+  \item Cleanup that must happen before the next frame.
+  \item Batched updates across multiple events.
+\end{itemize}
+
+Queue with \code{ctx.microtask(...)}; the loop drains
+the queue before rendering.
+
+\section{Idle callbacks}
+
+For low-priority work (telemetry, prefetch), an idle
+callback runs when the loop is otherwise quiet:
+
+\begin{lstlisting}
+ctx.on_idle([&] { precompute_thumbnail(); });
+\end{lstlisting}
+
+The callback fires after the loop has been idle for a
+threshold (50 ms default).
+
+\section{Effect strategies}
+
+Different effect kinds:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{effect}: runs on every dependency change.
+  \item \code{effect\_throttled}: at most once per N ms.
+  \item \code{effect\_debounced}: after N ms of quiet.
+  \item \code{effect\_first}: runs once on first change.
+\end{itemize}
+
+\section{Cleanup}
+
+An effect can register a cleanup to run before its next
+invocation:
+
+\begin{lstlisting}
+ctx.effect([&] {
+    auto timer = start_timer(...);
+    return [timer] { cancel_timer(timer); };
+});
+\end{lstlisting}
+
+The returned lambda is the cleanup. On the next run (or
+unmount) the cleanup fires first.
+
+\section{Async effects}
+
+An effect can spawn an async job:
+
+\begin{lstlisting}
+ctx.effect([&] {
+    auto id = ctx.get(user_id);
+    spawn([id] {
+        auto data = fetch(id);
+        post_to_main_thread([&] {
+            ctx.set(user_data, data);
+        });
+    });
+});
+\end{lstlisting}
+
+The spawned thread does work; the main thread receives the
+result via a post-back. Signal updates must happen on the
+main thread.
+
+\section{Suspension}
+
+For coroutines, an effect can co\_await a future:
+
+\begin{lstlisting}
+ctx.async_effect([&]() -> Task {
+    auto data = co_await fetch(...);
+    ctx.set(loaded, data);
+});
+\end{lstlisting}
+
+The runtime resumes the coroutine on the main thread when
+the future completes.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Effects fire eagerly between event and render.
+  \item Topological order ensures dependents see updated
+    inputs.
+  \item Microtasks for ``soon, not now''.
+  \item Idle callbacks for ``when nothing else needs to
+    happen''.
+  \item Throttle, debounce, cleanup, async variants.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a debounced effect that saves text input
+    after 500 ms of quiet.
+  \item Use an idle callback for analytics.
+  \item Implement an async effect with cleanup that
+    cancels mid-flight.
+\end{enumerate}

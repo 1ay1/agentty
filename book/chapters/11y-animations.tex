@@ -1,0 +1,140 @@
+\chapter{Animations and easing}
+\label{ch:animations}
+
+\begin{aside}
+Snap-changes feel sudden; tweened changes feel polished. A
+quarter-second fade is the difference between a popup that
+appears and a popup that arrives.
+\end{aside}
+
+\section{The interpolator}
+
+An animation maps time to a value:
+
+\begin{lstlisting}
+auto fade = animate(300ms, [](float t) {
+    return lerp(0.0f, 1.0f, t);
+});
+\end{lstlisting}
+
+The runtime ticks $t$ from 0 to 1 over 300 ms and calls the
+lambda. The return value drives a signal which drives a
+re-render.
+
+\section{Easing}
+
+Linear time often feels mechanical. Easing curves shape the
+$t$ value:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ease\_in}: slow start, fast finish.
+  \item \code{ease\_out}: fast start, slow finish.
+  \item \code{ease\_in\_out}: slow at both ends.
+  \item \code{spring}: overshoot and settle.
+  \item \code{bounce}: ballistic return.
+\end{itemize}
+
+The cubic-bezier formulation:
+
+\begin{lstlisting}
+float ease_in_out(float t) {
+    return t < 0.5f
+         ? 2 * t * t
+         : 1 - std::pow(-2*t + 2, 2) / 2;
+}
+\end{lstlisting}
+
+\section{Composing}
+
+Animations compose:
+
+\begin{itemize}[leftmargin=*]
+  \item Sequential: A then B then C.
+  \item Parallel: A and B simultaneously.
+  \item Conditional: A if X, else B.
+\end{itemize}
+
+\maya{}'s \code{seq()}, \code{par()}, \code{when()}
+combinators build these from primitives.
+
+\section{Frame rate}
+
+The runtime ticks at a fixed rate (60 Hz default). Each
+animation gets a frame; multiple animations share one
+frame.
+
+A long-running animation does not block the loop --- it
+schedules a wake at its next tick deadline and otherwise
+sleeps.
+
+\section{Interrupting}
+
+An animation that is interrupted (state changes mid-tween)
+either:
+
+\begin{itemize}[leftmargin=*]
+  \item Snaps to current state and starts a new tween from
+    there.
+  \item Reverses (good for ``open / close'' animations).
+  \item Cancels.
+\end{itemize}
+
+The choice is per-animation. Snapping causes visual jolts;
+reversing is smoother; cancelling leaves the value in an
+intermediate state.
+
+\section{Performance}
+
+A frame with 100 active animations runs 100 callbacks per
+tick. Each callback is cheap (one arithmetic op typically)
+but they add up. For very large animation counts, batch:
+one callback that updates many values.
+
+\section{Disabled motion}
+
+Some users (vestibular disorders, terminal in motion on a
+phone) prefer reduced motion. Respect:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{REDUCE\_MOTION=1} environment variable.
+  \item Application setting.
+\end{itemize}
+
+When set, animations snap to end state instantly.
+
+\begin{warning}
+Animations are a polish, not a function. Snap-mode must
+always be a viable path; never make UI rely on the
+in-between frames for information.
+\end{warning}
+
+\section{Terminal-side animations}
+
+Some image protocols (Kitty) support terminal-side
+animations: emit frames and timing, terminal cycles. CPU on
+the application side is zero.
+
+For a spinner or a progress beachball, terminal-side is
+ideal --- the app sleeps and the screen still moves.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Animation = time-to-value interpolator.
+  \item Easing curves shape perceived feel.
+  \item Compose with seq, par, when.
+  \item Interruption strategy is per-animation.
+  \item Respect reduced-motion preferences.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Animate a panel slide-in. Try ease-in-out and
+    spring; pick what feels right.
+  \item Add reduced-motion support. Test with the env var.
+  \item Build a sequential animation chain (fade in,
+    delay, fade out).
+\end{enumerate}

@@ -1,0 +1,86 @@
+\chapter{Patterns: model, view, presenter}
+\label{ch:mvp}
+
+\begin{aside}
+Separation of concerns: model holds data, view renders, the
+glue between them is the presenter (or controller, or view
+model). The names vary; the idea persists.
+\end{aside}
+
+\section{The three layers}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Model.} Pure data and business logic. No
+    \maya{} types.
+  \item \textbf{View.} Pure rendering. Takes data, returns
+    elements.
+  \item \textbf{Presenter.} The glue: signal bindings,
+    event handlers.
+\end{itemize}
+
+\section{The view}
+
+\begin{lstlisting}
+Element user_view(const User& u) {
+    return column(
+        text(u.name),
+        text(u.email)
+    );
+}
+\end{lstlisting}
+
+No signals, no callbacks. Just data in, element out. Easy
+to test.
+
+\section{The presenter}
+
+\begin{lstlisting}
+Element user_presenter() {
+    auto u = ctx.consume<UserStore>();
+    return user_view(ctx.get(u->user));
+}
+\end{lstlisting}
+
+The presenter wires the view to the store.
+
+\section{Why this matters}
+
+\begin{itemize}[leftmargin=*]
+  \item Views are testable without a context.
+  \item Models are testable without UI.
+  \item Presenters are thin and obvious.
+\end{itemize}
+
+\section{Other patterns}
+
+MVVM (Model-View-ViewModel) is similar; the ViewModel
+holds the bindings. MVC (Controller) is older and similar
+shape. Pick whichever vocabulary your team prefers.
+
+\section{Anti-patterns}
+
+\begin{itemize}[leftmargin=*]
+  \item God presenter: knows everything, fragile.
+  \item View with signals: tightly coupled, hard to test.
+  \item Model with UI: pollutes the data layer.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Model: data. View: render. Presenter: glue.
+  \item Views are pure functions.
+  \item Models have no UI types.
+  \item Presenters are thin.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Refactor one screen into model/view/presenter.
+  \item Write a unit test for the view (no context).
+  \item Identify any god presenter in your code; split
+    it.
+\end{enumerate}

@@ -1,0 +1,91 @@
+\chapter{Internationalisation}
+\label{ch:i18n2}
+
+\begin{aside}
+Hard-coded English makes your app readable only to English
+speakers. Internationalisation lets the same code serve a
+French user, a Japanese user, a right-to-left Arabic user.
+\end{aside}
+
+\section{Message catalogues}
+
+Strings live in catalogues, one per locale:
+
+\begin{lstlisting}
+// en.toml
+greeting = "Hello, {}"
+
+// fr.toml
+greeting = "Bonjour, {}"
+\end{lstlisting}
+
+\section{Lookup}
+
+\begin{lstlisting}
+auto msg = i18n("greeting", username);
+\end{lstlisting}
+
+Lookup picks the active locale's catalogue, substitutes
+arguments.
+
+\section{Pluralisation}
+
+``1 file'' vs ``2 files''. CLDR plural rules:
+
+\begin{lstlisting}
+auto msg = i18n_plural("file_count", n);
+// en: "1 file" / "{} files"
+// ru: 3 forms based on n
+\end{lstlisting}
+
+\code{libicu} or smaller libs handle the rules.
+
+\section{Date and time formatting}
+
+Locale-dependent: ``Jan 1, 2024'' vs ``1 janvier 2024''.
+Use \code{std::format} with locale, or icu, or a small
+manual table.
+
+\section{Number formatting}
+
+Thousands separator: \code{,} vs \code{.} vs space.
+Decimal: \code{.} vs \code{,}. Use locale-aware formatters.
+
+\section{Right-to-left}
+
+Arabic, Hebrew flow right-to-left. \maya{} doesn't shape
+RTL automatically (see Chapter~\ref{ch:shaping}). For
+RTL-only sections, pre-reverse and use the result; for
+mixed, you need a BiDi library.
+
+\section{Font and width}
+
+Some scripts (Devanagari, Thai) need cluster shaping that
+the terminal may not do well. Test on representative
+fonts.
+
+\section{Locale detection}
+
+Check \code{LANG} and \code{LC\_ALL} environment
+variables. Fallback to en\_US.UTF-8.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Catalogues per locale.
+  \item Pluralisation via CLDR.
+  \item Date, time, number locale-aware.
+  \item RTL needs care.
+  \item Detect via \code{LANG}; default to English.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add an English and French catalogue; switch via
+    config.
+  \item Implement plural messages.
+  \item Test your app with \code{LANG=fr\_FR.UTF-8}.
+\end{enumerate}

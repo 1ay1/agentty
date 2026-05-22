@@ -1,0 +1,63 @@
+\chapter{Patterns: lazy state}
+\label{ch:lazystate}
+
+\begin{aside}
+A signal that exists only when needed. Pay the cost on first
+access; nothing before.
+\end{aside}
+
+\section{Definition}
+
+\begin{lstlisting}
+auto big = lazy_signal([&] {
+    return parse_huge_file();
+});
+\end{lstlisting}
+
+The lambda runs on first \code{get}.
+
+\section{Caching}
+
+Once computed, the result caches. Subsequent reads are
+fast.
+
+\section{Invalidation}
+
+To recompute, reset the lazy:
+
+\begin{lstlisting}
+big.invalidate();
+auto v = ctx.get(big);  // recomputes
+\end{lstlisting}
+
+\section{Use cases}
+
+\begin{itemize}[leftmargin=*]
+  \item Settings panel content that few users open.
+  \item Help screen that loads markdown.
+  \item Big derived tables.
+  \item Expensive validators that depend on infrequent
+    state.
+\end{itemize}
+
+\section{Startup impact}
+
+Moving work out of startup shortens the time to first
+frame. Lazy state is a powerful tool for this.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Lazy signal computes on first read.
+  \item Caches; invalidate to recompute.
+  \item Shorten startup by deferring.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Identify three signals you could make lazy.
+  \item Convert them; measure startup time.
+\end{enumerate}

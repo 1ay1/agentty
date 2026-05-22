@@ -1,0 +1,67 @@
+\chapter{Comparison with web frameworks}
+\label{ch:web}
+
+\begin{aside}
+\maya{}'s declarative model borrows from React, Svelte, Vue,
+SolidJS. The borrowed ideas, the deliberate differences.
+\end{aside}
+
+\section{React}
+
+\textbf{Borrowed:} declarative components, virtual DOM
+analog, hooks model.
+
+\textbf{Different:} no JSX (\cpp{} doesn't allow);
+explicit lifetimes via owners; element tree rebuilt every
+frame (no virtual DOM diff at element level).
+
+\section{Svelte}
+
+\textbf{Borrowed:} signals as the unit of reactivity.
+
+\textbf{Different:} no compiler; everything at runtime.
+
+\section{Vue}
+
+\textbf{Borrowed:} reactivity API (refs vs reactive).
+
+\textbf{Different:} no templates; only \cpp{}.
+
+\section{SolidJS}
+
+\textbf{Borrowed:} fine-grained reactivity. The closest
+inspiration.
+
+\textbf{Different:} \cpp{} type system; no JSX.
+
+\section{Flutter}
+
+\textbf{Borrowed:} build method; widget tree.
+
+\textbf{Different:} text grid not pixel; less animation
+emphasis.
+
+\section{Why a new library}
+
+The TUI niche is small, and existing TUI libs are largely
+imperative. The web's declarative model fits this medium
+beautifully. \maya{} is the bridge.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Borrowed: signals, components, hooks-like
+    lifecycle.
+  \item Differences: \cpp{}, no JSX, terminal-native.
+  \item SolidJS is the closest cousin.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Compare a React component to its \maya{}
+    equivalent line-for-line.
+  \item Identify which features port and which don't.
+\end{enumerate}

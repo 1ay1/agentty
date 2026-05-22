@@ -1,0 +1,93 @@
+\chapter{Animation curves and physics}
+\label{ch:curves}
+
+\begin{aside}
+A linear animation feels mechanical. A spring feels alive.
+The math is simple; the difference is huge.
+\end{aside}
+
+\section{Curves library}
+
+\maya{} ships:
+
+\begin{itemize}[leftmargin=*]
+  \item Linear.
+  \item Quadratic ease-in / ease-out / ease-in-out.
+  \item Cubic, quartic, quintic variants.
+  \item Sine, exponential, circular.
+  \item Bounce, elastic, back.
+  \item Spring (physics-based).
+\end{itemize}
+
+\section{Cubic bezier}
+
+The CSS bezier curve takes four control points:
+
+\begin{lstlisting}
+auto curve = bezier(0.25, 0.1, 0.25, 1.0);  // ease
+\end{lstlisting}
+
+Most named curves are bezier presets.
+
+\section{Spring physics}
+
+A spring is parameterised by stiffness, damping, mass:
+
+\begin{lstlisting}
+struct Spring {
+    float stiffness = 170;
+    float damping = 26;
+    float mass = 1;
+    float advance(float dt);
+};
+\end{lstlisting}
+
+The animation runs until the spring settles (velocity
+near zero). Duration is not fixed --- it depends on
+parameters.
+
+\section{When to use what}
+
+\begin{itemize}[leftmargin=*]
+  \item Linear: progress bars (literal motion).
+  \item Ease-out: things appearing (UI feels polished).
+  \item Ease-in: things disappearing.
+  \item Spring: organic motion (drag-and-drop snap-back).
+  \item Bounce: playful only; avoid for tools.
+\end{itemize}
+
+\section{Per-axis curves}
+
+A 2-D animation can use different curves per axis. Slide
+horizontally with ease-out, fade with linear.
+
+\section{Performance}
+
+Curve evaluation is one or two multiplies per frame. Even
+hundreds of concurrent animations cost microseconds.
+
+\section{Reduced motion}
+
+When the user prefers reduced motion, snap to the end
+value. The curve is bypassed entirely.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Many named curves; cubic bezier underneath.
+  \item Spring physics for organic motion.
+  \item Per-axis curves for 2-D.
+  \item Cheap to evaluate.
+  \item Respect reduced-motion preferences.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Try linear, ease-out, spring on the same
+    animation; pick the best.
+  \item Animate a card with different curves per axis.
+  \item Bypass curves when reduced motion is set.
+\end{enumerate}

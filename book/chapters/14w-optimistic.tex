@@ -1,0 +1,65 @@
+\chapter{Patterns: optimistic updates}
+\label{ch:optimistic}
+
+\begin{aside}
+Wait for the server before updating the UI? Too slow. Update
+first, reconcile later. The user feels fast; the network does
+its work in the background.
+\end{aside}
+
+\section{The pattern}
+
+\begin{enumerate}[leftmargin=*]
+  \item User clicks like button.
+  \item UI immediately shows liked.
+  \item Background request posts to server.
+  \item On success: confirm.
+  \item On failure: revert with toast.
+\end{enumerate}
+
+\section{Tracking pending state}
+
+Each optimistic update carries a state: \code{pending},
+\code{confirmed}, \code{reverted}.
+
+\begin{lstlisting}
+struct OptimisticUpdate {
+    Update u;
+    enum State { Pending, Confirmed, Reverted } state;
+};
+\end{lstlisting}
+
+\section{Visible pending}
+
+A subtle visual cue: dim the optimistic value, or show a
+spinner. Or nothing --- if reverts are rare.
+
+\section{Conflict with other updates}
+
+If two optimistic updates affect the same value, the order
+matters. Apply in order; revert in reverse on failure.
+
+\section{Idempotency}
+
+Server-side: idempotent updates make retries safe. A
+client that thinks it failed but actually succeeded can
+retry without duplicating.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Update local first; reconcile after.
+  \item Track pending state.
+  \item Subtle visual cue, optional.
+  \item Idempotent server-side for safe retries.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Implement an optimistic like button.
+  \item Add revert-on-failure with toast.
+  \item Test with network throttling.
+\end{enumerate}

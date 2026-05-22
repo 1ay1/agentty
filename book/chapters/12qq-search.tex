@@ -1,0 +1,94 @@
+\chapter{Search, find, and replace}
+\label{ch:search}
+
+\begin{aside}
+A search box that filters in real time. Find next, find
+previous, replace one, replace all. The pattern recurs in
+every text-heavy TUI.
+\end{aside}
+
+\section{The search signal}
+
+\begin{lstlisting}
+auto query = signal<std::string>("");
+auto matches = memo([&] {
+    return find_all(content, ctx.get(query));
+});
+\end{lstlisting}
+
+The memo re-runs only on query change.
+
+\section{Case sensitivity}
+
+Toggle case sensitivity via a checkbox or modifier:
+
+\begin{lstlisting}
+auto case_sensitive = signal<bool>(false);
+\end{lstlisting}
+
+Smart case (case-insensitive unless the query has
+uppercase) is a common default.
+
+\section{Regex}
+
+For power users, allow regex queries. Toggle via flag.
+\code{std::regex} works; \code{re2} is faster for large
+corpora.
+
+\section{Find next}
+
+Walking through matches:
+
+\begin{lstlisting}
+auto current_match = signal(0);
+on_key(KeyN, [&] {
+    auto i = ctx.get(current_match);
+    ctx.set(current_match, (i + 1) % matches.size());
+});
+\end{lstlisting}
+
+\section{Visual highlighting}
+
+Mark every match in the text with a highlighted
+background. The current one gets a stronger highlight.
+
+\section{Replace}
+
+\begin{itemize}[leftmargin=*]
+  \item Replace current.
+  \item Replace all.
+  \item Replace all in selection.
+  \item Replace with regex capture groups.
+\end{itemize}
+
+\section{Incremental search}
+
+Search updates on every keystroke. The first match becomes
+the cursor position. Pressing Enter commits; Escape
+cancels.
+
+\section{Search history}
+
+Up/down in the search box recalls previous queries. Persist
+across sessions.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Query signal + memoised matches.
+  \item Smart case for friendliness.
+  \item Regex for power.
+  \item Highlight all + emphasis on current.
+  \item Replace one/all with regex captures.
+  \item Incremental, with history.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build an incremental search.
+  \item Add regex support.
+  \item Implement replace with capture groups.
+\end{enumerate}

@@ -1,0 +1,80 @@
+\chapter{Memory model and ownership}
+\label{ch:memory}
+
+\begin{aside}
+\maya{} avoids garbage collection and reference counting. The
+ownership tree is the memory model. Each owner deallocates
+its tree on destruction.
+\end{aside}
+
+\section{Ownership tree}
+
+Every signal, effect, store, and widget has an owner. Owners
+form a tree rooted at the application context. When an owner
+dies, everything it owns dies with it.
+
+This mirrors lexical scoping: variables live as long as the
+scope they were declared in.
+
+\section{Smart pointers}
+
+\maya{} uses:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{unique\_ptr} for sole ownership.
+  \item \code{shared\_ptr} sparingly --- only when ownership
+    is genuinely shared and the cycle risk is bounded.
+  \item Raw pointers for non-owning views.
+\end{itemize}
+
+\section{Arena allocation}
+
+The element tree lives in an arena (Chapter~\ref{ch:allocations}).
+Reset between frames. No individual destructors run --- the
+arena resets and forgets. So arena-allocated types must be
+trivially destructible.
+
+\section{Strict aliasing}
+
+\maya{} doesn't violate strict aliasing. Cells are
+\code{uint64\_t}; cell-meaning is achieved by bit unpacking,
+not pointer reinterpretation.
+
+\section{Concurrency model}
+
+Single-threaded UI thread by default. Workers post results
+back. Signals are not thread-safe by design.
+
+\code{TSan} run on the test suite verifies no races.
+
+\section{Move semantics}
+
+DSL builders use rvalue references. Element construction
+is move-only; no copying of element trees.
+
+\section{Lifetime annotations}
+
+\cpp{}26 lifetime annotations are not yet broadly available
+in compilers. \maya{} uses comments and code review for
+ownership clarity until they are.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Ownership tree, not GC or refcount.
+  \item Arena for element-tree memory.
+  \item Single-threaded UI; workers post back.
+  \item Move semantics for cheap composition.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Trace your app's ownership tree. Identify any
+    smart pointer that could be replaced with raw.
+  \item Run under TSan; fix any race.
+  \item Audit the element tree for non-trivial
+    destructors that snuck into arena allocation.
+\end{enumerate}

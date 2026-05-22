@@ -1,0 +1,82 @@
+\chapter{Charts and sparklines}
+\label{ch:charts}
+
+\begin{aside}
+A 80-cell terminal can show a graph. Not as detailed as a
+1920-pixel display, but enough to spot a trend. Sparklines,
+bar charts, line graphs --- all are widgets in \maya{}.
+\end{aside}
+
+\section{Sparkline}
+
+A compact line graph in one row using block characters:
+
+\begin{lstlisting}
+constexpr const char* blocks[] = {
+    "\u2581", "\u2582", "\u2583", "\u2584",
+    "\u2585", "\u2586", "\u2587", "\u2588"
+};
+
+void sparkline(Painter& p, span<float> data, Rect r) {
+    auto [lo, hi] = std::minmax_element(...);
+    for (size_t i = 0; i < data.size(); ++i) {
+        int level = scale(data[i], *lo, *hi, 0, 7);
+        p.put(r.x + i, r.y, Cell{blocks[level]});
+    }
+}
+\end{lstlisting}
+
+8 levels of fill per cell give decent vertical resolution
+in one row.
+
+\section{Bar chart}
+
+A multi-row bar chart uses the same block characters,
+stacking vertically. Each column is a value.
+
+\section{Line chart}
+
+For smooth lines across multiple rows, use braille
+characters. Each braille cell is a 2x4 dot grid; a line
+crosses cells by lighting the appropriate dots.
+
+\maya{}'s \code{line\_chart} widget does this.
+
+\section{Axes and labels}
+
+A chart with axes needs labelled gridlines. Render the
+labels at fixed positions; ensure they don't overlap.
+
+\section{Colours}
+
+Multiple series get different colours. Avoid red-green
+colour blindness traps; use distinct hues.
+
+\section{Real-time updates}
+
+A live chart appends a new data point per frame. The
+chart scrolls left, dropping the oldest.
+
+\section{Logarithmic}
+
+For data with large dynamic range, log scale. Provide a
+toggle.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Sparkline = one row, 8 fill levels per cell.
+  \item Bar chart = many rows of fills.
+  \item Line chart = braille for sub-cell precision.
+  \item Real-time scroll for live data.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a sparkline showing CPU usage.
+  \item Add a real-time line chart of network throughput.
+  \item Stack two series with different colours.
+\end{enumerate}

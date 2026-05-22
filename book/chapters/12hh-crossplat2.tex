@@ -1,0 +1,90 @@
+\chapter{Cross-platform considerations}
+\label{ch:crossplat2}
+
+\begin{aside}
+\maya{} runs on Linux, macOS, and BSD. Windows is a different
+universe: ConPTY, different signals, different escape parsing.
+This chapter is about the things that differ.
+\end{aside}
+
+\section{Termios vs Console API}
+
+Unix: \code{tcsetattr} switches to raw mode. Windows:
+\code{SetConsoleMode} with \code{ENABLE\_VIRTUAL\_TERMINAL\_
+PROCESSING}.
+
+\maya{} wraps both in \code{Terminal::raw\_mode()}.
+
+\section{Signal differences}
+
+\begin{itemize}[leftmargin=*]
+  \item SIGWINCH (resize): Unix only. Windows uses a
+    different mechanism.
+  \item SIGTSTP/SIGCONT (suspend): Unix only.
+  \item SIGINT: both have it; Windows via
+    \code{SetConsoleCtrlHandler}.
+\end{itemize}
+
+\section{Path conventions}
+
+Unix paths: \code{/home/user}. Windows: \code{C:\\Users\\user}.
+\code{std::filesystem::path} abstracts but you may still
+hit edge cases (case sensitivity, max path length).
+
+\section{Locale defaults}
+
+Unix: \code{en\_US.UTF-8} or similar. Windows: code-page
+based; recent versions can use UTF-8.
+
+\section{Terminal differences}
+
+\begin{itemize}[leftmargin=*]
+  \item macOS Terminal: missing many features (truecolour,
+    DEC 2026, image protocols).
+  \item iTerm2 (macOS): rich features.
+  \item Windows Terminal: modern; mostly compatible with
+    xterm.
+  \item Linux console (without X): limited; no truecolour.
+\end{itemize}
+
+\section{Fork and exec}
+
+\code{fork} doesn't exist on Windows. Use
+\code{CreateProcess}. \maya{}'s spawn API abstracts the
+two.
+
+\section{File watching}
+
+Linux: \code{inotify}. macOS: \code{FSEvents} or
+\code{kqueue}. BSD: \code{kqueue}. Windows:
+\code{ReadDirectoryChangesW}.
+
+\maya{} ships a small abstraction; for advanced use,
+\code{libuv}.
+
+\section{Endianness and word size}
+
+\maya{} assumes 64-bit little-endian. Big-endian and 32-bit
+are not actively tested. The packed cell type relies on
+specific bit layouts.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Raw mode differs; \maya{} abstracts.
+  \item Unix signals don't all map to Windows.
+  \item \code{std::filesystem} for paths.
+  \item Spawn API differs; abstract.
+  \item 64-bit LE assumed.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Test your app on a different OS. List the things
+    that broke.
+  \item Use the spawn abstraction instead of direct fork.
+  \item Try a non-x86 build (ARM Mac, Raspberry Pi).
+\end{enumerate}

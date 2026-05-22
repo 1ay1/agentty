@@ -1,0 +1,71 @@
+\chapter{Future of TUI: graphics protocols}
+\label{ch:future_graphics}
+
+\begin{aside}
+The terminal has been a character grid for fifty years. The
+last five have seen it learn to render images, true colour,
+hyperlinks, and synchronised frames. The next five will see
+even more.
+\end{aside}
+
+\section{Where we are}
+
+\begin{itemize}[leftmargin=*]
+  \item Truecolour: now universal.
+  \item OSC-8 links: most modern terminals.
+  \item Image protocols: three competing, narrowing to two.
+  \item DEC 2026: arrived.
+  \item CSI-u keyboard: arrived.
+\end{itemize}
+
+\section{Where it's going}
+
+\begin{itemize}[leftmargin=*]
+  \item Animation primitives (terminal-side tweens).
+  \item Vector graphics protocol.
+  \item Standardised image protocol (sixel and Kitty
+    converge or one wins).
+  \item Native multi-window in terminals.
+  \item GPU shaders for terminal post-processing.
+\end{itemize}
+
+\section{What's stuck}
+
+\begin{itemize}[leftmargin=*]
+  \item Apple Terminal: no new features in years.
+  \item tmux passthrough: better than nothing but lossy.
+  \item BiDi: unsolved at the protocol level.
+\end{itemize}
+
+\section{What \maya{} will do}
+
+Track the new features as they ship. The internal model
+already separates capability detection from emission;
+adding new outputs is a matter of feature flags.
+
+\section{The big speculation}
+
+Will the terminal become a GUI? Probably not in the
+near term. The character grid is too useful, too fast,
+too SSH-friendly. Innovations layer on top, not replace.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Truecolour, links, images, synced output now
+    common.
+  \item More animation and graphics likely soon.
+  \item Apple Terminal and tmux are the stuck links.
+  \item The grid is here to stay.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Check which features your daily terminal
+    supports.
+  \item Try Kitty or Wezterm; observe the difference.
+  \item Speculate: what feature do you most want next?
+\end{enumerate}

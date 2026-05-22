@@ -1,0 +1,107 @@
+\chapter{Glossary of terms}
+\label{ch:glossary2}
+
+\begin{aside}
+A reference for the vocabulary used across this book.
+Alphabetical, brief.
+\end{aside}
+
+\textbf{Alt-screen.} The terminal's separate buffer for
+full-screen apps. \maya{} enters on startup.
+
+\textbf{ANSI escape.} A control sequence that changes
+terminal state. Always starts with \code{ESC} (\code{0x1B}).
+
+\textbf{Awaiter.} An object that suspends a coroutine and
+resumes it later with a value.
+
+\textbf{Back buffer.} The off-screen canvas where painting
+happens before diff and emit.
+
+\textbf{Bracketed paste.} Mode where the terminal wraps
+pasted bytes in markers so the app can distinguish from
+typed input.
+
+\textbf{Canvas.} The 2-D grid of cells representing the
+screen.
+
+\textbf{Cell.} One column of one row. \maya{} packs each
+into 64 bits.
+
+\textbf{Cluster.} A grapheme cluster: the user-perceived
+``character''.
+
+\textbf{Coroutine.} A function that can pause and resume.
+\cpp{}20 added the syntax.
+
+\textbf{CSI-u.} Modern keyboard encoding that gives every
+key a unique escape.
+
+\textbf{DEC 2026.} Synchronised output mode; brackets a
+frame so the terminal applies it atomically.
+
+\textbf{Diff.} Compare two canvases; produce a minimal
+list of changes.
+
+\textbf{Effect.} A signal subscriber that produces side
+effects when its dependencies change.
+
+\textbf{Element.} A node in the UI tree. Layout,
+positioning, paint.
+
+\textbf{Front buffer.} The canvas representing what's on
+screen.
+
+\textbf{Grapheme.} See cluster.
+
+\textbf{Memo.} A computed signal whose value is cached
+until inputs change.
+
+\textbf{Microtask.} A deferred function scheduled to run
+soon, not immediately.
+
+\textbf{OSC-8.} Hyperlink escape sequence.
+
+\textbf{OSC-52.} Clipboard escape sequence.
+
+\textbf{Owner.} Lifetime parent for signals and effects.
+
+\textbf{Painter.} The API for writing into the back buffer.
+
+\textbf{Pty.} Pseudo-terminal: bidirectional fd pair that
+mimics a real terminal.
+
+\textbf{Reactive.} State + automatic recomputation of
+derived values.
+
+\textbf{Reconcile.} Compare new and old element trees,
+compute minimal updates.
+
+\textbf{Render.} A frame: layout, paint, diff, emit.
+
+\textbf{SGR.} Set Graphics Rendition: ANSI for colour and
+attributes.
+
+\textbf{Signal.} Reactive container for a value.
+
+\textbf{Sixel.} DEC's pixel encoding for terminal graphics.
+
+\textbf{Sprite.} A cached cell array for fast blit.
+
+\textbf{TUI.} Text User Interface. The category.
+
+\textbf{Truecolour.} 24-bit RGB; supported by modern
+terminals.
+
+\textbf{Variation selector.} Code point that picks emoji
+or text presentation.
+
+\textbf{Virtualised list.} List that renders only visible
+rows.
+
+\textbf{Widget.} A reusable element type.
+
+\textbf{XDG.} Cross-Desktop Group: standard directory
+conventions.
+
+\textbf{ZWJ.} Zero-width joiner; emoji sequence connector.

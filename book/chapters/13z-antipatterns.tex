@@ -1,0 +1,89 @@
+\chapter{Anti-patterns to avoid}
+\label{ch:antipatterns}
+
+\begin{aside}
+Things that look reasonable but are wrong. Walk the path
+once; learn to avoid the next time.
+\end{aside}
+
+\section{Reading signals in render order}
+
+If component A's render reads a signal that B's render
+sets, you have a race. Render the producer first.
+
+\section{Mutating during render}
+
+A render function should be pure. Setting a signal during
+render schedules a re-render --- infinite loop.
+
+\section{Background thread touching signals}
+
+Signals are not thread-safe. Always post results back to
+the main thread.
+
+\section{Synchronous I/O on main thread}
+
+A blocking read freezes the UI. Always async.
+
+\section{Long-running effects}
+
+An effect should compute quickly. Long work goes to a
+worker thread.
+
+\section{Too many effects}
+
+An effect per item in a 10,000-item list is wasteful. Use
+a single effect that handles all items.
+
+\section{Reaching into widget internals}
+
+Widgets are opaque. If you find yourself reaching in,
+either compose differently or extend the widget's API.
+
+\section{Hardcoded colours}
+
+Theme-aware code uses theme tokens, not literal hex. Hex
+literals are for the theme definition itself.
+
+\section{Hardcoded sizes}
+
+Layout systems exist; let them work. Hardcoded pixel
+sizes (cell sizes) are fragile across terminal sizes.
+
+\section{No keyboard path}
+
+Mouse-only widgets exclude users. Always provide a
+keyboard alternative.
+
+\section{Ignoring NO\_COLOR}
+
+Some users need colour off. Respect.
+
+\section{Crashing on resize}
+
+Resize is common. Test by dragging the window.
+
+\section{Allocating per frame}
+
+Allocations add up. Use the arena; reuse buffers.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Pure render; no side effects.
+  \item Signals are single-threaded.
+  \item Async I/O always.
+  \item Theme tokens, not hex.
+  \item Keyboard parity with mouse.
+  \item Respect NO\_COLOR.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Audit your code for any anti-pattern above.
+  \item Fix the worst offender.
+  \item Add a lint or grep to catch future occurrences.
+\end{enumerate}

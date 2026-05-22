@@ -1,0 +1,152 @@
+\chapter{Snapshot testing}
+\label{ch:snapshot}
+
+\begin{aside}
+Render. Compare to a recorded screen. Diff. That's a snapshot
+test --- the most efficient way to test UI for ``it still looks
+right''.
+\end{aside}
+
+\section{The idea}
+
+A snapshot test:
+
+\begin{enumerate}[leftmargin=*]
+  \item Construct a known state.
+  \item Render to an in-memory canvas (string backend).
+  \item Compare against a stored ``golden'' file.
+  \item Pass if equal; fail with a diff otherwise.
+\end{enumerate}
+
+When the UI changes intentionally, regenerate the goldens.
+When a refactor unintentionally changes pixels, the diff is
+obvious in code review.
+
+\section{Capturing}
+
+\begin{lstlisting}
+TEST_CASE("button renders") {
+    Context ctx;
+    auto el = button("Click me");
+    auto snap = render_to_string(el, 20, 3);
+    EXPECT_SNAPSHOT(snap, "button.snap");
+}
+\end{lstlisting}
+
+The first run creates \code{button.snap}; subsequent runs
+compare.
+
+\section{Format}
+
+A snapshot is a plain-text grid: each row a line, columns
+separated by nothing. Styles are encoded as inline markers
+(or omitted, for layout-only snapshots).
+
+For style verification, an extended format includes per-cell
+foreground/background/attribute lines. \maya{}'s snapshot
+helper supports both.
+
+\section{Diff display}
+
+When a snapshot fails, the diff is shown side-by-side or
+with red/green highlighting per character. The reader can
+spot a one-cell shift instantly.
+
+\section{Regenerating goldens}
+
+\begin{lstlisting}
+UPDATE_SNAPSHOTS=1 ctest
+\end{lstlisting}
+
+Sets every snapshot to the current output. Review the diff
+before committing.
+
+\section{Snapshot stability}
+
+Snapshots break on:
+
+\begin{itemize}[leftmargin=*]
+  \item Font metric changes (cell-pixel ratio differs across
+    machines).
+  \item Timestamp inclusion (don't put dates in snapshots).
+  \item Random data (seed your RNG).
+  \item Locale-dependent formatting (force a locale).
+\end{itemize}
+
+\maya{}'s snapshot helper provides hooks to mask volatile
+regions:
+
+\begin{lstlisting}
+snap.mask({0, 0, 8, 1}, "TIME");
+\end{lstlisting}
+
+The masked region renders as the literal string for
+comparison.
+
+\section{Layout-only snapshots}
+
+For tests that only care about structure, snapshot the
+element tree as a text outline:
+
+\begin{lstlisting}
+auto tree = dump_tree(el);
+EXPECT_SNAPSHOT(tree, "button.tree");
+\end{lstlisting}
+
+The output is something like:
+
+\begin{lstlisting}
+button {
+  text("Click me")
+  width: 20
+  height: 1
+}
+\end{lstlisting}
+
+Style and layout are tested separately.
+
+\section{Property-based snapshots}
+
+Combine snapshots with property-based testing: generate
+random states, render, ensure no crash, snapshot canonical
+states.
+
+\maya{} ships a \code{property::run} helper that integrates
+with rapidcheck.
+
+\section{Visual snapshot}
+
+For terminals that support image protocols (Kitty), render to
+a PNG via a headless image protocol and store that. Compare
+PNGs pixel-by-pixel. Catches font-rendering regressions but
+needs identical font on every CI machine.
+
+Most teams stop at the text-grid snapshot.
+
+\section{Snapshot review in code review}
+
+Treat \code{.snap} files as code: review them. A change that
+``just'' updates a snapshot is often the right thing to
+review most carefully --- the snapshot is the contract.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Render + compare against stored golden = snapshot.
+  \item Update with \code{UPDATE\_SNAPSHOTS=1}.
+  \item Mask volatile regions.
+  \item Layout-only snapshots for structural tests.
+  \item Review snapshot diffs as you would code.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a snapshot test for your app's main screen.
+    Commit the golden.
+  \item Make a visual tweak (border style). Watch the
+    snapshot diff and update.
+  \item Add masks for the timestamp in your status bar.
+\end{enumerate}

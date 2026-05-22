@@ -1,0 +1,88 @@
+\chapter{Forms of state machines}
+\label{ch:undostate}
+
+\begin{aside}
+Undo is a state machine: each action records a step; undo
+rewinds. The data structure is a stack; the discipline is
+that every mutation goes through the recorder.
+\end{aside}
+
+\section{The pattern}
+
+\begin{lstlisting}
+template<typename Action>
+class History {
+    std::vector<Action> undo_stack;
+    std::vector<Action> redo_stack;
+public:
+    void apply(Action a) {
+        a.do_();
+        undo_stack.push_back(a);
+        redo_stack.clear();  // new branch
+    }
+    void undo() { /* pop, undo_, push to redo */ }
+    void redo() { /* pop, do_, push to undo */ }
+};
+\end{lstlisting}
+
+\section{Action design}
+
+Each action is reversible. Examples:
+
+\begin{itemize}[leftmargin=*]
+  \item Insert text at position N: undo by deleting N
+    characters.
+  \item Delete range: undo by re-inserting the saved text.
+  \item Move cursor: undo by moving back.
+\end{itemize}
+
+\section{Grouping}
+
+Multiple keystrokes into one undo unit. Group by:
+
+\begin{itemize}[leftmargin=*]
+  \item Time (within 500 ms of last).
+  \item Boundary (space or punctuation starts new group).
+\end{itemize}
+
+\section{Branching}
+
+When the user undoes then makes a new change, the redo stack
+clears (the future is gone). Some editors implement a
+branching history tree; \maya{} does not by default.
+
+\section{Snapshot vs delta}
+
+\begin{itemize}[leftmargin=*]
+  \item Snapshot: store the full state. Memory-heavy.
+  \item Delta: store the change. Smaller; needs reversal
+    logic.
+\end{itemize}
+
+Delta is the standard for text editors. Snapshot is fine
+for small data structures.
+
+\section{Persistence}
+
+Some apps persist undo history across sessions. Tricky:
+the data must survive process restart and reattach to the
+current state.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Undo stack + redo stack.
+  \item Each action reversible.
+  \item Group by time or boundary.
+  \item Delta is the standard.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add undo/redo to a text input.
+  \item Implement grouping by 500 ms windows.
+  \item Compare snapshot vs delta memory cost.
+\end{enumerate}

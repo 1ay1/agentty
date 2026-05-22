@@ -1,0 +1,123 @@
+\chapter{Keymaps and bindings}
+\label{ch:keymaps}
+
+\begin{aside}
+A keymap is a function from key event to action. Users want
+to remap; widgets want defaults; chord prefixes need state.
+A small system handles all three.
+\end{aside}
+
+\section{The map}
+
+\begin{lstlisting}
+struct Binding {
+    KeyEvent key;
+    std::function<void()> action;
+    std::string description;
+};
+
+class Keymap {
+    std::vector<Binding> bindings;
+public:
+    bool dispatch(KeyEvent ev) {
+        for (auto& b : bindings)
+            if (matches(b.key, ev)) {
+                b.action(); return true;
+            }
+        return false;
+    }
+};
+\end{lstlisting}
+
+\section{Layered keymaps}
+
+Keymaps stack: widget keymap, then panel keymap, then
+global keymap. Dispatch tries each in order; first match
+wins.
+
+\begin{lstlisting}
+class KeymapStack {
+    std::vector<Keymap*> layers;
+public:
+    void dispatch(KeyEvent ev) {
+        for (auto* k : layers)
+            if (k->dispatch(ev)) return;
+    }
+};
+\end{lstlisting}
+
+\section{Modes}
+
+A modal app (vim-style) has a different keymap per mode.
+Switch via mode signal:
+
+\begin{lstlisting}
+auto km = ctx.get(mode) == Mode::Insert
+    ? &insert_map
+    : &normal_map;
+\end{lstlisting}
+
+\section{Chord prefixes}
+
+\code{g d} for ``go to definition'' is a chord. The first
+key (\code{g}) sets a prefix state; the next key resolves
+against the prefix's submap.
+
+\begin{lstlisting}
+auto current = bindings;
+on_key([&](KeyEvent ev) {
+    auto next = current.lookup(ev);
+    if (next.is_submap()) current = next;
+    else if (next.is_action()) {
+        next.action();
+        current = bindings;
+    }
+});
+\end{lstlisting}
+
+A timeout resets the prefix if the second key doesn't
+arrive in time.
+
+\section{User remapping}
+
+The keymap is data; load from config:
+
+\begin{lstlisting}
+[[bindings]]
+key = "Ctrl-S"
+action = "save"
+\end{lstlisting}
+
+Action names map to functions; the loader looks them up by
+name.
+
+\section{Help screen}
+
+A help command lists every binding with its description.
+Generated from the keymap itself.
+
+\section{Conflict detection}
+
+Two bindings on the same key: the second wins. \maya{}'s
+loader warns on conflicts.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Keymap = list of (key, action, description).
+  \item Layered stack for widget/panel/global.
+  \item Modes swap maps.
+  \item Chords via prefix state.
+  \item User remap via config; help screen lists.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a keymap for your app's main commands.
+  \item Add a chord binding (e.g., \code{Space f} for
+    file picker).
+  \item Implement a help screen that lists bindings.
+\end{enumerate}

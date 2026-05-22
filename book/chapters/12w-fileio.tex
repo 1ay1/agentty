@@ -1,0 +1,101 @@
+\chapter{File I/O and config files}
+\label{ch:fileio}
+
+\begin{aside}
+A TUI typically reads a config file at startup and writes
+state on exit. Both should be atomic, locale-stable, and
+encoded in a forgiving format.
+\end{aside}
+
+\section{Where files live}
+
+XDG Base Directory spec:
+
+\begin{itemize}[leftmargin=*]
+  \item Config: \code{\$XDG\_CONFIG\_HOME/myapp/config.toml}
+    (default \code{\~/.config/myapp/}).
+  \item Data: \code{\$XDG\_DATA\_HOME/myapp/} (default
+    \code{\~/.local/share/myapp/}).
+  \item Cache: \code{\$XDG\_CACHE\_HOME/myapp/} (default
+    \code{\~/.cache/myapp/}).
+\end{itemize}
+
+\maya{} provides \code{xdg::config\_path("myapp")} that
+expands correctly.
+
+\section{Config format}
+
+TOML, JSON, and YAML are the common choices. \maya{} ships
+a TOML parser; users can write their own loaders for other
+formats.
+
+TOML is the recommended default: clean syntax, no
+significant whitespace, comments, types.
+
+\section{Loading on startup}
+
+\begin{lstlisting}
+auto cfg = load_config(xdg::config_path("myapp") + "/config.toml");
+ctx.provide(cfg);
+\end{lstlisting}
+
+If the file doesn't exist, fall back to defaults. If it
+exists but is malformed, log and use defaults.
+
+\section{Atomic writes}
+
+Writing to a file is not atomic if interrupted mid-write.
+Use the rename trick:
+
+\begin{lstlisting}
+auto tmp = path + ".tmp";
+std::ofstream(tmp) << content;
+::rename(tmp.c_str(), path.c_str());
+\end{lstlisting}
+
+Rename is atomic on POSIX: the target either has the old
+content or the new, never partial.
+
+\section{Hot reload}
+
+Watch the config file for changes:
+
+\begin{lstlisting}
+watch_file("config.toml", [&] {
+    auto cfg = reload_config();
+    ctx.set(config_signal, cfg);
+});
+\end{lstlisting}
+
+The signal update propagates to all consumers.
+
+\section{Locale and encoding}
+
+Files are UTF-8 by default. Reading a non-UTF-8 file fails
+with a clear error; don't silently re-interpret.
+
+\section{File sizes}
+
+A config file should be small (KB, not MB). For large data
+(message history, cached search index), use a separate file
+in the data directory.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item XDG paths for config, data, cache.
+  \item TOML is the friendly format.
+  \item Atomic writes via rename.
+  \item Hot reload via file watcher.
+  \item UTF-8 only; fail loud on others.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a config file to your app. Load on startup.
+  \item Wire atomic write on exit.
+  \item Implement hot reload.
+\end{enumerate}

@@ -1,0 +1,71 @@
+\chapter{Patterns: virtual scrolling tricks}
+\label{ch:vscroll}
+
+\begin{aside}
+Virtual scrolling for the common case is in
+Chapter~\ref{ch:lists}. The tricks beyond.
+\end{aside}
+
+\section{Variable-height rows}
+
+A prefix-sum tree gives O(log N) lookup of row Y by
+index. Update on row height change.
+
+\section{Skeleton rows}
+
+While async-loading, show placeholder rows (grey blocks)
+of the expected height. Layout stays stable.
+
+\section{Pinned rows}
+
+Some rows always visible (header, current selection).
+Render as a separate sticky element above or below the
+virtual list.
+
+\section{Sticky group headers}
+
+When a list has group headers (Date / Section), keep the
+current group's header pinned at top as the user scrolls
+past its items.
+
+\section{Inertial scrolling}
+
+Smooth deceleration after a flick (mouse wheel or
+trackpad). Tween the scroll position; ease-out over
+500 ms.
+
+\section{Snap points}
+
+Scroll snaps to row boundaries. The user can't scroll to a
+half-row position.
+
+\section{Side scrollbar}
+
+A custom scrollbar on the right indicates position and
+size. Click to jump.
+
+\section{Anchor preservation}
+
+When items are added above the viewport, preserve the
+visible content's position by adjusting scroll offset.
+Otherwise the view jumps.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Prefix sums for variable height.
+  \item Skeletons preserve layout during load.
+  \item Sticky headers track groups.
+  \item Inertial scroll feels polished.
+  \item Anchor preservation avoids jumps.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add variable-height rows to your list.
+  \item Implement sticky group headers.
+  \item Wire inertial scrolling.
+\end{enumerate}

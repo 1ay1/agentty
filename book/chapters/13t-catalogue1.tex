@@ -1,0 +1,86 @@
+\chapter{Widget catalogue: layout primitives}
+\label{ch:catalogue_layout}
+
+\begin{aside}
+A reference of every layout primitive in \maya{}'s built-in
+catalogue. Quick recipes, not deep dives.
+\end{aside}
+
+\section{column / row}
+
+Vertical / horizontal flex container. Default growth: 1
+for all children.
+
+\section{stack}
+
+Z-ordered stack. Children paint in order; last wins.
+
+\section{center}
+
+Centres its child both axes. Equivalent to row(spacer,
+child, spacer) | column(spacer, ., spacer) but cheaper.
+
+\section{align}
+
+Specify alignment on each axis:
+\code{align(left, top)}.
+
+\section{padding}
+
+Reserve cells around the child. \code{padding(1, 2)} =
+1 row, 2 columns.
+
+\section{margin}
+
+Like padding but outside the child's box.
+
+\section{border}
+
+Wrap with a border preset. See Chapter~\ref{ch:borders}.
+
+\section{spacer}
+
+A flexible empty element that pushes siblings.
+
+\section{box}
+
+A fixed-size empty element. Useful for padding when
+flex won't do.
+
+\section{flex}
+
+A modifier that sets the flex factor.
+
+\section{width / height}
+
+Constraints. \code{width(20)} = exactly 20 cells.
+\code{width(20, 80)} = between 20 and 80.
+
+\section{overflow}
+
+Wrap, ellipsis, scroll, truncate, hidden.
+
+\section{clip}
+
+Force a clip rectangle. Children paint within.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Containers: column, row, stack.
+  \item Positioning: center, align, padding, margin.
+  \item Decoration: border, spacer, box.
+  \item Sizing: flex, width, height.
+  \item Overflow and clip controls.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a layout using only catalogue primitives.
+  \item Replace a custom widget with composed primitives.
+  \item Time the difference between flex(1) and explicit
+    sizes.
+\end{enumerate}

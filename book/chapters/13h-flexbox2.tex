@@ -1,0 +1,89 @@
+\chapter{Layout: flexbox in detail}
+\label{ch:flexbox2}
+
+\begin{aside}
+Flexbox is the layout engine behind nearly all modern UI.
+\maya{}'s implementation is small but covers the cases that
+matter for terminals.
+\end{aside}
+
+\section{Concepts}
+
+\begin{itemize}[leftmargin=*]
+  \item Main axis vs cross axis.
+  \item Flex grow, flex shrink, flex basis.
+  \item Justify content, align items.
+\end{itemize}
+
+\section{Main axis}
+
+In a row, main is horizontal; in a column, main is
+vertical. Children flow along the main axis.
+
+\section{Flex factors}
+
+\begin{lstlisting}
+auto row = row(
+    sidebar() | flex(0),    // fixed
+    content() | flex(1),    // takes the rest
+    inspector() | flex(0)   // fixed
+);
+\end{lstlisting}
+
+\code{flex(0)} means ``don't grow''. \code{flex(1)} means
+``share the leftover space''.
+
+\section{Distributing}
+
+If three children all have \code{flex(1)}, the leftover
+splits in three. If they're \code{flex(1)}, \code{flex(2)},
+\code{flex(1)}, the middle gets twice as much.
+
+\section{Shrink}
+
+When content overflows, shrink redistributes:
+\code{shrink(0)} forbids shrinking; \code{shrink(1)} allows.
+
+\section{Justify content}
+
+How children align on the main axis when there's leftover
+space:
+
+\begin{itemize}[leftmargin=*]
+  \item start: pack to start.
+  \item end: pack to end.
+  \item center: pack to centre.
+  \item space-between: gaps between children.
+  \item space-around: gaps including ends.
+  \item space-evenly: equal gaps.
+\end{itemize}
+
+\section{Align items}
+
+How children align on the cross axis:
+start, end, center, stretch (default).
+
+\section{Wrap}
+
+\code{flex\_wrap} flows children onto multiple lines when
+they don't fit. \maya{} supports this but rarely uses it
+for TUI layouts.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Main axis flow + cross axis alignment.
+  \item Flex factors share leftover space.
+  \item Shrink controls overflow behaviour.
+  \item Justify and align handle gaps.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a three-pane layout with flex factors.
+  \item Add justify-space-between for a footer.
+  \item Centre a dialog with align-center.
+\end{enumerate}

@@ -1,0 +1,98 @@
+\chapter{Profiling and optimisation}
+\label{ch:profile}
+
+\begin{aside}
+Before optimising, measure. After measuring, fix the worst.
+After fixing, measure again. The cycle ends when the slowest
+part is fast enough.
+\end{aside}
+
+\section{Tools}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{perf}: Linux sampling profiler.
+  \item \code{Tracy}: instrumentation profiler.
+  \item \code{Instruments}: macOS.
+  \item \code{callgrind}: cache misses, branch
+    mispredicts.
+  \item \code{vtune}: Intel, deep micro-arch.
+\end{itemize}
+
+\section{Sampling vs instrumentation}
+
+Sampling (\code{perf}): periodic stack traces. Low
+overhead, identifies hot functions.
+
+Instrumentation (\code{Tracy}): trace points in code, full
+detail. Higher overhead, gives complete picture.
+
+For exploration, start with sampling. For deep tuning,
+switch to instrumentation.
+
+\section{What to measure}
+
+In \maya{}, the typical hot spots are:
+
+\begin{itemize}[leftmargin=*]
+  \item Diff inner loop (SIMD or scalar).
+  \item Element-tree walk (layout).
+  \item ANSI emission.
+  \item Signal-graph propagation.
+\end{itemize}
+
+If your hot spot is application code (e.g., string
+formatting), focus there.
+
+\section{Common wins}
+
+\begin{itemize}[leftmargin=*]
+  \item Inline hot functions.
+  \item Reduce allocations (arena, reuse).
+  \item Cache derived values (memos).
+  \item Vectorise inner loops.
+  \item Reduce branch mispredicts.
+\end{itemize}
+
+\section{Compiler flags}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{-O3}: aggressive optimisation.
+  \item \code{-march=native}: target the build machine's
+    ISA.
+  \item \code{-flto}: link-time optimisation.
+  \item \code{-fno-omit-frame-pointer}: for profilers.
+\end{itemize}
+
+\section{PGO}
+
+Profile-guided optimisation: build instrumented, run a
+representative workload, rebuild with the profile data.
+Gains of 10--20\% are typical.
+
+\section{When to stop}
+
+A profile dominated by ``main loop'' and ``poll'' means the
+work itself is small. Time goes to waiting; the CPU is
+already efficient.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Sampling for exploration; instrumentation for
+    detail.
+  \item Hot spots: diff, layout, emit, signals.
+  \item Common wins: inline, reduce alloc, cache, vectorise.
+  \item PGO for the last 10--20\%.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Profile your app with \code{perf}; identify the
+    hottest function.
+  \item Try \code{-flto} and \code{-march=native}; measure
+    the gain.
+  \item Set up PGO for one representative workload.
+\end{enumerate}

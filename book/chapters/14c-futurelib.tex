@@ -1,0 +1,69 @@
+\chapter{Future of TUI: the library}
+\label{ch:future_library}
+
+\begin{aside}
+What's next for \maya{}? A list of things in progress,
+planned, or wished for.
+\end{aside}
+
+\section{In progress}
+
+\begin{itemize}[leftmargin=*]
+  \item BiDi support via libfribidi.
+  \item Plug-in ABI v2.
+  \item Native widget themes (matching popular editors).
+  \item Web export (canvas-based).
+\end{itemize}
+
+\section{Planned}
+
+\begin{itemize}[leftmargin=*]
+  \item Hot reload built into the runtime.
+  \item Snapshot test framework.
+  \item Benchmark suite expansion.
+  \item More widget catalogue (date pickers, charts).
+\end{itemize}
+
+\section{Wished for}
+
+\begin{itemize}[leftmargin=*]
+  \item Mobile terminal support (iSH, Termux native).
+  \item GUI backend (render to a window without
+    terminal).
+  \item AOT compilation of element trees.
+\end{itemize}
+
+\section{What's stable}
+
+The core: signal graph, element tree, diff loop. Changes
+here are rare and additive.
+
+\section{What's evolving}
+
+The widget catalogue: more widgets, refined APIs.
+
+\section{Versioning}
+
+Semver. Major bumps for breaking changes. The book tracks
+the latest.
+
+\section{Community}
+
+Issues, PRs, discussions. See Chapter~\ref{ch:contributing}.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Core stable, widgets evolving.
+  \item Hot reload, snapshot framework planned.
+  \item Mobile and GUI backends wished.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item File an issue suggesting a feature.
+  \item Look at the planned list; pick one to implement.
+\end{enumerate}

@@ -1,0 +1,97 @@
+\chapter{Custom widgets from scratch}
+\label{ch:customwidget}
+
+\begin{aside}
+The built-in widgets cover 80\% of cases. The other 20\% is
+you. Custom widgets are a small protocol: measure, layout,
+paint, handle events.
+\end{aside}
+
+\section{The widget protocol}
+
+\begin{lstlisting}
+class MyWidget : public Widget {
+public:
+    Size measure(Constraints c) override;
+    void layout(Rect bounds) override;
+    void paint(Painter& p) override;
+    bool on_event(Event e) override;
+};
+\end{lstlisting}
+
+Four methods. Each runs at a specific phase of the frame.
+
+\section{Measure}
+
+Given constraints (min/max width and height), report your
+preferred size. Layout uses this to allocate.
+
+\section{Layout}
+
+You are told your final rectangle. Position any children
+within it.
+
+\section{Paint}
+
+Write cells into the painter. Respect the clip rectangle
+(automatic).
+
+\section{Events}
+
+Receive keyboard, mouse, focus events. Return true to
+consume; false to let parent handle.
+
+\section{State}
+
+Per-instance state lives in member variables. Persistent
+state across frames (via the widget identity in
+Chapter~\ref{ch:reconcile}) survives rebuilds.
+
+\section{A complete example: progress ring}
+
+\begin{lstlisting}
+class ProgressRing : public Widget {
+    float pct;
+public:
+    Size measure(Constraints c) override {
+        return {5, 3};
+    }
+    void layout(Rect b) override { bounds = b; }
+    void paint(Painter& p) override {
+        int fill = std::round(pct * 4);
+        const char* glyphs[] =
+            {" . o O *"};
+        p.put(bounds.x + 2, bounds.y + 1,
+              Cell{ glyphs[fill] });
+    }
+};
+\end{lstlisting}
+
+A 5x3 widget showing one of 5 fill levels.
+
+\section{Composition}
+
+A complex widget composes simpler ones rather than drawing
+from scratch. Wrap a text element inside a border element
+inside an alignment element.
+
+Drop to raw paint only when no composition works.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Widget = measure + layout + paint + event.
+  \item Compose where possible; raw paint when not.
+  \item State in members; identity from tree path.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a custom widget from scratch.
+  \item Add it to your app and use it.
+  \item Refactor: can it be composed from built-ins
+    instead?
+\end{enumerate}

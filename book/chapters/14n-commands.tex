@@ -1,0 +1,79 @@
+\chapter{Patterns: command queues}
+\label{ch:commands}
+
+\begin{aside}
+Some actions are commands: user-invoked operations with a
+defined name and effect. Storing them in a queue enables
+undo, replay, and macros.
+\end{aside}
+
+\section{The command pattern}
+
+\begin{lstlisting}
+struct Command {
+    std::string name;
+    std::function<void()> execute;
+    std::function<void()> undo;
+};
+\end{lstlisting}
+
+Each user action constructs a Command and submits.
+
+\section{Dispatching}
+
+A command dispatcher executes and records:
+
+\begin{lstlisting}
+class Dispatcher {
+    std::vector<Command> history;
+public:
+    void dispatch(Command c) {
+        c.execute();
+        history.push_back(c);
+    }
+    void undo() {
+        if (history.empty()) return;
+        auto c = history.back();
+        history.pop_back();
+        c.undo();
+    }
+};
+\end{lstlisting}
+
+\section{Naming}
+
+The name field enables:
+
+\begin{itemize}[leftmargin=*]
+  \item Command palette (search by name).
+  \item Macro recording (save a sequence).
+  \item Telemetry (count which commands are popular).
+\end{itemize}
+
+\section{Macros}
+
+A macro is a saved command sequence. Replay by dispatching
+each in order.
+
+\section{Recording}
+
+A toggle records every dispatched command. On stop, save
+to a macro.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Commands have name, execute, undo.
+  \item Dispatcher records history.
+  \item Names enable palette, macros, telemetry.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Convert one button to a command.
+  \item Wire undo via command history.
+  \item Implement macro record and replay.
+\end{enumerate}

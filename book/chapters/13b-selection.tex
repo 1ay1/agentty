@@ -1,0 +1,72 @@
+\chapter{Selection and clipboard}
+\label{ch:selection}
+
+\begin{aside}
+Selecting text and copying it should work in a TUI the way it
+works everywhere else. Mouse drag, keyboard extend, copy on
+release.
+\end{aside}
+
+\section{Selection types}
+
+\begin{itemize}[leftmargin=*]
+  \item Linear: start to end, one continuous span.
+  \item Block: rectangular region, multi-column.
+  \item Multi-cursor: many disjoint cursors.
+\end{itemize}
+
+\section{Mouse drag}
+
+On mouse down, start a selection at the cell. On drag,
+extend. On release, finalise. Visual feedback: invert the
+selected cells.
+
+\section{Keyboard extend}
+
+Shift+arrow extends the selection by one cell. Shift+Home
+extends to line start; Shift+End to line end.
+
+\section{Word selection}
+
+Double-click selects a word. Triple-click selects a line.
+
+\section{Copy}
+
+Selected text copies to the clipboard via OSC-52
+(Chapter~\ref{ch:editors}). Some terminals require user
+permission for OSC-52; allow but expect failure.
+
+\section{Cut}
+
+Cut is copy plus delete. Same as copy if the source is
+read-only.
+
+\section{Paste}
+
+Bracketed paste delivers the pasted text as one event. The
+focused element inserts at the cursor.
+
+\section{Primary selection (X11)}
+
+Primary selection on Linux: middle-click pastes the last
+selection. OSC-52 \code{p} target supports this.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Linear, block, multi-cursor selections.
+  \item Mouse drag + keyboard extend.
+  \item Double/triple click for word/line.
+  \item OSC-52 for copy; bracketed paste for paste.
+  \item Primary selection on X11.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Implement linear selection with mouse drag.
+  \item Add word and line selection.
+  \item Wire OSC-52 copy and verify on your terminal.
+\end{enumerate}

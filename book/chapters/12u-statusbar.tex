@@ -1,0 +1,73 @@
+\chapter{Status bars and gutters}
+\label{ch:statusbar}
+
+\begin{aside}
+A status bar is one row of fixed-position information at the
+edge of the screen. Mode, cursor position, time, current
+file. The hardest part is deciding what not to show.
+\end{aside}
+
+\section{Layout}
+
+A status bar is a row docked to the bottom (or top):
+
+\begin{lstlisting}
+auto root = column_flex(
+    main_content,
+    status_bar() | height(1)
+);
+\end{lstlisting}
+
+The main content stretches; the bar takes one row.
+
+\section{Sections}
+
+A status bar typically has left, centre, and right sections.
+Left and right grow to push centre to the middle.
+
+\section{Content choices}
+
+Common entries: mode (insert/normal/visual), file path,
+cursor position, modified indicator, encoding, line ending,
+time, battery, network.
+
+\section{Truncation}
+
+When the bar is narrower than its content, sections truncate
+from the centre or the longest section first. \maya{}'s bar
+uses priority: highest-priority entries stay; lowest get
+ellipsed first.
+
+\section{Gutters}
+
+A gutter is a vertical strip beside the editor: line
+numbers, git change markers, diagnostic icons, breakpoint
+dots.
+
+\maya{}'s editor widget has a configurable gutter.
+
+\section{Mode colour}
+
+A common pattern: change the status bar background based on
+mode. Vim does this. The cell-diff handles updates
+efficiently.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Bar docks to top or bottom, 1 row tall.
+  \item Left/centre/right sections.
+  \item Priority-based truncation.
+  \item Gutter is the vertical analogue.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a status bar with mode, path, cursor.
+  \item Add priority-based truncation.
+  \item Add a left gutter with line numbers and git
+    markers.
+\end{enumerate}

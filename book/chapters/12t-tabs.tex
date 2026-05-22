@@ -1,0 +1,81 @@
+\chapter{Tabs, sections, and side rails}
+\label{ch:tabs}
+
+\begin{aside}
+Tabs let one screen hold many views. The active tab fills the
+content area; inactive tabs are labels at the top.
+\end{aside}
+
+\section{Tab strip}
+
+\begin{lstlisting}
+auto tabs = tab_strip({
+    {"Home",     home_view()},
+    {"Settings", settings_view()},
+    {"About",    about_view()},
+}, active);
+\end{lstlisting}
+
+The strip renders labels separated by some glyph; the
+active one is highlighted.
+
+\section{Keyboard navigation}
+
+\begin{itemize}[leftmargin=*]
+  \item Ctrl-Tab: next.
+  \item Ctrl-Shift-Tab: previous.
+  \item Ctrl-1..9: jump to tab N.
+\end{itemize}
+
+\section{Closable tabs}
+
+A close glyph (x) per tab, click to close:
+
+\begin{lstlisting}
+auto label = row(text(name), close_button(on_close));
+\end{lstlisting}
+
+\section{Reorderable tabs}
+
+Drag a tab left or right to reorder. The tab strip emits a
+reorder event; the application updates the order signal.
+
+\section{Vertical tabs}
+
+A side rail is a vertical tab strip on the left edge. Icons
+plus optional labels. Common for IDE-style tools.
+
+\section{Tab groups}
+
+Some apps group related tabs (file groups, workspaces).
+Render group separators in the strip.
+
+\section{Overflow}
+
+Too many tabs? Two options:
+
+\begin{itemize}[leftmargin=*]
+  \item Scroll the strip horizontally.
+  \item Collapse extras into a ``+5'' dropdown.
+\end{itemize}
+
+\maya{} defaults to scroll; dropdown is opt-in.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Tab strip + content area.
+  \item Keyboard nav with Ctrl-Tab.
+  \item Closable, reorderable, vertical variants.
+  \item Overflow via scroll or dropdown.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a tabbed view with three tabs.
+  \item Add Ctrl-W to close the current tab.
+  \item Implement drag-to-reorder.
+\end{enumerate}

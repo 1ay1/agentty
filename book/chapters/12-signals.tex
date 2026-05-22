@@ -1,0 +1,254 @@
+\chapter{Signals, computeds, effects}
+\label{ch:signals}
+
+The Elm runtime from Chapter~\ref{ch:elm} is one way to organise
+state and updates. \maya{} ships a second, complementary mechanism:
+\textbf{fine-grained reactivity} via \code{Signal<T>},
+\code{Computed<T>}, and \code{Effect}. Inspired by SolidJS (and
+Leptos in Rust), it lets you write code that \emph{looks} like
+direct mutation but automatically tracks dependencies and runs only
+the precise computations that depend on whatever changed.
+
+This chapter explains the model, its data structures, and when to
+reach for it over a \code{Program}.
+
+\section{The problem reactivity solves}
+
+In an Elm-style program, after every \code{Msg}, you call \code{view}
+on the entire \code{Model} and re-render the whole UI. The diff
+machinery makes this affordable, but the \emph{view function itself}
+still touches every field --- even fields that did not change.
+
+In a small app this is fine. In a 10,000-line dashboard with 200
+panels, you would like a different property: when only one field
+changes, only the views that read that field should re-evaluate.
+
+That is what fine-grained reactivity gives you. It is not better
+than Elm; it is a different point on the trade-off curve.
+
+\section{The three primitives}
+
+\subsection{\code{Signal<T>}: a value with subscribers}
+
+A \code{Signal<T>} holds a value and remembers who is reading from
+it:
+
+\begin{lstlisting}
+Signal<int> count{0};
+
+int    n = count.get();        // read the current value
+count.set(5);                  // write a new one
+count.update([](int& x){ ++x; }); // mutate in place
+\end{lstlisting}
+
+Underneath, a \code{Signal} is a \code{ReactiveNode} (the base type
+in \file{maya/include/maya/core/signal.hpp}) with a value field, a
+list of \code{subscribers}, and a version counter.
+
+\subsection{\code{Computed<T>}: a value derived from signals}
+
+A \code{Computed<T>} is a function that uses other signals:
+
+\begin{lstlisting}
+Signal<int>   count{0};
+Computed<int> doubled = computed([&] { return count.get() * 2; });
+
+count.set(5);
+int x = doubled.get();   // 10
+\end{lstlisting}
+
+Two ideas at play:
+
+\begin{itemize}[leftmargin=*]
+  \item When the lambda runs, every \code{get()} it calls is tracked
+    as a \emph{dependency}. \maya{}'s reactive runtime keeps a
+    thread-local ``current scope'' that signals push themselves
+    onto.
+  \item When any dependency changes, the computed is marked
+    \emph{dirty}. The next \code{get()} on the computed re-runs the
+    lambda; the get is cheap and idempotent.
+\end{itemize}
+
+\subsection{\code{Effect}: run a side effect when signals change}
+
+An \code{Effect} is a lambda that runs once on construction and
+re-runs whenever its dependencies change:
+
+\begin{lstlisting}
+Signal<int> count{0};
+Effect e = effect([&] {
+    std::println("count is now {}", count.get());
+});
+
+count.set(1);   // prints "count is now 1"
+count.set(2);   // prints "count is now 2"
+\end{lstlisting}
+
+Effects are how reactive state reaches the outside world. The render
+function in \maya{}'s \code{run(event\_fn, render\_fn)} quick-tool
+API is effectively wrapped in an effect: the render runs once at
+startup; subsequent renders happen automatically when any signal
+read inside the render changes.
+
+\section{How dependency tracking works}
+
+Reactivity, when you understand it, is almost embarrassingly simple.
+
+\begin{lstlisting}
+namespace detail {
+struct ReactiveNode {
+    std::vector<ReactiveNode*> subscribers;
+    std::vector<ReactiveNode*> dependencies;
+    bool pending = false;       // O(1) de-dup flag
+    uint64_t version = 0;
+    virtual void mark_dirty() = 0;
+    virtual void evaluate() = 0;
+};
+
+// Thread-local: the node currently being evaluated.
+inline thread_local ReactiveNode* current = nullptr;
+}
+\end{lstlisting}
+
+The dance:
+
+\begin{enumerate}[leftmargin=*]
+  \item When a computed or effect runs its lambda, it sets
+    \code{current = this} for the duration.
+  \item Inside the lambda, every \code{Signal<T>::get()} checks
+    \code{current}. If it is non-null, the signal adds
+    \code{current} to its \code{subscribers}, and the current node
+    adds the signal to its \code{dependencies}.
+  \item When \code{Signal<T>::set()} runs, it walks
+    \code{subscribers} and calls \code{mark\_dirty()} on each.
+  \item A dirty computed re-evaluates on next \code{get()}; a
+    dirty effect schedules a re-run.
+\end{enumerate}
+
+The graph is bipartite-ish: signals are sources, effects are sinks,
+computeds are both. Nothing is automatic but the bookkeeping; user
+code just reads and writes signals as if they were variables.
+
+\subsection{Batching}
+
+If you write \code{count.set(5)} then \code{count.set(6)} in rapid
+succession, you do not want effects to fire twice. \maya{} provides
+\code{Batch}:
+
+\begin{lstlisting}
+{
+    Batch batch;
+    count.set(5);
+    count.set(6);
+    name.set("new");
+}   // batch destructor flushes all dirty effects, exactly once each
+\end{lstlisting}
+
+Inside a batch, signal writes accumulate dirty flags on subscribers
+but do not actually re-run them. When the batch is destroyed, every
+dirty subscriber runs once. The \code{pending} bool on
+\code{ReactiveNode} is the deduplication flag --- it ensures an
+effect that depends on three batched signals fires once, not three
+times.
+
+\section{When to reach for reactivity}
+
+A rule of thumb: reactivity is most useful when the UI has many
+\textbf{independent} sub-views over a large state. A clock that
+ticks every second alongside a chat scroll that updates on every
+message alongside a status bar that watches a network connection
+--- all three can be effects in their own right, each touching only
+the signals they care about.
+
+A pure \code{Program} is more useful when the state is small enough
+to re-render in full every frame, when you want to record-and-replay,
+or when you want to test the update function in isolation.
+
+You can mix the two. \agentty{} runs Elm at the top level
+(\code{Model} + \code{Msg} + \code{update}) and uses signals
+internally for ephemeral UI state (cursor position, scroll offset,
+animation phase).
+
+\section{A worked example}
+
+A weather panel that re-renders only the temperature line when the
+temperature changes:
+
+\begin{lstlisting}
+Signal<double>    temperature{20.5};
+Signal<int>       humidity{60};
+Signal<std::string> location{"Tokyo"};
+
+auto panel = v(
+    t<"Weather"> | Bold,
+    dyn([&] { return text("Location: "    + location.get()); }),
+    dyn([&] { return text("Temperature: " + std::to_string(temperature.get())); }),
+    dyn([&] { return text("Humidity: "    + std::to_string(humidity.get()) + "%"); })
+);
+\end{lstlisting}
+
+The \code{dyn(...)} lambdas each read exactly one signal. Under
+\maya{}'s reactive runtime, only the changed line is recomputed when
+its signal changes. The diff machinery from Chapter~\ref{ch:simd}
+then notices that only a few cells differ and emits a few bytes of
+ANSI. The total cost of changing the temperature is on the order of
+\emph{microseconds}.
+
+\section{Lifetime and ownership}
+
+A natural question: who owns the \code{ReactiveNode} graph? \maya{}'s
+nodes are heap-allocated and reference-counted, but the references
+are scoped:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Signal<T>} is a value handle. Copy it freely; the
+    underlying node is shared.
+  \item \code{Computed<T>} likewise.
+  \item \code{Effect} is RAII. When the \code{Effect} object goes out
+    of scope, the effect is unregistered from its dependencies and
+    will not fire again.
+\end{itemize}
+
+The thread-local current scope means signals are \emph{not}
+thread-safe across threads. The doc-level rule: one reactive graph
+per thread. Cross-thread updates go through \code{Cmd<Msg>::task} (a
+\code{Program} mechanism) or through a thread-safe queue you flush
+on the UI thread.
+
+\section{Comparison with React, Solid, Leptos}
+
+If you have used reactive UI libraries:
+
+\begin{itemize}[leftmargin=*]
+  \item \maya{}'s model is closest to \textbf{Solid}'s. Signals are
+    granular; tracking is automatic; there is no virtual DOM.
+  \item Unlike \textbf{React}, there is no component re-render cycle.
+    A signal change wakes only the effects that read it.
+  \item Unlike \textbf{Leptos}, the host language is \cpp{} so
+    there is no macro DSL --- signals are plain objects, the
+    \code{|} pipes are the visual difference.
+\end{itemize}
+
+\begin{recap}
+\maya{} ships a signal/computed/effect reactive runtime in
+\file{core/signal.hpp}. Signals hold values; computeds derive;
+effects run side effects. Dependency tracking is automatic via a
+thread-local current-scope pointer. Batching deduplicates
+notifications. Use reactivity for fine-grained sub-view updates;
+use \code{Program} for testable top-level logic. The two compose.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a clock effect that prints the current time every
+    second. Drive it with a \code{Signal<std::string>} you update
+    from a background thread (use \code{Cmd::Task} for the safe
+    way).
+  \item Build a \code{Computed<int>} that depends on two signals.
+    Mutate them inside a \code{Batch} and verify the computed
+    re-evaluates exactly once.
+  \item Read \file{maya/include/maya/core/signal.hpp}. Find the
+    \code{thread\_local} current-scope pointer. Trace how
+    \code{Signal::get()} consults it.
+\end{enumerate}

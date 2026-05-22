@@ -1,0 +1,94 @@
+\chapter{Appendix: element API reference}
+\label{ch:elementref}
+
+\begin{aside}
+The element types and modifiers in one place.
+\end{aside}
+
+\section{Containers}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{column(...)}, \code{row(...)},
+    \code{stack(...)}: flex containers.
+  \item \code{center(child)}, \code{align(x, y, child)}.
+  \item \code{padding(t, r, b, l, child)},
+    \code{margin(t, r, b, l, child)}.
+  \item \code{border(child)}, \code{border(preset, child)}.
+  \item \code{box(w, h)}, \code{spacer()}.
+\end{itemize}
+
+\section{Display}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{text(s)}, \code{paragraph(s)},
+    \code{markdown(s)}.
+  \item \code{code(s)}, \code{code(s, lang)}.
+  \item \code{image(path)}, \code{block\_image(path)}.
+  \item \code{badge(s)}, \code{kbd(s)}, \code{tag(s)},
+    \code{avatar(s)}.
+  \item \code{separator()}, \code{rule(label)}.
+\end{itemize}
+
+\section{Input}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{text\_input(signal)},
+    \code{multiline\_input(signal)},
+    \code{password\_input(signal)},
+    \code{number\_input(signal, min, max)}.
+  \item \code{date\_input(signal)},
+    \code{combo(options, signal)}.
+  \item \code{checkbox(signal)},
+    \code{radio\_group(options, signal)},
+    \code{toggle(signal)}.
+  \item \code{slider(signal, min, max)}.
+  \item \code{button(label, on\_click)}.
+\end{itemize}
+
+\section{Containers (interactive)}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{card(child)}, \code{panel(title, child)}.
+  \item \code{tabs(...)}, \code{tab\_strip(...)},
+    \code{accordion(...)}, \code{collapsible(...)}.
+  \item \code{split(a, b, ratio)}, \code{hsplit}, \code{vsplit}.
+  \item \code{scroll\_view(child)},
+    \code{virtual\_list(items, render)},
+    \code{tree\_view(root)},
+    \code{table(rows, cols)}.
+\end{itemize}
+
+\section{Feedback}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{spinner()}, \code{progress\_bar(pct)},
+    \code{progress\_ring(pct)}.
+  \item \code{toast(msg)}, \code{notification(msg)},
+    \code{snackbar(msg)}.
+  \item \code{alert(level, msg)}.
+  \item \code{tooltip(target, content)},
+    \code{popover(target, content)}.
+\end{itemize}
+
+\section{Modifiers (piped)}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{| fg<color>}, \code{| bg<color>}.
+  \item \code{| bold}, \code{| italic}, \code{| underline},
+    \code{| dim}, \code{| reverse}.
+  \item \code{| width(n)}, \code{| height(n)},
+    \code{| flex(n)}.
+  \item \code{| overflow(mode)}, \code{| clip(rect)}.
+  \item \code{| hyperlink(url)}, \code{| tooltip(text)}.
+  \item \code{| on\_click(fn)}, \code{| on\_hover(fn)},
+    \code{| on\_key(key, fn)}.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Containers, display, input, feedback.
+  \item Pipe operators apply styles and handlers.
+\end{itemize}
+\end{recap}

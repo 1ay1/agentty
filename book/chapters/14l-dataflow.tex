@@ -1,0 +1,66 @@
+\chapter{Patterns: data flow}
+\label{ch:dataflow}
+
+\begin{aside}
+One-way data flow: state down, events up. The opposite leads
+to tangle.
+\end{aside}
+
+\section{The pattern}
+
+Parents pass data to children as props. Children emit
+events that parents handle.
+
+\begin{lstlisting}
+auto editable = [&] (std::string val, auto on_change) {
+    return text_input(val, on_change);
+};
+
+auto parent = [&] {
+    auto v = signal("");
+    return editable(ctx.get(v), [&](auto s) {
+        ctx.set(v, s);
+    });
+};
+\end{lstlisting}
+
+\section{Two-way binding}
+
+Some frameworks have two-way binding (the child can mutate
+the parent's state directly). \maya{} doesn't. Pass a
+mutator callback if needed:
+
+\begin{lstlisting}
+auto field = bound_input(signal_ref);
+\end{lstlisting}
+
+The helper bundles read and write into one parameter.
+
+\section{Lifting state}
+
+When two children need to share state, lift to their parent.
+The shared signal lives in the parent; both children read
+and write via parent-provided callbacks.
+
+\section{Unidirectional reasoning}
+
+The mental model: data flows down, events bubble up. State
+lives at the highest level needed. Each component is a
+function: same props in, same render out.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Data down, events up.
+  \item No two-way binding; explicit callbacks.
+  \item Lift shared state to common parent.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Identify any reverse flow in your app.
+  \item Refactor to one-way.
+\end{enumerate}

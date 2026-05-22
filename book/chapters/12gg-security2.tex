@@ -1,0 +1,84 @@
+\chapter{Security in TUI apps}
+\label{ch:security2}
+
+\begin{aside}
+TUIs run with the user's privileges. Reading a file the user
+can read is fine. Writing one they didn't intend to write is
+a bug. Executing one they didn't intend to execute is a
+disaster.
+\end{aside}
+
+\section{Input validation}
+
+User input is untrusted. A filename from a search box can
+contain \code{../}. A URL can be malicious. Sanitise.
+
+\section{Shell-out hygiene}
+
+If your app shells out (e.g., \code{system("foo " +
+arg)}), the arg is a shell injection vector. Use
+\code{execvp} with separate arguments, never string
+concatenation.
+
+\section{Path traversal}
+
+Joining user input to a base path can escape via
+\code{../}. Resolve and verify:
+
+\begin{lstlisting}
+auto p = std::filesystem::canonical(base / user_input);
+if (!p.starts_with(base)) throw "out of bounds";
+\end{lstlisting}
+
+\section{Secret handling}
+
+API tokens, passwords. Never write to log files. Never
+display in plain text. Use \code{mlock} on Linux to keep
+out of swap. Wipe with \code{explicit\_bzero} on release.
+
+\section{Code injection in displayed strings}
+
+If you display a string with embedded ANSI escapes from
+untrusted source, the user's terminal interprets them ---
+potentially moving the cursor, setting the title to
+something nasty, or worse.
+
+\maya{} provides \code{sanitise\_for\_display} that strips
+control bytes from untrusted strings before they reach
+the cell buffer.
+
+\section{Update mechanism}
+
+If your app self-updates, the update channel is a security
+boundary. Sign updates; verify on download. \maya{}
+doesn't ship an updater; if you write one, follow
+established practice.
+
+\section{TLS}
+
+Network connections to anything sensitive must use TLS.
+Verify certificates; never disable verification ``for
+testing''.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Validate user input.
+  \item Never shell concatenate.
+  \item Canonicalise paths.
+  \item Secrets out of logs, out of swap, wiped on release.
+  \item Sanitise untrusted strings before display.
+  \item Signed updates over TLS.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Audit your app's shell-outs; replace with
+    \code{execvp}.
+  \item Add path-traversal protection to file pickers.
+  \item Strip control bytes from any string from
+    untrusted sources before display.
+\end{enumerate}

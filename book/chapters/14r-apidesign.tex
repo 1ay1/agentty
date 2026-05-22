@@ -1,0 +1,72 @@
+\chapter{The art of API design}
+\label{ch:apidesign}
+
+\begin{aside}
+A library's API is its UI for programmers. Same principles
+apply: minimise surface, name well, default sensibly.
+\end{aside}
+
+\section{Minimise surface}
+
+Every public symbol is a maintenance burden. Hide
+implementation; expose intent.
+
+\section{Name well}
+
+Names communicate purpose. \code{set\_visible(true)} is
+clearer than \code{set\_v(1)}. Verb-noun for actions.
+
+\section{Sensible defaults}
+
+The default should be what 80\% of users want. Make the
+common case zero-config.
+
+\section{Builder vs constructor}
+
+For elements with many optional parameters, the pipe
+operator builder is friendlier than a 10-arg constructor:
+
+\begin{lstlisting}
+text("hi") | bold | fg<"red"> | width(20);
+\end{lstlisting}
+
+Versus:
+
+\begin{lstlisting}
+text("hi", true, "red", 20, ...);
+\end{lstlisting}
+
+\section{Errors as values}
+
+Use \code{std::expected} or a sentinel return; avoid
+exceptions for routine failures.
+
+\section{Composability}
+
+Functions that take and return elements compose. Functions
+that take config structs less so.
+
+\section{Versioning}
+
+Public API changes break users. Use semver; deprecate
+gradually.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Small surface, clear names.
+  \item Defaults for the common case.
+  \item Builders for many optional args.
+  \item Errors as values; not exceptions for routine.
+  \item Compose, don't accumulate.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Audit your own public API for over-exposure.
+  \item Rename one badly-named function.
+  \item Convert one config struct to a builder.
+\end{enumerate}

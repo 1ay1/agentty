@@ -1,0 +1,270 @@
+\chapter{Building, packaging, shipping}
+\label{ch:build}
+
+This last chapter is the practical mile: how to compile \maya{}, how
+to depend on it from your own project, how to ship a binary that
+runs anywhere, and what to do when something goes wrong. It assumes
+you have read the architecture chapters and want to put a real
+program on a real machine.
+
+\section{Compiler requirements}
+
+\maya{} requires \cpp{}26. As of this writing the meaningful
+toolchains are:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{Compiler} & \textbf{Minimum} & \textbf{Notes} \\
+\hline
+GCC                & 15 & recommended on Linux and macOS \\
+Clang              & 18 & needs libstdc++ 15 or libc++ trunk \\
+MSVC               & 14.40 & \cpp{}23 + \texttt{/std:c++latest} \\
+AppleClang         & --- & not yet \cpp{}26-capable; use Homebrew GCC \\
+\end{tabular}
+\end{center}
+
+On Apple Silicon this means \code{brew install gcc} then explicitly
+configure with \code{cmake -DCMAKE\_CXX\_COMPILER=g++-15}. The
+AppleClang shipped with Xcode is not ready for \cpp{}26 yet.
+
+\section{Building \maya{}}
+
+The standard incantation:
+
+\begin{lstlisting}[style=shell]
+git clone --recursive https://github.com/1ay1/agentty
+cd agentty/maya
+cmake -B build
+cmake --build build -j$(nproc)
+\end{lstlisting}
+
+A few useful CMake options:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{-DMAYA\_BUILD\_EXAMPLES=ON} --- build the 26 example
+    programs. On by default if \maya{} is the top-level project; off
+    when it is a sub-build.
+  \item \code{-DMAYA\_BUILD\_TESTS=ON} --- build the test suite.
+    Run with \code{ctest --test-dir build}.
+  \item \code{-DCMAKE\_BUILD\_TYPE=Release} --- enable
+    \code{-O3 -DNDEBUG}. \maya{} also turns on link-time
+    optimisation (LTO) automatically in Release.
+  \item \code{-DCMAKE\_INTERPROCEDURAL\_OPTIMIZATION=OFF} ---
+    disable LTO if your linker is short on memory.
+\end{itemize}
+
+A clean Release build of \maya{} plus all examples takes about a
+minute on a modern laptop.
+
+\section{Linking \maya{} into your own program}
+
+The supported path is to install \maya{} and \code{find\_package} it
+from your project's CMake.
+
+\subsection{Installing}
+
+\begin{lstlisting}[style=shell]
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cmake --install build --prefix /usr/local
+\end{lstlisting}
+
+This installs headers under \code{\$prefix/include/maya/} and the
+static library under \code{\$prefix/lib/}, plus a CMake config
+package under \code{\$prefix/lib/cmake/maya/}.
+
+\subsection{Depending on it}
+
+In your project's \code{CMakeLists.txt}:
+
+\begin{lstlisting}[style=shell]
+cmake_minimum_required(VERSION 3.28)
+project(my_app LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(maya 0.1 REQUIRED)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE maya::maya)
+\end{lstlisting}
+
+Then in \code{main.cpp}:
+
+\begin{lstlisting}
+#include <maya/maya.hpp>
+#include <maya/widget/markdown.hpp>     // each widget header opt-in
+
+int main() {
+    maya::print(maya::dsl::t<"Hello from your app">.build());
+}
+\end{lstlisting}
+
+\subsection{Vendoring via \code{FetchContent}}
+
+If you prefer to vendor \maya{} alongside your sources:
+
+\begin{lstlisting}[style=shell]
+include(FetchContent)
+FetchContent_Declare(maya
+    GIT_REPOSITORY https://github.com/1ay1/agentty.git
+    GIT_TAG        master
+    SOURCE_SUBDIR  maya
+)
+set(MAYA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MAYA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(maya)
+
+target_link_libraries(my_app PRIVATE maya::maya)
+\end{lstlisting}
+
+This downloads, builds, and links \maya{} as part of your
+configure step. No installation required. Slower first build,
+faster CI.
+
+\section{Sandboxing your program (Linux / macOS)}
+
+\maya{} itself does not sandbox; that is a feature of programs like
+\agentty{} that wrap shell calls. If your TUI shells out, look at
+\agentty{}'s \file{src/tool/util/sandbox.cpp} as a reference. The
+relevant building blocks:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Linux:} \code{bwrap} (bubblewrap) with read-only
+    binds for \code{/usr}, \code{/etc}, etc., a fresh
+    \code{tmpfs} for \code{/tmp}, a shared network namespace.
+  \item \textbf{macOS:} \code{sandbox-exec} with a sandbox profile
+    file written to a temp path and removed on exit.
+\end{itemize}
+
+The pattern is to detect the backend by attempting a
+\code{<exe> --version} probe, fall back to no-sandbox if absent,
+and surface the decision to the user.
+
+\section{Producing a static binary}
+
+If you want one binary you can scp to any compatible machine,
+build with static linking. The shape (Linux) is:
+
+\begin{lstlisting}[style=shell]
+cmake -B build-static \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+cmake --build build-static -j
+\end{lstlisting}
+
+This statically links libstdc++ and libgcc, but leaves libc
+dynamic (fully-static glibc breaks DNS resolution via NSS). For a
+100\%-static binary on Linux you need a musl toolchain
+(\code{x86\_64-linux-musl-g++} from Alpine or
+\code{musl-cross-make}). On macOS, only \code{libSystem} is
+dynamic --- that is Apple's only supported ABI.
+
+On Windows, link the static MSVC runtime (\code{/MT}) and use the
+\code{x64-windows-static} vcpkg triplet for any third-party
+dependencies. \agentty{}'s release pipeline does exactly this; you
+can crib from its \code{CMakeLists.txt}.
+
+\section{Packaging}
+
+For distribution, see \agentty{}'s \file{packaging/} directory and
+\file{scripts/release.sh}. The script builds:
+
+\begin{itemize}[leftmargin=*]
+  \item A \code{.deb} (Debian / Ubuntu).
+  \item An \code{.rpm} (Fedora / RHEL).
+  \item A \code{.pkg.tar.zst} (Arch).
+  \item A Homebrew formula.
+  \item A Scoop manifest (Windows).
+  \item An AUR PKGBUILD.
+  \item Raw static binaries.
+\end{itemize}
+
+The whole pipeline runs locally; no CI required. The script is a
+worked example for any project that wants a similar one-command
+release flow.
+
+\section{Debugging}
+
+\subsection{Terminal stuck in raw mode}
+
+If your program crashed and the shell is acting weird, run
+\code{stty sane} or \code{reset}. Avoid this in the future by using
+RAII for the terminal state (which \maya{} does internally).
+
+\subsection{Rendering looks corrupted}
+
+First, check that your terminal supports truecolour and the modes
+\maya{} uses. \code{echo \$TERM} should show a modern value
+(\code{xterm-256color}, \code{kitty}, \code{wezterm}). Some old
+terminals (Windows command prompt) need explicit enablement of
+ANSI processing.
+
+Second, capture a frame to a file:
+
+\begin{lstlisting}[style=shell]
+script -q -c './my_program' frames.txt
+\end{lstlisting}
+
+The \code{frames.txt} file contains every byte your program sent;
+inspect it with \code{cat -v frames.txt} to see the raw ANSI.
+
+\subsection{Slow rendering}
+
+If frames are dropping, the bottleneck is almost certainly your
+view function or your event handler, not \maya{}. Profile with
+\code{perf record} (Linux), \code{Instruments} (macOS), or
+\code{Tracy} (cross-platform). \maya{}'s render path itself
+measures in the tens of microseconds.
+
+\section{Going further}
+
+This book has been a guided tour. The repository contains a great
+deal more:
+
+\begin{itemize}[leftmargin=*]
+  \item \file{maya/docs/}: 14 markdown chapters that overlap with
+    this book but are more reference-style.
+  \item \file{maya/examples/}: 26 fully-worked programs ranging
+    from \file{counter.cpp} (60 lines) to \file{messenger.cpp}
+    (3000+ lines, a real chat UI).
+  \item \file{maya/docs/internals/}: deep engineering writeups on
+    the corner cases of inline rendering, the witness chain, and
+    scrollback integrity.
+  \item \agentty{}'s repository: the largest production user of
+    \maya{}, with its own design discipline that complements the
+    library's.
+\end{itemize}
+
+If you finished this book and built something with \maya{}, you have
+joined a small club of people who write terminal UIs by composing
+typed values rather than by typing escape sequences. That is the
+right way to build them; the rest of the world will get there
+eventually.
+
+\begin{recap}
+Build \maya{} with CMake against GCC 15+ or Clang 18+ (or MSVC
+14.40+ on Windows). Use \code{find\_package(maya)} or
+\code{FetchContent} to depend on it. Static binaries need
+\code{-static-libstdc++ -static-libgcc} on Linux (musl for fully
+static) or \code{/MT} on Windows. Packaging is one script away in
+\agentty{}'s \file{scripts/release.sh}. When something looks wrong,
+\code{script(1)} the byte stream and read the ANSI.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Set up a new project, vendor \maya{} via
+    \code{FetchContent}, and write a one-screen TUI for something
+    you actually want --- a directory size visualiser, a small
+    log tail, an HTTP-endpoint poller.
+  \item Build it static. Scp it to a different machine. Run it.
+    Note how the dependency story stays exactly: zero.
+  \item Contribute back. Pick a widget that does not yet exist
+    (a kanban board, a piano-roll, a syntax-highlighted JSON
+    viewer) and PR it. The maintainers are friendly; the
+    architecture makes the work tractable.
+\end{enumerate}

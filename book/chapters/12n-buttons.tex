@@ -1,0 +1,119 @@
+\chapter{Buttons and clickables}
+\label{ch:buttons}
+
+\begin{aside}
+A button is the simplest interactive widget: text plus an
+action. The work is in the polish --- hover, press, disabled,
+focus ring, keyboard activation.
+\end{aside}
+
+\section{The minimal button}
+
+\begin{lstlisting}
+auto btn = text("Save") | on_click(save_action);
+\end{lstlisting}
+
+A click anywhere on the text fires the action. That's it.
+
+\section{States}
+
+Buttons have visual states:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Normal.} Default appearance.
+  \item \textbf{Hover.} Mouse over, slightly different.
+  \item \textbf{Pressed.} Mouse down, inverted or
+    darkened.
+  \item \textbf{Focused.} Selected via keyboard, ring or
+    different style.
+  \item \textbf{Disabled.} Greyed out, not clickable.
+\end{itemize}
+
+\maya{}'s button widget tracks each via signals.
+
+\section{Keyboard activation}
+
+Focused button + Enter (or Space) fires the action. The
+default key handler:
+
+\begin{lstlisting}
+on_key(KeyEnter, [&] { if (focused) action(); });
+\end{lstlisting}
+
+\section{Focus ring}
+
+The focus ring is a subtle border or background change.
+Honour OS conventions: dotted underline on Mac, solid
+border on Windows, custom on Linux.
+
+\maya{}'s default is a 1px bright border. Override per
+theme.
+
+\section{Toggle buttons}
+
+A toggle button has on/off state:
+
+\begin{lstlisting}
+auto toggle = button("Mute")
+            | toggleable(is_muted);
+\end{lstlisting}
+
+The signal tracks the state; the visual reflects it.
+
+\section{Button groups}
+
+A row of buttons where only one can be active (radio
+group):
+
+\begin{lstlisting}
+auto group = radio_group(options, selected);
+\end{lstlisting}
+
+Internally each button is a toggle bound to the selected
+signal.
+
+\section{Confirmation buttons}
+
+A dangerous action (delete, sign out) deserves a
+confirmation:
+
+\begin{lstlisting}
+auto del = button("Delete")
+         | confirm("Are you sure?");
+\end{lstlisting}
+
+The button opens a modal; the action fires only on the
+modal's confirm.
+
+\section{Async actions}
+
+A button that triggers async work should show progress:
+
+\begin{lstlisting}
+auto btn = button(loading ? "Saving..." : "Save")
+         | disabled(loading)
+         | on_click([&]() -> Task<void> {
+             ctx.set(loading, true);
+             co_await save();
+             ctx.set(loading, false);
+           });
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Button = text + click action.
+  \item Five visual states.
+  \item Keyboard activation via Enter or Space.
+  \item Toggle, radio, confirmation, async variants.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a button with all five visual states.
+  \item Wire keyboard activation for focused buttons.
+  \item Add async loading state to a save button.
+\end{enumerate}

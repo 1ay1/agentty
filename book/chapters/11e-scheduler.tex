@@ -1,0 +1,212 @@
+\chapter{The frame scheduler}
+\label{ch:scheduler}
+
+\begin{aside}
+A TUI is event-driven, not frame-driven. There is no 60 Hz
+refresh; there is no v-sync. Frames happen because something
+asked for one. This chapter is about who asks, and how often.
+\end{aside}
+
+\section{What is a frame?}
+
+A frame in \maya{} is a single render pass: clear back buffer,
+paint, diff, emit. Frames are not free --- each is at least one
+\code{write} syscall and a few microseconds of CPU --- so we want
+exactly as many as the application needs and no more.
+
+\section{Triggers}
+
+Three things trigger a frame:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Input.} A key press, a mouse event, a paste, a
+    focus change, a resize.
+  \item \textbf{Signal change.} Application state updated via
+    the signal graph (see Chapter~\ref{ch:signals}).
+  \item \textbf{Animation.} A widget registered an ongoing
+    animation that wants a frame at a specific time.
+\end{enumerate}
+
+A frame triggered by any source serves all of them: if input and
+a signal change arrive together, one frame paints both.
+
+\section{The event loop}
+
+The loop is roughly:
+
+\begin{lstlisting}
+while (running) {
+  Event ev = wait_for_next_event(deadline);
+  dispatch(ev);
+  if (frame_dirty) {
+    render_frame();
+    frame_dirty = false;
+  }
+}
+\end{lstlisting}
+
+\code{wait\_for\_next\_event} sleeps the thread until input
+arrives or the deadline fires. The deadline is the soonest of:
+
+\begin{itemize}[leftmargin=*]
+  \item Animation frame deadline (e.g. ``redraw at $t + 16$ ms''
+    for a 60-Hz animation).
+  \item Timeout (a registered timer).
+  \item Forever, if neither of the above.
+\end{itemize}
+
+\section{Coalescing}
+
+Multiple events in a single wakeup are dispatched in order
+before rendering. This coalesces:
+
+\begin{itemize}[leftmargin=*]
+  \item A paste of 500 bytes: 500 keys, one frame.
+  \item A burst of mouse-move events: many moves, one frame.
+  \item A flurry of signal changes during a command: many
+    updates, one frame.
+\end{itemize}
+
+Coalescing makes the renderer's throughput O(unique frames), not
+O(events).
+
+\section{Frame budget}
+
+Sixty frames per second gives 16.7 ms per frame. \maya{}'s
+target is to finish a frame in under 5 ms, leaving headroom for
+the application's own work.
+
+Of that 5 ms:
+
+\begin{itemize}[leftmargin=*]
+  \item Layout: 0.5--1 ms typical, depends on tree depth.
+  \item Paint: 0.5--2 ms, scales with cell count.
+  \item Diff and emit: 0.5--1 ms.
+  \item Application: whatever is left.
+\end{itemize}
+
+If a frame goes over budget, the next event is processed
+immediately and a new frame is requested. There is no
+back-pressure: the renderer cannot ask the keyboard to slow down.
+
+\section{Animation tick}
+
+An animation registers a callback and a duration:
+
+\begin{lstlisting}
+animate(300ms, [](float t) {
+    // t goes from 0.0 to 1.0
+    ctx.set(progress, t);
+});
+\end{lstlisting}
+
+The scheduler picks a tick rate (default 60 Hz) and fires the
+callback every tick with a $t$ value. When $t$ reaches 1.0 the
+animation completes.
+
+Many animations can be active at once; the scheduler picks the
+deadline of the soonest tick and wakes then.
+
+\section{Tick deduplication}
+
+If three animations all want a tick at $t + 16$ ms, the
+scheduler wakes once and fires all three. One frame paints the
+combined effect.
+
+\section{Debouncing}
+
+For events that fire faster than the scheduler can keep up
+(rapid scrolling, mouse motion), \maya{} debounces by simply
+processing the latest. The wakeup empties the input queue and
+dispatches all events; the renderer paints once with the final
+state.
+
+\begin{tryit}
+Hold a key down. The repeat rate of your OS may be 30 Hz or
+faster, but \maya{} processes it as ``keys'' not as ``frames''
+--- one frame per repeat is fine, but a slow widget might
+combine several into one.
+\end{tryit}
+
+\section{Sleeping}
+
+When idle, \maya{} blocks on \code{poll} (Linux),
+\code{kqueue} (BSD), or \code{select}. The thread sleeps; CPU
+goes to 0\%. There is no spinning, no busy wait.
+
+\begin{funfact}
+A long-running TUI like a chat client uses about 0.1\% CPU when
+idle. Compare to a browser tab with the same chat, which often
+uses 5--10\% for the cursor blink alone.
+\end{funfact}
+
+\section{Resize handling}
+
+SIGWINCH (window change signal) interrupts the syscall and
+returns \code{EINTR}. \maya{}'s loop catches this, queries the
+new terminal size via \code{TIOCGWINSZ}, and forces a full
+redraw.
+
+The redraw is forced via the sentinel trick from
+Chapter~\ref{ch:buffers}: the front buffer is filled with sentinels,
+the next frame diffs every cell.
+
+\section{Suspend and resume}
+
+Ctrl-Z sends SIGTSTP. \maya{} catches it, restores the terminal
+to cooked mode, prints the appropriate ANSI to exit alt-screen,
+and re-raises SIGTSTP so the shell can suspend the process.
+
+On SIGCONT the loop reverses the dance: alt-screen, raw mode,
+sentinel-flood, render.
+
+\begin{warning}
+If a custom shutdown handler raises an exception, the terminal
+may be left in raw mode. \maya{} installs handlers in the
+constructor with RAII guards so even \code{std::terminate}
+leaves the terminal sane.
+\end{warning}
+
+\section{The render-on-every-tick fallacy}
+
+Some libraries render at a fixed rate regardless of state:
+``redraw at 60 Hz''. This is wasteful for a TUI. A file
+browser sitting on the same folder for ten minutes should
+emit zero ANSI in those ten minutes.
+
+\maya{}'s scheduler emits ANSI only when something changed. If
+nothing did, the screen is byte-for-byte the same as before.
+
+\section{Tearing}
+
+Without DEC 2026 synchronised output, a long frame may be
+emitted in chunks. The user can see a half-painted screen for
+one tick. \maya{} mitigates by sending the smallest possible
+runs and by using \code{TCSADRAIN} on resize.
+
+DEC 2026, when supported, brackets the whole frame so the
+terminal applies it atomically.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Frames are demand-driven: input, signals, or
+    animation.
+  \item The loop coalesces events: many events, one frame.
+  \item Idle costs zero CPU.
+  \item Animation tick rate defaults to 60 Hz, configurable.
+  \item Resize and suspend handlers restore the terminal.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a frame counter to your status bar. Confirm it
+    increments only when something changes.
+  \item Register an animation that fades a colour over 1
+    second. Observe the tick rate via the counter.
+  \item Suspend and resume your app via Ctrl-Z and \code{fg}.
+    The terminal should restore cleanly each time.
+\end{enumerate}

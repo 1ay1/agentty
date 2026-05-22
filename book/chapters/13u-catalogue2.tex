@@ -1,0 +1,67 @@
+\chapter{Widget catalogue: input}
+\label{ch:catalogue_input}
+
+\section{text\_input}
+
+Single-line text input. Cursor, selection, undo/redo,
+clipboard.
+
+\section{multiline\_input}
+
+Multi-line variant with wrapping and vertical movement.
+
+\section{password\_input}
+
+Like text\_input but characters render as bullets.
+
+\section{number\_input}
+
+Numeric only. Up/down arrows increment. Configurable
+min, max, step.
+
+\section{date\_input}
+
+Date picker with calendar overlay.
+
+\section{checkbox}
+
+A toggleable box. Bind to a bool signal.
+
+\section{radio}
+
+A group where one is selected.
+
+\section{slider}
+
+Drag a thumb along a track. Numeric output between min
+and max.
+
+\section{combo}
+
+Dropdown with options. Searchable.
+
+\section{button}
+
+See Chapter~\ref{ch:buttons}.
+
+\section{toggle}
+
+Two-state slider; horizontal binary switch.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Text variants: single, multi, password, number, date.
+  \item Choice: checkbox, radio, combo, toggle.
+  \item Numeric: slider, number\_input.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a settings panel using each input type.
+  \item Validate inputs and show errors inline.
+  \item Persist the settings to config.
+\end{enumerate}

@@ -1,0 +1,77 @@
+\chapter{Syntax highlighting}
+\label{ch:syntax}
+
+\begin{aside}
+A code viewer without syntax highlighting feels primitive.
+Coloured keywords, strings, comments --- the cost is a
+parser; the benefit is readability.
+\end{aside}
+
+\section{Approaches}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Regex.} Simple, fast, imperfect.
+  \item \textbf{Tree-sitter.} Real parser, incremental, accurate.
+  \item \textbf{LSP semantic tokens.} From a language server,
+    most accurate.
+\end{itemize}
+
+\maya{} doesn't bundle a highlighter. Pick by need.
+
+\section{Tree-sitter}
+
+Tree-sitter parses on every edit incrementally; only the
+changed subtree re-parses. Cost is O(edit), not O(file).
+
+\begin{lstlisting}
+auto tree = ts_parser_parse_string(parser, nullptr, source, len);
+auto root = ts_tree_root_node(tree);
+// walk nodes, map to styles
+\end{lstlisting}
+
+\section{Mapping to styles}
+
+A theme assigns styles to syntax categories:
+
+\begin{lstlisting}
+[syntax]
+keyword = { fg = "purple", attrs = ["bold"] }
+string = { fg = "green" }
+comment = { fg = "grey", attrs = ["italic"] }
+\end{lstlisting}
+
+\section{Incremental rendering}
+
+Highlight only the visible viewport. As the user scrolls,
+highlight new rows on demand.
+
+\section{Cache invalidation}
+
+On edit, invalidate the highlight cache for the changed
+region. Use tree-sitter's incremental parsing to limit
+the work.
+
+\section{Languages}
+
+A real editor supports dozens. Each language ships a
+grammar; load on demand.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Regex for simple cases; tree-sitter for real.
+  \item Theme maps syntax categories to styles.
+  \item Highlight only the visible region.
+  \item Incremental on edit.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add basic regex highlighting (keyword, string,
+    comment) to your code viewer.
+  \item Integrate tree-sitter for one language.
+  \item Build a theme switcher for syntax styles.
+\end{enumerate}

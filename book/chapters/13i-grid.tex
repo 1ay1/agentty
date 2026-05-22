@@ -1,0 +1,99 @@
+\chapter{Layout: grid and absolute positioning}
+\label{ch:grid}
+
+\begin{aside}
+Flexbox handles 1-D layouts well. For 2-D, grid is the
+answer. For ``put this exactly here'' moments, absolute
+positioning escapes layout entirely.
+\end{aside}
+
+\section{Grid basics}
+
+\begin{lstlisting}
+auto layout = grid({
+    .rows = "auto 1fr auto",
+    .cols = "200 1fr"
+}, {
+    {0, 0, header() | span(2)},
+    {1, 0, sidebar()},
+    {1, 1, main_content()},
+    {2, 0, footer() | span(2)},
+});
+\end{lstlisting}
+
+Each child occupies cells in the grid; \code{span} extends
+across rows or columns.
+
+\section{Track sizing}
+
+\begin{itemize}[leftmargin=*]
+  \item Fixed: literal cell count.
+  \item \code{auto}: shrink to content.
+  \item \code{1fr}: fractional, share leftover.
+  \item \code{minmax(a, b)}: between min and max.
+\end{itemize}
+
+\section{Areas}
+
+A named-area syntax:
+
+\begin{lstlisting}
+auto layout = grid({
+    .areas = R"(
+        header header
+        side   main
+        footer footer
+    )"
+}, {
+    {.area = "header", .child = header()},
+    // ...
+});
+\end{lstlisting}
+
+Readable; reflects the layout shape.
+
+\section{Absolute positioning}
+
+For overlays, tooltips, popovers --- escape layout:
+
+\begin{lstlisting}
+auto popup = absolute(card, .x = 20, .y = 5);
+\end{lstlisting}
+
+The popup paints at the given coordinates regardless of
+parent.
+
+\section{Relative positioning}
+
+\code{relative} shifts an element from where layout placed
+it. Useful for animations or decorative offsets.
+
+\section{Z-index}
+
+For overlays with stacking order:
+
+\begin{lstlisting}
+auto over = card | z(100);
+\end{lstlisting}
+
+Higher z paints later (on top). See Chapter~\ref{ch:zorder}.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Grid for 2-D; flexbox for 1-D.
+  \item Track sizes: fixed, auto, fr, minmax.
+  \item Named areas for readable layouts.
+  \item Absolute for overlays and popovers.
+  \item Z-index controls stacking.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a holy-grail layout with grid.
+  \item Use named areas.
+  \item Add an absolutely-positioned tooltip.
+\end{enumerate}

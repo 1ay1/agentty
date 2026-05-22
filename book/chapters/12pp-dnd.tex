@@ -1,0 +1,85 @@
+\chapter{Drag and drop}
+\label{ch:dnd}
+
+\begin{aside}
+Drag-and-drop in a terminal feels modern. The implementation
+is bookkeeping: pick-up on press, follow on move, drop on
+release.
+\end{aside}
+
+\section{States}
+
+\begin{itemize}[leftmargin=*]
+  \item Idle.
+  \item Dragging (carrying a payload).
+  \item Hovering over a drop target.
+  \item Drop in progress.
+\end{itemize}
+
+\section{Pick up}
+
+On press over a draggable element, capture the payload:
+
+\begin{lstlisting}
+on_press([&] {
+    ctx.set(drag_payload, item_id);
+    ctx.set(drag_state, Drag::Active);
+});
+\end{lstlisting}
+
+\section{Move}
+
+On mouse motion, update the cursor position. Optionally
+render a ghost element following the cursor.
+
+\section{Drop targets}
+
+Each potential target subscribes to drag events:
+
+\begin{lstlisting}
+on_drop([&](Payload p) {
+    accept(p);
+    ctx.set(drag_state, Drag::Idle);
+});
+\end{lstlisting}
+
+\section{Drop preview}
+
+While hovering a target, render a visual cue (highlight,
+insertion indicator). Cancel on hover-out.
+
+\section{Cancel}
+
+Escape cancels the drag without dropping. Cursor returns,
+state resets.
+
+\section{Multi-select drag}
+
+If multiple items are selected and one is dragged, the
+whole selection drags. Payload is a list.
+
+\section{Cross-window dnd}
+
+Within a single \maya{} app, drag-and-drop is simple. Drag
+to another terminal window is the OS's problem;
+terminals don't propagate dnd events.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Four states: idle, dragging, hovering, dropping.
+  \item Ghost element follows cursor.
+  \item Drop targets highlight on hover.
+  \item Escape cancels.
+  \item Multi-select drag carries a list.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a drag-to-reorder list.
+  \item Add a ghost element following the cursor.
+  \item Implement escape-to-cancel.
+\end{enumerate}

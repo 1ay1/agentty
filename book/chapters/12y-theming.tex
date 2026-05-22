@@ -1,0 +1,99 @@
+\chapter{Theming and skinning}
+\label{ch:theming}
+
+\begin{aside}
+A theme is a colour palette plus a few style decisions. Two
+apps with different themes look like cousins; same widgets,
+different paint.
+\end{aside}
+
+\section{The theme struct}
+
+\begin{lstlisting}
+struct Theme {
+    Color background, foreground;
+    Color accent, muted;
+    Color error, warning, success, info;
+    Color border, focus;
+    BorderChars borders;
+    std::string name;
+};
+\end{lstlisting}
+
+\section{Light and dark}
+
+Two built-in themes:
+
+\begin{itemize}[leftmargin=*]
+  \item Light: bright background, dark text.
+  \item Dark: dark background, bright text.
+\end{itemize}
+
+The user picks; the app honours.
+
+\section{Detecting OS preference}
+
+Some terminals report the OS theme via \code{COLORFGBG} or
+DEC mode 2031. \maya{} reads on startup and picks a
+matching theme.
+
+\section{Custom themes}
+
+Users define their own themes in config:
+
+\begin{lstlisting}
+[theme]
+name = "solarized"
+background = "#002b36"
+accent = "#268bd2"
+\end{lstlisting}
+
+\section{Theme switching at runtime}
+
+A theme signal:
+
+\begin{lstlisting}
+auto theme = signal<Theme>(load_default());
+\end{lstlisting}
+
+Effects on theme change re-render everything that consumes
+it.
+
+\section{Per-widget overrides}
+
+A widget can ignore the theme for accent purposes:
+
+\begin{lstlisting}
+auto special = button("Critical")
+             | fg<"#FF0000">;  // override
+\end{lstlisting}
+
+Use sparingly; consistency is a virtue.
+
+\section{Accessible themes}
+
+WCAG contrast ratios: 4.5:1 for body text, 3:1 for large
+text. A theme that fails contrast is a UX bug.
+
+\maya{}'s built-in themes meet AA contrast.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Theme = palette + style decisions.
+  \item Light and dark built-in; user-defined possible.
+  \item OS theme detection on capable terminals.
+  \item Theme signal for runtime switching.
+  \item Mind contrast.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Load a theme from config; switch at runtime.
+  \item Detect dark/light mode from \code{COLORFGBG}.
+  \item Measure contrast in your theme; fix anything
+    below 4.5:1.
+\end{enumerate}

@@ -1,0 +1,128 @@
+\chapter{Sprite caching and partial paint}
+\label{ch:sprite}
+
+\begin{aside}
+A box you draw a hundred times a second is a box you should
+draw once and stamp. Sprite caching is the renderer's optional
+``don't repaint that thing'' optimisation.
+\end{aside}
+
+\section{The pattern}
+
+A complex widget (gradient title bar, decorated card, ASCII
+logo) paints the same cells every frame. The cells are computed
+from props the renderer has seen before.
+
+A sprite cache memoises: key on the props, store the cell
+array, recall on hit.
+
+\section{Cache structure}
+
+\begin{lstlisting}
+struct Sprite {
+    int w, h;
+    std::vector<Cell> cells;
+};
+std::unordered_map<Key, Sprite> cache_;
+\end{lstlisting}
+
+The key is a hash of the widget's render-relevant inputs:
+text, style, width, height. On hit, blit the cached cells
+into the back buffer.
+
+\section{When to cache}
+
+Caching pays off when:
+
+\begin{itemize}[leftmargin=*]
+  \item Paint cost is high (computed gradients, glyph
+    composition).
+  \item The widget renders repeatedly with the same props.
+  \item Memory budget allows.
+\end{itemize}
+
+Caching hurts when:
+
+\begin{itemize}[leftmargin=*]
+  \item Props change every frame.
+  \item Widget is cheap to paint anyway.
+  \item Cache eviction thrashes.
+\end{itemize}
+
+\section{Eviction}
+
+LRU is the standard policy. Size the cache to a memory
+budget: number of cells, not number of entries.
+
+\maya{}'s default budget is 256 KB. A modest UI uses
+~10--20 KB; large media-heavy UIs may need more.
+
+\section{Invalidation}
+
+When a prop changes, the cache key changes; the old entry
+sits in cache until evicted by LRU. No explicit
+invalidation needed.
+
+If a global setting changes (theme, font, locale) that
+should invalidate everything, call \code{cache.clear()}
+explicitly.
+
+\section{Compositing onto the back buffer}
+
+\begin{lstlisting}
+void blit(Painter& p, Rect dst, const Sprite& s) {
+    for (int dy = 0; dy < s.h; ++dy)
+        for (int dx = 0; dx < s.w; ++dx)
+            p.put(dst.x + dx, dst.y + dy,
+                  s.cells[dy * s.w + dx]);
+}
+\end{lstlisting}
+
+A nested loop; cheap. The cache replaces the widget's own
+paint method.
+
+\section{Partial paint}
+
+A stronger form: only paint what changed since last frame.
+Requires per-widget dirty tracking and a damage rectangle
+list to feed the diff.
+
+\maya{} does not do partial paint. The trade-off:
+bookkeeping cost vs cell-diff cost. The cell diff already
+finds unchanged regions cheaply; partial paint would
+duplicate the work.
+
+For very large screens (>200x100), partial paint becomes
+attractive. \maya{}'s sweet spot is normal terminal sizes.
+
+\section{Pre-rendered assets}
+
+For static elements (logo, splash screen, decorative ASCII
+art), compute the cells once at startup, store in static
+storage, blit each frame. This is sprite caching's degenerate
+case --- key is the constant ``true''.
+
+\maya{} provides \code{static\_sprite(...)} as a helper.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Sprite cache memoises expensive paint.
+  \item LRU eviction with a memory budget.
+  \item No explicit invalidation; key change is sufficient.
+  \item Partial paint not implemented; cell diff suffices
+    for typical sizes.
+  \item Static sprites for unchanging assets.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Identify your most expensive widget. Add a sprite
+    cache; measure the speedup.
+  \item Stress test eviction by changing a widget's prop
+    every frame; watch cache thrash.
+  \item Pre-render an ASCII logo as a static sprite.
+\end{enumerate}

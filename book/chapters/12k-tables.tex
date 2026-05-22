@@ -1,0 +1,135 @@
+\chapter{Tables and data grids}
+\label{ch:tables}
+
+\begin{aside}
+A table is a 2-D structure with columns and rows. The data is
+homogeneous within columns. The layout is regular. The
+challenge is keeping a 1000-row table interactive.
+\end{aside}
+
+\section{Column model}
+
+\begin{lstlisting}
+struct Column {
+    std::string title;
+    int width;          // or 0 = flex
+    std::function<Element(const Row&)> render;
+};
+
+std::vector<Column> cols = {
+    {"Name", 20, [](auto& r) { return text(r.name); }},
+    {"Age",   5, [](auto& r) { return text(std::to_string(r.age)); }},
+    {"Email", 0, [](auto& r) { return text(r.email); }},
+};
+\end{lstlisting}
+
+\section{Header row}
+
+A frozen header row sits above the scrollable body:
+
+\begin{lstlisting}
+auto table = column(
+    table_header(cols),
+    virtual_list(rows, [&](int i) {
+        return table_row(cols, rows[i]);
+    })
+);
+\end{lstlisting}
+
+\section{Selection}
+
+Single or multi-row selection:
+
+\begin{lstlisting}
+auto selected = signal<std::set<int>>({});
+\end{lstlisting}
+
+Click toggles; Shift-click ranges; Ctrl-click multi. The
+visual cue: highlight the selected row's background.
+
+\section{Sorting}
+
+Click a header to sort by that column. The sort key is a
+signal:
+
+\begin{lstlisting}
+auto sort_by = signal<int>(0);
+auto sort_dir = signal<bool>(true);  // ascending
+
+auto sorted = memo([&] {
+    auto v = items;
+    std::sort(v.begin(), v.end(), ...);
+    return v;
+});
+\end{lstlisting}
+
+The memo recomputes only when sort signals change.
+
+\section{Filtering}
+
+A search box drives a filter:
+
+\begin{lstlisting}
+auto filter = signal<std::string>("");
+auto filtered = memo([&] {
+    auto q = ctx.get(filter);
+    std::vector<Row> out;
+    for (auto& r : items)
+        if (matches(r, q)) out.push_back(r);
+    return out;
+});
+\end{lstlisting}
+
+The sort and filter compose: filter first (smaller list),
+sort second.
+
+\section{Column resizing}
+
+A drag handle on the column boundary lets the user resize.
+Track the drag with mouse events:
+
+\begin{lstlisting}
+on_drag([&](int dx) {
+    auto w = ctx.get(col_widths)[i];
+    ctx.set(col_widths, /* updated vector */);
+});
+\end{lstlisting}
+
+\section{Frozen columns}
+
+A frozen leftmost column stays visible during horizontal
+scroll. Implement as two side-by-side virtual lists sharing
+a scroll signal for vertical position.
+
+\section{Cell editing}
+
+Click a cell to edit in place. The cell becomes a text
+input; commit on blur or enter; cancel on escape.
+
+\begin{lstlisting}
+auto cell = ctx.get(editing) == (r, c)
+    ? text_input(value)
+    : text(value) | on_click([&] {
+        ctx.set(editing, {r, c});
+      });
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Columns: title, width, render function.
+  \item Header above, virtualised body below.
+  \item Selection, sort, filter as signals.
+  \item Column resize via drag.
+  \item In-place cell editing.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a 10-column 10,000-row table.
+  \item Add sort by clicking headers.
+  \item Implement in-place editing for one column.
+\end{enumerate}

@@ -1,0 +1,60 @@
+\chapter{Patterns: progressive disclosure}
+\label{ch:progdisc}
+
+\begin{aside}
+Show the simple case by default. Reveal complexity on
+demand. The user sees what they need; the power is one
+keystroke away.
+\end{aside}
+
+\section{The pattern}
+
+\begin{itemize}[leftmargin=*]
+  \item Default view: minimal, common case.
+  \item Expand: more options.
+  \item Advanced: power-user features.
+\end{itemize}
+
+\section{Examples}
+
+\begin{itemize}[leftmargin=*]
+  \item A search box (default) with regex toggle
+    (advanced).
+  \item A file list (default) with hidden files toggle
+    (advanced).
+  \item A settings panel with a ``Show advanced'' link.
+\end{itemize}
+
+\section{Visual cues}
+
+A small arrow or ``...'' indicates expandable. The user
+learns to look.
+
+\section{Stay clean}
+
+Resist adding ``one more option'' to the default view. Each
+addition raises the noise floor for new users.
+
+\section{Defaults that work}
+
+The default should be useful without configuration. If
+defaults don't work, the app is broken; no amount of
+advanced settings will fix.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Simple default; advanced on demand.
+  \item Visual cues for expansion.
+  \item Defaults must work alone.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Audit your UI for noise; hide what's rare.
+  \item Add a ``Show advanced'' toggle.
+  \item Test defaults with a new user.
+\end{enumerate}

@@ -1,0 +1,303 @@
+\chapter{ANSI serialization and the writer}
+\label{ch:ansi}
+
+The diff in the previous chapter tells us \emph{which cells changed
+and what they should be}. This chapter is about the last mile: turning
+that information into the exact byte stream the terminal expects, and
+getting those bytes out to the wire as cheaply as possible.
+
+\section{What the renderer must emit}
+
+For every run of changed cells, the renderer must produce:
+
+\begin{enumerate}[leftmargin=*]
+  \item A \textbf{cursor positioning} sequence to move to the start
+    of the run.
+  \item A \textbf{style change} (SGR) sequence if the new style
+    differs from the cursor's current style.
+  \item The \textbf{UTF-8 bytes} of the cells' code points.
+  \item Optionally, \textbf{hyperlink} OSC-8 wrap if a link is
+    associated with the cells.
+\end{enumerate}
+
+For a typical animation frame at, say, 1\% changed cells on an
+80x24 grid, that is around 20 runs, each maybe 4 cells long, each
+requiring a CUP (8-10 bytes), maybe an SGR (15-30 bytes for full
+truecolour), and the UTF-8 bytes. Total: about a kilobyte per frame.
+That kilobyte must be assembled and written in well under one frame
+($\sim$16 ms) to keep up with 60 FPS.
+
+\section{Zero-allocation building blocks}
+
+The old version of \maya{}'s renderer built a \code{std::vector<RenderOp>}
+and then serialised it --- which allocated for every entry. The
+current version writes ANSI bytes directly into one growing
+\code{std::string}. Every per-cell allocation was eliminated.
+
+The lowest layer is \file{maya/include/maya/terminal/ansi.hpp}, a
+collection of free functions that append ANSI sequences to a
+caller-supplied string:
+
+\begin{lstlisting}
+MAYA_FORCEINLINE void write_cursor_up(std::string& out, int n);
+MAYA_FORCEINLINE void write_cursor_down(std::string& out, int n);
+MAYA_FORCEINLINE void write_move_to(std::string& out, int col, int row);
+MAYA_FORCEINLINE void write_erase_lines(std::string& out, int n);
+\end{lstlisting}
+
+Each one is a few \code{out += ...} calls and a single
+\code{std::to\_chars} for the integer parameter. \code{std::to\_chars}
+is \cpp{}17's allocation-free, locale-free integer formatter; it
+writes into a stack buffer that we then \code{append} onto \code{out}.
+
+\subsection{A worked function}
+
+\begin{lstlisting}
+namespace detail {
+    MAYA_FORCEINLINE void append_int(std::string& out, int n) {
+        char buf[12];                            // 2^31 fits in 11 chars + sign
+        auto [end, _] = std::to_chars(buf, buf + sizeof(buf), n);
+        out.append(buf, end);
+    }
+}
+
+MAYA_FORCEINLINE void write_move_to(std::string& out, int col, int row) {
+    out += "\x1b[";
+    detail::append_int(out, row);
+    out += ';';
+    detail::append_int(out, col);
+    out += 'H';
+}
+\end{lstlisting}
+
+No heap allocation. No \code{std::format}. \code{out += "\textbackslash
+x1b["} appends a \code{string\_view} which is two characters; the
+integers add 1--3 bytes; the totals are usually 8-10 bytes per CUP.
+\code{MAYA\_FORCEINLINE} is a portable wrapper for
+\code{\_\_attribute\_\_((always\_inline))} (GCC/Clang) and
+\code{\_\_forceinline} (MSVC) --- a hint that this should be inlined
+even at low optimisation levels.
+
+\subsection{Per-cell positioning, faster}
+
+The diff loop's hot path bypasses even \code{std::to\_chars} for the
+common case of row and column numbers under 1000, using a hand-written
+ASCII digit splitter:
+
+\begin{lstlisting}
+MAYA_FORCEINLINE char* write_uint_pos(char* p, unsigned n) noexcept {
+    if (n < 10) {
+        *p++ = char('0' + n);
+    } else if (n < 100) {
+        *p++ = char('0' + n / 10);
+        *p++ = char('0' + n % 10);
+    } else if (n < 1000) {
+        *p++ = char('0' + n / 100);
+        *p++ = char('0' + (n / 10) % 10);
+        *p++ = char('0' + n % 10);
+    } else {
+        // fallback: std::to_chars
+    }
+    return p;
+}
+\end{lstlisting}
+
+Inlined into the diff loop, this compiles to a tiny chain of
+conditional moves and stores --- a few cycles per integer. Premature
+optimisation? Not in a loop that runs once per changed cell.
+
+\section{UTF-8 encoding}
+
+For every changed cell we need to encode its 32-bit code point into
+1--4 UTF-8 bytes. \maya{}'s encoder is in \code{render/diff.hpp}:
+
+\begin{lstlisting}
+MAYA_FORCEINLINE void encode_utf8(char32_t cp, std::string& out) {
+    if (cp < 0x80) [[likely]] {                      // ASCII fast path
+        out += char(cp);
+        return;
+    }
+    char buf[4];
+    int len;
+    if (cp < 0x800) {                                // 2-byte
+        buf[0] = char(0xC0 | (cp >> 6));
+        buf[1] = char(0x80 | (cp & 0x3F));
+        len = 2;
+    } else if (cp < 0x10000) [[likely]] {            // 3-byte (BMP)
+        buf[0] = char(0xE0 |  (cp >> 12));
+        buf[1] = char(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = char(0x80 |  (cp        & 0x3F));
+        len = 3;
+    } else {                                         // 4-byte (supplementary)
+        buf[0] = char(0xF0 |  (cp >> 18));
+        buf[1] = char(0x80 | ((cp >> 12) & 0x3F));
+        buf[2] = char(0x80 | ((cp >>  6) & 0x3F));
+        buf[3] = char(0x80 |  (cp        & 0x3F));
+        len = 4;
+    }
+    out.append(buf, len);
+}
+\end{lstlisting}
+
+The \code{[[likely]]} attribute tells the compiler to lay out the
+branches with the ASCII and BMP cases on the hot path; the rare
+4-byte case takes the cold branch.
+
+\section{The style cache}
+
+A style change emits an SGR sequence whose exact bytes depend on the
+\code{Style} struct: \code{ESC[0;1;3;38;2;100;180;255;48;2;20;25;35m}
+for ``reset, bold, italic, fg=(100,180,255), bg=(20,25,35)''. Building
+that string takes a dozen \code{to\_chars} calls and several
+conditional branches.
+
+Doing this once per changed cell would dominate runtime. \maya{} does
+it \emph{once per distinct style, ever} --- when the style is
+interned into the \code{StylePool} --- and caches the bytes:
+
+\begin{lstlisting}
+StyleId StylePool::intern(Style s) {
+    auto [it, inserted] = lookup_.try_emplace(s, table_.size());
+    if (inserted) {
+        table_.push_back(s);
+        cache_sgr_.push_back(build_sgr_string(s));   // do it once
+    }
+    return it->second;
+}
+\end{lstlisting}
+
+The diff loop's style change is then a single \code{memcpy}:
+
+\begin{lstlisting}
+if (new_style_id != current_style_id) {
+    out += pool.sgr(new_style_id);
+    current_style_id = new_style_id;
+}
+\end{lstlisting}
+
+No formatting. No branches. The bytes are already laid out.
+
+\section{The terminal writer}
+
+After the renderer assembles its kilobyte of ANSI, the runtime needs
+to put those bytes on the terminal file descriptor. The writer
+(\file{maya/include/maya/terminal/writer.hpp}) wraps that:
+
+\begin{lstlisting}
+class Writer {
+public:
+    explicit Writer(int fd) : fd_(fd) {}
+    void write(std::string_view bytes);
+    void flush();
+private:
+    int         fd_;
+    std::string buffer_;
+};
+\end{lstlisting}
+
+Three details worth noting:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Buffered.} Multiple \code{write()} calls accumulate
+    into \code{buffer\_}; one \code{::write(fd, ...)} system call
+    sends them all. System calls are expensive; one big write beats
+    many small writes.
+  \item \textbf{Partial-write loop.} A blocking \code{::write} may
+    return having sent fewer bytes than requested. The writer loops
+    until everything is out (or an error pins it).
+  \item \textbf{Single-frame atomicity.} The whole frame is one
+    contiguous string. Even if the terminal is slow, the user never
+    sees a half-rendered frame --- the writer hands the whole
+    buffer to the kernel in one go.
+\end{itemize}
+
+\subsection{Synchronised output mode}
+
+A subtle problem: even with one \code{write}, the terminal can paint
+the bytes incrementally, producing a brief flash of the half-applied
+frame (a phenomenon called \emph{tearing}). Modern emulators support
+``synchronised output mode'' --- a pair of DCS escape sequences that
+tell the emulator ``hold off painting until I say I am done.''
+\maya{} wraps each frame in these:
+
+\begin{lstlisting}
+ESC P = 1 s ESC \    // begin synchronised update
+... frame bytes ...
+ESC P = 2 s ESC \    // end synchronised update; paint atomically
+\end{lstlisting}
+
+Emulators that do not understand the sequence ignore it; those that
+do paint the frame as one unit. Result: zero tearing on supporting
+terminals, no regression on others.
+
+\section{Putting it all together}
+
+Here is the simplified inner loop of the renderer's \code{emit\_run}:
+
+\begin{lstlisting}
+void emit_run(std::string& out, int x, int y,
+              const uint64_t* cells, std::size_t count,
+              const StylePool& pool,
+              StyleId& current_style)
+{
+    // 1. Cursor positioning (1-based in ANSI; +1 to both).
+    out += "\x1b[";
+    char buf[16];
+    char* p = buf;
+    p = write_uint_pos(p, y + 1);
+    *p++ = ';';
+    p = write_uint_pos(p, x + 1);
+    *p++ = 'H';
+    out.append(buf, p - buf);
+
+    // 2. Cells.
+    for (std::size_t i = 0; i < count; ++i) {
+        auto [cp, sty, width] = unpack(cells[i]);
+        if (sty != current_style) {
+            out += pool.sgr(sty);
+            current_style = sty;
+        }
+        if (width == 0) continue;       // trailing half of a wide cell
+        encode_utf8(cp, out);
+    }
+}
+\end{lstlisting}
+
+Notice the discipline: every operation is either a \code{string\_view}
+append, a \code{memcpy}, or a few stack-buffer writes followed by an
+append. There are no allocations inside the loop.
+
+\section{Cost, measured}
+
+On a modern x86 laptop, with AVX2 and a 200x50 terminal, \maya{}'s
+render loop --- including layout, paint, diff, and serialise ---
+typically takes \emph{30-80 microseconds} per frame in steady state.
+At 60 FPS the per-frame budget is 16,666 microseconds; we are using
+under 1\%. The remaining headroom is the terminal emulator's
+business.
+
+\begin{recap}
+The renderer turns the diff into ANSI bytes via a chain of
+allocation-free helpers: stack-buffered integer formatting,
+inline-friendly UTF-8 encoding, and a per-style pre-cached SGR
+string. The writer batches the frame into one \code{::write()} and
+optionally wraps it in synchronised-output mode for tear-free
+rendering. The hot path is dominated by \code{memcpy}; the
+allocation count is zero.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Read \file{maya/include/maya/terminal/ansi.hpp}. Identify
+    every \code{constexpr string\_view} constant and match it to an
+    ANSI sequence from Chapter~\ref{ch:terminal}.
+  \item In a scratch program, construct a \code{Canvas}, write some
+    text into it with \code{draw\_text}, and dump the diff bytes
+    against an empty front buffer. Inspect the bytes by hand.
+  \item Toggle the synchronised-output sequences off in a debug
+    fork of \maya{} and run an animation example. On a fast
+    terminal you will see frames tear; on a slow one (try
+    \code{ssh localhost} into the same machine) the effect is
+    more obvious.
+\end{enumerate}

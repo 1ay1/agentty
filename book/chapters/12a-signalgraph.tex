@@ -1,0 +1,144 @@
+\chapter{Signal storage and the dependency graph}
+\label{ch:signalgraph}
+
+\begin{aside}
+A signal is a value with a name and a list of subscribers. The
+list of subscribers is built automatically by tracking which
+effects read which signals. The graph is the runtime's nervous
+system.
+\end{aside}
+
+\section{The Signal type}
+
+A signal stores a value of any type plus metadata:
+
+\begin{lstlisting}
+template<typename T>
+class Signal {
+    T value_;
+    std::vector<EffectId> subs_;
+    uint32_t version_;
+public:
+    const T& get();   // tracks dependency
+    void set(T v);    // marks subs dirty
+};
+\end{lstlisting}
+
+\section{Tracking dependencies}
+
+When an effect runs, it sets a thread-local
+``currently-running effect''. Signal reads, while that
+thread-local is non-null, add the effect to the signal's
+subscriber list and remember the signal in the effect's
+dependency list.
+
+After the effect finishes, the thread-local is cleared. The
+graph now has the edges this run produced.
+
+\section{Re-tracking each run}
+
+Every time an effect re-runs, its dependencies are tracked
+fresh. The previous edges are dropped first, then the new
+run accumulates new ones.
+
+This handles conditional reads: an effect that reads
+\code{signalA} when X is true and \code{signalB} when X is
+false subscribes only to whichever it read this run.
+
+\section{Versioning}
+
+Each signal carries a version counter. \code{set} increments
+it. An effect that recomputes can compare the versions of
+its dependencies to detect ``did anything actually change''.
+
+This is useful for batching: if many signals update but
+their net effect on a derived value is zero, the derived
+effect can early-out.
+
+\section{Memos}
+
+A memo is a computed signal: a function of other signals,
+cached. It re-runs only when its inputs change.
+
+\begin{lstlisting}
+auto fullname = memo([&] {
+    return ctx.get(first) + " " + ctx.get(last);
+});
+\end{lstlisting}
+
+The memo subscribes to \code{first} and \code{last}. Its
+own value is itself a signal that other effects can read.
+
+\section{Effects vs memos}
+
+Both react to signal changes. The difference:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Memo:} produces a value. Lazy --- runs when
+    its value is read.
+  \item \textbf{Effect:} produces side effects. Eager --- runs
+    when any input changes.
+\end{itemize}
+
+A memo that nobody reads does no work. An effect runs
+regardless.
+
+\section{Batching updates}
+
+A flurry of signal updates within one event handler should
+fire effects once, not N times. \maya{} batches:
+
+\begin{lstlisting}
+ctx.batch([&] {
+    ctx.set(a, 1);
+    ctx.set(b, 2);
+    ctx.set(c, 3);
+});  // one re-render at the end
+\end{lstlisting}
+
+Inside the batch, dirty signals accumulate; effects are
+fired after the batch closes.
+
+\section{Cycle detection}
+
+An effect that writes a signal it reads can loop forever.
+\maya{} detects this in debug builds: if an effect's own
+write triggers its own re-run, abort with a diagnostic.
+
+In release, the cycle still happens; the user sees a
+runaway CPU.
+
+\section{Graph size}
+
+A small app has a few dozen signals and a few dozen
+effects. The graph fits in 10 KB. Lookups are
+\code{vector<EffectId>}; insertions are amortised O(1).
+
+\begin{warning}
+A signal with thousands of subscribers (everyone in the UI
+reads a global ``current time'') is fine but expensive. Each
+update walks every subscriber. Prefer narrow signals.
+\end{warning}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Signals: value + version + subscribers.
+  \item Effects track dependencies via a thread-local.
+  \item Memos are lazy; effects are eager.
+  \item Batch to coalesce updates.
+  \item Cycles caught in debug; expensive in release.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a counter signal. Subscribe an effect that
+    logs each change.
+  \item Create a memo that depends on two signals.
+    Confirm it re-runs only when either changes.
+  \item Try to create a cycle (effect writes its own
+    read). Observe the diagnostic.
+\end{enumerate}

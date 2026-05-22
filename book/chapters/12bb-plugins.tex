@@ -1,0 +1,91 @@
+\chapter{Plug-ins and extensions}
+\label{ch:plugins}
+
+\begin{aside}
+A pluggable app lets users add functionality without
+rebuilding. \maya{}'s plug-in model is dynamic loading plus a
+narrow ABI.
+\end{aside}
+
+\section{The ABI}
+
+A plug-in is a shared library that exports a C ABI entry
+point:
+
+\begin{lstlisting}
+extern "C" {
+    void* maya_plugin_init(MayaContext* ctx);
+    void  maya_plugin_shutdown(void* state);
+}
+\end{lstlisting}
+
+\code{init} returns an opaque state pointer; \code{shutdown}
+cleans up.
+
+\section{Discovery}
+
+\maya{} scans a plug-in directory at startup:
+
+\begin{lstlisting}
+~/.config/myapp/plugins/*.so
+\end{lstlisting}
+
+For each, dlopen, find the symbols, call init.
+
+\section{ABI stability}
+
+The ABI surface is tiny and stable across versions. The
+plug-in talks to the context via opaque handles; the
+context itself can evolve internally.
+
+\section{What plug-ins can do}
+
+\begin{itemize}[leftmargin=*]
+  \item Register commands.
+  \item Add keybindings.
+  \item Subscribe to events.
+  \item Provide widgets.
+  \item Add menu entries.
+\end{itemize}
+
+\section{Sandboxing}
+
+\maya{} does not sandbox plug-ins; they have full process
+access. If sandboxing is needed, run plug-ins in a child
+process and IPC.
+
+\section{Lua and scripting}
+
+Many TUI apps embed a scripting language (Lua, Python,
+JavaScript) for plug-ins. The runtime is heavier but the
+barrier to entry is lower.
+
+\maya{} does not ship an embedded interpreter; this is an
+opt-in extension.
+
+\section{Plug-in lifecycle}
+
+\code{init} runs at app startup. \code{shutdown} runs at
+app exit. Reload at runtime requires unloading the dylib,
+which can be brittle.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Plug-in = shared library with C ABI.
+  \item Discovery via scan of a directory.
+  \item Narrow ABI for stability.
+  \item No sandboxing built-in.
+  \item Scripting is opt-in.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a hello-world plug-in.
+  \item Have the plug-in register a custom command.
+  \item Try reloading the plug-in at runtime; observe the
+    pitfalls.
+\end{enumerate}

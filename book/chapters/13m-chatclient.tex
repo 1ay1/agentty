@@ -1,0 +1,104 @@
+\chapter{Building a chat client}
+\label{ch:chatclient}
+
+\begin{aside}
+A walkthrough: build a chat client TUI in \maya{} from
+scratch. Three panels, async networking, message history.
+\end{aside}
+
+\section{Sketch}
+
+Three vertical panels: channel list (left), message view
+(centre), input (bottom). A status bar at the top.
+
+\section{State}
+
+\begin{lstlisting}
+struct ChatState {
+    Signal<std::vector<Channel>> channels;
+    Signal<int> active_channel;
+    Signal<std::vector<Message>> messages;
+    Signal<std::string> input_text;
+    Signal<ConnState> conn;
+};
+\end{lstlisting}
+
+\section{Layout}
+
+\begin{lstlisting}
+auto root = column(
+    status_bar() | height(1),
+    row(
+        channel_list() | flex(1),
+        column(
+            message_view() | flex(1),
+            input_box()    | height(3)
+        ) | flex(4)
+    ) | flex(1)
+);
+\end{lstlisting}
+
+\section{Networking}
+
+A background task connects to the server, parses incoming
+messages, posts to the message signal.
+
+\begin{lstlisting}
+spawn([&]() -> Task<void> {
+    auto sock = co_await connect("chat.example");
+    while (sock.alive()) {
+        auto msg = co_await sock.read_message();
+        ctx.post_to_main([msg] {
+            messages.push_back(msg);
+        });
+    }
+});
+\end{lstlisting}
+
+\section{Input}
+
+The bottom input is a text input. Enter sends the message:
+
+\begin{lstlisting}
+on_key(KeyEnter, [&] {
+    auto text = ctx.get(input_text);
+    if (!text.empty()) {
+        send(text);
+        ctx.set(input_text, "");
+    }
+});
+\end{lstlisting}
+
+\section{Scrolling}
+
+The message view auto-scrolls to bottom on new messages
+unless the user has scrolled up.
+
+\section{Notifications}
+
+Highlighted messages (your name mentioned) trigger an OSC 9
+notification.
+
+\section{Persistence}
+
+Recent messages cached to disk; reloaded on startup.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Three panels + status bar.
+  \item Async networking via spawn + post\_to\_main.
+  \item Auto-scroll with user-override.
+  \item Notifications on mention.
+  \item Cache to disk.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build the layout shell.
+  \item Wire a mock network backend.
+  \item Add notifications and persistence.
+\end{enumerate}

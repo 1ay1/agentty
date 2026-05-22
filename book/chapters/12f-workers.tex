@@ -1,0 +1,103 @@
+\chapter{Worker pool and thread bridge}
+\label{ch:workers}
+
+\begin{aside}
+The main thread paints. Workers compute. The bridge is a
+queue: tasks go in, results come back to the main thread for
+signal updates.
+\end{aside}
+
+\section{The pool}
+
+\maya{} ships a small thread pool sized to
+\code{std::thread::hardware\_concurrency()}. Each worker
+pulls tasks from a lock-free queue.
+
+\begin{lstlisting}
+ThreadPool pool(N);
+pool.submit([] { heavy_work(); });
+\end{lstlisting}
+
+\section{Main-thread post-back}
+
+A worker that wants to update a signal posts back:
+
+\begin{lstlisting}
+pool.submit([&] {
+    auto result = compute();
+    ctx.post_to_main([result] {
+        ctx.set(value, result);
+    });
+});
+\end{lstlisting}
+
+\code{post\_to\_main} pushes a microtask onto the main
+loop's queue; the loop drains it before the next render.
+
+\section{Why not direct signal writes}
+
+The signal graph is single-threaded. A worker writing a
+signal would race with the main thread reading it. Posting
+back serialises the update.
+
+\section{Queues}
+
+The main-thread queue is bounded (e.g., 1024 entries). A
+worker that fills it backs off briefly. This is rare in
+practice --- the main thread drains fast.
+
+\section{Backpressure}
+
+Workers should not produce results faster than the main
+thread can consume. For high-throughput jobs (image
+decoding bursts), batch results:
+
+\begin{lstlisting}
+pool.submit([&] {
+    std::vector<Result> batch;
+    for (int i = 0; i < 100; ++i)
+        batch.push_back(work(i));
+    post_to_main([batch] {
+        for (auto& r : batch) ctx.set(...);
+    });
+});
+\end{lstlisting}
+
+One queue entry, many results.
+
+\section{Long-running workers}
+
+For continuous tasks (file watcher, network listener), the
+worker loops on its own and posts results as they arrive.
+The pool's submit is for one-shot tasks; long-runners use a
+dedicated thread.
+
+\section{Cancellation}
+
+Worker tasks check a cancel flag periodically and bail
+early. The cancel flag is owned by the application; the
+worker just reads it.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Pool sized to hardware concurrency.
+  \item Workers post back to the main thread for signal
+    updates.
+  \item Bounded queues with backpressure.
+  \item Batch results when high-rate.
+  \item Long-running tasks need dedicated threads.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a parallel image decoder. Submit one task
+    per image; observe parallelism.
+  \item Add backpressure by counting in-flight tasks;
+    refuse to submit if too many.
+  \item Build a file-watcher worker that posts changes
+    back to the main thread.
+\end{enumerate}

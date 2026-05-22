@@ -1,0 +1,107 @@
+\chapter{Layout splits and resizable panes}
+\label{ch:splits}
+
+\begin{aside}
+A two-pane editor with a sidebar. A three-way diff with
+gutters. Resizable splits give the user control over screen
+real estate.
+\end{aside}
+
+\section{Split layouts}
+
+A horizontal split divides cells left and right:
+
+\begin{lstlisting}
+auto split = hsplit(left_pane, right_pane, ratio);
+\end{lstlisting}
+
+Where \code{ratio} is the fraction allocated to the left
+(0.0--1.0). 0.5 is even.
+
+A vertical split is the same, top and bottom.
+
+\section{Drag handles}
+
+The boundary between panes is a draggable handle. \maya{}'s
+split widget binds mouse events on the boundary cell:
+
+\begin{lstlisting}
+on_drag([&](int dx) {
+    auto new_ratio = std::clamp(
+        ratio + dx / float(total_width),
+        0.1f, 0.9f
+    );
+    ctx.set(ratio_signal, new_ratio);
+});
+\end{lstlisting}
+
+The clamp prevents collapsing one pane to nothing.
+
+\section{Keyboard resize}
+
+For accessibility, allow keyboard resize:
+
+\begin{itemize}[leftmargin=*]
+  \item Ctrl-Shift-Left/Right: shrink/grow the focused
+    pane.
+  \item Ctrl-Shift-=: reset to 50/50.
+\end{itemize}
+
+\section{Nested splits}
+
+A horizontal split with a vertical split inside the right
+pane is a three-pane layout:
+
+\begin{lstlisting}
+hsplit(
+    left,
+    vsplit(top_right, bottom_right, 0.5),
+    0.3
+);
+\end{lstlisting}
+
+\section{Snap}
+
+Resize can snap to convenient ratios (1/3, 1/2, 2/3) when
+near them. \maya{}'s split widget offers \code{snap\_to}
+parameter.
+
+\section{Collapsible panes}
+
+A pane can collapse to zero width (hidden). Double-click
+the handle to collapse; double-click again to restore.
+
+The collapsed state remembers the previous ratio.
+
+\section{Tabbed splits}
+
+A split where one pane holds a tab strip is a
+panes-with-tabs layout. Each tab has its own content;
+switching tabs swaps the visible element.
+
+\section{Persistence}
+
+Save the ratio across sessions so the user's layout
+persists. One signal per split, persisted to config.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Splits divide layout by ratio.
+  \item Drag handle for resize.
+  \item Keyboard support for accessibility.
+  \item Nesting builds N-pane layouts.
+  \item Collapse, snap, persist for polish.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a three-pane layout (sidebar, editor,
+    preview).
+  \item Add keyboard shortcuts for resize.
+  \item Persist the ratios so the layout survives
+    restart.
+\end{enumerate}

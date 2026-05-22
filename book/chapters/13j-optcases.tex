@@ -1,0 +1,69 @@
+\chapter{Optimisation case studies}
+\label{ch:optcases}
+
+\begin{aside}
+Three real cases where \maya{} apps had a performance
+problem, and how each was solved. Specific numbers from
+specific bug reports.
+\end{aside}
+
+\section{Case 1: typing lag in a 5000-line buffer}
+
+\textbf{Symptom.} Each keystroke had a 50 ms latency.
+
+\textbf{Diagnosis.} The whole buffer was re-rendered every
+keystroke. Layout walked 5000 elements.
+
+\textbf{Fix.} Switched to virtualised rendering. Only the
+visible 50 rows render. Latency dropped to under 2 ms.
+
+\section{Case 2: scrolling stutter}
+
+\textbf{Symptom.} Scrolling a list felt jerky.
+
+\textbf{Diagnosis.} Each row computed an expensive derived
+value on every render. The derivation depended on a list
+that was stable.
+
+\textbf{Fix.} Hoisted the derivation to a memo at parent
+scope. Computed once, reused per row. Scrolling became
+smooth.
+
+\section{Case 3: 100\% CPU on idle}
+
+\textbf{Symptom.} The app pegged a core even when not in
+use.
+
+\textbf{Diagnosis.} A signal updated every frame
+(clock-based). An effect that wrote a derived signal read
+this clock. The chain caused infinite re-renders.
+
+\textbf{Fix.} Removed the unnecessary clock dependency from
+the effect. Idle CPU returned to zero.
+
+\section{Common themes}
+
+\begin{itemize}[leftmargin=*]
+  \item Virtualisation for big lists.
+  \item Hoist expensive memos.
+  \item Watch for accidental clock dependencies.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Real cases, real numbers.
+  \item Virtualisation, memo hoisting, dependency hygiene
+    are the big three.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Find a slow path in your app; apply one of the
+    three techniques.
+  \item Measure before and after.
+  \item Add a regression test.
+\end{enumerate}

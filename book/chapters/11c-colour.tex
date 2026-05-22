@@ -1,0 +1,228 @@
+\chapter{Truecolour, palette, and degradation}
+\label{ch:colour}
+
+\begin{aside}
+A modern terminal claims to support 16 million colours. The
+terminal you SSHed into last week claims sixteen. \maya{}'s job is
+to make your app look as good as possible on each, without writing
+the app twice.
+\end{aside}
+
+\section{Three colour modes}
+
+Terminal colour history is a stack of additions, each one keeping
+the previous:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Sixteen.} The original ANSI palette: eight base,
+    eight bright. Emitted as \code{ESC [ 30..37 m} and \code{ESC
+    [ 90..97 m} for foreground; \code{40..47} and \code{100..107}
+    for background.
+  \item \textbf{256.} An xterm extension: 16 base + 216 RGB cube
+    (6x6x6) + 24 greys. Emitted as \code{ESC [ 38 ; 5 ; N m}.
+  \item \textbf{Truecolour.} 24-bit RGB. \code{ESC [ 38 ; 2 ; R ;
+    G ; B m}. Standardised by ISO 8613-6 in 1994; widely
+    supported since about 2015.
+\end{enumerate}
+
+\maya{} represents every colour as 24-bit RGB internally and
+degrades at emit time based on the detected terminal capabilities.
+
+\section{Detection}
+
+The \code{COLORTERM} environment variable is the de-facto switch:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{COLORTERM=truecolor} or \code{=24bit}: truecolour.
+  \item Otherwise check \code{TERM}: \code{xterm-256color},
+    \code{screen-256color}, etc. imply 256.
+  \item Otherwise check \code{TERM}: \code{xterm}, \code{vt100},
+    etc. imply 16.
+  \item \code{TERM=dumb} or unset means no colour at all.
+\end{itemize}
+
+\begin{lstlisting}
+ColorMode detect_colour_mode() {
+    if (auto* ct = std::getenv("COLORTERM"))
+        if (std::string_view(ct) == "truecolor"
+         || std::string_view(ct) == "24bit")
+            return ColorMode::Truecolour;
+    auto* term = std::getenv("TERM");
+    if (!term) return ColorMode::None;
+    std::string_view t = term;
+    if (t.contains("256color")) return ColorMode::Indexed256;
+    if (t == "dumb")            return ColorMode::None;
+    return ColorMode::Indexed16;
+}
+\end{lstlisting}
+
+\section{Degradation}
+
+When the requested colour exceeds the terminal's capability,
+\maya{} maps it down. There are two strategies:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Nearest.} For each input RGB, walk the palette
+    and pick the entry with smallest Euclidean distance in RGB
+    space.
+  \item \textbf{Perceptual.} Convert to CIELAB and pick by
+    $\Delta E$. This handles eye sensitivity better but costs a
+    matrix multiply per pixel.
+\end{itemize}
+
+\maya{} uses nearest, with the 16-colour palette using a
+hand-tuned mapping that splits the cube differently from a naive
+nearest-neighbour (the result looks better for typical UI
+accents).
+
+\section{The 16-colour palette}
+
+The base 16 are not fixed RGB values. They are slots, and the
+user's terminal theme picks the actual colour. The standard names
+(\code{red}, \code{bright\_red}, etc.) map to slots, not pixels.
+
+This is a feature: a user who chose a Solarized theme expects
+your ``red'' to be Solarized's red. \maya{} does not override; it
+emits the slot and lets the terminal do its job.
+
+\begin{warning}
+Hardcoded RGB ``corrections'' to the base 16 break this. Resist
+the urge. If you want a specific shade, use truecolour and
+accept the degradation on 16-colour terminals.
+\end{warning}
+
+\section{The 256-colour cube}
+
+The 6x6x6 RGB cube uses non-linear levels:
+\code{\{0, 95, 135, 175, 215, 255\}}. The gap between 0 and 95 is
+huge; the gaps after are 40 each. The non-linearity matches human
+brightness perception roughly but not well.
+
+A truecolour-to-cube map:
+
+\begin{lstlisting}
+int channel_to_cube(uint8_t v) {
+    static constexpr int levels[6] =
+        {0, 95, 135, 175, 215, 255};
+    int best = 0, best_d = 1000;
+    for (int i = 0; i < 6; ++i) {
+        int d = std::abs(int(v) - levels[i]);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+}
+\end{lstlisting}
+
+Then the palette index is \code{16 + 36*r + 6*g + b}.
+
+The grey ramp (indices 232--255) is a separate 24-step linear
+grey. If R = G = B, mapping to the grey ramp gives a more
+faithful tone than the cube, which has only 6 grey samples on
+its diagonal.
+
+\section{Default colours}
+
+\code{ESC [ 39 m} resets foreground to default; \code{49} resets
+background. \maya{} emits these when a cell explicitly uses
+\code{Color::default}. Saving the default-reset means the
+terminal background shows through, which is what users on
+transparent or themed terminals expect.
+
+\section{NO\_COLOR}
+
+\begin{funfact}
+Jason Boice proposed the \code{NO\_COLOR} environment variable
+in 2017. Set it to any value and conforming programs must emit
+no ANSI colour codes. Over 250 programs honour it today,
+including \code{ls}, \code{grep}, \code{git}, and \maya{}.
+\end{funfact}
+
+\maya{} checks \code{NO\_COLOR} at startup and clamps to
+\code{ColorMode::None} if set. Style attributes (bold, italic,
+underline) still emit; only colour is suppressed.
+
+\section{Dim, bold, and SGR interaction}
+
+The \code{ESC [ 1 m} (bold) and \code{ESC [ 2 m} (dim) codes
+have an unfortunate interaction with the base 16 palette: on
+many terminals, bold makes the bright variant fire even if the
+slot is the dim one. So \code{red + bold} looks identical to
+\code{bright\_red}.
+
+\maya{} does \emph{not} compensate. The behaviour is
+user-configured and varies; trying to ``fix'' it would surprise
+users who tuned their terminal.
+
+\section{Colour spaces and gamma}
+
+Terminal RGB is sRGB, gamma 2.2 approximately. Computing
+gradients in sRGB looks wrong (the middle of a gradient is too
+dark). For accurate gradients, convert to linear, interpolate,
+and convert back:
+
+\begin{lstlisting}
+float to_linear(uint8_t v) {
+    float f = v / 255.0f;
+    return f <= 0.04045f
+         ? f / 12.92f
+         : std::pow((f + 0.055f) / 1.055f, 2.4f);
+}
+\end{lstlisting}
+
+This matters for the gradient widget and for any element that
+blends colours. \maya{} provides \code{lerp\_srgb} as a helper
+that does the round trip.
+
+\section{Hex helpers}
+
+Most users think in hex. \maya{} accepts hex literals as
+compile-time strings:
+
+\begin{lstlisting}
+auto label = text("hello") | fg<"#FF6432">;
+\end{lstlisting}
+
+The parser is \code{constexpr}, so a typo (\code{"FF6"} or
+\code{"\#ZZZZZZ"}) is a compile error, not a runtime one.
+
+\section{Theme tokens}
+
+For consistency across a UI, name your colours:
+
+\begin{lstlisting}
+namespace theme {
+  constexpr auto accent     = "\#FF6432";
+  constexpr auto background = "\#1E1E1E";
+  constexpr auto muted      = "\#8E8E8E";
+}
+\end{lstlisting}
+
+Then \code{fg<theme::accent>} reads the role, not the hex.
+Changing the theme is one edit in one place.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Three modes: 16, 256, truecolour.
+  \item Detect via \code{COLORTERM} and \code{TERM}.
+  \item \maya{} stores RGB internally and degrades on emit.
+  \item Honour \code{NO\_COLOR}.
+  \item Base 16 are slots, not pixels; let the user's theme
+    pick.
+  \item Hex literals are validated at compile time.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Print the result of \code{detect\_colour\_mode()} at
+    startup. Run with \code{TERM=xterm}, \code{TERM=xterm-256color},
+    \code{COLORTERM=truecolor}, and \code{NO\_COLOR=1}.
+  \item Build a gradient widget that fades from one hex to
+    another. Compare sRGB-linear and naive lerp side by side.
+  \item Add a \code{--theme} flag to your app that swaps the
+    \code{theme::} namespace at startup. Persist the choice in
+    a config file.
+\end{enumerate}

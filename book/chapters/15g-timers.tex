@@ -1,0 +1,79 @@
+\chapter{Patterns: timer accumulators}
+\label{ch:timers}
+
+\begin{aside}
+A debounce, a throttle, a long-press, a hover-delay. All are
+timers with a tweak. Patterns for the four.
+\end{aside}
+
+\section{Debounce}
+
+\begin{lstlisting}
+auto debounced = debounce(500ms, [&](auto v) {
+    save(v);
+});
+on_change(field, debounced);
+\end{lstlisting}
+
+The callback fires 500 ms after the last change. Rapid
+changes coalesce; a single quiet 500 ms triggers.
+
+\section{Throttle}
+
+\begin{lstlisting}
+auto throttled = throttle(100ms, [&] {
+    redraw_preview();
+});
+on_scroll(throttled);
+\end{lstlisting}
+
+Fires at most every 100 ms. Smooth-streaming, not bursty.
+
+\section{Long press}
+
+\begin{lstlisting}
+on_press([&] {
+    long_press_timer = ctx.timer(500ms, [&] {
+        show_context_menu();
+    });
+});
+on_release([&] {
+    long_press_timer.cancel();
+});
+\end{lstlisting}
+
+Press held 500 ms triggers the menu; released before
+cancels.
+
+\section{Hover delay}
+
+A tooltip after 1 second of hover:
+
+\begin{lstlisting}
+on_hover_enter([&] {
+    hover_timer = ctx.timer(1s, [&] { show_tooltip(); });
+});
+on_hover_leave([&] {
+    hover_timer.cancel();
+    hide_tooltip();
+});
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Debounce: wait for quiet.
+  \item Throttle: maximum rate.
+  \item Long press: hold to activate.
+  \item Hover delay: linger to reveal.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Debounce a search box.
+  \item Throttle a scroll handler.
+  \item Add a long-press context menu.
+\end{enumerate}

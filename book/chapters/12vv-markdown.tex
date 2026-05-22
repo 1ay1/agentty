@@ -1,0 +1,80 @@
+\chapter{Markdown rendering}
+\label{ch:markdown}
+
+\begin{aside}
+A README in the terminal, a help screen, a documentation
+viewer --- all benefit from rendered Markdown. Plain text with
+a few bold and italic spans goes a long way.
+\end{aside}
+
+\section{Parsing}
+
+\maya{} apps can use \code{md4c}, \code{cmark}, or a small
+hand-rolled parser. CommonMark is the standard.
+
+\section{Block elements}
+
+\begin{itemize}[leftmargin=*]
+  \item Paragraph.
+  \item Heading (1--6).
+  \item Code block.
+  \item Quote.
+  \item Lists (ordered, unordered, nested).
+  \item Tables.
+  \item Horizontal rule.
+\end{itemize}
+
+Each maps to a \maya{} element with appropriate styling.
+
+\section{Inline elements}
+
+\begin{itemize}[leftmargin=*]
+  \item Bold, italic, strikethrough.
+  \item Inline code.
+  \item Link (OSC-8 hyperlinks).
+  \item Image (sometimes inline image protocol).
+\end{itemize}
+
+\section{Headings}
+
+H1 might be bold + large + with a horizontal rule below.
+H2: bold + colour. H3: bold only.
+
+\section{Code blocks}
+
+Render with monospace (already), optionally syntax-highlight
+via tree-sitter or simple regex.
+
+\section{Tables}
+
+Use \maya{}'s table widget. Align by header marker (\code{:--},
+\code{:-:}, \code{--:}).
+
+\section{Reflow}
+
+Wrap paragraphs to the terminal width. Reflow on resize.
+
+\section{Images}
+
+Inline images render via the protocols in
+Chapter~\ref{ch:images}. For unsupported terminals, show
+alt-text or a placeholder.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Parse CommonMark with an off-the-shelf lib.
+  \item Map blocks to \maya{} elements.
+  \item Inline formatting via styles.
+  \item Reflow on resize.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Render a README in your app's help screen.
+  \item Add syntax highlighting to code blocks.
+  \item Support inline images via the half-block fallback.
+\end{enumerate}

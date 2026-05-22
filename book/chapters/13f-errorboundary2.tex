@@ -1,0 +1,82 @@
+\chapter{Error boundaries and recovery}
+\label{ch:errorboundary2}
+
+\begin{aside}
+A widget that throws shouldn't take down the whole app. An
+error boundary catches the throw and renders a fallback.
+\end{aside}
+
+\section{The boundary}
+
+\begin{lstlisting}
+auto safe_panel = error_boundary(
+    [&] { return my_panel(); },
+    [&](std::exception_ptr e) {
+        return text("Error: " + to_string(e))
+             | fg<theme::error>;
+    }
+);
+\end{lstlisting}
+
+The first lambda renders; if it throws, the second renders
+instead.
+
+\section{Catching}
+
+\maya{}'s renderer wraps each error boundary's children in
+a try/catch. Exceptions from layout, paint, or event
+handlers are caught.
+
+\section{Retry}
+
+A fallback can include a ``retry'' button that re-runs the
+failed render:
+
+\begin{lstlisting}
+return column(
+    text("Failed: " + msg),
+    button("Retry", [&] { reset_signal(...); })
+);
+\end{lstlisting}
+
+\section{Reporting}
+
+A boundary can report the error to the logger or to a
+crash service.
+
+\section{Scope}
+
+Place boundaries at meaningful boundaries: per route, per
+panel, per major feature. A boundary at the root catches
+everything but loses context.
+
+\section{What doesn't catch}
+
+Exceptions in async tasks. The task system must wrap them
+separately:
+
+\begin{lstlisting}
+ctx.async_effect([&]() -> Task<void> {
+    try { co_await ...; }
+    catch (...) { ctx.set(error, ...); }
+});
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Error boundary catches render throws.
+  \item Fallback renders alternative content.
+  \item Include retry where reasonable.
+  \item Async needs its own try/catch.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Wrap each route in an error boundary.
+  \item Add retry buttons.
+  \item Wire boundary errors to your logger.
+\end{enumerate}

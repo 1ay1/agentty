@@ -1,0 +1,68 @@
+\chapter{Patterns: portal rendering}
+\label{ch:portals}
+
+\begin{aside}
+Sometimes a component's lexical position differs from its
+visual position. A tooltip lives next to its anchor in the
+code but renders above everything in the visual layer.
+\end{aside}
+
+\section{Portal mechanics}
+
+A portal element registers its subtree with the renderer
+to paint at a different time:
+
+\begin{lstlisting}
+auto popup = portal(
+    panel("Help") | absolute(10, 5)
+);
+\end{lstlisting}
+
+The popup lives in the tree where written but paints in
+the overlay layer.
+
+\section{Multiple portal targets}
+
+\maya{} has named layers:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{main}: the default.
+  \item \code{overlay}: above main.
+  \item \code{modal}: above overlay.
+  \item \code{tooltip}: above modal.
+\end{itemize}
+
+\code{portal\_to("modal", element)} targets a specific
+layer.
+
+\section{Z-ordering within layers}
+
+Within a layer, paint order is registration order. Last
+registered paints on top.
+
+\section{Use cases}
+
+\begin{itemize}[leftmargin=*]
+  \item Tooltips near anchors.
+  \item Dropdowns from inputs.
+  \item Floating action buttons.
+  \item Status overlays.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Portals decouple lexical and visual position.
+  \item Named layers stack.
+  \item Last registered paints on top within a layer.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a tooltip via portal.
+  \item Compare with inline rendering; observe Z issues.
+  \item Use multiple layers in a complex screen.
+\end{enumerate}

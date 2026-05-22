@@ -1,0 +1,123 @@
+\chapter{Editors: text input internals}
+\label{ch:editors}
+
+\begin{aside}
+A text input feels simple: type, see characters. The
+implementation hides a cursor, a selection, an undo stack,
+clipboard interaction, history, IME quirks, and Unicode word
+boundaries. Each is a small thing; together they are an
+editor.
+\end{aside}
+
+\section{The buffer}
+
+The simplest buffer is a string:
+
+\begin{lstlisting}
+std::string text;
+size_t cursor;
+\end{lstlisting}
+
+Insertion at cursor: \code{text.insert(cursor, c); ++cursor}.
+Deletion: \code{text.erase(cursor, 1)}.
+
+For long buffers, a gap buffer or a rope is faster (O(1)
+insertion at gap or splay point). Single-line inputs use a
+string; multi-line editors use a piece table or rope.
+
+\section{Cursor and selection}
+
+The selection is a range from anchor to cursor.
+When no selection, anchor equals cursor. Movement
+collapses the selection unless Shift is held.
+
+\section{Word boundaries}
+
+Ctrl-Left jumps to the previous word boundary.
+Boundaries follow Unicode TR\#29 word-segmentation rules:
+between letters and punctuation, between digits and
+letters, etc.
+
+\maya{} implements a small state machine.
+
+\section{Undo}
+
+Every mutation pushes onto an undo stack:
+
+\begin{lstlisting}
+struct Edit {
+    size_t pos;
+    std::string old_text;
+    std::string new_text;
+};
+std::vector<Edit> undo_stack;
+\end{lstlisting}
+
+Undo pops, reverses the edit. Redo pushes the reverse onto
+a redo stack.
+
+\section{Grouping}
+
+Each keystroke as a separate undo entry is annoying. \maya{}
+groups consecutive insertions of word characters into one
+undoable unit. A boundary (space, punctuation, cursor move)
+starts a new group.
+
+\section{Clipboard}
+
+OSC-52 lets terminals access the system clipboard:
+
+\begin{lstlisting}
+ESC ] 52 ; c ; BASE64 BEL
+\end{lstlisting}
+
+Letter c for clipboard, p for primary selection. The
+terminal copies the base64-decoded text.
+
+Pasting comes via bracketed paste, not via OSC-52.
+
+\section{IME}
+
+Input methods for CJK languages compose characters before
+commit. The terminal handles the popup; \maya{} sees the
+committed string. No special handling required.
+
+\section{History}
+
+A separate history (up/down arrow recalls previous values)
+is common for command lines. The history stack persists
+across sessions in a file.
+
+\section{Multi-line}
+
+A multi-line editor needs:
+\begin{itemize}[leftmargin=*]
+  \item Per-line wrapping.
+  \item Vertical cursor movement (preserve column).
+  \item Scrolling.
+  \item Line-numbered display (optional).
+\end{itemize}
+
+\maya{} provides \code{multiline\_input} that wraps the
+single-line input with these affordances.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item String buffer for short; rope for long.
+  \item Selection = anchor + cursor.
+  \item Word boundaries via TR\#29.
+  \item Undo grouped by word.
+  \item OSC-52 for clipboard.
+  \item IME is the terminal's problem.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a text input. Add Ctrl-Left/Right word jumps.
+  \item Implement undo/redo with grouping.
+  \item Wire OSC-52 copy on Ctrl-C.
+\end{enumerate}

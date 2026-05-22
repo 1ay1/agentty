@@ -1,0 +1,75 @@
+\chapter{Animations: spinners library}
+\label{ch:spinners}
+
+\begin{aside}
+Ten spinners. The same loop. The choice is which one fits
+your aesthetic.
+\end{aside}
+
+\section{Catalogue}
+
+ASCII (4 frames): \code{| / - \textbackslash}
+
+Dots (3 frames): \code{. .. ...}
+
+Arrow (4 frames): \code{\^{} > v <}
+
+Earth (3 frames): three globe glyphs.
+
+Moon (8 frames): phases from new to full.
+
+Braille (10 frames): rotating dot pattern using Unicode
+braille.
+
+Box (4 frames): rotating outline.
+
+Pong (8 frames): a ball bouncing along a track.
+
+Spiral (4 frames): nested arcs.
+
+Triangle (3 frames): rotating triangle.
+
+\section{Choosing}
+
+Match the spinner to the app's tone:
+
+\begin{itemize}[leftmargin=*]
+  \item Serious tools: ASCII or dots.
+  \item Playful tools: pong, earth, moon.
+  \item Modern: braille (smooth).
+\end{itemize}
+
+\section{Tick rate}
+
+50--150 ms per frame. Faster feels frantic; slower feels
+sluggish.
+
+\section{Multiple spinners}
+
+If many spinners are visible, they share a tick. All move
+together; the wall clock drives the frame index.
+
+\section{Stop conditions}
+
+A spinner stops when its driving condition (loading
+signal) clears. The frame index resets so the next time
+it appears, it starts at frame 0.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Many spinners, one loop.
+  \item Match tone to app.
+  \item 50--150 ms per frame.
+  \item Shared tick across spinners.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Try each spinner; pick the one you like.
+  \item Build a custom 6-frame spinner.
+  \item Share a tick across three concurrent spinners.
+\end{enumerate}

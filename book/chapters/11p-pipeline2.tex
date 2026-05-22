@@ -1,0 +1,149 @@
+\chapter{The render pipeline end-to-end}
+\label{ch:pipeline2}
+
+\begin{aside}
+You have seen each stage. This chapter walks one frame from
+``user pressed a key'' to ``ANSI on the wire'' with all the
+parts assembled.
+\end{aside}
+
+\section{The key press}
+
+The user holds \code{j} in a list widget to scroll. The kernel
+delivers the byte to \maya{}'s pty reader. The reader's
+\code{poll} returns; the loop wakes.
+
+\section{Parse}
+
+The byte is fed to the input parser. The parser is a state
+machine that handles escape sequences, modifier folding, and
+bracketed paste. For a bare \code{j} byte it emits one event:
+
+\begin{lstlisting}
+KeyEvent { code = 'j', special = None }
+\end{lstlisting}
+
+\section{Dispatch}
+
+The event reaches the dispatcher, which walks the focus stack.
+The list widget has focus; its key handler matches \code{j}
+to ``move selection down''.
+
+\section{Mutation}
+
+The handler calls \code{ctx.set(selection, sel + 1)}. This:
+
+\begin{enumerate}[leftmargin=*]
+  \item Updates the signal's stored value.
+  \item Walks the dependency graph and marks every effect
+    that read this signal as dirty.
+  \item Schedules a frame.
+\end{enumerate}
+
+\section{Render}
+
+The scheduler dequeues the frame:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Layout.} The element tree is walked; each
+    element computes its size and position. The list's height
+    is the parent height; the visible rows are the slice
+    starting at scroll offset.
+  \item \textbf{Paint.} The back buffer is cleared and the
+    tree is painted depth-first. The list draws its rows;
+    one row is highlighted (the new selection).
+  \item \textbf{Diff.} The back and front buffers are
+    compared. Two rows differ: the previously selected row
+    (now unhighlighted) and the new one.
+  \item \textbf{Emit.} ANSI for the two rows is generated and
+    bundled into one string.
+\end{itemize}
+
+\section{Write}
+
+The string goes to \code{write(1, ...)}. The kernel queues it
+to the pty. The terminal emulator reads it from the pty
+master, parses the ANSI, and updates its internal screen
+buffer.
+
+\section{Pixels}
+
+The terminal emulator renders the screen buffer to pixels
+using its font and palette. The window manager composites the
+window. The GPU writes to the monitor. The user's eye sees
+the change.
+
+\section{Time budget}
+
+For a key-press-to-screen latency:
+
+\begin{itemize}[leftmargin=*]
+  \item Kernel + pty: <1 ms.
+  \item Parse: ~10 microseconds.
+  \item Dispatch + mutation: ~10 microseconds.
+  \item Layout: 0.5 ms typical.
+  \item Paint: 1 ms typical.
+  \item Diff: 0.5 ms typical.
+  \item Emit + write: 0.5 ms.
+  \item Terminal render: 5--15 ms depending on terminal.
+\end{itemize}
+
+Total: under 20 ms, well within a 60 Hz visual budget.
+
+\section{What slows it down}
+
+\begin{itemize}[leftmargin=*]
+  \item Big trees: layout is O(N) but N can be thousands.
+  \item Big screens: paint and diff are O(cells).
+  \item Slow terminals: render dominates on terminals
+    without GPU acceleration.
+  \item Bad coalescing: handling one key at a time when many
+    arrive in a burst.
+\end{itemize}
+
+The renderer fixes the first three; the loop's coalescing
+fixes the fourth.
+
+\section{Profiling}
+
+\maya{} can dump per-stage timings to a trace file. Enable
+with \code{MAYA\_TRACE=1}. The file is JSON; tools like
+chrome://tracing or Perfetto can visualise it.
+
+\begin{tryit}
+Enable tracing and capture 10 seconds of a typing burst.
+Look at the timeline. Layout and paint should both be sub-
+millisecond; if one spikes, that is your bottleneck.
+\end{tryit}
+
+\section{What if it crashes mid-frame}
+
+A crash during paint leaves the back buffer in an undefined
+state. The atexit hook still runs: shutdown bundle restores
+the terminal. The user sees their pre-crash shell.
+
+A crash during emit (mid-write) is harmless; the kernel
+delivers whatever bytes made it, and shutdown bytes are sent
+after.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Key to pixel in under 20 ms; under 5 in \maya{} land.
+  \item Each stage is bounded and instrumentable.
+  \item Coalescing keeps wakeups proportional to user
+    actions, not byte arrivals.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Enable tracing and identify the slowest stage in
+    your app.
+  \item Type a paragraph of text rapidly; confirm one
+    frame per multi-key burst, not one per key.
+  \item Measure end-to-end latency with a stopwatch app
+    on your phone. Compare your terminal with another.
+\end{enumerate}

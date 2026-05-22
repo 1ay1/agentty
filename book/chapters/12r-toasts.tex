@@ -1,0 +1,78 @@
+\chapter{Notifications and toasts}
+\label{ch:toasts}
+
+\begin{aside}
+A toast is a non-modal message that appears briefly and fades.
+Notifications are the bigger sibling --- persistent, queued,
+sometimes interactive.
+\end{aside}
+
+\section{Toast widget}
+
+\begin{lstlisting}
+ctx.toast("Saved!");
+ctx.toast("Error", ToastLevel::Error);
+\end{lstlisting}
+
+The toast appears at a corner (top-right typically), holds
+3 seconds, fades. Multiple toasts stack vertically.
+
+\section{Levels}
+
+\begin{itemize}[leftmargin=*]
+  \item Info: blue or neutral.
+  \item Success: green.
+  \item Warning: yellow.
+  \item Error: red.
+\end{itemize}
+
+\section{Persistence}
+
+A toast vanishes on a timer. A notification stays until
+dismissed. \maya{} treats them as separate types.
+
+\section{Queue}
+
+If toasts come faster than they expire, new ones queue
+behind. \maya{}'s queue caps at 5 visible at a time;
+overflow waits.
+
+\section{Action toasts}
+
+A toast can carry an action button:
+
+\begin{lstlisting}
+ctx.toast("File deleted", action("Undo", undo_fn));
+\end{lstlisting}
+
+The toast stays until clicked or timed out. Common for
+``undo last action'' UX.
+
+\section{Animation}
+
+Slide in from the right, slide out to the right. 200 ms
+each way. Respect reduced-motion.
+
+\section{OS-level notifications}
+
+For attention even when the terminal is unfocused, OSC 9
+(see Chapter~\ref{ch:titles}) raises an OS notification.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Toasts: transient, corner, fade.
+  \item Levels colour-code severity.
+  \item Action toasts include a button.
+  \item OSC 9 for OS-level escalation.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Wire toasts on save, delete, and error paths.
+  \item Add an undo action toast after delete.
+  \item Bridge to OS notifications for the error level.
+\end{enumerate}

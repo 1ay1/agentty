@@ -1,0 +1,238 @@
+\chapter{Events, focus, input parsing}
+\label{ch:events}
+
+A TUI consumes events: keystrokes, mouse clicks, paste, resize, focus
+changes. This chapter dissects how \maya{} parses these from the
+ragged byte stream the terminal delivers, and how it routes them to
+the right handler.
+
+\section{What the terminal sends}
+
+In raw mode (Chapter~\ref{ch:terminal}) every keystroke arrives as
+one or more bytes on \code{stdin}. The mapping is:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{Key} & \textbf{Bytes} \\
+\hline
+\code{a}                & \code{0x61} \\
+\code{Ctrl-A}           & \code{0x01} \\
+\code{Esc}              & \code{0x1B} \\
+\code{Alt-a}            & \code{0x1B 0x61} \\
+\code{Up}               & \code{0x1B [ A} \\
+\code{Down}             & \code{0x1B [ B} \\
+\code{F1}               & \code{0x1B O P} \\
+\code{Shift-Tab}        & \code{0x1B [ Z} \\
+\code{Mouse click (SGR)} & \code{0x1B [ < button ; col ; row M} \\
+\code{Paste}            & \code{0x1B [ 200~ ... 0x1B [ 201~} \\
+\end{tabular}
+\end{center}
+
+The parser has to:
+
+\begin{enumerate}[leftmargin=*]
+  \item Recognise prefixes incrementally (a single \code{0x1B}
+    might be the start of a longer sequence, or it might be a
+    lone Escape keypress).
+  \item Time out: if no bytes follow \code{0x1B} within a few
+    milliseconds, treat it as a lone Esc.
+  \item Disambiguate identical prefixes (some terminals send
+    \code{ESC[OP} for F1, others \code{ESC[[A}).
+  \item Handle bracketed paste --- treat the whole \code{200~...
+    201~} block as one event, not a stream of fake keystrokes.
+\end{enumerate}
+
+The parser lives in \file{maya/src/terminal/input.cpp}. It is a
+state machine driven by incoming bytes; we will not reproduce it
+here, but the shape of what it produces is the interesting bit.
+
+\section{The \code{Event} variant}
+
+What the parser \emph{outputs} is a variant:
+
+\begin{lstlisting}
+struct Key {
+    KeyCode  code;          // Char, Up, Down, F1, ...
+    char32_t ch = 0;        // for KeyCode::Char
+    Mods     mods{};        // bitset: Ctrl, Alt, Shift
+};
+
+struct Mouse {
+    int  x = 0, y = 0;
+    MouseButton button;     // Left, Middle, Right, ScrollUp, ScrollDown, None
+    MouseAction action;     // Press, Release, Move, Drag
+    Mods         mods{};
+};
+
+struct Resize { int width = 0, height = 0; };
+struct Paste  { std::string text; };
+struct Focus  { bool gained = true; };
+
+using Event = std::variant<Key, Mouse, Resize, Paste, Focus>;
+\end{lstlisting}
+
+Every event \maya{} delivers is one of these. The renderer never sees
+raw bytes; the user code never sees raw bytes. The parser is the
+choke point.
+
+\subsection{Why types, not strings?}
+
+Some libraries deliver \emph{key chord strings} (\code{"Ctrl+Up"}).
+\maya{} delivers structured values. Two reasons:
+
+\begin{itemize}[leftmargin=*]
+  \item Pattern matching is exhaustive. \code{std::visit} on
+    \code{Event} forces you to handle every alternative.
+  \item No string parsing in user code. To check ``user pressed
+    Ctrl-Up,'' you read the \code{Key} struct's fields, not a
+    string.
+\end{itemize}
+
+\section{Event helpers}
+
+For the common pattern of ``did the user press this key,'' \maya{}
+provides predicate helpers:
+
+\begin{lstlisting}
+bool key(const Event& e, char32_t ch);                   // any key press of ch
+bool ctrl(const Event& e, char32_t ch);                  // ctrl-ch
+bool alt(const Event& e, char32_t ch);                   // alt-ch
+bool key(const Event& e, KeyCode code);                  // arrows, F-keys, ...
+bool mouse_clicked(const Event& e, MouseButton btn);     // any click
+bool mouse_clicked_in(const Event& e, Rect r, MouseButton b);
+
+template <typename F>
+void on(const Event& e, char32_t ch, F&& fn);             // syntactic sugar
+\end{lstlisting}
+
+Usage:
+
+\begin{lstlisting}
+if (key(ev, 'q'))                  return false;            // quit
+if (key(ev, KeyCode::Up))          scroll_up();
+if (ctrl(ev, 'c'))                 cancel();
+if (mouse_clicked(ev, MouseButton::Left)) select_under_cursor();
+\end{lstlisting}
+
+\section{From event to Msg --- \code{key\_map}}
+
+A \code{Program}'s \code{subscribe} function returns a \code{Sub<Msg>}.
+The most common subscription is ``map keys to messages,'' and
+\maya{} ships a builder for it:
+
+\begin{lstlisting}
+template <typename Msg>
+Sub<Msg> key_map(std::initializer_list<std::pair<char32_t, Msg>> bindings);
+\end{lstlisting}
+
+In use:
+
+\begin{lstlisting}
+static Sub<Msg> subscribe(const Model&) {
+    return key_map<Msg>({
+        {'+',  Inc{}},
+        {'-',  Dec{}},
+        {'q',  Quit{}},
+    });
+}
+\end{lstlisting}
+
+The runtime, given this \code{Sub}, knows that when the user
+presses \code{+} it should construct an \code{Inc\{\}} \code{Msg}
+and feed it through \code{update}. Compose more elaborate
+subscriptions by combining \code{key\_map}, \code{mouse\_map},
+\code{tick} (timers), and \code{batch}.
+
+\section{Focus}
+
+When the user clicks into a different terminal window or tab, the
+emulator may send a focus event (\code{ESC [ I} for focus-gained,
+\code{ESC [ O} for focus-lost) if focus reporting is enabled. The
+parser emits a \code{Focus\{gained: true|false\}} event; \maya{}
+programs typically use it to pause animations or dim the UI when
+unfocused.
+
+Inside the app, \maya{} has a focus manager
+(\file{maya/include/maya/core/focus.hpp}) that tracks which widget
+has logical focus, so Tab/Shift-Tab can move focus between input
+fields. The widget catalogue in Chapter~\ref{ch:widgets} expects
+this manager to exist.
+
+\section{Resize}
+
+When \code{SIGWINCH} fires, the runtime resamples the terminal size
+with \code{ioctl(TIOCGWINSZ)} and emits a \code{Resize\{w, h\}}
+event. The renderer recomputes layout against the new size and
+repaints. Most user code does not need to handle resize explicitly;
+the layout engine reflows automatically.
+
+If you do want to react (for example, to re-load a configuration
+based on the new aspect ratio), pattern-match on \code{Resize} in
+your event handler.
+
+\section{Paste}
+
+Modern terminals support \textbf{bracketed paste}: when the user
+pastes a block of text, the terminal wraps the pasted bytes in
+\code{ESC[200\textasciitilde} ... \code{ESC[201\textasciitilde}.
+\maya{}'s parser collects all bytes between these markers into one
+\code{Paste\{text\}} event. This is essential because pasted text
+often contains literal newlines and tabs that would otherwise look
+like Enter and Tab keypresses --- which would, for example, submit a
+chat message after every pasted newline.
+
+To enable bracketed paste, write \code{ESC[?2004h} on startup
+(\maya{} does this automatically). To disable, write \code{ESC[?2004l}.
+
+\section{The polling loop}
+
+How does \maya{} actually wait for events? On POSIX, the runtime
+uses \code{poll(2)} over three file descriptors:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{stdin} --- for key/mouse/paste bytes.
+  \item A \code{signalfd}-or-equivalent --- for \code{SIGWINCH}.
+  \item A \code{wake\_fd} --- a pipe used to interrupt the poll
+    when a background task (a \code{Cmd::Task}) dispatches a
+    message.
+\end{itemize}
+
+The wake\_fd is a classic Unix trick: when a background thread
+wants to feed a \code{Msg} into the event loop, it pushes the
+message onto a thread-safe queue and writes one byte to the pipe.
+The poll wakes up, drains the pipe, drains the queue, and
+processes the message. This is how \maya{}'s pure-functional
+\code{update} cooperates with real concurrency.
+
+\section{Windows}
+
+Windows has no \code{poll(2)} for keyboard input. The Windows
+implementation uses \code{ReadConsoleInputW} on a dedicated reader
+thread, posting events onto a shared queue that the main thread
+polls. The interface --- the \code{Event} variant --- is the
+same; the plumbing differs.
+
+\begin{recap}
+The terminal sends raw bytes; \maya{}'s parser turns them into a
+typed \code{Event = variant<Key, Mouse, Resize, Paste, Focus>}.
+Helpers (\code{key}, \code{ctrl}, \code{on}) make pattern-matching
+ergonomic. The polling loop ties stdin, signals, and a wake-fd
+together so that background tasks can interrupt the main loop.
+Bracketed paste prevents pasted text from being misread as
+keystrokes.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a tiny program that prints every \code{Event} it
+    receives, then run it and try unusual keys (F-keys, function
+    + modifier combos, mouse, paste).
+  \item Read the first 200 lines of \file{maya/src/terminal/input.cpp}.
+    Identify the state machine's states (waiting for ESC, in CSI,
+    in OSC, ...).
+  \item Build a small program that uses mouse events to drag a
+    coloured square around the screen. The squares' position
+    lives in a \code{Signal<Point>}.
+\end{enumerate}

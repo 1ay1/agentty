@@ -1,0 +1,105 @@
+\chapter{Logging and debugging strategies}
+\label{ch:logging}
+
+\begin{aside}
+A TUI cannot print to stderr without messing up the screen.
+But you still need a way to see what's happening when
+something goes wrong.
+\end{aside}
+
+\section{Log to a file}
+
+\maya{}'s default logger writes to \code{maya.log} in the
+current directory:
+
+\begin{lstlisting}
+LOG_INFO("Started session");
+LOG_ERROR("Failed to load: {}", err);
+\end{lstlisting}
+
+Format strings via \code{fmt::format} or
+\code{std::format}.
+
+\section{Levels}
+
+ERROR, WARN, INFO, DEBUG, TRACE. Filter via environment:
+
+\begin{lstlisting}
+MAYA_LOG=DEBUG ./myapp
+\end{lstlisting}
+
+\section{Tail in another terminal}
+
+\begin{lstlisting}
+tail -f maya.log
+\end{lstlisting}
+
+The log scrolls as your app runs. This is the standard
+debug workflow.
+
+\section{Structured logging}
+
+For machine consumption, JSON Lines:
+
+\begin{lstlisting}
+{"ts":"2024-01-01T12:00:00Z","level":"INFO","msg":"started"}
+\end{lstlisting}
+
+Parsable by jq, log aggregators, etc.
+
+\section{In-app log view}
+
+For users to see logs without leaving the app, build a
+log-tail widget:
+
+\begin{lstlisting}
+auto log = file_tail("maya.log") | scrollable;
+\end{lstlisting}
+
+Bound to a hotkey like F10.
+
+\section{Conditional breakpoints}
+
+Inside a debugger, set a condition on a log line:
+
+\begin{lstlisting}
+break log.cpp:42 if level == ERROR
+\end{lstlisting}
+
+Catches errors only.
+
+\section{Crash dumps}
+
+Install a signal handler that writes a stack trace to a
+file before re-raising. \maya{} ships a default that uses
+\code{libbacktrace}.
+
+\section{Reproducing bugs}
+
+Save a session trace (every input event) and replay:
+
+\begin{lstlisting}
+MAYA_TRACE=session.trace ./myapp        # record
+./myapp --replay session.trace          # replay
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Log to file, not stderr.
+  \item Levels filterable via env.
+  \item Tail in a side terminal.
+  \item Structured logs for machine reading.
+  \item Crash dumps for after-the-fact analysis.
+  \item Record + replay for bug reproduction.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Install the logger; tail in another terminal.
+  \item Build an in-app log viewer bound to F10.
+  \item Wire a crash dump handler.
+\end{enumerate}

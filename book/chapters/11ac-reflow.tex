@@ -1,0 +1,115 @@
+\chapter{Reflow and resize}
+\label{ch:reflow}
+
+\begin{aside}
+The terminal resizes. Your UI must follow. Layout knows how;
+the trick is doing it fast enough that drag-resize feels live.
+\end{aside}
+
+\section{The signal}
+
+SIGWINCH fires when the terminal size changes. \maya{}'s
+loop catches the EINTR return, queries the new size via
+\code{TIOCGWINSZ}, and triggers a resize event.
+
+\section{The reflow}
+
+A resize event invalidates both buffers:
+
+\begin{enumerate}[leftmargin=*]
+  \item Reallocate canvases to the new dimensions.
+  \item Fill the front with sentinels.
+  \item Re-run layout with the new viewport.
+  \item Repaint and full-screen emit.
+\end{enumerate}
+
+The cost: one allocation pair (front + back), one layout
+pass, one full-screen ANSI emission. On a 200x60 terminal,
+all under 5 ms.
+
+\section{Layout responsiveness}
+
+If layout is slow (deep nesting, expensive measure
+functions), drag-resize lags. The user drags the corner and
+watches stale frames before the new size catches up.
+
+\maya{}'s layout is fast enough for typical UIs that
+drag-resize is live.
+
+\section{Coalescing rapid resizes}
+
+A user dragging the resize handle generates many SIGWINCH
+events. Each is a few bytes of ioctl work but a full
+relayout is expensive. \maya{} coalesces: if multiple
+resize events arrive in one wakeup, only the latest size
+triggers a relayout.
+
+\section{Reflow vs scroll}
+
+For a scrolling region, resize changes the viewport. The
+content's logical scroll position is preserved; the visible
+rows shift.
+
+For a wrapping text view, the wrap points change. Cursor
+position in characters is preserved; cursor position in
+visual rows shifts. The view scrolls so the cursor stays
+visible.
+
+\section{Sticky pinned content}
+
+Status bars, headers, footers should not move. Layout
+naturally handles this: they have fixed heights and live in
+their own row of a column layout.
+
+\section{Content-driven sizing}
+
+A widget that auto-sizes to its content (a label) has zero
+flex --- its size is dictated by content. Reflow recomputes
+its measure; if content fits, no change. If content
+overflows, fall back to wrap or truncate.
+
+\section{The minimum viable size}
+
+A 1x1 terminal is technically possible. Reasonable UIs
+expect at least 20x5; very rich UIs require 80x24 or more.
+
+\maya{}'s elements have minimum sizes (border = 3x3, button
+= label-width + 2, etc.). Below these, layout warns and
+falls back to a degraded form (no border, ASCII fallback).
+
+\section{Resize event payload}
+
+The event carries the new size:
+
+\begin{lstlisting}
+struct ResizeEvent {
+    Size old_size;
+    Size new_size;
+};
+\end{lstlisting}
+
+Widgets can subscribe and react (e.g., recompute their
+internal scroll position).
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item SIGWINCH + TIOCGWINSZ + sentinel flood = resize.
+  \item Coalesce burst events.
+  \item Layout speed = drag-resize feel.
+  \item Status bars stay put via layout, not magic.
+  \item Mind the minimum viable size.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Drag-resize your terminal during a \maya{} app.
+    Watch the relayout happen smoothly.
+  \item Print layout time on resize. Identify any deep
+    tree that pushes you over 5 ms.
+  \item Build a widget that displays current size in its
+    own corner.
+\end{enumerate}

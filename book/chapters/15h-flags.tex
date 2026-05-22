@@ -1,0 +1,69 @@
+\chapter{Patterns: feature flags}
+\label{ch:flags}
+
+\begin{aside}
+Ship code that's behind a flag. Enable for beta users. Roll
+out gradually. Roll back instantly. The standard pattern in
+modern software.
+\end{aside}
+
+\section{Flag definition}
+
+\begin{lstlisting}
+struct Flags {
+    Signal<bool> dark_mode = false;
+    Signal<bool> new_search = false;
+    Signal<bool> experimental_charts = false;
+};
+\end{lstlisting}
+
+Flags as signals enable runtime toggle.
+
+\section{Usage}
+
+\begin{lstlisting}
+auto search = ctx.get(flags.new_search)
+            ? new_search_widget()
+            : old_search_widget();
+\end{lstlisting}
+
+\section{Sources}
+
+Flags come from:
+
+\begin{itemize}[leftmargin=*]
+  \item Config file.
+  \item Environment variables.
+  \item Command-line arguments.
+  \item Remote config service.
+\end{itemize}
+
+\section{Cohort selection}
+
+For gradual rollout: a flag is on if your user hash falls
+in the active range. \code{hash(user\_id) \% 100 < N}.
+
+\section{Cleanup}
+
+A feature graduates: remove the flag, keep only the new
+code. Tech-debt budget for this.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Flags as signals for runtime toggle.
+  \item Multiple sources (file, env, remote).
+  \item Cohort selection for gradual rollout.
+  \item Clean up old flags.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add a feature flag for one experimental
+    feature.
+  \item Wire to a config file.
+  \item Plan its cleanup.
+\end{enumerate}

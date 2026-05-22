@@ -1,0 +1,98 @@
+\chapter{The complete render loop, annotated}
+\label{ch:loopannotated}
+
+\begin{aside}
+Every line of the main loop, with commentary. The whole thing
+is maybe 80 lines of code; understanding it is understanding
+\maya{}.
+\end{aside}
+
+\section{The pseudocode}
+
+\begin{lstlisting}
+void Runtime::run() {
+    // [1] startup bundle
+    backend.write(boot_ansi());
+
+    // [2] initial render
+    schedule_frame();
+
+    // [3] the loop
+    while (running) {
+        auto deadline = next_deadline();
+        auto event = backend.poll(deadline);
+
+        // [4] dispatch and drain
+        if (event) dispatch(*event);
+        drain_input();
+
+        // [5] microtasks
+        run_microtasks();
+
+        // [6] effects
+        run_dirty_effects();
+
+        // [7] render if needed
+        if (frame_dirty) render_frame();
+    }
+
+    // [8] shutdown bundle
+    backend.write(shutdown_ansi());
+}
+\end{lstlisting}
+
+\section{[1] Startup}
+
+Boot bundle = alt-screen + raw mode + mouse + CSI-u +
+clear + home. See Chapter~\ref{ch:altscreen}.
+
+\section{[2] Initial render}
+
+Mark the first frame dirty so something paints
+immediately.
+
+\section{[3] Loop}
+
+\code{deadline} is the next timer or animation tick. The
+poll sleeps until input or deadline.
+
+\section{[4] Dispatch}
+
+Parse the event; route to the focused element. Drain any
+queued events (input came faster than wake).
+
+\section{[5] Microtasks}
+
+Deferred functions scheduled by handlers.
+
+\section{[6] Effects}
+
+Dirty signals fire their effects in topological order.
+
+\section{[7] Render}
+
+If any signal write or input dispatch dirtied the frame,
+render: layout, paint, diff, emit.
+
+\section{[8] Shutdown}
+
+Reverse of boot. Atexit hook backs this up.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item One loop, eight steps.
+  \item Sleep until something wants the CPU.
+  \item Render only when dirty.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Trace your app through the eight steps for one
+    keystroke.
+  \item Identify where time goes.
+  \item Add a custom step (e.g., a metrics flush).
+\end{enumerate}

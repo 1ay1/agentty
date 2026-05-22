@@ -1,0 +1,59 @@
+\chapter{Documenting your TUI app}
+\label{ch:docs}
+
+\begin{aside}
+A TUI without docs feels mysterious. The keys are the
+documentation; the rest is footnotes.
+\end{aside}
+
+\section{The help screen}
+
+The first stop. F1 or \code{?}. Every action visible.
+See Chapter~\ref{ch:help}.
+
+\section{The man page}
+
+A traditional Unix tool ships a man page. Generated from
+markdown or asciidoc.
+
+\section{The README}
+
+Quick install, quick run, a screenshot or asciinema cast.
+
+\section{Tutorials}
+
+Step-by-step walkthroughs for common workflows. Either in
+the help screen (interactive) or as separate web docs.
+
+\section{Reference}
+
+Every key, every command, every option. Generated from
+the keymap and config schema where possible.
+
+\section{Changelog}
+
+Per release: what's new, what changed, what broke.
+
+\section{Examples}
+
+Real config files, example workflows, screenshots of
+common screens.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Help screen + man + README cover most users.
+  \item Reference for the determined.
+  \item Examples for the visual learners.
+  \item Changelog for upgrade fears.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a one-paragraph README intro.
+  \item Build an in-app help screen.
+  \item Record an asciinema cast of your app.
+\end{enumerate}

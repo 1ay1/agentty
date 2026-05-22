@@ -1,0 +1,136 @@
+\chapter{Routing and navigation}
+\label{ch:routing}
+
+\begin{aside}
+A TUI with multiple screens needs a way to move between them.
+Whether that's tabs at the top, a back-stack, or URL-style
+routes, the pattern is the same: which view is current?
+\end{aside}
+
+\section{The route signal}
+
+A simple router:
+
+\begin{lstlisting}
+enum class Route { Home, Settings, About };
+auto route = signal(Route::Home);
+
+auto root = [&] {
+    switch (ctx.get(route)) {
+        case Route::Home:     return home();
+        case Route::Settings: return settings();
+        case Route::About:    return about();
+    }
+};
+\end{lstlisting}
+
+Setting the route signal swaps the visible view.
+
+\section{The back stack}
+
+For navigation history:
+
+\begin{lstlisting}
+class BackStack {
+    std::vector<Route> stack;
+public:
+    void push(Route r) { stack.push_back(r); }
+    void pop()        { if (!stack.empty()) stack.pop_back(); }
+    Route current()    { return stack.back(); }
+};
+\end{lstlisting}
+
+The current route is the top of the stack. Pop returns to
+the previous view.
+
+\section{Route parameters}
+
+Some routes have parameters (which doc, which user):
+
+\begin{lstlisting}
+struct DocRoute { int doc_id; };
+struct UserRoute { std::string username; };
+using Route = std::variant<HomeRoute, DocRoute, UserRoute>;
+\end{lstlisting}
+
+The view function pattern-matches:
+
+\begin{lstlisting}
+auto view = std::visit([&](auto&& r) -> Element {
+    using T = std::decay_t<decltype(r)>;
+    if constexpr (std::is_same_v<T, HomeRoute>)
+        return home();
+    else if constexpr (std::is_same_v<T, DocRoute>)
+        return doc_view(r.doc_id);
+    // ...
+}, ctx.get(route));
+\end{lstlisting}
+
+\section{Modal routes}
+
+A modal (settings overlay over current view) is a route
+that doesn't replace the current view but overlays it.
+Tracked as a separate signal:
+
+\begin{lstlisting}
+auto modal = signal<std::optional<Modal>>(std::nullopt);
+\end{lstlisting}
+
+The view renders the modal if set, on top of the regular
+view.
+
+\section{Deep linking}
+
+For apps that accept URL-like arguments, parse the route on
+startup:
+
+\begin{lstlisting}
+int main(int argc, char** argv) {
+    Route r = parse_route(argv[1]);
+    ctx.set(route, r);
+    run();
+}
+\end{lstlisting}
+
+A \code{myapp settings} command-line jumps straight to the
+settings view.
+
+\section{Animated transitions}
+
+Switching routes can animate (slide left, fade out + in).
+Wrap the route view in an animator that crossfades on
+change.
+
+\section{Side effects on navigation}
+
+Going to a route might trigger a fetch. Use an effect:
+
+\begin{lstlisting}
+ctx.effect([&] {
+    auto r = ctx.get(route);
+    if (auto* doc = std::get_if<DocRoute>(&r))
+        fetch_document(doc->doc_id);
+});
+\end{lstlisting}
+
+The effect re-runs on route change.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Route signal selects the current view.
+  \item Back stack for history.
+  \item Variants for parameterised routes.
+  \item Modals as a separate overlay route.
+  \item Effects fire fetches on route change.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a three-tab app with route switching.
+  \item Add a back stack with Escape to pop.
+  \item Crossfade between routes; tune the duration.
+\end{enumerate}

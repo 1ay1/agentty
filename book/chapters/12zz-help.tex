@@ -1,0 +1,70 @@
+\chapter{Help systems}
+\label{ch:help}
+
+\begin{aside}
+A help screen is a TUI's documentation. Make it
+context-aware, searchable, and accessible without leaving
+the app.
+\end{aside}
+
+\section{Triggering help}
+
+Standard keybind: F1 or \code{?}. Some apps use
+\code{:help} (vim).
+
+\section{Modal vs split}
+
+A help overlay (modal) covers the screen briefly. A help
+panel (split) stays open beside the work. Pick based on
+the app's complexity.
+
+\section{Context-aware}
+
+\code{?} in normal mode shows normal-mode help.
+\code{?} in a dialog shows dialog-specific help. The
+current mode or focus drives the help content.
+
+\section{Content sources}
+
+\begin{itemize}[leftmargin=*]
+  \item Keymap auto-generated (Chapter~\ref{ch:keymaps}).
+  \item Markdown files shipped with the app.
+  \item Tooltip text from individual widgets.
+\end{itemize}
+
+\section{Search}
+
+A search box in the help screen lets the user find
+``how do I rename''. The result list shows matching
+sections.
+
+\section{Glossary}
+
+A glossary of terms with cross-references. Hyperlink
+between entries (OSC-8 internal links).
+
+\section{Tutorials}
+
+An interactive tutorial guides the user through tasks.
+\maya{}'s \code{tutorial} widget shows steps and tracks
+progress.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item F1 or \code{?} to open.
+  \item Context-aware content.
+  \item Sources: keymap, markdown, tooltips.
+  \item Search, glossary, tutorials.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a help overlay that lists keybindings.
+  \item Make it context-aware (different content per
+    mode).
+  \item Add a search box that filters help content.
+\end{enumerate}

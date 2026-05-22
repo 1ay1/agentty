@@ -1,0 +1,152 @@
+\chapter{Benchmarks and microbenchmarks}
+\label{ch:bench}
+
+\begin{aside}
+``It's fast'' is a feeling. Numbers are how we keep that
+feeling honest. \maya{} ships microbenchmarks for the hot paths
+so a refactor that quietly halves throughput shows up
+immediately.
+\end{aside}
+
+\section{What to benchmark}
+
+The hot paths:
+
+\begin{itemize}[leftmargin=*]
+  \item Canvas diff (SIMD).
+  \item ANSI emit.
+  \item Layout for a tree of $N$ elements.
+  \item Signal-graph propagation.
+  \item Grapheme cluster iteration.
+  \item Width lookup.
+\end{itemize}
+
+The not-so-hot paths:
+
+\begin{itemize}[leftmargin=*]
+  \item App startup time.
+  \item First-frame latency.
+\end{itemize}
+
+\section{Microbench framework}
+
+\maya{} uses \code{nanobench} (header-only, single file):
+
+\begin{lstlisting}
+ankerl::nanobench::Bench()
+    .run("diff 80x24 unchanged", [&] {
+        diff_no_op(front, back);
+    });
+\end{lstlisting}
+
+The framework auto-tunes iteration counts, reports
+mean/median/stddev, and outputs in a parseable format.
+
+\section{Comparing variants}
+
+Run two variants and compare:
+
+\begin{lstlisting}
+Bench b;
+b.run("scalar diff", [&] { scalar_diff(...); });
+b.run("simd diff",   [&] { simd_diff(...); });
+\end{lstlisting}
+
+Output shows nanoseconds per op and ops per second.
+
+\section{Macrobench}
+
+A full app's frame loop is the macrobench. Drive a simulated
+input stream and measure frames per second:
+
+\begin{lstlisting}
+TEST_CASE("60Hz typing") {
+    auto app = make_app();
+    for (int i = 0; i < 600; ++i) {
+        app.send_key('a');
+        app.render_frame();
+    }
+    // assert no frame > 16ms
+}
+\end{lstlisting}
+
+This catches whole-pipeline regressions.
+
+\section{Calibration}
+
+Microbenchmarks need a baseline. \maya{} measures the
+overhead of an empty loop and subtracts. The framework does
+this automatically.
+
+\section{Reference machine}
+
+\maya{}'s CI runs benchmarks on a fixed machine. Numbers
+are stored; a 10\% regression fails the run. The numbers do
+not need to be portable --- relative regression is what
+matters.
+
+\section{Profiling vs benchmarking}
+
+A benchmark measures throughput. A profile shows where time
+goes. Both are needed:
+
+\begin{itemize}[leftmargin=*]
+  \item Bench first: ``the diff is 30\% slower''.
+  \item Profile next: ``the wide-cell branch is mispredicting''.
+  \item Fix and re-bench.
+\end{itemize}
+
+\section{Memory benchmarks}
+
+Throughput isn't the only metric. Working-set size matters
+for cache behaviour:
+
+\begin{itemize}[leftmargin=*]
+  \item Canvas: $w \times h \times 8$ bytes.
+  \item Element tree: typically under 100 KB.
+  \item Signal storage: under 10 KB for small apps.
+\end{itemize}
+
+\maya{} prints these on \code{about()}.
+
+\section{Pitfalls}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Dead-code elimination.} The compiler may
+    elide a benchmark whose result is unused. Mark with
+    \code{doNotOptimizeAway}.
+  \item \textbf{Cold cache.} First iteration is slow. Use
+    median or warmup.
+  \item \textbf{Frequency scaling.} CPU may downclock on
+    battery. Pin the test machine.
+  \item \textbf{Background noise.} Measure on idle systems
+    or take the minimum.
+\end{itemize}
+
+\section{Reporting}
+
+\maya{}'s CI posts benchmark deltas as PR comments. The
+table shows ``before / after / delta'' for each named
+benchmark. Reviewer sees the impact at a glance.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Microbench the hot paths.
+  \item Macrobench the full pipeline.
+  \item Compare variants, not absolutes.
+  \item Profile after benchmarking.
+  \item Mind dead-code elimination and frequency scaling.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Write a microbench for your most expensive widget.
+    Bench it before and after a simple optimisation.
+  \item Add a 60-Hz typing macrobench to your test suite.
+  \item Compare scalar and SIMD diff on your CPU. Record the
+    ratio.
+\end{enumerate}

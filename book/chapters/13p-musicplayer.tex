@@ -1,0 +1,76 @@
+\chapter{Building a music player}
+\label{ch:musicplayer}
+
+\begin{aside}
+Library browser, playlist, controls. The music itself plays
+via an external library (libmpv, libVLC, ffmpeg).
+\end{aside}
+
+\section{Layout}
+
+Three panels: library tree (left), playlist (centre),
+now-playing card (right). Plus a transport bar at the
+bottom.
+
+\section{Library}
+
+The library is a tree of artist > album > track. Build
+the tree from a metadata cache; rescan on demand.
+
+\section{Playlist}
+
+A reorderable list. Drag-and-drop or up/down with shift.
+
+\section{Playback}
+
+A background thread (or external process) handles audio.
+\maya{} sends commands (play, pause, seek, next) and
+receives state (position, duration, current track).
+
+\section{Now playing}
+
+Track title, artist, album art (if image protocol),
+progress bar, elapsed/remaining time.
+
+\section{Visualisation}
+
+A live waveform or spectrum analyser as a sparkline.
+Cheap eye candy.
+
+\section{Controls}
+
+\begin{itemize}[leftmargin=*]
+  \item Space: play/pause.
+  \item Left/Right: seek.
+  \item J/K: previous/next.
+  \item Up/Down: volume.
+\end{itemize}
+
+\section{Shuffle and repeat}
+
+Modes toggled with R and S. Icons in the transport bar.
+
+\section{Library search}
+
+\code{/} focuses a search box. Fuzzy-match against title,
+artist, album.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Library tree + playlist + now-playing.
+  \item External audio engine; \maya{} drives it.
+  \item Transport bar with controls.
+  \item Optional visualisation.
+  \item Search across metadata.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build the layout shell with mock data.
+  \item Wire an audio engine (libmpv).
+  \item Add visualisation.
+\end{enumerate}

@@ -1,0 +1,66 @@
+\chapter{Patterns: undo with branches}
+\label{ch:undobranches}
+
+\begin{aside}
+Linear undo discards the future when you make a new change.
+Branching undo keeps every branch as a tree. The user can
+explore alternatives.
+\end{aside}
+
+\section{The tree}
+
+\begin{lstlisting}
+struct Node {
+    Action action;
+    Node* parent;
+    std::vector<Node*> children;
+};
+Node* current;
+\end{lstlisting}
+
+The current node is the present. Going back walks toward
+the root; going forward walks to a child.
+
+\section{Branching}
+
+A new action under \code{current} creates a new child.
+\code{current} advances to it. Existing children remain
+accessible.
+
+\section{Navigation}
+
+\begin{itemize}[leftmargin=*]
+  \item Undo: go to parent.
+  \item Redo: go to last-visited child.
+  \item Branch picker: choose among siblings.
+\end{itemize}
+
+\section{Visualisation}
+
+Vim has \code{:undolist}. \maya{} apps can show a tree
+view of the history.
+
+\section{Memory}
+
+A long-lived editing session can accumulate a deep tree.
+Compress: drop branches older than N steps; merge linear
+runs.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Tree of actions, not stack.
+  \item Branches preserved on new action.
+  \item Navigate parent/child/sibling.
+  \item Compress old branches.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Replace your undo stack with a tree.
+  \item Add a branch picker.
+  \item Implement compression.
+\end{enumerate}

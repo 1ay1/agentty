@@ -1,0 +1,85 @@
+\chapter{Distributing your app}
+\label{ch:distrib}
+
+\begin{aside}
+You built it. Now ship it. Static binaries, package
+managers, container images, source releases --- pick one or
+all.
+\end{aside}
+
+\section{Static binary}
+
+The simplest distribution. \code{-static} at link time;
+one file users download and run. Size: 5--20 MB depending
+on what's linked.
+
+\section{Package managers}
+
+\begin{itemize}[leftmargin=*]
+  \item DEB (Debian, Ubuntu): \code{cpack -G DEB}.
+  \item RPM (Fedora, RHEL): \code{cpack -G RPM}.
+  \item Homebrew (macOS): a formula.
+  \item Chocolatey (Windows): a nuspec.
+  \item AUR (Arch): a PKGBUILD.
+  \item Nix: a derivation.
+\end{itemize}
+
+Each has its own packaging discipline. \maya{}'s built-in
+CMake/CPack handles the first two; the rest are
+user-written.
+
+\section{Container image}
+
+\begin{lstlisting}
+FROM debian:bookworm-slim
+COPY myapp /usr/local/bin/
+ENTRYPOINT ["myapp"]
+\end{lstlisting}
+
+A 50 MB image; fine for CI or for distributing as
+\code{docker run}.
+
+\section{Source release}
+
+A tarball with source and \code{CMakeLists.txt}. Users
+build themselves. Smallest download, biggest user effort.
+
+\section{Versioning}
+
+Semver: \code{major.minor.patch}. Tag releases in git.
+Embed the version in the binary via a \code{config.h}
+generated from CMake.
+
+\section{Release notes}
+
+CHANGELOG.md with sections per version. Categories:
+Added, Changed, Fixed, Removed.
+
+\section{Signing}
+
+GPG-sign release tarballs. Provide checksums (sha256).
+Users verify before installing.
+
+\section{Auto-update}
+
+If your app self-updates, the channel is a security
+boundary. Sign updates; verify on download.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Static binary is simplest.
+  \item Package managers reach more users.
+  \item Containers for CI.
+  \item Semver + changelog + signing.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a static binary; check the size.
+  \item Generate a DEB via CPack.
+  \item Write a 5-line changelog for your last 5 commits.
+\end{enumerate}

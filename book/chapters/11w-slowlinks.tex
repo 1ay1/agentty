@@ -1,0 +1,101 @@
+\chapter{Rendering on slow links}
+\label{ch:slowlinks}
+
+\begin{aside}
+Your app works locally. Then a user runs it over SSH from a
+coffee-shop wifi and the screen lags by seconds. The diff was
+small; the link is the problem. There are mitigations.
+\end{aside}
+
+\section{Where bandwidth goes}
+
+A typical TUI sends:
+
+\begin{itemize}[leftmargin=*]
+  \item Initial alt-screen entry: ~100 bytes.
+  \item Full-screen first paint: 1--10 KB depending on
+    content and colour density.
+  \item Steady-state frame: 30--500 bytes per active frame.
+  \item Idle: zero.
+\end{itemize}
+
+Over a 1 Mbps SSH session that is one frame per ~5 ms; over
+56 kbps dial-up (some still exist) it is 50 ms per KB.
+
+\section{Reducing wire bytes}
+
+\begin{itemize}[leftmargin=*]
+  \item Avoid full-screen redraws. Keep diffs minimal.
+  \item Cache styles aggressively (don't re-emit unchanged
+    SGR).
+  \item Use \code{ESC [ K} (erase to end of line) instead of
+    spaces when a row's tail is uniform.
+  \item Avoid OSC 8 hyperlinks on every cell; share IDs.
+\end{itemize}
+
+\maya{} does the first three automatically. The fourth is the
+app's responsibility.
+
+\section{Mosh}
+
+For very slow or intermittent links, the Mosh project
+(\code{mosh.org}) provides a Predict-and-Sync layer: client
+predicts what the screen should look like and the server
+sends only deltas to the client's local prediction.
+
+\maya{} apps work over Mosh transparently. The wire savings
+are dramatic on flaky links.
+
+\section{Reducing colour}
+
+Truecolour is 18--22 bytes per cell. 256-colour is 11. Plain
+text is 0 (no SGR). On a slow link, a flag like
+\code{--mono} that disables colour can be a usability win.
+
+\section{Lazy rendering}
+
+For huge logs, don't render the parts the user cannot see.
+\maya{}'s scroll widget already does this: only the visible
+viewport is painted. The data structure is the full log;
+the painted slice is the small window.
+
+\section{Latency vs throughput}
+
+A bandwidth-constrained link delivers many bytes per second
+eventually. A high-latency link makes every small frame feel
+slow. The two need different fixes:
+
+\begin{itemize}[leftmargin=*]
+  \item Low bandwidth: shrink frames.
+  \item High latency: predict locally (Mosh).
+\end{itemize}
+
+\section{Synchronised output}
+
+DEC 2026 reduces visible mid-frame artifacts. On a slow
+link, mid-frame visibility is amplified --- the user sees
+half a frame for hundreds of milliseconds. \maya{} uses
+2026 when available.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Minimal diffs help everyone, especially slow links.
+  \item Erase-to-end-of-line beats trailing spaces.
+  \item Drop colour for severe constraint.
+  \item Mosh hides latency at the protocol layer.
+  \item Synchronised output reduces visible mid-frame
+    artifacts.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item SSH into a remote box and run your app. Measure
+    bytes per frame via \code{tcpdump}.
+  \item Try Mosh; compare typing latency.
+  \item Implement a \code{--mono} flag and measure bandwidth
+    reduction.
+\end{enumerate}

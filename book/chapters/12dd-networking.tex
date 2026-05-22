@@ -1,0 +1,92 @@
+\chapter{Networking and remote state}
+\label{ch:networking}
+
+\begin{aside}
+Many TUIs are clients: a chat app, an RSS reader, an SSH
+multiplexer. Networking adds latency, errors, and a need to
+think about offline.
+\end{aside}
+
+\section{Sockets}
+
+\maya{} doesn't bundle a network library --- use what you
+need. \code{asio}, \code{boost.asio}, \code{libuv} for
+async I/O; raw sockets for simple HTTP.
+
+\section{Integration with the loop}
+
+The event loop's \code{poll} can watch multiple fds. Add
+the socket to the watch list; on readable, drain into a
+buffer; parse into events.
+
+\begin{lstlisting}
+ctx.watch_fd(sock, [&] {
+    auto bytes = read_some(sock);
+    parse_protocol(bytes);
+});
+\end{lstlisting}
+
+\section{Offline UI}
+
+Network requests fail. The UI should:
+
+\begin{itemize}[leftmargin=*]
+  \item Show a connection state indicator.
+  \item Queue actions while offline; retry on reconnect.
+  \item Display cached data if no fresh data.
+  \item Never freeze.
+\end{itemize}
+
+\section{Retry and backoff}
+
+Exponential backoff: 1 s, 2 s, 4 s, 8 s, capped. Add
+jitter to avoid thundering herd.
+
+\section{HTTP basics}
+
+\maya{} apps doing simple HTTP can shell out to \code{curl}
+or use a small library (\code{cpr}, \code{httplib}).
+
+\section{WebSockets}
+
+For server-pushed updates, WebSockets. \code{IXWebSocket},
+\code{websocketpp} are options.
+
+\section{State sync}
+
+Two strategies:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pull.} Poll periodically.
+  \item \textbf{Push.} Server pushes updates over a
+    persistent connection.
+\end{itemize}
+
+Push is gentler on the wire and more responsive; harder to
+implement.
+
+\section{Optimistic UI}
+
+Update local state immediately on user action; reconcile
+with server response. If the server disagrees, roll back
+visually.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Watch sockets via the same poll loop.
+  \item Offline indicator + retry queue + cached data.
+  \item Exponential backoff with jitter.
+  \item Push beats pull for responsiveness.
+  \item Optimistic UI feels fast.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Wire a socket into the event loop.
+  \item Build a connection-state widget.
+  \item Implement optimistic update with rollback.
+\end{enumerate}

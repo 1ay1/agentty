@@ -1,0 +1,84 @@
+\chapter{Migrating from other TUI libraries}
+\label{ch:migrating}
+
+\begin{aside}
+You have an app in ncurses, ftxui, blessed, ratatui. Moving
+to \maya{} is mostly a port, mostly mechanical. The patterns
+translate.
+\end{aside}
+
+\section{ncurses}
+
+ncurses is C, imperative. \maya{} is C++, declarative. The
+big change is moving from ``write to screen at coordinates''
+to ``return an element tree''.
+
+A typical ncurses loop:
+
+\begin{lstlisting}
+mvprintw(y, x, "%s", text);
+refresh();
+ch = getch();
+// handle ch
+\end{lstlisting}
+
+Becomes:
+
+\begin{lstlisting}
+return text(s) | position(x, y);
+\end{lstlisting}
+
+Layout calculates positions; you don't.
+
+\section{ftxui}
+
+ftxui has a similar element model. Direct port: element
+names mostly match. \maya{}'s signals replace ftxui's
+\code{Component} state.
+
+\section{blessed (Node.js)}
+
+blessed is event-driven and component-based. \maya{}'s
+event handlers and signals map cleanly.
+
+\section{ratatui (Rust)}
+
+Ratatui draws into a Frame imperatively each render. \maya{}
+uses a tree. The conversion is moving each Frame draw call
+into an element.
+
+\section{The data layer}
+
+Whatever your app's data layer is, \maya{} doesn't care. Put
+it behind signals and consume from views.
+
+\section{Style and theme}
+
+Each library has its own colour model. Map your theme to
+\maya{}'s palette type. Hex literals work universally.
+
+\section{Testing}
+
+Snapshots port directly: render your view, compare to
+golden. Adjust the format if needed.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item ncurses: write-to-screen \textrightarrow{}
+    return-an-element.
+  \item ftxui, ratatui, blessed: mostly mechanical.
+  \item Data layer is independent.
+  \item Snapshots port directly.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Port one screen from your old library to \maya{}.
+  \item Compare line counts and clarity.
+  \item Identify any \maya{} feature missing from the old
+    one.
+\end{enumerate}

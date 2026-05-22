@@ -1,0 +1,727 @@
+\chapter{Inline mode and the witness chain}
+\label{ch:inline}
+
+Most TUI libraries take over the entire terminal: they switch to the
+\textbf{alternate screen}, paint, restore the original screen on
+exit. \maya{} supports that --- it is the \texttt{Fullscreen}
+rendering mode. But \maya{} also supports something rarer and far
+more delicate: \textbf{inline mode}, where the UI lives \emph{at the
+bottom of your normal scrollback}, redrawing in place but never
+destroying what is above it.
+
+Inline mode is what makes \agentty{} feel different from a
+``classic'' TUI: when you type \code{agentty} in your shell, the chat
+UI appears below your prompt without taking over the terminal, and
+when it exits, your shell is exactly where you left it --- with the
+conversation now permanent scrollback above the cursor. That
+behaviour is, in principle, one wrong escape sequence away from
+permanently corrupting the user's terminal history.
+
+This chapter is a careful walk through how \maya{} guarantees it
+\emph{doesn't}. We will look at the failure modes that real bugs in
+the renderer produced (with citations), the four-part theorem
+\maya{} commits to (\textbf{Scrollback Integrity}), and the five
+layers of type-system machinery that close each leak in the theorem
+into a compile error.
+
+\section{The two modes, briefly}
+
+\begin{lstlisting}
+enum class Mode {
+    Inline,      // raw mode, no alt screen, scrollback preserved
+    Fullscreen,  // alt screen buffer, double-buffered cell diff
+};
+\end{lstlisting}
+
+\textbf{Fullscreen mode} writes \code{ESC[?1049h} on startup
+(``enter alt screen''), paints absolute-positioned cells, writes
+\code{ESC[?1049l} on exit (``leave alt screen''). The user's
+scrollback is bytes the renderer never touches. Easy.
+
+\textbf{Inline mode} stays on the normal screen. The cursor starts
+wherever the shell left it; the UI occupies some number of rows
+\emph{below the cursor}; when the program quits, those rows remain
+(or are erased and replaced). On every frame, the renderer must
+re-paint the same region without ever writing a byte that affects
+the rows above. The shell's history, your previous commands, the
+output of \code{ls} you ran two minutes ago --- all immutable.
+
+The naive question: what could go wrong? Two answers, both with
+real bug reports in the repository.
+
+\section{Failure mode 1: ghosting from over-tall paint}
+
+The first real bug, documented in
+\file{maya/docs/internals/inline-autogrow.md}, came from trying to
+optimise the renderer. The legacy code pattern was: paint into the
+existing canvas, measure how tall the content turned out, resize and
+paint again if it overflowed. Two paint passes when content was big;
+the first one always discarded.
+
+The optimisation seemed obvious: ask the layout engine to compute
+the natural height \emph{first} (with an effectively infinite height
+constraint), resize, then paint once.
+
+\begin{lstlisting}
+constexpr int kBigH = 1 << 20;        // "infinite"
+build_layout_tree(root, layout_nodes, theme);
+layout::compute(layout_nodes, root_idx, w, kBigH);
+const int natural_h = layout_nodes[root_idx].computed.size.height.raw();
+if (canvas.height() < natural_h + 8) canvas.resize(w, natural_h + 8);
+paint_element(root, canvas, pool, layout_nodes, root_idx, 0, 0);
+\end{lstlisting}
+
+One paint, correctly-sized canvas, no out-of-bounds window for the
+component cache to capture from. Everything looks fine.
+
+\textbf{It ghosted.} Interactive sessions started showing rows
+duplicated and stacked into scrollback.
+
+\subsection{Why}
+
+The layout engine's \code{height} parameter is the \emph{available
+height} for the root container. That value flows down to children
+as their containing block. A child with \code{flex-grow > 0} or
+\code{align-items: stretch} distributes a share of that available
+height. Under \code{kBigH}, ``remaining height'' is pathologically
+large: elastic children claim huge vertical extents that they would
+never have claimed under a realistic constraint.
+
+So the painted frame was a 50-row layout on a 24-row terminal.
+
+\subsection{The downstream catastrophe}
+
+After paint, \code{InlineFrameState::prev\_rows} records the painted
+height (50). The next frame calls \code{compose\_inline\_frame},
+which positions the cursor relative to where it left off:
+
+\begin{lstlisting}
+const int cursor_row_start = prev_rows - 1;            // 49
+const int delta = first_changed - cursor_row_start;    // e.g. -45
+if (delta < 0) {
+    int up = std::min(-delta, prev_on_screen - 1);     // capped at 23
+    if (up > 0) ansi::write_cursor_up(out, up);
+    out += '\r';
+}
+\end{lstlisting}
+
+\code{prev\_on\_screen = min(prev\_rows, term\_h) = 24}. The
+\code{prev\_on\_screen - 1} cap is essential --- without it, the
+cursor would walk \emph{up into scrollback-committed history},
+overwriting the user's earlier output. With it, when we genuinely
+need to move 45 rows up to reach \code{first\_changed}, we move
+only 23. The cursor lands at the wrong physical line.
+
+The per-row emit loop then proceeds as if the cursor were at
+\code{first\_changed}:
+
+\begin{lstlisting}
+for (int y = first_changed; y <= last_row_to_visit; ++y) {
+    if (y > first_changed) out += "\r\n";
+    emit_row_diff(y, ...);
+}
+\end{lstlisting}
+
+Every row gets written 22 lines too far down. Old content above
+stays visible; new content overwrites whatever was previously at
+those positions. When the content next shrinks back to a normal
+size, the cycle repeats with a different misalignment --- and rows
+that have already been pushed past the bottom into native
+scrollback are gone, permanently.
+
+\subsection{The fix}
+
+Keep the two-compute pattern, but skip the wasted first paint:
+
+\begin{lstlisting}
+build_layout_tree(root, layout_nodes, theme);
+layout::compute(layout_nodes, root_idx, w, canvas.height());   // realistic budget
+const int needed_h = layout_nodes[root_idx].computed.size.height.raw();
+if (canvas.height() < needed_h + 8) {
+    canvas.resize(w, needed_h + 8);
+    layout::compute(layout_nodes, root_idx, w, canvas.height());  // recompute
+}
+paint_element(root, canvas, pool, layout_nodes, root_idx, 0, 0);  // single paint
+\end{lstlisting}
+
+The recompute is what produces the painted layout, with the resized
+height as the constraint --- byte-for-byte equivalent to legacy's
+second \code{render\_tree} call, but with the first paint elided.
+
+The doc concludes with the \textbf{invariant for future readers}:
+
+\begin{quote}\itshape
+The layout that gets painted must come from a \code{layout::compute}
+call whose height parameter is at least as large as the canvas about
+to receive the paint.
+\end{quote}
+
+That sentence is, in the larger sense, an unenforced human
+discipline. A future contributor could ``simplify'' the code right
+back into the broken shape, and CI would not catch it. We will
+return to this kind of fragility in a moment --- it is why the
+witness chain exists.
+
+\section{Failure mode 2: \code{commit\_prefix} over-claim}
+
+The second bug class, documented in \file{scrollback-corruption-audit.md},
+is more insidious. It begins with a feature: a long-running chat UI
+that streams turns should eventually \emph{commit} old turns to
+scrollback, so that the live frame stays small and fresh content
+keeps painting at the bottom.
+
+The Cmd that does this is \code{Cmd::commit\_scrollback(int rows)}.
+The handler, in the legacy implementation, simply decremented
+\code{prev\_rows} and \code{memmove}-d \code{prev\_cells} up:
+
+\begin{lstlisting}
+// src/render/serialize.cpp (legacy)
+prev_rows -= rows;
+// (no bytes written, no escape emitted, no verification)
+\end{lstlisting}
+
+The implicit contract: ``\code{rows} is the count of rows that the
+terminal \emph{already scrolled out of the viewport on its own},
+because we emitted more \code{\textbackslash r\textbackslash n}s
+than the terminal could fit.''
+
+\subsection{Why a guessed row count corrupts everything}
+
+\agentty{}'s \code{maybe\_virtualize} called
+
+\begin{lstlisting}
+return Cmd<Msg>::commit_scrollback(kSliceChunk * kRowsPerDroppedMessageLower);
+\end{lstlisting}
+
+The arithmetic was a \emph{guess} at the rendered height of dropped
+messages, not a count of physical viewport scrolls. Concrete
+scenario from the audit:
+
+\begin{itemize}[leftmargin=*]
+  \item 50-row terminal, 8 turns at $\sim$3 rows each:
+    \code{prev\_rows $\approx$ 24}.
+  \item All 24 rows are on screen; zero rows have scrolled.
+  \item \code{commit\_inline\_prefix(8)} runs: \code{prev\_rows}
+    drops from 24 to 16; \code{prev\_cells} is shifted up by 8.
+  \item Physical viewport: unchanged. The renderer's model and
+    reality now disagree by 8 rows.
+\end{itemize}
+
+Next compose:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{cursor\_row\_start = 16 - 1 = 15}.
+  \item Physical cursor: actually at row 23.
+  \item Every emit lands 8 rows below where the renderer thinks.
+  \item Later, when \code{\textbackslash r\textbackslash n} finally
+    scrolls the viewport, the rows that scroll into native
+    scrollback are \textbf{the stale ghost rows} --- the renderer's
+    incorrect model, frozen into the user's permanent history.
+\end{itemize}
+
+That is the corruption. It is not recoverable: bytes already
+committed to native scrollback are out of the renderer's reach.
+
+\subsection{The structural fix}
+
+Two paths, both shipped:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Clamp inside the handler.} The Cmd handler now
+    enforces \code{min(rows, max(0, prev\_rows - term\_h))}: a
+    request to commit more rows than have actually overflowed the
+    viewport becomes a no-op rather than a corruption.
+  \item \textbf{Prefer the typed alternative.}
+    \code{Cmd::commit\_scrollback\_overflow} takes no row count;
+    it asks the renderer to commit precisely the rows that have
+    provably overflowed (\code{prev\_rows - term\_h}). The caller
+    cannot get the number wrong because there is no number.
+\end{enumerate}
+
+Path 1 makes the bug class harder to trigger; path 2 makes it
+impossible. The library now prefers (2).
+
+\section{The theorem: Scrollback Integrity}
+
+After enough of these one-off fixes, the \maya{} authors did
+something unusual: they wrote down the \emph{theorem} the renderer
+should satisfy and then engineered the type system so violations
+become compile errors.
+
+\begin{theory}
+\textbf{Scrollback Integrity.} For any well-typed \maya{} program
+$P$, for any sequence of host events $e_1 \ldots e_n$, the bytes
+the terminal emulator commits to its native scrollback are
+\emph{exactly} the bytes \code{serialize} would produce for the
+overflow-portion of past frames, in order. No row is ever targeted
+by an escape sequence emitted by \maya{} once it has overflowed the
+viewport.
+\end{theory}
+
+The theorem decomposes into four sub-claims, each closed by a
+different layer of the chain:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{T0 (canvas-cache integrity).} The
+    \code{last\_content\_col(y)} and \code{max\_content\_row()}
+    metadata a diff trusts is a true function of the cell buffer.
+  \item \textbf{T1 (no-ghost).} No cursor-positioning escape
+    targets a row above the viewport top.
+  \item \textbf{T2 (no-corruption).} No cell-paint escape
+    disagrees with \code{paint(view(model))} at the corresponding
+    canvas coordinate.
+  \item \textbf{T3 (monotone scrollback).} Once a row leaves the
+    viewport via \code{\textbackslash r\textbackslash n} overflow,
+    no subsequent render targets it.
+\end{itemize}
+
+T0 closes the ``stale tail'' ghost class (header shrinks; old tail
+not cleared). T1 closes the ``cursor walks into history''
+class. T2 closes the ``wire and shadow disagree'' class. T3 closes
+the ``commit\_prefix over-claim'' class above.
+
+Together: the bytes in emulator scrollback at any moment are the
+union of \emph{truths committed so far} and \emph{truth currently on
+screen}, both byte-identical to what the canvas claims. The
+emulator's scrollback is what the model says it is. End of theorem.
+
+\subsection{The honest hypotheses}
+
+A theorem with no hypotheses is suspicious. \maya{}'s claim holds
+\emph{only} when four assumptions hold:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{A1 --- Terminal conformance.} The emulator honours
+    ECMA-48 cursor control, DEC 2026 synchronised output if
+    advertised, EL, ED, DECAWM. A buggy emulator that misinterprets
+    \code{CSI A} is out of scope.
+  \item \textbf{A2 --- Kernel write fidelity.} \code{write(2)}'s
+    return value accurately reflects bytes delivered. POSIX
+    guarantee; treat as axiom.
+  \item \textbf{A3 --- Exclusive fd ownership.} \maya{}'s
+    \code{Writer} is the only entity in the process writing to
+    fd 1. Host code that calls \code{std::cout} or
+    \code{fwrite(stdout)} outside \code{Cmd::print} or
+    \code{Runtime::with\_external\_io} bypasses the entire chain.
+    Cannot be enforced by the type system because \cpp{} does not
+    let us seal \code{stdout}.
+  \item \textbf{A4 --- No silent memory corruption.} Between
+    \code{verify\_shadow} returning a witness and
+    \code{compose\_inline\_frame\_v2} consuming it, the
+    \code{prev\_cells} buffer is not mutated by use-after-free, an
+    overflow in adjacent code, or a cosmic ray. An FNV-1a re-hash
+    inside compose catches mutation with probability $1 - 2^{-64}$.
+\end{itemize}
+
+\section{The witness chain: five layers}
+
+Each sub-claim is closed by a distinct piece of type machinery.
+None of them depends on a comment, a convention, or a code review
+catching it. The compiler is the proof assistant.
+
+\subsection{Layer 0 --- \code{CanvasWitness} (T0)}
+
+\textbf{Header:} \file{maya/include/maya/render/canvas\_witness.hpp}.
+
+A \code{Canvas} caches metadata: per-row last-non-blank column
+(\code{last\_content\_col\_[y]}) and overall max-content row
+(\code{max\_y\_}). The diff loop reads these to skip blank tails ---
+an enormous optimisation for typical UIs that are mostly empty
+columns to the right of text.
+
+The risk: if the cache lies (claims a longer tail than the cells
+actually contain), the diff can re-emit cells that should be blank,
+producing the classic ``stacked header, stale tail'' ghost row.
+
+\code{CanvasWitness} is move-only, has a private constructor, and is
+friended only to \code{verify\_canvas}. The verifier re-derives the
+cache from the cells in a slow $O(W \cdot H)$ scan and returns
+\code{nullopt} if they disagree. On match it records FNV-1a hashes
+of both the cell buffer and the \code{(last\_col\_, max\_y\_)} tuple
+and stamps the witness with them.
+
+\begin{lstlisting}
+class CanvasWitness {
+    friend std::optional<CanvasWitness> verify_canvas(const Canvas&);
+    Canvas* canvas_;
+    uint64_t cells_hash_;
+    uint64_t cache_hash_;
+    CanvasWitness(Canvas* c, uint64_t ch, uint64_t kh)  // private
+      : canvas_(c), cells_hash_(ch), cache_hash_(kh) {}
+public:
+    CanvasWitness(const CanvasWitness&) = delete;
+    CanvasWitness(CanvasWitness&&) noexcept = default;
+    uint64_t cells_hash() const noexcept { return cells_hash_; }
+    uint64_t cache_hash() const noexcept { return cache_hash_; }
+};
+\end{lstlisting}
+
+The \code{diff()} function that consumes the witness re-hashes the
+moved-in canvas and \code{std::abort}s on mismatch. The renderer is
+single-threaded; a mismatch between two consecutive calls signals
+memory corruption, and there is no recovery path the renderer would
+trust.
+
+The host's only recovery if \code{verify\_canvas} returns
+\code{nullopt} is \code{clear\_row()} plus full repaint --- never
+``emit anyway.'' The escape hatch does not exist by construction.
+
+\subsection{Layer 1 --- \code{WireRow} and \code{Viewport} (T1)}
+
+\textbf{Header:} \file{maya/include/maya/render/wire\_row.hpp}.
+
+Cursor coordinates are saturating. A \code{WireRow} is a wrapper
+around an \code{int} whose constructor clamps:
+
+\begin{lstlisting}
+class WireRow {
+    friend class Viewport;
+    int row_;
+    WireRow(int row, int top, int bottom)
+      : row_(std::clamp(row, top, bottom - 1)) {}
+public:
+    int raw() const noexcept { return row_; }
+};
+\end{lstlisting}
+
+The only public producers:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{Viewport::for\_fresh\_frame(term\_h)} --- a fresh
+    \code{Viewport} with the live region $[0,$ \code{term\_h}$)$.
+  \item \code{Viewport::for\_redraw(term\_h, wire\_cursor\_rows)}
+    --- the redraw variant, used after a frame has already started.
+  \item \code{Viewport::row(int y)} --- the sole producer that takes
+    an arbitrary absolute row index; clamps via \code{std::clamp}.
+  \item \code{WireRow::up(n)} / \code{down(n)} --- arithmetic that
+    saturates inside the same $[top, bottom)$.
+\end{itemize}
+
+\code{emit\_move(out, from, to)} is the sole emitter of cursor-up /
+cursor-down escapes, and its parameters are typed \code{WireRow}.
+There is no public \code{WireRow(int)} constructor, no
+\code{data()}, no escape hatch.
+
+\textbf{Proof of T1.} The set of cursor targets any \code{emit\_move}
+can produce is precisely the set of \code{WireRow} values; the set
+of \code{WireRow} values is precisely \code{Viewport::[top, bottom)}.
+Targeting a row above the viewport top is, by construction,
+unrepresentable.
+
+This is the same flavour of compile-time proof as agentty's
+permission policy from earlier: encode the rule as a type, make
+violations uncompilable. The \code{kBigH} ghosting story from
+earlier in this chapter could not happen against this layer ---
+even if the renderer miscomputed the cursor delta, the resulting
+\code{WireRow} would have saturated at the viewport top and no
+escape would have aimed above it.
+
+\subsection{Layer 2 --- \code{ContentRows} (closes one wrong-source class)}
+
+\textbf{Header:} \file{maya/include/maya/render/serialize.hpp}.
+
+\code{ContentRows} is an \code{int}-wrapper with a private
+constructor. The sole producer is \code{content\_rows(canvas)},
+which calls \code{content\_height(canvas)} on the canvas about to be
+diffed and binds the result to that canvas's pointer.
+
+\begin{lstlisting}
+class ContentRows {
+    friend ContentRows content_rows(const Canvas&);
+    int rows_;
+    const Canvas* src_;
+    ContentRows(int r, const Canvas* s) : rows_(r), src_(s) {}
+public:
+    int raw()              const noexcept { return rows_; }
+    const Canvas* source() const noexcept { return src_; }
+};
+\end{lstlisting}
+
+\code{compose\_inline\_frame\_v2} consumes \code{ContentRows}. The
+historical bug class --- computing the row count from the wrong
+source (the layout's height, a hard-coded constant, a stale
+\code{prev\_rows} from a different canvas, an agentty caller's
+guess of how many rows are about to scroll) --- becomes
+\emph{uncompilable}. There is exactly one way to construct a
+\code{ContentRows}, and it forces the value to come from the canvas
+the renderer is about to paint from.
+
+\subsection{Layer 3 --- \code{ShadowWitness} (T2)}
+
+\textbf{Header:} \file{maya/include/maya/render/serialize.hpp}.
+
+The diff inside \code{compose\_inline\_frame\_v2} reads
+\code{state.prev\_cells} --- the \emph{shadow buffer}, a mirror of
+what the renderer believes is currently on the terminal --- and
+emits ANSI for the cells that differ from the new canvas. If
+\code{prev\_cells} disagrees with reality (use-after-free, an
+unrelated bug overwriting it, an out-of-bounds write from another
+subsystem), the diff emits the wrong bytes.
+
+\code{ShadowWitness} is the move-only token that proves
+\code{prev\_cells} matches the recorded shadow hash. The sole
+producer is \code{verify\_shadow(state)}, which re-hashes
+\code{state.prev\_cells} and returns \code{nullopt} on disagreement:
+
+\begin{lstlisting}
+class ShadowWitness {
+    friend std::optional<ShadowWitness> verify_shadow(InlineFrameState&);
+    InlineFrameState* state_;
+    uint64_t hash_at_issue_;
+    ShadowWitness(InlineFrameState* s, uint64_t h)         // private
+      : state_(s), hash_at_issue_(h) {}
+public:
+    ShadowWitness(const ShadowWitness&) = delete;
+    ShadowWitness(ShadowWitness&&) noexcept = default;
+    uint64_t hash_at_issue() const noexcept { return hash_at_issue_; }
+};
+\end{lstlisting}
+
+\code{compose\_inline\_frame\_v2} consumes a \code{ShadowWitness\&\&}.
+Inside, it re-hashes the moved-in state and \code{std::abort}s on
+mismatch. The window between \code{verify\_shadow} returning a
+witness and compose re-checking is small --- both calls happen on
+the same thread, in the same function --- so under hypothesis A4
+(no silent memory corruption) the cells the diff reads are the cells
+the terminal is showing, and the emitted bytes are the byte-for-byte
+difference.
+
+\subsection{Layer 4 --- \code{FrameBytes} (atomic state advance)}
+
+\textbf{Header:} \file{maya/include/maya/render/frame\_bytes.hpp}.
+
+\code{compose\_inline\_frame\_v2} returns a \code{FrameBytes} ---
+the bytes the frame would emit, plus the \code{InlineFrameState}
+the caller should hold \emph{if the bytes ship}. It is move-only.
+The only consumers:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{commit\_to(writer) \&\& -> CommitOutcome} --- a
+    \code{std::variant} of \code{commit::Synced\{state\}} (full
+    delivery) or \code{commit::Stale\{state, reason\}} (hard I/O
+    error).
+  \item \code{abandon() \&\& -> commit::Stale\{state, ok()\}} ---
+    explicit drop.
+\end{itemize}
+
+Because the return type is a \code{std::variant} and structured
+bindings on \code{variant} are ill-formed, every call site must
+\code{std::visit} both arms. \textbf{There is no success-only code
+path.}
+
+\begin{lstlisting}
+auto bytes = std::move(synced).render(canvas, content_rows(canvas),
+                                       term_h, pool, *std::move(wit));
+auto outcome = std::move(bytes).commit_to(*writer);
+return std::visit(overload{
+    [](commit::Synced&& s) { return RenderResult{std::move(s.state)}; },
+    [](commit::Stale&&  s) { return RenderResult{std::move(s.state),
+                                                 s.reason}; }
+}, std::move(outcome));
+\end{lstlisting}
+
+The historical bug class --- ``state advanced; \code{write} returned
+partial; next compose diffed against a state the wire doesn't
+show'' --- becomes a compile error, because the only way to obtain a
+\code{Synced} state is the return value of a successful
+\code{commit\_to}, and the only way to obtain a \code{Stale} state
+is from either \code{commit\_to}'s I/O-error arm or
+\code{abandon()}. State advance and byte delivery are fused into
+one operation whose outcome is a value the caller must destructure.
+
+\subsection{Layer 5 --- \code{InlineFrame<Tag>} (linear chain)}
+
+\textbf{Header:} \file{maya/include/maya/render/inline\_frame.hpp}.
+
+The apex. \code{InlineFrame<Tag>} is a phantom-tagged type-state.
+Five tags:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{Tag} & \textbf{Meaning} \\
+\hline
+\code{Empty}  & no frame yet \\
+\code{Fresh}  & first frame just rendered \\
+\code{Synced} & wire and shadow agree (this is the steady state) \\
+\code{Stale}  & wire and shadow may disagree (after an I/O error) \\
+\code{Sealed} & program is exiting; no further render \\
+\end{tabular}
+\end{center}
+
+Each tag is a distinct class (template specialisation); each is
+move-only; each has a private constructor friended only to its
+predecessors in the transition graph:
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\textbf{From} & \textbf{Op} & \textbf{To} \\
+\hline
+\code{Empty}    & \code{seed()}                  & \code{Fresh}                          \\
+\code{Fresh}    & \code{render(...)}             & \code{Synced} or \code{Stale}         \\
+\code{Synced}   & \code{verify()}                & \code{optional<ShadowWitness>}        \\
+\code{Synced}   & \code{render(..., wit\&\&)}     & \code{Synced} or \code{Stale}         \\
+\code{Synced}   & \code{demote\_to\_stale()}      & \code{Stale}                          \\
+\code{Synced}   & \code{commit(marker)}          & \code{Synced} (scrollback advance)    \\
+\code{Stale}    & \code{render(...)}             & \code{Synced} or \code{Stale}         \\
+\code{any}      & \code{finalize(out)}           & \code{Sealed}                         \\
+\end{tabular}
+\end{center}
+
+Compile-time consequences:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{InlineFrame<Synced>::render} requires
+    \code{ShadowWitness\&\&}. You cannot render a Synced frame
+    without first calling \code{verify()}.
+  \item \code{InlineFrame<Sealed>} has no \code{render} method ---
+    rendering after \code{finalize} is a compile error.
+  \item \code{InlineFrame<Empty>::render} does not exist ---
+    rendering before \code{seed} is a compile error.
+  \item All five specialisations are non-copyable ---
+    holding two parallel views of the state is a compile error.
+\end{itemize}
+
+The non-copyability is enforced by \code{static\_assert}:
+
+\begin{lstlisting}
+static_assert(!std::is_copy_constructible_v<InlineFrame<Empty>>);
+static_assert(!std::is_copy_constructible_v<InlineFrame<Fresh>>);
+static_assert(!std::is_copy_constructible_v<InlineFrame<Synced>>);
+static_assert(!std::is_copy_constructible_v<InlineFrame<Stale>>);
+static_assert(!std::is_copy_constructible_v<InlineFrame<Sealed>>);
+static_assert(!std::is_copy_constructible_v<ShadowWitness>);
+static_assert(!std::is_copy_constructible_v<FrameBytes>);
+\end{lstlisting}
+
+If a future refactor accidentally adds \code{= default} after
+removing the move-only \code{delete}s, these \code{static\_assert}s
+fire and the build breaks. The discipline is checked by the
+compiler on every commit.
+
+\subsection{Scrollback commit, formalised (T3)}
+
+The Cmd that committed the legacy bug --- ``commit N rows to
+scrollback'' --- has been completely re-typed. The new flow:
+
+\begin{lstlisting}
+auto marker = synced.scrollback_marker(rows);   // rows clamped to [0, prev_rows]
+auto next   = std::move(synced).commit(std::move(marker));
+\end{lstlisting}
+
+\code{ScrollbackMarker} is move-only and consumed exactly once. The
+returned \code{InlineFrame<Synced>} has \code{prev\_rows} strictly
+less than or equal to the prior. The set of row coordinates any
+future cursor move can target is bounded above by
+\code{prev\_rows\_at\_emit + W} where \code{W} is the wire-cursor
+row count from the most recent successful emit.
+
+T3 follows: once a row leaves the viewport via overflow, no future
+emit can target it, because no \code{Viewport} produced from any
+later state contains it, and \code{WireRow} closes the cursor
+inside the viewport.
+
+\subsection{What the chain does \emph{not} claim}
+
+Honest scope:
+
+\begin{itemize}[leftmargin=*]
+  \item It does not prevent bugs \emph{inside} the diff algorithm.
+    If a per-row emit miscalculates a span or wide-char snap fails
+    on a new emoji range, the wrong bytes go out for the right
+    state. Type-state cannot witness algorithmic correctness;
+    property-based fuzzing of the diff is the right complement.
+  \item It does not prevent the terminal emulator from dropping
+    bytes (A1).
+  \item It does not prevent host code from writing to fd 1 directly
+    (A3).
+  \item It does not prevent silent memory corruption (A4); the
+    FNV-1a re-checks are the probabilistic defense.
+\end{itemize}
+
+These are not handwaves. Each is a hypothesis named in the proof.
+
+\section{Where the code lives}
+
+A quick map for when you want to read the source:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\textbf{File} & \textbf{Role} \\
+\hline
+\file{maya/include/maya/render/canvas\_witness.hpp} & Layer 0 --- T0 \\
+\file{maya/include/maya/render/wire\_row.hpp}        & Layer 1 --- T1 \\
+\file{maya/include/maya/render/serialize.hpp}        & Layers 2--3 --- ContentRows, ShadowWitness \\
+\file{maya/include/maya/render/frame\_bytes.hpp}     & Layer 4 --- atomic state advance \\
+\file{maya/include/maya/render/inline\_frame.hpp}    & Layer 5 --- linear chain \\
+\file{maya/src/render/serialize.cpp}                  & \code{compose\_inline\_frame\_v2} \\
+\file{maya/src/render/inline\_frame.cpp}              & runtime transitions \\
+\file{maya/docs/internals/witness-chain.md}           & this chapter's source material \\
+\file{maya/docs/internals/scrollback-corruption-audit.md} & every prior bug, with citations \\
+\file{maya/docs/internals/inline-autogrow.md}         & the ghosting trap, in detail \\
+\file{maya/tests/test\_wire\_row.cpp}                 & 10 tests + saturation proofs \\
+\file{maya/tests/test\_inline\_frame.cpp}             & 5 happy paths + \code{static\_assert}s \\
+\end{tabular}
+\end{center}
+
+\section{Why all this matters}
+
+It is reasonable to ask: this is a lot of machinery for what is, in
+the end, ``don't write the wrong escape sequence.'' Why?
+
+The answer is the same one you find in every chapter of this book.
+\maya{} is a library; libraries are used by people who did not
+write them; the bugs that matter most are the ones the user never
+triggers in dev because their terminal happens to be 80x24 and
+their chat fits in a viewport. They appear in production --- on a
+50-line terminal, after a long session, after a virtualising
+\code{Cmd::commit\_scrollback}, in a way that destroys the user's
+permanent terminal history.
+
+The fixes you'd write to those bugs as one-off patches eventually
+diverge from the discipline they enforce. A new contributor will
+read the patched code, not the patch, and re-introduce the bug. The
+witness chain makes the discipline a \emph{property of the type
+system}. The compiler enforces it on every build, in every
+contributor's editor, without anyone having to remember.
+
+If you take one thing from this chapter, take that:
+\textbf{discipline encoded in types survives refactoring;
+discipline written in prose does not}.
+
+\begin{recap}
+Inline mode is rendering into the user's normal scrollback without
+ever destroying what is above the UI. Two historical bug classes
+--- \emph{ghosting from over-tall paint} and \emph{over-claimed
+scrollback commit} --- showed how brittle the convention-only
+approach was. \maya{}'s answer is the \textbf{witness chain}: a
+four-part theorem (\emph{Scrollback Integrity}) decomposed into T0
+(canvas cache truth), T1 (no cursor escape above viewport), T2
+(no cell paint disagreeing with the model), T3 (monotone
+scrollback), each closed by a move-only typed token (\code{CanvasWitness},
+\code{WireRow}, \code{ShadowWitness}, \code{FrameBytes}) and
+ultimately by the \code{InlineFrame<Tag>} linear chain. Every
+prior bug class is now a compile error.
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Read \file{maya/include/maya/render/wire\_row.hpp}. Find
+    the private constructor, the \code{std::clamp} call, and the
+    list of friends. Try to construct a \code{WireRow} outside
+    \code{Viewport}; convince yourself the compiler refuses.
+  \item Read \file{maya/docs/internals/witness-chain.md}. Identify
+    which paragraph of the theorem corresponds to T0, T1, T2, T3.
+    Match each to its layer in the chain.
+  \item Read \file{maya/docs/internals/scrollback-corruption-audit.md},
+    Finding \#1 (\code{commit\_prefix} over-claim). Match the
+    failure mode in the audit to the layer in the chain that now
+    prevents it.
+  \item Look at \file{maya/tests/test\_inline\_frame.cpp}. Identify
+    the \code{static\_assert}s that pin non-copyability. Imagine
+    deleting one of the \code{delete}d copy constructors; predict
+    which \code{static\_assert} fires.
+\end{enumerate}

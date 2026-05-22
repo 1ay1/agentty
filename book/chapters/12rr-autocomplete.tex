@@ -1,0 +1,80 @@
+\chapter{Auto-completion and suggestions}
+\label{ch:autocomplete}
+
+\begin{aside}
+A text input that suggests as you type feels intelligent. The
+implementation is filter plus dropdown plus keyboard
+navigation.
+\end{aside}
+
+\section{The pattern}
+
+\begin{lstlisting}
+auto query = signal<std::string>("");
+auto suggestions = memo([&] {
+    return filter(corpus, ctx.get(query));
+});
+auto selected = signal(0);
+\end{lstlisting}
+
+The dropdown shows suggestions; up/down moves selected;
+Tab or Enter commits.
+
+\section{Filter strategies}
+
+\begin{itemize}[leftmargin=*]
+  \item Prefix match: starts-with.
+  \item Substring: contains.
+  \item Fuzzy: subset matching with scoring.
+\end{itemize}
+
+Fuzzy is the trend; prefix is the most predictable.
+
+\section{Ranking}
+
+Recency, frequency, exact-match-first. Personalise to the
+user's history.
+
+\section{Visual}
+
+The dropdown appears below the input (or above if no room
+below). Each row highlights the matching characters.
+
+\section{Async sources}
+
+Suggestions from a server arrive asynchronously. Debounce
+the query so you don't fire on every keystroke; cancel
+in-flight requests when the query changes.
+
+\section{Commit and accept}
+
+\begin{itemize}[leftmargin=*]
+  \item Tab: accept current.
+  \item Enter: accept and submit.
+  \item Escape: dismiss.
+  \item Up/Down: move selection.
+\end{itemize}
+
+\section{Multi-token}
+
+For inputs with multiple tokens (file paths, email lists),
+complete the current token only.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Query + filtered suggestions + selected index.
+  \item Fuzzy match with ranking.
+  \item Async sources need debounce and cancel.
+  \item Tab to accept, Escape to dismiss.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build an autocompleting search box.
+  \item Add fuzzy matching.
+  \item Wire to an async source with debounce.
+\end{enumerate}

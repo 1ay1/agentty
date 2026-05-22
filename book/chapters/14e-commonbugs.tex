@@ -1,0 +1,89 @@
+\chapter{Common bugs and their fixes}
+\label{ch:commonbugs}
+
+\begin{aside}
+The bugs you'll hit at least once. Listed by symptom, with
+the fix.
+\end{aside}
+
+\section{Symptom: screen freezes after some input}
+
+\textbf{Cause:} The event loop is blocked.
+
+\textbf{Fix:} Find the synchronous I/O on main thread.
+Move to async.
+
+\section{Symptom: widget loses focus mysteriously}
+
+\textbf{Cause:} Tree rebuild without keys for list items.
+
+\textbf{Fix:} Add stable keys to list rows.
+
+\section{Symptom: signal updates don't trigger re-render}
+
+\textbf{Cause:} The signal was read outside an effect, so
+no subscription.
+
+\textbf{Fix:} Move the read into an effect or memo.
+
+\section{Symptom: 100\% CPU on idle}
+
+\textbf{Cause:} A clock signal subscribed to by an effect
+that writes a signal read by the same effect.
+
+\textbf{Fix:} Break the cycle. Don't depend on the clock
+from a non-animation effect.
+
+\section{Symptom: terminal stuck after crash}
+
+\textbf{Cause:} Atexit hook didn't run.
+
+\textbf{Fix:} Run \code{reset} in the shell. Investigate
+why atexit was skipped (signal-killed?).
+
+\section{Symptom: garbled text in mixed CJK content}
+
+\textbf{Cause:} Width table mismatch with the terminal.
+
+\textbf{Fix:} Set ambiguous-width to match the terminal
+(usually 1; CJK locale users want 2).
+
+\section{Symptom: missed keystrokes during paste}
+
+\textbf{Cause:} Bracketed paste not enabled.
+
+\textbf{Fix:} \maya{} enables it by default; verify
+nothing disabled it.
+
+\section{Symptom: animations jerky}
+
+\textbf{Cause:} Long frames; or render-on-tick fallacy.
+
+\textbf{Fix:} Profile. If renders take >16 ms, optimise.
+If renders fire too often, debounce.
+
+\section{Symptom: ANSI bytes leaking}
+
+\textbf{Cause:} Untrusted string with control bytes
+emitted directly.
+
+\textbf{Fix:} Sanitise before display
+(Chapter~\ref{ch:security2}).
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Blocked loop = sync I/O on main.
+  \item Lost focus = missing keys.
+  \item No re-render = read outside effect.
+  \item Idle CPU = signal cycle.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Pick a symptom you've hit; verify the cause.
+  \item Add a regression test.
+\end{enumerate}

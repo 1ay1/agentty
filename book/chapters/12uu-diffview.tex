@@ -1,0 +1,78 @@
+\chapter{Diffs and merge views}
+\label{ch:diffview}
+
+\begin{aside}
+Side-by-side diffs, unified diffs, three-way merges --- TUIs
+shine here. Plain text + ANSI colour is exactly enough.
+\end{aside}
+
+\section{Diff representation}
+
+\begin{lstlisting}
+struct DiffLine {
+    enum Kind { Same, Added, Removed, Modified };
+    Kind kind;
+    std::string text;
+    int old_line, new_line;
+};
+\end{lstlisting}
+
+Compute with Myers' algorithm or call out to \code{git
+diff}.
+
+\section{Unified diff view}
+
+One column. Added lines green, removed red, context grey.
+Line numbers in a gutter.
+
+\section{Side-by-side}
+
+Two columns. Old on left, new on right. Same lines align;
+gaps fill with blanks where one side has no line.
+
+\section{Inline diff}
+
+Within a modified line, highlight added/removed words or
+characters. Implement with a per-line word diff.
+
+\section{Folding}
+
+Long unchanged regions collapse to a placeholder:
+
+\begin{lstlisting}
+@@ collapsed 50 unchanged lines @@
+\end{lstlisting}
+
+Click or press a key to expand.
+
+\section{Merge view}
+
+Three columns for three-way merge: base, ours, theirs.
+Conflicts show as overlapping changes.
+
+\section{Navigation}
+
+\begin{itemize}[leftmargin=*]
+  \item Next/previous change.
+  \item Jump to conflict.
+  \item Stage chunk / unstage chunk.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Diff lines with kind + text + line numbers.
+  \item Unified vs side-by-side vs inline.
+  \item Fold unchanged regions.
+  \item Three-way for merges.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a unified diff viewer for git output.
+  \item Add side-by-side toggle.
+  \item Implement next/prev change navigation.
+\end{enumerate}

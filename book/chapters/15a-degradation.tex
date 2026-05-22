@@ -1,0 +1,72 @@
+\chapter{Patterns: graceful degradation}
+\label{ch:degradation}
+
+\begin{aside}
+The user's terminal may not support what you assume. Detect,
+degrade, continue.
+\end{aside}
+
+\section{What to detect}
+
+\begin{itemize}[leftmargin=*]
+  \item Colour mode (16, 256, truecolour).
+  \item Image protocol (Sixel, Kitty, iTerm2, none).
+  \item OSC-8 hyperlinks.
+  \item CSI-u keyboard.
+  \item DEC 2026 sync.
+  \item Mouse modes.
+  \item Bracketed paste.
+\end{itemize}
+
+\section{Fallbacks}
+
+For each capability, a fallback:
+
+\begin{itemize}[leftmargin=*]
+  \item Truecolour \textrightarrow{} 256 \textrightarrow{}
+    16.
+  \item Image \textrightarrow{} half-block image
+    \textrightarrow{} ASCII art \textrightarrow{} text
+    label.
+  \item Hyperlink \textrightarrow{} plain text (URL shown).
+  \item CSI-u \textrightarrow{} legacy keys (some
+    distinctions lost).
+\end{itemize}
+
+\section{Detection at startup}
+
+Query the terminal; parse the reply. Cache results for the
+session.
+
+\section{Runtime checks}
+
+\begin{lstlisting}
+if (ctx.caps().has_image) {
+    return image(path);
+} else {
+    return block_image(path);
+}
+\end{lstlisting}
+
+\section{Manual override}
+
+A config flag lets users force a specific level (testing,
+or terminals that lie about capabilities).
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Detect capabilities at startup.
+  \item Provide fallbacks at every level.
+  \item Allow manual override.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Test your app in xterm-16, xterm-256, kitty.
+  \item Add fallbacks where missing.
+  \item Add a config override flag.
+\end{enumerate}

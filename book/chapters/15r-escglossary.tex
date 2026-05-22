@@ -1,0 +1,75 @@
+\chapter{Appendix: glossary of escape names}
+\label{ch:escglossary}
+
+\begin{aside}
+Every escape category and its full name. Decoding cryptic
+sequences becomes easier when you know what the letters stand
+for.
+\end{aside}
+
+\section{Prefix codes}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ESC} = \code{0x1B} (escape).
+  \item \code{CSI} = \code{ESC [} (Control Sequence
+    Introducer).
+  \item \code{OSC} = \code{ESC ]} (Operating System
+    Command).
+  \item \code{DCS} = \code{ESC P} (Device Control String).
+  \item \code{APC} = \code{ESC \_} (Application Program
+    Command).
+  \item \code{ST} = \code{ESC \textbackslash} (String
+    Terminator).
+  \item \code{BEL} = \code{0x07} (bell).
+\end{itemize}
+
+\section{CSI commands}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{A}: cursor up.
+  \item \code{B}: cursor down.
+  \item \code{C}: cursor forward.
+  \item \code{D}: cursor backward.
+  \item \code{H}: cursor position.
+  \item \code{J}: erase in display.
+  \item \code{K}: erase in line.
+  \item \code{m}: SGR (style).
+  \item \code{n}: device status report.
+  \item \code{r}: set scroll region.
+  \item \code{s}: save cursor.
+  \item \code{u}: restore cursor (or CSI-u keyboard).
+\end{itemize}
+
+\section{SGR}
+
+\code{SGR} = Select Graphics Rendition. The escape
+\code{ESC [ N m} where N is a parameter selecting
+attributes or colours.
+
+\section{DEC private modes}
+
+DEC private modes use \code{ESC [ ? N h/l}. Examples:
+\code{?25} cursor visibility, \code{?1049} alt screen,
+\code{?2026} sync output.
+
+\section{OSC commands}
+
+\begin{itemize}[leftmargin=*]
+  \item \code{0}: window title.
+  \item \code{1}: icon title.
+  \item \code{2}: window title.
+  \item \code{4}: define palette colour.
+  \item \code{7}: current working directory.
+  \item \code{8}: hyperlink.
+  \item \code{9}: notification (iTerm2).
+  \item \code{52}: clipboard.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Letter codes have full names.
+  \item Knowing them speeds decoding ANSI streams.
+\end{itemize}
+\end{recap}

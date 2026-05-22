@@ -1,0 +1,90 @@
+\chapter{Pickers: file, command, fuzzy}
+\label{ch:pickers}
+
+\begin{aside}
+A picker is a modal list with a search box. File pickers,
+command palettes, branch pickers, symbol pickers --- the
+template is the same.
+\end{aside}
+
+\section{The components}
+
+\begin{itemize}[leftmargin=*]
+  \item Modal overlay.
+  \item Search input at top.
+  \item Scrollable list below.
+  \item Highlighted current row.
+  \item Optional preview pane on right.
+\end{itemize}
+
+\section{The data source}
+
+\begin{lstlisting}
+auto items = signal<std::vector<Item>>(...);
+auto query = signal<std::string>("");
+auto filtered = memo([&] {
+    return fuzzy_filter(items, query);
+});
+\end{lstlisting}
+
+\section{Async loading}
+
+For large data (filesystem walk, git log), populate
+asynchronously:
+
+\begin{lstlisting}
+spawn([&]{
+    for (auto& path : walk_dir("/")) {
+        ctx.post_to_main([path]{
+            items.push_back(path);
+        });
+    }
+});
+\end{lstlisting}
+
+The user sees results stream in.
+
+\section{Preview pane}
+
+The selected row drives a preview signal. The preview shows
+file content, command help, diff, etc.
+
+\section{Keybindings}
+
+\begin{itemize}[leftmargin=*]
+  \item Up/Down: move selection.
+  \item Enter: open / execute.
+  \item Tab: complete.
+  \item Escape: dismiss.
+  \item Ctrl-P / Ctrl-N: vim-like up/down.
+\end{itemize}
+
+\section{Multi-select}
+
+For pickers that allow multiple selection (e.g., add files
+to staging area), track a set:
+
+\begin{lstlisting}
+auto selected_set = signal<std::set<Id>>({});
+\end{lstlisting}
+
+Space toggles current; Enter commits the set.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Modal + search + list + optional preview.
+  \item Fuzzy filter via memo.
+  \item Async stream for large sources.
+  \item Multi-select with set + Space toggle.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a file picker rooted at \code{\~/}.
+  \item Add a preview pane.
+  \item Implement multi-select with Tab.
+\end{enumerate}

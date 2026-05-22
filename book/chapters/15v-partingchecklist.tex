@@ -1,0 +1,79 @@
+\chapter{Appendix: parting checklist}
+\label{ch:partingchecklist}
+
+\begin{aside}
+Before you ship, before you announce, before you call it
+done. One last pass over the obvious.
+\end{aside}
+
+\section{Functionality}
+
+\begin{itemize}[leftmargin=*]
+  \item Every advertised feature works.
+  \item Defaults make sense for first run.
+  \item Empty states are designed.
+  \item Errors are visible and actionable.
+\end{itemize}
+
+\section{Performance}
+
+\begin{itemize}[leftmargin=*]
+  \item Idle CPU is near zero.
+  \item Startup completes under one second.
+  \item Typing latency under twenty milliseconds.
+  \item No memory leaks under one-hour soak.
+\end{itemize}
+
+\section{Polish}
+
+\begin{itemize}[leftmargin=*]
+  \item Animations respect reduced-motion.
+  \item Colours respect \code{NO\_COLOR}.
+  \item Theme contrast meets AA.
+  \item Cursor restored on exit.
+\end{itemize}
+
+\section{Robustness}
+
+\begin{itemize}[leftmargin=*]
+  \item Survives resize during typing.
+  \item Survives Ctrl-Z and resume.
+  \item Survives SIGTERM with cleanup.
+  \item Crash leaves terminal usable.
+\end{itemize}
+
+\section{Distribution}
+
+\begin{itemize}[leftmargin=*]
+  \item Static or properly-linked binary.
+  \item Signed and checksummed.
+  \item README explains install in 5 lines.
+  \item Changelog covers since last release.
+\end{itemize}
+
+\section{Documentation}
+
+\begin{itemize}[leftmargin=*]
+  \item Help screen lists every key.
+  \item Man page or web docs for reference.
+  \item Asciinema cast for quick visual.
+  \item Issues link in --help output.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Functionality, performance, polish, robustness,
+    distribution, documentation.
+  \item Six checklists; one app.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Run the checklist on your current project.
+  \item Note what's missing; fix or document.
+  \item Ship.
+\end{enumerate}

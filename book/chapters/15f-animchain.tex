@@ -1,0 +1,76 @@
+\chapter{Patterns: animation chaining}
+\label{ch:animchain}
+
+\begin{aside}
+A single animation is simple. Compose them and you get
+storyboards: fade in, slide, pause, fade out.
+\end{aside}
+
+\section{Sequential}
+
+\begin{lstlisting}
+auto story = seq(
+    fade_in(card, 200ms),
+    delay(500ms),
+    slide(card, 300ms),
+    fade_out(card, 200ms)
+);
+\end{lstlisting}
+
+Each step starts when the previous ends.
+
+\section{Parallel}
+
+\begin{lstlisting}
+auto entrance = par(
+    fade_in(card, 200ms),
+    scale_up(card, 200ms)
+);
+\end{lstlisting}
+
+Both run together; the parent ends when the slowest does.
+
+\section{Composition}
+
+Sequential and parallel nest:
+
+\begin{lstlisting}
+auto reveal = seq(
+    par(fade_in, scale_up),
+    delay(1s),
+    par(fade_out, scale_down)
+);
+\end{lstlisting}
+
+\section{Conditions}
+
+\code{when} gates a branch:
+
+\begin{lstlisting}
+auto anim = when(should_animate,
+    full_story,
+    snap_to_end);
+\end{lstlisting}
+
+\section{Cancellation}
+
+A composed animation cancels by cancelling its current
+step. The remaining steps are dropped.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Seq for sequential, par for parallel.
+  \item Compose by nesting.
+  \item When for conditional branches.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build a multi-step entrance animation.
+  \item Nest seq and par.
+  \item Test cancellation mid-way.
+\end{enumerate}

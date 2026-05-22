@@ -1,0 +1,67 @@
+\chapter{Appendix: capability detection cheatsheet}
+\label{ch:capref}
+
+\begin{aside}
+The escapes \maya{} sends at startup to detect what the
+terminal supports.
+\end{aside}
+
+\section{Truecolour}
+
+\code{COLORTERM=truecolor} (env). Send a truecolour SGR and
+query position; some terminals echo. \maya{} trusts env.
+
+\section{256-colour}
+
+\code{TERM} contains \code{256color}. Or query
+\code{ESC [ ? 1 c}; a modern terminal reports.
+
+\section{Image protocols}
+
+\begin{itemize}[leftmargin=*]
+  \item Kitty: query \code{ESC \_ G i=1,s=1,v=1,a=q ; ESC \textbackslash}.
+  \item Sixel: device attributes \code{ESC [ c} response
+    includes 4.
+  \item iTerm2: \code{TERM\_PROGRAM=iTerm.app} (env).
+\end{itemize}
+
+\section{OSC-8 hyperlinks}
+
+No detection escape. Send the sequence; terminals that
+don't support it ignore. \maya{} sends unconditionally.
+
+\section{CSI-u}
+
+Send \code{ESC [ > 1 u}; query with \code{ESC [ ? u}.
+Modern terminals reply.
+
+\section{DEC 2026 synchronised output}
+
+Query mode 2026 with \code{ESC [ ? 2026 \$ p}. Reply
+\code{ESC [ ? 2026 ; 0/1/2 \$ y}.
+
+\section{Mouse SGR}
+
+Send \code{ESC [ ? 1006 h}; no reply. Try mouse events;
+if SGR comes back, supported.
+
+\section{Bracketed paste}
+
+\code{ESC [ ? 2004 h}; no reply. Universal on modern
+terminals.
+
+\section{Pixel size}
+
+\code{ESC [ 16 t} reports cell-pixel size as
+\code{ESC [ 6 ; H ; W t}. Used for inline image sizing.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Env vars first; queries second.
+  \item Some features are query-and-listen, others are
+    fire-and-hope.
+  \item Cache results for the session.
+\end{itemize}
+\end{recap}

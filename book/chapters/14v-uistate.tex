@@ -1,0 +1,71 @@
+\chapter{Patterns: state machines for UI}
+\label{ch:uistate}
+
+\begin{aside}
+A button's state: idle, hover, pressed, disabled. A login
+form's state: empty, typing, validating, error, success. State
+machines model these explicitly.
+\end{aside}
+
+\section{Why explicit state}
+
+A boolean is rarely sufficient. ``is\_loading'' tells you one
+thing but not what it means in context. A state machine names
+each combination.
+
+\section{Encoding}
+
+\begin{lstlisting}
+enum class LoginState {
+    Empty, Typing, Validating, Error, Success
+};
+auto state = signal(LoginState::Empty);
+\end{lstlisting}
+
+\section{Transitions}
+
+Each transition is a method or function:
+
+\begin{lstlisting}
+void on_submit() {
+    if (state == Typing) state = Validating;
+}
+\end{lstlisting}
+
+Transitions from invalid states are no-ops (or asserts).
+
+\section{Side effects}
+
+A transition can fire side effects (network request, log
+event, animation). Keep side effects in transitions, not
+in renders.
+
+\section{Visualisation}
+
+For complex machines, draw the diagram. Check it in. Keep
+in sync.
+
+\section{Statechart libraries}
+
+For very complex flows: boost.sml, xstate-cpp. Declarative,
+testable. \maya{} doesn't bundle one; pick when complexity
+demands.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Enum state, signal-wrapped.
+  \item Transitions are methods.
+  \item Side effects in transitions, not renders.
+  \item Diagram complex machines.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Convert one boolean flag to a state machine.
+  \item Draw the diagram.
+  \item Test each transition.
+\end{enumerate}

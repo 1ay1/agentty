@@ -1,0 +1,70 @@
+\chapter{Resource limits}
+\label{ch:limits}
+
+\begin{aside}
+Every TUI has limits: how big a screen it can handle, how
+many widgets, how fast it can update. Knowing the limits
+prevents the rude surprise.
+\end{aside}
+
+\section{Screen size}
+
+\maya{} supports 1x1 through any size your terminal allows.
+Very large screens (>500 cells wide) push diff cost above
+1 ms. Typical TUIs are under 200x60.
+
+\section{Element count}
+
+A frame with 10,000 elements is fine; layout is O(N) with
+small constants. A frame with 100,000 starts to slow.
+Virtualise when you hit this.
+
+\section{Signal count}
+
+A few thousand signals are routine. Tens of thousands are
+fine. A million might thrash; use stores to bundle related
+state.
+
+\section{Effect count}
+
+Each effect costs a function call on every relevant signal
+change. Hundreds are fine. Thousands of effects, each with
+many subscribers, can dominate the frame.
+
+\section{Memory}
+
+A typical \maya{} app uses 10--50 MB resident. Heavy data
+(large document loaded) drives this. Use lazy loading and
+virtualisation.
+
+\section{Wire bandwidth}
+
+A frame's ANSI output is typically 100 bytes to 5 KB. Full
+redraws hit 50 KB or more. On slow links, frame budget is
+the bottleneck.
+
+\section{File descriptors}
+
+\maya{} uses 2--5 fds at runtime (stdin, stdout, log file).
+Adding watchers, sockets, child PTYs grows this. Default
+ulimit is 1024 on Linux; pay attention if you embed many
+PTYs.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Screen, elements, signals, effects, memory,
+    wire, fds.
+  \item Each has a sweet spot for typical TUIs.
+  \item Know yours; design within.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Measure your app's resource usage.
+  \item Identify the limit you'll hit first.
+  \item Plan how to scale past it.
+\end{enumerate}

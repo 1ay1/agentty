@@ -1,0 +1,169 @@
+\chapter{Text shaping and combining}
+\label{ch:shaping}
+
+\begin{aside}
+``Shape'' a string means turn code points into positioned
+glyphs. Browsers do this with HarfBuzz; terminals mostly don't
+do it at all. A monospace grid is simpler --- but only mostly.
+\end{aside}
+
+\section{Why shaping}
+
+In proportional fonts, shaping decides which glyph to use for
+each code point (small caps, swashes, kerning pairs).
+Monospace fonts mostly skip this --- each code point maps to
+one glyph at one width.
+
+But some scripts need shaping even in monospace:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Arabic.} Letters have initial/medial/final
+    forms; the same code point picks different glyphs based
+    on context.
+  \item \textbf{Devanagari.} Consonant clusters merge into
+    conjuncts.
+  \item \textbf{Combining marks.} Stacking diacritics.
+\end{itemize}
+
+Terminals delegate these to their font and renderer. \maya{}
+sees ``code points''; the terminal sees ``glyphs''.
+
+\section{What \maya{} does and doesn't}
+
+\maya{} is responsible for:
+
+\begin{itemize}[leftmargin=*]
+  \item Grouping code points into grapheme clusters.
+  \item Computing each cluster's column width.
+  \item Storing the base code point in the canvas cell and
+    combining marks in a side-table.
+\end{itemize}
+
+\maya{} is \emph{not} responsible for:
+
+\begin{itemize}[leftmargin=*]
+  \item Selecting glyph variants.
+  \item Drawing combining marks at the right offset.
+  \item Substituting ligatures (\code{->}, \code{!=}, etc.).
+  \item Handling bidirectional text.
+\end{itemize}
+
+These belong to the terminal emulator's font renderer.
+
+\section{Ligatures}
+
+Programmer fonts like Fira Code substitute \code{->} with an
+arrow glyph spanning two cells. The terminal sees two code
+points and one cell each; the font renderer decides to draw
+one arrow across two cells.
+
+The diff cannot tell. If a ligature changes mid-frame, the
+terminal redraws the relevant cells; both cells appear in the
+diff.
+
+Some users find ligatures confusing in TUIs (the cursor
+position becomes ambiguous). \maya{} does not opt in or out
+--- the font picks.
+
+\section{Combining marks in the canvas}
+
+A cell holds a base code point. Combining marks for that cell
+live in a side-table keyed by cell index:
+
+\begin{lstlisting}
+struct CellExtras {
+    std::vector<char32_t> marks;
+};
+std::unordered_map<size_t, CellExtras> extras_;
+\end{lstlisting}
+
+For most cells, no marks: no side-table entry. Cells with
+marks pay a small allocation cost.
+
+\section{Emitting combining marks}
+
+When emitting a cell with combining marks, \maya{} emits the
+base code point followed by each mark:
+
+\begin{lstlisting}
+emit_codepoint(base);
+for (auto m : marks) emit_codepoint(m);
+\end{lstlisting}
+
+The terminal stacks the marks visually. Most monospace fonts
+have decent combining-mark coverage; some scripts (Hebrew with
+nikud) look broken on some fonts.
+
+\section{ZWJ sequences}
+
+Zero-width joiner sequences (the family emoji, the trans
+flag, the rainbow flag) are emitted code point by code point;
+the terminal recognises the sequence and draws one glyph.
+
+\maya{} treats them as one grapheme cluster. The canvas
+stores the first code point as base and the rest as
+``combining'' (even though ZWJ is not technically a
+combining mark; the model is the same).
+
+\section{Variation selectors}
+
+\code{U+FE0F} (emoji presentation) and \code{U+FE0E} (text
+presentation) are stored as marks on the base. The terminal
+honours them when drawing.
+
+\section{Width and rendering interaction}
+
+The width of a cluster determines column reservation; the
+rendering decides what pixels appear in those columns. They
+should agree. They don't always:
+
+\begin{itemize}[leftmargin=*]
+  \item A wide emoji is reserved 2 columns but a font might
+    only draw 1 column wide.
+  \item A combining mark is width 0 but the font might draw
+    it overflowing into the next column.
+\end{itemize}
+
+\maya{} cannot detect these mismatches; the user sees a
+visual artefact. The fix is a better font or a different
+terminal.
+
+\begin{warning}
+If your app uses many emoji and combining marks, test on
+multiple terminals and fonts. The variance is large.
+\end{warning}
+
+\section{Bidirectional text (out of scope)}
+
+\maya{} renders code points left-to-right in memory order.
+For RTL scripts, this is wrong but not catastrophic --- the
+characters appear in reverse. The user can read them; the
+caret semantics are confusing.
+
+If you need BiDi, reverse RTL substrings yourself before
+passing to \maya{}, or wait for a future version with
+\code{libfribidi} integration.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item \maya{} clusters but does not shape.
+  \item Combining marks stored in a side-table.
+  \item ZWJ sequences are clusters; the terminal renders.
+  \item Ligatures are font features; \maya{} is unaware.
+  \item Variation selectors flip emoji/text presentation.
+  \item BiDi is currently a user problem.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Type Hebrew text and observe the order; reverse it
+    in your code and confirm visual correctness.
+  \item Compare a ZWJ family emoji rendered in your app to
+    rendered in your terminal alone; should match.
+  \item Use a font with ligatures; observe \code{->}
+    becoming an arrow without \maya{} knowing.
+\end{enumerate}

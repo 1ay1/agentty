@@ -1,0 +1,242 @@
+\chapter{The diff loop in depth}
+\label{ch:diffloop}
+
+\begin{aside}
+Most TUI libraries spend the bulk of a frame in their diff. Ten
+microseconds shaved here is ten microseconds your application can
+spend thinking. \maya{}'s diff is two pages of code; this chapter
+is twenty.
+\end{aside}
+
+Chapter~\ref{ch:simd} introduced the vector instructions. This chapter
+zooms in on the loop structure that wraps them: how runs are
+detected, how spans become ANSI, what happens at the buffer edges,
+and where the loop intentionally trades a little CPU for a lot of
+output bandwidth.
+
+\section{The naive baseline}
+
+The simplest correct diff is one cell, one ANSI burst:
+
+\begin{lstlisting}
+for (int y = 0; y < h; ++y)
+  for (int x = 0; x < w; ++x)
+    if (front[y][x] != back[y][x]) {
+      emit_cursor_move(x, y);
+      emit_sgr(back[y][x].style);
+      emit_glyph(back[y][x].cp);
+    }
+\end{lstlisting}
+
+This is correct but terrible. For an 80x24 grid filled with random
+changes you emit roughly 50 bytes of ANSI per changed cell, most of
+it cursor moves and SGR sets. \maya{} aims for under 5 bytes per
+cell in steady state.
+
+\section{Run detection}
+
+The first optimisation is to detect \emph{runs} of consecutive
+changed cells with the same style. Within a run, no cursor move
+and no SGR is needed:
+
+\begin{lstlisting}
+for (int y = 0; y < h; ++y) {
+  int x = 0;
+  while (x < w) {
+    if (front(x,y) == back(x,y)) { ++x; continue; }
+    int start = x;
+    Style s = style_of(back(x,y));
+    while (x < w
+        && front(x,y) != back(x,y)
+        && style_of(back(x,y)) == s) ++x;
+    emit_run(start, y, s, back, x - start);
+  }
+}
+\end{lstlisting}
+
+Now a 20-cell solid-colour change costs one cursor move, one SGR
+set, and 20 UTF-8 glyph encodings: roughly 35 bytes total.
+
+\section{SIMD-accelerated skip}
+
+The \code{while (front(x,y) == back(x,y))} loop is what SIMD
+accelerates. \maya{} reads 4 cells (256 bits) at a time on AVX2 or
+8 cells on AVX-512:
+
+\begin{lstlisting}
+__m256i f = _mm256_loadu_si256(front_row + x);
+__m256i b = _mm256_loadu_si256(back_row + x);
+__m256i eq = _mm256_cmpeq_epi64(f, b);
+uint32_t mask = _mm256_movemask_epi8(eq);
+if (mask == 0xFFFFFFFFu) { x += 4; continue; }
+// fall back to scalar to find the exact change boundary
+\end{lstlisting}
+
+The fast path skips identical 32-byte chunks at memory bandwidth.
+The slow path handles boundaries one cell at a time. The
+combination is roughly 10x the throughput of a pure scalar loop on
+typical TUI screens, which tend to have long unchanged horizontal
+spans (margins, padding, backgrounds).
+
+\section{The style cache}
+
+Within a frame, \maya{} caches the last SGR set so it can skip
+redundant emissions:
+
+\begin{lstlisting}
+Style last = Style::invalid();
+for (... each run ...) {
+  Style s = run.style;
+  if (s != last) { emit_sgr(s); last = s; }
+  emit_glyphs(run.cells);
+}
+\end{lstlisting}
+
+This matters when many small runs share style --- a fullscreen
+fill with one accent colour, for example. Without the cache, every
+run resets the SGR.
+
+\section{Cursor move optimisation}
+
+Cursor moves come in three flavours:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Absolute.} \code{ESC [ y ; x H}, ~8 bytes.
+  \item \textbf{Carriage return + down.} \code{\char`\\r\char`\\n},
+    2 bytes, only valid for column 0.
+  \item \textbf{Implicit.} If the previous emission left the
+    cursor exactly where the next run starts, no move is needed.
+\end{itemize}
+
+\maya{} tracks the predicted cursor position after each glyph run
+and picks the cheapest move. For a vertical column of changes
+(typing in a centred input field), the saving over naive absolute
+moves is 6 bytes per line.
+
+\begin{tryit}
+Set the environment variable \code{MAYA\_TRACE\_ANSI=1} (if your
+build was compiled with tracing) and watch a frame. You will see
+many runs end with no cursor move at all --- the previous run
+left it in the right place.
+\end{tryit}
+
+\section{Wide cells and combining marks}
+
+Wide cells (CJK, emoji) take two grid columns but emit as one
+glyph. The cell at $x+1$ has width 0 and code point 0; the diff
+must treat the pair as one unit, otherwise it would emit half a
+glyph and corrupt the screen.
+
+\maya{}'s solution: every cell carries its width in the packed
+representation, and the diff loop, on detecting a width-2 cell,
+extends the run by one column without emitting anything for the
+trailing slot.
+
+\begin{warning}
+If you write a custom canvas writer you must zero the trailing
+slot of a wide cell. \maya{}'s built-in \code{put} does this.
+Forgetting leaves stale glyph data that confuses the diff into
+emitting partial sequences.
+\end{warning}
+
+\section{Hyperlinks}
+
+OSC-8 hyperlinks are a special case. The link is part of the
+style, but the SGR set does not carry it. \maya{} emits a
+separate \code{ESC ] 8 ; ; URL \char`\\7} before runs whose link
+changes and \code{ESC ] 8 ; ; \char`\\7} to terminate them.
+
+Like SGR, the link is cached: if the next run has the same URL,
+no reset.
+
+\section{Bracketed paste and mouse mode}
+
+These are not diffed --- they are emitted once at startup and
+once at shutdown, and on any state toggle (entering a modal that
+disables mouse, for example). They live outside the buffer.
+
+\section{The emit buffer}
+
+ANSI bytes do not go straight to \code{write(1)}. \maya{}
+accumulates them into a \code{std::string} and flushes once at
+end of frame:
+
+\begin{lstlisting}
+std::string out;
+out.reserve(initial_estimate);
+diff(front, back, out);
+::write(1, out.data(), out.size());
+\end{lstlisting}
+
+One write means one syscall per frame. Without batching, every
+SGR set and cursor move would be its own syscall (terminals are
+line-buffered, but only by convention; raw mode is byte-buffered).
+
+\begin{idea}
+\textbf{Syscall amortisation.} Bundling many small writes into
+one big write turns N syscalls into one. The kernel cost per
+byte goes to zero in the limit.
+\end{idea}
+
+\section{When the diff is wrong}
+
+The diff is wrong if the front buffer does not match what is
+actually on screen. This happens when:
+
+\begin{itemize}[leftmargin=*]
+  \item Another program wrote to the terminal (a stray
+    \code{printf}).
+  \item The user pressed \code{Ctrl-L} expecting a redraw.
+  \item The terminal was resized without \maya{} noticing
+    (rare; SIGWINCH catches this).
+\end{itemize}
+
+The recovery is a sentinel-flood (see Chapter~\ref{ch:buffers}). The
+next frame redraws everything.
+
+\section{Synchronised output}
+
+Some terminals (Kitty, Wezterm, foot) support DEC mode 2026,
+which brackets a frame with \code{ESC [ ? 2026 h} and
+\code{ESC [ ? 2026 l}. The terminal buffers all the ANSI
+between the brackets and applies it atomically. The user never
+sees a half-painted frame.
+
+\maya{} probes for this at startup and uses it when available.
+Without it, fast-typing users on slow terminals may see
+mid-frame flicker.
+
+\begin{funfact}
+DEC mode 2026 was specified by the Contour terminal author
+Christian Parpart in 2020 and ratified by xterm a year later.
+It is the first new private mode to gain broad adoption since
+mouse tracking.
+\end{funfact}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Naive diff is correct but bandwidth-expensive.
+  \item Run detection cuts SGR and cursor overhead.
+  \item SIMD accelerates the skip over unchanged regions.
+  \item Style and link caches avoid redundant emissions.
+  \item Cursor move optimisation picks the shortest sequence.
+  \item Wide cells are one unit; the trailing slot is silent.
+  \item DEC 2026 prevents mid-frame flicker on capable
+    terminals.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Instrument the diff to count: total cells, changed
+    cells, runs emitted, bytes emitted. Display these in a
+    status line.
+  \item Force a sentinel flood on every keystroke. Measure the
+    wire bandwidth increase --- it should be 100--1000x.
+  \item Detect at startup whether the terminal supports DEC
+    2026 by sending a query and parsing the response. Skip the
+    bracketing if it does not.
+\end{enumerate}

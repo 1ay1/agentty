@@ -1,0 +1,77 @@
+\chapter{Appendix: ANSI quick reference}
+\label{ch:ansiref}
+
+\begin{aside}
+The escape sequences \maya{} (and you) use most often, with
+the bytes spelled out.
+\end{aside}
+
+\section{Cursor}
+
+\begin{itemize}[leftmargin=*]
+  \item Move to (r,c): \code{ESC [ r ; c H}.
+  \item Up N: \code{ESC [ N A}.
+  \item Down N: \code{ESC [ N B}.
+  \item Right N: \code{ESC [ N C}.
+  \item Left N: \code{ESC [ N D}.
+  \item Save position: \code{ESC 7}.
+  \item Restore: \code{ESC 8}.
+  \item Hide: \code{ESC [ ? 25 l}.
+  \item Show: \code{ESC [ ? 25 h}.
+\end{itemize}
+
+\section{Erase}
+
+\begin{itemize}[leftmargin=*]
+  \item End of line: \code{ESC [ K}.
+  \item Whole line: \code{ESC [ 2 K}.
+  \item End of screen: \code{ESC [ J}.
+  \item Whole screen: \code{ESC [ 2 J}.
+\end{itemize}
+
+\section{Style (SGR)}
+
+\begin{itemize}[leftmargin=*]
+  \item Reset: \code{ESC [ 0 m}.
+  \item Bold: \code{ESC [ 1 m}.
+  \item Dim: \code{ESC [ 2 m}.
+  \item Italic: \code{ESC [ 3 m}.
+  \item Underline: \code{ESC [ 4 m}.
+  \item Reverse: \code{ESC [ 7 m}.
+  \item Strike: \code{ESC [ 9 m}.
+  \item FG 16: \code{ESC [ 30..37 m} or \code{90..97 m}.
+  \item BG 16: \code{ESC [ 40..47 m} or \code{100..107 m}.
+  \item FG 256: \code{ESC [ 38 ; 5 ; N m}.
+  \item FG RGB: \code{ESC [ 38 ; 2 ; R ; G ; B m}.
+  \item Default FG: \code{ESC [ 39 m}.
+\end{itemize}
+
+\section{Modes}
+
+\begin{itemize}[leftmargin=*]
+  \item Alt screen: \code{ESC [ ? 1049 h} / \code{l}.
+  \item Mouse SGR: \code{ESC [ ? 1006 h} / \code{l}.
+  \item Mouse drag: \code{ESC [ ? 1002 h} / \code{l}.
+  \item Bracketed paste: \code{ESC [ ? 2004 h} / \code{l}.
+  \item Focus events: \code{ESC [ ? 1004 h} / \code{l}.
+  \item Sync output: \code{ESC [ ? 2026 h} / \code{l}.
+\end{itemize}
+
+\section{OSC}
+
+\begin{itemize}[leftmargin=*]
+  \item Title: \code{ESC ] 0 ; TEXT BEL}.
+  \item CWD: \code{ESC ] 7 ; URL BEL}.
+  \item Hyperlink: \code{ESC ] 8 ; ; URL BEL}.
+  \item Notification: \code{ESC ] 9 ; TEXT BEL}.
+  \item Clipboard: \code{ESC ] 52 ; c ; BASE64 BEL}.
+\end{itemize}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Reference table for daily lookups.
+  \item Most apps use under 20 sequences.
+\end{itemize}
+\end{recap}

@@ -1,0 +1,162 @@
+\chapter{Tracing and observability}
+\label{ch:tracing}
+
+\begin{aside}
+You cannot fix what you cannot measure. The renderer's quiet
+nature is also its trickiness: a slow frame, a sudden burst of
+output, a memory leak --- nothing screams. Tracing is how you
+find out.
+\end{aside}
+
+\section{Trace points}
+
+A trace point is a recorded event with a name and a timestamp.
+\maya{} sprinkles them through the render pipeline:
+
+\begin{lstlisting}
+trace("frame_begin");
+layout();
+trace("layout_done");
+paint();
+trace("paint_done");
+diff();
+trace("diff_done");
+emit();
+trace("frame_end");
+\end{lstlisting}
+
+Compiled out unless \code{MAYA\_TRACE} is set.
+
+\section{Output format}
+
+Traces are written as JSON, one event per line, compatible
+with chrome://tracing:
+
+\begin{lstlisting}
+{"name":"layout","ph":"X","ts":12345,"dur":540,
+ "pid":1,"tid":1}
+\end{lstlisting}
+
+Tools like Perfetto or Speedscope visualise the timeline.
+
+\section{Per-frame counters}
+
+Beyond timing, \maya{} records counters per frame:
+
+\begin{itemize}[leftmargin=*]
+  \item Cells changed.
+  \item ANSI bytes emitted.
+  \item Effects re-run.
+  \item Elements in tree.
+  \item Allocations.
+\end{itemize}
+
+A status bar can display these for debugging. \maya{} ships
+\code{stats\_widget()} that does exactly this.
+
+\section{Logging levels}
+
+A simple log filter:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{ERROR}: something is broken; user-visible.
+  \item \code{WARN}: surprising but recoverable.
+  \item \code{INFO}: notable events (startup, shutdown,
+    capability detection).
+  \item \code{DEBUG}: diagnostic detail.
+  \item \code{TRACE}: per-frame, per-event spam.
+\end{itemize}
+
+The active level is environment-set: \code{MAYA\_LOG=DEBUG}.
+
+\section{Where logs go}
+
+Not to stderr (the terminal is the display, not a log sink).
+\maya{} writes logs to a file: \code{maya.log} in the current
+directory by default, configurable.
+
+\begin{tryit}
+Set \code{MAYA\_LOG=DEBUG} and tail the log file in another
+terminal. Watch the runtime narrate itself.
+\end{tryit}
+
+\section{Counters and aggregates}
+
+For long-running apps, summary stats every minute:
+
+\begin{itemize}[leftmargin=*]
+  \item Frames per second (during activity).
+  \item Average ANSI bytes per frame.
+  \item Peak memory.
+  \item Total signal updates.
+\end{itemize}
+
+These accumulate cheaply (one integer increment per event)
+and dump periodically.
+
+\section{User-visible diagnostics}
+
+Some libraries hide their internals; others expose them. \maya{}
+exposes via:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{maya::about()}: prints library version, build
+    flags, detected terminal, capability summary.
+  \item \code{maya::stats()}: dumps current counters.
+  \item Debug overlay: live counters and rectangles.
+\end{itemize}
+
+Users hitting odd behaviour can paste the output of
+\code{about()} in a bug report and the maintainer knows
+what to look at first.
+
+\section{Profiling integration}
+
+For production profiling, \maya{} cooperates with:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{perf}: standard Linux sampling.
+  \item \code{tracy}: instrumentation-based.
+  \item \code{Tracing Framework} or \code{TEF}: chrome
+    JSON.
+\end{itemize}
+
+Trace points compile down to the chosen backend via macro
+glue. Tracy gets native zones; perf gets nothing extra; TEF
+gets JSON.
+
+\section{Signal-graph observability}
+
+The signal graph (see Chapter~\ref{ch:signals}) can dump its
+state: which signals exist, which effects subscribe to what,
+last update time. This is invaluable for debugging
+``something updates every frame'' regressions.
+
+\begin{lstlisting}
+ctx.dump_graph("/tmp/graph.dot");
+\end{lstlisting}
+
+Pipe through \code{dot -Tpng} for a visual.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Trace points compile out by default.
+  \item JSON format is chrome-compatible.
+  \item Per-frame counters in a stats widget.
+  \item Logs to file, not stderr.
+  \item \code{about()} for bug reports.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Add the stats widget to your status bar. Identify a
+    frame that took unusually long.
+  \item Set \code{MAYA\_TRACE=1} and visualise a 5-second
+    capture in chrome://tracing.
+  \item Print \code{maya::about()} on startup. Confirm it
+    reports your terminal and capabilities.
+\end{enumerate}

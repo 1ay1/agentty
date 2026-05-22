@@ -1,0 +1,223 @@
+\chapter{Borders, padding, and box decoration}
+\label{ch:borders}
+
+\begin{aside}
+The most basic question of UI: ``draw a box''. The answer
+unfolds into Unicode rules, theme palettes, joinery for adjacent
+borders, and the ancient art of corner glyphs.
+\end{aside}
+
+\section{Border characters}
+
+Unicode block U+2500 BOX DRAWING gives us 128 glyphs for lines,
+corners, junctions, and thick variants. \maya{}'s built-in
+border presets are:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{single.} Single thin: \code{U+2500}, \code{U+2502},
+    \code{U+250C}, etc.
+  \item \textbf{thick.} Heavy lines: \code{U+2501}, \code{U+2503},
+    \code{U+250F}, etc.
+  \item \textbf{double.} Double lines: \code{U+2550},
+    \code{U+2551}, \code{U+2554}, etc.
+  \item \textbf{rounded.} Single with rounded corners:
+    \code{U+256D}, \code{U+256E}, \code{U+256F}, \code{U+2570}.
+  \item \textbf{ascii.} Pure ASCII: \code{+}, \code{-}, \code{|}.
+\end{itemize}
+
+The \code{ascii} preset is for environments without Unicode
+support (legacy terminals, dumb pipes for logging) and as a
+diagnostic.
+
+\section{The preset struct}
+
+A border preset is six characters:
+
+\begin{lstlisting}
+struct BorderChars {
+    char32_t top, bottom, left, right;
+    char32_t tl, tr, bl, br;        // corners
+};
+
+constexpr BorderChars rounded = {
+    U'\u2500', U'\u2500',           // top, bottom
+    U'\u2502', U'\u2502',           // left, right
+    U'\u256D', U'\u256E',           // top-left, top-right
+    U'\u2570', U'\u256F',           // bot-left, bot-right
+};
+\end{lstlisting}
+
+Custom presets are literally just a struct. The build-the-cool-
+border ritual is: pick the eight characters, name them.
+
+\section{Border placement}
+
+Layout reserves one cell on each side for the border before
+distributing space to children. A border element with size $w
+\times h$ leaves $(w-2) \times (h-2)$ for its content.
+
+This costs cells; for narrow elements (status bars, single-line
+inputs) the border may not be worth it. \maya{}'s convention is
+that the border is optional and off by default.
+
+\section{Padding}
+
+Padding is space between border and content. It does not draw
+anything --- it just reserves cells:
+
+\begin{lstlisting}
+auto card = text("hi")
+          | padding(1, 2)   // 1 row, 2 columns
+          | border;
+\end{lstlisting}
+
+The padding goes inside the border. Margin (which is outside)
+also exists and works the same way but reserves cells outside
+the border.
+
+\section{Joinery}
+
+Two adjacent boxes can share their border. The classic case is a
+table: every cell has its own border, but the borders touch and
+should join with cross or tee glyphs.
+
+\begin{lstlisting}
+| A | B |
++---+---+
+| C | D |
+\end{lstlisting}
+
+The \code{+} at the centre is a four-way junction. Each box on
+its own would draw a corner; the table layout overlaps the
+corners and substitutes the junction.
+
+\maya{} performs this substitution in a post-paint pass:
+\begin{itemize}[leftmargin=*]
+  \item For each cell containing a border glyph, look at its
+    four neighbours.
+  \item If the neighbours' glyphs imply additional incoming
+    strokes, upgrade this cell's glyph.
+\end{itemize}
+
+The upgrade table is 256 entries: for each combination of N, S,
+E, W strokes (each present/absent/thick) pick the glyph.
+
+\section{Thickness mixing}
+
+A thick border next to a thin border needs a glyph that
+transitions. \maya{}'s table has these (\code{U+2541},
+\code{U+2542}, etc.) but only for single-to-thick.
+Single-to-double does not exist in Unicode, so \maya{} falls
+back to picking one side.
+
+\begin{warning}
+Mixing border presets in adjacent elements often looks worse
+than picking one. The Unicode coverage of mixed-style
+junctions is incomplete and what does exist looks uneven on
+many fonts.
+\end{warning}
+
+\section{Theme colours}
+
+A border carries a style: foreground, background, attributes.
+The default takes the parent's foreground:
+
+\begin{lstlisting}
+auto panel = column(...)
+           | border
+           | fg<theme::muted>;   // muted border
+\end{lstlisting}
+
+For panels that need emphasis on focus, conditionally swap:
+
+\begin{lstlisting}
+auto panel = column(...)
+           | border
+           | fg<dynamic>(focused ? theme::accent
+                                  : theme::muted);
+\end{lstlisting}
+
+\section{Titles}
+
+A common pattern: a panel with a title embedded in the top
+border:
+
+\begin{lstlisting}
++-- Header ----------+
+| body              |
++-------------------+
+\end{lstlisting}
+
+\maya{} provides \code{border\_with\_title(view)} which paints
+the title at column 2, overwriting the border with the title's
+text. The title can also take a style.
+
+\section{Funky borders}
+
+You can use any characters. Hashes \code{\#}, dashes \code{-},
+ASCII art bricks, full-block characters, dotted lines (\code{U+
+2508}, \code{U+250A}). Some apps use lighter colour for a
+``ghost'' border that feels less heavy than the standard
+single.
+
+\begin{tryit}
+Build a border preset using only spaces with background colour
+set --- a coloured frame with no glyphs. Useful for high-
+contrast UIs.
+\end{tryit}
+
+\section{No-border focus indication}
+
+Borders are a heavy way to show focus. Lighter options:
+
+\begin{itemize}[leftmargin=*]
+  \item Change background to a slight tint.
+  \item Add a left-edge stripe (one column of solid colour).
+  \item Bold the text.
+  \item Underline the active line.
+\end{itemize}
+
+Use heavy borders sparingly --- one main panel, perhaps, not
+every input.
+
+\section{Border bugs}
+
+The two most common bugs:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Off-by-one.} Forgetting that the border eats
+    cells; content overflows.
+  \item \textbf{Single-cell width.} A border around a
+    one-column element vanishes (border + padding + content =
+    minimum width 3).
+\end{itemize}
+
+\maya{}'s layout engine refuses to draw a border smaller than 3
+columns or rows: it logs a warning and renders the contents
+without the border instead.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Borders are presets: six or eight Unicode glyphs.
+  \item Layout reserves cells around the content.
+  \item Padding (inside) and margin (outside) tune the space.
+  \item Joinery upgrades corner glyphs to junctions.
+  \item Titles overlay the top border at column 2.
+  \item Heavy borders are not the only focus indicator.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Implement a custom border preset using \code{+},
+    \code{=}, \code{|}, and ASCII corners. Apply it to a
+    panel.
+  \item Build a 3x3 grid of bordered cells. Confirm that
+    \maya{}'s joinery upgrades each interior intersection to
+    a cross.
+  \item Replace one cell's border preset with the thick one
+    and observe the transitions.
+\end{enumerate}

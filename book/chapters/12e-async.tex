@@ -1,0 +1,127 @@
+\chapter{Coroutines and async}
+\label{ch:async}
+
+\begin{aside}
+A coroutine pauses where a function would return. \cpp{}20
+gave us the syntax; \maya{} integrates it with the event loop
+so a TUI can do async work without blocking the screen.
+\end{aside}
+
+\section{Tasks}
+
+\maya{}'s task type wraps a \cpp{} coroutine:
+
+\begin{lstlisting}
+Task<int> compute() {
+    auto a = co_await fetch(...);
+    auto b = co_await fetch(...);
+    co_return a + b;
+}
+\end{lstlisting}
+
+The task runs until the first \code{co\_await}, then yields.
+The runtime resumes it when the awaited future is ready.
+
+\section{The scheduler}
+
+\maya{}'s coroutines run on a single thread (the main loop)
+by default. \code{co\_await} suspends; the loop continues
+processing events; the awaited result fires the resume.
+
+For CPU-bound work, \code{co\_await on(thread\_pool)}
+switches to a worker thread. Switch back with
+\code{co\_await on(main)} before touching signals.
+
+\section{Awaiters}
+
+Anything with the right shape (\code{await\_ready},
+\code{await\_suspend}, \code{await\_resume}) can be
+awaited. \maya{} provides:
+
+\begin{itemize}[leftmargin=*]
+  \item \code{sleep(duration)}: wait for time to pass.
+  \item \code{when\_event(filter)}: wait for an event.
+  \item \code{io::read(fd, buf)}: wait for I/O.
+  \item \code{when\_signal\_changes(sig)}: wait for a
+    signal update.
+\end{itemize}
+
+\section{Cancellation}
+
+A task can be cancelled. The cancel signal propagates: the
+current await throws \code{Cancelled}; cleanup runs via
+destructors.
+
+\maya{} provides a cancellation token:
+
+\begin{lstlisting}
+auto token = make_cancel_token();
+spawn(task(token));
+// later:
+token.cancel();
+\end{lstlisting}
+
+\section{Effect to task bridge}
+
+An async effect spawns a task that gets cancelled on
+dependency change:
+
+\begin{lstlisting}
+ctx.async_effect([&]() -> Task<void> {
+    auto id = ctx.get(user_id);
+    auto data = co_await fetch(id);
+    ctx.set(user_data, data);
+});
+\end{lstlisting}
+
+If \code{user\_id} changes mid-fetch, the in-flight task is
+cancelled and a new one starts.
+
+\section{Promises}
+
+For non-coroutine code, \code{Promise<T>} is the bridge:
+
+\begin{lstlisting}
+auto p = Promise<int>();
+std::thread([&]{
+    auto x = expensive_work();
+    p.set(x);
+}).detach();
+
+Task<int> wait() {
+    co_return co_await p.future();
+}
+\end{lstlisting}
+
+The promise can be set from any thread; the future
+awaiter resumes on the main thread.
+
+\section{Avoiding the main thread}
+
+Long CPU work must not run on the main thread, or the
+render loop stalls. The worker pool (next chapter) is the
+escape hatch.
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item Tasks wrap \cpp{} coroutines.
+  \item Single-thread by default; \code{on(pool)} to
+    offload.
+  \item Awaiters for sleep, events, I/O, signals.
+  \item Cancellation via tokens.
+  \item Promises bridge non-coroutine async code.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build an async fetch widget that loads data and
+    displays it.
+  \item Cancel the fetch on a typed character (search box
+    style).
+  \item Run a CPU-heavy task on a worker thread; post the
+    result back.
+\end{enumerate}
