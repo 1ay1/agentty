@@ -737,3 +737,72 @@ if(AGENTTY_PGO)
     endif()
     message(STATUS "agentty: PGO phase = ${AGENTTY_PGO} (data dir: ${AGENTTY_PGO_DIR})")
 endif()
+
+# ─────────────────────────────────────────────────────────────────────
+# Tests / benchmarks (opt-in via -DAGENTTY_BUILD_TESTS=ON, default OFF)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Off by default so plain `cmake -B build` keeps building only the
+# shipping binary. Turn on when iterating on perf or running CI.
+#
+# Each test target links the FULL runtime + tool stack (no main.cpp) so
+# the bench is exercising the same code paths the production binary
+# would run — not a stripped-down stand-in.
+option(AGENTTY_BUILD_TESTS "Build the test + benchmark binaries." OFF)
+if(AGENTTY_BUILD_TESTS)
+    enable_testing()
+
+    # long_session_bench — perf stress for the resume/render hot paths
+    # exercised by the seven pins in docs/INLINE_SCROLLBACK.md. Builds
+    # synthetic tool-heavy Threads of varying shape and times every
+    # phase from Thread construction through warm render.
+    add_executable(long_session_bench
+        tests/long_session_bench.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(long_session_bench PRIVATE include)
+    target_compile_definitions(long_session_bench PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(long_session_bench PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(long_session_bench PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(long_session_bench PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    # CTest entry — runs the bench with default scenarios. Exits non-zero
+    # if any scenario throws; perf regressions are reported via stdout,
+    # not via a CTest fail, because absolute timings vary by machine.
+    add_test(NAME long_session_bench COMMAND long_session_bench)
+    set_tests_properties(long_session_bench PROPERTIES TIMEOUT 600)
+
+    # fuzzy_match_smoke — small correctness smoke for the line-DP
+    # fuzzy matcher used by the edit tool. Standalone (no maya / no
+    # runtime), so it compiles against just the fuzzy_match TU.
+    add_executable(fuzzy_match_smoke
+        tests/fuzzy_match_smoke.cpp
+        src/tool/util/fuzzy_match.cpp
+    )
+    target_include_directories(fuzzy_match_smoke PRIVATE include)
+    target_link_libraries(fuzzy_match_smoke PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_test(NAME fuzzy_match_smoke COMMAND fuzzy_match_smoke)
+endif()
