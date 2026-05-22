@@ -1,0 +1,858 @@
+\chapter{Reference manual}
+\label{ch:refman}
+
+\begin{aside}
+The rest of this book taught you to think in \maya{}. This
+chapter is the dictionary you reach for when you've already
+internalised the grammar and just need to remember the
+spelling. Every public API surface, every DSL pipe, every
+widget, paired with the smallest example that exercises it.
+\end{aside}
+
+\section{One header, two namespaces}
+
+Everything below the widget line lives behind one include:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+using namespace maya;
+using namespace maya::dsl;
+\end{lstlisting}
+
+\noindent Widgets are header-per-widget:
+
+\begin{lstlisting}[language=C++]
+#include <maya/widget/badge.hpp>
+#include <maya/widget/markdown.hpp>
+\end{lstlisting}
+
+\noindent And the low-level pipeline, for the rare case you
+need it:
+
+\begin{lstlisting}[language=C++]
+#include <maya/internal.hpp>
+\end{lstlisting}
+
+\section{The Program concept}
+
+A type \code{P} satisfies \code{Program} when it provides:
+
+\begin{itemize}[leftmargin=*]
+  \item nested \code{Model} (any data),
+  \item nested \code{Msg} (usually a \code{std::variant}),
+  \item \code{static Model init()} \emph{or}
+    \code{static std::pair<Model, Cmd<Msg>> init()},
+  \item \code{static auto update(Model, Msg)
+    -> std::pair<Model, Cmd<Msg>>},
+  \item \code{static Element view(const Model\&)},
+  \item optionally \code{static Sub<Msg> subscribe(const Model\&)}.
+\end{itemize}
+
+\noindent The smallest program that satisfies all six:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+using namespace maya;
+using namespace maya::dsl;
+
+struct Hello {
+    struct Model {};
+    struct Quit {};
+    using Msg = std::variant<Quit>;
+
+    static Model init() { return {}; }
+
+    static auto update(Model m, Msg)
+        -> std::pair<Model, Cmd<Msg>>
+    {
+        return {m, Cmd<Msg>::quit()};
+    }
+
+    static Element view(const Model&) {
+        return text("press q") | Bold;
+    }
+
+    static auto subscribe(const Model&) -> Sub<Msg> {
+        return key_map<Msg>({ {'q', Quit{}} });
+    }
+};
+
+static_assert(Program<Hello>);
+
+int main() { run<Hello>({.title = "hello"}); }
+\end{lstlisting}
+
+\section{\code{run} and \code{RunConfig}}
+
+\begin{lstlisting}[language=C++]
+template <Program P>
+void run(RunConfig cfg = {});
+
+struct RunConfig {
+    std::string_view title = "";
+    bool             mouse = false;
+    Mode             mode  = Mode::Fullscreen;
+    Theme            theme = theme::dark;
+};
+\end{lstlisting}
+
+\noindent Designated initialisers; set only what you need:
+
+\begin{lstlisting}[language=C++]
+run<App>({});                              // all defaults
+run<App>({.title = "editor"});
+run<App>({.title = "editor", .mouse = true});
+run<App>({.theme = theme::light});
+\end{lstlisting}
+
+\section{\code{Cmd<Msg>}: side effects as data}
+
+Returned from \code{update}; performed by the runtime.
+
+\begin{lstlisting}[language=C++]
+Cmd<Msg>{}                              // no-op
+Cmd<Msg>::quit()                        // exit
+Cmd<Msg>::batch({c1, c2})               // multiple
+Cmd<Msg>::after(100ms, msg)             // delayed
+Cmd<Msg>::task([]{ return Msg{...}; }) // async work
+Cmd<Msg>::set_title("editor")
+Cmd<Msg>::write_clipboard("text")
+\end{lstlisting}
+
+\noindent A working stopwatch using \code{after}:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+#include <chrono>
+using namespace maya;
+using namespace maya::dsl;
+using namespace std::chrono_literals;
+
+struct Stop {
+    struct Model { bool flash = false; int n = 0; };
+    struct Bump {}; struct Clear {}; struct Quit {};
+    using Msg = std::variant<Bump, Clear, Quit>;
+
+    static Model init() { return {}; }
+
+    static auto update(Model m, Msg msg)
+        -> std::pair<Model, Cmd<Msg>>
+    {
+        return std::visit(overload{
+            [&](Bump) {
+                m.n++; m.flash = true;
+                return std::pair{m,
+                    Cmd<Msg>::after(300ms, Clear{})};
+            },
+            [&](Clear) {
+                m.flash = false;
+                return std::pair{m, Cmd<Msg>{}};
+            },
+            [](Quit) { return std::pair{Model{}, Cmd<Msg>::quit()}; },
+        }, msg);
+    }
+
+    static Element view(const Model& m) {
+        auto n = text(std::to_string(m.n));
+        return v(
+            m.flash ? n | Bold | fgc(Color::yellow())
+                    : n | Bold,
+            text("b bump, q quit") | Dim
+        ) | padding(1) | border(BorderStyle::Round);
+    }
+
+    static auto subscribe(const Model&) -> Sub<Msg> {
+        return key_map<Msg>({ {'b', Bump{}}, {'q', Quit{}} });
+    }
+};
+
+int main() { run<Stop>({.title = "stop"}); }
+\end{lstlisting}
+
+\section{\code{Sub<Msg>}: subscriptions}
+
+\begin{lstlisting}[language=C++]
+Sub<Msg>::none()
+Sub<Msg>::batch({s1, s2})
+Sub<Msg>::on_key([](const KeyEvent& k)
+    -> std::optional<Msg> { ... })
+Sub<Msg>::on_mouse([](const MouseEvent& m)
+    -> std::optional<Msg> { ... })
+Sub<Msg>::on_resize([](Size sz)
+    -> std::optional<Msg> { ... })
+Sub<Msg>::on_paste([](std::string text)
+    -> std::optional<Msg> { ... })
+Sub<Msg>::every(1s,
+    [](auto now) -> Msg { return Tick{now}; })
+
+// Shorthand for the common case
+key_map<Msg>({ {'q', Quit{}}, {'+', Inc{}} });
+\end{lstlisting}
+
+\noindent A ticking counter that pauses when idle:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+#include <chrono>
+using namespace maya;
+using namespace maya::dsl;
+using namespace std::chrono_literals;
+
+struct Tick {
+    struct Model { int n = 0; bool on = true; };
+    struct Pulse {}; struct Toggle {}; struct Quit {};
+    using Msg = std::variant<Pulse, Toggle, Quit>;
+
+    static Model init() { return {}; }
+
+    static auto update(Model m, Msg msg)
+        -> std::pair<Model, Cmd<Msg>>
+    {
+        return std::visit(overload{
+            [&](Pulse)  { m.n++;       return std::pair{m, Cmd<Msg>{}}; },
+            [&](Toggle) { m.on = !m.on; return std::pair{m, Cmd<Msg>{}}; },
+            [](Quit)    { return std::pair{Model{}, Cmd<Msg>::quit()}; },
+        }, msg);
+    }
+
+    static Element view(const Model& m) {
+        return v(
+            text("count: " + std::to_string(m.n)) | Bold,
+            text(m.on ? "running" : "paused") | Dim
+        ) | padding(1) | border(BorderStyle::Round);
+    }
+
+    static auto subscribe(const Model& m) -> Sub<Msg> {
+        auto keys = key_map<Msg>({
+            {'q', Quit{}}, {' ', Toggle{}},
+        });
+        if (!m.on) return keys;
+        return Sub<Msg>::batch({
+            keys,
+            Sub<Msg>::every(500ms,
+                [](auto) -> Msg { return Pulse{}; }),
+        });
+    }
+};
+
+int main() { run<Tick>({.title = "tick"}); }
+\end{lstlisting}
+
+\section{Event helpers}
+
+For use inside \code{on\_key} / \code{on\_mouse} lambdas, or
+inside \code{canvas\_run} event handlers:
+
+\begin{lstlisting}[language=C++]
+key(ev, 'q')                         // char
+key(ev, SpecialKey::Up)              // special
+ctrl(ev, 'c')                        // Ctrl+C
+alt(ev, 'f')                         // Alt+F
+shift(ev, SpecialKey::Tab)           // Shift+Tab
+any_key(ev)                          // catch-all
+as_key(ev)                           // const KeyEvent*
+
+mouse_clicked(ev, MouseButton::Left)
+mouse_released(ev)
+mouse_moved(ev)
+scrolled_up(ev) / scrolled_down(ev)
+mouse_pos(ev)                        // std::optional<MousePos>
+as_mouse(ev)                         // const MouseEvent*
+\end{lstlisting}
+
+\noindent \code{SpecialKey}: \code{Up}, \code{Down},
+\code{Left}, \code{Right}, \code{Home}, \code{End},
+\code{PageUp}, \code{PageDown}, \code{Tab}, \code{BackTab},
+\code{Backspace}, \code{Delete}, \code{Insert},
+\code{Enter}, \code{Escape}, \code{F1}..\code{F12}.
+
+\noindent \code{MouseButton}: \code{Left}, \code{Middle},
+\code{Right}, \code{WheelUp}, \code{WheelDown}.
+
+\section{Element DSL: text}
+
+\begin{lstlisting}[language=C++]
+// Compile-time, zero allocation
+t<"Hello"> | Bold | Fg<255, 100, 80>
+"Hello"_t | Bold                     // UDL form
+
+// Runtime
+text("hello")
+text("hello") | Bold | fgc(Color::red())
+text(42)                             // int auto-formats
+text(3.14)                           // float too
+
+// Wrap behaviour
+text("longish") | clip               // truncate at width
+text("longish") | nowrap             // no wrap
+\end{lstlisting}
+
+\section{Element DSL: containers}
+
+\begin{lstlisting}[language=C++]
+v(child1, child2, child3)            // vertical (column)
+h(child1, child2, child3)            // horizontal (row)
+
+// A vector of children works as a child slot:
+std::vector<Element> rows = { text("a"), text("b") };
+v(t<"Header"> | Bold, rows, t<"Footer"> | Dim)
+\end{lstlisting}
+
+\section{Element DSL: compile-time pipes}
+
+For literal arguments — the values are template parameters,
+so they resolve at compile time and emit no runtime cost.
+
+\begin{lstlisting}[language=C++]
+v(...) | pad<1>                       // all sides
+v(...) | pad<1, 2>                    // vertical, horizontal
+v(...) | pad<1, 2, 3, 4>              // top, right, bottom, left
+v(...) | gap_<1>                      // gap between children
+v(...) | grow_<1>                     // flex grow
+v(...) | w_<40>                       // fixed width
+v(...) | h_<10>                       // fixed height
+v(...) | border_<Round>               // border style
+v(...) | bcol<50, 54, 62>             // border colour (rgb)
+v(...) | bordered<Round, 0x323746>    // border + colour
+v(...) | Fg<255, 100, 80>             // foreground rgb
+v(...) | Bg<30, 30, 40>               // background rgb
+v(...) | fg<0xFF4444>                 // foreground hex
+v(...) | bg<0x1A1A2E>                 // background hex
+\end{lstlisting}
+
+\section{Element DSL: runtime pipes}
+
+Same syntax with runtime values:
+
+\begin{lstlisting}[language=C++]
+v(...) | padding(1)                   // all sides
+v(...) | padding(1, 2)                // vertical, horizontal
+v(...) | padding(1, 2, 3, 4)          // t, r, b, l
+v(...) | margin(1)                    // same variants
+v(...) | gap(n)
+v(...) | grow(1.0f)
+v(...) | width(40) | height(10)
+v(...) | border(BorderStyle::Round)
+v(...) | bcolor(c)
+v(...) | btext("Title")
+v(...) | btext("Status",
+               BorderTextPos::Bottom,
+               BorderTextAlign::Right)
+v(...) | fgc(Color::cyan())
+v(...) | bgc(Color::rgb(30, 30, 40))
+v(...) | align(Align::Center)
+v(...) | justify(Justify::SpaceBetween)
+v(...) | overflow(Overflow::Hidden)
+\end{lstlisting}
+
+\noindent \code{Align}: \code{Start}, \code{Center},
+\code{End}, \code{Stretch}, \code{Baseline}, \code{Auto}.
+
+\noindent \code{Justify}: \code{Start}, \code{End},
+\code{Center}, \code{SpaceBetween}, \code{SpaceAround},
+\code{SpaceEvenly}.
+
+\noindent \code{Overflow}: \code{Visible}, \code{Hidden},
+\code{Scroll}.
+
+\section{Element DSL: dynamic helpers}
+
+\begin{lstlisting}[language=C++]
+dyn([&] { return text("n = " + std::to_string(n)); })
+when(is_loading, spinner, content)    // if/else
+when(show_debug, debug_panel)         // if only
+
+map(items, [](auto& s) { return text(s) | Bold; })
+
+text("debug") | visible(debug_mode)
+
+space          // flex-growing spacer
+spacer()       // function form
+sep            // horizontal separator
+vsep           // vertical separator
+blank_         // empty line
+blank()        // function form
+\end{lstlisting}
+
+\section{A complete dashboard layout}
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+using namespace maya;
+using namespace maya::dsl;
+
+struct Dash {
+    struct Model { std::string status = "READY"; };
+    struct Quit {};
+    using Msg = std::variant<Quit>;
+
+    static Model init() { return {}; }
+    static auto update(Model m, Msg)
+        -> std::pair<Model, Cmd<Msg>> {
+        return {m, Cmd<Msg>::quit()};
+    }
+
+    static Element view(const Model& m) {
+        return v(
+            h(
+                text("My App") | Bold,
+                space,
+                text(m.status) | fgc(Color::green())
+            ),
+            sep,
+            h(
+                v(text("Nav 1"), text("Nav 2"))
+                    | width(20) | padding(1),
+                vsep,
+                v(text("Content"))
+                    | grow(1) | padding(1)
+            ) | grow(1),
+            sep,
+            text("[q] quit") | Dim
+        ) | padding(1) | gap(1);
+    }
+
+    static auto subscribe(const Model&) -> Sub<Msg> {
+        return key_map<Msg>({ {'q', Quit{}} });
+    }
+};
+
+int main() { run<Dash>({.title = "dash"}); }
+\end{lstlisting}
+
+\section{Style}
+
+\begin{lstlisting}[language=C++]
+Style{}                              // empty
+Style{}.with_bold()
+Style{}.with_dim()
+Style{}.with_italic()
+Style{}.with_underline()
+Style{}.with_strikethrough()
+Style{}.with_inverse()
+Style{}.with_fg(Color::red())
+Style{}.with_bg(Color::rgb(30, 30, 40))
+
+// Compose -- rhs wins on conflicts
+auto heading = bold_style | Style{}.with_fg(Color::cyan());
+
+// Predefined: bold_style, dim_style,
+//             italic_style, underline_style
+\end{lstlisting}
+
+\section{Colour}
+
+\begin{lstlisting}[language=C++]
+Color::black()    Color::bright_black()
+Color::red()      Color::bright_red()
+Color::green()    Color::bright_green()
+Color::yellow()   Color::bright_yellow()
+Color::blue()     Color::bright_blue()
+Color::magenta()  Color::bright_magenta()
+Color::cyan()     Color::bright_cyan()
+Color::white()    Color::bright_white()
+
+Color::rgb(255, 128, 0)
+Color::hex(0xFF8000)            // consteval
+Color::indexed(214)             // 256-colour palette
+Color::hsl(30.f, 1.f, 0.5f)     // hue, sat, light
+\end{lstlisting}
+
+\section{Theme}
+
+\begin{lstlisting}[language=C++]
+theme::dark        // default, truecolor
+theme::light       // truecolor light
+theme::dark_ansi   // 16-colour dark
+theme::light_ansi  // 16-colour light
+
+run<App>({.theme = theme::light});
+
+// Custom override at compile time
+constexpr auto mine = Theme::derive(
+    theme::dark,
+    [](Theme& t) { t.primary = Color::hex(0xFF6B6B); }
+);
+\end{lstlisting}
+
+\noindent Theme fields you can read from \code{ctx.theme}:
+\code{primary}, \code{secondary}, \code{accent},
+\code{success}, \code{error}, \code{warning}, \code{info},
+\code{text}, \code{inverse\_text}, \code{muted},
+\code{surface}, \code{background}, \code{border},
+\code{diff\_added}, \code{diff\_removed},
+\code{diff\_changed}, \code{highlight}, \code{selection},
+\code{cursor}, \code{link}, \code{placeholder},
+\code{shadow}, \code{overlay}.
+
+\section{Borders}
+
+\begin{lstlisting}[language=C++]
+BorderStyle::None
+BorderStyle::Single         // standard box drawing
+BorderStyle::Double         // double lines
+BorderStyle::Round          // rounded corners
+BorderStyle::Bold           // heavy lines
+BorderStyle::SingleDouble   // mixed
+BorderStyle::DoubleSingle   // mixed
+BorderStyle::Classic        // ASCII fallback
+BorderStyle::Arrow
+
+// Selective sides via the box builder
+box().border(BorderStyle::Single)
+     .border_sides(BorderSides::all())
+     .border_sides(BorderSides::horizontal())
+     .border_sides(BorderSides::vertical())
+     .border_sides(BorderSides::top())
+     // | composes
+     .border_sides(BorderSides::top() | BorderSides::left())
+\end{lstlisting}
+
+\section{Signals: fine-grained reactivity}
+
+For the parts of an app that don't fit Model-Update-View
+cleanly, \maya{} also ships reactive signals.
+
+\begin{lstlisting}[language=C++]
+Signal<int> count{0};
+
+count.get()                     // read; auto-tracks
+count()                         // shorthand
+count.set(42)                   // write
+count.update([](int& n) { n *= 2; });
+count.version()                 // change counter
+
+auto doubled = computed([&] { return count.get() * 2; });
+auto labeled = count.map([](int n) {
+    return "value: " + std::to_string(n);
+});
+
+Effect e([&] {
+    std::println("count = {}", count.get());
+});
+
+{
+    Batch b;        // RAII batched updates
+    x.set(10);
+    y.set(20);
+}                   // one notify, not two
+\end{lstlisting}
+
+\section{\code{print}: one-shot inline render}
+
+\begin{lstlisting}[language=C++]
+void print(const Element& root);
+void print(const Element& root, int width);
+\end{lstlisting}
+
+\noindent A summary card from a build tool:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+using namespace maya;
+using namespace maya::dsl;
+
+int main() {
+    print(
+        v(
+            text("build complete") | Bold
+                | fgc(Color::green()),
+            text("warnings: 0") | Dim,
+            text("errors:   0") | Dim
+        ) | padding(1) | border(BorderStyle::Round)
+    );
+}
+\end{lstlisting}
+
+\section{\code{live}: inline animation loop}
+
+\begin{lstlisting}[language=C++]
+struct LiveConfig {
+    int  fps       = 30;
+    int  max_width = 0;          // 0 = auto
+    bool cursor    = false;
+};
+
+template <AnyLiveRenderFn F>
+void live(LiveConfig cfg, F&& render_fn);
+
+void quit() noexcept;            // ends live() loop
+\end{lstlisting}
+
+\noindent A three-second inline progress bar:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+#include <chrono>
+using namespace maya;
+using namespace maya::dsl;
+
+int main() {
+    auto start = std::chrono::steady_clock::now();
+    live({.fps = 30}, [&]() -> Element {
+        using namespace std::chrono;
+        auto e = duration_cast<milliseconds>(
+            steady_clock::now() - start).count();
+        if (e >= 3000) quit();
+        int filled = static_cast<int>(e * 30 / 3000);
+        std::string bar(30, '.');
+        for (int i = 0; i < filled && i < 30; ++i) bar[i] = '#';
+        return h(
+            text(bar) | fgc(Color::green()),
+            text(" "),
+            text(std::to_string(e / 30) + "%") | Bold
+        );
+    });
+    print(text("done") | Bold | fgc(Color::green()));
+}
+\end{lstlisting}
+
+\section{Widgets: at a glance}
+
+Every widget satisfies the \code{Node} concept and drops
+into the DSL as a child. Pick what you need; include only
+the headers you use.
+
+\subsection*{Input}
+
+\code{Input<Cfg>}, \code{TextArea}, \code{Checkbox},
+\code{ToggleSwitch}, \code{Radio<N>}, \code{Button},
+\code{Select}, \code{Slider}.
+
+\subsection*{Data}
+
+\code{Table}, \code{List<Cfg>}, \code{Tree<T>},
+\code{Sparkline}.
+
+\subsection*{Navigation}
+
+\code{Tabs}, \code{Breadcrumb}, \code{Menu},
+\code{CommandPalette}.
+
+\subsection*{Display}
+
+\code{Badge}, \code{Callout}, \code{ToastManager},
+\code{FileRef}, \code{UserMessage},
+\code{AssistantMessage}, \code{ProgressBar},
+\code{ActivityBar}, \code{Divider}.
+
+\subsection*{Overlay}
+
+\code{Modal}, \code{Popup}, \code{ScrollableView}.
+
+\subsection*{Visualisation}
+
+\code{BarChart}, \code{LineChart}, \code{Gauge},
+\code{Heatmap}, \code{PixelCanvas}.
+
+\subsection*{Specialised}
+
+\code{Markdown}, \code{DiffView}, \code{PlanView},
+\code{LogViewer}, \code{Calendar}, \code{KeyHelp},
+\code{Disclosure}, \code{ThinkingBlock}.
+
+\subsection*{Tools}
+
+\code{ToolCall}, \code{BashTool}, \code{EditTool},
+\code{WriteTool}, \code{ReadTool}, \code{FetchTool},
+\code{SearchResult}, \code{AgentTool}, \code{Permission}.
+
+\subsection*{Working widget composition}
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+#include <maya/widget/badge.hpp>
+#include <maya/widget/callout.hpp>
+#include <maya/widget/progress.hpp>
+#include <maya/widget/table.hpp>
+
+using namespace maya;
+using namespace maya::dsl;
+
+struct App {
+    struct Model {}; struct Quit {};
+    using Msg = std::variant<Quit>;
+    static Model init() { return {}; }
+    static auto update(Model m, Msg)
+        -> std::pair<Model, Cmd<Msg>> {
+        return {m, Cmd<Msg>::quit()};
+    }
+    static Element view(const Model&) {
+        return v(
+            Badge::info("status"),
+            Callout::success("Build passed",
+                             "All 42 tests green"),
+            ProgressBar{.value = 0.75f, .label = "Progress"},
+            Table({
+                .headers = {"Name", "Value"},
+                .rows    = {{"fps", "60"}, {"mem", "128MB"}},
+            })
+        ) | padding(1);
+    }
+    static auto subscribe(const Model&) -> Sub<Msg> {
+        return key_map<Msg>({ {'q', Quit{}} });
+    }
+};
+
+int main() { run<App>({.title = "widgets"}); }
+\end{lstlisting}
+
+\section{Core types}
+
+\begin{lstlisting}[language=C++]
+Columns w{80};       Rows h{24};        // strong wrappers
+w.value;             // int
+w + Columns{5};      // arithmetic preserves type
+
+Size s{80, 24};
+s.width.value;  s.height.value;
+s.is_zero();    s.area();
+
+Position p{10, 5};
+Position::origin();           // {0, 0}
+
+Rect r{{0, 0}, {80, 24}};
+r.left(); r.top(); r.right(); r.bottom();
+r.contains(p);
+r.intersect(other);           // std::optional<Rect>
+r.unite(other);
+
+Edges<int> e{1, 2, 3, 4};     // t, r, b, l
+e.horizontal();  e.vertical();
+
+Dimension::auto_();
+Dimension::fixed(40);         // or px(40)
+Dimension::percent(50.0f);
+
+using namespace maya::literals;
+50_pct;                       // same as percent(50)
+\end{lstlisting}
+
+\section{Errors (low-level only)}
+
+\begin{lstlisting}[language=C++]
+enum class ErrorKind {
+    Io, ParseError, NotFound, PermissionDenied,
+    InvalidInput, Timeout, Unknown,
+};
+
+struct Error {
+    ErrorKind   kind;
+    std::string message;
+    static Error from_errno(std::string_view ctx);
+};
+
+Result<int> r = ok(42);
+Status      s = ok();
+Result<int> e = err<int>(Error{ErrorKind::Io, "boom"});
+
+if (r) {
+    int v = *r;               // operator* extracts
+}
+r.value_or(0);
+r.error();                    // only if !r
+
+// Macros that early-return on failure
+MAYA_TRY(name, expr);         // binds name on success
+MAYA_TRY_VOID(expr);          // for Status
+\end{lstlisting}
+
+\section{The escape hatch: \code{canvas\_run}}
+
+When the Program shape doesn't fit — direct event polling,
+custom timing, low-level canvas access — drop to:
+
+\begin{lstlisting}[language=C++]
+#include <maya/internal.hpp>
+
+canvas_run(
+    {.title = "demo", .mouse = true},
+    [&](const Event& ev) -> bool {
+        if (key(ev, 'q')) return false;   // false = quit
+        return true;
+    },
+    [&](const Ctx& ctx) -> Element {
+        return text("size: " + std::to_string(
+            ctx.size.width.value));
+    }
+);
+\end{lstlisting}
+
+\noindent \code{Ctx} carries \code{size} and \code{theme}.
+Everything else is the same DSL you already know.
+
+\section{Putting it together: counter}
+
+The example from the top of \code{API.md}, reproduced here
+so the chapter ends as it began — with one complete program
+that exercises Program, \code{Cmd}, \code{Sub}, the DSL,
+colour, padding, and \code{key\_map}:
+
+\begin{lstlisting}[language=C++]
+#include <maya/maya.hpp>
+using namespace maya;
+using namespace maya::dsl;
+
+struct Counter {
+    struct Model { int count = 0; };
+    struct Inc {}; struct Dec {}; struct Quit {};
+    using Msg = std::variant<Inc, Dec, Quit>;
+
+    static Model init() { return {}; }
+
+    static auto update(Model m, Msg msg)
+        -> std::pair<Model, Cmd<Msg>>
+    {
+        return std::visit(overload{
+            [&](Inc)  { return std::pair{Model{m.count + 1}, Cmd<Msg>{}}; },
+            [&](Dec)  { return std::pair{Model{m.count - 1}, Cmd<Msg>{}}; },
+            [](Quit)  { return std::pair{Model{}, Cmd<Msg>::quit()}; },
+        }, msg);
+    }
+
+    static Element view(const Model& m) {
+        auto c = m.count >= 0 ? Color::green() : Color::red();
+        return v(
+            text("Count: " + std::to_string(m.count))
+                | Bold | fgc(c),
+            text("[+/-] change  [q] quit") | Dim
+        ) | padding(1);
+    }
+
+    static auto subscribe(const Model&) -> Sub<Msg> {
+        return key_map<Msg>({
+            {'+', Inc{}}, {'-', Dec{}}, {'q', Quit{}},
+        });
+    }
+};
+
+int main() { run<Counter>({.title = "counter"}); }
+\end{lstlisting}
+
+\section{Recap}
+
+\begin{recap}
+\begin{itemize}[leftmargin=*]
+  \item One header (\code{<maya/maya.hpp>}), two namespaces
+    (\code{maya}, \code{maya::dsl}).
+  \item Program concept: six members; the runtime calls them.
+  \item Effects are \code{Cmd<Msg>}; inputs are
+    \code{Sub<Msg>}; layout is the DSL.
+  \item Compile-time pipes for literals; runtime pipes for
+    variables.
+  \item Widgets are header-per-widget and drop into the DSL.
+  \item For everything else there's \code{canvas\_run} and
+    \code{<maya/internal.hpp>}.
+\end{itemize}
+\end{recap}
+
+\section*{Workshop}
+
+\begin{enumerate}[leftmargin=*]
+  \item Build and run every code block in this chapter. They
+    are deliberately small.
+  \item Pick three widgets you've never used. Compose them
+    in a single screen.
+  \item Replace one of your existing apps' bespoke layouts
+    with the DSL pipes documented above.
+\end{enumerate}
