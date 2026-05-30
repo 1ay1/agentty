@@ -99,7 +99,13 @@ jobs:
 
       - name: Install deps (vcpkg static)
         shell: pwsh
-        run: vcpkg install openssl nghttp2 --triplet x64-windows-static
+        run: |
+          # The runner image's vcpkg ports tree can be stale/broken (e.g. the
+          # nghttp2 port missing its manifest); refresh + re-bootstrap first.
+          git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth 1 origin master
+          git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
 
       - name: Configure + build
         shell: pwsh
