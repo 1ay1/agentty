@@ -9,7 +9,8 @@ name: release
 #   • pushing a tag `vX.Y.Z`         → builds that tag, publishes the release
 #   • manual run (workflow_dispatch) → builds the chosen ref, publishes `tag`
 #
-# Artifacts: agentty-linux-{x86_64,aarch64,i686}, agentty-windows-x86_64.exe,
+# Artifacts: agentty-linux-{x86_64,aarch64,i686}, agentty-macos-{arm64,x86_64},
+# agentty-windows-x86_64.exe,
 # agentty_<v>_{amd64,arm64}.deb, agentty-<v>-1.{x86_64,aarch64}.rpm,
 # agentty-bin-<v>-1-x86_64.pkg.tar.zst, agentty-<v>.tar.gz, SHA256SUMS.
 
@@ -160,6 +161,45 @@ jobs:
         shell: bash
         run: gh release upload "$TAG" agentty-windows-x86_64.exe --clobber
 
+  build-macos:
+    name: macos ${{ matrix.arch }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14   # Apple Silicon
+          - arch: x86_64
+            runner: macos-15-intel   # Intel (macos-13 retired)
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init maya submodule (HTTPS)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --recursive
+      - name: Install deps (Homebrew)
+        run: brew install openssl@3 nghttp2 ninja
+      - name: Configure + build (standalone, static OpenSSL/nghttp2)
+        run: |
+          # Pin to GitHub Actions' macOS deployment baseline so the binary
+          # runs on older OS versions than the runner. STANDALONE statically
+          # links OpenSSL + nghttp2; only libSystem stays dynamic.
+          cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF \
+            -DAGENTTY_USE_MIMALLOC=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix nghttp2)"
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+          strip build/agentty
+          cp build/agentty agentty-macos-${{ matrix.arch }}
+      - name: Upload to release
+        run: gh release upload "$TAG" agentty-macos-${{ matrix.arch }} --clobber
+
   package-linux:
     name: packages
     needs: [prepare, build-linux]
@@ -205,7 +245,7 @@ jobs:
   # leg still gets a checksum file for everything that did land.
   checksums:
     name: checksums
-    needs: [prepare, build-linux, build-windows, package-linux]
+    needs: [prepare, build-linux, build-macos, build-windows, package-linux]
     if: always()
     runs-on: ubuntu-latest
     env:
