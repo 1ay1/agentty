@@ -1,14 +1,13 @@
 name: release
 
-# Builds every release artifact and publishes a GitHub release — replaces the
-# manual scripts/release.sh + bump.sh flow. Triggers:
+# Streaming release: the GitHub release is created up front, then every job
+# uploads ITS artifact the moment it's built (gh release upload --clobber).
+# A slow leg (aarch64/i686 under QEMU, or the windows vcpkg build) never blocks
+# the release or the artifacts that are already done.
+#
+# Triggers:
 #   • pushing a tag `vX.Y.Z`         → builds that tag, publishes the release
 #   • manual run (workflow_dispatch) → builds the chosen ref, publishes `tag`
-#
-# aarch64 builds under QEMU emulation and is ~3× slower than the rest, so it is
-# decoupled: the release publishes as soon as the fast artifacts are ready, and
-# a follow-up job (release-aarch64) appends the aarch64 binary + arm packages
-# and refreshes SHA256SUMS once that build finishes.
 #
 # Artifacts: agentty-linux-{x86_64,aarch64,i686}, agentty-windows-x86_64.exe,
 # agentty_<v>_{amd64,arm64}.deb, agentty-<v>-1.{x86_64,aarch64}.rpm,
@@ -16,7 +15,8 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -31,12 +31,47 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
-  # ──────────────────────────────────────────────────────────────────────────
-  # Fast Linux static (musl) binaries — x86_64 / i686 via Alpine (+ QEMU/386).
-  # ──────────────────────────────────────────────────────────────────────────
+  # Create/refresh the release immediately + upload the source tarball.
+  prepare:
+    name: prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Init maya submodule (HTTPS)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --recursive
+      - name: Resolve version + tag
+        id: meta
+        run: |
+          V=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Ensure release exists + upload source tarball
+        env:
+          V: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" \
+                 --notes "See [CHANGELOG.md](https://github.com/1ay1/agentty/blob/master/CHANGELOG.md)."
+          pipx run git-archive-all "agentty-${V}.tar.gz"
+          gh release upload "$TAG" "agentty-${V}.tar.gz" --clobber
+
   build-linux:
     name: linux ${{ matrix.arch }}
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -45,21 +80,23 @@ jobs:
           - arch: x86_64
             platform: linux/amd64
             cmarch: avx2
+          - arch: aarch64
+            platform: linux/arm64
+            cmarch: native
           - arch: i686
             platform: linux/386
             cmarch: sse2
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Init maya submodule (HTTPS)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule update --init --recursive
-
       - name: Set up QEMU
         if: matrix.platform != 'linux/amd64'
         uses: docker/setup-qemu-action@v3
-
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
@@ -78,62 +115,20 @@ jobs:
               strip build-rel/agentty
               cp build-rel/agentty agentty-linux-${{ matrix.arch }}
             '
-
+      - name: Upload to release + stash for packaging
+        run: gh release upload "$TAG" agentty-linux-${{ matrix.arch }} --clobber
       - uses: actions/upload-artifact@v4
         with:
           name: bin-linux-${{ matrix.arch }}
           path: agentty-linux-${{ matrix.arch }}
           if-no-files-found: error
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # Slow Linux static binary — aarch64 via Alpine + QEMU. Runs independently so
-  # it never blocks the main release; its artifacts are appended afterwards.
-  # ──────────────────────────────────────────────────────────────────────────
-  build-linux-aarch64:
-    name: linux aarch64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Init maya submodule (HTTPS)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
-        run: |
-          docker run --rm --platform linux/arm64 \
-            -e CMARCH='native' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
-              set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
-                openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
-              git config --global --add safe.directory /src
-              rm -rf build-rel
-              cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
-                    -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
-                    -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
-                    -DAGENTTY_ARCH="$CMARCH"
-              cmake --build build-rel -j"$(nproc)"
-              strip build-rel/agentty
-              cp build-rel/agentty agentty-linux-aarch64
-            '
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-linux-aarch64
-          path: agentty-linux-aarch64
-          if-no-files-found: error
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Windows x86_64 — MSVC + vcpkg static triplet.
-  # ──────────────────────────────────────────────────────────────────────────
   build-windows:
     name: windows x86_64
+    needs: prepare
     runs-on: windows-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Init maya submodule (HTTPS)
@@ -141,17 +136,13 @@ jobs:
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule update --init --recursive
-
       - name: Install deps (vcpkg static)
         shell: pwsh
         run: |
-          # The runner image's vcpkg ports tree can be stale/broken (e.g. the
-          # nghttp2 port missing its manifest); refresh + re-bootstrap first.
           git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth 1 origin master
           git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
           & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
-
       - name: Configure + build
         shell: pwsh
         run: |
@@ -160,58 +151,40 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static
           cmake --build build --config Release -j
-
       - name: Stage binary
         shell: pwsh
         run: |
           $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
           Copy-Item $exe.FullName agentty-windows-x86_64.exe
+      - name: Upload to release
+        shell: bash
+        run: gh release upload "$TAG" agentty-windows-x86_64.exe --clobber
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bin-windows-x86_64
-          path: agentty-windows-x86_64.exe
-          if-no-files-found: error
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Fast Linux packages — deb (amd64) / rpm (x86_64) / Arch, from x86_64 binary.
-  # ──────────────────────────────────────────────────────────────────────────
   package-linux:
     name: packages
-    needs: build-linux
+    needs: [prepare, build-linux]
     runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Read version
-        id: ver
-        run: echo "version=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')" >> "$GITHUB_OUTPUT"
-
       - uses: actions/download-artifact@v4
         with:
-          name: bin-linux-x86_64
           path: bins
-
+          pattern: bin-linux-*
+          merge-multiple: true
       - name: Tooling
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
-
-      - name: Build .deb (amd64)
-        env:
-          V: ${{ steps.ver.outputs.version }}
+      - name: Build + upload .deb / .rpm / .pkg.tar.zst
         run: |
           mkdir -p dist
           chmod +x bins/agentty-linux-*
-          bash packaging/deb/build.sh "$V" amd64 bins/agentty-linux-x86_64  dist
-
-      - name: Build .rpm (x86_64)
-        env:
-          V: ${{ steps.ver.outputs.version }}
-        run: |
-          bash packaging/rpm/build.sh "$V" x86_64  bins/agentty-linux-x86_64  dist
-
-      - name: Build Arch .pkg.tar.zst (x86_64)
-        env:
-          V: ${{ steps.ver.outputs.version }}
-        run: |
+          # deb/build.sh cd's into a tmpdir, so the output dir must be absolute.
+          bash packaging/deb/build.sh "$V" amd64 bins/agentty-linux-x86_64  "$PWD/dist"
+          bash packaging/deb/build.sh "$V" arm64 bins/agentty-linux-aarch64 "$PWD/dist"
+          bash packaging/rpm/build.sh "$V" x86_64  bins/agentty-linux-x86_64  "$PWD/dist"
+          bash packaging/rpm/build.sh "$V" aarch64 bins/agentty-linux-aarch64 "$PWD/dist"
           work="$(mktemp -d)"
           sed -e "s/^pkgver=.*/pkgver=$V/" \
               -e "s|source_x86_64=.*|source_x86_64=(\"agentty-$V-x86_64::file:///pkg/agentty-linux-x86_64\")|" \
@@ -224,166 +197,24 @@ jobs:
             su build -c "cd /pkg && PKGDEST=/pkg makepkg -f --skipinteg --noconfirm"
           '
           cp "$work"/agentty-bin-*-x86_64.pkg.tar.zst dist/
+          gh release upload "$TAG" dist/*.deb dist/*.rpm dist/*.pkg.tar.zst --clobber
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: packages
-          path: dist/*
-          if-no-files-found: error
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # aarch64 packages — deb (arm64) / rpm (aarch64), from the aarch64 binary.
-  # ──────────────────────────────────────────────────────────────────────────
-  package-linux-aarch64:
-    name: packages aarch64
-    needs: build-linux-aarch64
+  # Runs last; regenerates SHA256SUMS over whatever is on the release. The
+  # binaries are already live regardless of whether this finishes — it only
+  # adds/refreshes the checksum file. `always()` so a single slow/failed build
+  # leg still gets a checksum file for everything that did land.
+  checksums:
+    name: checksums
+    needs: [prepare, build-linux, build-windows, package-linux]
+    if: always()
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Read version
-        id: ver
-        run: echo "version=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: bin-linux-aarch64
-          path: bins
-
-      - name: Tooling
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm
-
-      - name: Build .deb (arm64)
-        env:
-          V: ${{ steps.ver.outputs.version }}
+      - name: Download release assets, hash, re-upload
         run: |
-          mkdir -p dist
-          chmod +x bins/agentty-linux-*
-          bash packaging/deb/build.sh "$V" arm64 bins/agentty-linux-aarch64 dist
-
-      - name: Build .rpm (aarch64)
-        env:
-          V: ${{ steps.ver.outputs.version }}
-        run: |
-          bash packaging/rpm/build.sh "$V" aarch64 bins/agentty-linux-aarch64 dist
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: packages-aarch64
-          path: dist/*
-          if-no-files-found: error
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Publish the release as soon as the fast artifacts are ready (no aarch64).
-  # The full dist (minus aarch64) is re-uploaded as `release-dist` so the
-  # follow-up aarch64 job can rebuild a complete SHA256SUMS.
-  # ──────────────────────────────────────────────────────────────────────────
-  release:
-    name: publish
-    needs: [build-linux, build-windows, package-linux]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Init maya submodule (HTTPS)
-        run: |
-          git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
-
-      - name: Read version
-        id: ver
-        run: echo "version=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Explicit per-name downloads so a finished aarch64 build can't sneak in.
-      - uses: actions/download-artifact@v4
-        with: { name: bin-linux-x86_64, path: staging }
-      - uses: actions/download-artifact@v4
-        with: { name: bin-linux-i686, path: staging }
-      - uses: actions/download-artifact@v4
-        with: { name: bin-windows-x86_64, path: staging }
-      - uses: actions/download-artifact@v4
-        with: { name: packages, path: staging }
-
-      - name: Assemble dist + tarball + checksums
-        env:
-          V: ${{ steps.ver.outputs.version }}
-        run: |
-          mkdir -p dist
-          cp staging/agentty-linux-x86_64 staging/agentty-linux-i686 dist/
-          cp staging/agentty-windows-x86_64.exe dist/
-          cp staging/*.deb staging/*.rpm staging/*.pkg.tar.zst dist/
-          chmod +x dist/agentty-linux-* || true
-          pipx run git-archive-all "dist/agentty-${V}.tar.gz"
-          ( cd dist && sha256sum * > SHA256SUMS )
-          ls -la dist
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: ${{ steps.tag.outputs.name }}
-          fail_on_unmatched_files: true
-          files: dist/*
-
-      # Re-upload the published dist so release-aarch64 can recompute SHA256SUMS
-      # over the complete set (incl. the exact same source tarball bytes).
-      - uses: actions/upload-artifact@v4
-        with:
-          name: release-dist
-          path: dist/*
-          if-no-files-found: error
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Append aarch64 artifacts to the already-published release and refresh
-  # SHA256SUMS. Runs after the slow aarch64 build + packaging finish.
-  # ──────────────────────────────────────────────────────────────────────────
-  release-aarch64:
-    name: publish aarch64
-    needs: [release, build-linux-aarch64, package-linux-aarch64]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Resolve tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # The full published dist (fast bins + windows + packages + tarball + old
-      # SHA256SUMS) so the regenerated checksum file covers every asset.
-      - uses: actions/download-artifact@v4
-        with: { name: release-dist, path: dist }
-      - uses: actions/download-artifact@v4
-        with: { name: bin-linux-aarch64, path: staging }
-      - uses: actions/download-artifact@v4
-        with: { name: packages-aarch64, path: staging }
-
-      - name: Add aarch64 artifacts + refresh checksums
-        run: |
-          cp staging/agentty-linux-aarch64 dist/
-          cp staging/*.deb staging/*.rpm dist/
-          chmod +x dist/agentty-linux-aarch64 || true
-          rm -f dist/SHA256SUMS
-          ( cd dist && sha256sum * > SHA256SUMS )
-          ls -la dist
-
-      - name: Publish aarch64 assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: ${{ steps.tag.outputs.name }}
-          fail_on_unmatched_files: true
-          files: |
-            dist/agentty-linux-aarch64
-            dist/*arm64*.deb
-            dist/*aarch64*.rpm
-            dist/SHA256SUMS
+          mkdir -p dist && cd dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing || true
+          rm -f SHA256SUMS
+          sha256sum -- * > SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber
