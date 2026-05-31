@@ -48,8 +48,13 @@ namespace {
 maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
 
-    if (!cache.streaming)
+    if (!cache.streaming) {
         cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+        // Animated live tail: gradient trail + scramble→resolve + pulsing
+        // caret on the streaming edge (maya reveal_fx). Only animates while
+        // the widget is live_; the settled build is untouched.
+        cache.streaming->set_reveal_fx(true);
+    }
 
     // Pick the source bytes for THIS frame:
     //   • settled: msg.text holds the final body, streaming_text empty.
