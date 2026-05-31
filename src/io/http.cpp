@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -1233,6 +1234,200 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
 }
 
 // -----------------------------------------------------------------------
+// HTTP/1.1 unary fallback.
+//
+// The core transport is h2-only: dial_new() hard-rejects any peer that
+// negotiates anything other than h2 via ALPN.  That's correct for the
+// streaming chat path (it relies on h2 flow-control + multiplexing) and for
+// a direct connection to Anthropic's edge, which always speaks h2.
+//
+// But an air-gapped host reaches the internet through a SOCKS/SSH tunnel,
+// and the far side of that tunnel is frequently a TLS-intercepting corporate
+// proxy that downgrades ALPN to http/1.1.  A transparent tunnel preserves
+// ALPN end-to-end; an intercepting one terminates TLS and re-offers only
+// http/1.1.  When that happens the OAuth token refresh (a tiny unary POST)
+// fails with "peer did not negotiate h2 (ALPN)", the session can't refresh,
+// and — because the failure is classified Tls, not Auth — the mid-session
+// refresh-retry never fires.
+//
+// This speaks HTTP/1.1 for *unary* requests only.  One request, one
+// response, `Connection: close` so the body ends at EOF (no need to parse
+// chunked transfer-encoding or trust Content-Length).  Streaming stays
+// h2-only.  TLS is still pinned on ep.host, so the intercepting proxy is
+// inside the user's own trust boundary (they configured the tunnel) and
+// can't reach anything we didn't already send it.
+// True iff `e` is the specific "peer negotiated something other than h2"
+// failure raised in dial_new — the one case the h1 fallback is meant for.
+// Matched on the detail substring set at the single reject site below.
+bool is_alpn_h2_failure(const HttpError& e) noexcept {
+    return e.kind == HttpErrorKind::Tls &&
+           e.detail.find("negotiate h2 (ALPN)") != std::string::npos;
+}
+
+std::expected<Response, HttpError>
+h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
+              CancelToken* cancel) {
+    auto fd_or = dial_tcp(ep, tos, cancel);
+    if (!fd_or) return std::unexpected(std::move(fd_or).error());
+    socket_t fd = *fd_or;
+
+    tls::SSL* ssl = tls::wrap_client(static_cast<int>(fd), ep.host);
+    if (!ssl) { sock_close(fd); return std::unexpected(HttpError::tls("SSL_new failed")); }
+    auto cleanup = [&] { tls::free_ssl(ssl); sock_close(fd); };
+
+    if (auto r = tls_handshake(fd, ssl, tos, cancel); !r) {
+        cleanup(); return std::unexpected(std::move(r).error());
+    }
+
+    // Total-request deadline.  tos.total==0 means "no cap"; fall back to a
+    // generous fixed ceiling so a wedged proxy can't hang the refresh forever.
+    auto deadline = clock_t_::now() +
+        (tos.total.count() > 0 ? tos.total : std::chrono::milliseconds{60'000});
+
+    // ── build the request head ───────────────────────────────────────
+    std::string out;
+    out += wire_name(req.method);
+    out += ' ';
+    out += req.path.empty() ? "/" : req.path;
+    out += " HTTP/1.1\r\n";
+    out += "host: ";
+    out += ep.host;
+    if (ep.port != 443) { out += ':'; out += std::to_string(ep.port); }
+    out += "\r\n";
+    for (const auto& h : req.headers) {
+        // We own host / content-length / connection — skip any caller dupes
+        // so the wire request stays well-formed.
+        if (h.name == "host" || h.name == "content-length" ||
+            h.name == "connection")
+            continue;
+        out += h.name; out += ": "; out += h.value; out += "\r\n";
+    }
+    out += "content-length: "; out += std::to_string(req.body.size()); out += "\r\n";
+    out += "connection: close\r\n\r\n";
+    out += req.body;
+
+    // ── write it all (non-blocking SSL + poll, mirrors tls_handshake) ──
+    {
+        size_t off = 0;
+        while (off < out.size()) {
+            if (cancel && cancel->is_cancelled())
+                { cleanup(); return std::unexpected(HttpError::cancelled("h1 write")); }
+            int chunk = static_cast<int>(std::min<size_t>(out.size() - off, 1 << 20));
+            int r = SSL_write(ssl, out.data() + off, chunk);
+            if (r > 0) { off += static_cast<size_t>(r); continue; }
+            int e = SSL_get_error(ssl, r);
+            if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE)
+                { cleanup(); return std::unexpected(HttpError::tls("h1 SSL_write: " + tls::last_error(ssl))); }
+            int rem = remaining_ms(deadline, 200);
+            if (rem <= 0) { cleanup(); return std::unexpected(HttpError::timeout("h1 write timed out")); }
+            pollfd pfd{ fd, (e == SSL_ERROR_WANT_READ) ? (short)POLLIN : (short)POLLOUT, 0 };
+            int pr = sock_poll(&pfd, 1, rem);
+            if (pr < 0 && !sock_intr(sock_last_err()))
+                { cleanup(); return std::unexpected(HttpError::tls("h1 write poll: errno=" + std::to_string(sock_last_err()))); }
+            if (pfd.revents & (POLLERR | POLLNVAL))
+                { cleanup(); return std::unexpected(HttpError::socket_hangup("h1 write hangup")); }
+        }
+    }
+
+    // ── read until EOF (server honours Connection: close) ─────────────
+    std::string in;
+    bool eof = false;
+    while (!eof) {
+        if (cancel && cancel->is_cancelled())
+            { cleanup(); return std::unexpected(HttpError::cancelled("h1 read")); }
+        if (in.size() > req.max_body_bytes + (64u << 10))   // headers + body cap
+            { cleanup(); return std::unexpected(HttpError::tls("h1 response exceeds max_body_bytes")); }
+        char buf[16 * 1024];
+        int r = SSL_read(ssl, buf, sizeof(buf));
+        if (r > 0) { in.append(buf, static_cast<size_t>(r)); continue; }
+        int e = SSL_get_error(ssl, r);
+        if (e == SSL_ERROR_ZERO_RETURN) { eof = true; break; }     // clean TLS close
+        if (e == SSL_ERROR_SYSCALL && r == 0) { eof = true; break; } // raw FIN w/o close_notify
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+            // Some servers drop the connection without close_notify after the
+            // full body; if we already have a complete-looking response treat
+            // it as EOF rather than erroring.
+            if (!in.empty()) { eof = true; break; }
+            cleanup(); return std::unexpected(HttpError::tls("h1 SSL_read: " + tls::last_error(ssl)));
+        }
+        int rem = remaining_ms(deadline, 200);
+        if (rem <= 0) { cleanup(); return std::unexpected(HttpError::timeout("h1 read timed out")); }
+        pollfd pfd{ fd, (e == SSL_ERROR_WANT_WRITE) ? (short)POLLOUT : (short)POLLIN, 0 };
+        int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err()))
+            { cleanup(); return std::unexpected(HttpError::tls("h1 read poll: errno=" + std::to_string(sock_last_err()))); }
+    }
+    cleanup();
+
+    // ── parse status line + headers + body ────────────────────────────
+    auto hdr_end = in.find("\r\n\r\n");
+    if (hdr_end == std::string::npos)
+        return std::unexpected(HttpError::protocol("h1: no header terminator"));
+    std::string_view head_sv{in.data(), hdr_end};
+    std::string body = in.substr(hdr_end + 4);
+
+    auto eol = head_sv.find("\r\n");
+    std::string_view status_line = head_sv.substr(0, eol == std::string_view::npos ? head_sv.size() : eol);
+    // "HTTP/1.1 200 OK" → 200
+    int status = 0;
+    {
+        auto sp = status_line.find(' ');
+        if (sp != std::string_view::npos) {
+            for (size_t k = sp + 1; k < status_line.size() && status_line[k] >= '0' && status_line[k] <= '9'; ++k)
+                status = status * 10 + (status_line[k] - '0');
+        }
+    }
+    if (status == 0)
+        return std::unexpected(HttpError::protocol("h1: malformed status line"));
+
+    Headers headers;
+    size_t pos = (eol == std::string_view::npos) ? head_sv.size() : eol + 2;
+    while (pos < head_sv.size()) {
+        auto nl = head_sv.find("\r\n", pos);
+        std::string_view line = head_sv.substr(pos, (nl == std::string_view::npos ? head_sv.size() : nl) - pos);
+        pos = (nl == std::string_view::npos) ? head_sv.size() : nl + 2;
+        auto colon = line.find(':');
+        if (colon == std::string_view::npos) continue;
+        std::string name{line.substr(0, colon)};
+        for (auto& c : name) c = static_cast<char>(std::tolower((unsigned char)c));
+        size_t vb = colon + 1;
+        while (vb < line.size() && (line[vb] == ' ' || line[vb] == '\t')) ++vb;
+        headers.push_back({ std::move(name), std::string{line.substr(vb)} });
+    }
+
+    // If the server *did* send chunked despite Connection: close, decode it;
+    // otherwise the body is already the raw bytes after the headers.
+    for (const auto& h : headers) {
+        if (h.name == "transfer-encoding" && h.value.find("chunked") != std::string::npos) {
+            std::string decoded;
+            size_t p = 0;
+            while (p < body.size()) {
+                auto ln = body.find("\r\n", p);
+                if (ln == std::string::npos) break;
+                size_t sz = 0;
+                for (size_t k = p; k < ln; ++k) {
+                    char c = body[k];
+                    int d = (c >= '0' && c <= '9') ? c - '0'
+                          : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                          : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+                    if (d < 0) break;
+                    sz = sz * 16 + static_cast<size_t>(d);
+                }
+                p = ln + 2;
+                if (sz == 0) break;
+                if (p + sz > body.size()) break;
+                decoded.append(body, p, sz);
+                p += sz + 2;  // skip chunk + trailing CRLF
+            }
+            body = std::move(decoded);
+            break;
+        }
+    }
+
+    return Response{ status, std::move(headers), std::move(body) };
+}
+
+// -----------------------------------------------------------------------
 // Connection pool.  Simple LIFO stack per endpoint with two age caps:
 // idle TTL (entry hasn't been used in N seconds) and total lifetime
 // (entry has been around for N minutes regardless of use). The
@@ -1439,7 +1634,13 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         auto conn_or = (attempt == 0)
             ? acquire_or_dial(impl_->pool, ep, tos, cancel)
             : dial_new(ep, tos, cancel);
-        if (!conn_or) { last_err = std::move(conn_or).error(); continue; }
+        if (!conn_or) {
+            last_err = std::move(conn_or).error();
+            // An ALPN downgrade won't fix itself on retry — bail to the h1
+            // fallback below immediately rather than burning the retry budget.
+            if (is_alpn_h2_failure(last_err)) break;
+            continue;
+        }
         auto conn = std::move(*conn_or);
 
         StreamCtx sctx{};
@@ -1456,6 +1657,17 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         // not transport, and retrying the POST would duplicate side effects.
         if (sctx.status != 0) break;
         if (is_cancelled(cancel)) break;
+    }
+
+    // h2 unreachable because the peer (an intercepting proxy on an air-gapped
+    // tunnel) only offers http/1.1.  Unary requests have no h2 dependency, so
+    // retry once over HTTP/1.1.  Streaming (Client::stream) deliberately has
+    // no such fallback — it needs h2 multiplexing + flow-control.
+    if (is_alpn_h2_failure(last_err) && !is_cancelled(cancel)) {
+        if (auto h1 = h1_unary_send(ep, req, tos, cancel.get()); h1)
+            return std::move(*h1);
+        else
+            last_err = std::move(h1).error();
     }
 
     return std::unexpected(std::move(last_err));
