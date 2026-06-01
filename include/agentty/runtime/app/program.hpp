@@ -121,32 +121,16 @@ struct AgenttyApp {
         // deadlines, so a tight bucket here costs nothing when no
         // animation is live.
         //
-        // CRITICAL for long-thread idle cost: the time bucket must be
-        // gated on whether anything is ACTUALLY animating. The composer
-        // requests an animation frame every ~33 ms while idle to drive
-        // the cursor blink, so the run loop wakes ~30x/s even when the
-        // user is just sitting there reading. If we mixed a 33 ms
-        // bucket unconditionally, the visual-hash gate would NEVER skip
-        // a frame at idle and we'd pay a full view() + render() (and
-        // maya's O(rows x width) clear + witness) 30x/s forever — the
-        // dominant idle cost on a long thread. Instead:
-        //
-        //   • Streaming / spinner / welcome wordmark are live, fast
-        //     motion — bucket at 33 ms (30 fps) so each visible step
-        //     advances the hash.
-        //   • Otherwise the only idle animation is the 530 ms composer
-        //     cursor blink. Bucket at 265 ms (half the blink period) so
-        //     the two blink half-phases land in different buckets and
-        //     the toggle is still captured — but idle re-renders drop
-        //     from ~30/s to ~4/s, each one corresponding to a real
-        //     cursor toggle rather than a no-op repaint.
-        const bool fast_anim =
-            m.s.active() || m.d.current.messages.empty();
-        const std::uint64_t bucket_ms = fast_anim ? 33ULL : 265ULL;
+        // 33 ms = 30 fps — fast enough for the welcome screen's
+        // sine-wave wordmark bob, the streaming caret pulse, and
+        // the spinner. The composer cursor blink (530 ms period)
+        // still resolves correctly inside this bucket: two adjacent
+        // ~265 ms half-periods land in different 33 ms buckets so
+        // the toggle is captured.
         const auto now_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-        mix(static_cast<std::uint64_t>(now_ms) / bucket_ms);
+        mix(static_cast<std::uint64_t>(now_ms / 33));
 
         return k;
     }
