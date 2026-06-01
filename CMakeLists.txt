@@ -794,6 +794,43 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME long_session_bench COMMAND long_session_bench)
     set_tests_properties(long_session_bench PROPERTIES TIMEOUT 600)
 
+    # o1_probe — measures steady-state per-frame warm render AFTER the
+    # live-session freeze+trim flow (the path long_session_bench's
+    # rehydrate-based render phase does NOT cover). Used to verify the
+    # frozen row-cap keeps warm render flat regardless of thread length.
+    add_executable(o1_probe
+        tests/o1_probe.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(o1_probe PRIVATE include)
+    target_compile_definitions(o1_probe PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(o1_probe PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(o1_probe PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(o1_probe PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime), so it compiles against just the fuzzy_match TU.

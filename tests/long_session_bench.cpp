@@ -486,10 +486,18 @@ struct RenderStats { Stats cold; Stats warm; };
         agentty::app::detail::rehydrate_frozen(m);
         // Force-pad m.ui.frozen past the soft cap so the trim actually fires.
         // (The cap lives inside frozen.cpp; we just keep duplicating an
-        // existing entry to stress the erase path.)
+        // existing entry to stress the erase path.) Keep the parallel
+        // frozen_rows / frozen_row_total accounting in lockstep —
+        // trim_frozen_if_oversized indexes frozen_rows by entry.
         if (!m.ui.frozen.empty()) {
             const auto exemplar = m.ui.frozen.back();
-            while (m.ui.frozen.size() < 200) m.ui.frozen.push_back(exemplar);
+            const int  exemplar_rows = m.ui.frozen_rows.empty()
+                ? 1 : m.ui.frozen_rows.back();
+            while (m.ui.frozen.size() < 200) {
+                m.ui.frozen.push_back(exemplar);
+                m.ui.frozen_rows.push_back(exemplar_rows);
+                m.ui.frozen_row_total += static_cast<std::size_t>(exemplar_rows);
+            }
         }
         auto t0 = Clock::now();
         (void)agentty::app::detail::trim_frozen_if_oversized(m);

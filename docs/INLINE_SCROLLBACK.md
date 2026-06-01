@@ -52,8 +52,14 @@ If inline-mode rendering breaks, check these in order:
 7. **Canvas shrink + trim.** `Runtime::render`'s inline path
    reallocates the canvas down to `content + 64` rows when
    `canvas.height() * 2 > shrink_target * 3` (1.5×). `trim_frozen_if_oversized`
-   trims `m.ui.frozen` past 80 entries in chunks of 30, then issues
-   `Cmd::commit_scrollback_overflow()`.
+   trims `m.ui.frozen` by ROWS — dropping oldest entries until
+   `frozen_row_total` is under ~600 rows (and entry count under 60),
+   keeping at least the most recent 3 entries — then issues
+   `Cmd::commit_scrollback_overflow()`. The per-entry row count is
+   estimated from each tool card's **args** body (write content, edit
+   hunks, read/grep results), NOT its one-line output footer; counting
+   output alone under-estimates a tall write to ~1 row and the cap
+   never trips.
 
 Each pin has a section below with the file/line, the rationale, and
 the failure mode if you undo it.
@@ -439,21 +445,43 @@ proportional to `canvas.height()`.
 `trim_frozen_if_oversized()`.
 
 ```cpp
-constexpr std::size_t kFrozenMax  = 80;
-constexpr std::size_t kFrozenTrim = 30;
+constexpr std::size_t kFrozenMaxRows    = 600;   // primary: bound canvas height
+constexpr std::size_t kFrozenMaxEntries = 60;    // secondary: pathological tiny entries
+constexpr std::size_t kKeepMinEntries   = 3;     // never drop the immediate context
 
-if (m.ui.frozen.size() <= kFrozenMax) return maya::Cmd<Msg>::none();
-// erase oldest 30 entries...
+if (frozen_row_total <= kFrozenMaxRows
+    && frozen.size() <= kFrozenMaxEntries) return maya::Cmd<Msg>::none();
+// drop oldest WHOLE entries (front) until both caps satisfied,
+// keeping >= kKeepMinEntries; frozen / frozen_rows / frozen_row_total
+// stay in lockstep...
 return maya::Cmd<Msg>::commit_scrollback_overflow();
 ```
 
-**Why.** `m.ui.frozen` is borrowed by maya every frame via
-`list_ref`, so its size directly drives `render_tree`'s walk. 80
-entries ≈ 25–30 full turns of recent work. Trimmed entries are
-NOT lost — they remain on disk in `m.d.current.messages`; they're
-just no longer in the in-app scrollback window. The terminal's
-native scrollback still holds the rows that physically overflowed
-during the live session.
+**Why ROWS, not entries.** `m.ui.frozen` is borrowed by maya every
+frame via `list_ref`, and the inline canvas auto-sizes to
+`frozen_row_total + chrome`. Maya then re-runs THREE O(rows×width)
+passes per frame: `render_tree` (layout/measure), `canvas.clear()`,
+and the canvas/shadow witness scan. So per-frame cost — and the
+spinner/input lag the user feels on a long thread — scales with
+total frozen ROWS, not entry count. A single full `write`/`edit`
+body is hundreds of rows in ONE entry, so an entry-count cap alone
+can't bound the canvas. ~600 rows ≈ a few full viewports; warm
+per-frame render stays ~0.2 ms there (vs ~25–240 ms when a tall
+body is left un-capped). Trimmed entries are NOT lost — they remain
+on disk in `m.d.current.messages` AND in the terminal's native
+scrollback (painted live once, full body and all). Only the in-app
+re-render window shrinks; `show_all` bodies are never collapsed.
+
+**The row count is estimated from tc.args, NOT tc.output().** A tool
+card renders its body from its ARGS — `write` shows `args["content"]`
+(the whole new file), `edit` shows every hunk under `args["edits"]`,
+`read`/`grep` show their result text. `tc.output()` is only the
+one-line "wrote N lines" footer. The original estimate counted only
+output, so a 3000-line write was scored at ~1 row — `frozen_row_total`
+read tiny, the cap never tripped, and the canvas ballooned to
+thousands of rows while the model believed the thread was small.
+This was THE root cause of the long-thread render lag; see
+`estimate_msg_rows` in `frozen.cpp`.
 
 **The `commit_scrollback_overflow` Cmd is the safe variant.** It
 lets maya derive the safe row count itself

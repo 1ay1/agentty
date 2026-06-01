@@ -184,6 +184,24 @@ struct Model {
         // when a saved thread is loaded.
         std::vector<maya::Element> frozen;
 
+        // Parallel to `frozen`: estimated rendered-row count per entry,
+        // recorded at push time. The inline canvas is sized to the SUM
+        // of these rows, and maya re-derives a full O(rows x width)
+        // canvas witness (plus clear + render_tree) EVERY frame, so
+        // per-frame cost scales with total frozen rows, not entry
+        // count. One full write/edit body can be hundreds of rows in
+        // ONE entry, so an entry-count cap can't bound it.
+        // trim_frozen_if_oversized() trims by ROWS via this. The
+        // estimate MUST count a tool card's rendered body, which comes
+        // from tc.args (write content, edit hunks, read/grep results)
+        // — NOT tc.output(), which is only the one-line footer. Always
+        // the same length as `frozen`.
+        std::vector<int>           frozen_rows;
+
+        // Running sum of frozen_rows, maintained on push/trim so the
+        // oversize check is O(1).
+        std::size_t                frozen_row_total = 0;
+
         // Exclusive upper bound into m.d.current.messages. Every
         // message with index < frozen_through has already been built
         // into `frozen` and need not be rendered live. The suffix

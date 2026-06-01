@@ -72,6 +72,63 @@ maya::Element compaction_divider_row() {
         && !mm.tool_calls.empty();
 }
 
+// Cheap byte-based row estimate for a single message's contribution
+// to a frozen Turn. NOT a render — a coarse proxy (avg ~60 cols/row)
+// used only to BOUND the frozen canvas height, where over/under by a
+// few rows is harmless. Shared by rehydrate_frozen (budget walk) and
+// freeze_range (per-entry frozen_rows accounting).
+std::size_t estimate_msg_rows(const Message& mm) {
+    std::size_t bytes = mm.text.size() + mm.streaming_text.size();
+    for (const auto& tc : mm.tool_calls) {
+        bytes += tc.output().size();
+        bytes += tc.args_streaming.size();
+        // The RENDERED body of a settled tool card comes from its
+        // ARGS, not its output: a write card shows args["content"]
+        // (the whole new file, show_all), an edit card shows every
+        // hunk's old/new text under args["edits"], a read/grep card
+        // shows its result text. tc.output() is only the one-line
+        // "wrote N lines" footer. Counting just output() under-
+        // estimated a 3000-line write as ~1 row, so the row cap never
+        // tripped and the canvas ballooned to thousands of rows while
+        // frozen_row_total still read tiny. Approximate the body by
+        // the serialized args size; coarse is fine (this only BOUNDS
+        // the canvas height, it is never a render).
+        if (!tc.args.is_null()) {
+            // dump() is O(args) but args are already in memory and this
+            // runs once per freeze, not per frame. Use a compact dump
+            // (no indent) so the byte count tracks content, not
+            // formatting whitespace.
+            bytes += tc.args.dump().size();
+        }
+        // Header / footer / chrome rows per tool card (~4 rows even
+        // for an empty body — title, divider, status, blank).
+        bytes += 4 * 60;
+    }
+    // Per-message envelope (header, gap, divider).
+    bytes += 3 * 60;
+    return bytes / 60 + 1;
+}
+
+// Estimated rows for the run messages[from..to) that collapse into
+// ONE frozen Turn entry.
+int estimate_run_rows(const Model& m, std::size_t from, std::size_t to) {
+    std::size_t rows = 0;
+    for (std::size_t k = from; k < to && k < m.d.current.messages.size(); ++k)
+        rows += estimate_msg_rows(m.d.current.messages[k]);
+    return static_cast<int>(rows);
+}
+
+// Push a built frozen Element together with its estimated row count,
+// keeping m.ui.frozen / m.ui.frozen_rows / m.ui.frozen_row_total in
+// lockstep. EVERY push into m.ui.frozen must go through here so the
+// row accounting never drifts from the element vector.
+void push_frozen(Model& m, maya::Element e, int rows) {
+    if (rows < 1) rows = 1;
+    m.ui.frozen.push_back(std::move(e));
+    m.ui.frozen_rows.push_back(rows);
+    m.ui.frozen_row_total += static_cast<std::size_t>(rows);
+}
+
 // Run-level safety gate: a frozen turn captures an Element snapshot
 // whose hash_id is stamped once and never recomputed. If we freeze a
 // run that still contains a Pending / Approved / Running tool, that
@@ -131,14 +188,14 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         }
 
         if (needs_compaction_divider(i)) {
-            m.ui.frozen.push_back(compaction_divider_row());
+            push_frozen(m, compaction_divider_row(), 1);
         }
 
         // Leading gap: one blank row before every turn except the
         // very first frozen row (avoid a top-of-thread gap).
         const bool first_overall = m.ui.frozen.empty();
         if (!first_overall) {
-            m.ui.frozen.push_back(gap_row());
+            push_frozen(m, gap_row(), 1);
         }
 
         const Message& head = m.d.current.messages[i];
@@ -162,7 +219,8 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
                 kb.add(m.d.current.messages[j].compute_render_key());
             }
             cfg.hash_id = kb.build();
-            m.ui.frozen.push_back(maya::Turn{std::move(cfg)}.build());
+            push_frozen(m, maya::Turn{std::move(cfg)}.build(),
+                        estimate_run_rows(m, i, run_end));
             ++m.ui.frozen_turn;
         } else {
             // User / compaction-summary single-message Turn.
@@ -176,7 +234,8 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
                 .add(std::string_view{head.id.value})
                 .add(head.compute_render_key())
                 .build();
-            m.ui.frozen.push_back(maya::Turn{std::move(cfg)}.build());
+            push_frozen(m, maya::Turn{std::move(cfg)}.build(),
+                        estimate_run_rows(m, i, run_end));
         }
 
         i = run_end;
@@ -194,6 +253,8 @@ void freeze_through(Model& m, std::size_t live_start) {
 
 void clear_frozen(Model& m) {
     m.ui.frozen.clear();
+    m.ui.frozen_rows.clear();
+    m.ui.frozen_row_total = 0;
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
 }
@@ -235,20 +296,6 @@ void rehydrate_frozen(Model& m) {
     constexpr int kComposerReserve = 6;
     const std::size_t kRehydrateRowBudget = static_cast<std::size_t>(
         std::max(8, term_size.height.value - kComposerReserve));
-
-    auto estimate_msg_rows = [](const Message& mm) -> std::size_t {
-        std::size_t bytes = mm.text.size() + mm.streaming_text.size();
-        for (const auto& tc : mm.tool_calls) {
-            bytes += tc.output().size();
-            bytes += tc.args_streaming.size();
-            // Header / footer / chrome rows per tool card (~4 rows
-            // even for an empty body — title, divider, status, blank).
-            bytes += 4 * 60;
-        }
-        // Per-message envelope (header, gap, divider).
-        bytes += 3 * 60;
-        return bytes / 60 + 1;
-    };
 
     // Walk backward counting speaker-runs until EITHER cap trips.
     std::size_t units      = 0;
@@ -293,38 +340,86 @@ void rehydrate_frozen(Model& m) {
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
-    // Soft cap on the frozen vector. Above this, the oldest entries
-    // are dropped — maya's row diff sees a shorter live tree and the
+    // Soft cap on the frozen prefix. Above it, the oldest entries are
+    // dropped — maya's row diff sees a shorter live tree and the
     // already-overflowed rows naturally commit to native scrollback.
     //
-    // Tradeoff: memory + every-frame render_tree cost vs in-app
-    // scroll reach. Render cost dominates on tool-heavy sessions —
-    // every settled turn appends a multi-row Element to frozen and
-    // the canvas auto-resizes to `total_rows + 8`. canvas_.clear()
-    // streaming_fills the entire surface each frame and render_tree
-    // walks every node to position it; 240 entries of write/edit/bash
-    // panels reaches ~5000 rows and pushes per-frame render past
-    // 15 ms, which the user feels as input lag.
+    // Why ROWS, not entries: the inline canvas auto-resizes to
+    // `frozen_row_total + chrome`, and maya re-derives a full
+    // O(rows x width) canvas witness EVERY frame (see maya
+    // canvas_witness.cpp verify_canvas / verify_shadow). So the
+    // per-frame render cost — and the animation lag the user feels on
+    // a long thread — scales with TOTAL FROZEN ROWS, not entry count.
+    // A single full `write`/`edit` body is hundreds of rows in ONE
+    // entry, so an entry-count cap alone can't bound the canvas: 80
+    // entries of fat tool panels still reach ~5000 rows and push
+    // per-frame render past 15 ms. Capping rows keeps the canvas
+    // bounded regardless of how tall any individual entry is.
     //
-    // 80 entries ≈ 25-30 full turns of recent work — enough for the
-    // in-flight task to stay visible, small enough that the canvas
-    // never blows past ~2000 rows. Older turns are still in the
-    // terminal's native scrollback (committed there when they
-    // overflowed during the live session). 30-entry trim chunk
-    // amortises the per-trim cost across many appends.
-    constexpr std::size_t kFrozenMax  = 80;
-    constexpr std::size_t kFrozenTrim = 30;
+    // Older turns stay in the terminal's native scrollback (committed
+    // there when they overflowed live), and the full message history
+    // is intact on disk — only the in-app re-render window shrinks.
+    // Composer history (↑) and thread reload are unaffected.
+    //
+    // The per-frame inline render cost is dominated by THREE passes
+    // that are each O(canvas_rows x width) and run EVERY tick:
+    //   1. render_tree over the full element tree (layout/measure),
+    //   2. canvas_.clear() (streaming_fill over every cell),
+    //   3. the canvas/shadow witness scan (verify_canvas).
+    // canvas_rows tracks frozen_row_total, so to keep the spinner /
+    // input latency flat on an arbitrarily long thread we must keep
+    // frozen_row_total bounded to a SMALL multiple of the viewport.
+    // Anything that has scrolled past the top of the viewport already
+    // lives in the terminal's OWN scrollback (it was painted live
+    // once, full body and all) — re-rendering it inside agentty every
+    // frame buys nothing but lag. The user scrolls back through it
+    // with the terminal, not the app.
+    //
+    // ~600 rows ≈ a handful of full viewports of recent work; at that
+    // height the warm per-frame render measures ~4 ms (vs ~12 ms at
+    // 1500 and ~25-97 ms when a single tall write/edit body is left
+    // un-capped). The entry cap is a secondary guard against
+    // pathological counts of tiny entries. Trimming drops whole
+    // entries from the front until BOTH caps are satisfied, leaving at
+    // least the most recent few entries no matter how tall they are —
+    // full bodies are NEVER collapsed (the `show_all` UX is intact);
+    // they simply graduate from the in-app re-render window into
+    // native terminal scrollback.
+    constexpr std::size_t kFrozenMaxRows = 600;
+    constexpr std::size_t kFrozenMaxEntries = 60;
+    constexpr std::size_t kKeepMinEntries = 3;
 
-    if (m.ui.frozen.size() <= kFrozenMax) return maya::Cmd<Msg>::none();
+    const bool over_rows    = m.ui.frozen_row_total > kFrozenMaxRows;
+    const bool over_entries = m.ui.frozen.size() > kFrozenMaxEntries;
+    if (!over_rows && !over_entries) return maya::Cmd<Msg>::none();
 
-    const std::size_t n = std::min(kFrozenTrim,
-        m.ui.frozen.size() > kFrozenMax / 2
-            ? m.ui.frozen.size() - kFrozenMax / 2
-            : std::size_t{0});
-    if (n == 0) return maya::Cmd<Msg>::none();
+    // Drop entries from the front until both caps are satisfied, but
+    // never below kKeepMinEntries so the live context stays visible
+    // even when the tail is a single enormous write/edit body.
+    std::size_t drop = 0;
+    const std::size_t max_drop =
+        m.ui.frozen.size() > kKeepMinEntries
+            ? m.ui.frozen.size() - kKeepMinEntries
+            : std::size_t{0};
+    std::size_t rows_after    = m.ui.frozen_row_total;
+    std::size_t entries_after = m.ui.frozen.size();
+    while (drop < max_drop
+           && (rows_after > kFrozenMaxRows || entries_after > kFrozenMaxEntries)) {
+        rows_after -= static_cast<std::size_t>(m.ui.frozen_rows[drop]);
+        --entries_after;
+        ++drop;
+    }
+    if (drop == 0) return maya::Cmd<Msg>::none();
 
+    // Keep frozen / frozen_rows / frozen_row_total in lockstep.
+    std::size_t removed_rows = 0;
+    for (std::size_t k = 0; k < drop; ++k)
+        removed_rows += static_cast<std::size_t>(m.ui.frozen_rows[k]);
     m.ui.frozen.erase(m.ui.frozen.begin(),
-                      m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(n));
+                      m.ui.frozen.begin() + static_cast<std::ptrdiff_t>(drop));
+    m.ui.frozen_rows.erase(m.ui.frozen_rows.begin(),
+                           m.ui.frozen_rows.begin() + static_cast<std::ptrdiff_t>(drop));
+    m.ui.frozen_row_total -= removed_rows;
 
     // commit_scrollback_overflow lets maya derive the safe row count
     // itself (max(0, prev_rows - term_h)) — the Cmd is just a trigger
