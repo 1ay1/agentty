@@ -121,39 +121,32 @@ struct AgenttyApp {
         // deadlines, so a tight bucket here costs nothing when no
         // animation is live.
         //
-        // CRITICAL for long-thread idle CPU: maya's composer calls
-        // request_animation_frame() every build to drive its 530 ms
-        // cursor blink, so the run loop wakes ~60x/s forever — even at
-        // idle. The visual-hash gate skips the actual render() when the
-        // hash is unchanged, so a wake on which NOTHING visible changed
-        // costs only this hash + a sub rebuild (microseconds). But if we
-        // advance the hash on a time bucket, every bucket flip forces a
-        // FULL view() + render() (maya's O(rows x width) clear +
-        // witness) of the entire thread — and on a long thread one such
-        // render is tens to >100 ms. Even a "slow" 4 Hz blink bucket
-        // then burns 20-40%+ CPU at idle (100% when a tall most-recent
-        // turn makes a render exceed the bucket period). The cursor
-        // blink is not worth re-rendering a whole transcript.
+        // CRITICAL for long-thread idle cost: the time bucket must be
+        // gated on whether anything is ACTUALLY animating. The composer
+        // requests an animation frame every ~33 ms while idle to drive
+        // the cursor blink, so the run loop wakes ~30x/s even when the
+        // user is just sitting there reading. If we mixed a 33 ms
+        // bucket unconditionally, the visual-hash gate would NEVER skip
+        // a frame at idle and we'd pay a full view() + render() (and
+        // maya's O(rows x width) clear + witness) 30x/s forever — the
+        // dominant idle cost on a long thread. Instead:
         //
-        // So: advance the time bucket ONLY while something genuinely
-        // animating is on screen — streaming / spinner / tool activity
-        // (m.s.active()) or the welcome wordmark (empty thread). At true
-        // idle we mix NO time component: the hash goes stable, the gate
-        // skips every render, and idle CPU drops to ~0. The cursor stops
-        // blinking while idle (it's a static block), which is the
-        // standard TUI tradeoff; it reappears/moves the instant any
-        // keystroke arrives (input sets needs_render directly), and the
-        // composer text/cursor fields above already advance the hash on
-        // every edit so typing is always live.
-        const bool animating =
+        //   • Streaming / spinner / welcome wordmark are live, fast
+        //     motion — bucket at 33 ms (30 fps) so each visible step
+        //     advances the hash.
+        //   • Otherwise the only idle animation is the 530 ms composer
+        //     cursor blink. Bucket at 265 ms (half the blink period) so
+        //     the two blink half-phases land in different buckets and
+        //     the toggle is still captured — but idle re-renders drop
+        //     from ~30/s to ~4/s, each one corresponding to a real
+        //     cursor toggle rather than a no-op repaint.
+        const bool fast_anim =
             m.s.active() || m.d.current.messages.empty();
-        if (animating) {
-            // 33 ms = 30 fps — smooth spinner / streaming caret / bob.
-            const auto now_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-            mix(static_cast<std::uint64_t>(now_ms) / 33ULL);
-        }
+        const std::uint64_t bucket_ms = fast_anim ? 33ULL : 265ULL;
+        const auto now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        mix(static_cast<std::uint64_t>(now_ms) / bucket_ms);
 
         return k;
     }
