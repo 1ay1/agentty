@@ -77,6 +77,38 @@ maya::Element compaction_divider_row() {
 // used only to BOUND the frozen canvas height, where over/under by a
 // few rows is harmless. Shared by rehydrate_frozen (budget walk) and
 // freeze_range (per-entry frozen_rows accounting).
+// Cheap, non-allocating estimate of a JSON value's rendered byte
+// footprint. Walks the node tree summing string lengths + a small
+// constant per scalar/structural node. Used ONLY to bound the frozen
+// canvas height, so precision doesn't matter — but it must be cheap:
+// the previous version called j.dump(), which allocated a full
+// serialized copy of the args for EVERY tool call on EVERY freeze. On
+// a thread with large write/edit args that was megabytes of JSON
+// serialization per resume (rehydrate_frozen freezes the whole tail)
+// and per user turn (freeze_through) — the dominant cost of opening an
+// old long thread. This walk allocates nothing.
+std::size_t estimate_json_bytes(const nlohmann::json& j) {
+    switch (j.type()) {
+        case nlohmann::json::value_t::string:
+            return j.get_ref<const std::string&>().size();
+        case nlohmann::json::value_t::array: {
+            std::size_t n = 2;  // brackets
+            for (const auto& e : j) n += estimate_json_bytes(e) + 1;
+            return n;
+        }
+        case nlohmann::json::value_t::object: {
+            std::size_t n = 2;  // braces
+            for (const auto& [k, v] : j.items())
+                n += k.size() + 2 + estimate_json_bytes(v) + 1;
+            return n;
+        }
+        case nlohmann::json::value_t::null:
+            return 0;
+        default:
+            return 8;  // number / bool: a few bytes
+    }
+}
+
 std::size_t estimate_msg_rows(const Message& mm) {
     std::size_t bytes = mm.text.size() + mm.streaming_text.size();
     for (const auto& tc : mm.tool_calls) {
@@ -90,15 +122,12 @@ std::size_t estimate_msg_rows(const Message& mm) {
         // "wrote N lines" footer. Counting just output() under-
         // estimated a 3000-line write as ~1 row, so the row cap never
         // tripped and the canvas ballooned to thousands of rows while
-        // frozen_row_total still read tiny. Approximate the body by
-        // the serialized args size; coarse is fine (this only BOUNDS
-        // the canvas height, it is never a render).
+        // frozen_row_total still read tiny. Approximate the body by a
+        // cheap (non-allocating) walk of the args JSON — NOT dump(),
+        // which allocated a full serialized copy per freeze and made
+        // resuming a long thread slow.
         if (!tc.args.is_null()) {
-            // dump() is O(args) but args are already in memory and this
-            // runs once per freeze, not per frame. Use a compact dump
-            // (no indent) so the byte count tracks content, not
-            // formatting whitespace.
-            bytes += tc.args.dump().size();
+            bytes += estimate_json_bytes(tc.args);
         }
         // Header / footer / chrome rows per tool card (~4 rows even
         // for an empty body — title, divider, status, blank).
