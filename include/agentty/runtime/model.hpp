@@ -215,6 +215,19 @@ struct Model {
         // for its display numbers.
         int                 frozen_turn = 0;
 
+        // True when frozen_through landed in the MIDDLE of an Assistant
+        // run — i.e. the freezer committed the completed leading sub-
+        // turns of a still-active run (freeze_settled_subturns) while
+        // its tail keeps streaming. The live tail must then render the
+        // remaining sub-turns as a CONTINUATION (rail only, no repeated
+        // header / turn number / inter-turn gap) so the frozen prefix
+        // and the live remainder read as one turn. frozen_turn is NOT
+        // advanced for a mid-run freeze (the run isn't finished), so
+        // the live remainder still computes the same turn number.
+        // Reset to false whenever a freeze completes a whole run or the
+        // run finishes (freeze_through at idle).
+        bool                frozen_midrun = false;
+
         // One-shot hint to maya's run loop: "the next view() result
         // contains a heavy frozen scrollback that hasn't been painted
         // yet on this thread; please pre-warm the component cache

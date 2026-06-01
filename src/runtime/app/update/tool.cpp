@@ -219,6 +219,13 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                         }
             }
             apply_tool_output(m, e.id, std::move(e.result));
+            // Mid-run incremental freeze: this tool settling may have
+            // made the leading sub-turns of the active run fully
+            // terminal. Freeze that completed prefix now so the live
+            // canvas holds only the active sub-turn — keeps per-frame
+            // cost flat as edits/writes pile up in one long auto-pilot
+            // turn (no-op when nothing new is freezable).
+            freeze_settled_subturns(m);
             auto cmd = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(cmd)};
         },

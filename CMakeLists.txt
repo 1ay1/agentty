@@ -842,4 +842,41 @@ if(AGENTTY_BUILD_TESTS)
     target_link_libraries(fuzzy_match_smoke PRIVATE
         nlohmann_json::nlohmann_json)
     add_test(NAME fuzzy_match_smoke COMMAND fuzzy_match_smoke)
+
+    # midrun_freeze_test — correctness for freeze_settled_subturns: the
+    # mid-run split (frozen prefix + live continuation tail) must be
+    # visually seamless (one header, all content present, no elision).
+    add_executable(midrun_freeze_test
+        tests/midrun_freeze_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(midrun_freeze_test PRIVATE include)
+    target_compile_definitions(midrun_freeze_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(midrun_freeze_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(midrun_freeze_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(midrun_freeze_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME midrun_freeze_test COMMAND midrun_freeze_test)
 endif()

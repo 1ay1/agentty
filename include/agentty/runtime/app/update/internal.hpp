@@ -80,6 +80,26 @@ void           persist_settings(const Model& m);
 // is about to be pushed).
 void freeze_through(Model& m, std::size_t live_start);
 
+// freeze_settled_subturns: mid-run incremental freeze. During an ACTIVE
+// auto-pilot run the trailing Assistant run can't be frozen by
+// freeze_through (its tail is still streaming / has a running tool), so
+// the WHOLE run — every completed edit/write sub-turn included — stays
+// in the live tail and is re-laid-out + re-painted every frame. As edits
+// accumulate the live canvas grows without bound and per-frame cost
+// (canvas clear + layout + compose, all O(rows)) climbs with tool count.
+//
+// This freezes the COMPLETED leading sub-turns of the active run up to
+// (but not including) the first non-terminal sub-turn, committing them
+// into m.ui.frozen as a continuation entry. frozen_turn is NOT advanced
+// (the run isn't finished); frozen_midrun is set so the live tail draws
+// the remainder as a continuation (rail only, no repeated header/gap).
+// The live frame then holds only the active sub-turn — flat per-frame
+// cost regardless of how many tools the turn has run. No content is
+// hidden: the frozen sub-turns render in full via the zero-copy frozen
+// list, exactly as a settled turn would. No-op when the active run has
+// no freezable completed prefix.
+void freeze_settled_subturns(Model& m);
+
 // rehydrate_frozen: rebuild m.ui.frozen from scratch from the current
 // thread's messages + compaction records. Used on thread switch /
 // thread load — anywhere the messages vector was replaced wholesale.

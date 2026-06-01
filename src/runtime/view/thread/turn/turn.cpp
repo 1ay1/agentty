@@ -527,7 +527,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
 maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m)
+    int turn_num, const Model& m, bool continuation)
 {
     const auto& msgs = m.d.current.messages;
     // Pre-conditions defended at the only two call sites (build_live_tail
@@ -544,8 +544,13 @@ maya::Turn::Config turn_config_for_assistant_run(
     cfg.glyph        = style.glyph;
     cfg.label        = style.label;
     cfg.rail_color   = style.color;
-    cfg.continuation = false;   // a run is one logical Turn by construction
-    cfg.meta         = format_turn_meta(head, turn_num,
+    // A self-contained run is one logical Turn; a continuation run is the
+    // live remainder of a turn whose prefix was frozen mid-run — its
+    // header is suppressed (maya draws the rail only) so the two pieces
+    // read as one turn with no repeated glyph/label/meta.
+    cfg.continuation = continuation;
+    cfg.meta         = continuation ? std::string{}
+                     : format_turn_meta(head, turn_num,
                           head.role == Role::Assistant
                               ? assistant_elapsed(head, m)
                               : std::nullopt);

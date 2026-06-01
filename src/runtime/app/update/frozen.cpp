@@ -221,9 +221,15 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         }
 
         // Leading gap: one blank row before every turn except the
-        // very first frozen row (avoid a top-of-thread gap).
+        // very first frozen row (avoid a top-of-thread gap). Suppressed
+        // when this run is the completion of a mid-run freeze — its
+        // header (and the gap above it) were already pushed by
+        // freeze_settled_subturns; this entry is a continuation.
         const bool first_overall = m.ui.frozen.empty();
-        if (!first_overall) {
+        const bool completing_midrun =
+            m.ui.frozen_midrun && i == m.ui.frozen_through
+            && m.d.current.messages[i].role == Role::Assistant;
+        if (!first_overall && !completing_midrun) {
             push_frozen(m, gap_row(), 1);
         }
 
@@ -232,7 +238,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         if (head.role == Role::Assistant) {
             int turn_num = m.ui.frozen_turn + 1;
             auto cfg = ui::turn_config_for_assistant_run(
-                i, run_end, turn_num, m);
+                i, run_end, turn_num, m, /*continuation=*/completing_midrun);
 
             // Hash key: settled assistant run. The merge inputs (every
             // run-member msg.id + the run length) all fold in so a
@@ -242,6 +248,8 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
             // ComponentCache reuses the painted cells every frame.
             maya::CacheIdBuilder kb;
             kb.add(std::string_view{"agentty.turn.assistant_run"})
+              .add(completing_midrun ? std::string_view{"cont"}
+                                     : std::string_view{"head"})
               .add(static_cast<std::uint64_t>(run_end - i));
             for (std::size_t j = i; j < run_end; ++j) {
                 kb.add(std::string_view{m.d.current.messages[j].id.value});
@@ -251,6 +259,9 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
             push_frozen(m, maya::Turn{std::move(cfg)}.build(),
                         estimate_run_rows(m, i, run_end));
             ++m.ui.frozen_turn;
+            // Run is now wholly frozen — the mid-run split (if any) is
+            // resolved; the next run starts fresh with a header.
+            m.ui.frozen_midrun = false;
         } else {
             // User / compaction-summary single-message Turn.
             int turn_num = m.ui.frozen_turn;
@@ -280,12 +291,97 @@ void freeze_through(Model& m, std::size_t live_start) {
     freeze_range(m, m.ui.frozen_through, live_start);
 }
 
+void freeze_settled_subturns(Model& m) {
+    const auto& msgs = m.d.current.messages;
+    const std::size_t total = msgs.size();
+    if (m.ui.frozen_through >= total) return;
+
+    // Only act on a live tail that begins with an Assistant run (the
+    // auto-pilot case). A User head means a fresh turn boundary that
+    // freeze_through handles on submit.
+    const std::size_t run_start = m.ui.frozen_through;
+    if (msgs[run_start].role != Role::Assistant) return;
+
+    const std::size_t run_end = ui::turn_run_end(msgs, run_start);
+
+    // Find the first sub-turn that is NOT yet freezable — i.e. carries a
+    // non-terminal tool. We freeze the contiguous terminal prefix
+    // [run_start, cut) and leave [cut, run_end) live. A sub-turn with no
+    // tools at all (pure streaming text) is also a stop point: its text
+    // may still be growing, so it must stay live.
+    std::size_t cut = run_start;
+    for (std::size_t i = run_start; i < run_end; ++i) {
+        const Message& mm = msgs[i];
+        bool terminal_tools = !mm.tool_calls.empty();
+        for (const auto& tc : mm.tool_calls)
+            if (!tc.is_terminal()) { terminal_tools = false; break; }
+        // Freeze a sub-turn only if it has at least one tool and all of
+        // them are terminal. A text-only or empty sub-turn (the active
+        // streaming placeholder, or the tail the model is writing into)
+        // stays live.
+        if (!terminal_tools) break;
+        cut = i + 1;
+    }
+
+    // Never freeze the entire run here — the last sub-turn is the active
+    // one (streaming tail / pending continuation) and must stay live so
+    // freeze_through (at idle) does the final, turn-completing freeze
+    // with the correct turn-number advance. Leaving >=1 sub-turn live
+    // also means there's always a live remainder to render as the
+    // continuation, so the header (painted in the frozen prefix) is
+    // never duplicated.
+    if (cut >= run_end) cut = run_end - 1;
+    if (cut <= run_start) return;   // nothing freezable yet
+
+    // The frozen entry is a CONTINUATION iff this run's header was
+    // already committed to frozen by an earlier mid-run freeze this
+    // turn. The FIRST mid-run freeze of a run carries the header; every
+    // subsequent one continues it. Either way the live remainder is a
+    // continuation (header already frozen), so frozen_midrun is set.
+    const bool entry_continuation = m.ui.frozen_midrun;
+
+    // Leading gap: same discipline as freeze_range — a gap before the
+    // entry unless it's the very first frozen row OR it's a continuation
+    // (continuations have no inter-turn seam; the header turn owns the
+    // gap above it).
+    if (!m.ui.frozen.empty() && !entry_continuation) {
+        push_frozen(m, gap_row(), 1);
+    }
+
+    // Turn number mirrors what the live tail showed for this run
+    // (frozen_turn + 1) so a continuation freeze that splits later does
+    // not renumber. We do NOT ++frozen_turn: the run is unfinished.
+    int turn_num = m.ui.frozen_turn + 1;
+    auto cfg = ui::turn_config_for_assistant_run(
+        run_start, cut, turn_num, m, entry_continuation);
+
+    // Hash key identical in shape to freeze_range's so the freeze
+    // handoff from the live tail is a cache HIT (same key the live tail
+    // stamped while the prefix waited). Includes a continuation marker
+    // so a prefix and its later self-freeze can't collide.
+    maya::CacheIdBuilder kb;
+    kb.add(std::string_view{"agentty.turn.assistant_run"})
+      .add(entry_continuation ? std::string_view{"cont"} : std::string_view{"head"})
+      .add(static_cast<std::uint64_t>(cut - run_start));
+    for (std::size_t j = run_start; j < cut; ++j) {
+        kb.add(std::string_view{msgs[j].id.value});
+        kb.add(msgs[j].compute_render_key());
+    }
+    cfg.hash_id = kb.build();
+    push_frozen(m, maya::Turn{std::move(cfg)}.build(),
+                estimate_run_rows(m, run_start, cut));
+
+    m.ui.frozen_through = cut;
+    m.ui.frozen_midrun  = true;   // remainder of this run is a continuation
+}
+
 void clear_frozen(Model& m) {
     m.ui.frozen.clear();
     m.ui.frozen_rows.clear();
     m.ui.frozen_row_total = 0;
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
+    m.ui.frozen_midrun  = false;
 }
 
 void rehydrate_frozen(Model& m) {

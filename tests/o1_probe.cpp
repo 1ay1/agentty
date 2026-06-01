@@ -22,6 +22,7 @@
 #include <maya/style/theme.hpp>
 #include <maya/widget/app_layout.hpp>
 
+#include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -237,6 +238,89 @@ static double active_run_ms(int write_lines) {
     return best;
 }
 
+// SCALING breakdown: an in-flight run accumulating N settled edits,
+// one per sub-turn (the real auto-pilot shape), plus a streaming tail
+// keeping the run non-terminal. Measures view-build (turn_config) and
+// paint SEPARATELY so we can see WHICH grows with N. Flat = win.
+static void scaling_breakdown() {
+    std::printf("\nin-flight run, N accumulated edits — view vs paint:\n");
+    std::printf("%-8s | %12s | %12s | %12s\n",
+                "n", "view_ms", "paint_ms", "total_ms");
+    std::printf("---------+--------------+--------------+--------------\n");
+    for (int n : {1, 5, 10, 20, 40, 80, 160, 320}) {
+        Model m;
+        m.d.current.id = agentty::ThreadId{"scale"};
+        Message u; u.role = Role::User; u.text = "do many edits";
+        m.d.current.messages.push_back(std::move(u));
+        for (int e = 0; e < n; ++e) {
+            Message a; a.role = Role::Assistant;
+            ToolUse t;
+            static int c = 0;
+            t.id   = ToolCallId{"e_" + std::to_string(++c)};
+            t.name = ToolName{"edit"};
+            nlohmann::json edits = nlohmann::json::array();
+            edits.push_back({{"old_text", code_block(6)},
+                             {"new_text", code_block(6)}});
+            t.args = {{"path", "src/foo.cpp"}, {"edits", edits}};
+            auto now = steady_clock::now();
+            t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
+            a.tool_calls.push_back(std::move(t));
+            m.d.current.messages.push_back(std::move(a));
+        }
+        Message tail; tail.role = Role::Assistant;
+        tail.streaming_text = "more";
+        m.d.current.messages.push_back(std::move(tail));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+        agentty::app::detail::clear_frozen(m);
+        // Real auto-pilot flow: the User turn is frozen on submit, then
+        // each settled sub-turn freezes its completed prefix
+        // incrementally (freeze_settled_subturns runs on every
+        // ToolExecOutput). Replay both — calling the mid-run freeze
+        // once per sub-turn so frozen accrues as separate entries
+        // (exactly the real per-settle cadence), which lets trim bound
+        // the row total. Measures the LIVE frame the user sees.
+        agentty::app::detail::freeze_through(m, 1);   // freeze the User
+        agentty::app::detail::freeze_settled_subturns(m);
+        (void)agentty::app::detail::trim_frozen_if_oversized(m);
+
+        // Count how many message-indices remain live (un-frozen). The
+        // whole point of the mid-run freeze: this stays ~constant (1-2)
+        // no matter how many edits accumulated.
+        const std::size_t live_msgs =
+            m.d.current.messages.size() - m.ui.frozen_through;
+
+        // Canvas sized to the trimmed content (+chrome), as maya's
+        // inline path allocates — NOT a fixed 60000. This is what the
+        // user's terminal actually pays per frame.
+        const int canvas_h = static_cast<int>(
+            m.ui.frozen_row_total) + 200;
+        maya::StylePool pool;
+        maya::Canvas canvas(120, std::max(500, canvas_h), &pool);
+        double vbuild = 1e9, paint = 1e9;
+        // Prime twice so maya's hash-keyed component cache captures the
+        // frozen entries' cells (the warm/blit path the real loop hits).
+        for (int w = 0; w < 2; ++w) {
+            auto r = agentty::app::AgenttyApp::view(m);
+            canvas.clear();
+            maya::render_tree(r, canvas, pool, maya::theme::dark, true);
+        }
+        for (int it = 0; it < 9; ++it) {
+            auto t1 = steady_clock::now();
+            auto r = agentty::app::AgenttyApp::view(m);
+            auto t2 = steady_clock::now();
+            canvas.clear();
+            maya::render_tree(r, canvas, pool, maya::theme::dark, true);
+            auto t3 = steady_clock::now();
+            vbuild = std::min(vbuild, ms(t2 - t1));
+            paint  = std::min(paint,  ms(t3 - t2));
+        }
+        std::printf("%-8d | %12.3f | %12.3f | %12.3f | %5zu live | %6zu rows\n",
+                    n, vbuild, paint, vbuild + paint,
+                    live_msgs, m.ui.frozen_row_total);
+    }
+}
+
 int main() {
     struct Shape { const char* name; int turns; int lines; };
     Shape shapes[] = {
@@ -261,5 +345,7 @@ int main() {
         std::printf("%-18s | %12zu | %10.2f | %10.2f | %12.2f | %12.2f\n",
                     s.name, m.ui.frozen_row_total, c.cold, c.warm, lt, ar);
     }
+
+    scaling_breakdown();
     return 0;
 }

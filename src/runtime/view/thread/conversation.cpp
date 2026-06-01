@@ -83,8 +83,20 @@ void build_live_tail(const Model& m, int& running_turn,
     while (i < total) {
         const std::size_t run_end = turn_run_end(m.d.current.messages, i);
 
+        // The remainder of a run whose completed prefix was frozen
+        // mid-run (freeze_settled_subturns) is a CONTINUATION: its
+        // header was already painted in the frozen prefix, so the live
+        // remainder draws rail-only and gets NO leading gap (the gap
+        // belongs to the header turn above the frozen prefix). Only the
+        // FIRST live run — the one starting exactly at frozen_through —
+        // can be a mid-run continuation.
+        const bool midrun_continuation =
+            first_in_tail && m.ui.frozen_midrun
+            && i == m.ui.frozen_through
+            && m.d.current.messages[i].role == Role::Assistant;
+
         const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
-        if (!first_overall) {
+        if (!first_overall && !midrun_continuation) {
             out.push_back(gap_row());
         }
         first_in_tail = false;
@@ -102,7 +114,7 @@ void build_live_tail(const Model& m, int& running_turn,
             //    assistant Turn body until the first text/tool/etc.
             //    slot lands, then content replaces it.
             auto cfg = turn_config_for_assistant_run(
-                i, run_end, turn_num, m);
+                i, run_end, turn_num, m, /*continuation=*/midrun_continuation);
             // Reserve an indicator-height slot for the WHOLE active
             // phase. When the tail is an empty placeholder we paint
             // the breathing "thinking…" widget; once real content
@@ -199,6 +211,8 @@ void build_live_tail(const Model& m, int& running_turn,
             if (run_terminal && !reserve_slot) {
                 maya::CacheIdBuilder kb;
                 kb.add(std::string_view{"agentty.turn.assistant_run"})
+                  .add(midrun_continuation ? std::string_view{"cont"}
+                                           : std::string_view{"head"})
                   .add(static_cast<std::uint64_t>(run_end - i));
                 for (std::size_t j = i; j < run_end; ++j) {
                     kb.add(std::string_view{m.d.current.messages[j].id.value});

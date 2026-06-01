@@ -81,6 +81,7 @@ struct AgenttyApp {
         mix(m.d.current.messages.size());
         mix(static_cast<std::uint64_t>(m.ui.frozen.size()));
         mix(static_cast<std::uint64_t>(m.ui.frozen_turn));
+        mix(m.ui.frozen_midrun ? 1ULL : 0ULL);
         for (std::size_t i = m.ui.frozen_through;
              i < m.d.current.messages.size(); ++i) {
             mix(m.d.current.messages[i].compute_render_key());

@@ -41,9 +41,15 @@ namespace agentty::ui {
 //
 // Header (glyph, label, meta) is taken from the head message; meta carries
 // the head's timestamp + (optionally) elapsed since the last user message.
+//
+// `continuation`: when true the run is the LIVE remainder of a turn whose
+// completed leading sub-turns were already frozen mid-run
+// (freeze_settled_subturns). The header row (glyph/label/meta/turn-number)
+// is suppressed so the frozen prefix and this remainder read as one turn
+// — only the rail is drawn. Default false (a self-contained run).
 [[nodiscard]] maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m);
+    int turn_num, const Model& m, bool continuation = false);
 
 // Decide where the current speaker-run ends. For an Assistant head this
 // walks forward over consecutive Assistant messages; for User / other roles
