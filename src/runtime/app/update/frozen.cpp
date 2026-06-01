@@ -404,19 +404,21 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     // frame buys nothing but lag. The user scrolls back through it
     // with the terminal, not the app.
     //
-    // ~600 rows ≈ a handful of full viewports of recent work; at that
-    // height the warm per-frame render measures ~4 ms (vs ~12 ms at
-    // 1500 and ~25-97 ms when a single tall write/edit body is left
-    // un-capped). The entry cap is a secondary guard against
+    // ~1500 rows ≈ several full viewports of recent work; bounds the
+    // canvas enough to keep per-frame render in budget while trimming
+    // INFREQUENTLY — each trim issues commit_scrollback_overflow and
+    // shrinks the live frozen tree, which churns maya's inline diff, so
+    // a too-tight cap that fires every few turns is its own source of
+    // redraw stutter. The entry cap is a secondary guard against
     // pathological counts of tiny entries. Trimming drops whole
     // entries from the front until BOTH caps are satisfied, leaving at
     // least the most recent few entries no matter how tall they are —
     // full bodies are NEVER collapsed (the `show_all` UX is intact);
     // they simply graduate from the in-app re-render window into
     // native terminal scrollback.
-    constexpr std::size_t kFrozenMaxRows = 600;
-    constexpr std::size_t kFrozenMaxEntries = 60;
-    constexpr std::size_t kKeepMinEntries = 3;
+    constexpr std::size_t kFrozenMaxRows = 1500;
+    constexpr std::size_t kFrozenMaxEntries = 120;
+    constexpr std::size_t kKeepMinEntries = 8;
 
     const bool over_rows    = m.ui.frozen_row_total > kFrozenMaxRows;
     const bool over_entries = m.ui.frozen.size() > kFrozenMaxEntries;
