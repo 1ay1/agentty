@@ -57,23 +57,33 @@ int main(int argc, char** argv) {
                 ms(t1 - t0), m.ui.frozen.size(), m.ui.frozen_row_total);
 
     maya::StylePool pool;
-    auto build_and_render = [&](const char* tag, maya::Canvas& canvas) {
-        auto a = steady_clock::now();
-        auto root = maya::AppLayout{{
+    auto build = [&] {
+        return maya::AppLayout{{
             .thread        = agentty::ui::thread_config(m),
             .changes_strip = agentty::ui::changes_strip_config(m),
             .composer      = agentty::ui::composer_config(m),
             .status_bar    = agentty::ui::status_bar_config(m),
             .overlay       = std::nullopt,
         }}.build();
+    };
+    auto build_and_render = [&](const char* tag, maya::Canvas& canvas) {
+        auto a = steady_clock::now();
+        auto root = build();
         canvas.clear();
         maya::render_tree(root, canvas, pool, maya::theme::dark,
                           /*auto_height=*/true);
         auto b = steady_clock::now();
         std::printf("%-24s: %8.1f ms\n", tag, ms(b - a));
     };
-    maya::Canvas canvas(200, 200000, &pool);
+    // Canvas sized to the REAL inline canvas: frozen rows + a couple
+    // screens of chrome — NOT 200000 rows (clear() of 40M cells dwarfs
+    // the render and hides what we're measuring).
+    const int canvas_h = static_cast<int>(m.ui.frozen_row_total) + 200;
+    maya::Canvas canvas(200, std::max(400, canvas_h), &pool);
+    // Cold: nothing in the component cache yet.
     build_and_render("first render (cold)", canvas);
+    // Warm: the cache captured the frozen Turn's cells on the cold
+    // pass; the second render should blit them.
     build_and_render("second render (warm)", canvas);
     return 0;
 }
