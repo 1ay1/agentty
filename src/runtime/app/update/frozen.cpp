@@ -38,6 +38,7 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
 namespace agentty::app::detail {
 
@@ -205,6 +206,10 @@ bool run_is_freezable(const Model& m, std::size_t from, std::size_t run_end) {
 void freeze_range(Model& m, std::size_t from, std::size_t to) {
     const std::size_t total = m.d.current.messages.size();
     if (from >= to || to > total) return;
+    // Frozen Elements are painted once then blitted forever, so tool
+    // bodies render with full content (show_all) here — unlike the live
+    // tail, which elides to a window for per-frame cheapness.
+    ui::FrozenBuildScope frozen_scope;
 
     auto needs_compaction_divider = [&](std::size_t i) {
         for (const auto& rec : m.d.current.compactions) {
@@ -366,6 +371,7 @@ void freeze_settled_subturns(Model& m) {
     // (frozen_turn + 1) so a continuation freeze that splits later does
     // not renumber. We do NOT ++frozen_turn: the run is unfinished.
     int turn_num = m.ui.frozen_turn + 1;
+    ui::FrozenBuildScope frozen_scope;   // full body in the frozen snapshot
     auto cfg = ui::turn_config_for_assistant_run(
         run_start, cut, turn_num, m, entry_continuation);
 

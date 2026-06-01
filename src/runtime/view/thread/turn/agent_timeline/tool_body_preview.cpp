@@ -97,6 +97,26 @@ constexpr std::size_t kStreamTailLines = 64;
 
 } // namespace
 
+// ── Frozen-build scope ──────────────────────────────────────────────
+// A terminal write/edit/read card that lives in the LIVE tail (an
+// in-flight run whose earlier sub-turn already finished a big card) is
+// re-rendered every frame until the run settles and freeze_range
+// snapshots it. Rendering its FULL body each frame is the dominant live
+// cost (a 3000-line read measured ~21ms/frame). The frozen snapshot is
+// painted once and blitted, so it keeps the full body; the live render
+// elides to a window. This thread-local says which phase we're in.
+namespace {
+bool& frozen_build_flag() noexcept {
+    thread_local bool v = false;
+    return v;
+}
+} // namespace
+
+FrozenBuildScope::FrozenBuildScope() noexcept
+    : prev_(frozen_build_flag()) { frozen_build_flag() = true; }
+FrozenBuildScope::~FrozenBuildScope() { frozen_build_flag() = prev_; }
+bool building_frozen() noexcept { return frozen_build_flag(); }
+
 GrepHits collect_grep_hits(std::span<const ToolUse> tool_calls) {
     GrepHits out;
     for (const auto& tc : tool_calls) {
@@ -263,6 +283,17 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 // total; suppress it mid-stream (the status bar carries the
                 // live byte/tok rate) and it returns with the true total
                 // the instant the tool goes terminal (full body, show_all).
+                out.text = tail_window(content, kStreamTailLines);
+                out.show_footer_stats = false;
+            } else if (!building_frozen()) {
+                // Terminal, but sitting in the LIVE tail (run not settled
+                // yet, re-rendered every frame). Elide to a window so the
+                // per-frame split_lines stays bounded; the FROZEN snapshot
+                // built by freeze_range keeps show_all=true (painted once,
+                // then blitted). Footer is dropped here too because its
+                // count would reflect the slice; the frozen card carries
+                // the true `N lines · KB`.
+                out.show_all = false;
                 out.text = tail_window(content, kStreamTailLines);
                 out.show_footer_stats = false;
             } else {

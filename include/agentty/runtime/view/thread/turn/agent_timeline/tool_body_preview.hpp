@@ -32,4 +32,27 @@ using GrepHits = std::unordered_map<std::string, std::set<int>>;
 [[nodiscard]] maya::ToolBodyPreview::Config tool_body_preview_config(
     const ToolUse& tc, const GrepHits* grep_hits = nullptr);
 
+// Build-phase flag. When a terminal write/edit/read card is being built
+// for the FROZEN snapshot (freeze_range), the full body is rendered with
+// show_all=true because that Element is painted exactly ONCE and then
+// blitted forever. When it's being built for the LIVE tail (an in-flight
+// run whose prior sub-turn carries a big completed card, re-rendered
+// every frame until the run settles), the body is elided to a bounded
+// window so per-frame cost stays O(window) instead of O(file) — a
+// 3000-line read in the live tail measured ~21ms/frame fully expanded,
+// ~0.2ms windowed. The frozen snapshot still shows the full body.
+//
+// freeze_range sets this true for the duration of its build; everywhere
+// else (default false) means "live".
+class FrozenBuildScope {
+public:
+    FrozenBuildScope() noexcept;
+    ~FrozenBuildScope();
+    FrozenBuildScope(const FrozenBuildScope&)            = delete;
+    FrozenBuildScope& operator=(const FrozenBuildScope&) = delete;
+private:
+    bool prev_;
+};
+[[nodiscard]] bool building_frozen() noexcept;
+
 } // namespace agentty::ui
