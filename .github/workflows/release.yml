@@ -240,12 +240,16 @@ jobs:
           TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
           TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
         run: |
-          $signArgs = @()
-          if ($env:WINDOWS_CERT_BASE64 -or $env:TRUSTED_SIGNING_ENDPOINT) { $signArgs += '-Sign' }
-          ./packaging/windows/build-msi.ps1 `
-            -Version "$env:VERSION" `
-            -Exe agentty-windows-x86_64.exe `
-            -Arch x64 @signArgs
+          # Splat a hashtable so the -Sign switch is present only when signing
+          # inputs exist. An empty positional splat (@()) would bind '' as a
+          # positional arg and fail ("positional parameter ... argument ''").
+          $params = @{
+            Version = "$env:VERSION"
+            Exe     = 'agentty-windows-x86_64.exe'
+            Arch    = 'x64'
+          }
+          if ($env:WINDOWS_CERT_BASE64 -or $env:TRUSTED_SIGNING_ENDPOINT) { $params.Sign = $true }
+          ./packaging/windows/build-msi.ps1 @params
       - name: Upload to release
         shell: bash
         run: gh release upload "$TAG" agentty-windows-x86_64.exe agentty-windows-x86_64.msi --clobber
