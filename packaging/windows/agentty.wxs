@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  agentty Windows installer (WiX v4 / .NET wix tool).
+
+  Produces a per-machine MSI that:
+    • installs agentty.exe to "%ProgramFiles%\agentty\"
+    • adds that folder to the SYSTEM PATH (so `agentty` works in any shell)
+    • registers a proper Add/Remove Programs entry (icon, publisher, version,
+      help/about links) with a working uninstall
+    • carries an UpgradeCode so installing a newer MSI cleanly replaces the old
+
+  Build:
+    wix build packaging\windows\agentty.wxs ^
+      -d Version=0.1.0 -d ExePath=agentty-windows-x86_64.exe ^
+      -arch x64 -o agentty-windows-x86_64.msi
+
+  The Version is passed in from CI (CMake project version); GUIDs below are
+  fixed identities — do NOT regenerate them between releases or upgrades break.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="agentty"
+      Manufacturer="agentty"
+      Version="$(var.Version)"
+      UpgradeCode="6F3A2C18-9E4B-4D27-8A1E-7C5B2D0F9A41"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <SummaryInformation
+        Description="agentty — blazing-fast Claude in your terminal"
+        Manufacturer="agentty" />
+
+    <!-- Clean major-upgrade: a newer version removes the old one first. -->
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of agentty is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Add/Remove Programs metadata -->
+    <Property Id="ARPHELPLINK" Value="https://agentty.org/docs" />
+    <Property Id="ARPURLINFOABOUT" Value="https://agentty.org" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/1ay1/agentty/releases/latest" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Icon Id="agentty.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="agentty.ico" />
+
+    <!-- License shown in the installer UI -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicensePath)" />
+
+    <ui:WixUI xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+              Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <Feature Id="Main" Title="agentty" Level="1">
+      <ComponentGroupRef Id="agenttyComponents" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="agentty" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="agenttyComponents" Directory="INSTALLFOLDER">
+      <!-- The binary itself -->
+      <Component Id="agenttyExe" Guid="2B7D5E94-1A6C-4F38-B0D9-3E8A4C61F277">
+        <File Id="agenttyExe"
+              Source="$(var.ExePath)"
+              Name="agentty.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- Add the install dir to the SYSTEM PATH (per-machine). -->
+      <Component Id="agenttyPath" Guid="8C1F4A6E-5D2B-49C7-9F03-6B7E2A8D4C15">
+        <Environment Id="UpdatePath"
+                     Name="PATH"
+                     Value="[INSTALLFOLDER]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="yes" />
+        <RegistryValue Root="HKLM"
+                       Key="Software\agentty"
+                       Name="installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+
+      <!-- Start Menu shortcut that opens a terminal at agentty. -->
+      <Component Id="agenttyShortcut" Guid="D4E9B3F1-7A28-4C56-91BE-0F2A6D8C73B9"
+                 Directory="ProgramMenuFolder">
+        <Shortcut Id="agenttyStartMenu"
+                  Name="agentty"
+                  Description="Blazing-fast Claude in your terminal"
+                  Target="[System64Folder]cmd.exe"
+                  Arguments='/k "agentty"'
+                  Icon="agentty.ico"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\agentty"
+                       Name="shortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>

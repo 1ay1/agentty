@@ -10,7 +10,7 @@ name: release
 #   • manual run (workflow_dispatch) → builds the chosen ref, publishes `tag`
 #
 # Artifacts: agentty-linux-{x86_64,aarch64,i686}, agentty-macos-{arm64,x86_64},
-# agentty-windows-x86_64.exe,
+# agentty-windows-x86_64.exe, agentty-windows-x86_64.msi (signed installer),
 # agentty_<v>_{amd64,arm64}.deb, agentty-<v>-1.{x86_64,aarch64}.rpm,
 # agentty-bin-<v>-1-x86_64.pkg.tar.zst, agentty-<v>.tar.gz, SHA256SUMS.
 
@@ -223,9 +223,27 @@ jobs:
         run: |
           $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
           Copy-Item $exe.FullName agentty-windows-x86_64.exe
+      - name: Build (and sign) MSI installer
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          # Azure Trusted Signing — set these as repo secrets to produce a
+          # SmartScreen-trusted, signed .exe + .msi. Absent → unsigned MSI.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+        run: |
+          $sign = if ($env:TRUSTED_SIGNING_ENDPOINT) { '-Sign' } else { '' }
+          ./packaging/windows/build-msi.ps1 `
+            -Version "$env:VERSION" `
+            -Exe agentty-windows-x86_64.exe `
+            -Arch x64 $sign
       - name: Upload to release
         shell: bash
-        run: gh release upload "$TAG" agentty-windows-x86_64.exe --clobber
+        run: gh release upload "$TAG" agentty-windows-x86_64.exe agentty-windows-x86_64.msi --clobber
 
   build-macos:
     name: macos ${{ matrix.arch }}
