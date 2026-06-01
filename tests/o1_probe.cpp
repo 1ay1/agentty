@@ -347,5 +347,51 @@ int main() {
     }
 
     scaling_breakdown();
+
+    // ── Rehydrate budget: what an old thread paints on resume.
+    // The visible "rendering from top" lag on thread open is the wire
+    // emit of the rehydrated frozen rows. rehydrate_frozen should bound
+    // this to ~one viewport. Probe: a long thread ending in a big
+    // auto-pilot run, report the frozen rows the FIRST resume frame
+    // emits. (term height here is whatever the test env reports.)
+    std::printf("\nrehydrate budget (resume paint height):\n");
+    std::printf("%-26s | %12s | %12s\n",
+                "thread shape", "frozen_rows", "frozen_ent");
+    std::printf("---------------------------+--------------+--------------\n");
+    struct RShape { const char* name; int prior_turns; int final_edits; };
+    for (auto rs : {RShape{"50t + 5-edit final", 50, 5},
+                    RShape{"50t + 40-edit final", 50, 40},
+                    RShape{"200t + 80-edit final", 200, 80}}) {
+        Model m;
+        m.d.current.id = agentty::ThreadId{"rehy"};
+        for (int t = 0; t < rs.prior_turns; ++t) {
+            Message u; u.role = Role::User; u.text = "go";
+            m.d.current.messages.push_back(std::move(u));
+            Message a; a.role = Role::Assistant; a.text = "On it.";
+            a.tool_calls.push_back(write_tool(40));
+            m.d.current.messages.push_back(std::move(a));
+        }
+        // One big final auto-pilot run: many edit sub-turns.
+        Message uf; uf.role = Role::User; uf.text = "do many edits";
+        m.d.current.messages.push_back(std::move(uf));
+        for (int e = 0; e < rs.final_edits; ++e) {
+            Message a; a.role = Role::Assistant;
+            ToolUse t;
+            static int c = 0;
+            t.id = ToolCallId{"re_" + std::to_string(++c)};
+            t.name = ToolName{"edit"};
+            nlohmann::json edits = nlohmann::json::array();
+            edits.push_back({{"old_text", code_block(6)},
+                             {"new_text", code_block(6)}});
+            t.args = {{"path", "src/foo.cpp"}, {"edits", edits}};
+            auto now = steady_clock::now();
+            t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
+            a.tool_calls.push_back(std::move(t));
+            m.d.current.messages.push_back(std::move(a));
+        }
+        agentty::app::detail::rehydrate_frozen(m);
+        std::printf("%-26s | %12zu | %12zu\n",
+                    rs.name, m.ui.frozen_row_total, m.ui.frozen.size());
+    }
     return 0;
 }

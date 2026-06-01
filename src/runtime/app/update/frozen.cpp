@@ -423,6 +423,15 @@ void rehydrate_frozen(Model& m) {
         std::max(8, term_size.height.value - kComposerReserve));
 
     // Walk backward counting speaker-runs until EITHER cap trips.
+    // A long auto-pilot Assistant run can be hundreds of rows in a
+    // SINGLE run; including it whole would blow the one-viewport budget
+    // (the resume paint emits every frozen row to the wire, and rows
+    // past the viewport bottom scroll — the visible "render from top"
+    // lag). So when a single run already exceeds the budget, cut INSIDE
+    // it at sub-turn granularity: keep only the trailing sub-turns that
+    // fit. freeze_range renders that partial run with a header (it's
+    // the start of the rehydrated window); the elided leading sub-turns
+    // live in the on-disk JSON and the terminal's own scrollback.
     std::size_t units      = 0;
     std::size_t row_budget = 0;
     std::size_t start      = total;
@@ -438,6 +447,27 @@ void rehydrate_frozen(Model& m) {
         std::size_t run_rows = 0;
         for (std::size_t k = j; k < cursor; ++k)
             run_rows += estimate_msg_rows(msgs[k]);
+
+        // If this is the FIRST (newest) run and it ALONE overflows the
+        // budget, trim it from the front at sub-turn granularity so the
+        // resume paint still fits ~one viewport. Walk its sub-turns
+        // newest-first, keeping until the budget is met (always keep
+        // >=1 sub-turn).
+        if (units == 0 && run_rows > kRehydrateRowBudget
+            && (cursor - j) > 1) {
+            std::size_t kept = 0;
+            std::size_t cut  = cursor;
+            for (std::size_t k = cursor; k-- > j; ) {
+                kept += estimate_msg_rows(msgs[k]);
+                cut = k;
+                if (kept >= kRehydrateRowBudget) break;
+            }
+            ++units;
+            start = cut;
+            row_budget += kept;
+            break;   // budget spent inside this run
+        }
+
         // Always include at least one run — even a giant one is what
         // the user just loaded and wants to see. Stop AFTER the run
         // that pushes us over budget so the most-recent context is
