@@ -10,7 +10,7 @@
 A drop-in alternative to `claude-code` written in C++26 — no Node, no Python, no Electron, no `npm install`. Signs in with your **Claude Pro/Max OAuth** (or `ANTHROPIC_API_KEY`).
 
 <p align="center">
-  <img src="agentty.gif" alt="agentty streaming a turn with a tool call landing inline" />
+  <img src="assets/demo.gif" alt="agentty streaming a turn — tool calls landing inline in the Actions panel, then the reply" width="680" />
 </p>
 
 ## Speed
