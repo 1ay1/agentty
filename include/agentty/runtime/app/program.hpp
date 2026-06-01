@@ -146,7 +146,7 @@ struct AgenttyApp {
             m.s.active()                              // spinner / streaming caret
             || m.d.current.messages.empty()           // welcome wordmark bob
             || !m.ui.composer.queued.empty();         // queued-chip pulse
-        const std::int64_t bucket_ms = fine_anim_live ? 50 : 256;
+        const std::int64_t bucket_ms = fine_anim_live ? 33 : 256;
         mix(static_cast<std::uint64_t>(now_ms / bucket_ms));
 
         return k;

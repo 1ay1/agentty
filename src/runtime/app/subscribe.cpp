@@ -488,19 +488,8 @@ Sub<Msg> subscribe(const Model& m) {
     // spinner. The capability is heuristic-detected once at startup; see
     // maya::ansi::env_supports_synchronized_output().
     if (m.s.active()) {
-        // 50 ms (~20 fps) on sync terminals, not 33. During streaming
-        // every tick is a real visual change (text drip + growing tool
-        // args), so each tick is a FULL live-frame emit. On a slow tty
-        // (low-power CPU, multiplexer, ssh) a 33 ms cadence outruns the
-        // wire: the non-blocking write can't drain a multi-row frame in
-        // one go, the tail lands in maya's residue buffer, and the run
-        // loop then spins at ~8 ms draining residue while new 30 fps
-        // frames pile MORE residue on top — a feedback loop that pins
-        // CPU (observed ~80% on aarch64 mid-edit). 20 fps keeps the
-        // spinner/caret smooth while giving the wire time to drain
-        // between frames so residue clears and the loop sleeps again.
         static const auto tick_period = maya::ansi::env_supports_synchronized_output()
-            ? std::chrono::milliseconds(50)
+            ? std::chrono::milliseconds(33)
             : std::chrono::milliseconds(100);
         auto tick = Sub<Msg>::every(tick_period, Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
