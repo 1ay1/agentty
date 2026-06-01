@@ -223,6 +223,30 @@ jobs:
         run: |
           $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
           Copy-Item $exe.FullName agentty-windows-x86_64.exe
+      - name: Install WiX toolset + UI extension
+        shell: pwsh
+        # build-msi.ps1 invokes `wix build ... -ext WixToolset.UI.wixext`.
+        # The runner image ships the `wix` dotnet tool but does NOT register
+        # the UI extension — without it, wix fails with "WIX0144: The
+        # extension 'WixToolset.UI.wixext' could not be found." We register
+        # the extension against whatever `wix` is already resolved so the
+        # extension version always matches the tool (mixing a pinned tool
+        # with a preinstalled one on PATH causes version skew). Only install
+        # the tool if it's genuinely absent.
+        run: |
+          if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
+            dotnet tool install --global wix
+            $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
+            "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+          wix --version
+          # Pin the extension to the tool's own version so they match, then
+          # register it globally. `wix extension add` is idempotent.
+          # Strip any +buildmetadata suffix — NuGet version refs reject it.
+          $wixVer = (wix --version).Trim().Split('+')[0]
+          Write-Host "wix version: $wixVer"
+          wix extension add -g "WixToolset.UI.wixext/$wixVer"
+          wix extension list -g
       - name: Build (and sign) MSI installer
         shell: pwsh
         env:
