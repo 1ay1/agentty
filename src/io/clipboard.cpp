@@ -1,4 +1,5 @@
 #include "agentty/io/clipboard.hpp"
+#include "agentty/util/env.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -67,14 +68,11 @@ const char* sniff_image_type(std::string_view bytes) {
     return nullptr;
 }
 
-// The popen + tool-detection helpers below are only used on POSIX /
-// macOS. On Windows the clipboard read goes through the Win32 API
-// directly and these would trip -Wunused-function.
-#if !defined(_WIN32)
-
 // Run a shell command and capture binary stdout up to `cap` bytes.
 // Returns the bytes plus the wait-status. status==-1 means popen
-// failed outright (rare — fork/exec issues).
+// failed outright (rare — fork/exec issues). Available on every
+// platform: Windows maps AGENTTY_POPEN → _popen at the top of the
+// file, so the AGENTTY_CLIPBOARD_CMD override works there too.
 CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     CaptureResult r;
     FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
@@ -91,6 +89,14 @@ CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     r.status = AGENTTY_PCLOSE(fp);
     return r;
 }
+
+// Image capture via a user-supplied command (AGENTTY_CLIPBOARD_CMD).
+// Defined after wrap() below (it depends on it).
+
+// The tool-detection helpers below are only used on POSIX / macOS. On
+// Windows the clipboard read goes through the Win32 API directly and
+// these would trip -Wunused-function.
+#if !defined(_WIN32)
 
 bool tool_in_path(const char* name) {
     std::string cmd = "command -v ";
@@ -139,6 +145,37 @@ std::optional<ClipboardImage> wrap(CaptureResult r) {
     return img;
 }
 
+// Image capture via a user-supplied command (AGENTTY_CLIPBOARD_CMD).
+// The override is the airgap escape hatch: the remote agentty has no
+// local clipboard, so the user points this at a command that ferries
+// the laptop's clipboard image back over the open SSH session (e.g.
+// an `ssh` callback to the laptop's wl-paste/pbpaste). Returns:
+//   - an image  → override produced decodable bytes
+//   - nullopt + clip_handled=false → override unset, fall through to
+//     the platform-native path
+//   - nullopt + clip_handled=true  → override set but produced no
+//     usable image; error_out describes why (don't fall through, the
+//     user explicitly chose this path)
+std::optional<ClipboardImage>
+try_clipboard_cmd_override(std::string* error_out, bool& clip_handled) {
+    clip_handled = false;
+    const char* cmd = util::env::get_or_null<util::env::Var::ClipboardCmd>();
+    if (!cmd) return std::nullopt;
+    clip_handled = true;
+    auto r = popen_capture(cmd, kCap);
+    if (r.bytes.empty()) {
+        if (error_out)
+            *error_out = "AGENTTY_CLIPBOARD_CMD produced no output "
+                         "(clipboard empty, or the command failed)";
+        return std::nullopt;
+    }
+    if (auto img = wrap(std::move(r))) return img;
+    if (error_out)
+        *error_out = "AGENTTY_CLIPBOARD_CMD output was not a recognised "
+                     "image (expected PNG/JPEG/GIF/WEBP bytes on stdout)";
+    return std::nullopt;
+}
+
 } // namespace
 
 std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
@@ -150,6 +187,19 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         if (error_out) *error_out = std::move(msg);
         return std::nullopt;
     };
+
+    // AGENTTY_CLIPBOARD_CMD override runs FIRST, before any platform
+    // probe. This is the airgap path: the remote host has no clipboard
+    // of its own, so the override ferries the laptop's clipboard image
+    // back over the open SSH session. When set, it is authoritative —
+    // we don't fall through to wl-paste/xclip/etc. (those would only
+    // find the empty remote clipboard and clobber the precise error).
+    {
+        bool handled = false;
+        if (auto img = try_clipboard_cmd_override(error_out, handled))
+            return img;
+        if (handled) return std::nullopt;  // error_out already set
+    }
 
 #if defined(__linux__)
     // Session-type detection. KDE / GNOME / sway / etc. on Wayland
@@ -164,6 +214,22 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
     bool has_xclip    = tool_in_path("xclip");
 
     if (!has_wl_paste && !has_xclip) {
+        // No display server reachable usually means a headless / SSH /
+        // airgap host. The image lives on the user's laptop clipboard,
+        // not here — point them at the override that ferries it over
+        // the open SSH session.
+        const char* disp = std::getenv("DISPLAY");
+        const char* wl   = std::getenv("WAYLAND_DISPLAY");
+        const bool headless = (!disp || !*disp) && (!wl || !*wl);
+        if (headless) {
+            return fail(
+                "no clipboard on this host (headless / SSH / airgap). "
+                "The image is on your laptop, not the remote — set "
+                "AGENTTY_CLIPBOARD_CMD to a command that prints the "
+                "laptop's clipboard image to stdout (e.g. an ssh "
+                "callback to the laptop's wl-paste/pbpaste), or attach "
+                "the image by path instead");
+        }
         return fail(wayland
             ? "no clipboard tool — install wl-clipboard "
               "(`pacman -S wl-clipboard` / `apt install wl-clipboard`)"

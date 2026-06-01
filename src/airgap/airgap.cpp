@@ -84,7 +84,15 @@ void print_usage() {
         "                     `agentty` (resolved via remote PATH).\n"
         "\n"
         "  ssh and scp must be on this laptop's PATH.  Pass extra ssh args\n"
-        "  via the AGENTTY_AIRGAP_SSH env var (e.g. -i, -p, -J).\n");
+        "  via the AGENTTY_AIRGAP_SSH env var (e.g. -i, -p, -J).\n"
+        "\n"
+        "  Image paste (Ctrl+V) on the remote: the remote host has no\n"
+        "  clipboard of its own, so set AGENTTY_CLIPBOARD_CMD on the remote\n"
+        "  to a command that prints your laptop's clipboard image to stdout.\n"
+        "  Easiest is a reverse SSH callback — add a `-R` tunnel to an sshd\n"
+        "  on your laptop and point the command back through it, e.g.:\n"
+        "    AGENTTY_CLIPBOARD_CMD='ssh laptop wl-paste --type image/png'\n"
+        "  Without it, attach images by path instead.\n");
 }
 
 // Synchronously spawn `argv[0]` with the given argv and wait for it.
@@ -214,6 +222,16 @@ std::string sh_squote(std::string_view v) {
     // a cure for the visible "new turn appears at the bottom then
     // realigns" flicker on the rest.
     std::string remote_cmd = "AGENTTY_SOCKS_PROXY=localhost:1080 MAYA_FORCE_SYNC=1";
+
+    // Forward the clipboard-image override to the remote if the user
+    // set it on the laptop. The remote has no clipboard of its own, so
+    // this is how Ctrl+V image paste reaches the laptop's clipboard
+    // (the command typically shells back over a reverse SSH tunnel).
+    if (const char* cc =
+            util::env::get_or_null<util::env::Var::ClipboardCmd>()) {
+        remote_cmd += " AGENTTY_CLIPBOARD_CMD=";
+        remote_cmd += sh_squote(cc);
+    }
 
     // Forward terminal-identifying env vars from this laptop to the
     // remote shell so the remote agentty can tell whether the user's

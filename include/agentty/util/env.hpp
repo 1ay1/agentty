@@ -43,6 +43,9 @@ enum class Var : std::uint8_t {
     // ── Airgap (laptop side) ────────────────────────────────────────────
     AirgapSsh,               // AGENTTY_AIRGAP_SSH   (extra ssh flags)
 
+    // ── Clipboard override ──────────────────────────────────────────────
+    ClipboardCmd,            // AGENTTY_CLIPBOARD_CMD (shell cmd → image bytes on stdout)
+
     // ── Debug ───────────────────────────────────────────────────────────
     DebugApi,                // AGENTTY_DEBUG_API=1  (dump streaming events)
     DebugFile,               // AGENTTY_DEBUG_FILE   (target path for above)
@@ -61,6 +64,7 @@ inline constexpr std::array kCatalog = {
     VarSpec{Var::OAuthHost,        "AGENTTY_OAUTH_HOST"},
     VarSpec{Var::Insecure,         "AGENTTY_INSECURE"},
     VarSpec{Var::AirgapSsh,        "AGENTTY_AIRGAP_SSH"},
+    VarSpec{Var::ClipboardCmd,     "AGENTTY_CLIPBOARD_CMD"},
     VarSpec{Var::DebugApi,         "AGENTTY_DEBUG_API"},
     VarSpec{Var::DebugFile,        "AGENTTY_DEBUG_FILE"},
 };
@@ -93,6 +97,7 @@ consteval bool every_var_has_row() {
         Var::AnthropicApiKey, Var::ClaudeOAuthToken,
         Var::SocksProxy, Var::ApiHost, Var::OAuthHost, Var::Insecure,
         Var::AirgapSsh,
+        Var::ClipboardCmd,
         Var::DebugApi, Var::DebugFile,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
