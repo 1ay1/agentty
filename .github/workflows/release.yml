@@ -240,11 +240,12 @@ jobs:
           TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
           TRUSTED_SIGNING_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
         run: |
-          $sign = if ($env:WINDOWS_CERT_BASE64 -or $env:TRUSTED_SIGNING_ENDPOINT) { '-Sign' } else { '' }
+          $signArgs = @()
+          if ($env:WINDOWS_CERT_BASE64 -or $env:TRUSTED_SIGNING_ENDPOINT) { $signArgs += '-Sign' }
           ./packaging/windows/build-msi.ps1 `
             -Version "$env:VERSION" `
             -Exe agentty-windows-x86_64.exe `
-            -Arch x64 $sign
+            -Arch x64 @signArgs
       - name: Upload to release
         shell: bash
         run: gh release upload "$TAG" agentty-windows-x86_64.exe agentty-windows-x86_64.msi --clobber
