@@ -289,10 +289,10 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 // Terminal, but sitting in the LIVE tail (run not settled
                 // yet, re-rendered every frame). Elide to a window so the
                 // per-frame split_lines stays bounded; the FROZEN snapshot
-                // built by freeze_range keeps show_all=true (painted once,
-                // then blitted). Footer is dropped here too because its
-                // count would reflect the slice; the frozen card carries
-                // the true `N lines · KB`.
+                // built by freeze_range keeps a generous head+tail (painted
+                // once, then blitted). Footer is dropped here too because
+                // its count would reflect the slice; the frozen card
+                // carries the true `N lines · KB`.
                 out.show_all = false;
                 out.text = tail_window(content, kStreamTailLines);
                 out.show_footer_stats = false;

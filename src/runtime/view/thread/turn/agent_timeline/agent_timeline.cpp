@@ -69,26 +69,41 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
                    : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
                                       : std::string{"\xe2\x80\xa6"};
         }
-        // Per-event hash_id disabled.
+        // Per-event hash_id: enabled ONLY on the FROZEN build path.
         //
-        // Setting hash_id on terminal tool events activates maya's
-        // ComponentElement-keyed cell blit in the inline-frame compose
-        // pipeline. In the live agentty session that path produces
-        // scrollback corruption: action-card bodies collapse to their
-        // last line and the left border vanishes (matches the symptom
-        // in maya/tests/test_card_border.cpp, which currently passes
-        // in isolation but reproduces in the live compose loop).
+        // Setting hash_id on a terminal tool event makes maya wrap the
+        // event's (header + body) sub-tree in a ComponentElement and
+        // blit its cached cells across frames instead of re-laying-out
+        // ToolBodyPreview's per-line row Elements. For a settled
+        // write/edit with hundreds of lines that collapses hundreds of
+        // flex rows into one cached blit — the dominant per-frame cost
+        // of a tall settled card.
         //
-        // The outer turn_element cache (view/cache.hpp) still skips
-        // Turn::build() entirely once is_turn_resolved fires, which
-        // covers the dominant case (turn fully settled, user is
-        // reading). The case we forgo is the in-flight window where
-        // some siblings are Running and others are Done: those Done
-        // cards re-layout every frame until the whole turn settles.
-        // Bounded cost, correct rendering — restore the hash_id once
-        // maya's inline-frame pipeline handles ComponentElement blits
-        // without desyncing prev_cells.
+        // It is gated on building_frozen() because the corruption that
+        // forced this off historically was in the LIVE inline-compose
+        // loop (cards collapsing to their last line, left border
+        // vanishing — a prev_cells desync in the differential path).
+        // Frozen turns are built by freeze_range under FrozenBuildScope
+        // and rendered through the component-cache cell blit that the
+        // card-border tests exercise and pass (5/5 at maya HEAD). So we
+        // cache the settled, immutable frozen snapshot — where it's
+        // proven safe — and leave the live tail un-hashed (it rebuilds
+        // every frame anyway, and its body is already tail-windowed).
+        //
+        // Key: tool-call id + a render key that folds the terminal
+        // status and body size so a different settled state can't alias
+        // a cached blit. The id is stable for the lifetime of the
+        // frozen entry (frozen bytes never change), so it's a permanent
+        // cache hit.
         maya::CacheId event_hash_id;
+        if (building_frozen() && tc.is_terminal()) {
+            event_hash_id = maya::CacheIdBuilder{}
+                .add(std::string_view{"agentty.tool_event"})
+                .add(std::string_view{tc.id.value})
+                .add(static_cast<std::uint64_t>(tc.status.index()))
+                .add(static_cast<std::uint64_t>(tc.output().size()))
+                .build();
+        }
 
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
