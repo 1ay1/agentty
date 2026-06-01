@@ -192,83 +192,16 @@ try_clipboard_cmd_override(std::string* error_out, bool& clip_handled) {
 // Requires Kitty (TERM=xterm-kitty / KITTY_WINDOW_ID) and `kitten` on
 // PATH. Returns nullopt (no error_out) when not under Kitty so the
 // caller falls through to the native path.
-std::optional<ClipboardImage> try_kitty_clipboard(std::string* error_out) {
-#if !defined(_WIN32)
-    // Don't gate on TERM / KITTY_WINDOW_ID: SSH strips KITTY_WINDOW_ID
-    // and may rewrite TERM, so they're unreliable on a remote host.
-    // Presence of the `kitten` binary plus "no native clipboard" (the
-    // only context we're called in) is signal enough — if the terminal
-    // on the other end of the TTY isn't actually Kitty, the kitten's
-    // OSC handshake gets no reply and the `timeout` below bounds the
-    // wait, after which we fall through.
-    if (!tool_in_path("kitten")) return std::nullopt;
-
-    // Unique temp path. tmpnam is racy in general but fine here: we own
-    // the name, write+read+unlink it immediately, no attacker window in
-    // a single-user TTY session.
-    std::string tmp = "/tmp/agentty-kclip-" + std::to_string(::getpid()) + ".bin";
-
-    // --get-clipboard --mime 'image/*' picks the first image MIME the
-    // clipboard offers; kitten transcodes raster formats to what we ask.
-    // We request a concrete png file so kitten emits PNG.
-    //
-    // `timeout` guards against a stuck terminal handshake freezing the
-    // UI thread — the kitten waits on a terminal reply that may never
-    // come (terminal not Kitty after all, OSC swallowed, perms denied).
-    // 5s is generous for a clipboard round-trip incl. a permission tap.
-    std::string have_timeout = tool_in_path("timeout") ? "timeout 5 " : "";
-    std::string errlog = tmp + ".err";
-    std::string cmd = have_timeout
-        + "kitten clipboard --get-clipboard --mime 'image/png' "
-        + tmp + " </dev/tty >/dev/tty 2>" + errlog;
-    int rc = std::system(cmd.c_str());
-
-    CaptureResult r;
-    if (FILE* f = std::fopen(tmp.c_str(), "rb")) {
-        char buf[8192];
-        std::size_t n;
-        while (r.bytes.size() < kCap && (n = std::fread(buf, 1, sizeof(buf), f)) > 0)
-            r.bytes.append(buf, n);
-        std::fclose(f);
-        r.status = 0;
-    }
-
-    // Optional diagnostics: AGENTTY_DEBUG_FILE captures the kitten's
-    // exit code, captured bytes, and its stderr so a failed paste can
-    // be diagnosed without guessing.
-    if (const char* dbg = util::env::get_or_null<util::env::Var::DebugFile>()) {
-        std::string kerr;
-        if (FILE* ef = std::fopen(errlog.c_str(), "rb")) {
-            char b[1024]; std::size_t n;
-            while ((n = std::fread(b, 1, sizeof(b), ef)) > 0) kerr.append(b, n);
-            std::fclose(ef);
-        }
-        if (FILE* lf = std::fopen(dbg, "a")) {
-            std::fprintf(lf,
-                "[kitty-clip] cmd=%s rc=%d bytes=%zu stderr=%.500s\n",
-                cmd.c_str(), rc, r.bytes.size(), kerr.c_str());
-            std::fclose(lf);
-        }
-    }
-    std::remove(errlog.c_str());
-    std::remove(tmp.c_str());
-
-    if (r.bytes.empty()) {
-        if (error_out)
-            *error_out = "Kitty clipboard had no image "
-                         "(copy an image, then Ctrl+V; if a permission "
-                         "prompt appeared, accept it and retry)";
-        return std::nullopt;
-    }
-    if (auto img = wrap(std::move(r))) return img;
-    if (error_out)
-        *error_out = "Kitty clipboard returned non-image data";
-    return std::nullopt;
-#else
-    (void)error_out;
-    return std::nullopt;
-#endif
-}
+// NOTE: an earlier version shelled out to `kitten clipboard` here to
+// fetch the image over Kitty's terminal protocol in a plain SSH session.
+// That is fundamentally unsafe from inside a live TUI: the kitten reads
+// and writes the controlling /dev/tty that agentty already holds in raw
+// mode (bracketed paste, kitty keyboard, mouse, alt-screen). On exit the
+// kitten resets terminal modes to its own defaults, corrupting agentty's
+// terminal state and crashing the session on the next input. A correct
+// implementation must do the clipboard-read escape INSIDE maya's input
+// loop (which owns the tty), not via a subprocess. Removed until that
+// exists. AGENTTY_CLIPBOARD_CMD remains the supported escape hatch.
 
 } // namespace
 
@@ -309,23 +242,17 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
 
     if (!has_wl_paste && !has_xclip) {
         // No display server reachable usually means a headless / SSH /
-        // airgap host. The image is on the user's laptop, not here. If
-        // we're running under Kitty, the kitten can fetch it over the
-        // terminal's own clipboard protocol — works in a plain SSH
-        // session, no clipboard tool needed on this host.
-        std::string kitty_err;
-        if (auto img = try_kitty_clipboard(&kitty_err)) return img;
-
+        // airgap host. The image is on the user's laptop, not here —
+        // nothing on this machine can read it. Point at the override.
         const char* disp = std::getenv("DISPLAY");
         const char* wl   = std::getenv("WAYLAND_DISPLAY");
         const bool headless = (!disp || !*disp) && (!wl || !*wl);
         if (headless) {
-            if (!kitty_err.empty()) return fail_owned(std::move(kitty_err));
             return fail(
                 "no clipboard on this host (headless / SSH). The image is "
-                "on your laptop, not the remote. Use a Kitty terminal (its "
-                "`kitten` fetches the clipboard over SSH), set "
-                "AGENTTY_CLIPBOARD_CMD, or attach the image by path");
+                "on your laptop, not the remote — set AGENTTY_CLIPBOARD_CMD "
+                "to a command that prints the laptop's clipboard image to "
+                "stdout, or attach the image by path");
         }
         return fail(wayland
             ? "no clipboard tool — install wl-clipboard "
