@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1]
+
 ### Added
 - `--version` / `-V` / `version` flag — prints `agentty <PROJECT_VERSION>` and exits. The version is baked at build time from `CMakeLists.txt`'s `project(... VERSION ...)` line, so bumping the project version updates every site that reads `AGENTTY_VERSION`.
 - Queued messages render as preview rows in the conversation transcript (above the composer), visually identical to real user turns. Mirrors Claude Code 2.1.119's behaviour at binary offset 80106500.
@@ -18,6 +20,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - `submit_message` now queues on any non-Idle phase (`m.s.active()`) instead of just `is_streaming() || is_executing_tool()`. Defensive — the keymap already gated `AwaitingPermission` via the permission modal — but makes the guarantee structural.
 
 ### Fixed
+- **Model / thread / palette pickers felt unresponsive — arrow keys "registered once per 4-5 presses."** The Program render gate (`visual_hash`) didn't include any modal/picker selection state, so moving the cursor (`ModelPickerMove` → `index++`) produced a model the gate considered visually identical and `skip_render` fired; the new cursor position only painted when an unrelated hashed axis (the ~265 ms composer caret-blink parity) happened to flip. `visual_hash` now mixes in every modal's open/closed state plus the active picker's cursor index and filter query, so each keystroke repaints immediately.
+- **Picker arrow keys double-dispatched.** The picker `ScrollState`s defaulted to `auto_dispatch = true`, so every ↑/↓/PageUp was fed into `ScrollState::handle` (bumping `scroll.y`) *in addition* to the reducer's selection move — the two then fought the widget's selection-follow clamp. Set `auto_dispatch = false` on all six picker scroll states; scroll position is now a pure function of the selected index.
+- **Up-to-100 ms input stall on bare Escape and split escape sequences (maya).** The idle (`fps=0`) event loop slept the full 100 ms poll while the input parser held a partial escape sequence (a lone ESC, or an arrow key whose bytes arrived in separate reads over SSH/tmux/slow ptys) — only `flush_timeout()` could resolve it, and only after the 50 ms escape deadline, but the loop never woke to call it. The loop now clamps its poll timeout to the escape deadline while the parser has pending input (`Runtime::has_pending_input()`). Most visible in the pickers, which idle with no spinner tick to keep the loop spinning.
 - **`agentty gets stuck — nothing works` after Esc.** A worker thread's trailing `StreamError("cancelled")`, dispatched ~200 ms after the cancel-token trip, was running on the runtime's `active_ctx`. If the user submitted a new turn during that window, the handler's `a->cancel.reset()` would null out the *new* turn's cancel token, leaving `Esc` unable to cancel anything until process restart. `launch_stream` now wraps `dispatch` in a `guarded` lambda that captures the cancel token and short-circuits when tripped — no events from a cancelled worker reach the reducer, so the new turn's state is never touched.
 - Removed the redundant `N messages queued` line from the shortcut row; the composer's own `❚ N queued` chip is now the single source of truth for queue depth.
 
