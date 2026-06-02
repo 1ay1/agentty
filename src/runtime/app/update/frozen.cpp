@@ -118,41 +118,10 @@ maya::Element compaction_divider_row() {
 }
 
 // Cheap byte-based row estimate for a single message's contribution
-// to a frozen Turn. NOT a render — a coarse proxy (avg ~60 cols/row)
-// used only to BOUND the frozen canvas height, where over/under by a
-// few rows is harmless. Shared by rehydrate_frozen (budget walk) and
-// freeze_range (per-entry frozen_rows accounting).
-// Cheap, non-allocating estimate of a JSON value's rendered byte
-// footprint. Walks the node tree summing string lengths + a small
-// constant per scalar/structural node. Used ONLY to bound the frozen
-// canvas height, so precision doesn't matter — but it must be cheap:
-// the previous version called j.dump(), which allocated a full
-// serialized copy of the args for EVERY tool call on EVERY freeze. On
-// a thread with large write/edit args that was megabytes of JSON
-// serialization per resume (rehydrate_frozen freezes the whole tail)
-// and per user turn (freeze_through) — the dominant cost of opening an
-// old long thread. This walk allocates nothing.
-std::size_t estimate_json_bytes(const nlohmann::json& j) {
-    switch (j.type()) {
-        case nlohmann::json::value_t::string:
-            return j.get_ref<const std::string&>().size();
-        case nlohmann::json::value_t::array: {
-            std::size_t n = 2;  // brackets
-            for (const auto& e : j) n += estimate_json_bytes(e) + 1;
-            return n;
-        }
-        case nlohmann::json::value_t::object: {
-            std::size_t n = 2;  // braces
-            for (const auto& [k, v] : j.items())
-                n += k.size() + 2 + estimate_json_bytes(v) + 1;
-            return n;
-        }
-        case nlohmann::json::value_t::null:
-            return 0;
-        default:
-            return 8;  // number / bool: a few bytes
-    }
-}
+// to a frozen Turn. NOT a render — a coarse proxy used only to BOUND
+// the frozen canvas height, where over/under by a few rows is harmless.
+// Shared by rehydrate_frozen (budget walk) and freeze_range (per-entry
+// frozen_rows accounting).
 
 // Wrapped-row count for a text body at the given content width: each
 // hard newline starts a fresh row, and a line longer than `cols`
@@ -178,9 +147,37 @@ std::size_t wrapped_rows(std::string_view body, int cols) {
     return rows == 0 ? 1 : rows;
 }
 
+// Wrapped-row count contributed by every STRING value in a JSON args
+// tree. A tool card renders its big payload (write `content`, edit
+// `edits[].new_text`/`old_text`, etc.) one row per source line, so the
+// real rendered height tracks newlines in those strings — NOT the JSON
+// byte length. Summing per-string wrapped_rows captures multi-line
+// payloads accurately and biases toward OVER-counting (the safe
+// direction for the trim's "provably above the viewport" proof).
+// Non-string scalars contribute nothing (they render inline in the
+// header, not the body). Cheap: no allocation, no dump().
+std::size_t estimate_json_string_rows(const nlohmann::json& j, int cols) {
+    switch (j.type()) {
+        case nlohmann::json::value_t::string:
+            return wrapped_rows(j.get_ref<const std::string&>(), cols);
+        case nlohmann::json::value_t::array: {
+            std::size_t n = 0;
+            for (const auto& e : j) n += estimate_json_string_rows(e, cols);
+            return n;
+        }
+        case nlohmann::json::value_t::object: {
+            std::size_t n = 0;
+            for (const auto& [k, v] : j.items())
+                n += estimate_json_string_rows(v, cols);
+            return n;
+        }
+        default:
+            return 0;
+    }
+}
+
 std::size_t estimate_msg_rows(const Message& mm) {
     const int cols = estimate_wrap_cols();
-    const std::size_t w = static_cast<std::size_t>(cols);
 
     // Prose body: count real wrapped rows (newline-aware), not bytes/60.
     std::size_t rows = 0;
@@ -188,22 +185,31 @@ std::size_t estimate_msg_rows(const Message& mm) {
     if (!mm.streaming_text.empty()) rows += wrapped_rows(mm.streaming_text, cols);
 
     for (const auto& tc : mm.tool_calls) {
-        // The RENDERED body of a settled tool card comes from its
-        // ARGS, not its output: a write card shows args["content"]
-        // (the whole new file, show_all), an edit card shows every
-        // hunk's old/new text under args["edits"], a read/grep card
-        // shows its result text. tc.output() is only the one-line
-        // "wrote N lines" footer. Counting just output() under-
-        // estimated a 3000-line write as ~1 row, so the row cap never
-        // tripped and the canvas ballooned. We don't have the laid-out
-        // text here, so approximate the body's wrapped height from a
-        // cheap (non-allocating) byte walk of the args JSON divided by
-        // the real content width — NOT dump(), which allocated a full
-        // serialized copy per freeze and made resuming a long thread
-        // slow. output() bytes wrap too.
-        std::size_t body_bytes = tc.output().size() + tc.args_streaming.size();
-        if (!tc.args.is_null()) body_bytes += estimate_json_bytes(tc.args);
-        rows += (body_bytes + w - 1) / w;
+        // The RENDERED body of a settled tool card is one ROW PER SOURCE
+        // LINE (line-numbered write, per-hunk edit diff, read/grep
+        // output), not bytes/width. The old `body_bytes / w` estimate
+        // catastrophically UNDER-counted any body with many short lines:
+        // a 300-line write of ~20-char lines is ~300 rendered rows but
+        // bytes/width put it at ~79. That under-count is the root of the
+        // scrollback duplication — trim_frozen_above_viewport's "provably
+        // above the viewport" proof reads these row counts, and an
+        // under-counted (still on-screen) entry gets dropped, re-emitting
+        // committed scrollback rows shifted = the turn appears twice.
+        // Count newlines in the rendered text sources instead; wrapping
+        // only ADDS rows, so newline-count is a safe LOWER bound that's
+        // far closer to reality, and we keep the byte term as an extra
+        // over-count cushion for wrapped long lines.
+        std::size_t tool_rows = 0;
+        if (!tc.output().empty())
+            tool_rows += wrapped_rows(tc.output(), cols);
+        if (!tc.args_streaming.empty())
+            tool_rows += wrapped_rows(tc.args_streaming, cols);
+        // Args JSON: the big body is a string field (write `content`,
+        // edit `edits[].new_text`/`old_text`). Count newlines across all
+        // string values so a multi-line payload counts its real lines.
+        if (!tc.args.is_null())
+            tool_rows += estimate_json_string_rows(tc.args, cols);
+        rows += tool_rows;
         // Header / footer / chrome rows per tool card (~4 rows even
         // for an empty body — title, divider, status, blank). Fixed
         // row count, width-independent.
