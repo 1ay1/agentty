@@ -179,17 +179,37 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //      lands.
     if (n == "edit") {
         const bool streaming_now = !tc.is_terminal();
-        // Render edits through ONE renderer (Kind::EditDiff from args) in
-        // both the streaming and settled states. We used to swap to a
-        // GitDiff render parsed from the tool's ```diff fence the instant
-        // the edit went terminal — but EditDiff (per-hunk −/+ bands) and
-        // GitDiff (unified ---/+++/@@) have DIFFERENT row counts for the
-        // same edit, so the swap snapped the panel height by ±1 row at
-        // the settle instant. When the transcript fills the viewport that
-        // 1-row delta re-anchors the whole thread and visibly jolts the
-        // composer. Staying on EditDiff keeps the body height identical
-        // across settle (only the elision flag would change, and we leave
-        // that to the show_all decision below).
+        if (tc.is_terminal() && !tc.is_failed()) {
+            // Pull the diff payload out of the ```diff … ``` fence in the
+            // tool's output. Falls back to EditDiff-from-args if the fence
+            // isn't found (older threads, custom tool wrappers).
+            const auto& body = tc.output();
+            constexpr std::string_view kOpen = "```diff\n";
+            constexpr std::string_view kClose = "\n```";
+            auto a = body.find(kOpen);
+            if (a != std::string::npos) {
+                a += kOpen.size();
+                auto b = body.find(kClose, a);
+                if (b == std::string::npos) b = body.size();
+                out.kind = Kind::GitDiff;
+                // Full diff as soon as the edit is terminal — in the live
+                // tail too, not only the frozen snapshot. The output is
+                // FINAL the instant the tool settles, so eliding to a
+                // tail window here just to expand it one tick later (when
+                // freeze_range rebuilds with show_all) is the visible
+                // "diff squeezes, then pops to full size" lag. Per-frame
+                // split_lines over a stable body for the one-or-two
+                // frames before the freeze handoff is negligible, and the
+                // frozen snapshot emits the same full body so the handoff
+                // is seamless (no height jump).
+                out.text     = body.substr(a, b - a);
+                out.show_all = true;
+                out.text_color = text_tertiary;
+                return out;
+            }
+            // Fence missing — fall through to args-based EditDiff below.
+        }
+
         if (tc.args.is_object()) {
             // Mirror Write's discipline: while the edit is streaming, the
             // hunks grow line-by-line (each `edits[i].new_text` delta
