@@ -313,8 +313,15 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             // keeps it inside the live viewport so it never commits to
             // scrollback — only the settled show_all render reaches
             // scrollback, and it's painted once.
-            out.show_all     = !streaming_now;
             out.is_streaming = streaming_now;
+            // show_all (full head-anchored render) is for the FROZEN
+            // snapshot only. The live tail — streaming OR a settled-but-
+            // not-yet-frozen card — stays compact (tail window, maya
+            // elides to code_tail) so its height never jumps while its
+            // position is still mutable, the source of the duplicated
+            // write card. The full body lands in scrollback exactly once,
+            // via the frozen snapshot.
+            out.show_all     = !streaming_now && building_frozen();
             if (streaming_now) {
                 // Small tail slice → O(window) per frame and a fixed
                 // compact card height. show_all=false above makes maya
@@ -324,13 +331,26 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 // it returns with the true total the instant we settle.
                 out.text = tail_window(content, kStreamTailLines);
                 out.show_footer_stats = false;
-            } else {
-                // Terminal: full body, show_all, in BOTH the live tail and
-                // the frozen snapshot — identical bytes/height across the
-                // freeze instant. This is the only write render that ever
-                // commits to native scrollback, so there is nothing above
-                // it to disagree with.
+            } else if (building_frozen()) {
+                // Terminal frozen snapshot: full body, painted once then
+                // blitted. This is the ONLY write render that reaches
+                // native scrollback, and it does so exactly once.
                 out.text = std::move(content);
+            } else {
+                // Terminal but still LIVE (run can't freeze yet — e.g. a
+                // sibling tool in the same batch is still Running). Keep
+                // it compact (same window as the streaming preview) so
+                // the card height is stable from stream through settle
+                // until the freeze swaps in the full frozen snapshot.
+                // Rendering the full body here would overflow the
+                // viewport top while the card's position is still
+                // mutable, stranding a scrollback copy on freeze.
+                out.text = tail_window(content, kStreamTailLines);
+                // Footer line/byte totals are computed off cfg_.text;
+                // on the windowed slice they'd read 64 lines, not the
+                // file's true length. Suppress until the frozen snapshot
+                // (full body) carries the real totals.
+                out.show_footer_stats = false;
             }
         } else if (tc.is_running()) {
             out.kind = Kind::FileWrite;

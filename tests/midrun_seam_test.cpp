@@ -351,6 +351,107 @@ static void test_single_edit_stream_to_freeze() {
     CHECK(d_bc < 0, "single edit Done->freeze rewrote a committed scrollback row");
 }
 
+// THE exact screenshot: a READ batch (INSPECT) then an EDIT batch
+// (MUTATE) in ONE turn. The read settles to a full 12-line body while
+// the run is still active. With a frozen lead-in pushing the read's top
+// above the viewport, the read body's downward growth must NOT rewrite
+// any committed row of the MUTATE batch / continuation below it.
+//
+// frame A: read RUNNING (compact, no body) + edit batch below it
+// frame B: read DONE (full body) — card grows by ~12 rows
+// frame C: mid-run freeze fires
+// The committed prefix must be byte-stable A->B and B->C.
+static void test_read_then_edit_batch_freeze() {
+    constexpr int kTermH = 40;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"readedit"};
+    Message u; u.role = Role::User; u.text = "inspect then edit";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    // Lead-in: settled edits frozen so the read card's top is well
+    // above the viewport top before it settles.
+    for (int e = 0; e < 20; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("rlead" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    Message ph; ph.role = Role::Assistant; ph.streaming_text = "working";
+    m.d.current.messages.push_back(std::move(ph));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    agentty::app::detail::freeze_settled_subturns(m);
+    m.d.current.messages.pop_back();
+
+    // The INSPECT sub-turn: a read, RUNNING (no body yet).
+    {
+        Message a; a.role = Role::Assistant;
+        ToolUse t;
+        t.id   = ToolCallId{"read_target"};
+        t.name = ToolName{"read"};
+        t.args = {{"path", "src/target.cpp"}};
+        t.status = ToolUse::Running{steady_clock::now(), ""};
+        a.tool_calls.push_back(std::move(t));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // The MUTATE sub-turn already streamed in below the read (the model
+    // emitted both in sequence; the read result just hasn't landed yet).
+    {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("mutate"));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // Active placeholder behind both.
+    Message ph2; ph2.role = Role::Assistant; ph2.streaming_text = "...";
+    m.d.current.messages.push_back(std::move(ph2));
+    auto frame_a = render_rows(m);
+
+    // frame B: read SETTLES — full 12-line body appears, growing the
+    // INSPECT card and shifting the MUTATE batch below it down.
+    agentty::app::detail::with_live_tool(
+        m, ToolCallId{"read_target"}, [&](ToolUse& t) {
+            auto now = steady_clock::now();
+            std::string body;
+            for (int i = 0; i < 12; ++i)
+                body += "line " + std::to_string(i) + ": target file content\n";
+            t.status = ToolUse::Done{now - milliseconds{5}, now, std::move(body)};
+        });
+    auto frame_b = render_rows(m);
+
+    // frame C: mid-run freeze fires (ToolExecOutput cadence).
+    agentty::app::detail::freeze_settled_subturns(m);
+    auto frame_c = render_rows(m);
+
+    int d_ab = first_committed_divergence(frame_a, frame_b, kTermH);
+    int d_bc = first_committed_divergence(frame_b, frame_c, kTermH);
+
+    auto dump = [&](const char* what, int d,
+                    const std::vector<std::string>& p,
+                    const std::vector<std::string>& c) {
+        if (d < 0) return;
+        std::fprintf(stderr, "  read+edit %s committed-row divergence at %d\n",
+                     what, d);
+        for (int y = d; y < std::min<int>(d + 4,
+                 (int)std::max(p.size(), c.size())); ++y) {
+            std::fprintf(stderr, "    row %2d P |%s|\n", y,
+                         y < (int)p.size() ? p[y].c_str() : "<none>");
+            std::fprintf(stderr, "    row %2d C |%s|\n", y,
+                         y < (int)c.size() ? c[y].c_str() : "<none>");
+        }
+    };
+    if (d_ab >= 0 || d_bc >= 0)
+        std::fprintf(stderr, "  read+edit frames: A=%zu B=%zu C=%zu (kTermH=%d)\n",
+                     frame_a.size(), frame_b.size(), frame_c.size(), kTermH);
+    dump("Running->Done", d_ab, frame_a, frame_b);
+    dump("Done->freeze", d_bc, frame_b, frame_c);
+
+    CHECK(d_ab < 0,
+          "read settle grew its body and rewrote a committed row of the "
+          "batch below it (the duplicated INSPECT card)");
+    CHECK(d_bc < 0, "read+edit Done->freeze rewrote a committed scrollback row");
+}
+
 // THE write-tool transition the user actually hits: a single `write`
 // streamed through Running (compact tail-window preview, show_all=false)
 // -> Done (FULL body, show_all=true) -> mid-run freeze. The streaming
@@ -419,6 +520,37 @@ static void test_single_write_stream_to_freeze() {
     // ── frame C: mid-run freeze fires.
     agentty::app::detail::freeze_settled_subturns(m);
     auto frame_c = render_rows(m);
+
+    // The settled write MUST be frozen off the live tail. If it lingers
+    // live (full 170-row body re-rendering every frame) it can overflow
+    // the viewport while mutable and strand a scrollback copy — the
+    // duplicated write card. After the freeze only the active
+    // placeholder (1 message) should remain live.
+    {
+        const std::size_t live =
+            m.d.current.messages.size() - m.ui.frozen_through;
+        CHECK(live <= 1,
+              "settled write lingered in the live tail instead of freezing "
+              "(it re-renders its full body every frame and can overflow "
+              "scrollback -> duplicated write card)");
+    }
+
+    // The FROZEN snapshot (frame_c) must carry the WHOLE file — first
+    // AND last line both present — so the user sees the complete write
+    // in scrollback. (frame_b, the pre-freeze live render, is compact
+    // by design and need not show line 0.)
+    {
+        auto joined = [](const std::vector<std::string>& rows) {
+            std::string s;
+            for (const auto& r : rows) { s += r; s.push_back('\n'); }
+            return s;
+        };
+        const std::string c = joined(frame_c);
+        CHECK(c.find("line 0: some plausible") != std::string::npos,
+              "frozen write snapshot missing the FIRST line of the file");
+        CHECK(c.find("line 169: some plausible") != std::string::npos,
+              "frozen write snapshot missing the LAST line of the file");
+    }
 
     int d_ab = first_committed_divergence(frame_a, frame_b, kTermH);
     int d_bc = first_committed_divergence(frame_b, frame_c, kTermH);
@@ -739,6 +871,7 @@ int main() {
     test_incremental_freeze_prefix_stable();
     test_single_edit_stream_to_freeze();
     test_single_write_stream_to_freeze();
+    test_read_then_edit_batch_freeze();
     test_streaming_text_prefix_freeze();
     test_giant_fence_prefix_freeze();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
