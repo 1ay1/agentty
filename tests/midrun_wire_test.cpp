@@ -729,17 +729,27 @@ static void test_text_turn_finish_shrink() {
     close(rfd);
 }
 
-// REGRESSION for the shrink-guard over-fire. A frame that OVERFLOWS the
-// viewport shrinks by a few rows but STAYS overflowed (new_rows still >
-// term_h). The prior (buggy) shrink-guard fired commit(prev_rows-term_h)
-// + demote_to_stale on ANY shrink-while-overflowed; case-(B) then
-// re-emitted the viewport starting at content_rows-term_h, overlapping
-// the rows the prior frame had already committed at prev_rows-term_h, so
-// (prev_rows - content_rows) rows were stranded as duplicates one screen
-// up. The fix gates the guard on new_rows <= term_h; a still-overflowed
-// shrink must take the NORMAL diff path (which re-emits only the bottom
-// row + \x1b[J, leaving committed scrollback untouched). Drive a real
-// carried Synced state across the shrink and assert it STAYS Synced.
+// REGRESSION for the shrink-while-overflowed recovery gate. When the
+// prior frame OVERFLOWS the viewport and THIS frame is shorter, two
+// shapes are possible:
+//
+//   (1) TURN-FINISH FREEZE — the shrink is at the BOTTOM; the rows
+//       already in native scrollback (the overflow prefix) are
+//       byte-IDENTICAL. The diff path handles it append-only. The
+//       recovery (commit + case-(B)) MUST NOT fire here — case-(B)
+//       re-paints from content top, overlapping the committed prefix,
+//       stranding a duplicate. This is the "turn doubles in scrollback
+//       when it finishes" bug — and it strands EVEN when the frame
+//       crosses from overflow to fit (new_rows <= term_h), which the
+//       previous gate (new_rows <= term_h) wrongly routed into case-B.
+//
+//   (2) SCROLLBACK-CONTENT SHIFT — the prefix differs; recovery IS
+//       needed.
+//
+// The gate discriminates via InlineFrameState::scrollback_prefix_matches.
+// Drive a real carried Synced state across the shrink and assert: (a)
+// the prefix-match predicate returns true for a pure bottom shrink, and
+// (b) the verified diff path stays Synced and rewrites no committed row.
 static void test_overflowed_shrink_stays_synced() {
     constexpr int kWidth = 80;
     constexpr int kTermH = 24;
@@ -770,21 +780,35 @@ static void test_overflowed_shrink_stays_synced() {
     };
 
     // frame A: a tall settled-text reply that overflows by a wide margin.
-    // Each "line N" is its own paragraph so truncating the TAIL leaves
-    // every retained (upper) row byte-identical — a pure bottom-shrink,
-    // which is exactly the live→frozen turn-finish handoff shape.
+    // The body is the FROZEN content; A additionally carries extra
+    // TRAILING paragraphs that frame B drops. Critically the dropped
+    // rows are all at the BOTTOM (inside [rows_b, rows_a)), so the
+    // committed prefix [0, rows_a - term_h) is byte-identical between A
+    // and B — a true turn-finish bottom-shrink (live caret / reveal gap
+    // collapsing), NOT a content-removal that shifts scrollback.
+    const int kBodyParas = 80;
+    auto body_text = [](int paras) {
+        std::string body;
+        for (int i = 0; i < paras; ++i)
+            body += "reply line " + std::to_string(i) + " with enough text\n\n";
+        return body;
+    };
+    // The final paragraph wraps over several rows in A (long) and a
+    // single row in B (short). Everything above it is identical, so the
+    // committed prefix stays byte-identical while the bottom shrinks.
+    auto tall_tail = [](int width_lines) {
+        std::string s = "TAIL";
+        for (int i = 0; i < width_lines; ++i) s += " wwwwwwww wwwwwwww wwwwwwww";
+        return s;
+    };
     {
         Message a; a.role = Role::Assistant;
-        std::string body;
-        for (int i = 0; i < 80; ++i)
-            body += "reply line " + std::to_string(i) + " with enough text\n\n";
-        a.text = std::move(body);
+        a.text = body_text(kBodyParas) + tall_tail(8);
         auto& cache = m.ui.view_cache.message_md(m.d.current.id, a.id);
         cache.streaming = std::make_shared<maya::StreamingMarkdown>();
         cache.streaming->set_content(a.text);
         cache.streaming->finish();
         m.d.current.messages.push_back(std::move(a));
-        // idle: it lingers live until frozen.
     }
     Canvas ca = paint(build_root(m), kWidth, pool);
     auto oa = InlineFrame<Empty>{}.seed().render(
@@ -801,17 +825,12 @@ static void test_overflowed_shrink_stays_synced() {
     CHECK(rows_a > kTermH + 4,
           "shrink setup: frame A must overflow the viewport by several rows");
 
-    // frame B: the reply loses its TRAILING paragraphs (pure bottom
-    // shrink) but STAYS overflowed (still > term_h). The retained upper
-    // rows are byte-identical, so a correct diff path emits essentially
-    // nothing but a bottom-row re-anchor + \x1b[J. The buggy commit+
-    // case-(B) path re-serialises the whole viewport.
+    // frame B: drops the trailing filler paragraphs only. All 80 body
+    // paragraphs remain, so the upper (committed) rows are byte-identical;
+    // only the bottom few rows shrink. Stays overflowed.
     {
         auto& a = m.d.current.messages.back();
-        std::string body;
-        for (int i = 0; i < 68; ++i)   // drop the last 12 paragraphs
-            body += "reply line " + std::to_string(i) + " with enough text\n\n";
-        a.text = std::move(body);
+        a.text = body_text(kBodyParas) + tall_tail(0);
         auto& cache = m.ui.view_cache.message_md(m.d.current.id, a.id);
         cache.streaming->set_content(a.text);
         cache.streaming->finish();
@@ -823,46 +842,37 @@ static void test_overflowed_shrink_stays_synced() {
     CHECK(rows_b < rows_a && rows_b > kTermH,
           "shrink setup: frame B must be shorter than A yet still overflow");
 
-    // Replicate Runtime::render's Synced-arm dispatch EXACTLY (the guard
-    // lives there, not in InlineFrame::render which this test drives
-    // directly). The guard's decision and the case-(B) flush it triggers
-    // are what we're testing; mirror them faithfully so a change to
-    // maya's gate condition changes this test's outcome.
-    const int term_h_v   = kTermH;
+    // The gate's discriminator, exercised against the REAL API. For a
+    // pure bottom shrink the overflow prefix is byte-identical → the
+    // recovery must NOT fire and the diff path runs.
     const int prev_rows_v = s.rows();
-    const int new_rows_v  = content_rows(cb).value();
-    bool took_guard = false;
+    const int overflow    = prev_rows_v - kTermH;
+    const bool prefix_unchanged = s.scrollback_prefix_matches(cb, overflow);
+    if (!prefix_unchanged) {
+        auto rba = rows_of(ca);
+        auto rbb = rows_of(cb);
+        for (int y = 0; y < overflow; ++y) {
+            const std::string& la = y < (int)rba.size() ? rba[y] : std::string();
+            const std::string& lb = y < (int)rbb.size() ? rbb[y] : std::string();
+            if (la != lb) {
+                std::fprintf(stderr,
+                    "  [shrink] prefix diverges at row %d/%d\n    A |%s|\n    B |%s|\n",
+                    y, overflow, la.c_str(), lb.c_str());
+                break;
+            }
+        }
+    }
+    CHECK(prefix_unchanged,
+          "pure bottom shrink: scrollback_prefix_matches must report the "
+          "overflow prefix unchanged, so the recovery does NOT fire and the "
+          "diff path keeps it Synced (no stranded duplicate).");
+
+    // Run the actual gate decision (mirrors Runtime::render's Synced arm).
     std::string bytes_guard;
-    std::string bytes_caseB;
-
-    // The fixed gate: prev_rows > term_h && new_rows < prev_rows &&
-    // new_rows <= term_h. A still-overflowed shrink (new_rows > term_h)
-    // must NOT take it. We compute the SAME predicate here.
-    const bool guard_fires =
-        prev_rows_v > term_h_v && new_rows_v < prev_rows_v
-        && new_rows_v <= term_h_v;
-    CHECK(!guard_fires,
-          "still-overflowed shrink would trip the shrink-guard — the gate "
-          "predicate (new_rows <= term_h) is wrong, or the test content no "
-          "longer stays overflowed. The guard must only fire when the "
-          "frame stops overflowing.");
-
-    if (guard_fires) {
-        // Buggy-shape path (should be unreachable with the fix): commit
-        // the OLD overflow, demote to Stale, then flush the case-(B)
-        // repaint and capture its bytes.
-        took_guard = true;
-        const int overflow = prev_rows_v - term_h_v;
-        auto marker = s.scrollback_marker(overflow);
-        auto committed = std::move(s).commit(marker);
-        auto stale = std::move(committed).demote_to_stale();
-        auto ob = std::move(stale).render(
-            cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            false);
-        bytes_caseB = drain(rfd);
-        (void)ob;
+    if (!prefix_unchanged) {
+        std::fprintf(stderr, "  [shrink] unexpected recovery path\n");
+        std::abort();
     } else {
-        // Correct path: normal verified diff render.
         auto wit = s.verify();
         CHECK(wit.has_value(), "shrink shadow verify failed after A");
         if (wit) {
@@ -877,22 +887,19 @@ static void test_overflowed_shrink_stays_synced() {
             CHECK(synced, "still-overflowed shrink diff did not stay Synced");
         }
     }
-    (void)took_guard;
 
-    // Wire-volume witness. The normal diff path for a pure BOTTOM shrink
-    // (retained top rows byte-identical) emits only a bottom-row
-    // re-anchor + \x1b[J — a few hundred bytes. The buggy commit+case-(B)
-    // path re-serialises the ENTIRE viewport (term_h rows) in place,
-    // re-emitting rows already committed to native scrollback (the
-    // stranded duplicate) — multiple KB.
-    const std::size_t emitted =
-        took_guard ? bytes_caseB.size() : bytes_guard.size();
-    std::fprintf(stderr, "  [shrink] guard_fires=%d emitted_bytes=%zu\n",
-                 (int)guard_fires, emitted);
-    CHECK(emitted < 2048,
-          "shrink emitted a full-viewport repaint — the shrink-guard "
-          "over-fired into case-(B), re-emitting committed scrollback rows "
-          "(the stranded duplicate). Expected the small incremental diff.");
+    // Wire-volume witness. The diff path for a pure BOTTOM shrink emits
+    // only the changed bottom rows + scroll-off protection + \x1b[J — a
+    // few KB at most, NOT the full-viewport-plus-committed-prefix repaint
+    // the buggy commit+case-(B) recovery produced. The structural checks
+    // below (stays Synced, no committed row rewritten) are the primary
+    // assertion; this bound just catches a regression back to case-(B).
+    std::fprintf(stderr, "  [shrink] prefix_unchanged=%d emitted_bytes=%zu\n",
+                 (int)prefix_unchanged, bytes_guard.size());
+    CHECK(bytes_guard.size() < 4096,
+          "shrink emitted a full-viewport repaint — the recovery over-fired "
+          "into case-(B), re-emitting committed scrollback rows (the stranded "
+          "duplicate). Expected the small incremental diff.");
 
     auto rb = rows_of(cb);
     const int committed_b = rows_b > kTermH ? rows_b - kTermH : 0;
