@@ -170,9 +170,10 @@ struct AgenttyApp {
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
         // how often we'll re-render purely for animation; the actual
-        // wake-up cadence is driven by request_animation_frame()
-        // deadlines, so a tight bucket here costs nothing when no
-        // animation is live.
+        // wake-up cadence is driven by the widget frame-request
+        // scheduler (maya request_animation_frame() — the single
+        // animation clock), so a tight bucket here costs nothing when
+        // no animation is live.
         //
         // CRITICAL: the hash bucket must be PHASE-LOCKED to whatever
         // animation is actually on screen, otherwise the two beat
@@ -182,9 +183,10 @@ struct AgenttyApp {
         // hash is unchanged) means: if the hash doesn't advance on the
         // exact frame an animation toggles, the widget's build() never
         // runs, so its request_animation_frame() is never re-armed, the
-        // RAF deadline lapses, and the loop sleeps the full idle
-        // timeout until the next keypress. So the bucket has to step
-        // once per visible animation transition, no faster, no slower.
+        // frame request is never re-issued, and the loop sleeps the
+        // full idle timeout until the next keypress. So the bucket has
+        // to step once per visible animation transition, no faster, no
+        // slower.
         //
         // Three regimes:
         //   (a) fine animation live (spinner / streaming caret / welcome
@@ -210,9 +212,10 @@ struct AgenttyApp {
         //       still 33 ms — UX identical to before.
         //   (b) idle with the composer caret blinking: lock to the blink
         //       HALF-period (265 ms = 530 ms / 2) so every hash step is
-        //       exactly one caret toggle. This keeps the RAF loop self-
-        //       sustaining (each render re-arms the composer's RAF) and
-        //       the blink perfectly regular, at ~4 renders/sec.
+        //       exactly one caret toggle. This keeps the frame-request
+        //       loop self-sustaining (each render re-issues the
+        //       composer's frame request) and the blink perfectly
+        //       regular, at ~4 renders/sec.
         //   (c) nothing animating at all (no caret — e.g. a modal owns
         //       focus): no time bucket, so a settled screen does ZERO
         //       idle renders until an event arrives.
