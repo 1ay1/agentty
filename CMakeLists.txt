@@ -966,6 +966,44 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME midrun_seam_test COMMAND midrun_seam_test)
 
+    # midrun_wire_test — WIRE-LEVEL scrollback-duplication regression.
+    # Drives maya's REAL inline compose across the live->freeze handoff
+    # and asserts no committed scrollback row is rewritten (the stranded
+    # duplicate the seam test's render_tree comparison can't catch).
+    add_executable(midrun_wire_test
+        tests/midrun_wire_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(midrun_wire_test PRIVATE include)
+    target_compile_definitions(midrun_wire_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(midrun_wire_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(midrun_wire_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(midrun_wire_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME midrun_wire_test COMMAND midrun_wire_test)
+
     # table_render_test — pins maya's GFM table classification: a
     # well-formed table (header line starts at '|', blank line before)
     # is a Table block; a malformed one with lead-in prose on the header
