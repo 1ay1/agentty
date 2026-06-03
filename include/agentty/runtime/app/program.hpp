@@ -49,6 +49,16 @@ struct AgenttyApp {
     // spinner) are bucketed at coarse intervals so each visible step
     // advances the hash. The bucket size is the upper bound on how
     // often we'll render purely for animation.
+    //
+    // ENFORCED CONTRACT — this is NOT a place to rely on care alone.
+    // tests/visual_hash_coverage_test.cpp holds two declarative
+    // tables: every view-affecting model axis must advance this hash,
+    // and every non-visual axis (last_tick, token counters) must NOT.
+    // If you add a `mix()` for a new field, add a matching row to that
+    // test's kVisualAxes; if you add ephemeral state the view ignores,
+    // add it to kInvariantAxes. Forgetting to mix a view-axis is a
+    // SILENT dead region in production — the test converts it to a
+    // loud CI failure.
     static std::uint64_t visual_hash(const Model& m) {
         std::uint64_t k = 1469598103934665603ULL;
         auto mix = [&](std::uint64_t v) {

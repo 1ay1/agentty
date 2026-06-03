@@ -974,4 +974,44 @@ if(AGENTTY_BUILD_TESTS)
     add_executable(table_render_test tests/table_render_test.cpp)
     target_link_libraries(table_render_test PRIVATE maya::maya)
     add_test(NAME table_render_test COMMAND table_render_test)
+
+    # visual_hash_coverage_test — proves the render gate
+    # (Program::visual_hash) can't silently drop a visible change. Two
+    # declarative tables: every view-affecting model axis must advance
+    # the hash; every non-visual axis (tick clock, token counters) must
+    # not. Catches the "forgot to mix() a new field" footgun at CI time
+    # instead of as a silent dead region in production.
+    add_executable(visual_hash_coverage_test
+        tests/visual_hash_coverage_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(visual_hash_coverage_test PRIVATE include)
+    target_compile_definitions(visual_hash_coverage_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(visual_hash_coverage_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(visual_hash_coverage_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(visual_hash_coverage_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME visual_hash_coverage_test COMMAND visual_hash_coverage_test)
 endif()
