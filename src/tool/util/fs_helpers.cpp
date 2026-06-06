@@ -319,10 +319,22 @@ bool is_within_workspace(const fs::path& target) {
     std::error_code ec;
     // weakly_canonical resolves what exists and leaves the rest as-is —
     // perfect for write targets where the file doesn't exist yet but the
-    // parent directory does. Falls back to absolute() on either failure
-    // so a missing/permission-denied parent doesn't auto-allow the call.
+    // parent directory does, and it resolves symlinks so an in-workspace
+    // link pointing at /etc fails the prefix check.
     auto canon_target = fs::weakly_canonical(target, ec);
-    if (ec) { canon_target = fs::absolute(target, ec); if (ec) return false; }
+    if (ec) {
+        // weakly_canonical failed (e.g. a parent component is a dangling
+        // symlink, or EACCES walking the chain). Do NOT fall back to a
+        // plain absolute() — that skips symlink resolution and would let
+        // a crafted link escape the boundary. Retry on the parent dir
+        // (the common write-target case: file doesn't exist yet but the
+        // directory does, and canonicalising it still resolves symlinks),
+        // then re-attach the filename. If even that fails, deny.
+        std::error_code pec;
+        auto parent = fs::weakly_canonical(target.parent_path(), pec);
+        if (pec || parent.empty()) return false;
+        canon_target = parent / target.filename();
+    }
     auto canon_root = workspace_root();   // already canonicalised on set
     // Component-wise prefix check. Plain string startsWith would let
     // /home/user/project-other through when root is /home/user/project.
@@ -393,7 +405,12 @@ bool should_skip_dir(std::string_view name) noexcept {
 
 bool is_binary_file(const fs::path& p) {
     std::ifstream ifs(p, std::ios::binary);
-    if (!ifs) return true;
+    // Can't open (permission denied, transient lock, race-deleted): NOT
+    // a binary verdict. Returning `true` here made grep/glob silently
+    // skip the file and made read/edit report a bogus "cannot read
+    // binary file". Return `false` so the caller's real read runs and
+    // surfaces the actual open error instead of masking it.
+    if (!ifs) return false;
     char buf[512];
     ifs.read(buf, sizeof(buf));
     auto n = ifs.gcount();

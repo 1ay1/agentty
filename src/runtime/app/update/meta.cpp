@@ -129,14 +129,26 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // catching up) there is nothing left to smooth AGAINST:
             // continuing to dribble the buffered tail at kBytesPerSec is
             // exactly the "it pauses, then slowly scrolls in the text it
-            // already had" symptom. last_event_at is bumped on every SSE
-            // event (text/json delta AND heartbeats), so a gap here means
-            // the wire is genuinely idle — reveal the whole backlog now.
+            // already had" symptom.
+            // last_event_at is bumped on every SSE event (text/json
+            // delta AND heartbeats), so a gap here means the wire is
+            // genuinely idle — reveal the whole backlog now.
+            //
+            // Threshold tuning: 90 ms was too tight. A model that
+            // batches tokens routinely pauses 90–200 ms between
+            // content_block_deltas, so a 90 ms quiet window tripped a
+            // full backlog flush on nearly every inter-delta gap — the
+            // smoother never engaged and the user saw "freeze, then a
+            // chunk dumps, freeze, chunk" (the stuck-then-burst
+            // symptom). 250 ms only trips on a GENUINE pause (model
+            // thinking / finished a paragraph), where flushing is
+            // correct; ordinary token batching now flows through the
+            // pacer and reveals smoothly.
             bool wire_quiet = false;
             if (const auto* a = active_ctx(m.s.phase)) {
                 if (a->last_event_at.time_since_epoch().count() != 0)
                     wire_quiet = (now - a->last_event_at)
-                               > std::chrono::milliseconds(90);
+                               > std::chrono::milliseconds(250);
             }
 
             if (!m.d.current.messages.empty()
@@ -144,8 +156,8 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             {
                 auto& msg = m.d.current.messages.back();
                 if (!msg.pending_stream.empty()) {
-                    // ~32 KB/s reveal rate. At 30 fps that's ~1 KB per
-                    // tick on a steady fill, well above any plausible
+                    // Base reveal rate ~32 KB/s. At 30 fps that's ~1 KB
+                    // per tick on a steady fill, well above any plausible
                     // sustained model emission rate, so the pacer only
                     // engages on bursts. At 10 fps it's ~3 KB per tick,
                     // same wall-clock fill speed.
@@ -153,15 +165,20 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     constexpr std::size_t kDripMin   = 64;
                     // Burst-flush threshold. Anthropic batches code
                     // blocks heavily — a small function body arrives
-                    // in a single content_block_delta of 2–4 KB. The
-                    // prior threshold (2 KB) tripped on every such
-                    // delta, defeating the pacer for code-heavy
-                    // responses (most of them). 8 KB still bounds the
-                    // visual stall — at 32 KB/s reveal that's a
-                    // quarter-second of catch-up — while letting
-                    // routine code-block deltas flow through the
-                    // smoother instead of dumping in one tick.
+                    // in a single content_block_delta of 2–4 KB. 8 KB
+                    // bounds the visual stall — at the adaptive reveal
+                    // rate that's well under a quarter-second of
+                    // catch-up — while letting routine code-block deltas
+                    // flow through the smoother instead of dumping.
                     constexpr std::size_t kBurstFlushBytes = 8192;
+                    // Bound the catch-up: whatever the backlog, drain it
+                    // within this window so the pacer never lags the wire
+                    // by more than a fraction of a second. This is what
+                    // turns a fixed-rate dribble (which falls behind a
+                    // fast model, accumulates, then bursts on the next
+                    // quiet gap — the stuck-then-fast symptom) into a
+                    // smooth accelerate-to-catch-up.
+                    constexpr float kMaxDrainSeconds = 0.20f;
 
                     std::size_t drip;
                     if (msg.pending_stream.size() >= kBurstFlushBytes
@@ -171,8 +188,18 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                         // it all this tick.
                         drip = msg.pending_stream.size();
                     } else {
+                        // Reveal at the GREATER of the base rate and the
+                        // rate needed to drain the current backlog within
+                        // kMaxDrainSeconds. A small backlog reveals at the
+                        // gentle base rate; a growing one accelerates so it
+                        // stays close to the wire instead of saving up a
+                        // burst.
+                        auto base_target = kBytesPerSec * dt;
+                        auto drain_target =
+                            static_cast<float>(msg.pending_stream.size())
+                            * (dt / kMaxDrainSeconds);
                         auto target = static_cast<std::size_t>(
-                            kBytesPerSec * dt);
+                            std::max(base_target, drain_target));
                         drip = std::max(target, kDripMin);
                         drip = std::min(drip, msg.pending_stream.size());
                     }

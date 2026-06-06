@@ -85,7 +85,37 @@ std::atomic<Backend> g_backend{Backend::None};
     // the path doesn't exist on this distro (e.g. /lib64 on Alpine).
     push_bind("--ro-bind",     "/usr");
     push_bind("--ro-bind",     "/bin");
-    push_bind("--ro-bind",     "/etc");
+
+    // /etc: bind ONLY the files a shell + toolchain + name resolution
+    // actually need, not the whole tree. Binding all of /etc exposed
+    // host secrets (/etc/shadow if readable, krb5 keytabs, corporate
+    // config) to an "approved" bash call that also has --share-net —
+    // a read+exfiltrate path the sandbox is supposed to close.
+    // --ro-bind-try so a missing file on a given distro is skipped.
+    {
+        static constexpr const char* kEtcAllow[] = {
+            "/etc/resolv.conf",   // DNS
+            "/etc/hosts",
+            "/etc/nsswitch.conf", // NSS resolution order
+            "/etc/host.conf",
+            "/etc/passwd",        // uid->name (git, shells)
+            "/etc/group",
+            "/etc/localtime",     // timestamps
+            "/etc/ssl",           // TLS trust store (curl/git over https)
+            "/etc/pki",           // RHEL/Fedora trust store
+            "/etc/ca-certificates",
+            "/etc/ca-certificates.conf",
+            "/etc/gitconfig",     // system git config
+            "/etc/profile",
+            "/etc/alternatives",  // Debian toolchain symlinks
+        };
+        for (const char* f : kEtcAllow) {
+            argv.emplace_back("--ro-bind-try");
+            argv.emplace_back(f);
+            argv.emplace_back(f);
+        }
+    }
+
     argv.emplace_back("--ro-bind-try");
     argv.emplace_back("/lib"); argv.emplace_back("/lib");
     argv.emplace_back("--ro-bind-try");
@@ -107,6 +137,12 @@ std::atomic<Backend> g_backend{Backend::None};
 
     // Workspace: read-write. Bound LAST so it overlays any earlier
     // --tmpfs / --ro-bind that touches the same prefix.
+    //
+    // NOTE: with --workspace / the rw bind covers the entire host
+    // filesystem, which defeats the point of the sandbox. We still
+    // wrap (process/pid/session hardening + fresh /tmp/proc/dev keep
+    // some value) but describe_state() reports the degraded posture so
+    // the user isn't told they're "active (bwrap)" when they're not.
     argv.emplace_back("--bind");
     argv.emplace_back(ws);
     argv.emplace_back(ws);
@@ -296,7 +332,17 @@ std::string describe_state() {
         case Backend::SandboxExec: tag = "sandbox-exec"; break;
         case Backend::None:        tag = nullptr;        break;
     }
-    if (tag) return std::string{"sandbox: active ("} + tag + ")";
+    if (tag) {
+        // --workspace / rw-binds the whole filesystem: still wrapped,
+        // but no filesystem containment. Be honest about it.
+        std::error_code wec;
+        auto ws = fs::weakly_canonical(workspace_root(), wec);
+        if (wec) ws = workspace_root();
+        if (ws == ws.root_path())
+            return std::string{"sandbox: degraded ("} + tag
+                 + ", --workspace / gives no filesystem containment)";
+        return std::string{"sandbox: active ("} + tag + ")";
+    }
     if (m == Mode::On)
         return "sandbox: requested but no backend "
 #if defined(__linux__)

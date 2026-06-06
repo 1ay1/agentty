@@ -75,6 +75,21 @@ fs::path data_dir() {
     p /= ".agentty";
     std::error_code ec;
     fs::create_directories(p, ec);
+    // Surface a persistent-storage failure once. Silently swallowing it
+    // meant threads/settings/memory writes became no-ops with zero
+    // feedback (read-only $HOME, full disk, EACCES). One warning to
+    // stderr is enough — it prints before maya takes the screen, and
+    // the static guard keeps it from spamming on every save.
+    if (ec && !fs::is_directory(p, ec)) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                "agentty: warning: cannot create data dir '%s' (%s) — "
+                "threads and settings will not persist this session\n",
+                p.string().c_str(), ec.message().c_str());
+        }
+    }
     return p;
 }
 
@@ -639,13 +654,19 @@ struct AsyncWriter {
     }
 
     void flush_and_stop() {
+        std::thread to_join;
         {
             std::lock_guard<std::mutex> lk(mu);
             stopping = true;
-            if (!worker.joinable()) return;
+            // Hand the worker handle out under the lock so a concurrent
+            // enqueue() can't observe a half-stopped state, and join
+            // outside the lock. run() drains every queued save before it
+            // sees `stopping` and exits, so nothing enqueued before this
+            // call is dropped.
+            if (worker.joinable()) to_join = std::move(worker);
         }
         cv.notify_one();
-        worker.join();
+        if (to_join.joinable()) to_join.join();
     }
 
     ~AsyncWriter() { flush_and_stop(); }
@@ -661,6 +682,9 @@ private:
             {
                 std::unique_lock<std::mutex> lk(mu);
                 cv.wait(lk, [this] { return !pending.empty() || stopping; });
+                // Drain-then-stop: even when `stopping` is set we keep
+                // popping until `pending` is empty, so the final
+                // snapshot the Quit reducer enqueued always lands.
                 if (pending.empty()) {
                     if (stopping) return;
                     continue;
