@@ -88,6 +88,7 @@ void print_usage() {
         "  -m, --model ID      Model id (e.g. claude-opus-4-5)\n"
         "  -w, --workspace DIR Sandbox filesystem tools to this directory\n"
         "                      (default: cwd). Tools refuse paths outside it.\n"
+        "                      Pass `--workspace /` to disable the gate.\n"
         "      --sandbox MODE  Wrap bash/diagnostics in an OS-native sandbox\n"
         "                      (Linux: bwrap, macOS: sandbox-exec).\n"
         "                      MODE = auto (default: use if available),\n"

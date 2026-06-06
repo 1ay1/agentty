@@ -298,6 +298,32 @@ wire-message shaping, same permission policy — just driven over JSON-RPC on
 stdio instead of a terminal. Any other ACP client (not just Zed) works the same
 way.
 
+The same `--workspace` and `--sandbox` switches the TUI accepts apply in ACP
+mode (they run before the agent starts), so you can loosen or disable both from
+the Zed `args`:
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "agentty",
+      "args": ["acp", "--workspace", "/", "--sandbox", "off"]
+    }
+  }
+}
+```
+
+- **`--workspace DIR`** — file tools refuse paths outside `DIR` (default: the
+  folder you opened in Zed). Widen it to any directory, or pass `--workspace /`
+  to **turn the filesystem gate off** entirely (unrestricted access).
+- **`--sandbox off`** — stop wrapping `bash` / `diagnostics` in bwrap /
+  sandbox-exec. Use when you already have external isolation (a container, VM,
+  or you simply trust the loop). `--sandbox on` does the opposite: refuse to
+  start if no OS sandbox backend is available.
+
+With `--workspace /` the startup line honestly reports `sandbox: degraded` —
+binding the whole filesystem means there's no containment left to enforce.
+
 > Run `agentty acp` by hand and it'll sit waiting for newline-delimited
 > JSON-RPC on stdin (diagnostics go to stderr, stdout is the protocol channel).
 > `scripts/acp_smoke.py` is a tiny reference client that drives a full
