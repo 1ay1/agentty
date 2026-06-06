@@ -777,7 +777,7 @@ if(AGENTTY_BUILD_TESTS)
     # exercised by the seven pins in docs/INLINE_SCROLLBACK.md. Builds
     # synthetic tool-heavy Threads of varying shape and times every
     # phase from Thread construction through warm render.
-    add_executable(long_session_bench
+    add_executable(long_session_bench EXCLUDE_FROM_ALL
         tests/long_session_bench.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}
@@ -819,7 +819,7 @@ if(AGENTTY_BUILD_TESTS)
     # live-session freeze+trim flow (the path long_session_bench's
     # rehydrate-based render phase does NOT cover). Used to verify the
     # frozen row-cap keeps warm render flat regardless of thread length.
-    add_executable(o1_probe
+    add_executable(o1_probe EXCLUDE_FROM_ALL
         tests/o1_probe.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}
@@ -855,7 +855,7 @@ if(AGENTTY_BUILD_TESTS)
     # realthread_probe — loads a real on-disk thread JSON and times the
     # resume hot path (rehydrate_frozen + cold/warm render) to locate
     # where a long thread's open time actually goes.
-    add_executable(realthread_probe
+    add_executable(realthread_probe EXCLUDE_FROM_ALL
         tests/realthread_probe.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}
@@ -891,7 +891,7 @@ if(AGENTTY_BUILD_TESTS)
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime), so it compiles against just the fuzzy_match TU.
-    add_executable(fuzzy_match_smoke
+    add_executable(fuzzy_match_smoke EXCLUDE_FROM_ALL
         tests/fuzzy_match_smoke.cpp
         src/tool/util/fuzzy_match.cpp
     )
@@ -904,7 +904,7 @@ if(AGENTTY_BUILD_TESTS)
     # recovery (model leaks `<parameter name="…">` into the JSON tool
     # input). Header-only logic, so it links against just nlohmann + the
     # header-only tool spec catalog.
-    add_executable(param_tag_repair_test
+    add_executable(param_tag_repair_test EXCLUDE_FROM_ALL
         tests/param_tag_repair_test.cpp
     )
     target_include_directories(param_tag_repair_test PRIVATE include)
@@ -915,7 +915,7 @@ if(AGENTTY_BUILD_TESTS)
     # midrun_freeze_test — correctness for freeze_settled_subturns: the
     # mid-run split (frozen prefix + live continuation tail) must be
     # visually seamless (one header, all content present, no elision).
-    add_executable(midrun_freeze_test
+    add_executable(midrun_freeze_test EXCLUDE_FROM_ALL
         tests/midrun_freeze_test.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}
@@ -953,7 +953,7 @@ if(AGENTTY_BUILD_TESTS)
     # incremental mid-run freeze cadence, the committed row PREFIX must
     # stay byte-stable (a rewritten committed row = a duplicated turn in
     # native scrollback).
-    add_executable(midrun_seam_test
+    add_executable(midrun_seam_test EXCLUDE_FROM_ALL
         tests/midrun_seam_test.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}
@@ -991,7 +991,7 @@ if(AGENTTY_BUILD_TESTS)
     # Drives maya's REAL inline compose across the live->freeze handoff
     # and asserts no committed scrollback row is rewritten (the stranded
     # duplicate the seam test's render_tree comparison can't catch).
-    add_executable(midrun_wire_test
+    add_executable(midrun_wire_test EXCLUDE_FROM_ALL
         tests/midrun_wire_test.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}
@@ -1030,7 +1030,7 @@ if(AGENTTY_BUILD_TESTS)
     # is a Table block; a malformed one with lead-in prose on the header
     # line is a Paragraph (the wall-of-pipes a model produced). Standalone
     # against maya only — no agentty sources needed.
-    add_executable(table_render_test tests/table_render_test.cpp)
+    add_executable(table_render_test EXCLUDE_FROM_ALL tests/table_render_test.cpp)
     target_link_libraries(table_render_test PRIVATE maya::maya)
     add_test(NAME table_render_test COMMAND table_render_test)
 
@@ -1040,7 +1040,7 @@ if(AGENTTY_BUILD_TESTS)
     # the hash; every non-visual axis (tick clock, token counters) must
     # not. Catches the "forgot to mix() a new field" footgun at CI time
     # instead of as a silent dead region in production.
-    add_executable(visual_hash_coverage_test
+    add_executable(visual_hash_coverage_test EXCLUDE_FROM_ALL
         tests/visual_hash_coverage_test.cpp
         ${AGENTTY_IO_SOURCES}
         ${AGENTTY_WORKSPACE_SOURCES}

@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <exception>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -278,10 +279,24 @@ rpc::Outcome AgentServer::handle_request(const std::string& method,
                     "agentty has no credentials — run `agentty login` first");
             return rpc::Outcome::ok(json::object());
         }
+        if (method == "logout")
+            return rpc::Outcome::ok(on_logout(params));
         if (method == "session/new")
             return rpc::Outcome::ok(on_new_session(params));
         if (method == "session/load")
             return rpc::Outcome::ok(on_load_session(params));
+        if (method == "session/resume")
+            return rpc::Outcome::ok(on_resume_session(params));
+        if (method == "session/list")
+            return rpc::Outcome::ok(on_list_sessions(params));
+        if (method == "session/close")
+            return rpc::Outcome::ok(on_close_session(params));
+        if (method == "session/delete")
+            return rpc::Outcome::ok(on_delete_session(params));
+        if (method == "session/set_mode")
+            return rpc::Outcome::ok(on_set_mode(params));
+        if (method == "session/set_config_option")
+            return rpc::Outcome::ok(on_set_config_option(params));
         if (method == "session/prompt") {
             // Long-running: kick off the turn on a worker and reply later via
             // Peer::respond(id, ...). Tell the peer not to reply synchronously.
@@ -317,11 +332,29 @@ json AgentServer::on_initialize(const json& params) {
             {"version", AGENTTY_VERSION},
         }},
         {"agentCapabilities", {
+            // session/load is gated by this top-level flag (v1 quirk).
             {"loadSession", true},
             {"promptCapabilities", {
                 {"image", false},
                 {"audio", false},
                 {"embeddedContext", true},
+            }},
+            // We don't connect to MCP servers ourselves.
+            {"mcpCapabilities", {
+                {"http", false},
+                {"sse", false},
+            }},
+            // We authenticate ourselves from ~/.config/agentty, and support
+            // dropping that credential via the `logout` method.
+            {"auth", {
+                {"logout", json::object()},
+            }},
+            // The full optional session surface. `{}` for each = "supported".
+            {"sessionCapabilities", {
+                {"list",   json::object()},
+                {"resume", json::object()},
+                {"close",  json::object()},
+                {"delete", json::object()},
             }},
         }},
         // We authenticate ourselves; advertise no client-driven auth methods.
@@ -340,12 +373,17 @@ json AgentServer::on_new_session(const json& params) {
     Session s;
     s.id  = sid;
     s.cwd = cwd;
+    s.profile = profile_;   // inherit the server-wide default tier
     s.thread.id = tid;
     s.thread.title = cwd.empty() ? std::string{"ACP session"}
                                  : std::string{"ACP "} + cwd;
     const Session& stored = sessions_.emplace(sid, std::move(s)).first->second;
     persist(stored);
-    return json{{"sessionId", sid}};
+    index_session(stored);
+    return json{
+        {"sessionId", sid},
+        {"modes", mode_state(stored.profile)},
+    };
 }
 
 json AgentServer::on_load_session(const json& params) {
@@ -356,6 +394,7 @@ json AgentServer::on_load_session(const json& params) {
 
     Thread thread;
     bool   from_memory = false;
+    Profile profile = profile_;
 
     // If this subprocess already has the session live in memory, use that —
     // it's authoritative and sidesteps any not-yet-flushed async disk write.
@@ -364,6 +403,7 @@ json AgentServer::on_load_session(const json& params) {
         if (auto it = sessions_.find(sid); it != sessions_.end()) {
             if (!cwd.empty()) it->second.cwd = cwd;
             thread      = it->second.thread;   // copy under lock
+            profile     = it->second.profile;
             from_memory = true;
         }
     }
@@ -379,22 +419,200 @@ json AgentServer::on_load_session(const json& params) {
 
         std::lock_guard<std::mutex> lk(session_mtx_);
         Session s;
-        s.id     = sid;
-        s.cwd    = cwd;
-        s.thread = thread;
+        s.id      = sid;
+        s.cwd     = cwd;
+        s.profile = profile;
+        s.thread  = thread;
         sessions_.insert_or_assign(sid, std::move(s));
     }
 
     // Replay the full conversation so the client rebuilds the transcript,
-    // THEN resolve (the dispatcher wraps this return value as the response).
+    // THEN resolve with the current mode state.
     replay_history(sid, thread);
-    return json(nullptr);
+    return json{{"modes", mode_state(profile)}};
 }
 
 void AgentServer::on_cancel(const json& params) {
     std::string sid = params.value("sessionId", "");
     if (Session* s = find_session(sid); s && s->cancel)
         s->cancel->cancel();
+}
+
+// ── Session modes ─────────────────────────────────────────────────────────
+const char* AgentServer::mode_id_for(Profile p) {
+    switch (p) {
+        case Profile::Ask:     return "ask";
+        case Profile::Write:   return "write";
+        case Profile::Minimal: return "minimal";
+    }
+    return "ask";
+}
+
+Profile AgentServer::profile_from_mode_id(const std::string& mode_id,
+                                          Profile fallback) {
+    if (mode_id == "ask")     return Profile::Ask;
+    if (mode_id == "write")   return Profile::Write;
+    if (mode_id == "minimal") return Profile::Minimal;
+    return fallback;
+}
+
+json AgentServer::mode_state(Profile current) {
+    // agentty's three permission tiers as ACP SessionMode[]. The client
+    // (Zed) renders these in its mode picker and calls session/set_mode with
+    // the chosen id.
+    return json{
+        {"currentModeId", mode_id_for(current)},
+        {"availableModes", json::array({
+            json{{"id", "ask"},     {"name", "Ask"},
+                 {"description", "Prompt before edits, commands, and network access"}},
+            json{{"id", "write"},   {"name", "Write"},
+                 {"description", "Edit files and run commands without prompting; still prompt for risky ops"}},
+            json{{"id", "minimal"}, {"name", "Minimal"},
+                 {"description", "Prompt for everything, including file reads"}},
+        })},
+    };
+}
+
+json AgentServer::on_set_mode(const json& params) {
+    std::string sid    = params.value("sessionId", "");
+    std::string modeId = params.value("modeId", "");
+    Session* s = find_session(sid);
+    if (!s) throw std::runtime_error("session/set_mode: unknown sessionId: " + sid);
+    s->profile = profile_from_mode_id(modeId, s->profile);
+    // Echo the change back so the client's mode indicator stays in sync even
+    // if it didn't initiate the switch (per the current_mode_update contract).
+    send_update(sid, json{
+        {"sessionUpdate", "current_mode_update"},
+        {"currentModeId", mode_id_for(s->profile)},
+    });
+    return json::object();
+}
+
+// ── Session config options ───────────────────────────────────────────
+json AgentServer::on_set_config_option(const json& params) {
+    std::string sid      = params.value("sessionId", "");
+    std::string configId = params.value("configId", "");
+    std::string value    = params.value("value", "");
+    Session* s = find_session(sid);
+    if (!s) throw std::runtime_error("session/set_config_option: unknown sessionId: " + sid);
+    // The only config option we expose is the model selector; the value is a
+    // model id string. Empty value resets to the server default.
+    if (configId == "model")
+        s->model = value;
+    return json{{"configOptions", json::array()}};
+}
+
+// ── Authentication ───────────────────────────────────────────────
+json AgentServer::on_logout(const json& /*params*/) {
+    // Drop the in-process credential and wipe the on-disk store so a
+    // subsequent prompt reports authentication-required.
+    auth::clear_credentials();
+    auth_ = auth::ApiKeyHeader{""};   // empty arm → auth::is_empty() == true
+    return json::object();
+}
+
+// ── Session lifecycle: list / resume / close / delete ───────────────────
+json AgentServer::load_session_index() {
+    std::lock_guard<std::mutex> lk(index_mtx_);
+    std::ifstream ifs(persistence::threads_dir() / "acp_sessions.json");
+    if (!ifs) return json::object();
+    try {
+        json j; ifs >> j;
+        if (j.is_object()) return j;
+    } catch (...) {}
+    return json::object();
+}
+
+void AgentServer::index_session(const Session& sess) {
+    std::lock_guard<std::mutex> lk(index_mtx_);
+    auto path = persistence::threads_dir() / "acp_sessions.json";
+    json j = json::object();
+    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (...) { j = json::object(); } } }
+    if (!j.is_object()) j = json::object();
+    j[sess.id] = json{
+        {"cwd", sess.cwd},
+        {"title", sess.thread.title},
+        {"updatedAt", std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()},
+    };
+    std::ofstream ofs(path, std::ios::trunc);
+    if (ofs) ofs << j.dump();
+}
+
+void AgentServer::unindex_session(const std::string& id) {
+    std::lock_guard<std::mutex> lk(index_mtx_);
+    auto path = persistence::threads_dir() / "acp_sessions.json";
+    json j = json::object();
+    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (...) { return; } } }
+    if (!j.is_object() || !j.contains(id)) return;
+    j.erase(id);
+    std::ofstream ofs(path, std::ios::trunc);
+    if (ofs) ofs << j.dump();
+}
+
+json AgentServer::on_list_sessions(const json& params) {
+    // Filter by cwd if the client asks. Pagination (cursor/nextCursor) is
+    // unnecessary at our scale — we return the whole set in one page.
+    std::string filter_cwd = params.value("cwd", "");
+    json index = load_session_index();
+
+    // Fold in any live, not-yet-indexed sessions (defensive: index_session
+    // runs on creation, but keep the two views consistent).
+    {
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        for (const auto& [id, s] : sessions_) {
+            if (!index.contains(id))
+                index[id] = json{{"cwd", s.cwd}, {"title", s.thread.title}};
+        }
+    }
+
+    json sessions = json::array();
+    for (auto it = index.begin(); it != index.end(); ++it) {
+        const std::string& id = it.key();
+        const json& meta = it.value();
+        std::string cwd = meta.value("cwd", "");
+        if (!filter_cwd.empty() && cwd != filter_cwd) continue;
+        // SessionInfo requires a cwd; if we never recorded one, skip rather
+        // than emit an invalid entry.
+        if (cwd.empty()) continue;
+        json info{{"sessionId", id}, {"cwd", cwd}};
+        if (meta.contains("title") && meta["title"].is_string())
+            info["title"] = meta["title"];
+        sessions.push_back(std::move(info));
+    }
+    return json{{"sessions", std::move(sessions)}};
+}
+
+json AgentServer::on_resume_session(const json& params) {
+    // Resume is load + a richer response (mode/config state). Reuse the load
+    // path to restore + replay, then resolve with the mode state.
+    std::string sid = params.value("sessionId", "");
+    (void)on_load_session(params);   // restores, registers, replays history
+    Profile profile = profile_;
+    if (Session* s = find_session(sid)) profile = s->profile;
+    return json{
+        {"modes", mode_state(profile)},
+        {"configOptions", json::array()},
+    };
+}
+
+json AgentServer::on_close_session(const json& params) {
+    // Drop the session from memory (free its Thread + cancel token) but leave
+    // it on disk so it can be loaded/resumed/listed again later.
+    std::string sid = params.value("sessionId", "");
+    std::lock_guard<std::mutex> lk(session_mtx_);
+    sessions_.erase(sid);
+    return json::object();
+}
+
+json AgentServer::on_delete_session(const json& params) {
+    // Permanent removal: drop from memory, delete the on-disk thread, and
+    // remove the sidecar index entry.
+    std::string sid = params.value("sessionId", "");
+    { std::lock_guard<std::mutex> lk(session_mtx_); sessions_.erase(sid); }
+    persistence::delete_thread(ThreadId{sid});
+    unindex_session(sid);
+    return json::object();
 }
 
 void AgentServer::send_update(const std::string& session_id, json update) {
@@ -424,6 +642,11 @@ void AgentServer::on_prompt(const json& id, const json& params) {
         Message um;
         um.role = Role::User;
         um.text = std::move(text);
+        // Give the session a meaningful title from its first user message
+        // (the "ACP <cwd>" placeholder is only useful before any prompt).
+        if (it->second.thread.messages.empty() && !um.text.empty())
+            it->second.thread.title =
+                persistence::title_from_first_message(um.text);
         it->second.thread.messages.push_back(std::move(um));
         it->second.cancel = std::make_shared<http::CancelToken>();
     }
@@ -470,6 +693,7 @@ void AgentServer::run_turn(json prompt_id, std::string session_id) {
         // Persist the updated transcript so the session survives a restart
         // and can be reloaded via session/load.
         persist(*s);
+        index_session(*s);   // refresh title/updatedAt in the cwd sidecar
     }
 
     json result{{"stopReason", acp_stop_reason(last_stop, cancelled, errored)}};
@@ -481,7 +705,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                                           std::string& out_error) {
     // ── Build the wire request, mirroring launch_stream ──────────────────
     provider::Request req;
-    req.model         = model_id_;
+    req.model         = sess.model.empty() ? model_id_ : sess.model;
     req.system_prompt = provider::anthropic::default_system_prompt();
     req.cancel        = sess.cancel;
     req.auth          = auth_;
@@ -591,7 +815,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     //                    reads included.
     //   Write         — same side-effect prompts as Ask (Exec/WriteFs/Net
     //                    still prompt) but never prompts for reads.
-    const Profile profile = profile_;
+    const Profile profile = sess.profile;
 
     for (auto& tc : last.tool_calls) {
         if (sess.cancel && sess.cancel->is_cancelled()) {

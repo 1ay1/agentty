@@ -288,7 +288,16 @@ What works over ACP:
 - **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`,
   network) trigger Zed's native allow/reject dialog before they run; the
   `--profile` flag (above) tunes exactly which tools prompt.
+- **Session modes** — the three permission tiers (`Ask` / `Write` / `Minimal`)
+  surface as ACP session modes, so you can switch them live from Zed's mode
+  picker (`session/set_mode`) without restarting the agent; the starting tier
+  is the `--profile` flag.
 - **Cancellation** — stop a turn from Zed and the in-flight stream tears down.
+- **Full session lifecycle** — agentty advertises and implements the complete
+  ACP v1 session surface: `session/new`, `session/load`, `session/resume`,
+  `session/list`, `session/close`, `session/delete`, plus `logout`. Zed can
+  enumerate past sessions, reopen any of them, and prune them — all backed by
+  the on-disk thread store.
 - **Session persistence + reload** — every session is written to agentty's
   on-disk thread store after each turn (the *same* format the TUI uses), so it
   survives a subprocess restart. Zed can call `session/load` to resume a past
@@ -357,7 +366,9 @@ above copies them at `chmod 600`).
 > Run `agentty acp` by hand and it'll sit waiting for newline-delimited
 > JSON-RPC on stdin (diagnostics go to stderr, stdout is the protocol channel).
 > `scripts/acp_smoke.py` is a tiny reference client that drives a full
-> initialize → prompt → tool → permission round-trip.
+> initialize → prompt → tool → permission round-trip;
+> `scripts/acp_methods_test.py` exercises the rest of the v1 method surface
+> (modes, list/resume/close/delete, logout) offline.
 
 ## How it compares
 
