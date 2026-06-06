@@ -358,33 +358,11 @@ std::size_t estimate_msg_rows(const Message& mm, int cols) {
             tool_rows += wrapped_rows(tc.output(), cols);
         if (out_cap > 0 && tool_rows > out_cap)
             tool_rows = out_cap;
-        // Settled-body cap (write / edit). tool_body_preview drops
-        // show_all and renders a bounded head+tail preview once a settled
-        // write/edit body exceeds kSettledBodyLineCap source lines (see
-        // cap_settled_body) — so a giant body renders ~head+tail rows,
-        // not one-row-per-line. The estimate MUST follow or it over-counts
-        // a capped entry, and trim_frozen_above_viewport's keep-loop would
-        // then stop early and could drop an on-screen entry (the
-        // duplication ghost). Clamp the tool body to a ceiling that stays
-        // at/under the widget's REAL elided budget so the estimate never
-        // over-counts a capped entry.
-        //
-        // Real elided budget (tool_body_preview.hpp Config defaults):
-        //   write: code_head(4)+code_tail(3)+1 elision marker  = ~8 rows
-        //   edit : max_edit_hunks_shown(4) × (edit_head_per_side(6)
-        //          + edit_tail_per_side(2) + 1 marker)          = ~36 rows
-        // A single shared ceiling can't sit under BOTH (write is tiny,
-        // edit is larger), so use per-kind ceilings. Mirror
-        // kSettledBodyLineCap in tool_body_preview.cpp.
-        constexpr std::size_t kSettledBodyLineCap = 80;
-        constexpr std::size_t kWriteBodyRowCeiling = 8;
-        constexpr std::size_t kEditBodyRowCeiling  = 36;
-        if (tc.is_terminal() && tool_rows > kSettledBodyLineCap) {
-            if (tc.name.value == "write")
-                tool_rows = kWriteBodyRowCeiling;
-            else if (tc.name.value == "edit")
-                tool_rows = kEditBodyRowCeiling;
-        }
+        // write / edit render their FULL body when settled (no head+tail
+        // cap), so the estimate counts one row per source line via
+        // estimate_json_string_rows above — no ceiling clamp. The estimate
+        // is display-column accurate and one-sided UNDER (string_width,
+        // ceil-wrap), the safe direction for the trim keep-loops.
         rows += tool_rows;
         // Header / footer / chrome rows per tool card (~4 rows even
         // for an empty body — title, divider, status, blank). Fixed
@@ -1238,6 +1216,23 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
         keep_from = k;
         if (kept_rows >= kViewportKeepRows) break;
     }
+
+    // STRUCTURAL anti-duplication slack: keep ONE extra entry below the
+    // row-margin cut. The keep-loop above trusts frozen_rows[k] (an
+    // estimate). It is one-sided UNDER for a fresh entry, but a widen
+    // resize can make a stamped count OVER-state an entry's real height —
+    // then the loop would reach kViewportKeepRows before the REAL rows do
+    // and the entry at keep_from could still be partly on screen. Dropping
+    // it removes Element rows the wire hasn't committed (maya clamps the
+    // commit to prev_rows-term_h) → the live tree is shorter than the
+    // wire and the entry re-emits below the committed boundary (the
+    // duplication ghost). Retaining one whole extra entry guarantees a
+    // full entry of real rows sits between the cut and the viewport top,
+    // absorbing ANY single-entry estimate over-count regardless of
+    // direction. Cheap: one extra blitted entry, evicted next trim once
+    // it has truly scrolled off.
+    if (keep_from > 0) --keep_from;
+
     // Never drop the last 2 entries no matter what.
     if (m.ui.frozen.size() >= 2 && keep_from > m.ui.frozen.size() - 2)
         keep_from = m.ui.frozen.size() - 2;
