@@ -34,11 +34,14 @@
 #endif
 
 #include <cstdio>
+#include <iostream>
 #include <string>
 #include <utility>
 
 #include <maya/maya.hpp>
 
+#include "agentty/acp/jsonrpc.hpp"
+#include "agentty/acp/server.hpp"
 #include "agentty/airgap/airgap.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
@@ -75,6 +78,8 @@ void print_usage() {
         "  status            Show current auth status\n"
         "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"
         "                    (`agentty airgap --help` for details)\n"
+        "  acp               Run as an ACP agent over stdio (for Zed et al.)\n"
+        "  version           Print the agentty version and exit\n"
         "  help              Show this message\n"
         "\n"
         "options:\n"
@@ -108,7 +113,8 @@ Args parse_args(int argc, char** argv) {
     Args out;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "login" || a == "logout" || a == "status" || a == "help") {
+        if (a == "login" || a == "logout" || a == "status" || a == "help"
+         || a == "acp") {
             out.subcommand = std::move(a);
         } else if (a == "airgap") {
             // Hand the remaining argv tail to the airgap subcommand verbatim
@@ -258,6 +264,29 @@ int main(int argc, char** argv) {
     provider::anthropic::AnthropicProvider provider;
     io::FsStore                            store;
     app::install(provider, store, auth::make_auth_header(creds));
+
+    // ── ACP mode: run as a headless agent over stdio (Zed et al.) ───────
+    // No maya, no terminal UI. stdin/stdout carry newline-delimited
+    // JSON-RPC; all diagnostics go to stderr so the protocol channel stays
+    // clean. Reuses the same provider/tools/sandbox wired above.
+    if (args.subcommand == "acp") {
+        auto settings = persistence::load_settings();
+        std::string model_id = settings.model_id.empty()
+            ? std::string{"claude-opus-4-5"} : settings.model_id.value;
+
+        acp::rpc::Peer peer(std::cin, std::cout);
+        acp::AgentServer server(
+            peer,
+            [&provider](provider::Request req, provider::EventSink sink) {
+                provider.stream(std::move(req), std::move(sink));
+            },
+            auth::make_auth_header(creds),
+            std::move(model_id));
+        std::fprintf(stderr, "agentty: ACP agent ready on stdio\n");
+        int rc = server.serve();
+        persistence::flush_pending_saves();
+        return rc;
+    }
 
     // Pre-warm TLS to api.anthropic.com on a detached background thread.
     // The first prompt the user types will reuse the SSL session + DNS +

@@ -178,6 +178,7 @@ agentty --workspace ~/code/other-project   # run against a different workspace w
 agentty status                              # which auth source will be used
 agentty login / logout                      # non-interactive auth, useful over SSH
 agentty airgap user@host                    # see below
+agentty acp                                 # run as an ACP agent for Zed (see below)
 ```
 
 ## Keys
@@ -224,6 +225,59 @@ Requires OpenSSH ≥ 7.6 on both ends (October 2017 — every distro has it). `A
 ### Behind a TLS-terminating corporate proxy
 
 SOCKS keeps TLS end-to-end, so cert verification works untouched. Different story if you route through a forward proxy that re-encrypts with its own cert (Zscaler, Bluecoat, mitmproxy). Install the proxy's CA into the system trust store (`update-ca-certificates` on Debian, `update-ca-trust` on Fedora) — agentty picks up system roots at startup. As a last resort, `AGENTTY_INSECURE=1` skips peer verification entirely; don't ship that to anyone you care about.
+
+## Use agentty inside Zed (ACP)
+
+agentty speaks the [Agent Client Protocol](https://agentclientprotocol.com) — the
+same protocol Zed uses to drive Claude Code and Gemini. Point Zed at the
+`agentty acp` subcommand and your terminal agent becomes a first-class agent
+panel inside the editor: streaming responses, inline diffs for every edit, and
+native permission prompts before any file write or shell command.
+
+Add this to Zed's `settings.json` (`zed: open settings`):
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "agentty",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Then open the agent panel (`cmd-?` / `ctrl-?`), pick **agentty** from the agent
+list, and prompt. Auth is whatever `agentty login` already set up — the ACP
+process reads the same `~/.config/agentty/credentials.json`, so there's nothing
+extra to configure. Set the model once with `agentty -m claude-sonnet-4-5` (it's
+saved to settings) and the ACP agent picks it up.
+
+What works over ACP:
+
+- **Streaming text** — the model's reply renders token-by-token in Zed's panel.
+- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a
+  Zed tool card with the right icon, the raw arguments, and live status
+  (pending → running → done/failed).
+- **Inline diffs** — `write` and `edit` emit ACP `diff` content, so Zed renders
+  the file change inline and lets you review it in place.
+- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`,
+  network) trigger Zed's native allow/reject dialog before they run; read-only
+  inspection runs without prompting so the loop stays fluid.
+- **Cancellation** — stop a turn from Zed and the in-flight stream tears down.
+- **Workspace sandbox** — file tools stay inside the session's `cwd` (the
+  folder you opened in Zed); `bash` is wrapped in bwrap/sandbox-exec exactly
+  like the standalone TUI.
+
+The ACP agent is the *same* engine as the TUI — same provider, same tools, same
+wire-message shaping, same permission policy — just driven over JSON-RPC on
+stdio instead of a terminal. Any other ACP client (not just Zed) works the same
+way.
+
+> Run `agentty acp` by hand and it'll sit waiting for newline-delimited
+> JSON-RPC on stdin (diagnostics go to stderr, stdout is the protocol channel).
+> `scripts/acp_smoke.py` is a tiny reference client that drives a full
+> initialize → prompt → tool → permission round-trip.
 
 ## How it compares
 

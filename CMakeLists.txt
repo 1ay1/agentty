@@ -359,6 +359,14 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
 )
 
+# ACP (Agent Client Protocol) — lets agentty run as a headless agent
+# subprocess that Zed (or any ACP client) drives over JSON-RPC on stdio.
+# Reuses the provider + tools + wire shaping; no maya/UI dependency.
+set(AGENTTY_ACP_SOURCES
+    src/acp/jsonrpc.cpp
+    src/acp/server.cpp
+)
+
 set(AGENTTY_DIFF_SOURCES
     src/diff/diff.cpp
 )
@@ -452,6 +460,7 @@ add_executable(agentty
     ${AGENTTY_WORKSPACE_SOURCES}
     ${AGENTTY_AIRGAP_SOURCES}
     ${AGENTTY_PROVIDER_SOURCES}
+    ${AGENTTY_ACP_SOURCES}
     ${AGENTTY_DIFF_SOURCES}
     ${AGENTTY_TOOL_SOURCES}
     ${AGENTTY_RUNTIME_SOURCES}
@@ -890,6 +899,18 @@ if(AGENTTY_BUILD_TESTS)
     target_link_libraries(fuzzy_match_smoke PRIVATE
         nlohmann_json::nlohmann_json)
     add_test(NAME fuzzy_match_smoke COMMAND fuzzy_match_smoke)
+
+    # param_tag_repair_test — regression for the XML-in-JSON tool-call
+    # recovery (model leaks `<parameter name="…">` into the JSON tool
+    # input). Header-only logic, so it links against just nlohmann + the
+    # header-only tool spec catalog.
+    add_executable(param_tag_repair_test
+        tests/param_tag_repair_test.cpp
+    )
+    target_include_directories(param_tag_repair_test PRIVATE include)
+    target_link_libraries(param_tag_repair_test PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_test(NAME param_tag_repair_test COMMAND param_tag_repair_test)
 
     # midrun_freeze_test — correctness for freeze_settled_subturns: the
     # mid-run split (frozen prefix + live continuation tail) must be
