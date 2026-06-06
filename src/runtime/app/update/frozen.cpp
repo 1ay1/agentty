@@ -364,16 +364,26 @@ std::size_t estimate_msg_rows(const Message& mm, int cols) {
         // cap_settled_body) — so a giant body renders ~head+tail rows,
         // not one-row-per-line. The estimate MUST follow or it over-counts
         // a capped entry, and trim_frozen_above_viewport's keep-loop would
-        // then drop an on-screen entry (the duplication ghost). Clamp the
-        // tool body to the elided ceiling here. UNDER/exact is the safe
-        // side, so use a conservative ceiling above the widget's real
-        // head+tail budget. Mirrors kSettledBodyLineCap in
-        // tool_body_preview.cpp.
-        constexpr std::size_t kSettledBodyLineCap   = 80;
-        constexpr std::size_t kCappedBodyRowCeiling = 48;
-        if ((tc.name.value == "write" || tc.name.value == "edit")
-            && tc.is_terminal() && tool_rows > kSettledBodyLineCap) {
-            tool_rows = kCappedBodyRowCeiling;
+        // then stop early and could drop an on-screen entry (the
+        // duplication ghost). Clamp the tool body to a ceiling that stays
+        // at/under the widget's REAL elided budget so the estimate never
+        // over-counts a capped entry.
+        //
+        // Real elided budget (tool_body_preview.hpp Config defaults):
+        //   write: code_head(4)+code_tail(3)+1 elision marker  = ~8 rows
+        //   edit : max_edit_hunks_shown(4) × (edit_head_per_side(6)
+        //          + edit_tail_per_side(2) + 1 marker)          = ~36 rows
+        // A single shared ceiling can't sit under BOTH (write is tiny,
+        // edit is larger), so use per-kind ceilings. Mirror
+        // kSettledBodyLineCap in tool_body_preview.cpp.
+        constexpr std::size_t kSettledBodyLineCap = 80;
+        constexpr std::size_t kWriteBodyRowCeiling = 8;
+        constexpr std::size_t kEditBodyRowCeiling  = 36;
+        if (tc.is_terminal() && tool_rows > kSettledBodyLineCap) {
+            if (tc.name.value == "write")
+                tool_rows = kWriteBodyRowCeiling;
+            else if (tc.name.value == "edit")
+                tool_rows = kEditBodyRowCeiling;
         }
         rows += tool_rows;
         // Header / footer / chrome rows per tool card (~4 rows even
