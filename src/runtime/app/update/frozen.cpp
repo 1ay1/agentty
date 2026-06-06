@@ -195,6 +195,29 @@ std::size_t estimate_json_string_rows(const nlohmann::json& j, int cols) {
     }
 }
 
+// Max rendered BODY rows for a tool whose maya renderer ELIDES output to
+// a fixed head/tail budget regardless of show_all. tool_body_preview.hpp:
+//   bash/diagnostics → bash_output_tail, bash_tail = 4
+//   grep/glob/list_dir/web_search/git_* → code_block head+tail = 4+3 = 7
+//   read/find_definition → file_read, read_head = 5
+//   web_fetch → Json, head+tail ~ 7
+// These render the SAME elided height live AND frozen (their render
+// methods call elide() with fixed budgets and never honor show_all), so
+// counting full wrapped_rows(output) OVER-counts by the elided amount —
+// exactly what makes the mid-run keep-loop drop an on-screen entry and
+// strand a committed-scrollback ghost. Returns 0 when the tool renders
+// its full body (write/edit args path, git_diff show_all) so the caller
+// counts it whole.
+std::size_t tool_output_render_cap(std::string_view name) {
+    if (name == "bash" || name == "diagnostics")          return 4;
+    if (name == "read" || name == "find_definition")      return 5;
+    if (name == "grep" || name == "glob" || name == "list_dir"
+     || name == "web_search" || name == "web_fetch"
+     || name == "git_status" || name == "git_log"
+     || name == "git_commit")                             return 7;
+    return 0;   // 0 ⇒ no cap (render full output)
+}
+
 std::size_t estimate_msg_rows(const Message& mm) {
     const int cols = estimate_wrap_cols();
 
@@ -205,9 +228,12 @@ std::size_t estimate_msg_rows(const Message& mm) {
 
     for (const auto& tc : mm.tool_calls) {
         // The RENDERED body of a tool card is one ROW PER SOURCE LINE
-        // (line-numbered write, per-hunk edit diff, read/grep output),
-        // not bytes/width — a 300-line write of ~20-char lines is ~300
-        // rendered rows, which bytes/width put at ~79.
+        // for write (line-numbered) / edit (per-hunk diff) — those echo
+        // the full args payload (show_all). OUTPUT-based tools (bash,
+        // read, grep, …) DON'T: their maya renderers elide output to a
+        // fixed head/tail budget (see tool_output_render_cap), so a
+        // 200-line bash dump renders ~4 rows. Counting the full output
+        // for those over-counts — capped below.
         //
         // This count must NOT OVER-estimate. It feeds two trims, and the
         // mid-run one (trim_frozen_above_viewport) walks the NEWEST
@@ -232,8 +258,17 @@ std::size_t estimate_msg_rows(const Message& mm) {
             tool_rows += estimate_json_string_rows(tc.args, cols);
         else if (!tc.args_streaming.empty())
             tool_rows += wrapped_rows(tc.args_streaming, cols);
-        if (!tc.output().empty())
-            tool_rows += wrapped_rows(tc.output(), cols);
+        if (!tc.output().empty()) {
+            std::size_t out_rows = wrapped_rows(tc.output(), cols);
+            // Tools whose maya renderer elides output to a fixed head/
+            // tail budget render that many rows, NOT the full body —
+            // counting the full body OVER-counts and trips the mid-run
+            // keep-loop into dropping an on-screen entry (ghost band).
+            if (std::size_t cap = tool_output_render_cap(tc.name.value);
+                cap > 0 && out_rows > cap)
+                out_rows = cap;
+            tool_rows += out_rows;
+        }
         rows += tool_rows;
         // Header / footer / chrome rows per tool card (~4 rows even
         // for an empty body — title, divider, status, blank). Fixed

@@ -471,12 +471,11 @@ static void test_trim_commits_exact_dropped_rows() {
 }
 
 // 9. trim_frozen_above_viewport (mid-run-safe variant) must ALSO commit
-//    exactly the rows it dropped — NOT commit_scrollback_overflow. It has
-//    no production caller today, but a row-exact commit makes it safe by
-//    construction: even if re-wired into a mid-run path, commit_inline_
-//    prefix clamps the count to (prev_rows - term_h), so a still-visible
-//    row can never be committed and no duplicate can strand. This guards
-//    the latent footgun against ever shipping the overflow variant.
+//    exactly the rows it dropped — NOT commit_scrollback_overflow. Wired
+//    into the mid-run paths (tool.cpp after each tool settles, meta.cpp on
+//    Tick), where a row-exact commit is safe by construction: commit_
+//    inline_prefix clamps the count to (prev_rows - term_h), so a still-
+//    visible row can never be committed and no duplicate can strand.
 static void test_trim_above_viewport_commits_exact() {
     Model m;
     m.d.current.id = agentty::ThreadId{"trimabove"};
@@ -535,6 +534,54 @@ static void test_trim_above_viewport_commits_exact() {
     }
 }
 
+// 10. Output-elided tools (bash, read, grep, …) render a fixed head/tail
+//     budget, NOT their full output. The frozen_rows estimate must track
+//     the ELIDED render height, not the full output line count — an
+//     over-count trips the mid-run keep-loop into dropping an on-screen
+//     entry and stranding a committed-scrollback ghost band (the bash-card
+//     overlap bug). Assert the stored estimate stays close to the real
+//     rendered height for a bash card with a huge output.
+static void test_output_elided_tool_row_estimate_matches_render() {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"bashcap"};
+    Message u; u.role = Role::User; u.text = "run a noisy command";
+    m.d.current.messages.push_back(std::move(u));
+    Message a; a.role = Role::Assistant;
+    agentty::ToolUse tb;
+    tb.id   = agentty::ToolCallId{"bash_noisy"};
+    tb.name = agentty::ToolName{"bash"};
+    tb.args = {{"command", "grep -rn pattern src"}};
+    std::string output;
+    for (int i = 0; i < 200; ++i)
+        output += "src/file" + std::to_string(i) + ".cpp:"
+                + std::to_string(i) + ": some matching line of text\n";
+    auto now = steady_clock::now();
+    tb.status = agentty::ToolUse::Done{now - milliseconds{5}, now,
+                                       std::move(output)};
+    a.tool_calls.push_back(std::move(tb));
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Idle{};
+
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+
+    // The bash card elides 200 output lines to ~4 tail rows. The stored
+    // frozen_row_total must be in the same ballpark as the REAL rendered
+    // height — a pre-fix estimate counted all 200 lines (~200+ rows),
+    // wildly above the ~15-row render.
+    auto txt = render_dump(m);
+    int real_rows = 0;
+    for (char c : txt) if (c == '\n') ++real_rows;
+
+    CHECK(m.ui.frozen_row_total < static_cast<std::size_t>(real_rows) + 32,
+          "bash output row estimate vastly over-counts the elided render "
+          "(would trip the mid-run keep-loop into a ghost band)");
+    // Sanity: the body is still actually rendered (not dropped).
+    CHECK(txt.find("file199.cpp") != std::string::npos
+          || txt.find("file19") != std::string::npos,
+          "bash tail rows missing from the render");
+}
+
 int main() {
     std::printf("midrun_freeze_test\n");
     test_live_bounded();
@@ -546,6 +593,7 @@ int main() {
     test_trim_no_leading_gap();
     test_trim_commits_exact_dropped_rows();
     test_trim_above_viewport_commits_exact();
+    test_output_elided_tool_row_estimate_matches_render();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
     std::printf("PASSED\n");
