@@ -59,32 +59,57 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         cache.streaming->set_reveal_fx(true);
     }
 
-    // Pick the source bytes for THIS frame:
-    //   • settled: msg.text holds the final body, streaming_text empty.
+    // Pick the source bytes for THIS frame. The reveal cursor must see
+    // EVERY byte that has arrived from the wire so it can pace them
+    // smoothly on its own wall clock; if it only saw `streaming_text`,
+    // the visible text could advance only when meta.cpp's Tick handler
+    // drips pending_stream → streaming_text (33 ms sync / 100 ms non-
+    // sync / more over SSH). Between ticks each text delta still forces
+    // a render (fps=0), but streaming_text wouldn't have grown, so the
+    // reveal had nothing new to show — the text sat STUCK until the next
+    // tick dripped a chunk, then JUMPED. That is the "md gets stuck then
+    // bursts" stutter, and it is structural: deltas feed pending_stream,
+    // the drip feeds streaming_text only on Tick, the view read only
+    // streaming_text. Reading text + streaming_text + pending_stream
+    // makes the wall-clock reveal cursor the SINGLE display pacer over
+    // all arrived bytes, so visible output advances continuously at
+    // kRevealCharsPerSec independent of the tick cadence. (meta.cpp's
+    // drip still runs — it gates freeze_streaming_text_prefix and bounds
+    // the live tail — but it no longer controls what the user SEES.)
+    //
+    //   • settled: msg.text holds the final body, streaming_text +
+    //     pending_stream empty.
     //   • mid-sub-turn-2: msg.text holds the PRIOR sub-turn's settled
-    //     body and streaming_text holds the in-flight follow-up bytes.
-    //     We need to feed BOTH so the live tail keeps growing — picking
-    //     msg.text alone would freeze rendering at the prior sub-turn's
-    //     size until finalize_turn appended the new bytes in one jump.
-    //   • sub-turn-1 streaming: msg.text empty, streaming_text grows.
+    //     body; streaming_text + pending_stream hold the in-flight
+    //     follow-up bytes. Feed all so the live tail keeps growing.
+    //   • sub-turn-1 streaming: msg.text empty, streaming_text +
+    //     pending_stream grow.
     // The joined buffer is cached on MessageMdCache so the string_view
     // we hand to set_content_async stays valid across the call.
     const std::string* source_ptr = &msg.text;
-    if (!msg.streaming_text.empty()) {
-        if (msg.text.empty()) {
+    const bool has_live = !msg.streaming_text.empty()
+                       || !msg.pending_stream.empty();
+    if (has_live) {
+        if (msg.text.empty() && msg.pending_stream.empty()) {
+            // Streaming-text only, nothing buffered — reference it
+            // directly, no copy.
             source_ptr = &msg.streaming_text;
         } else {
             cache.combined_source.clear();
             cache.combined_source.reserve(
-                msg.text.size() + msg.streaming_text.size());
+                msg.text.size() + msg.streaming_text.size()
+                + msg.pending_stream.size());
             cache.combined_source.append(msg.text);
             cache.combined_source.append(msg.streaming_text);
+            cache.combined_source.append(msg.pending_stream);
             source_ptr = &cache.combined_source;
         }
     }
     const std::string& source = *source_ptr;
 
-    const bool settled = !msg.text.empty() && msg.streaming_text.empty();
+    const bool settled = !msg.text.empty()
+                       && msg.streaming_text.empty()
+                       && msg.pending_stream.empty();
     if (settled && !cache.combined_source.empty()) {
         // Reclaim the scratch buffer the moment streaming_text
         // drains — next freeze takes the snapshot off msg.text.
@@ -117,8 +142,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // the cursor forward to within kBacklogSnap of source.size() so
     // the reveal doesn't lag forever on a multi-KB paste. The reveal
     // is meant to be a smoothing filter, not a hard rate limit.
-    constexpr double kRevealCharsPerSec = 220.0;   // ~ChatGPT cadence
-    constexpr std::size_t kBacklogSnap   = 200;    // max bytes behind
+    // Reveal rate + backlog snap. The cursor now reveals against ALL
+    // arrived bytes (text+streaming_text+pending_stream), i.e. the
+    // model's true byte arrival rate, not the tick-paced streaming_text.
+    // So the rate must comfortably exceed a fast model's sustained
+    // output (a quick Sonnet is ~300–500 B/s, bursting higher) or the
+    // cursor would lag and lean on the snap every frame — the old
+    // burst/stutter. 400 c/s is a visible, readable typewriter that
+    // still tracks routine output; genuine multi-KB bursts (a code
+    // block landing at once) snap forward to within kBacklogSnap and
+    // trail smoothly rather than crawling. The live-edge FX in maya's
+    // reveal_fx animates off the moving fed-byte edge, so a steadily
+    // advancing cursor keeps the scramble/gradient/caret alive.
+    constexpr double kRevealCharsPerSec = 400.0;
+    constexpr std::size_t kBacklogSnap   = 512;    // max bytes behind
 
     const auto now = std::chrono::steady_clock::now();
     if (settled) {
