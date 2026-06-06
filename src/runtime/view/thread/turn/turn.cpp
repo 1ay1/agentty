@@ -1,6 +1,8 @@
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
@@ -212,6 +214,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         settled
         && cache.last_settled_size == source.size()
         && cache.revealed_size == source.size();
+
+    // Optional per-frame timer for the streaming-markdown widget. Set
+    // AGENTTY_STREAM_PROF=1 to log set_content+finish+build() cost for
+    // each non-fast-path call to /tmp/agentty-stream-prof.log. Isolates
+    // the in-flight widget cost from the (separately-profiled) timeline
+    // render. One line per call; skips the settled fast-path entirely.
+    static const bool stream_prof = []{
+        const char* e = std::getenv("AGENTTY_STREAM_PROF");
+        return e && *e && *e != '0';
+    }();
+    const auto prof_t0 = stream_prof
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
+
     if (!already_settled_into_cache) {
         // Use the async variant: tiny appends stay on the sync
         // incremental path inside StreamingMarkdown (cheap), but a
@@ -272,7 +288,25 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     cache.streaming->set_live(!settled || !reveal_complete);
     if (!reveal_complete) ::maya::request_animation_frame();
 
-    return cache.streaming->build();
+    auto built = cache.streaming->build();
+
+    if (stream_prof) {
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - prof_t0).count();
+        static std::FILE* out =
+            std::fopen("/tmp/agentty-stream-prof.log", "a");
+        if (out) {
+            std::fprintf(out,
+                "[stream] src=%zu revealed=%zu settled=%d fastpath=%d "
+                "build_us=%lld\n",
+                source.size(), cache.revealed_size, settled ? 1 : 0,
+                already_settled_into_cache ? 1 : 0,
+                static_cast<long long>(us));
+            std::fflush(out);
+        }
+    }
+
+    return built;
 }
 
 // ── Per-speaker visual identity: rail color + glyph + display name.

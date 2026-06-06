@@ -584,7 +584,11 @@ If inline scrollback rendering is broken after your changes:
    `/tmp/maya-frame-prof-<pid>.log`). Look at `rt=` and `cf=` —
    anything over ~2 ms steady-state is suspicious. Also
    `AGENTTY_VIEW_PROF=1` (writes to `/tmp/agentty-view-prof.log`)
-   for frozen/live-tail sizes per `conversation_config` call.
+   for frozen/live-tail sizes per `conversation_config` call. And
+   `AGENTTY_STREAM_PROF=1` (writes to `/tmp/agentty-stream-prof.log`)
+   for the in-flight StreamingMarkdown widget's per-frame
+   `set_content+finish+build()` cost — isolates the live-tail widget
+   from the timeline render; skips the settled fast-path.
 4. **Resume profile.** `AGENTTY_LOAD_PROF=1` (writes to
    `/tmp/agentty-load-prof.log`) — surfaces `rehydrate_frozen` +
    `release_to_kernel` timings on `ThreadLoaded`.
