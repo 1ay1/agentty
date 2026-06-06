@@ -1,5 +1,6 @@
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -154,10 +155,61 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // trail smoothly rather than crawling. The live-edge FX in maya's
     // reveal_fx animates off the moving fed-byte edge, so a steadily
     // advancing cursor keeps the scramble/gradient/caret alive.
-    constexpr double kRevealCharsPerSec = 400.0;
+    // Reveal rate. Adaptive: it tracks the model's actual byte-arrival
+    // rate (EWMA) so a fast model reveals fast and a slow one stays a
+    // smooth typewriter, instead of a single fixed rate that either lags
+    // a quick model (then snaps — the burst/stutter) or idles behind a
+    // slow one. The cursor still reveals against ALL arrived bytes
+    // (text+streaming_text+pending_stream). kRevealFloorCps keeps a
+    // readable minimum; kRevealTrackMul reveals a touch faster than
+    // arrival so the cursor closes any backlog and rides the live edge
+    // (where reveal_fx animates) rather than trailing far behind.
+    // kRevealCeilCps caps it so a multi-KB dump still plays as a visible
+    // sweep, not an instant paste. The live-edge FX animates off the
+    // moving fed-byte edge, so a steadily advancing cursor keeps the
+    // scramble/gradient/caret alive.
+    constexpr double kRevealFloorCps = 400.0;
+    constexpr double kRevealCeilCps  = 4000.0;
+    constexpr double kRevealTrackMul = 1.30;
     constexpr std::size_t kBacklogSnap   = 512;    // max bytes behind
 
     const auto now = std::chrono::steady_clock::now();
+
+    // ── Arrival-rate EWMA ──
+    // Sample how fast source bytes are arriving and smooth it. Drives
+    // the adaptive reveal rate below. Only meaningful while streaming.
+    if (!settled && !source.empty()) {
+        if (cache.last_arrival_tick.time_since_epoch().count() == 0) {
+            cache.last_arrival_tick = now;
+            cache.last_arrival_size = source.size();
+        } else if (source.size() > cache.last_arrival_size) {
+            const auto dt_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    now - cache.last_arrival_tick).count();
+            // Sample only over a non-trivial window so a single byte
+            // landing 1 ms after the last doesn't read as 1000 c/s.
+            if (dt_us >= 30'000) {
+                const double inst_cps =
+                    static_cast<double>(source.size() - cache.last_arrival_size)
+                    / (static_cast<double>(dt_us) / 1'000'000.0);
+                constexpr double kAlpha = 0.25;   // EWMA smoothing
+                cache.arrival_ewma_cps =
+                    cache.arrival_ewma_cps <= 0.0
+                        ? inst_cps
+                        : (1.0 - kAlpha) * cache.arrival_ewma_cps
+                              + kAlpha * inst_cps;
+                cache.last_arrival_tick = now;
+                cache.last_arrival_size = source.size();
+            }
+        }
+    }
+
+    // Effective reveal rate: track arrival (×mul), clamped to
+    // [floor, ceil].
+    const double kRevealCharsPerSec = std::clamp(
+        cache.arrival_ewma_cps * kRevealTrackMul,
+        kRevealFloorCps, kRevealCeilCps);
+
     if (settled) {
         // Stream finished — snap reveal to full size immediately.
         // The freeze path (stream.cpp's freeze_through on idle)

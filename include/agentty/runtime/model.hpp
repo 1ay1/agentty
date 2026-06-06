@@ -239,6 +239,17 @@ struct Model {
         // run finishes (freeze_through at idle).
         bool                frozen_midrun = false;
 
+        // Split-scan throttle for freeze_streaming_text_prefix. When a
+        // scan finds NO safe block boundary (a single giant fence /
+        // unbreakable block still accumulating), re-scanning the whole
+        // growing streaming_text from byte 0 every Tick is O(n) per tick
+        // = O(n²) over the block. Record the streaming_text size at the
+        // last no-split scan; the next attempt skips the scan until the
+        // buffer has grown by a meaningful step. Reset to 0 whenever a
+        // split lands or the live tail resets (a smaller streaming_text
+        // than the memo means a prefix was carved or the message rolled).
+        std::size_t         split_scan_nosplit_size = 0;
+
         // One-shot hint to maya's run loop: "the next view() result
         // contains a heavy frozen scrollback that hasn't been painted
         // yet on this thread; please pre-warm the component cache

@@ -111,6 +111,20 @@ struct MessageMdCache {
     std::size_t                               revealed_size = 0;
     std::chrono::steady_clock::time_point     last_reveal_tick{};
 
+    // Adaptive reveal rate. A fixed rate either lags a fast model
+    // (then snaps — burst/stutter) or sits idle behind a slow one. We
+    // track the model's actual byte-arrival rate via an EWMA and let
+    // the reveal float to track it (bounded), so a quick model reveals
+    // faster and a slow one stays a smooth typewriter without leaning
+    // on the backlog snap.
+    //   • arrival_ewma_cps  — smoothed arrival rate (chars/sec).
+    //   • last_arrival_size — source.size() at the previous arrival
+    //                         sample, to measure the delta.
+    //   • last_arrival_tick — wall-clock of that sample.
+    double                                    arrival_ewma_cps = 0.0;
+    std::size_t                               last_arrival_size = 0;
+    std::chrono::steady_clock::time_point     last_arrival_tick{};
+
     // Scratch buffer for multi-sub-turn rendering. When a single
     // Assistant message has produced text in a prior sub-turn (now
     // in `msg.text`) and is now streaming more text in a follow-up

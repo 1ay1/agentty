@@ -791,6 +791,21 @@ void freeze_streaming_text_prefix(Model& m) {
     constexpr std::size_t kMinSplitBytes = 512;
     if (scan_limit < kMinSplitBytes) return;
 
+    // No-split scan throttle. A single giant unbreakable block (one huge
+    // fence with no internal newline yet, or a no-blank-line table)
+    // makes last_safe_block_split return 0 — and re-scanning the whole
+    // growing streaming_text from byte 0 every Tick is O(n) per tick =
+    // O(n²) over the block. If the LAST scan found no split, skip the
+    // re-scan until the buffer has grown by at least kMinSplitBytes more
+    // (enough that a new line/boundary could plausibly have arrived). A
+    // shrink (prefix carved, or message rolled over) resets the memo.
+    if (active.streaming_text.size() < m.ui.split_scan_nosplit_size)
+        m.ui.split_scan_nosplit_size = 0;
+    if (m.ui.split_scan_nosplit_size != 0
+        && active.streaming_text.size()
+               < m.ui.split_scan_nosplit_size + kMinSplitBytes)
+        return;
+
     bool        fence_open = false;
     std::string fence_marker;
     std::size_t last_line_nl = 0;
@@ -856,7 +871,16 @@ void freeze_streaming_text_prefix(Model& m) {
         split = last_line_nl;
     }
 
-    if (split == 0) return;   // no safe boundary yet (still one short fence)
+    if (split == 0) {
+        // No safe boundary yet (still one short/unbreakable block).
+        // Memo the size so the next Tick skips re-scanning until the
+        // buffer grows by another kMinSplitBytes.
+        m.ui.split_scan_nosplit_size = active.streaming_text.size();
+        return;
+    }
+
+    // A split landed — clear the throttle so the next block scans freely.
+    m.ui.split_scan_nosplit_size = 0;
 
     // Carve the committed prefix out of the active tail. If this is the
     // FIRST split of this sub-turn, `active.text` is empty and the
@@ -903,6 +927,7 @@ void clear_frozen(Model& m) {
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
     m.ui.frozen_midrun  = false;
+    m.ui.split_scan_nosplit_size = 0;
 }
 
 void rehydrate_frozen(Model& m) {
