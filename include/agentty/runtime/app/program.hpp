@@ -244,21 +244,20 @@ struct AgenttyApp {
         // omitted the SSH floor and could beat against the real tick.
         const std::int64_t kFineAnimMs = streaming_tick_period().count();
 
-        // Typewriter-reveal override. The streaming-text reveal
-        // (cached_markdown_for's revealed_size cursor) is a genuine
-        // ~60 fps animation advanced from wall-clock INSIDE view().
-        // Unlike the spinner it is NOT phase-locked to the Tick — it
-        // wants a render on every RAF wake (16 ms). If we bucket it at
-        // the tick period (100 ms on non-sync terminals) the render
-        // gate SKIPS the intervening RAF wakes, so view() never runs,
-        // revealed_size never advances, and the text sits STUCK until
-        // the 100 ms bucket finally flips — then a ~22-char chunk pops
-        // in at once (the "stuck then flicker at md stream start"
-        // symptom). While an assistant message is actively streaming
-        // text, step the bucket at the RAF interval so each 16 ms wake
-        // renders one smooth reveal step. The spinner-only case (tool
-        // running, no streaming_text) keeps the calmer tick-period
-        // bucket so non-sync terminals don't tear the chrome at 60 fps.
+        // Streaming-text render bucket. While an assistant message is
+        // actively streaming, the live edge runs maya's reveal_fx
+        // (scramble→resolve + gradient + caret), a ~60 fps animation that
+        // wants a render on every RAF wake (16 ms). The host also re-feeds
+        // the full arrived source each frame, so newly arrived bytes show
+        // up promptly. If we bucketed this at the tick period (100 ms on
+        // non-sync terminals) the render gate would SKIP the intervening
+        // RAF wakes — view() wouldn't run, the live-edge FX would freeze,
+        // and a chunk of newly arrived text would pop in at once on the
+        // next 100 ms flip (the "stuck then burst" symptom). Stepping the
+        // bucket at the RAF interval renders each 16 ms wake. The
+        // spinner-only case (tool running, no streaming_text) keeps the
+        // calmer tick-period bucket so non-sync terminals don't tear the
+        // chrome at 60 fps.
         const bool revealing_text =
             m.s.active()
             && !m.d.current.messages.empty()

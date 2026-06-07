@@ -98,128 +98,25 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.last_tick = now;
             if (m.s.active()) m.s.spinner.advance(dt);
 
-            // ── Streaming-text smoothing pacer ────────────────────────
-            // Drip from pending_stream → streaming_text on every tick so
-            // big server bursts (Anthropic's content_block_delta can carry
-            // 50-100+ chars at once) reveal smoothly at cursor pace
-            // instead of jumping in.
-            //
-            // Frame-rate-independent: the reveal rate is bytes/second,
-            // not bytes/tick. On a 30 fps tick we drip ~kBytesPerSec/30
-            // per tick; on a 10 fps tick (non-DEC-2026 terminals) we
-            // drip 3× as much per tick. The user-perceived fill speed
-            // is identical across terminal capabilities — previously,
-            // Apple Terminal / plain xterm / tmux-without-sync paid a
-            // 3× latency tax because the 100 ms tick AND the per-tick
-            // cap compounded.
-            //
-            // Burst-flush: when more than kBurstFlushBytes are pending,
-            // the smoother is no longer hiding chunky paints — it's
-            // making the user stare at a stalled cursor. Drain the
-            // whole backlog in one tick. The fill animation is only
-            // worth preserving while the wire is keeping up; once it
-            // gets ahead by a paragraph or more, the latency cost
-            // dominates the aesthetic benefit.
-            // Wire-quiescence flush. The smoothing pacer only earns its
-            // keep while bytes are ACTIVELY flowing — it hides the visual
-            // jump of a chunky multi-KB content_block_delta by revealing
-            // it over a few frames. The moment the wire goes quiet (model
-            // paused between bursts, finished a paragraph and is thinking,
-            // or the render path was briefly backpressured and is now
-            // catching up) there is nothing left to smooth AGAINST:
-            // continuing to dribble the buffered tail at kBytesPerSec is
-            // exactly the "it pauses, then slowly scrolls in the text it
-            // already had" symptom.
-            // last_event_at is bumped on every SSE event (text/json
-            // delta AND heartbeats), so a gap here means the wire is
-            // genuinely idle — reveal the whole backlog now.
-            //
-            // Threshold tuning: 90 ms was too tight. A model that
-            // batches tokens routinely pauses 90–200 ms between
-            // content_block_deltas, so a 90 ms quiet window tripped a
-            // full backlog flush on nearly every inter-delta gap — the
-            // smoother never engaged and the user saw "freeze, then a
-            // chunk dumps, freeze, chunk" (the stuck-then-burst
-            // symptom). 250 ms only trips on a GENUINE pause (model
-            // thinking / finished a paragraph), where flushing is
-            // correct; ordinary token batching now flows through the
-            // pacer and reveals smoothly.
-            bool wire_quiet = false;
-            if (const auto* a = active_ctx(m.s.phase)) {
-                if (a->last_event_at.time_since_epoch().count() != 0)
-                    wire_quiet = (now - a->last_event_at)
-                               > std::chrono::milliseconds(250);
-            }
-
+            // ── pending_stream → streaming_text ──────────────────────
+            // Move buffered wire bytes into streaming_text every tick.
+            // No host-side pacing: agentty does NOT animate the stream.
+            // The view feeds text + streaming_text + pending_stream in
+            // full to the StreamingMarkdown widget, and maya's reveal_fx
+            // owns the live-edge animation. This move exists only so the
+            // bytes accumulate in streaming_text, where the freeze /
+            // trim pipeline (freeze_streaming_text_prefix et al.) can see
+            // a committed prefix to settle. It is a plain append; the
+            // old rate / backlog / burst-flush / wire-quiet smoother was
+            // a second pacing clock that beat against the widget's and
+            // produced the "stuck then burst" stutter — removed.
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant)
             {
                 auto& msg = m.d.current.messages.back();
                 if (!msg.pending_stream.empty()) {
-                    // Base reveal rate ~32 KB/s. At 30 fps that's ~1 KB
-                    // per tick on a steady fill, well above any plausible
-                    // sustained model emission rate, so the pacer only
-                    // engages on bursts. At 10 fps it's ~3 KB per tick,
-                    // same wall-clock fill speed.
-                    constexpr float kBytesPerSec     = 32768.0f;
-                    constexpr std::size_t kDripMin   = 64;
-                    // Burst-flush threshold. Anthropic batches code
-                    // blocks heavily — a small function body arrives
-                    // in a single content_block_delta of 2–4 KB. 8 KB
-                    // bounds the visual stall — at the adaptive reveal
-                    // rate that's well under a quarter-second of
-                    // catch-up — while letting routine code-block deltas
-                    // flow through the smoother instead of dumping.
-                    constexpr std::size_t kBurstFlushBytes = 8192;
-                    // Bound the catch-up: whatever the backlog, drain it
-                    // within this window so the pacer never lags the wire
-                    // by more than a fraction of a second. This is what
-                    // turns a fixed-rate dribble (which falls behind a
-                    // fast model, accumulates, then bursts on the next
-                    // quiet gap — the stuck-then-fast symptom) into a
-                    // smooth accelerate-to-catch-up.
-                    constexpr float kMaxDrainSeconds = 0.20f;
-
-                    std::size_t drip;
-                    if (msg.pending_stream.size() >= kBurstFlushBytes
-                        || wire_quiet) {
-                        // Backlog dominates, OR the wire has gone quiet so
-                        // there's nothing left to smooth against — flush
-                        // it all this tick.
-                        drip = msg.pending_stream.size();
-                    } else {
-                        // Reveal at the GREATER of the base rate and the
-                        // rate needed to drain the current backlog within
-                        // kMaxDrainSeconds. A small backlog reveals at the
-                        // gentle base rate; a growing one accelerates so it
-                        // stays close to the wire instead of saving up a
-                        // burst.
-                        auto base_target = kBytesPerSec * dt;
-                        auto drain_target =
-                            static_cast<float>(msg.pending_stream.size())
-                            * (dt / kMaxDrainSeconds);
-                        auto target = static_cast<std::size_t>(
-                            std::max(base_target, drain_target));
-                        drip = std::max(target, kDripMin);
-                        drip = std::min(drip, msg.pending_stream.size());
-                    }
-                    // UTF-8 safety: don't split a multi-byte codepoint
-                    // at the drip boundary. Walk forward to the next
-                    // leading byte; bounded by the 4-byte max UTF-8
-                    // sequence length so a buffer of malformed
-                    // continuation bytes can't drag us through the
-                    // whole pending_stream.
-                    {
-                        std::size_t walked = 0;
-                        while (drip < msg.pending_stream.size()
-                               && walked < 3
-                               && (static_cast<unsigned char>(msg.pending_stream[drip]) & 0xC0) == 0x80) {
-                            ++drip;
-                            ++walked;
-                        }
-                    }
-                    msg.streaming_text.append(msg.pending_stream, 0, drip);
-                    msg.pending_stream.erase(0, drip);
+                    msg.streaming_text.append(msg.pending_stream);
+                    msg.pending_stream.clear();
                 }
             }
 

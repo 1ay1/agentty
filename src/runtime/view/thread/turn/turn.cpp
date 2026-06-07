@@ -129,162 +129,32 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         return cache.streaming->build();
     }
 
-    // ── Typewriter reveal ──
+    // ── Reveal: feed ALL arrived bytes, every frame ──
     //
-    // While streaming, advance a reveal cursor at a fixed character
-    // rate so chunky model output unfolds smoothly. The cursor only
-    // reveals bytes that have actually arrived (capped at source.size())
-    // so it idles when the model is slower than the reveal rate, and
-    // never gets ahead of the model. On settle we snap to full size
-    // so the final state matches the source exactly.
+    // There is NO host-side typewriter cursor. The display pacer is
+    // maya's reveal_fx (scramble→resolve + gradient trail + caret on the
+    // live edge), which animates the trailing run of the text we feed.
+    // The host's only job is to keep handing the widget the full set of
+    // bytes that have arrived from the wire and to keep the animation
+    // frame armed while the stream is live.
     //
-    // Backlog policy: if the model is more than kBacklogSnap bytes
-    // ahead of the cursor (the model just dumped a huge chunk), snap
-    // the cursor forward to within kBacklogSnap of source.size() so
-    // the reveal doesn't lag forever on a multi-KB paste. The reveal
-    // is meant to be a smoothing filter, not a hard rate limit.
-    // Reveal rate + backlog snap. The cursor now reveals against ALL
-    // arrived bytes (text+streaming_text+pending_stream), i.e. the
-    // model's true byte arrival rate, not the tick-paced streaming_text.
-    // So the rate must comfortably exceed a fast model's sustained
-    // output (a quick Sonnet is ~300–500 B/s, bursting higher) or the
-    // cursor would lag and lean on the snap every frame — the old
-    // burst/stutter. 400 c/s is a visible, readable typewriter that
-    // still tracks routine output; genuine multi-KB bursts (a code
-    // block landing at once) snap forward to within kBacklogSnap and
-    // trail smoothly rather than crawling. The live-edge FX in maya's
-    // reveal_fx animates off the moving fed-byte edge, so a steadily
-    // advancing cursor keeps the scramble/gradient/caret alive.
-    // Reveal rate. Adaptive: it tracks the model's actual byte-arrival
-    // rate (EWMA) so a fast model reveals fast and a slow one stays a
-    // smooth typewriter, instead of a single fixed rate that either lags
-    // a quick model (then snaps — the burst/stutter) or idles behind a
-    // slow one. The cursor still reveals against ALL arrived bytes
-    // (text+streaming_text+pending_stream). kRevealFloorCps keeps a
-    // readable minimum; kRevealTrackMul reveals a touch faster than
-    // arrival so the cursor closes any backlog and rides the live edge
-    // (where reveal_fx animates) rather than trailing far behind.
-    // kRevealCeilCps caps it so a multi-KB dump still plays as a visible
-    // sweep, not an instant paste. The live-edge FX animates off the
-    // moving fed-byte edge, so a steadily advancing cursor keeps the
-    // scramble/gradient/caret alive.
-    constexpr double kRevealFloorCps = 400.0;
-    constexpr double kRevealCeilCps  = 4000.0;
-    constexpr double kRevealTrackMul = 1.30;
-    constexpr std::size_t kBacklogSnap   = 512;    // max bytes behind
-
-    const auto now = std::chrono::steady_clock::now();
-
-    // ── Arrival-rate EWMA ──
-    // Sample how fast source bytes are arriving and smooth it. Drives
-    // the adaptive reveal rate below. Only meaningful while streaming.
-    if (!settled && !source.empty()) {
-        if (cache.last_arrival_tick.time_since_epoch().count() == 0) {
-            cache.last_arrival_tick = now;
-            cache.last_arrival_size = source.size();
-        } else if (source.size() > cache.last_arrival_size) {
-            const auto dt_us =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    now - cache.last_arrival_tick).count();
-            // Sample only over a non-trivial window so a single byte
-            // landing 1 ms after the last doesn't read as 1000 c/s.
-            if (dt_us >= 30'000) {
-                const double inst_cps =
-                    static_cast<double>(source.size() - cache.last_arrival_size)
-                    / (static_cast<double>(dt_us) / 1'000'000.0);
-                constexpr double kAlpha = 0.25;   // EWMA smoothing
-                cache.arrival_ewma_cps =
-                    cache.arrival_ewma_cps <= 0.0
-                        ? inst_cps
-                        : (1.0 - kAlpha) * cache.arrival_ewma_cps
-                              + kAlpha * inst_cps;
-                cache.last_arrival_tick = now;
-                cache.last_arrival_size = source.size();
-            }
-        }
-    }
-
-    // Effective reveal rate: track arrival (×mul), clamped to
-    // [floor, ceil].
-    const double kRevealCharsPerSec = std::clamp(
-        cache.arrival_ewma_cps * kRevealTrackMul,
-        kRevealFloorCps, kRevealCeilCps);
-
-    if (settled) {
-        // Stream finished — snap reveal to full size immediately.
-        // The freeze path (stream.cpp's freeze_through on idle)
-        // snapshots this message into m.ui.frozen and stops calling
-        // cached_markdown_for for it; if revealed_size were still
-        // catching up at that moment the snapshot would freeze
-        // partial text + scramble glyphs forever. Smooth reveal is
-        // a streaming-only effect.
-        cache.revealed_size = source.size();
-        cache.last_reveal_tick = now;
-    } else if (source.empty()) {
-        cache.revealed_size = 0;
-        cache.last_reveal_tick = now;
-    } else {
-        if (cache.last_reveal_tick.time_since_epoch().count() == 0) {
-            cache.last_reveal_tick = now;
-            // FIRST reveal frame. Prime the cursor to a small starter
-            // chunk instead of leaving it at 0. With advance==0 the
-            // first frame feeds an EMPTY prefix, so the in-flight turn
-            // renders the "thinking" ActivityIndicator (≈2 rows), then
-            // the NEXT frame drops the indicator AND shows the first
-            // bytes — two height transitions back-to-back at the live
-            // seam, which on a terminal without atomic frames reads as a
-            // flicker right at stream start. Revealing a starter chunk
-            // now makes the indicator→content swap a SINGLE step (the
-            // body already has real text the moment the indicator drops).
-            constexpr std::size_t kRevealStarter = 24;
-            cache.revealed_size =
-                std::min(source.size(), kRevealStarter);
-        }
-        // Advance by elapsed time × rate (rounded down).
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                now - cache.last_reveal_tick).count();
-        const double new_chars =
-            (static_cast<double>(elapsed) / 1'000'000.0)
-            * kRevealCharsPerSec;
-        std::size_t advance = static_cast<std::size_t>(new_chars);
-        if (advance > 0) {
-            cache.revealed_size += advance;
-            // Move tick forward by the bytes we actually consumed to
-            // avoid floating-point drift (don't reset to `now`, which
-            // would silently drop sub-character fractions every frame).
-            const auto consumed_us = static_cast<long long>(
-                (static_cast<double>(advance) / kRevealCharsPerSec)
-                * 1'000'000.0);
-            cache.last_reveal_tick +=
-                std::chrono::microseconds(consumed_us);
-        }
-        // Cap to source size (never reveal bytes that don't exist).
-        if (cache.revealed_size > source.size())
-            cache.revealed_size = source.size();
-        // Snap forward if the backlog is huge — keep the reveal
-        // bounded behind the model so a sudden chunk doesn't take
-        // seconds to play out. Only applies while the model is still
-        // streaming; once settled, let the cursor finish naturally
-        // even if the final chunk was large.
-        if (!settled && source.size() > kBacklogSnap &&
-            cache.revealed_size + kBacklogSnap < source.size()) {
-            cache.revealed_size = source.size() - kBacklogSnap;
-            cache.last_reveal_tick = now;
-        }
-        // Round DOWN to a UTF-8 codepoint boundary so we never feed
-        // a half-multibyte sequence to the markdown parser.
-        while (cache.revealed_size > 0 &&
-               cache.revealed_size < source.size() &&
-               (static_cast<unsigned char>(source[cache.revealed_size])
-                & 0xC0) == 0x80) {
-            --cache.revealed_size;
-        }
-    }
-
-    // What we actually feed the widget this frame: the revealed prefix.
-    const std::string_view feed_source =
-        std::string_view{source}.substr(0, cache.revealed_size);
+    // Why no second cursor: a host pacing clock that withholds bytes and
+    // releases them at a fixed char/sec is a SECOND clock beating against
+    // (a) the wire-arrival clock and (b) the render-wake cadence. Any
+    // beat between them is visible as stutter — and if the host clock
+    // ever stops advancing (a render skipped, the wake cadence dropped to
+    // the 100 ms Tick) the text sits STUCK mid-reveal until an unrelated
+    // event flips the frame. Feeding the raw arrived bytes removes that
+    // clock entirely: visible text == arrived text, always. Chunky
+    // deltas (a multi-KB code block in one delta) appear at once, but
+    // reveal_fx animates their trailing edge so the seam still reads as a
+    // live stream, the same approach Zed / Claude Code use.
+    //
+    // revealed_size is kept == source.size() so the settled fast-path and
+    // the freeze snapshot (which read revealed_size) see a fully-revealed
+    // message and never freeze a partial body.
+    cache.revealed_size = source.size();
+    const std::string_view feed_source = source;
 
     // Settled-message fast path. Once a message has settled
     // (msg.text is final, streaming_text empty) the source bytes are
@@ -368,17 +238,66 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         }
     }
 
-    // Live mode: while streaming OR while the reveal cursor is still
-    // catching up to source.size(). The second condition keeps the
-    // animation alive for a fraction of a second after StreamFinished
-    // when bytes haven't fully unfolded yet (rare but visible at the
-    // end of short replies). The widget's animation frame request
-    // drives the per-frame advance of cache.revealed_size above.
-    const bool reveal_complete = cache.revealed_size >= source.size();
-    cache.streaming->set_live(!settled || !reveal_complete);
-    if (!reveal_complete) ::maya::request_animation_frame();
+    // Live mode: while streaming (msg not settled). reveal_fx animates
+    // the live edge while live_; the settled build is static.
+    cache.streaming->set_live(!settled);
+
+    // Track when `source` last grew so we can tell "actively streaming"
+    // (bytes flowing) from "streaming but stalled" (e.g. a 60–120 s
+    // extended-thinking pause with no deltas). Used by the RAF gate just
+    // below.
+    {
+        const auto now2 = std::chrono::steady_clock::now();
+        if (source.size() > cache.last_grow_size) {
+            cache.last_grow_size = source.size();
+            cache.last_grow_tick = now2;
+        } else if (source.size() < cache.last_grow_size) {
+            // Source rolled / shrank (set_content rollback, message reset).
+            cache.last_grow_size = source.size();
+            cache.last_grow_tick = now2;
+        }
+    }
+
+    // Re-arm the 16 ms animation frame for the WHOLE active streaming
+    // window. reveal_fx (the live-edge scramble/gradient/caret) is the
+    // only animation now; it needs a wake every frame while bytes are
+    // flowing so its trailing run resolves smoothly.
+    //
+    // Gate on "source grew within the last kRevealActiveMs" so a genuine
+    // model stall (a long extended-thinking pause with no deltas) drops
+    // us off the 60 fps clock and back to the calmer Tick / spinner
+    // cadence — we don't burn frames (or tear chrome on non-sync
+    // terminals) repainting an unchanging tail. The instant the next
+    // delta lands, byte arrival wakes the loop (eventfd, sub-ms), this
+    // runs again, and the active window re-arms. Note this gate cannot
+    // strand visible text the way a host pacing cursor could: we already
+    // FED the full arrived source above, so even if RAF lapsed for a beat
+    // the text is on screen — only the live-edge FX animation pauses,
+    // never the content.
+    constexpr std::int64_t kRevealActiveMs = 250;
+    const auto now3 = std::chrono::steady_clock::now();
+    const std::int64_t since_grow_ms =
+        cache.last_grow_tick.time_since_epoch().count() == 0
+            ? kRevealActiveMs + 1
+            : std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now3 - cache.last_grow_tick).count();
+    const bool stream_in_motion = !settled && since_grow_ms <= kRevealActiveMs;
 
     auto built = cache.streaming->build();
+
+    // Keep the 16 ms frame armed while EITHER new bytes are actively
+    // flowing (stream_in_motion) OR the widget's reveal cursor is still
+    // gliding toward the live edge after a burst. The second condition is
+    // what makes the typewriter continuous across a wire pause: the model
+    // ships a burst then goes quiet for 100-200 ms, but the cursor still
+    // has a backlog to type out — without re-arming here the loop would
+    // fall to the Tick cadence and the cursor would jump on the next wake
+    // (the "bursts, not continuous" symptom). build() advanced the cursor
+    // just above, so reveal_in_progress() reflects this frame's state.
+    if (stream_in_motion
+        || (!settled && cache.streaming->reveal_in_progress())) {
+        ::maya::request_animation_frame();
+    }
 
     if (stream_prof) {
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(

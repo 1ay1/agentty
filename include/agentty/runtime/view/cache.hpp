@@ -89,41 +89,25 @@ struct MessageMdCache {
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
 
-    // ── Typewriter reveal cursor ──
+    // ── Reveal bookkeeping ──
     //
-    // While a message is live (streaming), bytes from the model land
-    // in chunks of arbitrary size — sometimes a single token, often
-    // tens or hundreds of bytes at once. Feeding those chunks
-    // verbatim to the streaming widget makes text pop in abruptly.
-    // To smooth this, we feed only the first `revealed_size` bytes
-    // of the source each frame, and advance `revealed_size` at a
-    // fixed character rate (kRevealCharsPerSec). When the model is
-    // ahead of the cursor, the cursor catches up smoothly; when the
-    // cursor catches up to the model, it idles waiting for more
-    // bytes. On finish (settled) we snap to full size so no bytes
-    // are dropped.
-    //
-    // `last_reveal_tick` is the wall-clock at which `revealed_size`
-    // was last advanced; the next frame computes elapsed time and
-    // bumps the cursor accordingly. Codepoint-clean: we round the
-    // target byte index DOWN to a UTF-8 start byte so we never feed
-    // a half-multibyte sequence to the parser.
+    // There is no host-side typewriter cursor: cached_markdown_for feeds
+    // the FULL set of arrived bytes to the streaming widget every frame
+    // and lets maya's reveal_fx animate the live edge. `revealed_size` is
+    // therefore always held == source.size(); it survives only so the
+    // settled fast-path / freeze snapshot can confirm the whole message
+    // has been fed before treating it as final.
     std::size_t                               revealed_size = 0;
-    std::chrono::steady_clock::time_point     last_reveal_tick{};
 
-    // Adaptive reveal rate. A fixed rate either lags a fast model
-    // (then snaps — burst/stutter) or sits idle behind a slow one. We
-    // track the model's actual byte-arrival rate via an EWMA and let
-    // the reveal float to track it (bounded), so a quick model reveals
-    // faster and a slow one stays a smooth typewriter without leaning
-    // on the backlog snap.
-    //   • arrival_ewma_cps  — smoothed arrival rate (chars/sec).
-    //   • last_arrival_size — source.size() at the previous arrival
-    //                         sample, to measure the delta.
-    //   • last_arrival_tick — wall-clock of that sample.
-    double                                    arrival_ewma_cps = 0.0;
-    std::size_t                               last_arrival_size = 0;
-    std::chrono::steady_clock::time_point     last_arrival_tick{};
+    // Wall-clock of the last frame at which `source` grew (new bytes
+    // arrived from the wire). Drives the "stream in motion" grace window
+    // that keeps the 16 ms animation frame armed while bytes are flowing
+    // so reveal_fx animates smoothly. Once the wire goes quiet for longer
+    // than the window (a model stall) RAF lapses and the loop falls back
+    // to the calmer Tick cadence; the next delta's eventfd wake revives
+    // it. Reset to zero on source shrink / roll.
+    std::chrono::steady_clock::time_point     last_grow_tick{};
+    std::size_t                               last_grow_size = 0;
 
     // Scratch buffer for multi-sub-turn rendering. When a single
     // Assistant message has produced text in a prior sub-turn (now
