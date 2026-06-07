@@ -41,6 +41,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -74,6 +75,10 @@ struct Session {
     Profile     profile = Profile::Ask;
     std::string model;   // empty = use server default
     std::shared_ptr<http::CancelToken> cancel;
+    // Session-scoped "always allow" grants keyed by tool name, set when
+    // the client picks the allow_always option. Consulted in run_tools
+    // before prompting so a granted tool never re-asks this session.
+    std::set<std::string> grants;
 };
 
 class AgentServer {
@@ -138,8 +143,10 @@ private:
 
     // ── Helpers ──────────────────────────────────────────────────────────
     void send_update(const std::string& session_id, nlohmann::json update);
-    // session/request_permission round-trip. Returns true if allowed.
-    bool ask_permission(const std::string& session_id, const ToolUse& tc);
+    // session/request_permission round-trip. Returns the user's choice so
+    // run_tools can record a session-scoped grant on allow_always.
+    enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
+    PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
 
     Session* find_session(const std::string& id);
 

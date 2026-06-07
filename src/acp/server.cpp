@@ -852,18 +852,22 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // ask the client for Exec/WriteFs so Zed can show its own approval UI
         // when it wants to (the policy decides whether we MUST ask).
         bool needs_perm =
-            tool::DynamicDispatch::needs_permission(tc.name.value, profile);
+            tool::DynamicDispatch::needs_permission(tc.name.value, profile)
+            && !sess.grants.contains(tc.name.value);
         if (needs_perm) {
             send_update(sess.id, json{
                 {"sessionUpdate", "tool_call_update"},
                 {"toolCallId", tc.id.value},
                 {"status", "pending"},
             });
-            bool ok = ask_permission(sess.id, tc);
+            auto outcome = ask_permission(sess.id, tc);
             if (sess.cancel && sess.cancel->is_cancelled()) {
                 out_cancelled = true;
                 return false;
             }
+            if (outcome == PermissionOutcome::AllowAlways)
+                sess.grants.insert(tc.name.value);
+            const bool ok = outcome != PermissionOutcome::Deny;
             if (!ok) {
                 tc.status = ToolUse::Rejected{};
                 send_update(sess.id, json{
@@ -934,7 +938,8 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     return true;
 }
 
-bool AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
+AgentServer::PermissionOutcome
+AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
     json options = json::array({
         json{{"optionId", "allow_once"},  {"name", "Allow"},          {"kind", "allow_once"}},
         json{{"optionId", "allow_always"},{"name", "Always allow"},   {"kind", "allow_always"}},
@@ -954,18 +959,20 @@ bool AgentServer::ask_permission(const std::string& session_id, const ToolUse& t
     try {
         json resp = peer_.request("session/request_permission", req);
         // resp = { outcome: { outcome: "selected", optionId: "..." } | { outcome: "cancelled" } }
-        if (!resp.contains("outcome")) return false;
+        if (!resp.contains("outcome")) return PermissionOutcome::Deny;
         const auto& oc = resp["outcome"];
         std::string kind = oc.value("outcome", "");
-        if (kind == "cancelled") return false;
+        if (kind == "cancelled") return PermissionOutcome::Deny;
         if (kind == "selected") {
             std::string opt = oc.value("optionId", "");
-            return opt == "allow_once" || opt == "allow_always";
+            if (opt == "allow_always") return PermissionOutcome::AllowAlways;
+            if (opt == "allow_once")   return PermissionOutcome::AllowOnce;
+            return PermissionOutcome::Deny;
         }
-        return false;
+        return PermissionOutcome::Deny;
     } catch (const std::exception&) {
         // Client disconnected or errored — treat as denied.
-        return false;
+        return PermissionOutcome::Deny;
     }
 }
 

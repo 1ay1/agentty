@@ -500,7 +500,8 @@ Cmd<Msg> kick_pending_tools(Model& m) {
         if (ready) {
             const bool needs_perm = tc.is_approved()
                 ? false
-                : tool::DynamicDispatch::needs_permission(tc.name.value, m.d.profile);
+                : (!m.d.session_grants.contains(tc.name.value)
+                   && tool::DynamicDispatch::needs_permission(tc.name.value, m.d.profile));
             if (needs_perm && !m.d.pending_permission) {
                 m.d.pending_permission = PendingPermission{
                     tc.id, tc.name,

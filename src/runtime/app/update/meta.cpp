@@ -63,6 +63,10 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.d.profile = m.d.profile == Profile::Write   ? Profile::Ask
                       : m.d.profile == Profile::Ask     ? Profile::Minimal
                                                        : Profile::Write;
+            // A profile switch re-establishes the trust baseline; drop
+            // session "always allow" grants so tightening to Minimal
+            // actually re-arms the prompts the user expects.
+            m.d.session_grants.clear();
             persist_settings(m);
             return done(std::move(m));
         },

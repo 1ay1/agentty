@@ -269,8 +269,26 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             return {std::move(m), std::move(cmd)};
         },
         [&](PermissionApproveAlways) -> Step {
-            // MVP: same as Approve. Sticky grants TBD.
-            return agentty::app::update(std::move(m), Msg{PermissionApprove{}});
+            if (!m.d.pending_permission) return done(std::move(m));
+            auto id   = m.d.pending_permission->id;
+            auto name = m.d.pending_permission->tool_name;
+            // Record a session-scoped grant for this tool NAME so every
+            // future call to it this session auto-approves (consulted in
+            // kick_pending_tools). This also propagates to sibling
+            // pending tools of the same name in the current batch: the
+            // re-kick below re-evaluates each pending tool against the
+            // now-populated grant set, so a queued sibling `bash` won't
+            // re-prompt. Mirrors Zed's per-session allow-list with live
+            // sibling propagation.
+            m.d.session_grants.insert(name.value);
+            m.s.status = name.value + ": always allowed this session";
+            m.s.status_until = std::chrono::steady_clock::now()
+                             + std::chrono::seconds{3};
+            with_live_tool(m, id, [&](ToolUse& tc) {
+                tc.status = ToolUse::Approved{tc.started_at()};
+            });
+            m.d.pending_permission.reset();
+            return {std::move(m), cmd::kick_pending_tools(m)};
         },
     }, tm);
 }

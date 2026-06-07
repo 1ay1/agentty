@@ -7,6 +7,7 @@
 // only the runtime glue needs the full composite.
 
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -145,6 +146,14 @@ struct Model {
 
         std::vector<FileChange>          pending_changes;
         std::optional<PendingPermission> pending_permission;
+
+        // Session-scoped "always allow" grants, keyed by tool name
+        // (e.g. "bash", "write"). Set by PermissionApproveAlways;
+        // consulted in kick_pending_tools BEFORE prompting. NOT
+        // persisted — a grant lives for the lifetime of the process
+        // run, mirroring Zed's per-session allow-list. Cleared on
+        // profile change so tightening the profile re-arms prompts.
+        std::set<std::string>            session_grants;
     };
 
     struct UI {
