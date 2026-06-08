@@ -118,6 +118,29 @@ struct MessageMdCache {
     // stable backing for the string_view fed into
     // set_content_async. Cleared on settle.
     std::string                               combined_source;
+
+    // Drop all cached render state for this (thread, message) slot.
+    // Called by the host (freeze_streaming_text_prefix) right after it
+    // CARVES the front off an actively-streaming message's
+    // streaming_text: the next source the view feeds this widget is a
+    // SUFFIX of what it last saw, i.e. a non-prefix (divergent) change.
+    // Left alone, StreamingMarkdown::set_content treats that as a
+    // rollback and runs clear()+full-reparse, resetting its reveal
+    // cursor to 0 every carve (~once per half-viewport of growth) —
+    // the "md gets stuck / slow mid-stream" stutter. Resetting the
+    // slot here makes the next cached_markdown_for lazily build a fresh
+    // widget over the carved suffix: a clean append-only start, no
+    // divergent reparse. agentty owns this cache; maya stays a pure
+    // draw-from-source widget.
+    void reset() {
+        streaming.reset();
+        finalized.reset();
+        last_settled_size = static_cast<std::size_t>(-1);
+        revealed_size     = 0;
+        last_grow_tick    = {};
+        last_grow_size    = 0;
+        std::string{}.swap(combined_source);
+    }
 };
 
 struct TurnConfigCache {

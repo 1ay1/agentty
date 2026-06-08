@@ -948,8 +948,24 @@ void freeze_streaming_text_prefix(Model& m) {
     settled.role      = Role::Assistant;
     settled.text      = std::move(prefix_body);
     settled.timestamp = active.timestamp;
+    // Grab the active message's id BEFORE the insert below — the insert
+    // reallocates / shifts the vector and invalidates the `active`
+    // reference.
+    const MessageId active_id = active.id;
     // Insert before back(): msgs.end() - 1.
     msgs.insert(msgs.end() - 1, std::move(settled));
+
+    // Invalidate the active message's render cache. Its streaming_text
+    // just lost its front, so the next source the view feeds its widget
+    // is a SUFFIX (non-prefix) of what the widget last parsed. Without
+    // this reset StreamingMarkdown::set_content sees a divergent prefix,
+    // runs clear()+full-reparse, and resets its reveal cursor to 0 —
+    // every carve (~once per half-viewport) — which is the mid-stream
+    // "md stuck / slow" stutter. Resetting the slot makes the next
+    // cached_markdown_for build a fresh widget over the carved suffix:
+    // a clean append-only start. agentty owns the md cache; maya just
+    // draws what it's fed.
+    m.ui.view_cache.message_md(m.d.current.id, active_id).reset();
 
     // The settled prefix is now its own terminal (no tools, has text)
     // sub-turn in the live tail. freeze_settled_subturns will freeze it
