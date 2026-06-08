@@ -69,34 +69,38 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
                    : tc.is_approved() ? std::string{"approved\xe2\x80\xa6"}
                                       : std::string{"\xe2\x80\xa6"};
         }
-        // Per-event hash_id: enabled ONLY on the FROZEN build path.
+        // Per-event hash_id on every TERMINAL tool event — live tail
+        // AND frozen snapshot. Once a tool is terminal its bytes are
+        // immutable (status fixed, output().size() fixed), so the cache
+        // key is content-addressed and stable across every subsequent
+        // frame: maya blits the event's (header + body) sub-tree from
+        // its component cache instead of re-laying-out ToolBodyPreview's
+        // per-line row Elements. For a settled write/edit with hundreds
+        // of lines that collapses hundreds of flex rows into one cached
+        // blit — the dominant per-frame cost of a tall settled card
+        // sitting in an in-flight assistant run.
         //
-        // Setting hash_id on a terminal tool event makes maya wrap the
-        // event's (header + body) sub-tree in a ComponentElement and
-        // blit its cached cells across frames instead of re-laying-out
-        // ToolBodyPreview's per-line row Elements. For a settled
-        // write/edit with hundreds of lines that collapses hundreds of
-        // flex rows into one cached blit — the dominant per-frame cost
-        // of a tall settled card.
+        // Why this is safe in the live tail (the historical concern):
+        // the maya prev_cells desync that originally caused live cards
+        // to collapse to their last line and lose the left border is
+        // fixed in maya HEAD (card-border tests 5/5). The freeze handoff
+        // is also a pure cache hit: freeze_range builds the same Element
+        // sub-tree under the same hash_id, so maya's cache entry survives
+        // the live→frozen transition with zero re-paint.
         //
-        // It is gated on building_frozen() because the corruption that
-        // forced this off historically was in the LIVE inline-compose
-        // loop (cards collapsing to their last line, left border
-        // vanishing — a prev_cells desync in the differential path).
-        // Frozen turns are built by freeze_range under FrozenBuildScope
-        // and rendered through the component-cache cell blit that the
-        // card-border tests exercise and pass (5/5 at maya HEAD). So we
-        // cache the settled, immutable frozen snapshot — where it's
-        // proven safe — and leave the live tail un-hashed (it rebuilds
-        // every frame anyway, and its body is already tail-windowed).
+        // Why this is needed: an in-flight assistant run can contain
+        // many already-terminal write/edit/read cards (each sub-turn
+        // settles before the next continuation arrives). Without a key,
+        // every frame rebuilds and re-lays out every tall body for the
+        // entire run — ~21 ms/frame for a 3000-line read, multiplied
+        // by every settled card in the run. Over ssh that turns into
+        // visible lag as the turn grows.
         //
-        // Key: tool-call id + a render key that folds the terminal
-        // status and body size so a different settled state can't alias
-        // a cached blit. The id is stable for the lifetime of the
-        // frozen entry (frozen bytes never change), so it's a permanent
-        // cache hit.
+        // Key: tool-call id + status + output size. Permanent cache hit
+        // once terminal; running/pending events stay un-keyed (their
+        // body still mutates each frame and would alias a stale blit).
         maya::CacheId event_hash_id;
-        if (building_frozen() && tc.is_terminal()) {
+        if (tc.is_terminal()) {
             event_hash_id = maya::CacheIdBuilder{}
                 .add(std::string_view{"agentty.tool_event"})
                 .add(std::string_view{tc.id.value})
