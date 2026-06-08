@@ -340,28 +340,86 @@ the Zed `args`:
 With `--workspace /` the startup line honestly reports `sandbox: degraded` —
 binding the whole filesystem means there's no containment left to enforce.
 
-### agentty-in-Zed on an air-gapped remote (one command)
+### agentty-in-Zed on an air-gapped remote
 
-Want Zed to drive agentty running on a box with no direct internet? Don't
-hand-assemble tunnels — let one command print the exact config:
+Yes — you can run agentty inside Zed against a server with **zero internet access**. Your laptop relays every byte. Nothing runs on the remote besides the agent + your shell session.
+
+#### Roles (read once)
+
+- **Laptop** — has internet, has your Anthropic OAuth/API key, runs Zed, runs `ssh`. The relay.
+- **Remote** — the air-gapped box. No internet. Runs `agentty acp` (spawned by Zed via ssh).
+
+Everything below is done **on the laptop**.
+
+#### Prerequisites
+
+1. `agentty` installed on **both** machines (`which agentty` on each prints a path).
+2. Passwordless SSH from laptop to remote works (`ssh user@remote echo ok` returns `ok` without prompting). If it prompts, run `ssh-copy-id user@remote` first.
+3. You're logged in on the laptop (`agentty status` shows OAuth or API key). If not: `agentty login`.
+4. Zed installed on the laptop.
+
+#### One-time setup (two commands, ~5 seconds total)
+
+From the laptop:
 
 ```bash
-agentty airgap --setup user@airgapped-host           # once: copy your creds over
-agentty airgap user@airgapped-host --acp -m claude-haiku-4-5 --profile ask
+# 1. Copy your Anthropic credentials to the remote (once):
+agentty airgap --setup user@remote
+
+# 2. Print the Zed config block for this remote:
+agentty airgap user@remote --acp -m claude-haiku-4-5 --profile ask
 ```
 
-The `--acp` form **doesn't launch anything** — it prints a ready-to-paste Zed
-`agent_servers` block (and the path to your `settings.json`). The trick: the
-block's `command` is `ssh` itself, and its args open the reverse SOCKS tunnel
-*and* exec the remote `agentty acp` in one invocation. The ACP JSON-RPC rides
-ssh's stdio, so **a single ssh process is the tunnel, the agent, and the
-transport** — Zed spawns it, Zed kills it. No `ssh -N` to babysit, no remote
-wrapper script, no env block. Everything after `--acp` (model, `--profile`,
-`--workspace`, `--sandbox`) is forwarded verbatim to the remote agent.
+The second command **prints to stderr and exits** — it does not start anything. You'll see something like:
 
-Paste the printed block, pick **agentty (airgap)** in Zed's agent panel, prompt.
-The remote just needs agentty installed and its credentials (the `--setup` line
-above copies them at `chmod 600`).
+```
+agentty airgap --acp: add this to Zed's settings.json
+  → /home/you/.config/zed/settings.json:
+
+  "agent_servers": {
+    "agentty (airgap)": {
+      "command": "ssh",
+      "args": ["-T", "-R", "1080", "-o", "ExitOnForwardFailure=yes", ...
+              "user@remote",
+              "AGENTTY_SOCKS_PROXY=localhost:1080 exec agentty acp -m claude-haiku-4-5 --profile ask"]
+    }
+  }
+```
+
+#### Wire it into Zed (one paste)
+
+1. Open Zed's settings: `cmd-,` (macOS) or `ctrl-,` (Linux) → the settings file opens.
+2. Paste the printed `"agent_servers"` block into the JSON. If you already have an `agent_servers` object, merge the `"agentty (airgap)"` key into it.
+3. Save.
+
+#### Use it
+
+1. Open the agent panel in Zed: `cmd-?` / `ctrl-?`.
+2. From the agent picker, pick **agentty (airgap)**.
+3. Prompt.
+
+That's it. Zed spawns `ssh` directly — a single process is the tunnel, the agent, and the JSON-RPC transport. Zed owns its lifecycle: close the agent panel, the ssh + remote `agentty acp` both die. No `ssh -N` running in the background, no wrapper script, no daemon.
+
+#### What's happening under the hood
+
+- Zed runs `ssh -R 1080 user@remote 'AGENTTY_SOCKS_PROXY=localhost:1080 exec agentty acp ...'` directly.
+- `-R 1080` exposes a SOCKS5 proxy on the remote's `localhost:1080`. The remote `agentty` is told to route every outbound connection (chat, OAuth refresh, `web_fetch`, `web_search`) through it. Those connections tunnel back over SSH and are dialed by your laptop.
+- ACP JSON-RPC flows over ssh's stdio. No extra port, no extra process.
+- TLS still negotiates end-to-end with the real upstream (api.anthropic.com etc.). The laptop sees encrypted bytes only — it can't MITM.
+
+#### Trust model (read before `--setup`)
+
+`--setup` copies your laptop's `~/.config/agentty/credentials.json` to the remote (chmod 600). That file contains your OAuth refresh token (or API key). A compromised remote can exfiltrate it independent of the tunnel. **agentty airgap protects the network between laptop and remote, not the remote itself** — treat the remote as a credential-bearing peer, not a sandboxed proxy.
+
+#### Troubleshooting
+
+- **Zed shows the agent greyed out / "failed to start"** — check `~/.local/share/zed/logs/Zed.log` (Linux) or `~/Library/Logs/Zed/Zed.log` (macOS) for the ssh spawn line. Common causes: `ssh` not on Zed's PATH (rare), the remote prompts for a password (run `ssh-copy-id` first), or `agentty` isn't on the remote's PATH (pass `--remote-agentty /full/path/to/agentty` to the `airgap` command, then re-print the config).
+- **"connection refused" or "could not resolve host" mid-turn** — the SOCKS tunnel dropped. Usually a flaky network on the laptop. Close the agent panel in Zed and reopen — Zed respawns ssh.
+- **Slow first response** — first TLS handshake to api.anthropic.com tunnels through ssh, adds ~100 ms. Subsequent turns reuse the connection.
+- **`agentty: command not found` in the ssh spawn log** — agentty isn't on the remote shell's non-interactive PATH (`ssh user@remote 'echo $PATH'` shows what Zed sees). Either install it system-wide on the remote, or re-print the config with `--remote-agentty /full/path/to/agentty`.
+- **The remote needs a non-default ssh port / key / jump host** — export `AGENTTY_AIRGAP_SSH="-p 2222 -i ~/.ssh/work -J bastion"` before running `agentty airgap ... --acp`. Those flags get embedded into the printed config.
+
+> Want to drive it from the command line first to confirm it works before touching Zed? `agentty airgap user@remote` (no `--acp`) launches the agentty TUI running on the remote, in your local terminal. If that works, the ACP version will too — same tunnel, different transport.
 
 > Run `agentty acp` by hand and it'll sit waiting for newline-delimited
 > JSON-RPC on stdin (diagnostics go to stderr, stdout is the protocol channel).
