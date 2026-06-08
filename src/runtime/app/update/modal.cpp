@@ -199,6 +199,11 @@ Step submit_message(Model m) {
     // the view renders frozen as list_ref (zero copy) plus a tiny
     // live tail. Per-frame cost stops growing with session length.
     freeze_through(m, m.d.current.messages.size());
+    // A deferred settle-freeze may still be pending from the prior turn
+    // (user submitted before the next idle Tick fired). The freeze above
+    // just covered it, so drop the flag to avoid a redundant no-op freeze
+    // on the next Tick.
+    m.ui.pending_settle_freeze = false;
 
     m.d.current.messages.push_back(std::move(user));
 

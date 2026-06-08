@@ -1033,34 +1033,19 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             if (mm.role != Role::Assistant || mm.text.empty()) continue;
             settle_message_md(m, mm);
         }
-        freeze_through(m, m.d.current.messages.size());
-        // Trim frozen at idle, mirroring agent_session's MessageStop
-        // policy. Previously trim only ran on launch_stream (next user
-        // submit), so a long auto-pilot run (tool loop with many
-        // sub-turns) let frozen grow unbounded between user inputs.
-        // On long sessions that's the dominant per-frame cost — the
-        // canvas resizes to fit total transcript height and every
-        // render clears + paints all of it.
-        //
-        // The trim itself removes entries from the frozen tree and
-        // returns commit_scrollback(removed_rows) — committing EXACTLY
-        // the rows it dropped from the front to native scrollback. This
-        // matches the real shrink of the live tree: the next diff
-        // measures the smaller settled frame against a baseline that
-        // lost the same rows. (It deliberately does NOT use the generic
-        // commit_scrollback_overflow, which releases down to one viewport
-        // — over-committing the ~0.5 viewport the trim still KEEPS and
-        // re-emitting it as a stranded duplicate one screen up.) The
-        // non-trim path commits nothing: there the frozen tree still owns
-        // every visible row, so rebasing prev_cells without a matching
-        // tree shrink makes the next render grow back to full height and
-        // re-emit the committed rows every frame (heavy flicker). The
-        // freeze-seam height delta on the non-trim path is small (±N
-        // live-tail rows) and the normal new-vs-prev diff absorbs it.
-        if (auto trim = trim_frozen_if_oversized(m); !trim.is_none()) {
-            kp = Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                std::move(trim), std::move(kp)});
-        }
+        // DEFER the freeze by one paint. finish() (in settle_message_md
+        // above) changed the md widget's build shape + prefix generation,
+        // so the post-finish element tree's inner ComponentElement hash
+        // differs from the last LIVE (pre-finish) frame still in maya's
+        // prev_cells. Freezing NOW and swapping live-tail→frozen on the
+        // next paint would diff post-finish frozen against pre-finish
+        // prev_cells = cache miss = re-emit the whole turn from the top
+        // (the post-settle redraw). Instead we set a flag and let the
+        // live tail render the SETTLED (post-finish) message for one
+        // frame — prev_cells then holds the post-finish hash — and the
+        // next idle Tick (meta.cpp) freezes the byte-and-hash-identical
+        // tree as a cache HIT. The trim runs in that same deferred step.
+        m.ui.pending_settle_freeze = true;
     }
 
     // Post-turn idle auto-compaction.

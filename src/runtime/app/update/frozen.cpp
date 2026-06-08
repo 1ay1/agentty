@@ -986,6 +986,7 @@ void clear_frozen(Model& m) {
     m.ui.frozen_turn    = 0;
     m.ui.frozen_midrun  = false;
     m.ui.split_scan_nosplit_size = 0;
+    m.ui.pending_settle_freeze   = false;
 }
 
 void rehydrate_frozen(Model& m) {

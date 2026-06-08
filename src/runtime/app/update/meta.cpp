@@ -102,6 +102,26 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.last_tick = now;
             if (m.s.active()) m.s.spinner.advance(dt);
 
+            // ── Deferred settle-freeze (post-stream redraw fix) ──────
+            // finalize_turn settled the just-finished assistant message
+            // (finish() on its StreamingMarkdown) but deferred the freeze
+            // to AVOID the post-settle redraw: finish() changes the md
+            // widget's build shape + prefix generation, so freezing in
+            // the same tick would diff a post-finish frozen tree against
+            // the last pre-finish live frame still in maya's prev_cells
+            // (cache miss = re-emit the whole turn from the top). By now
+            // one view() has painted the settled (post-finish) message
+            // via the live tail, so prev_cells holds the post-finish
+            // hash. Freezing the byte-and-hash-identical tree HERE is a
+            // cache hit (no re-emit). Trim in the same step, exactly as
+            // the old inline path did.
+            maya::Cmd<Msg> settle_freeze_trim = maya::Cmd<Msg>::none();
+            if (m.ui.pending_settle_freeze && m.s.is_idle()) {
+                m.ui.pending_settle_freeze = false;
+                freeze_through(m, m.d.current.messages.size());
+                settle_freeze_trim = trim_frozen_if_oversized(m);
+            }
+
             // ── pending_stream → streaming_text ──────────────────────
             // Move buffered wire bytes into streaming_text every tick.
             // No host-side pacing: agentty does NOT animate the stream.
@@ -284,8 +304,13 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
+            if (!midrun_trim.is_none() && !settle_freeze_trim.is_none())
+                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+                    std::move(midrun_trim), std::move(settle_freeze_trim)})};
             if (!midrun_trim.is_none())
                 return {std::move(m), std::move(midrun_trim)};
+            if (!settle_freeze_trim.is_none())
+                return {std::move(m), std::move(settle_freeze_trim)};
             return done(std::move(m));
         },
         [&](Quit) -> Step {

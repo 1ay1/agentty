@@ -248,6 +248,22 @@ struct Model {
         // run finishes (freeze_through at idle).
         bool                frozen_midrun = false;
 
+        // Deferred settle-freeze. The post-stream settle (finish() on the
+        // StreamingMarkdown) flips the md widget's build shape + prefix
+        // generation, so the post-finish element tree's inner
+        // ComponentElement hash differs from every live (pre-finish)
+        // frame. If freeze_through ran in the SAME tick as finish(), the
+        // frozen tree (post-finish hash) would be diffed against
+        // prev_cells (last live, pre-finish hash) on the next paint = a
+        // maya component-cache miss = the whole turn re-emits from the
+        // top (the post-settle redraw). Instead finalize_turn settles
+        // here and sets this flag WITHOUT freezing; one view() paints the
+        // finished (still-unfrozen, live-tail) tree so prev_cells now
+        // holds the post-finish hash; the next idle Tick sees the flag,
+        // freezes the byte-and-hash-identical tree (cache HIT, no
+        // re-emit), and clears the flag.
+        bool                pending_settle_freeze = false;
+
         // Split-scan throttle for freeze_streaming_text_prefix. When a
         // scan finds NO safe block boundary (a single giant fence /
         // unbreakable block still accumulating), re-scanning the whole

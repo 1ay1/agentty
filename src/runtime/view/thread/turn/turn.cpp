@@ -59,20 +59,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     if (!cache.streaming) {
         cache.streaming = std::make_shared<maya::StreamingMarkdown>();
         // Animated live tail: gradient trail + scramble→resolve + pulsing
-        // caret on the streaming edge (maya reveal_fx).
+        // caret on the streaming edge (maya reveal_fx). Only animates while
+        // the widget is live_; the settled build is untouched.
         cache.streaming->set_reveal_fx(true);
-        // Eager-commit reveal: commits land at block boundaries DURING
-        // the stream (no defer) and the reveal overlay renders unrevealed
-        // codepoints INVISIBLE (height-stable) on the COMMITTED tail
-        // instead of clipping bytes out. This keeps the typewriter
-        // animation while making finish() a structural no-op — the
-        // frozen tree maya captures at settle is hash-identical to the
-        // last live frame, so the whole turn no longer re-emits from the
-        // top after the stream settles (the post-settle redraw). Without
-        // this, reveal_fx defers ALL commits and finish() bulk-commits
-        // the whole body at once, bumping prefix generation + flipping
-        // the build shape = full rebuild = cache miss = redraw.
-        cache.streaming->set_reveal_eager_commit(true);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
