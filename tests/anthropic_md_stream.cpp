@@ -179,10 +179,13 @@ int do_replay(const std::string& in_path,
               int width,
               bool fx_on,
               double floor_cps,
-              double drain_secs) {
+              double drain_secs,
+              double feed_cps) {
     auto deltas = load_fixture(in_path);
-    std::println(stderr, "→ replay {} deltas (realtime={}, width={}, fx={}, cps={}, drain={}s)",
-                 deltas.size(), realtime, width, fx_on, floor_cps, drain_secs);
+    std::println(stderr,
+        "→ replay {} deltas (realtime={}, width={}, fx={}, cps={}, drain={}s, feed_cps={})",
+        deltas.size(), realtime, width, fx_on, floor_cps, drain_secs,
+        feed_cps > 0.0 ? std::to_string(feed_cps) : std::string{"∞"});
 
     // Shared md is fed by a producer thread and read by maya::live's
     // render thread. StreamingMarkdown::append() + build() are not
@@ -198,13 +201,51 @@ int do_replay(const std::string& in_path,
     std::atomic<bool> done{false};
     auto wall_start = steady_clock::now();
 
+    // Flatten all deltas into one byte stream when --feed-cps is on:
+    // we drip codepoint-by-codepoint at the requested rate. This is
+    // what makes the typewriter feel REAL — the markdown parser's
+    // commit_range can never settle a paragraph faster than the user
+    // sees it appear, so committed prefixes don't flash in pre-styled.
+    // Without this throttle, a 150-char burst delta lands all bytes
+    // at once, the parser commits the paragraph (e.g. on `\n\n`), and
+    // the rendered prefix paints with full style — maya's reveal
+    // cursor only animates the still-live TAIL after that, so the
+    // user perceives "everything appears then animation happens".
+    std::string all_bytes;
+    if (feed_cps > 0.0) {
+        std::size_t total = 0;
+        for (const auto& d : deltas) total += d.text.size();
+        all_bytes.reserve(total);
+        for (const auto& d : deltas) all_bytes.append(d.text);
+    }
+
     std::thread producer([&, md] {
-        for (std::size_t i = 0; i < deltas.size(); ++i) {
-            if (realtime && i > 0) {
-                auto target = wall_start + milliseconds(deltas[i].t_ms);
-                std::this_thread::sleep_until(target);
+        if (feed_cps > 0.0) {
+            // Codepoint-paced drip. UTF-8 codepoint boundary = byte
+            // whose top 2 bits are not 10. Walk the byte stream,
+            // releasing one cp at a time at the requested rate.
+            const auto per_cp = duration_cast<nanoseconds>(
+                duration<double>(1.0 / feed_cps));
+            auto next_wake = steady_clock::now();
+            std::size_t i = 0;
+            while (i < all_bytes.size()) {
+                std::size_t j = i + 1;
+                while (j < all_bytes.size() &&
+                       (static_cast<unsigned char>(all_bytes[j]) & 0xC0) == 0x80)
+                    ++j;
+                md->append(std::string_view{all_bytes.data() + i, j - i});
+                i = j;
+                next_wake += per_cp;
+                std::this_thread::sleep_until(next_wake);
             }
-            md->append(deltas[i].text);
+        } else {
+            for (std::size_t i = 0; i < deltas.size(); ++i) {
+                if (realtime && i > 0) {
+                    auto target = wall_start + milliseconds(deltas[i].t_ms);
+                    std::this_thread::sleep_until(target);
+                }
+                md->append(deltas[i].text);
+            }
         }
         // Let the reveal cursor catch up + chrome settle before quit.
         std::this_thread::sleep_for(2s);
@@ -228,11 +269,20 @@ void usage() {
         "anthropic_md_stream — capture/replay real Anthropic SSE for maya md tests\n"
         "\n"
         "  capture <out.jsonl> [--prompt \"...\"] [--model claude-...]\n"
-        "  replay  <in.jsonl>  [--realtime] [--width N] [--no-fx]\n"
+        "  replay  <in.jsonl>  [--realtime | --feed-cps N]\n"
+        "                      [--width N] [--no-fx]\n"
         "                      [--cps N] [--drain SECS]\n"
         "\n"
-        "  --cps N        floor codepoints/sec of the reveal typewriter\n"
-        "                 (default 120; try 20 to see the animation crawl).\n"
+        "  --realtime     feed each delta at the recorded inter-delta gap.\n"
+        "                 Each delta still lands as ONE append() — the\n"
+        "                 markdown parser commits whole blocks instantly,\n"
+        "                 so settled paragraphs appear in one go.\n"
+        "  --feed-cps N   drip the stream byte-by-byte at N codepoints/sec\n"
+        "                 (e.g. 20 = 50 ms per char). This is the REAL\n"
+        "                 typewriter — commit_range can't settle a paragraph\n"
+        "                 faster than chars appear, so the user sees every\n"
+        "                 byte show up. Try `--feed-cps 25` first.\n"
+        "  --cps N        floor cps of maya's own reveal cursor (default 120).\n"
         "  --drain SECS   target seconds to clear a burst backlog (default 0.8).\n");
 }
 
@@ -259,16 +309,19 @@ int main(int argc, char** argv) {
         int    width     = 100;
         double floor_cps = 120.0;
         double drain_secs = 0.8;
+        double feed_cps   = 0.0;   // 0 = unthrottled (use delta cadence)
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--realtime") realtime = true;
             else if (a == "--no-fx")    fx_on    = false;
-            else if (a == "--width" && i + 1 < argc) width = std::atoi(argv[++i]);
-            else if (a == "--cps"   && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
-            else if (a == "--drain" && i + 1 < argc) drain_secs = std::atof(argv[++i]);
+            else if (a == "--width"   && i + 1 < argc) width = std::atoi(argv[++i]);
+            else if (a == "--cps"     && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
+            else if (a == "--drain"   && i + 1 < argc) drain_secs = std::atof(argv[++i]);
+            else if (a == "--feed-cps" && i + 1 < argc) feed_cps  = std::atof(argv[++i]);
             else { usage(); return 1; }
         }
-        return do_replay(path, realtime, width, fx_on, floor_cps, drain_secs);
+        return do_replay(path, realtime, width, fx_on,
+                         floor_cps, drain_secs, feed_cps);
     }
     usage();
     return 1;
