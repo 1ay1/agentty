@@ -180,12 +180,13 @@ int do_replay(const std::string& in_path,
               bool fx_on,
               double floor_cps,
               double drain_secs,
-              double feed_cps) {
+              double feed_cps,
+              bool trace) {
     auto deltas = load_fixture(in_path);
     std::println(stderr,
-        "→ replay {} deltas (realtime={}, width={}, fx={}, cps={}, drain={}s, feed_cps={})",
+        "→ replay {} deltas (realtime={}, width={}, fx={}, cps={}, drain={}s, feed_cps={}, trace={})",
         deltas.size(), realtime, width, fx_on, floor_cps, drain_secs,
-        feed_cps > 0.0 ? std::to_string(feed_cps) : std::string{"∞"});
+        feed_cps > 0.0 ? std::to_string(feed_cps) : std::string{"∞"}, trace);
 
     // Shared md is fed by a producer thread and read by maya::live's
     // render thread. StreamingMarkdown::append() + build() are not
@@ -217,6 +218,77 @@ int do_replay(const std::string& in_path,
         for (const auto& d : deltas) total += d.text.size();
         all_bytes.reserve(total);
         for (const auto& d : deltas) all_bytes.append(d.text);
+    }
+
+    if (trace) {
+        // Trace mode bypasses maya::live and runs a manual render loop
+        // that logs each frame's source/reveal/committed state to
+        // stderr. Lets us SEE whether bursts come from the producer,
+        // the reveal cursor, the commit, or the renderer.
+        auto start = steady_clock::now();
+        std::thread tprod([&, md] {
+            if (feed_cps > 0.0) {
+                const auto per_cp = duration_cast<nanoseconds>(
+                    duration<double>(1.0 / feed_cps));
+                auto next_wake = steady_clock::now();
+                std::size_t i = 0;
+                while (i < all_bytes.size()) {
+                    std::size_t j = i + 1;
+                    while (j < all_bytes.size() &&
+                           (static_cast<unsigned char>(all_bytes[j]) & 0xC0) == 0x80)
+                        ++j;
+                    md->append(std::string_view{all_bytes.data() + i, j - i});
+                    i = j;
+                    next_wake += per_cp;
+                    std::this_thread::sleep_until(next_wake);
+                }
+            } else {
+                for (std::size_t i = 0; i < deltas.size(); ++i) {
+                    if (realtime && i > 0) {
+                        auto target = start + milliseconds(deltas[i].t_ms);
+                        std::this_thread::sleep_until(target);
+                    }
+                    md->append(deltas[i].text);
+                }
+            }
+            std::this_thread::sleep_for(1500ms);
+            md->finish();
+            done = true;
+        });
+
+        // Frame loop. Render each frame to a plain string (no ANSI),
+        // measure how many visible chars are present, and log the
+        // per-frame delta. If the typewriter is smooth this should
+        // grow by ~floor_cps * 0.033 chars per 33 ms frame; if it's
+        // bursty we'll see long flat stretches followed by big jumps.
+        std::size_t last_visible = 0;
+        int frame = 0;
+        while (!done) {
+            const maya::Element& el = md->build();
+            std::string rendered = maya::render_to_string(el, width);
+            // Count visible (non-whitespace, non-newline) chars as a
+            // proxy for "what the user can see". Whitespace+newlines
+            // are added by the renderer for layout and would muddy
+            // the per-frame delta signal.
+            std::size_t visible = 0;
+            for (char c : rendered) {
+                if (c != ' ' && c != '\n' && c != '\r' && c != '\t')
+                    ++visible;
+            }
+            const auto t_ms = duration_cast<milliseconds>(
+                steady_clock::now() - start).count();
+            const long long delta = static_cast<long long>(visible)
+                                  - static_cast<long long>(last_visible);
+            std::println(stderr,
+                "[{:>6} ms] frame={:>4} visible={:>5} Δ={:+4} rendered_bytes={}",
+                t_ms, frame, visible, delta, rendered.size());
+            last_visible = visible;
+            ++frame;
+            std::this_thread::sleep_for(33ms);
+        }
+        tprod.join();
+        std::println(stderr, "→ trace done ({} deltas, {} frames)", deltas.size(), frame);
+        return 0;
     }
 
     std::thread producer([&, md] {
@@ -310,10 +382,12 @@ int main(int argc, char** argv) {
         double floor_cps = 120.0;
         double drain_secs = 0.8;
         double feed_cps   = 0.0;   // 0 = unthrottled (use delta cadence)
+        bool   trace      = false;
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--realtime") realtime = true;
             else if (a == "--no-fx")    fx_on    = false;
+            else if (a == "--trace")    trace    = true;
             else if (a == "--width"   && i + 1 < argc) width = std::atoi(argv[++i]);
             else if (a == "--cps"     && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
             else if (a == "--drain"   && i + 1 < argc) drain_secs = std::atof(argv[++i]);
@@ -321,7 +395,7 @@ int main(int argc, char** argv) {
             else { usage(); return 1; }
         }
         return do_replay(path, realtime, width, fx_on,
-                         floor_cps, drain_secs, feed_cps);
+                         floor_cps, drain_secs, feed_cps, trace);
     }
     usage();
     return 1;
