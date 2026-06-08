@@ -177,10 +177,12 @@ std::vector<Delta> load_fixture(const std::string& path) {
 int do_replay(const std::string& in_path,
               bool realtime,
               int width,
-              bool fx_on) {
+              bool fx_on,
+              double floor_cps,
+              double drain_secs) {
     auto deltas = load_fixture(in_path);
-    std::println(stderr, "→ replay {} deltas (realtime={}, width={}, fx={})",
-                 deltas.size(), realtime, width, fx_on);
+    std::println(stderr, "→ replay {} deltas (realtime={}, width={}, fx={}, cps={}, drain={}s)",
+                 deltas.size(), realtime, width, fx_on, floor_cps, drain_secs);
 
     // Shared md is fed by a producer thread and read by maya::live's
     // render thread. StreamingMarkdown::append() + build() are not
@@ -191,6 +193,7 @@ int do_replay(const std::string& in_path,
     auto md = std::make_shared<maya::StreamingMarkdown>();
     md->set_live(true);
     md->set_reveal_fx(fx_on);
+    md->set_reveal_pacing(floor_cps, drain_secs);
 
     std::atomic<bool> done{false};
     auto wall_start = steady_clock::now();
@@ -225,7 +228,12 @@ void usage() {
         "anthropic_md_stream — capture/replay real Anthropic SSE for maya md tests\n"
         "\n"
         "  capture <out.jsonl> [--prompt \"...\"] [--model claude-...]\n"
-        "  replay  <in.jsonl>  [--realtime] [--width N] [--no-fx]\n");
+        "  replay  <in.jsonl>  [--realtime] [--width N] [--no-fx]\n"
+        "                      [--cps N] [--drain SECS]\n"
+        "\n"
+        "  --cps N        floor codepoints/sec of the reveal typewriter\n"
+        "                 (default 120; try 20 to see the animation crawl).\n"
+        "  --drain SECS   target seconds to clear a burst backlog (default 0.8).\n");
 }
 
 } // namespace
@@ -247,16 +255,20 @@ int main(int argc, char** argv) {
         return do_capture(path, prompt, model);
     }
     if (mode == "replay") {
-        bool realtime = false, fx_on = true;
-        int  width    = 100;
+        bool   realtime   = false, fx_on = true;
+        int    width     = 100;
+        double floor_cps = 120.0;
+        double drain_secs = 0.8;
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--realtime") realtime = true;
             else if (a == "--no-fx")    fx_on    = false;
             else if (a == "--width" && i + 1 < argc) width = std::atoi(argv[++i]);
+            else if (a == "--cps"   && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
+            else if (a == "--drain" && i + 1 < argc) drain_secs = std::atof(argv[++i]);
             else { usage(); return 1; }
         }
-        return do_replay(path, realtime, width, fx_on);
+        return do_replay(path, realtime, width, fx_on, floor_cps, drain_secs);
     }
     usage();
     return 1;
