@@ -642,6 +642,19 @@ static void test_text_turn_finish_shrink() {
         m.d.current.messages.push_back(std::move(a));
         m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
     }
+    // The turn view's cached_markdown_for enables maya reveal_fx (a wall-
+    // clock typewriter) on the live widget, so the FIRST build only reveals
+    // the bytes the cursor has walked to — a tiny fraction of `body`. This
+    // test is about the freeze/shrink SEAM, not the reveal animation, and it
+    // needs frame A to render the full streamed body so it overflows the
+    // viewport. Pre-seed the cache with reveal_fx OFF so the streaming frame
+    // measures the settled height.
+    {
+        auto& cache = m.ui.view_cache.message_md(
+            m.d.current.id, m.d.current.messages.back().id);
+        cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+        cache.streaming->set_reveal_fx(false);
+    }
     Canvas ca = paint(build_root(m), kWidth, pool);
     auto oa = InlineFrame<Empty>{}.seed().render(
         ca, content_rows(ca), term_rows_for_test(kTermH), pool, writer, false);

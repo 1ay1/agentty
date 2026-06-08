@@ -1129,6 +1129,50 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME tool_result_budget_test COMMAND tool_result_budget_test)
 
+    # acp_integration_test — end-to-end ACP agent exercise. Drives a real
+    # agentty::acp::AgentServer (on the acp-cpp library) through
+    # initialize → session/new → session/prompt over an in-memory transport
+    # with a scripted provider. Verifies the deferred-prompt + outbound
+    # permission round-trip (the path that would deadlock a blocking handler),
+    # tool execution, history feedback, and the final stopReason. Links the
+    # ACP server TU + acp::acp on top of the tool/provider stack.
+    add_executable(acp_integration_test EXCLUDE_FROM_ALL
+        tests/acp_integration_test.cpp
+        ${AGENTTY_ACP_SOURCES}
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(acp_integration_test PRIVATE include)
+    target_compile_definitions(acp_integration_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(acp_integration_test PRIVATE
+        maya::maya
+        acp::acp
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(acp_integration_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(acp_integration_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME acp_integration_test COMMAND acp_integration_test)
+    set_tests_properties(acp_integration_test PROPERTIES TIMEOUT 60)
+
     # frozen_invariant_fuzz — randomized property test for the frozen-
     # scrollback subsystem. Drives arbitrary sequences of conversation
     # growth + freeze/trim/rehydrate ops and asserts the structural
@@ -1222,5 +1266,6 @@ if(AGENTTY_BUILD_TESTS)
         table_render_test
         visual_hash_coverage_test
         tool_result_budget_test
+        acp_integration_test
         frozen_invariant_fuzz)
 endif()
