@@ -8,8 +8,12 @@
 #include "agentty/acp/server.hpp"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <fstream>
+#include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -215,6 +219,32 @@ a::AgentHandlers AgentServer::make_handlers() {
 }
 
 int AgentServer::serve() {
+    // ── observability ──────────────────────────────────────────────────────
+    // AGENTTY_ACP_TRACE=1 → every JSON-RPC frame to stderr (debug Zed/glue).
+    // Stderr is reserved by the ACP stdio framing for free-form logging.
+    if (const char* t = std::getenv("AGENTTY_ACP_TRACE"); t && *t && std::strcmp(t, "0") != 0) {
+        static std::mutex trace_mu;
+        conn_.set_wire_trace([](a::WireDir dir, std::string_view line) {
+            std::lock_guard lk(trace_mu);
+            std::cerr << (dir == a::WireDir::Inbound ? "acp ← " : "acp → ")
+                      << line << '\n';
+            std::cerr.flush();
+        });
+    }
+    // Surface transport-level faults (peer EOF, reader exception) — silent
+    // failure here is the worst Zed-integration UX. errc::ConnectionLost is
+    // expected at session end; everything else is worth seeing.
+    conn_.set_error_callback([](int code, std::string_view msg) {
+        if (code == a::errc::ConnectionLost) return;  // normal end-of-session
+        std::cerr << "[acp] transport error (" << code << "): " << msg << '\n';
+    });
+    // Default deadline on outbound requests we issue to the client
+    // (request_permission, read_text_file, write_text_file, terminal_*).
+    // A dead client no longer wedges a worker thread forever — the future
+    // fails with errc::Timeout and ask_permission falls through to Deny.
+    // 5 min is generous for a human reading a permission dialog.
+    conn_.set_default_timeout(std::chrono::minutes(5));
+
     transport_.start(conn_.engine());
     transport_.join();   // blocks until EOF on stdin
     return 0;
