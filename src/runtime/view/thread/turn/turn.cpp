@@ -776,22 +776,37 @@ std::size_t freezable_prefix_cut(const Model& m, std::size_t run_start,
 
     // The last sub-turn of the run is normally kept LIVE so the active
     // edge keeps animating and frozen_through never lands on a still-
-    // mutable message. The one exception: a settled terminal-TOOL batch
-    // that is no longer msgs.back() (a continuation message already
-    // follows it). That message can no longer grow a trailing text block
-    // appended to itself, so the whole settled prefix is eligible — and
-    // we WANT it eligible so the big write/edit card lands in the
-    // zero-copy frozen prefix instead of re-rendering live every frame.
+    // mutable message. Two exceptions where the terminal-TOOL batch at
+    // the tail is byte-stable and CAN be included in the prefix:
+    //
+    //  (a) A continuation message already follows it (run_end < total)
+    //      — the model has moved on, no further bytes will land on it.
+    //
+    //  (b) The phase is ExecutingTool or AwaitingPermission. In both,
+    //      StreamFinished has already fired (deltas done, tools
+    //      dispatched / paused on permission), so no StreamTextDelta
+    //      can append text to msgs.back() before the next placeholder
+    //      push. Including it in the prefix on the LIVE-TAIL render
+    //      makes the hash stamped here MATCH the hash freeze_settled_
+    //      subturns will stamp on the very next tick (after
+    //      kick_pending_tools widens total): cache HIT, no re-emit.
+    //      Without this, every tool round of an auto-pilot run shows
+    //      a brief from-top redraw at the tool→continuation seam —
+    //      the user-visible "renders when nothing should" bug.
     //
     // A settled-text-only last sub-turn always stays live (it may be the
     // active prose tail freeze_streaming_text_prefix just carved, whose
     // successor bytes are still streaming).
-    const bool last_is_settled_tool_batch_not_back =
+    const bool tail_is_terminal_tools =
         cut == run_end
         && run_end > run_start
-        && run_end < total                 // a later (continuation) msg exists
-        && !msgs[run_end - 1].tool_calls.empty()
-        && m.s.active();
+        && !msgs[run_end - 1].tool_calls.empty();
+    const bool deltas_quiescent =
+        m.s.is_executing_tool() || m.s.is_awaiting_permission();
+    const bool last_is_settled_tool_batch_not_back =
+        tail_is_terminal_tools
+        && m.s.active()
+        && (run_end < total || deltas_quiescent);
     if (cut >= run_end && !last_is_settled_tool_batch_not_back)
         cut = (run_end > run_start) ? run_end - 1 : run_start;
     return cut;
