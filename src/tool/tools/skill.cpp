@@ -1,10 +1,14 @@
-// skill — load one on-demand skill's full instruction doc.
+// skill — load one on-demand skill's full instruction doc (tier 2 of
+// the agentskills.io progressive-disclosure model).
 //
 // The system prompt carries only the skill catalog (name + one-line
 // description). When a skill's task comes up the model calls this tool
-// with the skill name; the full SKILL.md body is returned as the tool
-// result for the model to follow. Progressive disclosure: nothing but
-// the cheap catalog rides every request.
+// with the skill name; the activation payload — body wrapped in
+// <skill_content>, the absolute skill directory, and a <skill_resources>
+// listing of bundled files (never eagerly read) — is returned as the
+// tool result. Re-activating a skill already loaded this session
+// returns a short already-active sentinel instead of re-injecting the
+// whole body (spec: deduplicate activations).
 
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/spec.hpp"
@@ -55,11 +59,18 @@ ExecResult run_skill(const SkillArgs& a) {
         else        msg += " — no skills are installed in this workspace";
         return std::unexpected(ToolError::not_found(std::move(msg)));
     }
-    std::ostringstream out;
-    out << "# Skill: " << s->name;
-    if (!s->description.empty()) out << "\n" << s->description;
-    out << "\n\n" << s->body;
-    return ToolOutput{out.str(), std::nullopt};
+    // Dedup re-activation (spec §5): the body is durable behavioral
+    // guidance already in context — re-injecting it doubles the token
+    // cost for zero signal. Tracker resets on thread swap (the old
+    // tool_results leave context with the old thread).
+    if (!skills::note_activated(s->name)) {
+        return ToolOutput{
+            "Skill '" + s->name + "' is already active in this "
+            "session — its instructions are in an earlier tool_result. "
+            "Refer to that instead of re-loading.",
+            std::nullopt};
+    }
+    return ToolOutput{skills::activation_payload(*s), std::nullopt};
 }
 
 } // namespace

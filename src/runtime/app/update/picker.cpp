@@ -22,6 +22,7 @@
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/tool/skills.hpp"
 
 namespace agentty::app::detail {
 
@@ -210,6 +211,9 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         },
         [&](NewThread) -> Step {
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            // Skill activations belong to the old thread's context;
+            // the new thread must be able to re-load any skill.
+            tools::skills::reset_activations();
             // No cache eviction needed — the freshly-minted Thread
             // has a different ThreadId, and a freshly-appended Message
             // has a fresh MessageId, so the old (tid, mid) keys never
@@ -265,6 +269,8 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // and leave the current thread in place.
             m.s.thread_loading = false;
             if (e.thread.id.value.empty()) return done(std::move(m));
+            // Old thread's skill activations leave context with it.
+            tools::skills::reset_activations();
             // Optional timing probe. AGENTTY_LOAD_PROF=1 keeps surfacing
             // the synchronous portion of the load (rehydrate +
             // release_to_kernel) that still lives on the UI thread.

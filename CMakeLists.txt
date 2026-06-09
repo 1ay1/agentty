@@ -928,6 +928,22 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json)
     add_test(NAME param_tag_repair_test COMMAND param_tag_repair_test)
 
+    # skills_engine_test — Agent Skills (agentskills.io) engine: discovery
+    # across native + interop roots (.agentty/.agents/.claude, project +
+    # user), shadowing precedence, lenient frontmatter, tier-3 resource
+    # enumeration, activation payload/dedup/reset, and the read-allowlist
+    # gate. Standalone: links just the skills + fs_helpers TUs.
+    add_executable(skills_engine_test EXCLUDE_FROM_ALL
+        tests/skills_engine_test.cpp
+        src/tool/skills.cpp
+        src/tool/util/fs_helpers.cpp
+    )
+    target_include_directories(skills_engine_test PRIVATE include)
+    target_link_libraries(skills_engine_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json)
+    add_test(NAME skills_engine_test COMMAND skills_engine_test)
+
     # midrun_freeze_test — correctness for freeze_settled_subturns: the
     # mid-run split (frozen prefix + live continuation tail) must be
     # visually seamless (one header, all content present, no elision).
@@ -1260,6 +1276,7 @@ if(AGENTTY_BUILD_TESTS)
         long_session_bench
         fuzzy_match_smoke
         param_tag_repair_test
+        skills_engine_test
         midrun_freeze_test
         midrun_seam_test
         midrun_wire_test

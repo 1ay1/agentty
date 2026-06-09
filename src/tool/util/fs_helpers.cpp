@@ -1,5 +1,6 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -346,6 +347,57 @@ bool is_within_workspace(const fs::path& target) {
     return rt == canon_root.end();
 }
 
+// ── Read-only allowlist roots ───────────────────────────────────────────
+namespace {
+
+// Canonicalised roots the READ gate also accepts (skill directories
+// under ~/.agentty/skills etc.). Guarded by its own mutex — reads come
+// from tool threads, registration from the skills scanner.
+struct ReadRoots {
+    std::mutex mu;
+    std::vector<fs::path> roots;
+};
+
+[[nodiscard]] ReadRoots& read_roots() {
+    static ReadRoots r;
+    return r;
+}
+
+// Component-wise "target under root" — same shape as the workspace
+// prefix check above; factored so both gates share the symlink-safe
+// canonicalisation rules.
+[[nodiscard]] bool under_root(const fs::path& canon_target, const fs::path& root) {
+    auto rt = root.begin();
+    auto tt = canon_target.begin();
+    for (; rt != root.end() && tt != canon_target.end(); ++rt, ++tt)
+        if (*rt != *tt) return false;
+    return rt == root.end();
+}
+
+} // namespace
+
+void allow_read_root(const fs::path& root) {
+    std::error_code ec;
+    auto canon = fs::weakly_canonical(root, ec);
+    if (ec || canon.empty()) return;
+    auto& rr = read_roots();
+    std::lock_guard lk{rr.mu};
+    if (std::find(rr.roots.begin(), rr.roots.end(), canon) == rr.roots.end())
+        rr.roots.push_back(std::move(canon));
+}
+
+bool is_read_allowlisted(const fs::path& target) {
+    if (target.empty()) return false;
+    std::error_code ec;
+    auto canon = fs::weakly_canonical(target, ec);
+    if (ec) return false;   // reads need the file to exist; no parent retry
+    auto& rr = read_roots();
+    std::lock_guard lk{rr.mu};
+    for (const auto& r : rr.roots)
+        if (under_root(canon, r)) return true;
+    return false;
+}
+
 std::expected<NormalizedPath, ToolError>
 make_workspace_path(std::string_view raw, std::string_view tool_name) {
     NormalizedPath p{raw};
@@ -381,6 +433,19 @@ promote_to_workspace_path(NormalizedPath p, std::string_view tool_name) {
             + workspace_root().string() + "'."));
     }
     return WorkspacePath{std::move(p)};
+}
+
+std::expected<WorkspacePath, ToolError>
+make_readable_path_checked(std::string_view raw, std::string_view tool_name) {
+    NormalizedPath p{raw};
+    if (is_within_workspace(p.path()) || is_read_allowlisted(p.path()))
+        return WorkspacePath{std::move(p)};
+    return std::unexpected(ToolError::out_of_workspace(
+        "tool '" + std::string{tool_name} + "' refused: '"
+        + p.string() + "' is outside the workspace root '"
+        + workspace_root().string() + "' and not under any skill "
+        "directory. Restart agentty in a parent directory or pass "
+        "--workspace <dir> to widen the scope."));
 }
 
 // ── Checked read/write delegates ────────────────────────────────

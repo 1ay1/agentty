@@ -203,7 +203,10 @@ std::expected<ReadArgs, ToolError> parse_read_args(const json& j) {
     auto path_opt = ar.require_str("path");
     if (!path_opt)
         return std::unexpected(ToolError::invalid_args("path required"));
-    auto wp = util::make_workspace_path_checked(*path_opt, "read");
+    // Read gate: workspace OR a registered skill directory (tier-3
+    // skill resources live under ~/.agentty/skills etc.). Write-side
+    // tools keep the strict workspace-only gate.
+    auto wp = util::make_readable_path_checked(*path_opt, "read");
     if (!wp) return std::unexpected(std::move(wp.error()));
     int offset = ar.integer("offset", 1);
     if (offset < 1) offset = 1;

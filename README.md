@@ -38,6 +38,7 @@ Four things the official client doesn't try to do:
 
 Plus:
 
+- **Open-standard skills.** Full [Agent Skills](https://agentskills.io) implementation — three-tier progressive disclosure, `.agents/` + `.claude/` interop so your existing Claude Code skills work unchanged. Teach it your internal codebase or DSL once; every session starts pre-loaded. See [Skills](#skills--teach-it-your-codebase-once).
 - **Workspace boundary.** Filesystem tools refuse paths outside the launch directory (`--workspace /` opts out).
 - **Inline render.** Lives at the bottom of your terminal, preserves scrollback, doesn't take over the screen.
 - **Reads like a single function.** The reducer is one `std::visit` over a closed event sum; the permission matrix is a `constexpr` with `static_assert`s — change a policy cell and the build breaks, not a test nobody runs.
@@ -197,6 +198,48 @@ S-Tab      cycle profile          ^N     new thread
 Each tool gets a purpose-built widget: diffs render as diffs, search results group by file with line numbers, bash shows exit codes, todos become checklists.
 
 `read`, `write`, `edit`, `bash`, `grep`, `glob`, `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`, `diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`, `forget`.
+
+## Skills — teach it your codebase once
+
+agentty implements the open [Agent Skills](https://agentskills.io) standard —
+the same `SKILL.md` format Claude Code, Codex, and Cursor use — with full
+three-tier progressive disclosure:
+
+1. **Catalog** — every skill's name + one-line description rides the system
+   prompt (~50 tokens each). Twenty installed skills cost a paragraph, not a
+   context window.
+2. **Instructions** — the full `SKILL.md` body loads only when the model
+   decides the task matches (or you ask for it). Loading twice in one thread
+   returns a one-line "already active" sentinel instead of re-paying the body.
+3. **Resources** — bundled `scripts/`, `references/`, `assets/` are *listed*
+   at activation but never eagerly read; the model `read`s the exact file the
+   instructions call for. Skill directories are read-allowlisted — and *only*
+   read: the write/edit boundary never widens.
+
+Drop a directory with a `SKILL.md` in any of these and it's live on the next
+turn — no restart, no config (mtime-keyed rescan):
+
+```
+<project>/.agentty/skills/   <project>/.agents/skills/   <project>/.claude/skills/
+~/.agentty/skills/           ~/.agents/skills/           ~/.claude/skills/
+```
+
+The `.agents/` convention means skills installed by any compliant client are
+visible to agentty and vice versa; `.claude/` compatibility means your
+existing Claude Code skills work unchanged. Project skills shadow user skills
+with the same name. Frontmatter supports the full spec surface —
+`compatibility`, `allowed-tools`, `metadata`, and `disable-model-invocation`
+(hidden from the model, loadable on request). Parsing is lenient per the
+spec's interop guidance: unquoted colons, name/dir mismatches, and missing
+frontmatter all still load.
+
+Why this matters: on a codebase or internal DSL no model has ever seen,
+agent accuracy starts below 20% — with curated skills (grammar sheets, golden
+examples, your team's ticket procedure) it reaches ~85%
+([research](https://arxiv.org/abs/2410.03981)). Write the skill once, commit
+it to the repo, and every teammate's agent knows your conventions from turn
+one. Pair with `CLAUDE.md` (always-on context) and `remember` (the model's
+own scratchpad) for the complete memory hierarchy.
 
 ## Air-gapped hosts (SSH tunnel)
 

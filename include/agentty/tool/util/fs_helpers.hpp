@@ -117,6 +117,9 @@ class WorkspacePath {
     friend std::expected<WorkspacePath, ToolError>
         promote_to_workspace_path(NormalizedPath p,
                                   std::string_view tool_name);
+    friend std::expected<WorkspacePath, ToolError>
+        make_readable_path_checked(std::string_view raw,
+                                   std::string_view tool_name);
 
 public:
     [[nodiscard]] const fs::path&   path()   const noexcept { return inner_.path(); }
@@ -130,6 +133,29 @@ public:
 // code so the gate's success travels with the value.
 [[nodiscard]] std::expected<WorkspacePath, ToolError>
 make_workspace_path_checked(std::string_view raw, std::string_view tool_name);
+
+// ── Read-only allowlist roots ───────────────────────────────────────────
+// Skill directories (agentskills.io tier-3 resources) may live OUTSIDE
+// the workspace (~/.agentty/skills/, ~/.agents/skills/). The spec's
+// client-implementation guidance: allowlist skill directories for reads
+// so the model can fetch bundled scripts/references without the
+// boundary refusing them. The allowlist is READ-ONLY by construction —
+// only `make_readable_path_checked` consults it; the write/edit gates
+// (make_workspace_path_checked) never do, so an allowlisted root can't
+// become a write escape.
+//
+// Registered by the skills scanner at discovery time. Idempotent;
+// bounded by the skill cap (≤ 64×2 roots per scope).
+void allow_read_root(const fs::path& root);
+
+// True when `target` sits under a registered read-allowlist root
+// (post-canonicalisation, symlink-escape checked like the workspace).
+[[nodiscard]] bool is_read_allowlisted(const fs::path& target);
+
+// Read-gate factory: passes when the path is within the workspace OR
+// under a read-allowlist root. Use ONLY in read-side tools (`read`).
+[[nodiscard]] std::expected<WorkspacePath, ToolError>
+make_readable_path_checked(std::string_view raw, std::string_view tool_name);
 
 // Promote an already-normalised path through the containment gate.
 // Useful when the caller composed a NormalizedPath itself (e.g.
