@@ -151,7 +151,14 @@ static void test_live_bounded() {
     CHECK(m.ui.frozen_through == 1,
           "mid-run freeze fired during an active run — the single freeze "
           "site is settle (finalize_turn)");
-    // Settle: stream finished, the deferred settle-freeze fires.
+    // Settle: stream finished. finalize_turn drains streaming_text into
+    // text before the settle freeze; mirror that — the hardened
+    // run_is_freezable refuses any run with un-drained streaming bytes.
+    {
+        auto& back = m.d.current.messages.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+    }
     m.s.phase = agentty::phase::Idle{};
     agentty::app::detail::freeze_through(m, m.d.current.messages.size());
     CHECK(m.ui.frozen_through == m.d.current.messages.size(),

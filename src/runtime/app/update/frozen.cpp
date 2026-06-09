@@ -536,17 +536,34 @@ void drop_leading_separators(Model& m) {
 }
 
 // Run-level safety gate: a frozen turn captures an Element snapshot
-// whose hash_id is stamped once and never recomputed. If we freeze a
-// run that still contains a Pending / Approved / Running tool, that
-// tool's status would mutate later (when ToolExecOutput finally
-// lands) but the rendered Element in m.ui.frozen would keep the
-// pre-mutation state forever — visible as a permanently-Running
-// spinner in scrollback. Refuse to freeze any run that isn't fully
-// terminal; the next freeze_through pass picks it up once the live
-// path has settled it.
+// whose hash_id is stamped once and never recomputed. Two ways a
+// not-yet-settled run could poison that snapshot:
+//
+//  • a Pending / Approved / Running tool — its status mutates later
+//    (when ToolExecOutput lands) but the rendered Element in
+//    m.ui.frozen keeps the pre-mutation state forever, visible as a
+//    permanently-Running spinner in scrollback;
+//
+//  • bytes still in streaming_text / pending_stream — the body is
+//    still growing, so the snapshot would freeze a prefix while the
+//    live tail re-renders the longer body, shifting every row below
+//    (the duplication ghost).
+//
+// Refuse to freeze any run that isn't fully terminal AND fully
+// settled. This makes the agent_session guarantee hold BY
+// CONSTRUCTION rather than by caller discipline: even a mis-called
+// freeze_through during an active stream stops at the run boundary
+// (frozen_through parks at `i`; the settle-time freeze picks the run
+// up once it's quiescent). Production callers are all idle-gated, so
+// this gate never fires there — it exists to make the unsafe call
+// impossible, mirroring how agent_session only ever freezes in its
+// MessageStop handler.
 bool run_is_freezable(const Model& m, std::size_t from, std::size_t run_end) {
     for (std::size_t j = from; j < run_end; ++j) {
-        for (const auto& tc : m.d.current.messages[j].tool_calls) {
+        const Message& mm = m.d.current.messages[j];
+        if (!mm.streaming_text.empty() || !mm.pending_stream.empty())
+            return false;
+        for (const auto& tc : mm.tool_calls) {
             if (!tc.is_terminal()) return false;
         }
     }

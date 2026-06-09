@@ -186,26 +186,24 @@ Step submit_message(Model m) {
         m.d.current.title = deps().title_from(title_src);
     }
 
-    // Freeze everything currently in messages before pushing the new
-    // User. The prior turn (whatever's there now) is fully settled by
-    // construction: submit only proceeds when m.s.is_idle(), so no
-    // tool is running and no stream is in flight. After this call,
-    // m.ui.frozen contains built Elements for messages[0..end), and
-    // m.ui.frozen_through == messages.size(). The freshly-pushed
-    // user + assistant placeholder become the live tail.
-    //
-    // Mirrors the agent_session example's discipline: settled turns
-    // are committed to m.frozen the moment the next thing arrives;
-    // the view renders frozen as list_ref (zero copy) plus a tiny
-    // live tail. Per-frame cost stops growing with session length.
+    // Freeze the prior turn AND the freshly-pushed User in one pass —
+    // the agent_session SessionStart analog (it pushes gap() + the user
+    // Turn into m.frozen the moment the user submits). The prior turn
+    // is fully settled by construction: submit only proceeds when
+    // m.s.is_idle(), so no tool is running and no stream is in flight.
+    // The user message is immutable from birth, so freezing it
+    // immediately is always safe. After this, the live tail contains
+    // ONLY the in-flight assistant run — exactly agent_session's shape:
+    // the user Turn paints once from frozen (zero-copy list_ref blit)
+    // instead of being re-built every frame for the whole run, and the
+    // settle-time freeze has one fewer seam to hand off.
+    m.d.current.messages.push_back(std::move(user));
     freeze_through(m, m.d.current.messages.size());
     // A deferred settle-freeze may still be pending from the prior turn
     // (user submitted before the next idle Tick fired). The freeze above
     // just covered it, so drop the flag to avoid a redundant no-op freeze
     // on the next Tick.
     m.ui.pending_settle_freeze = false;
-
-    m.d.current.messages.push_back(std::move(user));
 
     Message placeholder;
     placeholder.role = Role::Assistant;

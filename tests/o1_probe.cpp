@@ -556,13 +556,15 @@ static void scaling_breakdown() {
         const std::size_t live_msgs =
             m.d.current.messages.size() - m.ui.frozen_through;
 
-        // Canvas sized to the trimmed content (+chrome), as maya's
-        // inline path allocates — NOT a fixed 60000. This is what the
-        // user's terminal actually pays per frame.
-        const int canvas_h = static_cast<int>(
-            m.ui.frozen_row_total) + 200;
+        // Canvas sized to cover the FULL content height, as maya's
+        // inline path does (the inline canvas always spans the whole
+        // transcript). A short canvas would clip the live run's lower
+        // events out of paint range, so their painted-cell cache never
+        // populates and every frame re-renders them — a harness
+        // artifact, not an app cost.
+        const int canvas_h = 40000;
         maya::StylePool pool;
-        maya::Canvas canvas(120, std::max(500, canvas_h), &pool);
+        maya::Canvas canvas(120, canvas_h, &pool);
         double vbuild = 1e9, paint = 1e9;
         // Prime twice so maya's hash-keyed component cache captures the
         // frozen entries' cells (the warm/blit path the real loop hits).
