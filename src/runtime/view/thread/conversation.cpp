@@ -102,11 +102,13 @@ void build_live_tail(const Model& m, int& running_turn,
 
         // The remainder of a run whose completed prefix was frozen
         // mid-run is a CONTINUATION (frozen_midrun set). Only the FIRST
-        // live run starting at frozen_through can be one.
+        // live run starting at frozen_through can be one. Routed through
+        // the shared ui::is_midrun_continuation so this and the freeze
+        // path (freeze_settled_subturns / freeze_range) can never compute
+        // opposite values for the same run — a desync there is the
+        // duplication ghost.
         const bool midrun_continuation =
-            first_in_tail && m.ui.frozen_midrun
-            && i == m.ui.frozen_through
-            && m.d.current.messages[i].role == Role::Assistant;
+            first_in_tail && ui::is_midrun_continuation(m, i);
 
         const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (!first_overall && !midrun_continuation) {

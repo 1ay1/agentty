@@ -222,6 +222,17 @@ struct Model {
         // oversize check is O(1).
         std::size_t                frozen_row_total = 0;
 
+        // Full terminal width (cols) every frozen_rows[] count is
+        // currently measured at. push_frozen stamps it; the trims call
+        // ensure_frozen_width() to re-measure the whole prefix to the
+        // live width whenever it differs, BEFORE sizing their
+        // commit_scrollback(). frozen_rows[k] equals maya's emitted
+        // height only at the width it was measured at — a stale stamp
+        // after a resize lets the exact commit over-count the wire and
+        // strand a duplicate just above the viewport. 0 = unstamped
+        // (empty prefix / post-clear).
+        int                        frozen_cols = 0;
+
         // Exclusive upper bound into m.d.current.messages. Every
         // message with index < frozen_through has already been built
         // into `frozen` and need not be rendered live. The suffix

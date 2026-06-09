@@ -133,6 +133,22 @@ struct ToolUse {
     [[nodiscard]] bool is_rejected() const noexcept { return std::holds_alternative<Rejected>(status); }
     [[nodiscard]] bool is_terminal() const noexcept { return is_done() || is_failed() || is_rejected(); }
 
+    // Exhaustiveness pin for is_terminal(). The freeze gate
+    // (run_is_freezable), the mid-run prefix cut (freezable_prefix_cut),
+    // and the live-tail cache-key gate all decide "is this run safe to
+    // freeze into immutable scrollback?" by calling is_terminal(). That
+    // predicate enumerates the three settled states (Done/Failed/Rejected)
+    // by exclusion of the three in-flight ones (Pending/Approved/Running).
+    // A 7th Status variant added without classifying it here would default
+    // to non-terminal silently — at best a run that never freezes (lag),
+    // at worst, if classified terminal-by-accident elsewhere, a spinner
+    // pinned in scrollback forever. Pin the width so the omission is a
+    // build error, not a runtime ghost.
+    static_assert(std::variant_size_v<Status> == 6,
+                  "ToolUse::Status gained/lost a variant — re-derive "
+                  "is_terminal() (Done/Failed/Rejected) and classify the "
+                  "new state as terminal or in-flight before bumping this.");
+
     // ── State-safe accessors ─────────────────────────────────────────────
     // Return the relevant field for the current state, or an empty/default
     // when the alternative doesn't carry one. Views can rely on these

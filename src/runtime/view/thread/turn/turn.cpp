@@ -886,4 +886,20 @@ maya::CacheId assistant_run_hash_id(
     return kb.build();
 }
 
+bool is_midrun_continuation(const Model& m, std::size_t i)
+{
+    // A run is a continuation only when a mid-run freeze already
+    // committed this turn's header to m.ui.frozen, the run we're about
+    // to build starts exactly at the live-tail boundary, and that
+    // message is an Assistant head. Any of the three failing means a
+    // self-contained run (header drawn). Both the live-tail builder and
+    // the freeze path call THIS so they can never compute opposite
+    // values for the same run.
+    return m.ui.frozen_midrun
+        && i == m.ui.frozen_through
+        && i < m.d.current.messages.size()
+        && m.d.current.messages[i].role == Role::Assistant;
+}
+
+
 } // namespace agentty::ui

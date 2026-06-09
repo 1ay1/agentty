@@ -137,6 +137,26 @@ void rehydrate_frozen(Model& m);
 // For NewThread before a fresh-start submit.
 void clear_frozen(Model& m);
 
+// ensure_frozen_width: re-measure every frozen entry's stored row count
+// (frozen_rows[]) at `term_cols` (the FULL terminal width) whenever it has
+// changed since the counts were stamped (m.ui.frozen_cols). No-op when the
+// width is unchanged — the common case.
+//
+// frozen_rows[k] equals what maya emits for entry k ONLY at the width it was
+// measured at; push_frozen measures through maya's real layout engine, so a
+// fresh stamp matches the wire by construction at that width. A terminal
+// resize re-wraps every entry to a new height. Both trims size their
+// commit_scrollback() off frozen_rows[]; a stale post-WIDEN stamp over-counts
+// the wire, the trim over-commits, maya shifts prev_cells up by more rows
+// than the live tree shrank, and the next compose "grows" — scrolling kept
+// content into native scrollback as a duplicate just above the viewport.
+// Re-measuring to the live width before each trim consumes the counts keeps
+// the exact commit exact under any resize, making that over-commit
+// structurally impossible. Called by push_frozen and both trims; exposed
+// (rather than file-local) so the resize path is unit-testable. O(entries)
+// layout, only on a width change.
+void ensure_frozen_width(Model& m, int term_cols);
+
 // trim_frozen_if_oversized: when frozen exceeds a soft cap, drop the
 // oldest N entries to keep maya's prev_cells working set bounded.
 // Returns a Cmd::commit_scrollback_overflow() to tell maya to release

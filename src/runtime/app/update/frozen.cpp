@@ -457,8 +457,15 @@ std::size_t measure_element_rows(const maya::Element& e, int cols) {
 // storing in the int-typed frozen_rows[].
 void push_frozen(Model& m, maya::Element e, std::size_t rows,
                  bool separator = false) {
+    const int term_cols = term_dims().cols;
+    // Heal any width drift in the existing prefix BEFORE measuring the new
+    // entry, so every frozen_rows[] stamp shares ONE (the live) width — the
+    // single-width invariant the trims' commit accounting depends on. (If a
+    // resize landed between this freeze and the previous one without a trim
+    // in between, the old stamps would otherwise stay at the prior width.)
+    ensure_frozen_width(m, term_cols);
     const std::size_t measured =
-        measure_element_rows(e, estimate_wrap_cols(term_dims().cols));
+        measure_element_rows(e, estimate_wrap_cols(term_cols));
     if (measured > 0) rows = measured;
     if (rows < 1) rows = 1;
     const std::size_t clamped = std::min<std::size_t>(
@@ -467,6 +474,7 @@ void push_frozen(Model& m, maya::Element e, std::size_t rows,
     m.ui.frozen_rows.push_back(static_cast<int>(clamped));
     m.ui.frozen_is_separator.push_back(separator);
     m.ui.frozen_row_total += clamped;
+    m.ui.frozen_cols = term_cols;   // stamp the width this prefix is valid at
 }
 
 // Debug-time invariant: the three parallel vectors and the running sum
@@ -599,9 +607,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
         // header (and the gap above it) were already pushed by
         // freeze_settled_subturns; this entry is a continuation.
         const bool first_overall = m.ui.frozen.empty();
-        const bool completing_midrun =
-            m.ui.frozen_midrun && i == m.ui.frozen_through
-            && m.d.current.messages[i].role == Role::Assistant;
+        const bool completing_midrun = ui::is_midrun_continuation(m, i);
         if (!first_overall && !completing_midrun) {
             push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
         }
@@ -977,11 +983,31 @@ void freeze_streaming_text_prefix(Model& m) {
     // leaving only the small live tail to re-paint each frame.
 }
 
+void ensure_frozen_width(Model& m, int term_cols) {
+    if (term_cols < 1) return;                 // degenerate ioctl — keep stamps
+    if (m.ui.frozen_cols == term_cols) return; // already current (common case)
+    const int cols = estimate_wrap_cols(term_cols);
+    std::size_t total = 0;
+    for (std::size_t k = 0; k < m.ui.frozen.size(); ++k) {
+        std::size_t h = measure_element_rows(m.ui.frozen[k], cols);
+        // A degenerate measure (0) keeps the prior stamp rather than
+        // collapsing the entry to a wrong height.
+        if (h < 1) h = static_cast<std::size_t>(std::max(1, m.ui.frozen_rows[k]));
+        const std::size_t clamped = std::min<std::size_t>(
+            h, static_cast<std::size_t>(std::numeric_limits<int>::max()));
+        m.ui.frozen_rows[k] = static_cast<int>(clamped);
+        total += clamped;
+    }
+    m.ui.frozen_row_total = total;             // re-derive the running sum
+    m.ui.frozen_cols      = term_cols;
+}
+
 void clear_frozen(Model& m) {
     m.ui.frozen.clear();
     m.ui.frozen_rows.clear();
     m.ui.frozen_is_separator.clear();
     m.ui.frozen_row_total = 0;
+    m.ui.frozen_cols    = 0;   // unstamped — next push re-stamps at live width
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
     m.ui.frozen_midrun  = false;
@@ -1130,6 +1156,13 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     // the canvas to ~2 screens keeps EVERY full repaint cheap — the
     // per-frame tick, a resize (Divergent wipe+repaint), and Ctrl-L all
     // walk only ~1.5 screens instead of thousands of rows.
+    // Re-measure the prefix to the live width if a resize moved it since the
+    // counts were stamped. Both the keep-loop below and the commit count it
+    // feeds read frozen_rows[]; a stale (post-widen) stamp would over-count
+    // and over-commit, stranding a duplicate in scrollback. Do this FIRST so
+    // every count this function reads reflects the wire.
+    ensure_frozen_width(m, term_dims().cols);
+
     const std::size_t kFrozenMaxRows = frozen_row_budget();
     constexpr std::size_t kFrozenMaxEntries = 120;
     // Retention floor. Expressed in ROWS, not a fixed entry count: the
@@ -1258,6 +1291,14 @@ maya::Cmd<Msg> trim_frozen_above_viewport(Model& m) {
     // "provably above the viewport" proof.
     const TermDims dims = term_dims();
     const int term_h = dims.rows;
+    // Re-measure the prefix to the live width if a resize moved it since the
+    // counts were stamped, using the SAME dims snapshot the keep-margin math
+    // below derives from. The "provably above the viewport" proof depends on
+    // frozen_rows[k] matching the wire; a stale post-widen stamp would let
+    // the keep-loop stop early (dropping an on-screen entry) and the commit
+    // over-count — both strand a duplicate. Healing the width first makes the
+    // proof hold by construction.
+    ensure_frozen_width(m, dims.cols);
     // Keep ~2 viewports on the canvas. With the byte-based multibyte
     // over-count eliminated (the estimate now wraps on display columns),
     // the old 3x cushion that absorbed a worst-case ~2x byte inflation is

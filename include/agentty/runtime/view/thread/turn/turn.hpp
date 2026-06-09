@@ -94,4 +94,23 @@ namespace agentty::ui {
     const Model& m, std::size_t run_start, std::size_t run_end,
     bool continuation);
 
+// Decide whether the run beginning at message index `i` is the LIVE
+// REMAINDER of a turn whose completed leading sub-turns were already
+// frozen mid-run — i.e. a CONTINUATION (header suppressed, rail only).
+//
+// SINGLE SOURCE OF TRUTH for the continuation predicate. The `continuation`
+// flag is baked into both the Turn body shape (turn_config_for_assistant_run)
+// and the cache key (assistant_run_hash_id), so the live-tail builder and
+// the freeze path MUST compute the same value for the same run or the
+// freeze handoff becomes a cache miss (the duplication ghost). Both
+// build_live_tail and freeze_settled_subturns/freeze_range previously
+// hand-mirrored this boolean (`frozen_midrun && i == frozen_through &&
+// role==Assistant`) in two files; centralising it here means a future
+// edit can't desync one caller.
+//
+// True iff: the mid-run freeze flag is set, `i` is exactly the live-tail
+// boundary (frozen_through), and that message is an Assistant head.
+[[nodiscard]] bool is_midrun_continuation(const Model& m, std::size_t i);
+
+
 } // namespace agentty::ui
