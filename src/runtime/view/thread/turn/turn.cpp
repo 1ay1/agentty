@@ -74,8 +74,18 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // byte 0. Steady-state speed is unaffected: once tokens flow,
         // backlog accumulates and burst_cps (backlog/drain_secs) takes
         // over, pacing the cursor well above the floor.
+        //
+        // drain_secs is the cursor's lag behind the live edge: the
+        // burst term backlog/drain_secs converges the displayed rate to
+        // the wire rate with backlog ≈ drain_secs x wire_cps left
+        // standing. At 0.8 s the opening ramped 45→wire over ~2 s and
+        // the whole stream ran ~0.8 s behind arrival — the "md stream
+        // stuck at the start" feel vs agent_session (reveal off, paints
+        // on arrival). 0.25 s tracks the wire within a quarter second
+        // while keeping the floor-45 glide for sparse openings
+        // (backlog < ~11 cp still rides the floor).
         cache.streaming->set_reveal_pacing(/*floor_cps=*/45.0,
-                                           /*drain_secs=*/0.8);
+                                           /*drain_secs=*/0.25);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
