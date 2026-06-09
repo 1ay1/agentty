@@ -88,19 +88,19 @@ int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
 // derived from an explicit terminal-row count (see estimate_wrap_cols for
 // the one-snapshot rationale).
 // The live m.ui.frozen vector IS the inline canvas; every full repaint
-// (resume swap, resize→Divergent wipe+repaint, Ctrl-L) walks it top to
-// bottom and the user sees the paint. Bounding it to ~2 screens keeps
-// all three cheap. Older rows live in native terminal scrollback (the
-// terminal redraws them instantly) and on disk (recall via picker).
+// (resume swap, resize→HardReset re-emit, Ctrl-L) walks it top to bottom
+// and the user sees the paint. Older rows live on disk (recall via
+// picker). On width-resize maya emits \x1b[3J which wipes native
+// scrollback, so anything outside this budget at the moment of resize
+// is gone — sized to keep a useful recent window restorable.
 std::size_t frozen_row_budget(int term_rows) {
-    // ~1 extra viewport beyond the on-screen region, floored so a tiny
-    // window still keeps useful context. CALIBRATION: this budget is
-    // applied to estimate_msg_rows, which counts REAL display rows with no
-    // double-count and no byte-based multibyte inflation. 1.5x keeps a
-    // couple screens of recent context while holding the canvas — and the
-    // latency — flat. Older rows live in native terminal scrollback and
-    // on disk.
-    return static_cast<std::size_t>(std::max(48, (term_rows * 3) / 2));
+    // ~3 viewports, floored so a tiny window still keeps useful context.
+    // Trade-off: bigger window = more recent turns restored on resize
+    // and a larger one-shot HardReset paint. Per-frame cost is unchanged
+    // (maya hash_id cache hits on settled entries). 3x picked so an 80x24
+    // terminal restores ~72 rows of recent scrollback after a width
+    // resize while still bounding the canvas.
+    return static_cast<std::size_t>(std::max(48, term_rows * 3));
 }
 std::size_t frozen_row_budget() { return frozen_row_budget(term_dims().rows); }
 

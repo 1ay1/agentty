@@ -230,25 +230,28 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             m.s.phase = phase::Idle{};
             release_to_kernel();
             // Wholesale model swap into a fresh (empty) thread. The old
-            // thread may have overflowed the viewport, leaving rows in
-            // native scrollback. Commit that overflow (drop the stale
-            // prev_cells prefix so the diff scans the full visible
-            // viewport against the new empty frame) and soft-repaint.
-            // We deliberately do NOT reset_inline here: \x1b[3J would
-            // wipe the user's pre-agentty shell scrollback AND the old
-            // thread's history. The old thread's overflow rows stay in
-            // native scrollback as history; the new (shorter) frame
-            // paints clean, and the renderer's overflow→shrink guard
-            // commits any remaining overflow on the next frame without
-            // a destructive wipe.
+            // thread typically overflowed the viewport, committing many
+            // rows to the terminal's native scrollback. Those rows are
+            // off-viewport and OWNED by the terminal emulator — neither
+            // force_redraw (viewport-only case-B) nor
+            // commit_scrollback_overflow (advances prev_rows but leaves
+            // physical off-viewport rows on the wire) can erase them.
+            // Result without reset_inline: the previous thread's tail
+            // turns sit stranded above the new welcome screen, visible
+            // as a fake "continuation" of the new thread above it.
             //
-            // NOT force_redraw: it demotes Synced→Divergent (RESIZE-ONLY
-            // path), which can wipe native scrollback. The example
-            // (agent_session) never redraws on a swap; commit-overflow
-            // alone is sufficient and the soft-repaint lands on the next
-            // frame.
-            return {std::move(m),
-                Cmd<Msg>::commit_scrollback_overflow()};
+            // reset_inline emits `\x1b[2J\x1b[3J\x1b[H` — the ONLY path
+            // that reaches native scrollback. Per maya/app/app.hpp:
+            // "the correct recovery for a WHOLESALE CONTENT SWAP into
+            // shorter content (thread switch / new thread)."
+            //
+            // Cost: `\x1b[3J` wipes the terminal's saved-lines, including
+            // the user's pre-agentty shell history. This is an explicit,
+            // user-initiated content swap (^N / picker select) — wiping
+            // scrollback is acceptable here precisely because the user
+            // asked for it. Per maya's contract this is the ONE allowed
+            // wiring of reset_inline; do NOT extend it to per-turn paths.
+            return {std::move(m), Cmd<Msg>::reset_inline()};
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
@@ -308,24 +311,19 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
                 std::fclose(prof_out);
             }
-            // Wholesale model swap into the loaded thread. Commit the
-            // old thread's viewport overflow (so the diff scans the
-            // full visible range against the rehydrated frame) and
-            // soft-repaint. We deliberately do NOT reset_inline: its
-            // \x1b[3J wipes the user's terminal scrollback (both the
-            // pre-agentty shell history and the prior thread's lines).
-            // The old overflow rows remain in native scrollback as
-            // history; the rehydrated thread repaints clean in the
-            // viewport, and the renderer's overflow→shrink guard
-            // commits any remaining overflow non-destructively if the
-            // loaded thread is shorter.
+            // Wholesale model swap into the loaded thread. Same
+            // rationale as NewThread above: the previous thread's
+            // overflow rows are committed to native scrollback and only
+            // reset_inline (which emits `\x1b[2J\x1b[3J\x1b[H`) can
+            // erase them. Without it the previous thread's tail turns
+            // are visible above the rehydrated thread's first turn.
             //
-            // NOT force_redraw: it demotes Synced→Divergent (RESIZE-ONLY
-            // path) and can wipe native scrollback. agent_session never
-            // redraws on a swap; commit-overflow + the next-frame soft
-            // repaint is enough.
-            return {std::move(m),
-                Cmd<Msg>::commit_scrollback_overflow()};
+            // Per maya/app/app.hpp reset_inline() docs: this is the
+            // sanctioned recovery for thread switch / new thread. The
+            // `\x1b[3J` cost (wipes the user's pre-agentty shell
+            // scrollback) is acceptable because the user explicitly
+            // asked for the content swap (picker select).
+            return {std::move(m), Cmd<Msg>::reset_inline()};
         },
     }, tm);
 }

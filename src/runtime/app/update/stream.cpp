@@ -1684,10 +1684,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     m.s.status = "auth expired \xE2\x80\x94 refreshing token\xE2\x80\xA6";
                     m.s.status_until = {};
                     auto refresh_cmd = cmd::refresh_oauth(std::move(refresh_token));
-                    // No force_redraw — it's resize-only. The
-                    // StreamingMarkdown pre-settle above already
-                    // locks the message's height; the next render
-                    // takes the normal diff path.
+                    // No force_redraw needed: the StreamingMarkdown
+                    // pre-settle above already locks the message's
+                    // height; the next render takes the normal diff
+                    // path. (Inline force_redraw is safe here — just
+                    // a soft case-(B) redraw, not destructive — but
+                    // also unnecessary.)
                     return {std::move(m), std::move(refresh_cmd)};
                 }
                 // No refresh_token on disk (env-var OAuth, api-key with
@@ -1746,10 +1748,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 placeholder.role = Role::Assistant;
                 m.d.current.messages.push_back(std::move(placeholder));
                 auto retry_cmd = Cmd<Msg>::after(delay, Msg{RetryStream{}});
-                // No force_redraw — resize-only. The pre-settle
-                // above already finalised StreamingMarkdown so its
-                // height is locked before the retry stream feeds new
-                // deltas; the normal diff path handles the rest.
+                // No force_redraw needed: the pre-settle above already
+                // finalised StreamingMarkdown so its height is locked
+                // before the retry stream feeds new deltas; the normal
+                // diff path handles the rest. (Inline force_redraw is
+                // safe — soft case-(B) — but unnecessary here.)
                 return {std::move(m), std::move(retry_cmd)};
             }
 

@@ -330,13 +330,17 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             //     terminals bind their Ctrl-L to a full repaint of
             //     the emulator's local cell grid, which IS able to
             //     reach scrollback rows.
-            //   • Resizing the terminal window by even one cell —
-            //     maya treats a resize as a coherence-collapse,
-            //     routing the next render through the Divergent
-            //     path which DOES emit \x1b[2J\x1b[3J\x1b[H. That
-            //     sequence wipes the host's scrollback too, so it's
-            //     deliberately gated on a resize and not bound to a
-            //     keystroke.
+            //   • Resizing the terminal window — maya treats a WIDTH
+            //     change as a coherence-collapse, routing the next
+            //     render through HardReset which emits
+            //     \x1b[2J\x1b[3J\x1b[H (every row's wrap points
+            //     shift, prev_cells is byte-invalid, no other
+            //     recovery is coherent). That sequence wipes host
+            //     scrollback too — destructive but structurally
+            //     unavoidable on a width change. A HEIGHT-only
+            //     resize stays soft (case-(B), no scrollback wipe).
+            //     Either way it's a passive consequence of the
+            //     resize event, not bound to a keystroke.
             return {std::move(m), Cmd<Msg>::force_redraw()};
         },
         [&](ClearStatus& e) -> Step {
