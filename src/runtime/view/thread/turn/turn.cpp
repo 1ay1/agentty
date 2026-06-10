@@ -69,11 +69,21 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // the default 120 cps the cursor types those 9 bytes in 2 frames
         // then sits idle the whole gap: the "stuck at the beginning"
         // stutter (proven via the reveal-cursor trace — cp pins while
-        // inprog=0 until the next delta lands). A lower floor spreads the
-        // sparse opening across the gap so the typewriter glides from
+        // inprog=0 until the next delta lands). A lower floor spreads
+        // the sparse opening across the gap so the typewriter glides from
         // byte 0. Steady-state speed is unaffected: once tokens flow,
         // backlog accumulates and burst_cps (backlog/drain_secs) takes
         // over, pacing the cursor well above the floor.
+        //
+        // Floor value: the first delta is ~9 cp followed by a ~330 ms
+        // gap (traced via anthropic_md_stream --trace on the tour
+        // fixture). Gliding 9 cp across that gap needs <=27 cps; at 45
+        // the cursor burned the 9 cp in ~200 ms and PINNED for ~130 ms
+        // (4 frames of inprog=0 — the visible "stuck a lil at the
+        // start"). At 30 the pin is <=2 frames (~66 ms, under
+        // perception); the floor only ever applies when backlog
+        // < floor*drain ~= 8 cp, so mid-stream typing speed is
+        // unchanged.
         //
         // drain_secs is the cursor's lag behind the live edge: the
         // burst term backlog/drain_secs converges the displayed rate to
@@ -82,9 +92,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // the whole stream ran ~0.8 s behind arrival — the "md stream
         // stuck at the start" feel vs agent_session (reveal off, paints
         // on arrival). 0.25 s tracks the wire within a quarter second
-        // while keeping the floor-45 glide for sparse openings
-        // (backlog < ~11 cp still rides the floor).
-        cache.streaming->set_reveal_pacing(/*floor_cps=*/45.0,
+        // while keeping the floor-30 glide for sparse openings
+        // (backlog < ~8 cp still rides the floor).
+        cache.streaming->set_reveal_pacing(/*floor_cps=*/30.0,
                                            /*drain_secs=*/0.25);
     }
 
