@@ -313,26 +313,34 @@ Step smart_paste_from_clipboard(Model m) {
         return composer_update(std::move(m), ComposerPaste{std::move(*txt)});
     }
 
-    // Both failed. Before surfacing an error, try the terminal itself:
-    // OSC 52 asks the terminal emulator (which runs on the user's LOCAL
-    // machine even across SSH) to report its system clipboard back over
-    // the pty. maya decodes the reply into a PasteEvent, which re-enters
-    // the ComposerPaste arm below — its image magic-byte sniff ingests a
-    // PNG/JPEG, or the text path takes plain text. This is the portable
-    // clipboard read that needs no remote tool and no env var, so it's
-    // the right fallback on a headless / SSH host where wl-paste/xclip
-    // found nothing. It's also a valid fallback on a local terminal
-    // whose native tools are missing.
+    // Every local path failed to produce an image or text. Last resort,
+    // ALWAYS: ask the terminal itself via OSC 52. The terminal emulator
+    // runs on the user's LOCAL machine even across SSH, so its reply
+    // carries the laptop's clipboard back over the pty — maya decodes it
+    // into a PasteEvent that re-enters the ComposerPaste arm below (image
+    // magic-byte sniff ingests a PNG/JPEG; otherwise the text path takes
+    // it). This is the ONE clipboard read that needs no remote tool and
+    // no env var, so it's the universal fallback: headless/SSH host with
+    // no wl-paste/xclip, a local terminal whose native tools are missing,
+    // OR an AGENTTY_CLIPBOARD_CMD ferry that was set but failed (laptop
+    // unreachable, wrong reader, no sshd for the callback).
     //
-    // Gate to avoid a pointless query when a native tool DID run and
-    // authoritatively reported empty: AGENTTY_CLIPBOARD_CMD being set
-    // means the user picked an explicit ferry, so honour its error
-    // instead of racing an OSC 52 reply. Otherwise always try OSC 52 —
-    // terminals that don't support it simply never reply, the toast
-    // below stays on screen, and nothing is stranded.
-    const bool explicit_ferry =
-        util::env::get_or_null<util::env::Var::ClipboardCmd>() != nullptr;
-    if (!explicit_ferry) {
+    // Previously this was gated off whenever AGENTTY_CLIPBOARD_CMD was
+    // set — "the user picked an explicit ferry, honour its error." But
+    // the airgap launcher SETS that env var automatically, so a broken
+    // ferry callback dead-ended at the ferry's error and never tried the
+    // terminal, the one path that works out of the box. The ferry is
+    // still PREFERRED (it runs first, in read_clipboard_image); OSC 52 is
+    // just the safety net under it. Terminals that don't honour OSC 52
+    // reads simply never reply — the "reading clipboard…" toast lapses
+    // and nothing is stranded. A terminal that DOES reply delivers the
+    // bytes as a PasteEvent → the ComposerPaste arm below (no dedicated
+    // result Msg); an empty/"?" reply is dropped by maya's parse_osc and
+    // the toast simply lapses. img_err/txt_err are intentionally not
+    // surfaced here — OSC 52 is strictly more capable than the local
+    // probes that produced them, so their "no clipboard here" wording
+    // would be misleading while the terminal query is in flight.
+    {
         auto toast = set_status_toast(
             m, "reading clipboard from your terminal\xE2\x80\xA6",
             std::chrono::seconds{3});
@@ -340,18 +348,6 @@ Step smart_paste_from_clipboard(Model m) {
                 maya::Cmd<Msg>::batch(maya::Cmd<Msg>::query_clipboard(),
                                       std::move(toast))};
     }
-
-    // The image path produces the actionable reason
-    // ("no clipboard on this host (headless / SSH / airgap)…", "install
-    // wl-clipboard", "could not open Windows clipboard"), whereas the
-    // text path's "clipboard has no text" is generic noise. Prefer the
-    // image error; only fall back to the text error if the image path
-    // said nothing.
-    std::string err = !img_err.empty() ? std::move(img_err)
-                    : !txt_err.empty() ? std::move(txt_err)
-                    : std::string{"clipboard is empty"};
-    auto cmd = set_status_toast(m, std::move(err), std::chrono::seconds{6});
-    return {std::move(m), std::move(cmd)};
 }
 
 } // namespace
