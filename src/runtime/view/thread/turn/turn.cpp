@@ -390,29 +390,35 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // only animation now; it needs a wake every frame while bytes are
     // flowing so its trailing run resolves smoothly.
     //
-    // Gate on "source grew within the last kRevealActiveMs" so a genuine
-    // model stall (a long extended-thinking pause with no deltas) drops
-    // us off the 60 fps clock and back to the calmer Tick / spinner
-    // cadence — we don't burn frames (or tear chrome on non-sync
-    // terminals) repainting an unchanging tail. The instant the next
-    // delta lands, byte arrival wakes the loop (eventfd, sub-ms), this
-    // runs again, and the active window re-arms. Note this gate cannot
-    // strand visible text the way a host pacing cursor could: we already
-    // FED the full arrived source above, so even if RAF lapsed for a beat
-    // the text is on screen — only the live-edge FX animation pauses,
-    // never the content.
+    // PRIMARY signal: the model is authoritatively streaming. m.s
+    // .is_streaming() is variant-backed (phase::Streaming) and exact —
+    // it's the same signal the status bar / phase chip / sparkline gate
+    // on. Combined with !settled (this message still has live bytes in
+    // streaming_text/pending_stream), it means "the wire is open and
+    // THIS turn is the one receiving it." While that holds, keep the
+    // caret armed UNCONDITIONALLY — no matter how long the gap between
+    // deltas. The pulsing caret means "waiting for the model," which is
+    // exactly true during an inter-delta pause, even a 10 s one. This is
+    // what makes the fix robust across models/networks: it keys off the
+    // real in-flight state, not a guess about delta cadence.
     //
-    // Window size: slow models (Opus, high-effort thinking) ship deltas
-    // at median ~470 ms / p90 ~540 ms gaps (measured on the captured
-    // tour fixture); occasional gaps run 1-3 s. At the old 250 ms the
-    // gate lapsed INSIDE every such gap — the pulsing caret froze solid
-    // mid-sentence until the next delta, reading as "the stream died"
-    // (fast models, gaps < 250 ms, never showed it). 3 s covers the
-    // inter-delta cadence of every observed model so the live edge keeps
-    // breathing through normal pauses, while a real extended-thinking
-    // stall (10-120 s, no deltas) still drops to Tick after 3 s. Cost is
-    // bounded: ≤3 s of extra 60 fps frames per stall, each a no-content
-    // caret repaint (~0.1-0.4 ms view, 1-2 cell diff on the wire).
+    // The earlier byte-recency window (since_grow_ms) raced the model's
+    // gap: 250 ms lapsed inside every slow-model gap (median ~470 ms),
+    // freezing the caret mid-sentence ("stream looks dead"); bumping it
+    // to 3 s only moved the cliff. A fixed timeout can ALWAYS be out-run
+    // by a slower model or a laggy link. The phase gate can't — it ends
+    // the instant the wire closes (phase → Idle/ExecutingTool) and not a
+    // frame before. Cost while streaming is bounded and already paid:
+    // build() runs every frame the visual hash advances; an armed caret
+    // adds a ~0.1-0.4 ms no-content repaint, only while genuinely live.
+    //
+    // The since_grow_ms window is kept as a SECONDARY fallback for the
+    // edge where is_streaming() has already flipped (e.g. StreamFinished
+    // landed, phase → Idle) but the reveal cursor still has a backlog to
+    // glide out — reveal_in_progress() below already covers that, but the
+    // window catches a stale-phase beat without re-introducing the race
+    // (it only EXTENDS arming, never cuts it short while is_streaming()).
+    const bool wire_streaming_here = !settled && m.s.is_streaming();
     constexpr std::int64_t kRevealActiveMs = 3000;
     const auto now3 = std::chrono::steady_clock::now();
     const std::int64_t since_grow_ms =
@@ -420,7 +426,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
             ? kRevealActiveMs + 1
             : std::chrono::duration_cast<std::chrono::milliseconds>(
                   now3 - cache.last_grow_tick).count();
-    const bool stream_in_motion = !settled && since_grow_ms <= kRevealActiveMs;
+    const bool stream_in_motion =
+        wire_streaming_here
+        || (!settled && since_grow_ms <= kRevealActiveMs);
 
     auto built = cache.streaming->build();
 
