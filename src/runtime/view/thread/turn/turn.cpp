@@ -454,7 +454,28 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // bursts" stutter on big pastes / large reflows). Keeping the frame
     // armed while parsing makes build() keep polling so the result is
     // adopted the instant the worker finishes.
+    //
+    // Fourth condition — the widget is LIVE with reveal_fx (is_live()).
+    // render_live_overlay_ animates the trailing-edge scramble / gradient
+    // / pulsing caret EVERY frame the widget is live_, even when the
+    // reveal cursor has caught up to the edge (backlog 0) and is just
+    // waiting for the next token. The first three terms can ALL be false
+    // in that pinned-but-live state during a slow mid-stream gap: bytes
+    // aren't flowing (stream_in_motion can lapse if phase briefly leaves
+    // Streaming during a tool round-trip AND the 3 s window expires),
+    // the cursor is at the edge (reveal_in_progress false), no ramp, no
+    // parse. Without this term the caret would stop pulsing and the turn
+    // would look frozen even though the model is still working. Gating on
+    // is_live() (the exact condition render_live_overlay_ animates under)
+    // guarantees the caret keeps breathing for the whole live window,
+    // independent of phase or any timeout — the same robustness principle
+    // as the is_streaming() caret gate, applied to the widget's own live
+    // state. Cost is the bounded ~0.1-0.4 ms no-content repaint, paid
+    // only while a turn is genuinely live.
+    const bool live_caret =
+        !settled && cache.streaming->is_live();
     if (stream_in_motion
+        || live_caret
         || (!settled && cache.streaming->reveal_in_progress())
         || cache.streaming->is_finalizing()
         || cache.streaming->is_parsing()) {

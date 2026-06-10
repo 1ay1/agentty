@@ -294,12 +294,81 @@ static void test_freeze_gated_on_reveal_drain() {
     m.d.current.messages.back().streaming_text.clear();
 }
 
+// ── (4) The caret must stay armed when the widget is LIVE but the
+//        phase has left Streaming (e.g. a mid-run tool round-trip:
+//        Streaming → ExecutingTool → Streaming) AND the reveal cursor
+//        has caught up to the live edge. In that pinned-but-live window
+//        render_live_overlay_ still animates the scramble/gradient/
+//        pulsing caret every frame, so the RAF must keep firing or the
+//        turn looks frozen mid-response. is_streaming() is false here, so
+//        the phase gate (wire_streaming_here) does NOT cover it; the
+//        is_live() term must. Reproduces "md feels stuck in the middle
+//        when the stream is slow / pauses for a tool". ──────────────────
+static void test_caret_armed_when_live_but_phase_not_streaming() {
+    std::printf("test_caret_armed_when_live_but_phase_not_streaming\n");
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"liveness4"};
+    Message u; u.role = Role::User; u.text = "do some work";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    // In-flight assistant message, short body so the cursor reaches the
+    // edge fast. Mark it live via a streaming render first.
+    Message a; a.role = Role::Assistant;
+    a.streaming_text = "Ok";
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    CHECK(frame_requests_animation(m),
+          "armed on the first streaming frame (sets the widget live_)");
+
+    auto& cache = m.ui.view_cache.message_md(
+        m.d.current.id, m.d.current.messages.back().id);
+    // Drain the reveal cursor to the live edge so reveal_in_progress()
+    // can't be what arms the frame below.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (cache.streaming && cache.streaming->reveal_in_progress()
+           && std::chrono::steady_clock::now() < deadline) {
+        (void)frame_requests_animation(m);
+        std::this_thread::sleep_for(std::chrono::milliseconds{16});
+    }
+    CHECK(cache.streaming && cache.streaming->is_live(),
+          "widget still live after reaching the edge (precondition)");
+    CHECK(cache.streaming && !cache.streaming->reveal_in_progress(),
+          "reveal cursor reached the live edge (precondition)");
+
+    // The wire briefly leaves Streaming for a tool round-trip. The
+    // assistant message is NOT settled (streaming_text still holds the
+    // unsettled bytes) so the widget stays live_. Backdate the recency
+    // clock past kRevealActiveMs (3 s) so the since_grow window can't be
+    // what arms it either. Now ONLY the is_live() term remains.
+    m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+    cache.last_grow_tick =
+        std::chrono::steady_clock::now() - std::chrono::seconds{10};
+
+    // Sleep past maya's own recency window so its quiescent regime only
+    // self-arms once per phase bucket — consecutive same-bucket builds
+    // would return false without agentty's is_live() gate.
+    std::this_thread::sleep_for(std::chrono::milliseconds{400});
+
+    for (int f = 0; f < 6; ++f) {
+        CHECK(frame_requests_animation(m),
+              "caret STILL armed while live_ but phase=ExecutingTool, "
+              "cursor at edge, recency window expired — the is_live() RAF "
+              "term must keep the typewriter caret breathing");
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+}
+
 int main() {
     std::printf("stream_liveness_test — the caret must never look "
                 "frozen while a response is in flight\n\n");
 
     test_caret_armed_across_delta_gap();
     test_caret_disarms_after_settle();
+    test_caret_armed_when_live_but_phase_not_streaming();
     test_freeze_gated_on_reveal_drain();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
