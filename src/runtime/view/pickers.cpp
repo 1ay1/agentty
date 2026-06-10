@@ -5,6 +5,7 @@
 
 #include <maya/widget/picker.hpp>
 #include <maya/widget/plan_view.hpp>
+#include <maya/platform/io.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
@@ -60,6 +61,39 @@ std::string parent_segment(std::string_view dir) {
 // the widget's auto-scroll-to-selection logic.
 constexpr int kViewportH = 14;
 
+// Picker chrome around the scrollable list: top border + title row +
+// a blank + the two-row footer (blank + hint line) + bottom border, plus
+// the AppLayout outer padding. ~7 rows. The picker floats bottom-pinned
+// in a zstack over the base (welcome / conversation); maya's stack layout
+// extends the frame's content height to whichever layer is taller. If the
+// picker's TOTAL height (list + chrome) exceeds the terminal viewport,
+// opening it pushes the base's top rows (the welcome wordmark) above the
+// viewport top, scrolling them into native terminal scrollback via the
+// bottom-edge \r\n the inline renderer uses to grow. Closing the picker
+// shrinks the frame again, but those scrolled-off rows are owned by the
+// emulator and can't be reclaimed (only reset_inline's \x1b[3J could, and
+// that wipes the user's shell history) — so EACH open/close cycle strands
+// another copy of the wordmark above the welcome ("the wordmark gets
+// longer with every picker").
+//
+// Fix: clamp the list viewport so the WHOLE picker fits inside the
+// terminal viewport — then opening it never overflows, never scrolls, and
+// nothing strands. On a tall terminal this is a no-op (kViewportH wins);
+// on a short one the list shrinks (still scrollable to reach every item).
+constexpr int kPickerChromeRows = 7;
+
+[[nodiscard]] int picker_viewport_h() {
+    const auto sz = maya::platform::query_terminal_size(
+        maya::platform::stdout_handle());
+    const int term_rows = sz.height.value > 0 ? sz.height.value : 40;
+    // Leave the chrome plus a small breathing margin so the picker's top
+    // border sits strictly below the viewport top with the base behind it.
+    const int avail = term_rows - kPickerChromeRows - 1;
+    // Floor of 4 list rows keeps the picker usable even on a tiny term
+    // (it scrolls); ceiling is the shared kViewportH.
+    return std::clamp(avail, 4, kViewportH);
+}
+
 } // namespace
 
 Element model_picker(const Model& m) {
@@ -70,7 +104,7 @@ Element model_picker(const Model& m) {
     cfg.title      = " Models ";
     cfg.accent     = accent;
     cfg.min_width  = 40;
-    cfg.viewport_h = kViewportH;
+    cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.model_picker_scroll;
     cfg.selected   = picker->index;
 
@@ -114,7 +148,7 @@ Element thread_list(const Model& m) {
     cfg.title      = " Threads ";
     cfg.accent     = info;
     cfg.min_width  = 50;
-    cfg.viewport_h = kViewportH;
+    cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.thread_list_scroll;
     cfg.selected   = picker->index;
 
@@ -160,7 +194,7 @@ Element command_palette(const Model& m) {
     cfg.title      = " Command Palette ";
     cfg.accent     = highlight;
     cfg.min_width  = 50;
-    cfg.viewport_h = kViewportH;
+    cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.command_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
@@ -199,7 +233,7 @@ Element mention_palette(const Model& m) {
     cfg.title      = " Mention File ";
     cfg.accent     = info;
     cfg.min_width  = 50;
-    cfg.viewport_h = kViewportH;
+    cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.mention_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
@@ -250,7 +284,7 @@ Element symbol_palette(const Model& m) {
     cfg.title      = " Symbol ";
     cfg.accent     = highlight;
     cfg.min_width  = 60;
-    cfg.viewport_h = kViewportH;
+    cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.symbol_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
@@ -300,7 +334,7 @@ Element todo_modal(const Model& m) {
     cfg.title      = " Plan ";
     cfg.accent     = info;
     cfg.min_width  = 45;
-    cfg.viewport_h = kViewportH;
+    cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.todo_scroll;
     // No selection cursor in the todo modal — read-only. Pass -1
     // so the auto-scroll-to-selection is a no-op and the user's

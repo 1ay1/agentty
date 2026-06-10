@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -39,13 +40,19 @@
 #include <maya/terminal/writer.hpp>
 #include <maya/widget/app_layout.hpp>
 
+#include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
+#include "agentty/runtime/view/pickers.hpp"
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
 #include "agentty/runtime/view/thread/conversation.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
+#include "agentty/runtime/view/view.hpp"
 
 using agentty::Model;
 using agentty::Message;
@@ -1574,8 +1581,161 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
     close(rfd);
 }
 
+// REGRESSION: opening/closing the model picker over the welcome screen,
+// repeatedly, must NOT strand copies of the base frame in native
+// scrollback. The picker overlay is a few rows TALLER than the welcome
+// base; on a terminal where welcome+overlay exceeds term_h, the grow
+// scrolls the top rows (the wordmark) into scrollback via bottom-edge
+// \r\n, and the shrink-back can't reclaim them — each open/close cycle
+// strands another copy ("the wordmark gets longer with every picker").
+//
+// We drive the REAL inline compose (no force_redraw — that made it worse
+// by routing through case-B scroll) across several open→close cycles at a
+// SHORT term height and assert no row that overflowed the viewport top on
+// an earlier frame is ever rewritten, AND the frame stays Synced (a
+// recovery demote would itself scroll).
+static maya::Element view_root(const Model& m) {
+    return agentty::ui::view(m);
+}
+
+static void test_model_picker_open_close_no_scrollback_growth() {
+    using namespace agentty;
+    constexpr int kWidth = 100;
+    // SHORT viewport so welcome+overlay overflows — the production trigger.
+    constexpr int kTermH = 20;
+
+    // deps stub: ModelPickerSelect persists settings via deps().
+    app::install_deps(app::Deps{
+        .stream        = [](provider::Request, provider::EventSink) {},
+        .save_thread   = [](const agentty::Thread&) {},
+        .load_threads  = [] { return std::vector<agentty::Thread>{}; },
+        .load_thread   = [](const ThreadId&) { return std::optional<agentty::Thread>{}; },
+        .load_settings = [] { return store::Settings{}; },
+        .save_settings = [](const store::Settings&) {},
+        .new_thread_id = [] { return ThreadId{"stub"}; },
+        .title_from    = [](std::string_view) { return std::string{}; },
+        .auth          = {},
+    });
+
+    Model m;
+    m.d.current.id = ThreadId{"pickercycle"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = ModelId{"claude-opus-4-1"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = ModelId{"claude-sonnet-4-5"};
+
+    StylePool pool;
+    auto [writer, rfd] = make_pipe_writer();
+
+    auto rows_of = [&](const Canvas& c) {
+        std::vector<std::string> rows;
+        const int mr = c.max_content_row();
+        for (int y = 0; y <= mr; ++y) {
+            std::string line;
+            for (int x = 0; x < kWidth; ++x) {
+                char32_t ch = c.get(x, y).character;
+                line.push_back(ch && ch < 128 ? static_cast<char>(ch) : ' ');
+            }
+            while (!line.empty() && line.back() == ' ') line.pop_back();
+            rows.push_back(std::move(line));
+        }
+        return rows;
+    };
+
+    std::optional<InlineFrame<Synced>> synced;
+    std::vector<std::string> committed_wire;   // rows already off-screen
+
+    auto render_state = [&](const Model& mm) {
+        Canvas c = paint(view_root(mm), kWidth, pool);
+        auto cur = rows_of(c);
+        const int total = static_cast<int>(cur.size());
+        const int new_committed = total > kTermH ? total - kTermH : 0;
+
+        if (!synced) {
+            auto o = InlineFrame<Empty>{}.seed().render(
+                c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
+                false);
+            (void)drain(rfd);
+            synced = std::visit(
+                [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                    using T = std::decay_t<decltype(a)>;
+                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                        return std::move(a);
+                    else return std::nullopt;
+                }, std::move(o));
+            CHECK(synced.has_value(), "picker-cycle: first frame Synced");
+        } else {
+            auto wit = synced->verify();
+            CHECK(wit.has_value(),
+                  "picker-cycle: shadow verify before render (desync)");
+            if (!wit) { synced.reset(); return; }
+            auto o = std::move(*synced).render(
+                c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
+                std::move(*wit), false);
+            (void)drain(rfd);
+            synced = std::visit(
+                [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                    using T = std::decay_t<decltype(a)>;
+                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                        return std::move(a);
+                    else return std::nullopt;
+                }, std::move(o));
+            CHECK(synced.has_value(),
+                  "picker-cycle: render stayed Synced (a demote would "
+                  "scroll the base into scrollback)");
+            if (!synced) return;
+        }
+
+        // Committed prefix must be byte-stable across every frame.
+        const int check_n = std::min<int>(
+            static_cast<int>(committed_wire.size()), new_committed);
+        for (int y = 0; y < check_n; ++y) {
+            if (committed_wire[static_cast<std::size_t>(y)]
+                != cur[static_cast<std::size_t>(y)]) {
+                std::fprintf(stderr,
+                    "  PICKER committed-row rewrite at y=%d:\n"
+                    "    was |%s|\n    now |%s|\n", y,
+                    committed_wire[static_cast<std::size_t>(y)].c_str(),
+                    cur[static_cast<std::size_t>(y)].c_str());
+                CHECK(false,
+                      "a base-frame row that overflowed the viewport top "
+                      "was rewritten on a later open/close — stranded "
+                      "scrollback copy (the growing-wordmark bug)");
+                break;
+            }
+        }
+        committed_wire.assign(cur.begin(), cur.begin() + new_committed);
+    };
+
+    // Welcome (base).
+    render_state(m);
+    // Several open→close cycles — the accumulation the user reported.
+    // Render multiple animation frames per state so the welcome
+    // wordmark's per-frame bob and the picker animation advance.
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        m.ui.model_picker = ui::pick::OpenAt{0};   // open
+        for (int f = 0; f < 5; ++f) {
+            render_state(m);
+            std::this_thread::sleep_for(std::chrono::milliseconds{8});
+        }
+        auto [m2, cmd] = app::detail::model_picker_update(
+            std::move(m), msg::ModelPickerMsg{ModelPickerSelect{}});  // close
+        m = std::move(m2);
+        (void)cmd;
+        for (int f = 0; f < 5; ++f) {
+            render_state(m);
+            std::this_thread::sleep_for(std::chrono::milliseconds{8});
+        }
+    }
+
+    std::fprintf(stderr, "  [picker] cycles=4 committed_rows=%zu\n",
+                 committed_wire.size());
+    close(rfd);
+}
+
 int main() {
     std::printf("midrun_wire_test\n");
+    test_model_picker_open_close_no_scrollback_growth();
     test_growing_live_run_no_committed_rewrite();
     test_grep_read_highlight_no_stale_blit();
     test_write_freeze_no_rewrite();
