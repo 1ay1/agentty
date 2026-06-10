@@ -1,5 +1,6 @@
 #include "agentty/runtime/view/view.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <optional>
 
@@ -70,25 +71,13 @@ maya::Element overlay_layer(maya::Element el) {
 } // namespace
 
 maya::Element view(const Model& m) {
-    // ── Sized render context for the BUILD phase ──
+    // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
     // installs the sized RenderContext (the only guard site), so any
     // available_height()/available_width() read during Element
-    // construction — AppLayout's min_height, the welcome screen's
-    // viewport clamp, picker viewport caps — sees the 24x80 DEFAULT,
-    // not the real terminal. On a terminal shorter than 24 rows that
-    // bakes min_height=24 into the idle frame: it permanently
-    // overflows the viewport, the overflow rows commit to native
-    // scrollback at startup, and the first welcome→conversation swap
-    // (a shrink with a changed prefix) strands them there — guaranteed
-    // corruption on short terminals. Install the real dimensions for
-    // the duration of the build. ioctl per view build is one cheap
-    // syscall; COLUMNS/LINES is the non-tty fallback (tests, pipes).
-    // ioctl per view build is one cheap syscall; COLUMNS/LINES is the
-    // non-tty fallback (tests, pipes). A parent context, when one is
-    // already installed (nested render, test harness driving simulated
-    // dimensions), wins over the ioctl — it IS the authoritative
-    // geometry for this build.
+    // construction would see the 24x80 DEFAULT. Parent ctx wins (a
+    // nested render or a test harness driving simulated dims), else
+    // one cheap ioctl, else COLUMNS/LINES (tests, pipes).
     int cols = 0, rows = 0;
     if (maya::detail::render_ctx_) {
         cols = maya::available_width();
@@ -103,19 +92,47 @@ maya::Element view(const Model& m) {
         if (rows <= 0)
             if (const char* e = std::getenv("LINES"))   rows = std::atoi(e);
     }
-    maya::RenderContext ctx{cols > 0 ? cols : 80,
-                            rows > 0 ? rows : 24,
-                            maya::render_generation(),
-                            /*auto_height=*/true};
-    maya::RenderContextGuard guard(ctx);
+    if (cols <= 0) cols = 80;
+    if (rows <= 0) rows = 24;
 
-    auto base = maya::AppLayout{{
-        .thread        = thread_config(m),
-        .changes_strip = changes_strip_config(m),
-        .composer      = composer_config(m),
-        .status_bar    = status_bar_config(m),
-    }}.build();
-    auto overlay = pick_overlay(m);
+    // ── Phase 1: configs + overlay under the REAL dimensions ──
+    // The welcome clamp (welcome_screen_config) must see the true
+    // terminal height to size its row budget.
+    maya::AppLayout::Config alc;
+    std::optional<maya::Element> overlay;
+    {
+        maya::RenderContext ctx{cols, rows, maya::render_generation(),
+                                /*auto_height=*/true};
+        maya::RenderContextGuard guard(ctx);
+        alc.thread        = thread_config(m);
+        alc.changes_strip = changes_strip_config(m);
+        alc.composer      = composer_config(m);
+        alc.status_bar    = status_bar_config(m);
+        overlay = pick_overlay(m);
+    }
+
+    // ── Phase 2: layout build under a HEIGHT-CAPPED context ──
+    // AppLayout::build bakes min_height(fixed(available_height()))
+    // into the base vstack. Historically P::view always ran under
+    // maya's 24-row DEFAULT context (the sized one is installed only
+    // inside Runtime::render, AFTER view returns), so that min_height
+    // was a de-facto constant 24 in every working inline app
+    // (agent_session included): on a tall terminal the base box HUGS
+    // the content and the bottom-pinned picker floats just below the
+    // status bar. Handing build the REAL height regressed that — on an
+    // 80-row terminal the base box spanned the whole viewport, the
+    // picker dropped to the terminal bottom behind a huge dead gap,
+    // and opening it grew the painted frame from ~26 rows to the full
+    // screen: a resize-class reflow on a mere overlay toggle. Cap at
+    // min(rows, 24): tall terminals keep the historic content-hugged
+    // box; terminals SHORTER than 24 get the real height so the box —
+    // and anything pinned to its bottom — never overhangs the viewport.
+    maya::RenderContext lctx{cols, std::min(rows, 24),
+                             maya::render_generation(),
+                             /*auto_height=*/true};
+    maya::RenderContextGuard lguard(lctx);
+
+    auto base = maya::AppLayout{std::move(alc)}.build();
     if (!overlay) return base;
     return maya::detail::zstack({
         std::move(base),
