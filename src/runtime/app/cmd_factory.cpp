@@ -478,12 +478,15 @@ Cmd<Msg> launch_stream(Model& m) {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = std::move(model_id);
-        req.system_prompt = provider::anthropic::default_system_prompt();
-        // Weak local / OpenAI-compat models over-call tools and leak calls as
-        // content text. Append guidance that curbs both. Hosted Anthropic
-        // keeps the base prompt unchanged.
+        // Local / OpenAI-compat models choke on the full Claude agentic
+        // prompt (the verbose "Act, don't ask" + memory-tools sections prime
+        // a small model to over-call tools and leak them as content text —
+        // even on a bare "hi"). Send a slim decision-first prompt instead;
+        // hosted Anthropic gets the full prompt.
         if (provider::active().kind == provider::Kind::OpenAI)
-            req.system_prompt += provider::openai::local_model_prompt_addendum();
+            req.system_prompt = provider::openai::local_model_system_prompt();
+        else
+            req.system_prompt = provider::anthropic::default_system_prompt();
         req.cancel        = cancel;
         req.auth          = std::move(auth);
         req.retry_count   = retry_count;

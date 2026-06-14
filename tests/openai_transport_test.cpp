@@ -366,6 +366,21 @@ static void test_sse_truncated_leaked_tool_call_dropped() {
     CHECK(!joined_text(msgs).empty());
 }
 
+static void test_sse_fence_only_leak_dropped() {
+    // qwen answers a greeting with just a ```json fence (the leaked tool-call
+    // wrapper) and no JSON body — the bug where "hi" was answered with the
+    // literal text "json". The bare wrapper must NOT surface as prose; the
+    // empty-turn fallback fills the turn instead.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"```json\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(joined_text(msgs).find("json") == std::string::npos);
+    CHECK(joined_text(msgs).find('`') == std::string::npos);
+}
+
 static void test_sse_two_leaked_calls_unique_ids() {
     // Two complete leaked calls in one stream must get DISTINCT synthesised
     // ids, or the reducer keys both onto the same card (duplicate stuck card).
@@ -394,6 +409,8 @@ static void test_endpoint_presets() {
     CHECK(ollama.host == "localhost");
     CHECK(ollama.port == 11434);
     CHECK(!ollama.use_tls);
+    CHECK(ollama.native_api);
+    CHECK(ollama.path == "/api/chat");
 
     auto custom = oai::Endpoint::from_spec("my.host:8080");
     CHECK(custom.host == "my.host");
@@ -519,6 +536,7 @@ int main() {
     test_sse_salvage_fenced_tags();
     test_sse_salvage_unknown_tool_stays_text();
     test_sse_truncated_leaked_tool_call_dropped();
+    test_sse_fence_only_leak_dropped();
     test_sse_two_leaked_calls_unique_ids();
     test_sse_plain_json_prose_not_salvaged();
     test_sse_structured_tool_still_works_with_salvage_on();

@@ -25,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -33,6 +34,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/tool/skills.hpp"
 #include "agentty/util/base64.hpp"
 
 namespace agentty::provider::openai {
@@ -205,7 +207,18 @@ void close_active_tool(StreamCtx& ctx) {
 // an unadvertised tool is NOT incomplete — it still surfaces as text so the
 // user sees what the model meant.
 [[nodiscard]] bool hold_is_truncated_tool_json(std::string_view sv) noexcept {
+    std::string_view raw = sv;
     sv = strip_tool_call_wrappers(sv);
+    // A hold that is NOTHING BUT a tool-call wrapper — a bare ``` / ```json
+    // fence or a <tool_call> tag with no JSON body after stripping — is a
+    // leaked wrapper whose body never arrived (or a fence-only opener like
+    // qwen emitting just "```json" then stopping). It is never legitimate
+    // prose; surfacing it dumps a stray "json" / "```" into the reply (the
+    // bug where "hi" was answered with the literal text "json"). Drop it.
+    if (sv.empty() && raw != sv) return true;
+    // Likewise a fence-word-only remnant the stripper left (e.g. the model
+    // emitted exactly "json" or "```json" with nothing parseable).
+    if (sv == "json" || sv == "```" || sv == "`") return true;
     if (sv.empty() || sv.front() != '{') return false;
     try { auto _ = json::parse(sv); (void)_; return false; }   // complete — keep as text
     catch (...) { return true; }                    // truncated — drop
@@ -727,6 +740,163 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
     return m.role == Role::Assistant && !m.tool_calls.empty();
 }
 
+// ── Ollama native /api/chat protocol ────────────────────────────────────────
+// The OpenAI-compat shim (/v1/chat/completions) makes weak local models leak
+// tool calls as raw JSON in `content`. The native endpoint applies the model's
+// chat template, returns structured `message.tool_calls`, and chats cleanly on
+// a bare greeting. Request body shape differs (messages with tool_calls inline,
+// tool results as role:"tool"), and the response is NDJSON: one JSON object per
+// line, each `{"message":{...},"done":bool}`.
+
+// Build the native `messages` array. Like the OpenAI shape but Ollama wants
+// tool arguments as a JSON OBJECT (not a serialized string) and tool results
+// as role:"tool" with `tool_name`.
+[[nodiscard]] json build_native_messages(const std::vector<Message>& msgs) {
+    json arr = json::array();
+    for (const auto& m : msgs) {
+        const bool has_text  = !m.text.empty();
+        const bool has_tools = is_assistant_with_results(m);
+        bool has_images = false;
+        if (m.role == Role::User)
+            for (const auto& img : m.images)
+                if (!img.bytes.empty()) { has_images = true; break; }
+
+        if (has_text || has_images || has_tools) {
+            json msg;
+            msg["role"] = (m.role == Role::User) ? "user" : "assistant";
+            std::string wire_text = m.attachments.empty()
+                ? m.text : attachment::expand(m.text, m.attachments);
+            msg["content"] = scrub_utf8(wire_text);
+            if (has_images) {
+                // Ollama native: images is an array of base64 strings.
+                json imgs = json::array();
+                for (const auto& img : m.images)
+                    if (!img.bytes.empty())
+                        imgs.push_back(agentty::util::base64_encode(img.bytes));
+                if (!imgs.empty()) msg["images"] = std::move(imgs);
+            }
+            if (has_tools) {
+                json calls = json::array();
+                for (const auto& tc : m.tool_calls) {
+                    calls.push_back({
+                        {"function", {
+                            {"name", tc.name.value},
+                            {"arguments", tc.args.is_null() ? json::object()
+                                                            : tc.args},
+                        }},
+                    });
+                }
+                msg["tool_calls"] = std::move(calls);
+            }
+            arr.push_back(std::move(msg));
+        }
+        if (has_tools) {
+            for (const auto& tc : m.tool_calls) {
+                std::string out = tc.output();
+                if (out.empty()) {
+                    if (tc.is_rejected())       out = "(rejected by user)";
+                    else if (!tc.is_terminal()) out = "(no output)";
+                }
+                arr.push_back({
+                    {"role", "tool"},
+                    {"tool_name", tc.name.value},
+                    {"content", scrub_utf8(out)},
+                });
+            }
+        }
+    }
+    return arr;
+}
+
+// Handle one native message delta (the `message` object of an NDJSON frame).
+void handle_native_message(StreamCtx& ctx, const json& message) {
+    // Structured tool calls win — no salvage needed on the native endpoint.
+    if (message.contains("tool_calls") && message["tool_calls"].is_array()
+        && !message["tool_calls"].empty()) {
+        ctx.any_structured_tool = true;
+        ctx.holding = false;
+        ctx.text_hold.clear();
+        int idx = 0;
+        for (const auto& tc : message["tool_calls"]) {
+            std::string name, args = "{}";
+            if (tc.contains("function") && tc["function"].is_object()) {
+                const auto& fn = tc["function"];
+                if (fn.contains("name") && fn["name"].is_string())
+                    name = fn["name"].get<std::string>();
+                if (fn.contains("arguments")) {
+                    const auto& a = fn["arguments"];
+                    if (a.is_string())      args = a.get<std::string>();
+                    else if (!a.is_null())  args = a.dump();
+                }
+            }
+            if (name.empty()) continue;
+            std::string id = "call_native_"
+                + std::to_string(ctx.salvage_seq++) + "_"
+                + std::to_string(idx++);
+            ctx.sink(StreamToolUseStart{ToolCallId{id}, ToolName{name}});
+            ctx.sink(StreamToolUseDelta{args});
+            ctx.sink(StreamToolUseEnd{});
+            ctx.stop_reason = StopReason::ToolUse;
+        }
+    }
+    // Plain assistant text. On the native endpoint the template already
+    // separated tool calls into the structured channel, so content is real
+    // prose — emit it directly (no hold/salvage suspicion).
+    if (message.contains("content") && message["content"].is_string()) {
+        const auto& s = message["content"].get_ref<const std::string&>();
+        if (!s.empty()) {
+            ctx.sink(StreamTextDelta{s});
+            ctx.any_text_flushed = true;
+        }
+    }
+}
+
+// Parse one NDJSON line from /api/chat.
+void dispatch_native_line(StreamCtx& ctx, std::string_view line) {
+    if (line.empty()) return;
+    json j;
+    try { j = json::parse(line); } catch (...) { return; }
+    if (j.contains("error")) {
+        std::string msg = j["error"].is_string()
+            ? j["error"].get<std::string>() : j["error"].dump();
+        ctx.sink(StreamError{msg, std::nullopt});
+        ctx.terminated = true;
+        return;
+    }
+    if (j.contains("message") && j["message"].is_object())
+        handle_native_message(ctx, j["message"]);
+    if (j.value("done", false)) {
+        // Final frame carries usage + done_reason.
+        StreamUsage su;
+        su.input_tokens  = j.value("prompt_eval_count", 0);
+        su.output_tokens = j.value("eval_count", 0);
+        if (su.input_tokens || su.output_tokens) ctx.sink(su);
+        auto reason = j.value("done_reason", std::string{"stop"});
+        if (ctx.stop_reason != StopReason::ToolUse)
+            ctx.stop_reason = (reason == "length") ? StopReason::MaxTokens
+                                                   : StopReason::EndTurn;
+    }
+}
+
+// NDJSON line feeder for /api/chat (newline-delimited JSON, not SSE).
+void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
+    ctx.buf.append(data, len);
+    auto& read_pos = ctx.read_pos;
+    std::string_view buf{ctx.buf};
+    while (true) {
+        const auto nl = buf.find('\n', read_pos);
+        if (nl == std::string_view::npos) break;
+        std::string_view line = buf.substr(read_pos, nl - read_pos);
+        read_pos = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        dispatch_native_line(ctx, line);
+    }
+    if (read_pos >= kSseCompactThreshold) {
+        ctx.buf.erase(0, read_pos);
+        read_pos = 0;
+    }
+}
+
 } // namespace
 
 // ── Endpoint presets ────────────────────────────────────────────────────────
@@ -755,8 +925,10 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
                         "/v1/models", true, "cerebras"};
     }
     if (eq(spec, "ollama")) {
-        return Endpoint{"localhost", 11434, "/v1/chat/completions",
-                        "/v1/models", false, "ollama"};
+        Endpoint ep{"localhost", 11434, "/api/chat",
+                    "/api/tags", false, "ollama"};
+        ep.native_api = true;
+        return ep;
     }
     // Treat anything else as a raw "host[:port]" — defaults to https on 443,
     // plain http if a non-443 port is given (a local server convention).
@@ -950,31 +1122,47 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     };
 
     // ── Build the request body ──────────────────────────────────────────────
+    const bool native = req.endpoint.native_api;
     json body;
     body["model"]  = req.model;
     body["stream"] = true;
-    // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
-    // also accept max_completion_tokens; max_tokens stays accepted for the
-    // whole compatible family, so use it for portability).
-    body["max_tokens"] = req.max_tokens;
-    // Ask for a usage frame on the final SSE event so the context gauge can
-    // update even on streaming requests.
-    body["stream_options"] = {{"include_usage", true}};
 
-    // messages: system prompt first, then the conversation.
-    json messages = json::array();
-    if (!req.system_prompt.empty()) {
-        messages.push_back({{"role", "system"},
-                            {"content", scrub_utf8(req.system_prompt)}});
-    }
-    {
-        json conv = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
-        for (auto& m : conv) messages.push_back(std::move(m));
-    }
-    body["messages"] = std::move(messages);
+    if (native) {
+        // Ollama native /api/chat: system prompt as a role:"system" message,
+        // structured tool_calls, NDJSON response. No max_tokens/stream_options
+        // (Ollama uses `options.num_predict`); default generation is fine.
+        json messages = json::array();
+        if (!req.system_prompt.empty())
+            messages.push_back({{"role", "system"},
+                                {"content", scrub_utf8(req.system_prompt)}});
+        for (auto& m : build_native_messages(req.messages))
+            messages.push_back(std::move(m));
+        body["messages"] = std::move(messages);
+        if (!req.tools.empty()) body["tools"] = build_tools(req.tools);
+    } else {
+        // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
+        // also accept max_completion_tokens; max_tokens stays accepted for the
+        // whole compatible family, so use it for portability).
+        body["max_tokens"] = req.max_tokens;
+        // Ask for a usage frame on the final SSE event so the context gauge can
+        // update even on streaming requests.
+        body["stream_options"] = {{"include_usage", true}};
 
-    if (!req.tools.empty())
-        body["tools"] = build_tools(req.tools);
+        // messages: system prompt first, then the conversation.
+        json messages = json::array();
+        if (!req.system_prompt.empty()) {
+            messages.push_back({{"role", "system"},
+                                {"content", scrub_utf8(req.system_prompt)}});
+        }
+        {
+            json conv = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
+            for (auto& m : conv) messages.push_back(std::move(m));
+        }
+        body["messages"] = std::move(messages);
+
+        if (!req.tools.empty())
+            body["tools"] = build_tools(req.tools);
+    }
 
     std::string body_str;
     try {
@@ -1033,7 +1221,8 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
         if (is_success) {
-            feed_sse(ctx, chunk.data(), chunk.size());
+            if (native) feed_ndjson(ctx, chunk.data(), chunk.size());
+            else        feed_sse(ctx, chunk.data(), chunk.size());
         } else {
             if (error_body.size() < 64 * 1024)
                 error_body.append(chunk.data(),
@@ -1097,18 +1286,65 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
 std::string_view local_model_prompt_addendum() {
     return
         "\n\n<local-model-guidance>\n"
-        "You are running on a local / OpenAI-compatible model. Two hard rules:\n"
-        "1. Only call a tool when the user's request actually requires one. "
-        "For greetings, small talk, acknowledgements, or anything you can "
-        "answer directly, reply in plain text and call NO tools. In "
-        "particular, do NOT call `remember` unless the user explicitly asks "
-        "you to remember, note, or not forget something.\n"
-        "2. When you DO call a tool, emit exactly one tool call using the "
-        "tool-calling mechanism. Do not print the call as JSON in your "
-        "normal reply, do not wrap it in markdown fences, and never repeat a "
-        "call you already made this turn — once a tool result comes back, use "
-        "it and either continue or answer the user.\n"
+        "You are a small local model. Tool calls are EXPENSIVE and most "
+        "messages do NOT need one. Follow this decision procedure on EVERY "
+        "turn:\n"
+        "STEP 1 — Decide if a tool is needed. A tool is needed ONLY if the "
+        "user asked for a specific action, an external data lookup, or a file/"
+        "shell operation. Greetings (\"hi\", \"hello\"), small talk, thanks, "
+        "acknowledgements, and general questions you can answer from knowledge "
+        "do NOT need a tool.\n"
+        "STEP 2a — If NO tool is needed: reply directly in plain natural "
+        "language. Do NOT output any JSON, do NOT output the word \"json\", "
+        "do NOT output a code fence, do NOT output <tool_call> tags. Just "
+        "answer the user. For \"hi\" you simply say hello back.\n"
+        "STEP 2b — If a tool IS needed: emit exactly ONE tool call through the "
+        "tool-calling mechanism (not as text/JSON/markdown in your reply). "
+        "Use concrete argument values. After its result comes back, either "
+        "continue or give the final plain-text answer — never re-emit a call "
+        "you already made this turn.\n"
+        "NEVER call `remember`, `forget`, or `wipe_memory` unless the user "
+        "explicitly said to remember or forget something. These will be "
+        "REJECTED if you call them on a greeting or on your own initiative.\n"
         "</local-model-guidance>";
+}
+
+std::string local_model_system_prompt() {
+#if defined(_WIN32)
+    constexpr const char* os_name = "Windows";
+    constexpr const char* shell   = "cmd.exe";
+#elif defined(__APPLE__)
+    constexpr const char* os_name = "macOS";
+    constexpr const char* shell   = "sh";
+#else
+    constexpr const char* os_name = "Linux";
+    constexpr const char* shell   = "sh";
+#endif
+    std::string cwd;
+    try { cwd = std::filesystem::current_path().string(); } catch (...) {}
+
+    std::string out;
+    out.reserve(2048);
+    out += "You are agentty, a concise terminal coding assistant.\n";
+    // The decision-first core is the load-bearing part for small models.
+    out += local_model_prompt_addendum();
+    out += "\n\n<tools>\n"
+           "When you DO need a tool: read/write/edit operate on files; bash "
+           "runs a shell command; grep/glob/list_dir search the project. "
+           "Use exact paths. Make ONE call, wait for its result, then "
+           "continue or answer.\n"
+           "</tools>\n";
+    out += "\n<environment>\n  os: ";
+    out += os_name;
+    out += "\n  shell: ";
+    out += shell;
+    out += "\n";
+    if (!cwd.empty()) { out += "  cwd: "; out += cwd; out += "\n"; }
+    out += "</environment>\n";
+    // On-demand skills catalog (names + one-line summaries). Cheap; helps the
+    // model know what specialised procedures exist.
+    out += tools::skills::catalog_block();
+    return out;
 }
 
 // ── Model listing ────────────────────────────────────────────────────────────
@@ -1138,14 +1374,27 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
 
     try {
         auto j = json::parse(resp->body);
-        for (const auto& m : j.value("data", json::array())) {
-            auto id = m.value("id", "");
-            if (id.empty()) continue;
-            result.push_back(ModelInfo{
-                .id           = ModelId{id},
-                .display_name = id,
-                .provider     = endpoint.label,
-            });
+        if (endpoint.native_api) {
+            // Ollama /api/tags: {"models":[{"name":"qwen2.5-coder:7b",...}]}
+            for (const auto& m : j.value("models", json::array())) {
+                auto id = m.value("name", "");
+                if (id.empty()) continue;
+                result.push_back(ModelInfo{
+                    .id           = ModelId{id},
+                    .display_name = id,
+                    .provider     = endpoint.label,
+                });
+            }
+        } else {
+            for (const auto& m : j.value("data", json::array())) {
+                auto id = m.value("id", "");
+                if (id.empty()) continue;
+                result.push_back(ModelInfo{
+                    .id           = ModelId{id},
+                    .display_name = id,
+                    .provider     = endpoint.label,
+                });
+            }
         }
     } catch (...) {}
 

@@ -56,6 +56,13 @@ struct Endpoint {
     std::string models_path = "/v1/models";
     bool        use_tls     = true;
     std::string label       = "openai";
+    // When true, use Ollama's NATIVE /api/chat protocol (NDJSON stream,
+    // structured message.tool_calls) instead of the OpenAI-compat
+    // /v1/chat/completions shim. The shim makes weak local models leak
+    // tool calls as raw JSON in `content` (even on a bare "hi"); the native
+    // endpoint applies the model's chat template and answers cleanly. Set
+    // for the "ollama" preset only.
+    bool        native_api  = false;
 
     // Built-in presets for the common free / hosted backends. Pass a bare
     // name ("openai", "groq", "openrouter", "together", "cerebras",
@@ -99,6 +106,13 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 // in plain text when no tool is needed and to emit one well-formed call when
 // one is. Hosted OpenAI/Groq models ignore it harmlessly.
 [[nodiscard]] std::string_view local_model_prompt_addendum();
+
+// Full slim system prompt for local / OpenAI-compat models. Replaces (does
+// NOT append to) the hosted Claude prompt: a short decision-first instruction
+// set + environment block + the user's CLAUDE.md memory tiers + skills
+// catalog. The verbose Claude agentic prose is omitted because it primes small
+// models to over-call tools and leak them as content text.
+[[nodiscard]] std::string local_model_system_prompt();
 
 // Test-only: feed a complete OpenAI SSE byte buffer through the same parser
 // the live stream uses and collect every dispatched Msg. Lets a unit test
