@@ -85,6 +85,15 @@ struct Request {
     Headers     headers;
     std::string body;     // empty for GET; utf-8 bytes for POST.
 
+    // Cleartext HTTP/1.1 — skip TLS entirely and speak plain HTTP/1.1 over
+    // the raw socket. Set for a local OpenAI-compatible server (Ollama,
+    // llama.cpp) reached over `http://localhost:PORT`, which serves no TLS
+    // and no h2. The default false keeps every hosted upstream on the
+    // TLS + HTTP/2 path. When true: `send` does an h1.1 unary exchange and
+    // `stream` does an h1.1 chunked-SSE read; neither touches OpenSSL, the
+    // connection pool, or nghttp2.
+    bool plaintext = false;
+
     // Hard cap on the buffered (unary, non-streaming) response body. The
     // call returns a typed `body_too_large` HttpError once exceeded and
     // RST_STREAMs the stream so we don't keep reading. Default 16 MiB is

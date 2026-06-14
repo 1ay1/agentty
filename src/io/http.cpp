@@ -1263,6 +1263,331 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
 }
 
 // -----------------------------------------------------------------------
+// Cleartext HTTP/1.1 — for a local OpenAI-compatible server (Ollama,
+// llama.cpp) on http://localhost:PORT. No TLS, no h2, no pool. Plain
+// blocking-ish socket I/O over the non-blocking fd dial_tcp() returns,
+// poll()-driven to honor cancel + deadlines. Two entry points:
+//   • plain_unary_send   — one request/response (GET /v1/models)
+//   • plain_stream        — chunked SSE read feeding handler.on_chunk
+//                           (POST /v1/chat/completions, stream:true)
+// -----------------------------------------------------------------------
+namespace {
+
+// Raw socket write-all, poll-driven, cancel + deadline aware.
+std::expected<void, HttpError>
+plain_send_all(socket_t fd, const char* data, size_t len,
+               clock_t_::time_point deadline, CancelToken* cancel) {
+    size_t off = 0;
+    while (off < len) {
+        if (cancel && cancel->is_cancelled())
+            return std::unexpected(HttpError::cancelled("h1 plain write"));
+#if defined(_WIN32)
+        int n = ::send(fd, data + off, static_cast<int>(len - off), 0);
+#else
+        ssize_t n = ::send(fd, data + off, len - off, MSG_NOSIGNAL);
+#endif
+        if (n > 0) { off += static_cast<size_t>(n); continue; }
+        int e = sock_last_err();
+        if (sock_intr(e)) continue;
+        if (!sock_in_progress(e))
+            return std::unexpected(HttpError::connect(
+                "h1 plain send: errno=" + std::to_string(e)));
+        int rem = remaining_ms(deadline, 200);
+        if (rem <= 0)
+            return std::unexpected(HttpError::timeout("h1 plain write timed out"));
+        pollfd pfd{ fd, POLLOUT, 0 };
+        int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err()))
+            return std::unexpected(HttpError::connect(
+                "h1 plain write poll: errno=" + std::to_string(sock_last_err())));
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+            return std::unexpected(HttpError::socket_hangup("h1 plain write hangup"));
+    }
+    return {};
+}
+
+// Build an HTTP/1.1 request head (+ body) targeting a cleartext server.
+// `Connection: close` so the body ends at EOF for unary; for streaming we
+// instead keep the connection open and rely on the server's chunked
+// encoding / its own close to end the SSE.
+std::string plain_build_request(const Endpoint& ep, const Request& req,
+                                bool keep_alive) {
+    std::string out;
+    out += wire_name(req.method);
+    out += ' ';
+    out += req.path.empty() ? "/" : req.path;
+    out += " HTTP/1.1\r\n";
+    out += "host: ";
+    out += ep.host;
+    if (ep.port != 80) { out += ':'; out += std::to_string(ep.port); }
+    out += "\r\n";
+    for (const auto& h : req.headers) {
+        if (h.name == "host" || h.name == "content-length" ||
+            h.name == "connection")
+            continue;
+        out += h.name; out += ": "; out += h.value; out += "\r\n";
+    }
+    out += "content-length: "; out += std::to_string(req.body.size()); out += "\r\n";
+    out += keep_alive ? "connection: keep-alive\r\n\r\n"
+                      : "connection: close\r\n\r\n";
+    out += req.body;
+    return out;
+}
+
+// Parse "HTTP/1.1 200 OK\r\nHeader: v\r\n...\r\n\r\n" head into status + headers.
+// Returns the byte offset just past the \r\n\r\n, or npos if incomplete.
+std::size_t plain_parse_head(std::string_view in, int& status, Headers& headers) {
+    auto hdr_end = in.find("\r\n\r\n");
+    if (hdr_end == std::string_view::npos) return std::string_view::npos;
+    std::string_view head = in.substr(0, hdr_end);
+    auto eol = head.find("\r\n");
+    std::string_view status_line =
+        head.substr(0, eol == std::string_view::npos ? head.size() : eol);
+    status = 0;
+    if (auto sp = status_line.find(' '); sp != std::string_view::npos) {
+        for (size_t k = sp + 1; k < status_line.size()
+                 && status_line[k] >= '0' && status_line[k] <= '9'; ++k)
+            status = status * 10 + (status_line[k] - '0');
+    }
+    size_t pos = (eol == std::string_view::npos) ? head.size() : eol + 2;
+    while (pos < head.size()) {
+        auto nl = head.find("\r\n", pos);
+        std::string_view line =
+            head.substr(pos, (nl == std::string_view::npos ? head.size() : nl) - pos);
+        pos = (nl == std::string_view::npos) ? head.size() : nl + 2;
+        auto colon = line.find(':');
+        if (colon == std::string_view::npos) continue;
+        std::string name{line.substr(0, colon)};
+        for (auto& c : name) c = static_cast<char>(std::tolower((unsigned char)c));
+        size_t vb = colon + 1;
+        while (vb < line.size() && (line[vb] == ' ' || line[vb] == '\t')) ++vb;
+        headers.push_back({ std::move(name), std::string{line.substr(vb)} });
+    }
+    return hdr_end + 4;
+}
+
+[[nodiscard]] bool headers_say_chunked(const Headers& h) {
+    for (const auto& e : h)
+        if (e.name == "transfer-encoding"
+            && e.value.find("chunked") != std::string::npos)
+            return true;
+    return false;
+}
+
+// Incremental de-chunker. Feed it raw body bytes as they arrive; it appends
+// fully-decoded payload to `out` and keeps partial-chunk state across calls.
+// Returns false on a malformed chunk header. `done` is set when the
+// terminating 0-length chunk is seen.
+struct ChunkDecoder {
+    std::string pending;     // undecoded bytes carried across feeds
+    bool   done = false;
+    bool feed(std::string_view bytes, std::string& out) {
+        pending.append(bytes);
+        size_t p = 0;
+        while (p < pending.size()) {
+            auto ln = pending.find("\r\n", p);
+            if (ln == std::string::npos) break;            // need more bytes
+            size_t sz = 0; bool any = false;
+            for (size_t k = p; k < ln; ++k) {
+                char c = pending[k];
+                int d = (c >= '0' && c <= '9') ? c - '0'
+                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                      : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+                if (d < 0) break;          // chunk-ext (";...") or CRLF — stop
+                sz = sz * 16 + static_cast<size_t>(d); any = true;
+            }
+            if (!any && ln == p) { p = ln + 2; continue; }  // stray CRLF
+            size_t data_start = ln + 2;
+            if (sz == 0) { done = true; return true; }       // last chunk
+            if (data_start + sz + 2 > pending.size()) break;  // need full chunk
+            out.append(pending, data_start, sz);
+            p = data_start + sz + 2;                          // skip data + CRLF
+        }
+        if (p > 0) pending.erase(0, p);
+        return true;
+    }
+};
+
+} // namespace
+
+// Cleartext HTTP/1.1 streaming SSE read. Mirrors what Client::stream does for
+// h2, but over a raw socket: dial, write the request, read until the head is
+// complete (fire on_headers), then stream body bytes (de-chunking if needed)
+// to on_chunk until the server closes or sends the terminal 0-chunk.
+std::expected<void, HttpError>
+plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
+             Timeouts tos, CancelToken* cancel) {
+    auto fd_or = dial_tcp(ep, tos, cancel);
+    if (!fd_or) return std::unexpected(std::move(fd_or).error());
+    socket_t fd = *fd_or;
+    auto cleanup = [&] { if (fd != kBadSocket) sock_close(fd); };
+
+    // Streaming: no total cap (tos.total==0 for chat). Use idle as the wedge
+    // guard; fall back to a generous fixed write deadline.
+    auto write_deadline = clock_t_::now() + std::chrono::milliseconds{30'000};
+    std::string head_wire = plain_build_request(ep, req, /*keep_alive=*/false);
+    if (auto r = plain_send_all(fd, head_wire.data(), head_wire.size(),
+                               write_deadline, cancel); !r) {
+        cleanup(); return std::unexpected(std::move(r).error());
+    }
+
+    std::string inbuf;
+    bool head_done = false;
+    int  status = 0;
+    Headers headers;
+    bool chunked = false;
+    ChunkDecoder dechunk;
+    bool delivered_any = false;
+    auto last_rx = clock_t_::now();
+
+    char buf[64 * 1024];
+    while (true) {
+        if (cancel && cancel->is_cancelled()) {
+            cleanup(); return std::unexpected(HttpError::cancelled("h1 plain stream"));
+        }
+#if defined(_WIN32)
+        int r = ::recv(fd, buf, sizeof(buf), 0);
+#else
+        ssize_t r = ::recv(fd, buf, sizeof(buf), 0);
+#endif
+        if (r > 0) {
+            last_rx = clock_t_::now();
+            if (!head_done) {
+                inbuf.append(buf, static_cast<size_t>(r));
+                auto body_at = plain_parse_head(inbuf, status, headers);
+                if (body_at != std::string_view::npos) {
+                    head_done = true;
+                    chunked = headers_say_chunked(headers);
+                    if (handler.on_headers) handler.on_headers(status, headers);
+                    std::string body0 = inbuf.substr(body_at);
+                    inbuf.clear();
+                    if (!body0.empty()) {
+                        std::string payload;
+                        if (chunked) { dechunk.feed(body0, payload); }
+                        else payload = std::move(body0);
+                        if (!payload.empty() && handler.on_chunk) {
+                            delivered_any = true;
+                            if (!handler.on_chunk(payload)) { cleanup(); return {}; }
+                        }
+                        if (chunked && dechunk.done) { cleanup(); return {}; }
+                    }
+                }
+                continue;
+            }
+            std::string payload;
+            if (chunked) { dechunk.feed(std::string_view{buf, (size_t)r}, payload); }
+            else payload.assign(buf, static_cast<size_t>(r));
+            if (!payload.empty() && handler.on_chunk) {
+                delivered_any = true;
+                if (!handler.on_chunk(payload)) { cleanup(); return {}; }
+            }
+            if (chunked && dechunk.done) { cleanup(); return {}; }
+            continue;
+        }
+        if (r == 0) {   // peer closed — clean end of a Connection: close stream
+            cleanup();
+            if (!head_done && handler.on_headers) handler.on_headers(status, headers);
+            return {};
+        }
+        int e = sock_last_err();
+        if (sock_intr(e)) continue;
+        if (!sock_in_progress(e)) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 plain recv: errno=" + std::to_string(e)));
+        }
+        // would-block: poll with the idle guard.
+        int rem = 200;
+        if (tos.idle.count() > 0) {
+            auto since = clock_t_::now() - last_rx;
+            if (since >= tos.idle) {
+                cleanup();
+                return std::unexpected(HttpError::timeout("h1 plain idle timeout"));
+            }
+        }
+        pollfd pfd{ fd, POLLIN, 0 };
+        int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err())) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 plain poll: errno=" + std::to_string(sock_last_err())));
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup("h1 plain poll hangup"));
+        }
+        (void)delivered_any;
+    }
+}
+
+// Cleartext HTTP/1.1 unary (GET /v1/models on a local server).
+std::expected<Response, HttpError>
+plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
+                 CancelToken* cancel) {
+    auto fd_or = dial_tcp(ep, tos, cancel);
+    if (!fd_or) return std::unexpected(std::move(fd_or).error());
+    socket_t fd = *fd_or;
+    auto cleanup = [&] { if (fd != kBadSocket) sock_close(fd); };
+
+    auto deadline = clock_t_::now() +
+        (tos.total.count() > 0 ? tos.total : std::chrono::milliseconds{30'000});
+    std::string wire = plain_build_request(ep, req, /*keep_alive=*/false);
+    if (auto r = plain_send_all(fd, wire.data(), wire.size(), deadline, cancel); !r) {
+        cleanup(); return std::unexpected(std::move(r).error());
+    }
+
+    std::string in;
+    char buf[16 * 1024];
+    while (true) {
+        if (cancel && cancel->is_cancelled()) {
+            cleanup(); return std::unexpected(HttpError::cancelled("h1 plain unary"));
+        }
+        if (in.size() > req.max_body_bytes + (64u << 10)) {
+            cleanup();
+            return std::unexpected(HttpError::body(
+                "h1 plain response exceeds max_body_bytes"));
+        }
+#if defined(_WIN32)
+        int r = ::recv(fd, buf, sizeof(buf), 0);
+#else
+        ssize_t r = ::recv(fd, buf, sizeof(buf), 0);
+#endif
+        if (r > 0) { in.append(buf, static_cast<size_t>(r)); continue; }
+        if (r == 0) break;   // EOF — Connection: close
+        int e = sock_last_err();
+        if (sock_intr(e)) continue;
+        if (!sock_in_progress(e)) {
+            if (!in.empty()) break;
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 plain recv: errno=" + std::to_string(e)));
+        }
+        int rem = remaining_ms(deadline, 200);
+        if (rem <= 0) { cleanup(); return std::unexpected(HttpError::timeout("h1 plain read timed out")); }
+        pollfd pfd{ fd, POLLIN, 0 };
+        int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err())) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 plain poll: errno=" + std::to_string(sock_last_err())));
+        }
+    }
+    cleanup();
+
+    int status = 0;
+    Headers headers;
+    auto body_at = plain_parse_head(in, status, headers);
+    if (body_at == std::string_view::npos)
+        return std::unexpected(HttpError::protocol("h1 plain: no header terminator"));
+    std::string body = in.substr(body_at);
+    if (headers_say_chunked(headers)) {
+        ChunkDecoder d; std::string decoded; d.feed(body, decoded);
+        body = std::move(decoded);
+    }
+    return Response{ status, std::move(headers), std::move(body) };
+}
+
+// -----------------------------------------------------------------------
 // HTTP/1.1 unary fallback.
 //
 // The core transport is h2-only: dial_new() hard-rejects any peer that
@@ -1655,6 +1980,10 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
     HttpError last_err = HttpError::unknown("send: no attempts made");
 
+    // Cleartext local server (Ollama / llama.cpp) — no TLS, no h2, no pool.
+    if (req.plaintext)
+        return plain_unary_send(ep, req, tos, cancel.get());
+
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         if (is_cancelled(cancel)) return std::unexpected(HttpError::cancelled());
         if (!backoff_sleep(attempt, cancel))
@@ -1708,6 +2037,12 @@ HttpStreamResult
 Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
                CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
+
+    // Cleartext local server (Ollama / llama.cpp) — plain HTTP/1.1 chunked
+    // SSE over a raw socket. No TLS, no h2, no connection pool.
+    if (req.plaintext)
+        return plain_stream(ep, req, handler, tos, cancel.get());
+
     HttpError last_err = HttpError::unknown("stream: no attempts made");
     // Persist across attempts so the synthesised on_headers (if we never got
     // a real one) carries whatever metadata the *last* attempt did collect.

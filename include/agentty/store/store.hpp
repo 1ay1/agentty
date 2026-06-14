@@ -35,6 +35,12 @@ struct Settings {
     // once doesn't have to re-export it every shell. Anthropic is NOT
     // stored here — its creds live in credentials.json.
     std::map<std::string, std::string> provider_keys;
+    // Last model selected per provider, keyed by canonical provider id
+    // ("anthropic", "openai", "ollama", …). Lets a provider switch restore
+    // the model the user last used on that backend instead of carrying a
+    // model id that doesn't exist on the new provider. The global `model_id`
+    // above stays the active model; this map is just the per-provider recall.
+    std::map<std::string, std::string> provider_models;
 };
 
 template <class S>

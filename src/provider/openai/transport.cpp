@@ -340,6 +340,15 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
     if (!known) return false;
 
+    // Weak local models reflexively leak `remember`/`forget`/`wipe_memory`
+    // into the text channel on greetings and small talk. We never auto-run
+    // memory tools on the model's own initiative; surfacing the card just to
+    // fail it later flashes then vanishes (bad UX). Swallow the leaked JSON
+    // here so no card is ever born — return true to consume it from the hold.
+    static constexpr std::string_view kMemoryTools[] = {
+        "remember", "forget", "wipe_memory"};
+    for (auto t : kMemoryTools) if (t == name) return true;
+
     // arguments may be an object (qwen) or a JSON string (some templates).
     std::string args = "{}";
     if (j.contains("arguments")) {
@@ -1334,28 +1343,11 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
 
 std::string_view local_model_prompt_addendum() {
     return
-        "\n\n<local-model-guidance>\n"
-        "You are a small local model. Tool calls are EXPENSIVE and most "
-        "messages do NOT need one. Follow this decision procedure on EVERY "
-        "turn:\n"
-        "STEP 1 — Decide if a tool is needed. A tool is needed ONLY if the "
-        "user asked for a specific action, an external data lookup, or a file/"
-        "shell operation. Greetings (\"hi\", \"hello\"), small talk, thanks, "
-        "acknowledgements, and general questions you can answer from knowledge "
-        "do NOT need a tool.\n"
-        "STEP 2a — If NO tool is needed: reply directly in plain natural "
-        "language. Do NOT output any JSON, do NOT output the word \"json\", "
-        "do NOT output a code fence, do NOT output <tool_call> tags. Just "
-        "answer the user. For \"hi\" you simply say hello back.\n"
-        "STEP 2b — If a tool IS needed: emit exactly ONE tool call through the "
-        "tool-calling mechanism (not as text/JSON/markdown in your reply). "
-        "Use concrete argument values. After its result comes back, either "
-        "continue or give the final plain-text answer — never re-emit a call "
-        "you already made this turn.\n"
-        "NEVER call `remember`, `forget`, or `wipe_memory` unless the user "
-        "explicitly said to remember or forget something. These will be "
-        "REJECTED if you call them on a greeting or on your own initiative.\n"
-        "</local-model-guidance>";
+        "\n\nMost messages are answered in plain words — greetings, small "
+        "talk, and questions you already know do NOT use a tool. Only call a "
+        "tool when the user asks you to touch files, run a command, or look "
+        "something up; then make exactly ONE call and wait for its result. "
+        "Never call remember/forget/wipe_memory on your own.";
 }
 
 std::string local_model_system_prompt() {
@@ -1374,8 +1366,8 @@ std::string local_model_system_prompt() {
 
     std::string out;
     out.reserve(2048);
-    out += "You are agentty, a concise terminal coding assistant.\n";
-    // The decision-first core is the load-bearing part for small models.
+    out += "You are agentty, a concise, friendly terminal assistant. Answer "
+           "directly and naturally.\n";
     out += local_model_prompt_addendum();
     out += "\n\n<tools>\n"
            "When you DO need a tool: read/write/edit operate on files; bash "

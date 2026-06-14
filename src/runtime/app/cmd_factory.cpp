@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
@@ -478,12 +479,15 @@ Cmd<Msg> launch_stream(Model& m) {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = std::move(model_id);
-        // Local / OpenAI-compat models choke on the full Claude agentic
-        // prompt (the verbose "Act, don't ask" + memory-tools sections prime
-        // a small model to over-call tools and leak them as content text —
-        // even on a bare "hi"). Send a slim decision-first prompt instead;
-        // hosted Anthropic gets the full prompt.
-        if (provider::active().kind == provider::Kind::OpenAI)
+        // Weak models (small local / coder models inferred from the model id)
+        // choke on the full Claude agentic prompt — the verbose "Act, don't
+        // ask" + memory-tools sections prime them to over-call tools and leak
+        // them as content text, even on a bare "hi". Send a slim decision-
+        // first prompt instead. Strong models (Claude, large/tool-trained
+        // local models) get the full prompt. The decision is per-model via
+        // ModelCapabilities, not per-provider — a 70B llama on Ollama is
+        // treated as strong, a 7B coder on any endpoint as weak.
+        if (is_weak_model(req.model))
             req.system_prompt = provider::openai::local_model_system_prompt();
         else
             req.system_prompt = provider::anthropic::default_system_prompt();

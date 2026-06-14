@@ -741,6 +741,10 @@ store::Settings load_settings() {
             for (auto& [k, v] : j["provider_keys"].items())
                 if (v.is_string()) s.provider_keys[k] = v.get<std::string>();
         }
+        if (j.contains("provider_models") && j["provider_models"].is_object()) {
+            for (auto& [k, v] : j["provider_models"].items())
+                if (v.is_string()) s.provider_models[k] = v.get<std::string>();
+        }
     } catch (...) {}
     return s;
 }
@@ -757,6 +761,11 @@ void save_settings(const store::Settings& s) {
         json keys = json::object();
         for (const auto& [k, v] : s.provider_keys) keys[k] = v;
         j["provider_keys"] = std::move(keys);
+    }
+    if (!s.provider_models.empty()) {
+        json pm = json::object();
+        for (const auto& [k, v] : s.provider_models) pm[k] = v;
+        j["provider_models"] = std::move(pm);
     }
     (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }

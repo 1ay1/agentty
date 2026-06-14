@@ -930,6 +930,15 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json)
     add_test(NAME param_tag_repair_test COMMAND param_tag_repair_test)
 
+    # model_caps_test — ModelCapabilities weak-model inference (header-only).
+    add_executable(model_caps_test EXCLUDE_FROM_ALL
+        tests/model_caps_test.cpp
+    )
+    target_include_directories(model_caps_test PRIVATE include)
+    target_link_libraries(model_caps_test PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_test(NAME model_caps_test COMMAND model_caps_test)
+
     # skills_engine_test — Agent Skills (agentskills.io) engine: discovery
     # across native + interop roots (.agentty/.agents/.claude, project +
     # user), shadowing precedence, lenient frontmatter, tier-3 resource
@@ -1438,6 +1447,7 @@ if(AGENTTY_BUILD_TESTS)
         long_session_bench
         fuzzy_match_smoke
         param_tag_repair_test
+        model_caps_test
         skills_engine_test
         midrun_freeze_test
         midrun_seam_test

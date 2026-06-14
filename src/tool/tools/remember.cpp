@@ -18,8 +18,10 @@
 #include "agentty/tool/util/arg_reader.hpp"
 #include "agentty/tool/util/tool_args.hpp"
 
+#include <cctype>
 #include <format>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -81,7 +83,70 @@ std::expected<RememberArgs, ToolError> parse_remember_args(const json& j) {
     return out;
 }
 
+// Weak local models (e.g. Ollama qwen2.5-coder:7b) reflexively call
+// `remember` on trivial greetings/acknowledgements, polluting the store
+// with junk like "Hi! How can I assist you today?" or "You said hello."
+// despite the system prompt forbidding proactive memory writes. This
+// guard rejects such phrases BEFORE they hit the JSONL store. It is a
+// conservative blocklist of assistant-boilerplate / greeting shapes —
+// a real durable fact never reads like conversational filler.
+bool looks_like_reflexive_junk(std::string_view text) {
+    // Lower-case copy for case-insensitive substring checks.
+    std::string s;
+    s.reserve(text.size());
+    for (char c : text)
+        s += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Trim leading/trailing whitespace.
+    auto b = s.find_first_not_of(" \t\r\n");
+    auto e = s.find_last_not_of(" \t\r\n");
+    if (b == std::string::npos) return true;  // empty -> junk
+    s = s.substr(b, e - b + 1);
+
+    // Assistant-boilerplate phrases. Any occurrence -> junk.
+    static const char* kBoilerplate[] = {
+        "how can i assist", "how can i help", "how may i assist",
+        "how may i help", "what can i help", "what can i do for you",
+        "is there anything", "how can i be of", "glad to help",
+        "happy to help", "let me know if", "feel free to ask",
+    };
+    for (const auto* p : kBoilerplate)
+        if (s.find(p) != std::string::npos) return true;
+
+    // Bare greetings / acknowledgements (whole-string match after
+    // stripping trailing punctuation). "hi", "hello there", "thanks",
+    // "you said hello", etc.
+    std::string core = s;
+    while (!core.empty() &&
+           (core.back() == '.' || core.back() == '!' ||
+            core.back() == '?' || core.back() == ' '))
+        core.pop_back();
+    static const char* kGreetings[] = {
+        "hi", "hii", "hey", "hello", "hello there", "hi there",
+        "yo", "sup", "thanks", "thank you", "ok", "okay", "got it",
+        "sure", "you said hi", "you said hello", "the user said hi",
+        "the user said hello", "the user greeted me", "user greeted",
+        "greeting", "the user greeted",
+    };
+    for (const auto* p : kGreetings)
+        if (core == p) return true;
+
+    return false;
+}
+
 ExecResult run_remember(const RememberArgs& a) {
+    // Reject reflexive greeting/boilerplate junk from weak models — the
+    // system prompt forbids proactive remembers, but small local models
+    // ignore negative instructions. Pinned facts and supersedes are
+    // assumed deliberate (a model rarely pins junk) and pass through.
+    if (!a.pinned && a.supersedes_id.empty() &&
+        looks_like_reflexive_junk(a.text)) {
+        return std::unexpected(ToolError::invalid_args(
+            "remember: refusing to store conversational filler / a greeting "
+            "(\"" + a.text + "\"). Only call `remember` for durable facts the "
+            "user explicitly asked you to keep. Do not remember greetings, "
+            "acknowledgements, or assistant boilerplate."));
+    }
+
     memory::AppendOptions opts;
     opts.pinned        = a.pinned;
     opts.tags          = a.tags;

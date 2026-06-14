@@ -524,21 +524,39 @@ static void test_sse_salvage_two_sequential_calls() {
 static void test_sse_salvage_function_key() {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
-            "\"{\\\"function\\\": \\\"remember\\\", \\\"arguments\\\": "
+            "\"{\\\"function\\\": \\\"echo\\\", \\\"arguments\\\": "
             "{\\\"text\\\": \\\"Hi there!\\\"}}\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
         "data: [DONE]\n\n";
-    auto msgs = oai::parse_sse_for_test(sse, {"remember", "read"});
+    auto msgs = oai::parse_sse_for_test(sse, {"echo", "read"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
     CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
     CHECK(joined_text(msgs).empty());
     for (const auto& m : msgs)
         if (const auto* s = get_leaf<StreamToolUseStart>(m))
-            CHECK(s->name.value == "remember");
+            CHECK(s->name.value == "echo");
     CHECK(joined_tool_args(msgs) == std::string{"{\"text\":\"Hi there!\"}"});
     for (const auto& m : msgs)
         if (const auto* f = get_leaf<StreamFinished>(m))
             CHECK(f->stop_reason == StopReason::ToolUse);
+}
+
+// A leaked memory tool (remember/forget/wipe_memory) must be SWALLOWED at the
+// transport: no card is ever born (we never auto-run memory tools on the
+// model's own initiative, and a flash-then-delete card is bad UX). The JSON is
+// consumed (not surfaced as prose) and the turn finishes without a tool call.
+static void test_sse_salvage_memory_tool_swallowed() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"remember\\\", \\\"arguments\\\": "
+            "{\\\"text\\\": \\\"a fact\\\"}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"remember", "read"});
+    // No tool card, and the JSON never surfaces as prose.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(joined_text(msgs).find("remember") == std::string::npos);
+    CHECK(joined_text(msgs).find('{') == std::string::npos);
 }
 
 // ── Native Ollama /api/chat (NDJSON) path ────────────────────────────────────
@@ -641,6 +659,7 @@ int main() {
     test_sse_salvage_array_of_calls();
     test_sse_salvage_two_sequential_calls();
     test_sse_salvage_function_key();
+    test_sse_salvage_memory_tool_swallowed();
 
     // Native Ollama /api/chat NDJSON path.
     test_ndjson_plain_greeting();

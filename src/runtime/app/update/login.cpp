@@ -23,6 +23,7 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/tool/subagent.hpp"
 
 namespace agentty::app::detail {
 
@@ -191,6 +192,15 @@ Step login_submit(Model m) {
             auth::AuthHeader new_auth = provider::resolve_auth_for(
                 provider, deps().auth, /*cli_key=*/{}, /*saved_key=*/key);
             app::switch_provider(new_auth);
+            // Make a valid model active for the new provider (recall, else a
+            // built-in default); ModelsLoaded auto-selects from the refetch
+            // if this is empty or absent from the list.
+            if (auto next = model_for_provider(provider); !next.empty()) {
+                m.d.model_id = ModelId{next};
+                m.s.context_max =
+                    ui::context_max_for_model(m.d.model_id.value);
+                tools::subagent::set_model(m.d.model_id.value);
+            }
             m.d.available_models.clear();
             m.ui.login = login::Closed{};
             auto toast = set_status_toast(

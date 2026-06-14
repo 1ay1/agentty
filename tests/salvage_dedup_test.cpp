@@ -19,6 +19,7 @@
 
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 

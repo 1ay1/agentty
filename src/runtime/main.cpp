@@ -299,9 +299,21 @@ int main(int argc, char** argv) {
         provider_spec = s.provider;          // empty → anthropic
     } else if (args.subcommand != "acp") {
         // Persist the --provider choice (except in ACP mode, where it's an
-        // ephemeral per-subprocess override like -m).
+        // ephemeral per-subprocess override like -m). When no -m was given,
+        // also restore the model last used on THIS provider so `--provider X`
+        // boots straight onto X's model instead of carrying a model id that
+        // belongs to a different backend (and 400s on the first prompt).
         auto s = persistence::load_settings();
         s.provider = provider_spec;
+        if (args.cli_model.empty()) {
+            if (auto it = s.provider_models.find(provider_spec);
+                it != s.provider_models.end() && !it->second.empty())
+                s.model_id = ModelId{it->second};
+        } else {
+            // -m given alongside --provider: file the model as this
+            // provider's recall so a later bare relaunch restores it.
+            s.provider_models[provider_spec] = args.cli_model;
+        }
         persistence::save_settings(s);
     }
     auto selection = provider::parse_selection(provider_spec);

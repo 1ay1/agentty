@@ -31,7 +31,27 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
-    if (!settings.model_id.empty()) m.d.model_id = settings.model_id;
+    if (!settings.model_id.empty()) {
+        // Guard against a cross-provider model id collision. A persisted
+        // model id belongs to whatever provider was active when it was
+        // saved; relaunching on a DIFFERENT provider (or with no
+        // --provider, falling back to Anthropic) must not carry that id
+        // along — e.g. a leftover "qwen2.5-coder:7b" sent to Anthropic
+        // 404s on the first prompt. For Anthropic, only honour the saved
+        // id if it's a known Claude id; otherwise drop it and let the
+        // seed default (model_id's built-in) stand. The OpenAI side
+        // self-corrects via the eager fetch_models() round trip below,
+        // so it keeps the saved id and lets ModelsLoaded validate it.
+        const bool anthropic_active =
+            provider::active().kind == provider::Kind::Anthropic;
+        bool honour = true;
+        if (anthropic_active) {
+            honour = false;
+            for (const auto& mi : m.d.available_models)
+                if (mi.id == settings.model_id) { honour = true; break; }
+        }
+        if (honour) m.d.model_id = settings.model_id;
+    }
     // Set the per-model context window now (before any stream runs) so
     // the ctx % bar uses the right denominator from frame 1, not after
     // the user's first message lands.

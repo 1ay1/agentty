@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "agentty/diff/diff.hpp"
+#include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
@@ -678,11 +679,12 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                                           bool suppress_tools) {
     provider::Request req;
     req.model         = sess.model.empty() ? model_id_ : sess.model;
-    // Weak local models over the OpenAI-compatible path get a slim,
-    // decision-first prompt (the full Anthropic agentic prompt primes a 7B
-    // model to over-call tools even on a greeting). Hosted Anthropic keeps
-    // the full prompt. Mirrors the TUI's cmd_factory swap.
-    req.system_prompt = provider::active().kind == provider::Kind::OpenAI
+    // Weak models (small local / coder models, inferred from the model id)
+    // get a slim, decision-first prompt — the full Anthropic agentic prompt
+    // primes them to over-call tools even on a greeting. Strong models
+    // (Claude, large/tool-trained local models) keep the full prompt. The
+    // decision is per-model via ModelCapabilities, mirroring cmd_factory.
+    req.system_prompt = is_weak_model(req.model)
         ? provider::openai::local_model_system_prompt()
         : provider::anthropic::default_system_prompt();
     req.cancel        = sess.cancel;
