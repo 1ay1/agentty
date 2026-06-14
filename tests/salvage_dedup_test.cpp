@@ -71,13 +71,13 @@ Message user() {
 // ── 1. Re-leaked salvaged call (same name+args) is deduped ──────────────────
 void test_releak_same_turn_deduped() {
     Model m;
-    // One assistant message: a prior Done salvaged remember + a re-leaked
-    // Pending salvaged remember with identical args.
-    json a = {{"text", "Hi there!"}};
+    // One assistant message: a prior Done salvaged read + a re-leaked
+    // Pending salvaged read with identical args.
+    json a = {{"path", "/tmp/x"}};
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_0", "remember", a, /*terminal=*/true),
-        make_call("call_salvaged_1", "remember", a, /*terminal=*/false),
+        make_call("call_salvaged_0", "read", a, /*terminal=*/true),
+        make_call("call_salvaged_1", "read", a, /*terminal=*/false),
     }));
 
     auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
@@ -108,10 +108,10 @@ void test_salvaged_different_args_not_deduped() {
     Model m;
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_0", "remember",
-                  json{{"text", "fact A"}}, /*terminal=*/true),
-        make_call("call_salvaged_1", "remember",
-                  json{{"text", "fact B"}}, /*terminal=*/false),
+        make_call("call_salvaged_0", "read",
+                  json{{"path", "/a"}}, /*terminal=*/true),
+        make_call("call_salvaged_1", "read",
+                  json{{"path", "/b"}}, /*terminal=*/false),
     }));
 
     auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
@@ -125,8 +125,8 @@ void test_first_salvaged_call_runs() {
     Model m;
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_0", "remember",
-                  json{{"text", "x"}}, /*terminal=*/false),
+        make_call("call_salvaged_0", "read",
+                  json{{"path", "/x"}}, /*terminal=*/false),
     }));
 
     auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
@@ -138,17 +138,17 @@ void test_first_salvaged_call_runs() {
 // ── 5. Dedup is scoped to the current turn (User boundary resets) ───────────
 void test_prior_turn_not_counted() {
     Model m;
-    json a = {{"text", "x"}};
-    // Turn 1: salvaged remember ran Done.
+    json a = {{"path", "/x"}};
+    // Turn 1: salvaged read ran Done.
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_0", "remember", a, /*terminal=*/true),
+        make_call("call_salvaged_0", "read", a, /*terminal=*/true),
     }));
     // Turn 2: a NEW user message, then the same call again pending. This is a
     // fresh deliberate request — must NOT be deduped against turn 1.
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_1", "remember", a, /*terminal=*/false),
+        make_call("call_salvaged_1", "read", a, /*terminal=*/false),
     }));
 
     auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
@@ -163,14 +163,14 @@ void test_prior_turn_not_counted() {
 // messages in the same turn.
 void test_cross_subturn_releak_deduped() {
     Model m;
-    json a = {{"text", "Hi there!"}};
+    json a = {{"path", "/tmp/x"}};
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_0", "remember", a, /*terminal=*/true),
+        make_call("call_salvaged_0", "read", a, /*terminal=*/true),
     }));
     // Sub-turn B (continuation placeholder that streamed the re-leak).
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_1", "remember", a, /*terminal=*/false),
+        make_call("call_salvaged_1", "read", a, /*terminal=*/false),
     }));
 
     auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
@@ -192,14 +192,14 @@ void test_salvage_budget_bounds_drifting_loop() {
     std::vector<ToolUse> calls;
     for (int i = 0; i < 8; ++i)
         calls.push_back(make_call("call_salvaged_" + std::to_string(i),
-                                  "remember",
-                                  json{{"text", "fact " + std::to_string(i)}},
+                                  "read",
+                                  json{{"path", "/f" + std::to_string(i)}},
                                   /*terminal=*/true));
     m.d.current.messages.push_back(asst(std::move(calls)));
     // The 9th re-leak: a brand-new args value, not an exact duplicate.
     m.d.current.messages.push_back(asst({
-        make_call("call_salvaged_8", "remember",
-                  json{{"text", "fact 8 (drifted)"}}, /*terminal=*/false),
+        make_call("call_salvaged_8", "read",
+                  json{{"path", "/f8-drifted"}}, /*terminal=*/false),
     }));
 
     auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
@@ -217,8 +217,8 @@ void test_structured_call_not_budget_capped() {
     std::vector<ToolUse> calls;
     for (int i = 0; i < 8; ++i)
         calls.push_back(make_call("call_salvaged_" + std::to_string(i),
-                                  "remember",
-                                  json{{"text", "fact " + std::to_string(i)}},
+                                  "read",
+                                  json{{"path", "/f" + std::to_string(i)}},
                                   /*terminal=*/true));
     m.d.current.messages.push_back(asst(std::move(calls)));
     m.d.current.messages.push_back(asst({
@@ -232,6 +232,40 @@ void test_structured_call_not_budget_capped() {
           "structured call stays Pending despite spent salvage budget");
 }
 
+// ── 9. A SALVAGED memory tool is blocked outright (first call, no prior) ────
+// Weak models leak remember/forget/wipe_memory on greetings. A salvaged call
+// to a memory tool is never the user's intent — it must be failed WITHOUT
+// running, even as the FIRST salvaged call of the turn (no dedup twin, budget
+// not spent).
+void test_salvaged_memory_tool_blocked() {
+    for (const char* name : {"remember", "forget", "wipe_memory"}) {
+        Model m;
+        m.d.current.messages.push_back(user());
+        m.d.current.messages.push_back(asst({
+            make_call("call_salvaged_0", name,
+                      json{{"text", "Hi there!"}}, /*terminal=*/false),
+        }));
+        auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
+        check(n == 1, "salvaged memory tool blocked");
+        check(m.d.current.messages.back().tool_calls[0].is_failed(),
+              "salvaged memory tool resolved Failed without running");
+    }
+}
+
+// ── 10. A STRUCTURED memory tool is NOT blocked (deliberate / slash path) ──
+void test_structured_memory_tool_allowed() {
+    Model m;
+    m.d.current.messages.push_back(user());
+    m.d.current.messages.push_back(asst({
+        make_call("call_real_1", "remember",
+                  json{{"text", "durable fact"}}, /*terminal=*/false),
+    }));
+    auto n = agentty::app::cmd::dedup_releaked_salvage_calls(m);
+    check(n == 0, "structured memory tool not blocked");
+    check(m.d.current.messages.back().tool_calls[0].is_pending(),
+          "structured memory tool stays Pending");
+}
+
 } // namespace
 
 int main() {
@@ -243,6 +277,8 @@ int main() {
     test_cross_subturn_releak_deduped();
     test_salvage_budget_bounds_drifting_loop();
     test_structured_call_not_budget_capped();
+    test_salvaged_memory_tool_blocked();
+    test_structured_memory_tool_allowed();
 
     if (g_fails == 0) {
         std::printf("salvage_dedup_test: all checks passed\n");

@@ -103,8 +103,39 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
     // to answer in plain text.
     constexpr std::size_t kMaxSalvagedPerTurn = 3;
 
+    // Memory-management tools (remember / forget / wipe_memory) are META: they
+    // mutate the agent's own learned-memory store and must only fire on an
+    // EXPLICIT user request ("remember X", "forget Y"). A weak local model
+    // leaks them into `content` on greetings/small-talk ("remember: Hi there!",
+    // "forget: Hi there!") — always junk, never the user's intent. A SALVAGED
+    // call to one of these is therefore always illegitimate; fail it WITHOUT
+    // running, regardless of budget or exact-match. Structured calls are left
+    // alone (deliberate intent / the /slash activation path). This is the
+    // single most-leaked tool class on small Ollama models, so it gets its own
+    // hard block ahead of the generic loop guard.
+    static constexpr std::string_view kMemoryTools[] = {
+        "remember", "forget", "wipe_memory"};
+    auto is_memory_tool = [](std::string_view n) {
+        for (auto t : kMemoryTools) if (t == n) return true;
+        return false;
+    };
+    std::size_t mem_blocked = 0;
+    const auto now0 = std::chrono::steady_clock::now();
+    for (auto& tc : msgs.back().tool_calls) {
+        if (!tc.is_pending() && !tc.is_approved()) continue;
+        if (!is_salvaged_call(tc.id)) continue;
+        if (!is_memory_tool(tc.name.value)) continue;
+        tc.status = ToolUse::Failed{
+            tc.started_at(), now0,
+            std::string{"refusing to auto-run a memory tool ("} + tc.name.value
+            + "). These only run when the user explicitly asks to remember or "
+              "forget something. Do not call it again — answer the user in "
+              "plain text."};
+        ++mem_blocked;
+    }
+
     if (terminal_sigs.empty() && terminal_salvaged < kMaxSalvagedPerTurn)
-        return 0;
+        return mem_blocked;
 
     std::size_t deduped = 0;
     const auto now = std::chrono::steady_clock::now();
@@ -131,7 +162,7 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
                   "finish."}};
         ++deduped;
     }
-    return deduped;
+    return deduped + mem_blocked;
 }
 
 namespace {
