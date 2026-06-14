@@ -128,10 +128,8 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
         if (!is_memory_tool(tc.name.value)) continue;
         tc.status = ToolUse::Failed{
             tc.started_at(), now0,
-            std::string{"refusing to auto-run a memory tool ("} + tc.name.value
-            + "). These only run when the user explicitly asks to remember or "
-              "forget something. Do not call it again — answer the user in "
-              "plain text."};
+            std::string{"not run ("} + tc.name.value
+            + ": memory tools run only on an explicit user request)"};
         ++mem_blocked;
     }
 
@@ -153,14 +151,10 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
         tc.status = ToolUse::Failed{
             tc.started_at(), now,
             over_budget && !is_exact_releak
-                ? std::string{"too many repeated tool calls this turn — this "
-                  "call was NOT run. Stop calling tools and answer the user "
-                  "directly in plain text now."}
-                : std::string{"duplicate tool call — this exact call (same name "
-                  "and arguments) already ran this turn and its result is "
-                  "above. It was NOT run again to avoid repeating the side "
-                  "effect. Do not re-emit it; continue with the next step or "
-                  "finish."}};
+                ? std::string{"not run (too many repeated tool calls this "
+                  "turn)"}
+                : std::string{"not run (duplicate — this exact call already "
+                  "ran this turn; its result is above)"}};
         ++deduped;
     }
     return deduped + mem_blocked;
