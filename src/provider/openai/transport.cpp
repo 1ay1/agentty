@@ -119,6 +119,7 @@ struct StreamCtx {
     bool in_string = false;         // inside a JSON string literal
     bool escape_next = false;       // next char is escaped in string
     std::size_t json_start = std::string::npos;  // offset where current JSON began
+    bool saw_wrapper = false;  // have we seen any tool wrapper (```, <tool_call>) this hold?
 
     StopReason stop_reason = StopReason::Unspecified;
     bool terminated = false;
@@ -146,11 +147,24 @@ struct StreamCtx {
     
     std::string_view rest = s.substr(i);
     
-    // Pattern 1: Bare JSON object starting with {"
-    if (rest.starts_with("{\"")||
-        rest.starts_with("{ \"")) return true;
-    // Incomplete { - keep waiting if it's JUST { with no content after
-    if (rest == "{" || rest == "{ ") return true;
+    // Pattern 1: Bare JSON object starting with {
+    // Accept {, {whitespace, or {" — the brace may be followed by newlines
+    // before the first key (pretty-printed JSON from local models).
+    if (rest.front() == '{') {
+        if (rest.size() == 1) return true;  // just { so far
+        // Check what follows the {
+        std::string_view after_brace = rest.substr(1);
+        // Skip whitespace after {
+        std::size_t k = 0;
+        while (k < after_brace.size() && (after_brace[k] == ' ' || after_brace[k] == '\t'
+               || after_brace[k] == '\n' || after_brace[k] == '\r')) ++k;
+        // If only whitespace after {, keep waiting
+        if (k == after_brace.size()) return true;
+        // If next non-ws char is " (start of key) or } (empty object), valid JSON
+        if (after_brace[k] == '"' || after_brace[k] == '}') return true;
+        // Otherwise not valid JSON object start
+        return false;
+    }
     
     // Pattern 2: JSON array starting with [{ or [
     if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
@@ -486,26 +500,36 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
                 found_any = true;
                 continue;
             }
-            // Closing ``` followed by </tool_call> or { (JSON body)
+            // Bare ``` fence (with or without "json" suffix). The JSON body
+            // follows after whitespace. Strip it unconditionally — a tool call
+            // wrapper is NEVER followed by non-JSON content that matters.
             if (sv.starts_with("```")) {
-                std::string_view after = sv.substr(3);
-                std::size_t k = 0;
-                while (k < after.size() && (after[k] == ' ' || after[k] == '\t'
-                       || after[k] == '\n' || after[k] == '\r')) ++k;
-                if (k < after.size() &&
-                    (after[k] == '{' || after.substr(k).starts_with("</tool_call>"))) {
-                    sv.remove_prefix(3);
-                    found_this_pass = true;
-                    found_any = true;
-                    continue;
-                }
+                sv.remove_prefix(3);
+                // Also strip "json" if present (model might send it separately).
+                ltrim();
+                if (sv.starts_with("json")) sv.remove_prefix(4);
+                found_this_pass = true;
+                found_any = true;
+                continue;
+            }
+            // Bare "json" prefix (leftover from a streamed ```json fence where
+            // ``` was stripped on an earlier delta). Strip it.
+            if (sv.starts_with("json")) {
+                sv.remove_prefix(4);
+                found_this_pass = true;
+                found_any = true;
+                continue;
             }
         }
         
         if (!found_any) {
-            // No wrapper found — DON'T strip the leading whitespace either,
-            // it's meaningful content (e.g., a newline between code lines).
-            return;
+            // No wrapper found THIS call — but if we saw one on a PREVIOUS
+            // call (saw_wrapper), still strip leading whitespace (the gap
+            // between ```json and {).
+            if (!ctx.saw_wrapper) return;
+            // Fall through to strip whitespace after previously-seen wrapper.
+        } else {
+            ctx.saw_wrapper = true;
         }
         
         // Strip final whitespace after wrappers.
@@ -514,7 +538,12 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
         std::size_t removed = orig - sv.size();
         if (removed > 0) {
             ctx.text_hold.erase(0, removed);
-            ctx.json_start = std::string::npos;  // reset parse state
+            // Reset ALL parse state since we removed content.
+            ctx.json_start = std::string::npos;
+            ctx.brace_depth = 0;
+            ctx.bracket_depth = 0;
+            ctx.in_string = false;
+            ctx.escape_next = false;
         }
     };
 
@@ -702,6 +731,7 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                     ctx.bracket_depth = 0;
                     ctx.in_string = false;
                     ctx.escape_next = false;
+                    ctx.saw_wrapper = false;
                     (void)try_incremental_salvage(ctx);
                     // If it was a complete tool call, try_incremental_salvage
                     // already emitted it and cleared the hold.
