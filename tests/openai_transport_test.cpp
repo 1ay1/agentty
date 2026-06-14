@@ -351,13 +351,19 @@ static void test_sse_truncated_leaked_tool_call_dropped() {
     // (no closing braces, no [DONE]). The half-written JSON must NOT surface
     // as visible prose — dumping it pollutes the assistant turn and the weak
     // model re-leaks the same call next turn (the stuck "upstream cut off"
-    // re-invocation). It must be dropped silently.
+    // re-invocation). The raw JSON is dropped; because the turn would
+    // otherwise be completely empty (no text, no tool call), ensure_nonempty_turn
+    // substitutes a fixed sentinel so the user never sees a blank bubble.
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"name\\\": \\\"remember\\\", \\\"argum\"}}]}\n\n";
     auto msgs = oai::parse_sse_for_test(sse, {"remember"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);  // not salvageable
-    CHECK(joined_text(msgs).empty());                  // and not flushed as text
+    // The truncated JSON itself must not leak as prose.
+    CHECK(joined_text(msgs).find("remember") == std::string::npos);
+    CHECK(joined_text(msgs).find('{') == std::string::npos);
+    // But the turn is non-empty (the empty-turn fallback fired).
+    CHECK(!joined_text(msgs).empty());
 }
 
 static void test_sse_two_leaked_calls_unique_ids() {
@@ -399,6 +405,107 @@ static void test_endpoint_presets() {
     CHECK(def.use_tls);
 }
 
+// ── Incremental salvage tests ──────────────────────────────────────────────────
+
+// Streamed JSON tokens (like real Ollama does) should salvage correctly.
+static void test_sse_salvage_streamed_tokens() {
+    // Simulate how Ollama sends JSON one token at a time.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\\"name\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\\":\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" \\\"read\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\\",\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" \\\"arguments\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\\":\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" {}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"read", "write"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_text(msgs).empty());
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");
+    for (const auto& m : msgs)
+        if (const auto* f = get_leaf<StreamFinished>(m))
+            CHECK(f->stop_reason == StopReason::ToolUse);
+}
+
+// Prose BEFORE a tool call should be flushed as text, then the call salvaged.
+static void test_sse_prose_then_tool_call() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check.\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": {}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    // The prose before the JSON should be flushed.
+    CHECK(joined_text(msgs) == "Let me check.\n");
+    for (const auto& m : msgs)
+        if (const auto* f = get_leaf<StreamFinished>(m))
+            CHECK(f->stop_reason == StopReason::ToolUse);
+}
+
+// Array of tool calls: [{...}, {...}] should emit multiple tools.
+static void test_sse_salvage_array_of_calls() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"[{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": {}}, "
+            "{\\\"name\\\": \\\"write\\\", \\\"arguments\\\": {}}]\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"read", "write"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 2);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 2);
+    CHECK(joined_text(msgs).empty());
+    // Verify distinct IDs.
+    std::vector<std::string> ids;
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            ids.push_back(s->id.value);
+    CHECK(ids.size() == 2 && ids[0] != ids[1]);
+}
+
+// Multiple separate JSON objects in sequence (two calls, not an array).
+static void test_sse_salvage_two_sequential_calls() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": {}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"write\\\", \\\"arguments\\\": {}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"read", "write"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 2);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 2);
+}
+
+// Some models use "function" instead of "name" for the tool name key.
+static void test_sse_salvage_function_key() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"function\\\": \\\"remember\\\", \\\"arguments\\\": "
+            "{\\\"text\\\": \\\"Hi there!\\\"}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"remember", "read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_text(msgs).empty());
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "remember");
+    CHECK(joined_tool_args(msgs) == std::string{"{\"text\":\"Hi there!\"}"});
+    for (const auto& m : msgs)
+        if (const auto* f = get_leaf<StreamFinished>(m))
+            CHECK(f->stop_reason == StopReason::ToolUse);
+}
+
 int main() {
     test_build_tools();
     test_build_messages_basic();
@@ -416,6 +523,12 @@ int main() {
     test_sse_plain_json_prose_not_salvaged();
     test_sse_structured_tool_still_works_with_salvage_on();
     test_endpoint_presets();
+    // Incremental salvage tests.
+    test_sse_salvage_streamed_tokens();
+    test_sse_prose_then_tool_call();
+    test_sse_salvage_array_of_calls();
+    test_sse_salvage_two_sequential_calls();
+    test_sse_salvage_function_key();
 
     if (g_failures == 0) {
         std::printf("openai_transport_test: all checks passed\n");

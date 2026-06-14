@@ -90,17 +90,27 @@ struct StreamCtx {
     bool in_tool_use = false;
     bool any_structured_tool = false; // a real tool_calls[] delta arrived
 
-    // ── Leaked-tool-call salvage (weak local models) ────────────────────
-    // Some Ollama/llama.cpp models (e.g. qwen2.5-coder:7b) emit a tool call
-    // as a bare {"name":..,"arguments":..} JSON in `content` instead of the
-    // structured `tool_calls[]` channel. We HOLD leading text that could
-    // still be such a JSON (rather than streaming it then retracting), and
-    // at finish either convert it to a real tool call or flush it as text.
-    std::string text_hold;          // buffered leading text under suspicion
-    bool        holding   = true;   // still might be a leaked tool-call JSON
+    // ── Incremental leaked-tool-call salvage (local models) ─────────────
+    // Many Ollama/llama.cpp models (qwen2.5-coder, hermes, mistral, etc.)
+    // emit tool calls as bare JSON in `content` instead of the structured
+    // `tool_calls[]` channel. We parse INCREMENTALLY: as soon as a complete
+    // JSON object is recognized, emit it as a real tool call immediately
+    // (so the card appears during streaming, not after [DONE]).
+    //
+    // The hold buffer accumulates content that COULD still be tool JSON.
+    // We track brace depth to know when a JSON object is complete.
+    std::string text_hold;          // buffered text under suspicion
+    bool        holding   = true;   // still might be (more) leaked tool JSON
     bool        any_text_flushed = false;
     int         salvage_seq = 0;    // uniquifies synthesised salvage call ids
     std::vector<std::string> known_tools;  // tool names we may salvage to
+
+    // Incremental JSON parse state for salvage.
+    int  brace_depth = 0;           // nested {} depth in current JSON object
+    int  bracket_depth = 0;         // nested [] depth (for arrays of calls)
+    bool in_string = false;         // inside a JSON string literal
+    bool escape_next = false;       // next char is escaped in string
+    std::size_t json_start = std::string::npos;  // offset where current JSON began
 
     StopReason stop_reason = StopReason::Unspecified;
     bool terminated = false;
@@ -197,8 +207,24 @@ void close_active_tool(StreamCtx& ctx) {
 [[nodiscard]] bool hold_is_truncated_tool_json(std::string_view sv) noexcept {
     sv = strip_tool_call_wrappers(sv);
     if (sv.empty() || sv.front() != '{') return false;
-    try { (void)json::parse(sv); return false; }   // complete — keep as text
+    try { auto _ = json::parse(sv); (void)_; return false; }   // complete — keep as text
     catch (...) { return true; }                    // truncated — drop
+}
+
+// Emit a slice of text_hold as ordinary prose. Used when we've determined
+// some prefix isn't tool JSON (e.g., leading prose before a JSON object).
+void flush_text_slice(StreamCtx& ctx, std::size_t len) {
+    if (len == 0) return;
+    std::string_view slice{ctx.text_hold.data(), len};
+    ctx.sink(StreamTextDelta{std::string{slice}});
+    ctx.any_text_flushed = true;
+    ctx.text_hold.erase(0, len);
+    // Reset JSON parse state since we removed prefix.
+    ctx.json_start = std::string::npos;
+    ctx.brace_depth = 0;
+    ctx.bracket_depth = 0;
+    ctx.in_string = false;
+    ctx.escape_next = false;
 }
 
 // Emit any held text as ordinary prose and stop holding. Called when the
@@ -225,25 +251,44 @@ void flush_text_hold(StreamCtx& ctx) {
     ctx.text_hold.clear();
 }
 
-// At finish: if the model leaked a tool call into `content` (no structured
-// tool_calls arrived, and the held text is exactly one {"name","arguments"}
-// object naming a known tool), synthesise a real tool call. Returns true if
-// the held text was consumed as a tool call (caller must NOT also flush it).
-[[nodiscard]] bool try_salvage_tool_call(StreamCtx& ctx) {
-    if (ctx.any_structured_tool) return false;
-    if (ctx.text_hold.empty())   return false;
+// Guard against a SILENTLY EMPTY turn. Weak local models sometimes leak a
+// truncated tool-call JSON into `content` and nothing else; flush_text_hold
+// then drops it (correctly — see above) but the assistant message ends up
+// with zero text and zero tool calls, so the user sees an empty bubble. If
+// the whole stream produced no text, no salvaged tool, and no structured
+// tool call, emit one short line so the turn isn't a blank void. Call this
+// AFTER salvage/flush at every terminal close, BEFORE StreamFinished.
+void ensure_nonempty_turn(StreamCtx& ctx) {
+    if (ctx.any_text_flushed) return;
+    if (ctx.any_structured_tool) return;
+    if (ctx.stop_reason == StopReason::ToolUse) return;  // salvaged a call
+    ctx.sink(StreamTextDelta{
+        "(the model returned an empty or unparseable response)"});
+    ctx.any_text_flushed = true;
+}
 
-    // Peel off any <tool_call> tags / ```json fence / whitespace the model
-    // wrapped the call in, leaving (ideally) a bare JSON object.
-    std::string_view sv = strip_tool_call_wrappers(ctx.text_hold);
-    if (sv.empty() || sv.front() != '{') return false;
-
+// Try to emit a single tool call from a JSON object. Returns true if emitted.
+// The JSON must have {"name": "...", "arguments": {...}} or use "function"
+// as the name key (some models use this variant).
+[[nodiscard]] bool emit_salvaged_tool(StreamCtx& ctx, std::string_view sv) {
     json j;
     try { j = json::parse(sv); } catch (...) { return false; }
-    if (!j.is_object() || !j.contains("name") || !j["name"].is_string())
-        return false;
+    if (!j.is_object()) return false;
 
-    std::string name = j["name"].get<std::string>();
+    // Extract tool name — models use different keys:
+    //   - "name": "tool_name"           (standard)
+    //   - "function": "tool_name"       (some models)
+    //   - "tool": "tool_name"           (rare)
+    std::string name;
+    if (j.contains("name") && j["name"].is_string()) {
+        name = j["name"].get<std::string>();
+    } else if (j.contains("function") && j["function"].is_string()) {
+        name = j["function"].get<std::string>();
+    } else if (j.contains("tool") && j["tool"].is_string()) {
+        name = j["tool"].get<std::string>();
+    } else {
+        return false;  // no recognizable name key
+    }
     // Only salvage to a tool we actually advertised — never invent a call.
     bool known = false;
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
@@ -255,22 +300,217 @@ void flush_text_hold(StreamCtx& ctx) {
         const auto& a = j["arguments"];
         if (a.is_string())      args = a.get<std::string>();
         else if (a.is_object()) args = a.dump();
-    } else if (j.contains("parameters") && j["parameters"].is_object()) {
-        args = j["parameters"].dump();   // some templates use "parameters"
+        else if (a.is_array())  args = a.dump();  // some models use array
+    } else if (j.contains("parameters")) {
+        const auto& p = j["parameters"];
+        if (p.is_object())      args = p.dump();
+        else if (p.is_string()) args = p.get<std::string>();
     }
 
-    // Uniquify the id — two leaked calls in one turn (or a leaked call plus a
-    // structured one) must not collide on a single ToolCallId, or the reducer
-    // tool-use state machine keys both onto the same card and the second
-    // appears as a duplicate stuck Pending.
     std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
     ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
     ctx.sink(StreamToolUseDelta{args});
     ctx.sink(StreamToolUseEnd{});
     ctx.stop_reason = StopReason::ToolUse;
-    ctx.text_hold.clear();
-    ctx.holding = false;
     return true;
+}
+
+// Process an array of tool calls (some models emit [{...}, {...}]).
+// Returns true if at least one tool was emitted.
+[[nodiscard]] bool emit_salvaged_tool_array(StreamCtx& ctx, std::string_view sv) {
+    json arr;
+    try { arr = json::parse(sv); } catch (...) { return false; }
+    if (!arr.is_array()) return false;
+    bool any = false;
+    for (const auto& item : arr) {
+        if (item.is_object() && emit_salvaged_tool(ctx, item.dump()))
+            any = true;
+    }
+    return any;
+}
+
+// Scan text_hold for complete JSON objects/arrays that could be tool calls.
+// Emits them immediately as they're found. Returns true if any were emitted.
+// This is the core incremental salvage logic — tool cards appear DURING
+// streaming, not after [DONE].
+[[nodiscard]] bool try_incremental_salvage(StreamCtx& ctx) {
+    if (ctx.any_structured_tool) return false;  // real tool_calls[] wins
+    if (ctx.text_hold.empty()) return false;
+
+    bool any_emitted = false;
+
+    // Strip wrapper prefixes (opening tags/fences) and suffixes (closing).
+    // These might arrive before/after the JSON body.
+    auto skip_wrapper_prefix = [&]() {
+        std::string_view sv{ctx.text_hold};
+        std::size_t orig = sv.size();
+        // Trim leading whitespace.
+        while (!sv.empty() && (sv.front()==' '||sv.front()=='\t'
+                               ||sv.front()=='\n'||sv.front()=='\r')) {
+            sv.remove_prefix(1);
+        }
+        // <tool_call> tag.
+        if (sv.starts_with("<tool_call>")) {
+            sv.remove_prefix(11);
+        }
+        // </tool_call> closing tag (might appear after JSON).
+        if (sv.starts_with("</tool_call>")) {
+            sv.remove_prefix(12);
+        }
+        // ```json or ``` fence.
+        if (sv.starts_with("```json")) {
+            sv.remove_prefix(7);
+        } else if (sv.starts_with("```")) {
+            sv.remove_prefix(3);
+        }
+        // More whitespace after fence/tag.
+        while (!sv.empty() && (sv.front()==' '||sv.front()=='\t'
+                               ||sv.front()=='\n'||sv.front()=='\r')) {
+            sv.remove_prefix(1);
+        }
+        std::size_t removed = orig - sv.size();
+        if (removed > 0) {
+            ctx.text_hold.erase(0, removed);
+            ctx.json_start = std::string::npos;  // reset parse state
+        }
+    };
+
+    skip_wrapper_prefix();
+    if (ctx.text_hold.empty()) return false;
+
+    // Scan character by character to find complete JSON objects/arrays.
+    // We track brace/bracket depth to know when {} or [] is complete.
+    for (std::size_t i = 0; i < ctx.text_hold.size(); ++i) {
+        char c = ctx.text_hold[i];
+
+        if (ctx.escape_next) {
+            ctx.escape_next = false;
+            continue;
+        }
+
+        if (ctx.in_string) {
+            if (c == '\\') ctx.escape_next = true;
+            else if (c == '"') ctx.in_string = false;
+            continue;
+        }
+
+        // Not in string.
+        if (c == '"') {
+            ctx.in_string = true;
+            continue;
+        }
+
+        if (c == '{') {
+            if (ctx.brace_depth == 0 && ctx.bracket_depth == 0) {
+                // Starting a new JSON object.
+                if (ctx.json_start == std::string::npos) {
+                    // Flush any prose BEFORE this JSON.
+                    if (i > 0) {
+                        flush_text_slice(ctx, i);
+                        i = 0;  // Continue from new start.
+                    }
+                    ctx.json_start = 0;
+                }
+            }
+            ctx.brace_depth++;
+        } else if (c == '}') {
+            if (ctx.brace_depth > 0) ctx.brace_depth--;
+            // Complete object?
+            if (ctx.brace_depth == 0 && ctx.bracket_depth == 0
+                && ctx.json_start != std::string::npos) {
+                std::size_t end = i + 1;
+                std::string_view candidate{ctx.text_hold.data() + ctx.json_start,
+                                           end - ctx.json_start};
+                if (emit_salvaged_tool(ctx, candidate)) {
+                    any_emitted = true;
+                    // Remove the emitted JSON from hold.
+                    ctx.text_hold.erase(0, end);
+                    ctx.json_start = std::string::npos;
+                    ctx.brace_depth = 0;
+                    ctx.bracket_depth = 0;
+                    // Skip trailing </tool_call> or ``` if present.
+                    skip_wrapper_prefix();
+                    // Restart scan from beginning of remaining hold.
+                    i = static_cast<std::size_t>(-1);  // will be 0 after ++
+                    continue;
+                } else {
+                    // Not a valid tool call — flush as text.
+                    flush_text_slice(ctx, end);
+                    i = static_cast<std::size_t>(-1);
+                    continue;
+                }
+            }
+        } else if (c == '[') {
+            if (ctx.brace_depth == 0 && ctx.bracket_depth == 0) {
+                // Starting a JSON array (some models emit [{...}, {...}]).
+                if (ctx.json_start == std::string::npos) {
+                    if (i > 0) {
+                        flush_text_slice(ctx, i);
+                        i = 0;
+                    }
+                    ctx.json_start = 0;
+                }
+            }
+            ctx.bracket_depth++;
+        } else if (c == ']') {
+            if (ctx.bracket_depth > 0) ctx.bracket_depth--;
+            // Complete array?
+            if (ctx.bracket_depth == 0 && ctx.brace_depth == 0
+                && ctx.json_start != std::string::npos) {
+                std::size_t end = i + 1;
+                std::string_view candidate{ctx.text_hold.data() + ctx.json_start,
+                                           end - ctx.json_start};
+                if (emit_salvaged_tool_array(ctx, candidate)) {
+                    any_emitted = true;
+                    ctx.text_hold.erase(0, end);
+                    ctx.json_start = std::string::npos;
+                    ctx.brace_depth = 0;
+                    ctx.bracket_depth = 0;
+                    skip_wrapper_prefix();
+                    i = static_cast<std::size_t>(-1);
+                    continue;
+                } else {
+                    // Not valid tool calls — flush as text.
+                    flush_text_slice(ctx, end);
+                    i = static_cast<std::size_t>(-1);
+                    continue;
+                }
+            }
+        }
+    }
+
+    return any_emitted;
+}
+
+// At finish: try to salvage any remaining held text as a tool call.
+// This handles the case where the JSON was incomplete mid-stream but
+// completes by [DONE]. Returns true if salvaged.
+[[nodiscard]] bool try_salvage_tool_call(StreamCtx& ctx) {
+    if (ctx.any_structured_tool) return false;
+    if (ctx.text_hold.empty())   return false;
+
+    // Final attempt at incremental salvage (might complete now).
+    if (try_incremental_salvage(ctx)) return true;
+
+    // Legacy path: try the whole hold as one object.
+    std::string_view sv = strip_tool_call_wrappers(ctx.text_hold);
+    if (sv.empty()) return false;
+
+    // Could be a single object or an array.
+    if (sv.front() == '{') {
+        if (emit_salvaged_tool(ctx, sv)) {
+            ctx.text_hold.clear();
+            ctx.holding = false;
+            return true;
+        }
+    } else if (sv.front() == '[') {
+        if (emit_salvaged_tool_array(ctx, sv)) {
+            ctx.text_hold.clear();
+            ctx.holding = false;
+            return true;
+        }
+    }
+    return false;
 }
 
 // Handle one choices[0].delta object.
@@ -281,13 +521,30 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
         if (!s.empty()) {
             if (ctx.holding) {
                 ctx.text_hold += s;
-                // Stop holding the moment it can't be a leading tool-call
-                // JSON — then this delta (and all after) stream as prose.
-                if (!could_be_tool_json(ctx.text_hold))
+                // Try to salvage complete JSON tool calls immediately.
+                // This makes tool cards appear DURING streaming, not after.
+                (void)try_incremental_salvage(ctx);
+                // If we're still holding and it can't be tool JSON, flush.
+                if (ctx.holding && !could_be_tool_json(ctx.text_hold))
                     flush_text_hold(ctx);
             } else {
-                ctx.sink(StreamTextDelta{s});
-                ctx.any_text_flushed = true;
+                // Not currently holding. Check if this new content could
+                // START a tool call (models can emit prose then a call).
+                // Re-enable holding if it looks like JSON is starting.
+                if (!ctx.any_structured_tool && could_be_tool_json(s)) {
+                    ctx.holding = true;
+                    ctx.text_hold = s;
+                    // Reset incremental parse state for new JSON.
+                    ctx.json_start = std::string::npos;
+                    ctx.brace_depth = 0;
+                    ctx.bracket_depth = 0;
+                    ctx.in_string = false;
+                    ctx.escape_next = false;
+                    (void)try_incremental_salvage(ctx);
+                } else {
+                    ctx.sink(StreamTextDelta{s});
+                    ctx.any_text_flushed = true;
+                }
             }
         }
     }
@@ -357,6 +614,7 @@ void dispatch_data(StreamCtx& ctx, const std::string& data) {
             // Salvage a leaked tool call (or flush held text as prose)
             // before the terminal event.
             if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);
+            ensure_nonempty_turn(ctx);
             ctx.sink(StreamFinished{ctx.stop_reason});
             ctx.terminated = true;
         }
@@ -408,9 +666,15 @@ void dispatch_data(StreamCtx& ctx, const std::string& data) {
     // close any open tool call. We do NOT emit StreamFinished here — the
     // `[DONE]` sentinel (or emit_terminal at stream close) does, so a usage
     // frame after finish_reason still lands.
+    //
+    // If we've already salvaged a leaked tool call (stop_reason == ToolUse),
+    // don't let the server's "stop" overwrite it — weak local models report
+    // finish_reason=stop even when they emitted a tool call as JSON in content.
     if (choice.contains("finish_reason") && choice["finish_reason"].is_string()) {
-        ctx.stop_reason = parse_openai_finish(
+        auto server_reason = parse_openai_finish(
             choice["finish_reason"].get<std::string_view>());
+        if (ctx.stop_reason != StopReason::ToolUse)
+            ctx.stop_reason = server_reason;
         close_active_tool(ctx);
     }
 }
@@ -679,6 +943,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
             // Successful close without a [DONE] sentinel: still salvage a
             // leaked tool call (or flush held text) before finishing.
             if (!try_salvage_tool_call(c)) flush_text_hold(c);
+            ensure_nonempty_turn(c);
             c.sink(StreamFinished{c.stop_reason});
         }
         c.terminated = true;
@@ -900,6 +1165,7 @@ std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
     if (!ctx.terminated) {
         if (ctx.in_tool_use) { ctx.sink(StreamToolUseEnd{}); ctx.in_tool_use = false; }
         if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);
+        ensure_nonempty_turn(ctx);
         ctx.sink(StreamFinished{ctx.stop_reason});
     }
     return out;

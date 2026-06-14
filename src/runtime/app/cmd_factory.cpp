@@ -93,7 +93,15 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
     // call as a leak loop and fail it WITHOUT running, regardless of args.
     // Structured tool calls (deliberate model intent) are never counted or
     // capped here — only synthetic salvaged leaks.
-    constexpr std::size_t kMaxSalvagedPerTurn = 8;
+    //
+    // 3 matches the industry consensus for the "doom-loop" / repeat threshold
+    // on weak local models (Hermes-agent doom-loop=3; deer-flow warns at 3,
+    // hard-stops at 5; LangChain's 15 is for strong hosted models). A leaked
+    // tool call only ever comes from a small Ollama model that ignored the
+    // local-model guidance, so a tight bound turns a multi-second "stuck"
+    // hang into bounded degradation (~3 sub-turns) before we force the model
+    // to answer in plain text.
+    constexpr std::size_t kMaxSalvagedPerTurn = 3;
 
     if (terminal_sigs.empty() && terminal_salvaged < kMaxSalvagedPerTurn)
         return 0;
