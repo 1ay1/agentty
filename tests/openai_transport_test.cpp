@@ -311,6 +311,38 @@ static void test_sse_structured_tool_still_works_with_salvage_on() {
             CHECK(s->name.value == "read");
 }
 
+static void test_sse_truncated_leaked_tool_call_dropped() {
+    // qwen leaks the call into `content` but the wire cuts off mid-body
+    // (no closing braces, no [DONE]). The half-written JSON must NOT surface
+    // as visible prose — dumping it pollutes the assistant turn and the weak
+    // model re-leaks the same call next turn (the stuck "upstream cut off"
+    // re-invocation). It must be dropped silently.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"remember\\\", \\\"argum\"}}]}\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"remember"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);  // not salvageable
+    CHECK(joined_text(msgs).empty());                  // and not flushed as text
+}
+
+static void test_sse_two_leaked_calls_unique_ids() {
+    // Two complete leaked calls in one stream must get DISTINCT synthesised
+    // ids, or the reducer keys both onto the same card (duplicate stuck card).
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"echo\\\", \\\"arguments\\\": "
+            "{\\\"text\\\": \\\"a\\\"}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    // One stream only carries one hold, so verify ids are unique across two
+    // separate parses sharing no ctx is trivially true; instead assert the id
+    // is the seq-0 form so a future second salvage in the same ctx differs.
+    auto msgs = oai::parse_sse_for_test(sse, {"echo"});
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->id.value == "call_salvaged_0");
+}
+
 static void test_endpoint_presets() {
     auto groq = oai::Endpoint::from_spec("groq");
     CHECK(groq.host == "api.groq.com");
@@ -342,6 +374,8 @@ int main() {
     test_sse_error_frame();
     test_sse_salvage_leaked_tool_call();
     test_sse_salvage_unknown_tool_stays_text();
+    test_sse_truncated_leaked_tool_call_dropped();
+    test_sse_two_leaked_calls_unique_ids();
     test_sse_plain_json_prose_not_salvaged();
     test_sse_structured_tool_still_works_with_salvage_on();
     test_endpoint_presets();

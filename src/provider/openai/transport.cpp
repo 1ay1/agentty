@@ -99,6 +99,7 @@ struct StreamCtx {
     std::string text_hold;          // buffered leading text under suspicion
     bool        holding   = true;   // still might be a leaked tool-call JSON
     bool        any_text_flushed = false;
+    int         salvage_seq = 0;    // uniquifies synthesised salvage call ids
     std::vector<std::string> known_tools;  // tool names we may salvage to
 
     StopReason stop_reason = StopReason::Unspecified;
@@ -142,16 +143,51 @@ void close_active_tool(StreamCtx& ctx) {
     }
 }
 
+// True iff the held buffer opens like a bare tool-call JSON object but is
+// INCOMPLETE — it begins with `{` (after optional whitespace / a ```json
+// fence) yet does not parse as a complete JSON value. That is the signature of
+// a tool call the model leaked into `content` whose wire cut off mid-body
+// ("upstream cut off"). A COMPLETE object that simply named an unadvertised
+// tool is NOT incomplete — it still surfaces as text so the user sees what the
+// model meant.
+[[nodiscard]] bool hold_is_truncated_tool_json(std::string_view sv) noexcept {
+    auto ltrim = [](std::string_view& s) {
+        while (!s.empty() && (s.front()==' '||s.front()=='\t'
+                              ||s.front()=='\n'||s.front()=='\r')) s.remove_prefix(1);
+    };
+    ltrim(sv);
+    if (sv.starts_with("```")) {
+        sv.remove_prefix(3);
+        if (sv.starts_with("json")) sv.remove_prefix(4);
+        ltrim(sv);
+    }
+    if (sv.empty() || sv.front() != '{') return false;
+    try { (void)json::parse(sv); return false; }   // complete — keep as text
+    catch (...) { return true; }                    // truncated — drop
+}
+
 // Emit any held text as ordinary prose and stop holding. Called when the
 // held buffer can no longer be a leaked tool-call JSON, or at finish when
 // salvage did not apply.
+//
+// IMPORTANT: if the hold opens like a tool-call object but is INCOMPLETE (the
+// wire cut off mid-`content`, so it can't parse), we DROP it instead of
+// flushing it as visible prose. Dumping a half-written
+// `{"name":"remember","arguments":{...` into the assistant body both shows JSON
+// garbage AND round-trips back to a weak local model (qwen/llama.cpp), which
+// then re-leaks the same call next turn — the stuck "upstream cut off"
+// re-invocation. A COMPLETE object (even one naming an unadvertised tool) is
+// kept and surfaced so the user sees the model's intent.
 void flush_text_hold(StreamCtx& ctx) {
     ctx.holding = false;
-    if (!ctx.text_hold.empty()) {
-        ctx.sink(StreamTextDelta{ctx.text_hold});
-        ctx.any_text_flushed = true;
-        ctx.text_hold.clear();
+    if (ctx.text_hold.empty()) return;
+    if (hold_is_truncated_tool_json(ctx.text_hold)) {
+        ctx.text_hold.clear();   // truncated leaked tool call — drop
+        return;
     }
+    ctx.sink(StreamTextDelta{ctx.text_hold});
+    ctx.any_text_flushed = true;
+    ctx.text_hold.clear();
 }
 
 // At finish: if the model leaked a tool call into `content` (no structured
@@ -205,7 +241,12 @@ void flush_text_hold(StreamCtx& ctx) {
         args = j["parameters"].dump();   // some templates use "parameters"
     }
 
-    ctx.sink(StreamToolUseStart{ToolCallId{"call_salvaged_0"}, ToolName{name}});
+    // Uniquify the id — two leaked calls in one turn (or a leaked call plus a
+    // structured one) must not collide on a single ToolCallId, or the reducer
+    // tool-use state machine keys both onto the same card and the second
+    // appears as a duplicate stuck Pending.
+    std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
+    ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
     ctx.sink(StreamToolUseDelta{args});
     ctx.sink(StreamToolUseEnd{});
     ctx.stop_reason = StopReason::ToolUse;

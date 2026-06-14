@@ -41,6 +41,16 @@ namespace agentty::app::cmd {
 // Mutates `m` (sets phase, may push a placeholder assistant message).
 [[nodiscard]] maya::Cmd<Msg> kick_pending_tools(Model& m);
 
+// Resolve every PENDING *salvaged* tool call in the back assistant message
+// that byte-duplicates a call already terminal earlier in the same agent
+// turn, marking it Failed-without-side-effects instead of letting it run a
+// second time. Salvaged calls (synthetic `call_salvaged_` ids minted by the
+// OpenAI-compat transport when a weak local model leaks a tool call into the
+// `content` channel) are the only ones deduped — structured calls are the
+// model's deliberate intent. Returns the number deduped. Called by
+// kick_pending_tools before any promotion to Running; exposed for tests.
+std::size_t dedup_releaked_salvage_calls(Model& m);
+
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
 // ── In-app login modal ──────────────────────────────────────────────────

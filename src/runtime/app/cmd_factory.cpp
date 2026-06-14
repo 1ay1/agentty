@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <ranges>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include "agentty/auth/auth.hpp"
@@ -20,6 +22,85 @@
 namespace agentty::app::cmd {
 
 using maya::Cmd;
+
+namespace {
+
+// ── Salvaged-call re-leak dedup ──────────────────────────────────────────────
+// Weak local models on the OpenAI-compat path (qwen2.5-coder:7b via Ollama,
+// llama.cpp templates) leak tool calls as bare JSON in the `content` channel
+// instead of the structured tool_calls[] channel. The transport salvages those
+// into real tool calls with a synthetic `call_salvaged_N` id (see
+// provider/openai/transport.cpp). But these models routinely RE-LEAK the same
+// call on the post-tool sub-turn: they see the tool_result, then emit the
+// identical {"name":...,"arguments":...} again. Without a guard that re-leaked
+// call runs a SECOND time (the duplicate stuck card the user reported, e.g. a
+// `remember` that ran DONE then a clone stuck RUNNING).
+//
+// A structured tool call is the model's deliberate intent (calling `read`
+// twice with the same path is legitimate), so we ONLY dedup SALVAGED calls —
+// identified by the `call_salvaged_` id prefix, which no real server ever
+// mints. The scope is the current agent turn: the run of consecutive Assistant
+// messages since the last User message. If a pending salvaged call is
+// byte-identical (same name + same args) to a tool call already TERMINAL in
+// that run, it's a re-leak — we resolve it as Failed-without-side-effects
+// (never re-execute) so the wire-layer tool_use ↔ tool_result pairing stays
+// valid while the side effect happens exactly once.
+[[nodiscard]] bool is_salvaged_call(const ToolCallId& id) noexcept {
+    return std::string_view{id.value}.starts_with("call_salvaged_");
+}
+
+} // namespace
+
+// Resolve every PENDING salvaged call in the back assistant message that
+// duplicates a call already terminal earlier in the same agent turn. Returns
+// the number deduped (for tests). Must run BEFORE kick_pending_tools promotes
+// anything to Running.
+std::size_t dedup_releaked_salvage_calls(Model& m) {
+    if (m.d.current.messages.empty()) return 0;
+    auto& msgs = m.d.current.messages;
+    if (msgs.back().role != Role::Assistant) return 0;
+
+    // Walk back to the first Assistant message of this turn (stop at the
+    // User message that opened it). The turn is [turn_start, size).
+    std::size_t turn_start = msgs.size();
+    while (turn_start > 0 && msgs[turn_start - 1].role == Role::Assistant)
+        --turn_start;
+
+    // Collect (name, args.dump()) of every terminal call across the turn —
+    // the set of side effects that have ALREADY happened (or failed) this
+    // turn. args.dump() is canonical (key order is nlohmann's stable insert
+    // order from the same parse path), so byte-equality == semantic equality
+    // for the leaked-then-reparsed JSON.
+    auto sig = [](const ToolUse& tc) {
+        return tc.name.value + '\0' + tc.args.dump();
+    };
+    std::unordered_set<std::string> terminal_sigs;
+    for (std::size_t i = turn_start; i < msgs.size(); ++i)
+        for (const auto& tc : msgs[i].tool_calls)
+            if (tc.is_terminal())
+                terminal_sigs.insert(sig(tc));
+
+    if (terminal_sigs.empty()) return 0;
+
+    std::size_t deduped = 0;
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& tc : msgs.back().tool_calls) {
+        if (!tc.is_pending() && !tc.is_approved()) continue;
+        if (!is_salvaged_call(tc.id)) continue;   // only dedup salvaged leaks
+        if (!terminal_sigs.contains(sig(tc))) continue;
+        // Re-leak of a call already settled this turn. Resolve as Failed
+        // WITHOUT running it — the side effect already happened once. The
+        // message tells the model to stop re-emitting it so the loop ends.
+        tc.status = ToolUse::Failed{
+            tc.started_at(), now,
+            "duplicate tool call — this exact call (same name and arguments) "
+            "already ran this turn and its result is above. It was NOT run "
+            "again to avoid repeating the side effect. Do not re-emit it; "
+            "continue with the next step or finish."};
+        ++deduped;
+    }
+    return deduped;
+}
 
 namespace {
 
@@ -466,6 +547,12 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // marked Failed/Rejected by CancelStream's teardown loop, so
     // there's nothing left to advance anyway.
     if (m.s.is_idle()) return Cmd<Msg>::none();
+
+    // Drop re-leaked salvaged calls (weak local models re-emitting a tool
+    // call they already ran this turn) BEFORE any promotion to Running, so a
+    // duplicate never executes a second side effect. See
+    // dedup_releaked_salvage_calls.
+    dedup_releaked_salvage_calls(m);
 
     std::vector<Cmd<Msg>> cmds;
     bool any_pending = false;
