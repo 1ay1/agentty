@@ -99,10 +99,16 @@ struct StreamCtx {
     // JSON object is recognized, emit it as a real tool call immediately
     // (so the card appears during streaming, not after [DONE]).
     //
+    // IMPORTANT: Salvage ONLY applies at the START of a response. Once we've
+    // seen that the model is outputting prose (not a tool call), we disable
+    // salvage permanently. This prevents false positives on code like
+    // `int main() {` or `#include <iostream>`.
+    //
     // The hold buffer accumulates content that COULD still be tool JSON.
     // We track brace depth to know when a JSON object is complete.
     std::string text_hold;          // buffered text under suspicion
-    bool        holding   = true;   // still might be (more) leaked tool JSON
+    bool        holding   = false;  // currently buffering potential tool JSON
+    bool        salvage_eligible = true;  // can still be a tool call (start of response)
     bool        any_text_flushed = false;
     int         salvage_seq = 0;    // uniquifies synthesised salvage call ids
     std::vector<std::string> known_tools;  // tool names we may salvage to
@@ -120,75 +126,62 @@ struct StreamCtx {
     StreamCtx() { buf.reserve(64 * 1024); data_accum.reserve(8 * 1024); }
 };
 
-// Could `s` (so far) be the START of a bare tool-call JSON object? We only
-// keep holding while the text looks like it's heading toward one; the moment
-// it can't be, we stop holding and flush as ordinary prose. Cheap structural
-// check: ignore leading whitespace, require a leading '{', and require that
-// every non-whitespace char seen is plausible JSON-object material.
+// Could `s` be the START of a leaked tool-call? This is only called at the
+// beginning of a response (salvage_eligible=true). Once prose is detected,
+// salvage is disabled permanently for this response.
+//
+// We detect these patterns that weak local models use:
+// 1. Bare JSON object: {"name": "...", "arguments": {...}}
+// 2. JSON array of objects: [{...}, {...}]
+// 3. <tool_call> tag wrapper: <tool_call>{...}</tool_call>
+// 4. ```json fence wrapper: ```json\n{...}\n```
+//
+// For robustness: if content starts with ANYTHING ELSE, it's prose.
 [[nodiscard]] bool could_be_tool_json(std::string_view s) noexcept {
+    // Skip leading whitespace.
     std::size_t i = 0;
     while (i < s.size() && (s[i] == ' ' || s[i] == '\t'
                             || s[i] == '\n' || s[i] == '\r')) ++i;
-    if (i >= s.size()) return true;          // only whitespace so far
+    if (i >= s.size()) return true;  // only whitespace so far, still undecided
+    
     std::string_view rest = s.substr(i);
-    // Qwen / Hermes / many llama.cpp chat templates wrap a leaked tool call
-    // in <tool_call>…</tool_call> (or a fenced ```json block) instead of the
-    // structured tool_calls[] channel. Keep holding while the prefix is still
-    // a possible opener for any of those forms, or a bare JSON object.
-    // NOTE: A lone `{` is NOT enough — that could be C++ code like `int main() {`.
-    // Require `{"` (brace + quote) to indicate a JSON object is starting.
-    // If there's a newline before any quote, it's NOT JSON (C++ code block).
-    if (rest.front() == '{') {
-        if (rest.size() == 1) return true;  // incomplete, could be {"...
-        // Scan for the next significant character
-        for (std::size_t j = 1; j < rest.size(); ++j) {
-            char c = rest[j];
-            if (c == '"') return true;   // {" or { " = JSON object
-            if (c == '\n' || c == '\r') return false;  // {\n = C++ code, not JSON
-            // Skip spaces/tabs, keep looking
-            if (c != ' ' && c != '\t') return false;  // { followed by non-quote = not JSON
-        }
-        // Only spaces/tabs seen, still incomplete
-        return true;
-    }
-    // Prefix of "<tool_call>" — still possibly a tool call.
-    // NOTE: We ONLY hold if `rest` is a strict prefix of "<tool_call>"
-    // (e.g. "<", "<t", "<tool_"). We do NOT hold on arbitrary <...
-    // like "<iostream>" or "<vector>" — those are C++ headers, not tool wrappers.
+    
+    // Pattern 1: Bare JSON object starting with {"
+    if (rest.starts_with("{\"")||
+        rest.starts_with("{ \"")) return true;
+    // Incomplete { - keep waiting if it's JUST { with no content after
+    if (rest == "{" || rest == "{ ") return true;
+    
+    // Pattern 2: JSON array starting with [{ or [
+    if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
+    if (rest == "[" || rest == "[ ") return true;
+    
+    // Pattern 3: <tool_call> tag
+    if (rest.starts_with("<tool_call>")) return true;
+    // Incomplete prefix of <tool_call>
     constexpr std::string_view kTag = "<tool_call>";
-    if (kTag.starts_with(rest) && rest.size() < kTag.size()) return true;
-    // If it's the full "<tool_call>" or starts with it, hold.
-    if (rest.starts_with(kTag)) return true;
-    // ```json fence is a tool-call wrapper. But ```cpp / ```python / etc.
-    // are markdown code blocks the model is rendering as prose — DON'T hold.
-    // Only hold if it's exactly "```" (incomplete) or "```json" (tool fence).
-    if (rest.starts_with("```")) {
-        // If we've only seen "```" so far, still incomplete — hold.
-        if (rest.size() <= 3) return true;
-        // If it's "```json" (possibly with trailing whitespace/newline), hold.
-        std::string_view after_fence = rest.substr(3);
-        // Trim leading whitespace after ```
-        std::size_t k = 0;
-        while (k < after_fence.size() && (after_fence[k] == ' '
-               || after_fence[k] == '\t')) ++k;
-        after_fence = after_fence.substr(k);
-        // "```json" or "```\n{..." are tool wrappers
-        if (after_fence.empty()) return true;  // just "```   " so far
-        if (after_fence.starts_with("json")) return true;
-        if (after_fence.front() == '{') return true;
-        if (after_fence.front() == '\n' || after_fence.front() == '\r') {
-            // Check what comes after the newline
-            std::size_t nl = 0;
-            while (nl < after_fence.size() && (after_fence[nl] == '\n'
-                   || after_fence[nl] == '\r')) ++nl;
-            if (nl >= after_fence.size()) return true;  // just newlines
-            if (after_fence[nl] == '{') return true;  // ```\n{ = tool wrapper
+    if (rest.size() < kTag.size() && rest.front() == '<') {
+        for (std::size_t j = 0; j < rest.size(); ++j) {
+            if (rest[j] != kTag[j]) return false;  // diverged
         }
-        // It's ```cpp or ```python etc. — NOT a tool wrapper, don't hold.
+        return true;  // exact prefix match
+    }
+    
+    // Pattern 4: ```json fence
+    if (rest.starts_with("```json")) return true;
+    if (rest.starts_with("```")) {
+        if (rest.size() <= 3) return true;  // just ``` so far
+        std::string_view after = rest.substr(3);
+        // Could still be ```json or ```\n{
+        if (after.empty() || after[0] == '\n' || after[0] == '\r' ||
+            after[0] == ' ' || after[0] == '\t' || after[0] == 'j') {
+            return true;
+        }
+        // It's ```cpp or similar - NOT a tool wrapper
         return false;
     }
-    // Single backtick is never a tool wrapper.
-    if (rest.front() == '`') return false;
+    
+    // Anything else is prose.
     return false;
 }
 
@@ -680,44 +673,59 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
     if (delta.contains("content") && delta["content"].is_string()) {
         const auto& s = delta["content"].get_ref<const std::string&>();
         if (!s.empty()) {
+            // SIMPLE LOGIC:
+            // 1. If we're already holding, append and check if it's still valid
+            // 2. If salvage is still possible (start of response), check if this
+            //    STARTS a tool call pattern. If not, emit and disable salvage.
+            // 3. Once any prose is emitted, salvage is permanently disabled.
+            
             if (ctx.holding) {
+                // Accumulating a potential tool call.
                 ctx.text_hold += s;
-                // Try to salvage complete JSON tool calls immediately.
-                // This makes tool cards appear DURING streaming, not after.
+                // Try to extract complete JSON tool calls.
                 (void)try_incremental_salvage(ctx);
-                // If we're still holding and it can't be tool JSON, flush.
-                if (ctx.holding && !could_be_tool_json(ctx.text_hold))
+                // If still holding, check if it can still be a tool call.
+                if (ctx.holding && !could_be_tool_json(ctx.text_hold)) {
+                    // Not a tool call — flush as prose.
                     flush_text_hold(ctx);
-            } else {
-                // Not currently holding. Check if this new content could
-                // START a tool call (models can emit prose then a call).
-                // Re-enable holding if it looks like JSON is starting.
-                if (!ctx.any_structured_tool && could_be_tool_json(s)) {
+                    ctx.salvage_eligible = false;  // no more salvage attempts
+                }
+            } else if (ctx.salvage_eligible && !ctx.any_structured_tool) {
+                // Start of response or between tool calls. Check if this could
+                // be the beginning of a leaked tool call.
+                if (could_be_tool_json(s)) {
+                    // Start holding.
                     ctx.holding = true;
                     ctx.text_hold = s;
-                    // Reset incremental parse state for new JSON.
                     ctx.json_start = std::string::npos;
                     ctx.brace_depth = 0;
                     ctx.bracket_depth = 0;
                     ctx.in_string = false;
                     ctx.escape_next = false;
                     (void)try_incremental_salvage(ctx);
+                    // If it was a complete tool call, try_incremental_salvage
+                    // already emitted it and cleared the hold.
                 } else {
+                    // Not a tool call pattern — emit as prose.
                     ctx.sink(StreamTextDelta{s});
                     ctx.any_text_flushed = true;
+                    ctx.salvage_eligible = false;  // prose detected, no more salvage
                 }
+            } else {
+                // Salvage disabled — just emit text directly.
+                ctx.sink(StreamTextDelta{s});
+                ctx.any_text_flushed = true;
             }
         }
     }
 
-    // Tool-call fragments.
+    // Tool-call fragments (structured).
     if (delta.contains("tool_calls") && delta["tool_calls"].is_array()) {
-        // A real structured tool call wins over any leaked-JSON suspicion:
-        // drop the held text (it was never prose) and disable salvage.
         if (!delta["tool_calls"].empty()) {
             ctx.any_structured_tool = true;
             ctx.holding = false;
             ctx.text_hold.clear();
+            ctx.salvage_eligible = false;  // real tool call, no need for salvage
         }
         for (const auto& tc : delta["tool_calls"]) {
             const int index = tc.value("index", 0);
@@ -726,7 +734,6 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 ctx.tool_slots.resize(index + 1);
             auto& slot = ctx.tool_slots[index];
 
-            // Opening fragment for this index carries id + function.name.
             if (tc.contains("id") && tc["id"].is_string())
                 slot.id = tc["id"].get<std::string>();
             std::string fn_name;
@@ -740,17 +747,10 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             }
             if (!fn_name.empty()) slot.name = fn_name;
 
-            // A new index means the previous tool call is finished.
             if (index != ctx.active_tool_index) {
                 close_active_tool(ctx);
             }
 
-            // Emit Start the first time we have enough to open this index.
-            // OpenAI guarantees id+name on the FIRST fragment of each call,
-            // so by the time we see arguments we already have them. Some
-            // OpenAI-compatible servers (Ollama, llama.cpp) synthesise an
-            // id only if asked; fall back to a positional id so the tool
-            // loop still has a stable ToolCallId to key on.
             if (!slot.started) {
                 if (slot.id.empty())
                     slot.id = "call_" + std::to_string(index);

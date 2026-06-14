@@ -469,7 +469,9 @@ static void test_sse_salvage_streamed_tokens() {
             CHECK(f->stop_reason == StopReason::ToolUse);
 }
 
-// Prose BEFORE a tool call should be flushed as text, then the call salvaged.
+// Prose BEFORE a JSON object: once prose is detected, salvage is disabled.
+// This prevents false positives on code like "int main() {" or similar.
+// If a model emits prose followed by a tool call, the JSON is shown as text.
 static void test_sse_prose_then_tool_call() {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check.\\n\"}}]}\n\n"
@@ -477,12 +479,12 @@ static void test_sse_prose_then_tool_call() {
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
         "data: [DONE]\n\n";
     auto msgs = oai::parse_sse_for_test(sse, {"read"});
-    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
-    // The prose before the JSON should be flushed.
-    CHECK(joined_text(msgs) == "Let me check.\n");
-    for (const auto& m : msgs)
-        if (const auto* f = get_leaf<StreamFinished>(m))
-            CHECK(f->stop_reason == StopReason::ToolUse);
+    // Salvage is disabled after prose, so no tool call is emitted.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    // Both prose and JSON are flushed as text.
+    auto text = joined_text(msgs);
+    CHECK(text.find("Let me check") != std::string::npos);
+    CHECK(text.find("read") != std::string::npos);
 }
 
 // Array of tool calls: [{...}, {...}] should emit multiple tools.
