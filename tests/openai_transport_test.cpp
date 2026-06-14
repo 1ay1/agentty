@@ -559,6 +559,23 @@ static void test_sse_salvage_memory_tool_swallowed() {
     CHECK(joined_text(msgs).find('{') == std::string::npos);
 }
 
+// A leaked `skill` call (the meta-tool weak models hallucinate from the
+// catalog block on a greeting — {"name":"skill","arguments":{"name":...}})
+// must be SWALLOWED, never executed. Surfacing it spawns a "skill not found"
+// card that then loops. The JSON is consumed, not shown as prose.
+static void test_sse_salvage_skill_swallowed() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"skill\\\", \\\"arguments\\\": "
+            "{\\\"name\\\": \\\"greeting\\\"}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"skill", "read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(joined_text(msgs).find("skill") == std::string::npos);
+    CHECK(joined_text(msgs).find('{') == std::string::npos);
+}
+
 // ── Native Ollama /api/chat (NDJSON) path ────────────────────────────────────
 
 // A clean greeting: content streams as plain text, no tool calls.
@@ -599,9 +616,10 @@ static void test_ndjson_structured_tool_call() {
             CHECK(f->stop_reason == StopReason::ToolUse);
 }
 
-// THE regression: a weak local model leaks a {"name":..} tool call into
-// native message.content. It must be SALVAGED into a real tool call (so the
-// tool actually runs), NOT shown to the user as raw JSON text.
+// THE regression: qwen2.5-coder leaks a bare {"name":..} tool call into
+// native message.content (its output doesn't match Ollama's <tool_call>
+// template wrapper, so the server leaves it in content). It must be SALVAGED
+// into a real tool call so the tool actually runs — NOT shown as raw JSON.
 static void test_ndjson_leaked_content_salvaged() {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
@@ -660,6 +678,7 @@ int main() {
     test_sse_salvage_two_sequential_calls();
     test_sse_salvage_function_key();
     test_sse_salvage_memory_tool_swallowed();
+    test_sse_salvage_skill_swallowed();
 
     // Native Ollama /api/chat NDJSON path.
     test_ndjson_plain_greeting();

@@ -340,14 +340,18 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
     if (!known) return false;
 
-    // Weak local models reflexively leak `remember`/`forget`/`wipe_memory`
-    // into the text channel on greetings and small talk. We never auto-run
-    // memory tools on the model's own initiative; surfacing the card just to
-    // fail it later flashes then vanishes (bad UX). Swallow the leaked JSON
-    // here so no card is ever born — return true to consume it from the hold.
-    static constexpr std::string_view kMemoryTools[] = {
-        "remember", "forget", "wipe_memory"};
-    for (auto t : kMemoryTools) if (t == name) return true;
+    // Tools we NEVER auto-run from a leaked-content guess. Weak local models
+    // reflexively emit these on greetings / small talk:
+    //   - remember/forget/wipe_memory: mutate the user's memory store; only
+    //     ever run on an EXPLICIT user request, never the model's initiative.
+    //   - skill: a meta-tool the model hallucinates from the catalog block in
+    //     its prompt (e.g. {"name":"skill","arguments":{"name":"greeting"}}),
+    //     which then fails "not found" and loops.
+    // Swallow the leaked JSON so no card is ever born (return true consumes it
+    // from the hold); surfacing it just to fail it flashes/loops (bad UX).
+    static constexpr std::string_view kNeverSalvage[] = {
+        "remember", "forget", "wipe_memory", "skill"};
+    for (auto t : kNeverSalvage) if (t == name) return true;
 
     // arguments may be an object (qwen) or a JSON string (some templates).
     std::string args = "{}";
@@ -892,19 +896,19 @@ void handle_native_message(StreamCtx& ctx, const json& message) {
             ctx.stop_reason = StopReason::ToolUse;
         }
     }
-    // Assistant text. Ideally the template routed tool calls into the
-    // structured channel and `content` is pure prose — but weak local models
-    // (qwen2.5-coder etc.) STILL leak a `{"name":..,"arguments":..}` tool call
-    // into content even on the native endpoint. Run content through the SAME
-    // hold/salvage machinery the OpenAI-compat path uses so a leaked call is
-    // either executed (real request naming an advertised tool) or dropped
-    // (greeting leak / blocked memory tool) — never shown to the user as raw
-    // JSON. handle_delta is the single source of truth for that logic.
+    // Assistant text. Ollama's native /api/chat is SUPPOSED to route tool
+    // calls into the structured tool_calls[] channel above — but qwen2.5-coder
+    // and friends emit a bare {"name":..,"arguments":..} that doesn't match
+    // the chat template's <tool_call> wrapper, so Ollama leaves it in
+    // `content`. Without salvage these models can't call ANY tool. So we run
+    // content through the same hold/salvage machinery as the OpenAI-compat
+    // path: a complete JSON object naming an ADVERTISED tool is executed; a
+    // greeting leak / unknown-tool / memory tool is dropped (never shown as
+    // raw JSON, never looped). handle_delta is the single source of truth.
     if (message.contains("content") && message["content"].is_string()) {
         const auto& s = message["content"].get_ref<const std::string&>();
-        // Feed ONLY the content field — handle_delta also processes tool_calls,
-        // which we already handled above; passing the whole message would
-        // double-process the structured calls.
+        // Feed ONLY the content field — structured tool_calls were handled
+        // above; passing the whole message would double-process them.
         if (!s.empty()) handle_delta(ctx, json{{"content", s}});
     }
 }
