@@ -388,18 +388,20 @@ static void test_trim_no_leading_gap() {
 }
 
 // 8. The over-budget trim drops the oldest frozen entries from the MODEL
-//    but issues NO host scrollback commit. Current maya owns the
-//    scrollback reconciliation: when the frozen tree shrinks, maya's
-//    Synced render discriminates the shrink-while-overflowed case itself
-//    (app.cpp's scrollback_prefix_matches branch) and takes either the
-//    append-only diff path or its own commit-overflow + soft-repaint
-//    recovery. A host-issued commit (commit_scrollback or commit_scroll‐
-//    back_overflow) on top of that DOUBLE-commits: the host advances
-//    prev_rows externally, then maya's render commits again against the
-//    already-advanced state, stranding a duplicate copy of the trimmed
-//    boundary one screen up. That double-commit is the
-//    corruption/duplication regression this test now guards against.
-//    CONTRACT: the trim mutates the model and returns none().
+//    (a top-DELETION of the frozen prefix) and MUST commit exactly the
+//    dropped rows to native scrollback via Cmd::commit_scrollback(N).
+//    This is NOT a bottom-shrink: maya's render-time shrink
+//    reconciliation cannot fix a top-deletion. After the drop the new
+//    canvas content shifts up, so canvas row 0 differs from prev_cells
+//    and scrollback_prefix_matches() returns false; maya's only
+//    prefix-mismatch recovery commits the NEW prefix into scrollback
+//    rows that PHYSICALLY hold OLD content, stranding a duplicate of the
+//    trimmed boundary one screen up. Returning none() TRIGGERS that bug,
+//    it does not avoid it. commit_scrollback(removed_rows) runs against
+//    the prior (old-content) frame, advancing prev_rows/prev_cells in
+//    lockstep so the next render aligns and the boundary lands once.
+//    CONTRACT: the trim mutates the model AND returns
+//    commit_scrollback(removed_rows).
 static void test_trim_commits_exact_dropped_rows() {
     Model m;
     m.d.current.id = agentty::ThreadId{"trimrows"};
@@ -442,15 +444,25 @@ static void test_trim_commits_exact_dropped_rows() {
           "trim did not drop any entries despite an over-budget prefix");
     CHECK(dropped_rows > 0, "trim dropped entries but no rows");
 
-    // The returned Cmd MUST be none() — the host issues no scrollback
-    // commit; current maya owns the wire reconciliation of the shrink.
-    // Any host commit (CommitScrollback{N} or CommitScrollbackOverflow)
-    // would double-commit and strand a duplicate.
+    // The returned Cmd MUST be commit_scrollback(N) where N is the exact
+    // count of rows the trim removed from the TOP of the frozen prefix.
+    // A top-deletion is invisible to maya's render-time reconciliation;
+    // the host must commit the dropped rows against the still-valid old
+    // frame so the next render's shorter canvas aligns. Returning none()
+    // (or commit_scrollback_overflow) strands a duplicate boundary.
     using Cmd = maya::Cmd<agentty::Msg>;
-    CHECK(std::holds_alternative<Cmd::None>(cmd.inner),
-          "trim returned a host scrollback commit — forbidden; current maya "
-          "owns reconciliation and a host commit double-commits, stranding "
-          "a duplicate. The trim must return none().");
+    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    CHECK(commit != nullptr,
+          "trim must return commit_scrollback(N) for the top-deletion; "
+          "none() leaves maya unable to reconcile and strands a duplicate "
+          "of the trimmed boundary one screen up.");
+    if (commit) {
+        CHECK(commit->rows == static_cast<int>(dropped_rows),
+              "trim committed the wrong row count — must equal the rows "
+              "dropped from the frozen prefix, or the scrollback boundary "
+              "misaligns (under-commit strands the new prefix; over-commit "
+              "eats a visible row).");
+    }
 }
 
 // 9. (deleted) trim_frozen_above_viewport was the mid-run-safe trim for

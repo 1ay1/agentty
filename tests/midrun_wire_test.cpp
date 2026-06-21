@@ -1378,21 +1378,35 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
           "trim setup: prefix must overflow the viewport");
 
     // ── The trim (the ONE production trim, fired at turn boundaries).
-    //    Drops the off-budget front from the MODEL; issues NO host commit
-    //    (current maya owns the scrollback reconciliation of the shrink).
+    //    Drops the off-budget front from the MODEL and returns a
+    //    commit_scrollback(N) for the N rows it deleted from the TOP.
+    //    A top-deletion is invisible to maya's render-time shrink
+    //    reconciliation (the shifted-up canvas fails the prefix memcmp,
+    //    so maya would commit the NEW prefix over PHYSICAL old rows and
+    //    strand a duplicate) — the host must commit the dropped rows
+    //    against the still-valid old frame BEFORE the next render.
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
     using Cmd = maya::Cmd<agentty::Msg>;
-    CHECK(std::holds_alternative<Cmd::None>(cmd.inner),
-          "trim returned a host scrollback commit — forbidden; current maya "
-          "owns reconciliation and a host commit double-commits, stranding "
-          "a duplicate. The trim must return none().");
+    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    CHECK(commit != nullptr,
+          "trim must return commit_scrollback(N) for the top-deletion; "
+          "none() leaves maya unable to reconcile and strands a duplicate.");
+    // Apply the commit exactly as the production Cmd interpreter does:
+    // advance the prior (old-content) Synced frame's prev_rows/prev_cells
+    // by N before rendering the shorter tree. commit_inline_prefix's
+    // internal clamp = min(N, prev_rows - term_h); since the dropped
+    // entries overflowed, N never exceeds that bound.
+    if (commit && commit->rows > 0) {
+        const int safe = std::min(commit->rows, std::max(0, sa.rows() - kTermH));
+        if (safe > 0)
+            sa = std::move(sa).commit(sa.scrollback_marker(safe));
+    }
 
     // Render frame B against the trimmed tree through maya's REAL Synced
-    // render — NO manual commit. This is exactly the production wire: the
-    // frozen tree shrank at the top, and InlineFrame<Synced>::render's own
-    // shrink-while-overflowed discrimination reconciles it (append-only
-    // diff or its own commit-overflow + soft-repaint). We assert it does
-    // so WITHOUT rewriting a committed scrollback row.
+    // render, AFTER the host commit. This is exactly the production wire:
+    // the frozen tree shrank at the top, the host committed the dropped
+    // rows, and the next render must land the kept tree in place WITHOUT
+    // rewriting a committed scrollback row.
     Canvas cb = paint(build_root(m), kWidth, pool);
     // AUTHORITATIVE proof check: after the trim, the REAL rendered height
     // of the kept frozen tree (+ live tail) must still be >= term_h. The
@@ -1495,13 +1509,23 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
 
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
     using Cmd = maya::Cmd<agentty::Msg>;
-    CHECK(std::holds_alternative<Cmd::None>(cmd.inner),
-          "full-body trim returned a host scrollback commit — forbidden; "
-          "current maya owns reconciliation and a host commit double-"
-          "commits, stranding a duplicate. The trim must return none().");
+    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    CHECK(commit != nullptr,
+          "full-body trim must return commit_scrollback(N) for the "
+          "top-deletion; none() leaves maya unable to reconcile and "
+          "strands a duplicate of the trimmed boundary one screen up.");
+    // Apply the commit exactly as the production Cmd interpreter does:
+    // advance the prior (old-content) Synced frame's prev_rows/prev_cells
+    // by N before rendering the shorter tree.
+    if (commit && commit->rows > 0) {
+        const int safe = std::min(commit->rows, std::max(0, sa.rows() - kTermH));
+        if (safe > 0)
+            sa = std::move(sa).commit(sa.scrollback_marker(safe));
+    }
 
     // Render frame B against the trimmed tree through maya's REAL Synced
-    // render — NO manual commit (current maya reconciles the shrink).
+    // render, AFTER the host commit (which advanced the shadow in
+    // lockstep with the top-drop memmove).
     Canvas cb = paint(build_root(m), kWidth, pool);
     const int kept_real_rows = cb.max_content_row() + 1;
     std::fprintf(stderr, "  [full-body trim] kept_real_rows=%d term_h=%d\n",

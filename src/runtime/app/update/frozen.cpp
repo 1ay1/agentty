@@ -951,24 +951,34 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     std::size_t removed_rows = pop_front_frozen(m, drop);
     removed_rows += pop_front_frozen_leading_separators(m);
 
-    // NO host-issued scrollback commit. The trim drops the OLDEST frozen
-    // entries — content already deep in native scrollback — shrinking the
-    // frozen tree at the TOP. maya's Synced render path reconciles this
-    // shrink itself: its shrink-while-overflowed discrimination (app.cpp)
-    // sees the canvas prefix no longer matches prev_cells (content
-    // shifted up after the top-drop), takes its OWN commit-overflow +
-    // soft-repaint recovery, and corrects the viewport in place without
-    // a \x1b[3J wipe.
+    // Commit EXACTLY the rows the trim deleted from the TOP of the frozen
+    // prefix. This is a top-DELETION, not a bottom-shrink, and maya's
+    // render-time shrink reconciliation cannot fix it: after the drop the
+    // new canvas's content shifts up, so canvas row 0 differs from
+    // prev_cells and scrollback_prefix_matches() returns false. maya's
+    // only recovery for a prefix mismatch is
+    // `scrollback_marker(prev_rows - term_h) + soft-repaint`, which
+    // commits the NEW canvas's prefix into the scrollback region that
+    // PHYSICALLY still holds the OLD content — stranding a duplicate copy
+    // of the trimmed boundary one screen up. Returning none() does not
+    // avoid that; it triggers it, because render-time reconciliation
+    // can't tell "scrolled because the bottom grew" (commit byte-
+    // accurate) from "deleted at the top" (commit byte-wrong).
     //
-    // Issuing commit_scrollback_overflow() from the host on top of that
-    // double-commits: the host commit advances prev_rows down externally,
-    // then maya's recovery commits AGAIN against the already-advanced
-    // state, stranding a duplicate copy of the trimmed boundary one
-    // screen up — the corruption/duplication the user is seeing. The
-    // correct contract with current maya is: mutate the model (drop the
-    // oldest entries) and emit none(); maya owns the wire reconciliation.
-    (void)removed_rows;
-    return maya::Cmd<Msg>::none();
+    // commit_scrollback(removed_rows) runs against the PRIOR frame's
+    // Synced state — i.e. the still-valid OLD content — advancing
+    // prev_rows/prev_cells by exactly the dropped rows in lockstep with
+    // the memmove. The trimmed entries were off-viewport (deep in
+    // scrollback), so removed_rows <= prev_rows - term_h and maya's
+    // internal clamp never truncates. The next render() then paints the
+    // shorter canvas against the already-advanced shadow: new_rows ==
+    // prev_rows, the shrink-while-overflowed guard never fires, and the
+    // boundary lands once, in place, with no \x1b[3J wipe.
+    if (removed_rows == 0) return maya::Cmd<Msg>::none();
+    return maya::Cmd<Msg>::commit_scrollback(
+        static_cast<int>(std::min<std::size_t>(
+            removed_rows,
+            static_cast<std::size_t>(std::numeric_limits<int>::max()))));
 }
 
 } // namespace agentty::app::detail
