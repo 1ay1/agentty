@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
 
 Detects your OS and arch, downloads the right binary from the latest release, verifies SHA256, installs to `/usr/local/bin` (if root) or `~/.local/bin`. **Re-running the same command updates** to the newest release. No `apt`, no `brew`, no version drift.
 
-Flags: `--prefix ~/somewhere`, `--version v0.1.0`. Works on Linux + macOS, x86_64 + aarch64.
+Flags: `--prefix ~/somewhere`, `--version v0.2.0`. Works on Linux + macOS, x86_64 + aarch64.
 
 <details>
 <summary><b>Distro-native packages</b> — if you'd rather your package manager track it</summary>
@@ -61,8 +61,8 @@ Flags: `--prefix ~/somewhere`, `--version v0.1.0`. Works on Linux + macOS, x86_6
 ### Debian / Ubuntu
 
 ```bash
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_0.1.0_amd64.deb
-sudo dpkg -i agentty_0.1.0_amd64.deb       # or agentty_0.1.0_arm64.deb
+curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_0.2.0_amd64.deb
+sudo dpkg -i agentty_0.2.0_amd64.deb       # or agentty_0.2.0_arm64.deb
 ```
 
 Update: `dpkg -i` the new release's `.deb`.
@@ -70,7 +70,7 @@ Update: `dpkg -i` the new release's `.deb`.
 ### Fedora / RHEL / openSUSE
 
 ```bash
-sudo rpm -Uvh https://github.com/1ay1/agentty/releases/latest/download/agentty-0.1.0-1.x86_64.rpm
+sudo rpm -Uvh https://github.com/1ay1/agentty/releases/latest/download/agentty-0.2.0-1.x86_64.rpm
 ```
 
 `-U` is upgrade; works for the first install too. Same command future-proofs the update path.
@@ -197,7 +197,7 @@ S-Tab      cycle profile          ^N     new thread
 
 Each tool gets a purpose-built widget: diffs render as diffs, search results group by file with line numbers, bash shows exit codes, todos become checklists.
 
-`read`, `write`, `edit`, `bash`, `grep`, `glob`, `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`, `diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`, `forget`.
+`read`, `write`, `edit`, `bash`, `grep`, `glob`, `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`, `diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`, `forget`, `wipe_memory`, `task`, `skill`.
 
 ## Skills — teach it your codebase once
 

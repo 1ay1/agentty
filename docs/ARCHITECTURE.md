@@ -58,8 +58,11 @@ types and inline logic; `src/` carries the heavier implementations.
   - `msg.hpp` — the `Msg` sum, split into domain sub-variants (see §4).
   - `app/update/<domain>.cpp` — per-domain reducers.
   - `view/` — the `Model -> Element` pipeline, one file per widget family.
-- **`provider/`** — the `Provider` concept and its only implementation,
-  `anthropic/transport.cpp` (HTTP/2 + SSE).
+- **`provider/`** — the `Provider` concept and its implementations:
+  `anthropic/transport.cpp` (HTTP/2 + SSE, the OAuth/Pro/Max default) and
+  `openai/transport.cpp` (any OpenAI-compatible endpoint — openai, groq,
+  openrouter, together, cerebras, ollama, or a raw host). `selection.cpp`
+  resolves which one a `--provider` flag / persisted setting picks.
 - **`tool/`** — the `Tool` concept, the registry, the permission policy, and
   one file per tool under `tool/tools/`. `memory_store.cpp` backs
   `remember`/`forget`.
@@ -98,7 +101,8 @@ concept Provider = requires(P& p, Request req, EventSink sink) {
 ```
 
 Anything that streams a chat completion satisfies it — the real Anthropic
-transport in production, a deterministic in-memory script in tests.
+and OpenAI-compatible transports in production, a deterministic in-memory
+script in tests.
 
 ---
 
@@ -165,7 +169,8 @@ strategies:
 The shipped tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`,
 `list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`,
 `diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`,
-`forget`, `wipe_memory`.
+`forget`, `wipe_memory`, `task` (subagent dispatch), `skill` (load a skill
+body on demand).
 
 ---
 
@@ -271,7 +276,7 @@ Reliability rides on two independent pieces:
 
 ---
 
-## 8. Rendering performance
+## 10. Rendering performance
 
 Idle agentty costs zero CPU: `fps = 0` means maya only renders on a `Msg`,
 input, or timer tick. Two host-side optimizations keep it cheap under load:
@@ -290,7 +295,7 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
 
 ---
 
-## 9. Build notes
+## 11. Build notes
 
 - Requires GCC 14+ / Clang 18+ / MSVC 14.40+ and CMake 3.28+ (C++26).
 - `-DAGENTTY_STANDALONE=ON` statically links OpenSSL + nghttp2 + libstdc++ +
@@ -306,7 +311,7 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
 
 ---
 
-## 10. One-paragraph mental model
+## 12. One-paragraph mental model
 
 `main.cpp` resolves credentials and installs a Provider + Store behind the
 `Deps` seam, then hands control to maya. maya calls `view(model)` to paint and

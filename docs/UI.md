@@ -22,22 +22,53 @@ they adapt, and the directory layout mirrors the widget hierarchy
 ## 1. Top-level entry — `view(m)`
 
 ```cpp
-// src/runtime/view/view.cpp
+// src/runtime/view/view.cpp (shape — see the file for the exact body)
 maya::Element view(const Model& m) {
-    return maya::AppLayout{{
-        .thread        = thread_config(m),
-        .changes_strip = changes_strip_config(m),
-        .composer      = composer_config(m),
-        .status_bar    = status_bar_config(m),
-        .overlay       = pick_overlay(m),
-    }}.build();
+    // Resolve real terminal dims (maya installs the sized RenderContext
+    // only inside Runtime::render, AFTER view returns — so a naked
+    // available_width() here would read the 24x80 default).
+    int cols = …, rows = …;
+
+    // Phase 1: build every sub-widget Config + the overlay under the
+    // TRUE terminal dims (the welcome clamp needs the real height).
+    maya::AppLayout::Config alc;
+    std::optional<maya::Element> overlay;
+    {
+        maya::RenderContext ctx{cols, rows, …, /*auto_height=*/true};
+        maya::RenderContextGuard guard(ctx);
+        alc.thread        = thread_config(m);
+        alc.changes_strip = changes_strip_config(m);
+        alc.composer      = composer_config(m);
+        alc.status_bar    = status_bar_config(m);
+        overlay           = pick_overlay(m);
+    }
+
+    // Phase 2: build the layout under a height-capped context
+    // (min(rows, 24)) so the bottom-pinned overlay never overhangs.
+    maya::RenderContext lctx{cols, std::min(rows, 24), …, true};
+    maya::RenderContextGuard lguard(lctx);
+    auto base = maya::AppLayout{std::move(alc)}.build();
+    if (!overlay) return base;
+    return maya::detail::zstack({std::move(base),
+                                overlay_layer(std::move(*overlay))});
 }
 ```
 
-That's the entire host-side view layer. The body is one declarative
-struct expression — no imperative composition, no `if` branches around
-layout primitives. Each field is filled by exactly one adapter
-function from a sibling file.
+The host-side view layer is still pure data-assembly — each `alc.*` field
+is filled by exactly one adapter function from a sibling file, and the
+overlay is picked by `pick_overlay(m)`. The two-phase structure (and the
+custom `overlay_layer` z-stack instead of `AppLayout`'s own `.overlay`
+slot) exists for one reason: **a picker toggle must not change the
+painted frame height**, or the +2 rows it would add can push the top of
+a full-viewport welcome screen into unreclaimable native scrollback. The
+overlay is pinned 2 rows above the box bottom so opening it can never
+grow the frame. See the `view.cpp` comments for the full rationale.
+
+> **Note:** `AppLayout::Config` *does* carry an `overlay`
+> (`std::optional<Element>`) slot — agentty bypasses it here and builds
+> its own z-stack so it can apply the bottom inset. A future cleanup may
+> push the inset into `maya::Overlay` and restore the single-expression
+> form.
 
 ---
 
@@ -770,21 +801,45 @@ Headers mirror the same layout under `include/agentty/runtime/view/`.
 struct MessageMdCache {
     std::shared_ptr<maya::Element>           finalized;
     std::shared_ptr<maya::StreamingMarkdown> streaming;
+    std::size_t last_settled_size = SIZE_MAX;   // skip per-frame settle round-trip
+    std::size_t revealed_size     = 0;          // held == source.size()
+    // … plus reveal-grace + multi-sub-turn concat bookkeeping
 };
 
-[[nodiscard]] MessageMdCache& message_md_cache(const ThreadId& tid,
-                                               std::size_t msg_idx);
+class ViewCache {                               // LRU-bounded, 32 entries default
+public:
+    MessageMdCache&  message_md (const ThreadId&, const MessageId&);
+    TurnConfigCache& turn_config(const ThreadId&, const MessageId&);
+    void retain_messages(const ThreadId&, const std::unordered_set<std::string>& live);
+    void set_capacity(std::size_t max_entries) noexcept;
+};
 ```
 
-One thread-local cache, keyed on `(thread_id, msg_idx)`. Streaming
-messages hold a live `StreamingMarkdown` instance whose internal
-block-cache makes each delta `O(new_chars)`; finalized messages cache
-the resulting `Element` once and return the same pointer forever.
+The cache is an **LRU-bounded `ViewCache`** owned by the Model
+(`m.ui.view_cache`), not a process-global thread_local map. Entries are
+keyed on `(ThreadId, MessageId)` — a stable `MessageId`, **not** a
+message index (an index would alias across compaction / insert). Each
+entry pairs a `MessageMdCache` (the markdown render state) with a
+`TurnConfigCache` (reserved; empty today — settled assistant panels live
+in `m.ui.frozen`, not here).
 
-**Streaming-rate sparkline** (separate from this cache) lives in
-`StreamState::rate_history` — a 16-slot ring buffer that survives
-across sub-turns and tool gaps (only the per-burst rate accumulator
-resets on `StreamStarted`).
+Streaming messages hold a live `StreamingMarkdown` instance whose
+internal block-cache makes each delta `O(new_chars)`; once a message
+settles, `last_settled_size`/`revealed_size` gate the per-frame
+`set_content()`/`finish()` round-trip so a fully-revealed turn returns
+its cached `build()` for free.
+
+Capacity defaults to **32 entries** (a single 100 KB `read` result can
+cost several MiB of Element nodes). There is no manual `evict_*` on
+thread switch — LRU pressure pushes stale entries out as the new thread's
+MessageIds access fresh keys — except `retain_messages()`, called once
+per compaction to drop entries for messages that didn't survive (so the
+pre-compact Element trees don't linger in the LRU on a quiet session).
+
+**Streaming-rate sparkline** (separate from this cache) lives in the
+phase `Active` context's `rate_history` ring buffer — a 16-slot buffer
+that survives across sub-turns and tool gaps (only the per-burst rate
+accumulator resets on `StreamStarted`).
 
 ---
 
