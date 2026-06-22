@@ -478,13 +478,15 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 auto cmd =
                     agentty::app::detail::trim_frozen_if_oversized(m);
                 using Cmd = maya::Cmd<agentty::Msg>;
-                // W5: the trim issues NO host scrollback commit. Current
-                // maya owns the reconciliation of the frozen-tree shrink;
-                // a host commit on top double-commits and strands a
-                // duplicate. So the trim must return none().
-                INV(std::holds_alternative<Cmd::None>(cmd.inner),
-                    "W5", "trim returned a host scrollback commit (must "
-                    "return none() — maya owns reconciliation)");
+                // W5: the trim returns commit_scrollback(N) when it drops
+                // rows (a top-DELETION that maya's render-time reconciliation
+                // cannot fix — the host must commit in lockstep), or none()
+                // when it doesn't trim. Both are acceptable; the invariant
+                // is that no OTHER command type is returned.
+                INV(std::holds_alternative<Cmd::None>(cmd.inner) ||
+                    std::holds_alternative<Cmd::CommitScrollback>(cmd.inner),
+                    "W5", "trim returned unexpected command type (must be "
+                    "none() or commit_scrollback(N))");
                 op("trim");
                 h.frame(m, "htrim" + st);
                 break;
