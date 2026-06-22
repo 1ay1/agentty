@@ -1401,6 +1401,54 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME scrollback_wire_fuzz COMMAND scrollback_wire_fuzz)
     set_tests_properties(scrollback_wire_fuzz PROPERTIES TIMEOUT 120)
 
+    # reveal_scrollback_test — streaming scrollback DUPLICATION repro with
+    # reveal_fx ON (the production view path the fuzz forces OFF). Streams a
+    # long prose body that overflows a small viewport, then keeps rendering
+    # frames (advancing wall-clock so the live-edge overlay animates) and
+    # asserts no already-committed scrollback row is ever rewritten (R1),
+    # every render stays Synced (R2), the shadow verifies (R3).
+    add_executable(reveal_scrollback_test EXCLUDE_FROM_ALL
+        tests/reveal_scrollback_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(reveal_scrollback_test PRIVATE include)
+    target_compile_definitions(reveal_scrollback_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(reveal_scrollback_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(reveal_scrollback_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(reveal_scrollback_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME reveal_scrollback_test COMMAND reveal_scrollback_test)
+    # KNOWN-FAILING reproduction (R5): the reveal_fx settle->freeze handoff
+    # re-emits the whole turn, landing a SECOND copy in native scrollback
+    # below the live (SGR-garbled) copy — the production duplication bug.
+    # Marked WILL_FAIL so CI stays green while the repro is committed;
+    # FLIP THIS OFF (delete the WILL_FAIL property) the moment the fix
+    # lands so the test guards the regression going forward.
+    set_tests_properties(reveal_scrollback_test PROPERTIES
+        TIMEOUT 120 WILL_FAIL TRUE)
+
     # anthropic_md_stream — dev tool, NOT a ctest entry. Captures a real
     # Anthropic SSE markdown stream to a .jsonl fixture (network +
     # credentials required), or replays a captured fixture through
@@ -1460,6 +1508,7 @@ if(AGENTTY_BUILD_TESTS)
         salvage_dedup_test
         acp_integration_test
         frozen_invariant_fuzz
-        scrollback_wire_fuzz)
+        scrollback_wire_fuzz
+        reveal_scrollback_test)
 endif()
 

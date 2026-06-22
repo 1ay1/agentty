@@ -1,0 +1,799 @@
+// reveal_scrollback_test — reproduce the streaming scrollback DUPLICATION
+// with reveal_fx ON (the production view path).
+//
+// The scrollback_wire_fuzz harness deliberately forces reveal_fx OFF so
+// frame heights are a pure function of model state. But the bug reported
+// in production (the same prose line appearing twice in scrollback during
+// a live stream) only manifests with reveal_fx ON — the live-edge overlay
+// (scramble / gradient / caret) mutates the trailing rows of the canvas
+// EVERY frame on its own wall clock, independent of whether new bytes
+// arrived. If that per-frame mutation ever touches a row that has ALREADY
+// overflowed the viewport top and committed to native scrollback, maya
+// either rewrites a committed row (W4 violation) or its shrink/prefix
+// reconciliation re-commits a shifted copy → the visible duplicate.
+//
+// This test drives the REAL ui::view (reveal_fx ON, exactly as turn.cpp
+// builds it) through maya's REAL inline compose, streaming a long prose
+// body that overflows a small viewport, then continues rendering frames
+// (advancing wall-clock so the reveal overlay animates) and asserts:
+//
+//   R1  no wire row, once committed past the viewport top, is ever
+//       rewritten by a later frame (the stranded-duplicate check).
+//   R2  every render stays Synced (no Stale/HardReset full repaint).
+//   R3  the prev_cells shadow verifies before every render.
+//   R4  no UNIQUE prose line appears twice in a single rendered canvas
+//       (the element-tree double-render check).
+//   R5  THE SCREENSHOT SYMPTOM. A real ANSI terminal emulator (TermEmu)
+//       consumes the actual BYTES maya writes to the fd, maintaining a
+//       native scrollback + viewport. No unique prose line may appear
+//       twice across the cumulative transcript (scrollback ++ screen) —
+//       exactly what the user's eyes see. R1-R4 reconstruct rows from
+//       maya's CANVAS and so cannot see content re-committed to native
+//       scrollback by a from-the-top repaint; R5 can, and it catches
+//       the production duplication: at the settle->freeze handoff the
+//       reveal_fx widget's settled element tree diverges from the last
+//       LIVE (reveal-animated) tree, so maya re-emits the whole turn,
+//       landing a SECOND clean copy below the live (SGR-garbled) copy
+//       already in scrollback.
+//
+// A failure means the reveal overlay (or the height/shape it implies)
+// perturbs the committed scrollback prefix or forces a from-the-top
+// re-emit — the production duplication bug.
+
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <maya/render/canvas.hpp>
+#include <maya/render/inline_frame.hpp>
+#include <maya/render/renderer.hpp>
+#include <maya/render/serialize.hpp>
+#include <maya/style/theme.hpp>
+#include <maya/terminal/writer.hpp>
+
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/model.hpp"
+#include "agentty/runtime/view/view.hpp"
+
+using agentty::Model;
+using agentty::Message;
+using agentty::Role;
+using agentty::ToolUse;
+using namespace maya;
+using namespace maya::inline_frame;
+
+static int g_failures = 0;
+static int g_checks   = 0;
+
+#define CHK(cond, detail)                                              \
+    do { ++g_checks; if (!(cond)) {                                    \
+        ++g_failures;                                                  \
+        std::fprintf(stderr, "  FAIL: %s\n", std::string(detail).c_str()); \
+    } } while (0)
+
+// Paint the REAL view through render_tree under a sized context.
+static Canvas paint_view(const Model& m, int width, int term_h,
+                         StylePool& pool) {
+    maya::RenderContext ctx{width, term_h, maya::render_generation(),
+                            /*auto_height=*/true};
+    maya::RenderContextGuard guard(ctx);
+    Canvas c(width, 8000, &pool);
+    c.clear();
+    std::vector<layout::LayoutNode> nodes;
+    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::dark, nodes,
+                      /*auto_height=*/true);
+    return c;
+}
+
+static std::vector<std::string> rows_of(const Canvas& c, int width) {
+    std::vector<std::string> rows;
+    const int mr = c.max_content_row();
+    for (int y = 0; y <= mr; ++y) {
+        std::string line;
+        for (int x = 0; x < width; ++x) {
+            char32_t ch = c.get(x, y).character;
+            line.push_back(ch && ch < 128 ? static_cast<char>(ch) : ' ');
+        }
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        rows.push_back(std::move(line));
+    }
+    return rows;
+}
+
+static std::pair<Writer, int> make_pipe_writer() {
+    int fds[2];
+    if (pipe(fds) != 0) { std::perror("pipe"); std::abort(); }
+    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
+    return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
+}
+
+static void drain_fd(int rfd) {
+    char buf[8192];
+    while (read(rfd, buf, sizeof(buf)) > 0) {}
+}
+
+// Read ALL currently-available bytes from the pipe into a string (the
+// frame maya just wrote). Non-blocking fd; we loop until EAGAIN.
+static std::string read_fd(int rfd) {
+    std::string s;
+    char buf[8192];
+    for (;;) {
+        ssize_t n = read(rfd, buf, sizeof(buf));
+        if (n > 0) { s.append(buf, static_cast<std::size_t>(n)); continue; }
+        break;
+    }
+    return s;
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// A real ANSI terminal emulator with native scrollback.
+//
+// The canvas-reconstruction harness (Harness::frame) can only see what
+// maya's CANVAS describes for a single frame — it cannot see the actual
+// BYTES maya writes to the fd, nor what the terminal's NATIVE SCROLLBACK
+// accumulates as rows scroll off the top. The production duplication bug
+// ("Let me check the diagram source:" shown TWICE at once) lives in the
+// cumulative terminal state: a row commits to scrollback, then a later
+// frame's cursor-up/EL/scroll dance re-paints the same content again
+// inside the viewport — so the screen now shows it in BOTH places.
+//
+// This emulator consumes maya's exact escape vocabulary (cursor up/down/
+// forward, EL \x1b[K, ED \x1b[J, \r, \n with bottom-edge scroll into
+// scrollback, DECAWM ?7l, SGR, sync ?2026h/l, hide/show cursor, the
+// HardReset wipe \x1b[2J\x1b[3J\x1b[H) and maintains:
+//   - a viewport of `rows` lines, each `cols` wide
+//   - a native scrollback vector (rows that scrolled off the top)
+// so the test can run duplication checks over scrollback + viewport
+// TOGETHER, exactly what the user's eyes see.
+struct TermEmu {
+    int cols, rows;
+    int cx = 0, cy = 0;                  // cursor (viewport-relative)
+    std::vector<std::string> screen;    // rows lines, each cols chars
+    std::vector<std::string> scrollback;// committed rows (immutable history)
+    bool decawm = true;                 // auto-wrap on by default
+
+    TermEmu(int c, int r) : cols(c), rows(r) {
+        screen.assign(static_cast<std::size_t>(rows),
+                      std::string(static_cast<std::size_t>(cols), ' '));
+    }
+
+    std::string& line(int y) { return screen[static_cast<std::size_t>(y)]; }
+
+    void put(char ch) {
+        if (cx >= cols) {
+            if (decawm) { cx = 0; cursor_newline(); }
+            else        { cx = cols - 1; }   // clamp at right edge
+        }
+        if (cy < 0) cy = 0;
+        if (cy >= rows) cy = rows - 1;
+        std::string& l = line(cy);
+        if (static_cast<int>(l.size()) < cols)
+            l.resize(static_cast<std::size_t>(cols), ' ');
+        l[static_cast<std::size_t>(cx)] = ch;
+        ++cx;
+    }
+
+    // \n at the bottom row scrolls the viewport up; the row leaving the
+    // top is committed to native scrollback (exactly a real terminal).
+    void cursor_newline() {
+        if (cy < rows - 1) { ++cy; return; }
+        // scroll up by one
+        std::string top = screen.front();
+        while (!top.empty() && top.back() == ' ') top.pop_back();
+        scrollback.push_back(std::move(top));
+        screen.erase(screen.begin());
+        screen.push_back(std::string(static_cast<std::size_t>(cols), ' '));
+        // cy stays at rows-1
+    }
+
+    void carriage_return() { cx = 0; }
+    void cursor_up(int n)   { cy -= n; if (cy < 0) cy = 0; }
+    void cursor_down(int n) { for (int i = 0; i < n; ++i) cursor_newline(); }
+    void cursor_fwd(int n)  { cx += n; if (cx > cols) cx = cols; }
+
+    void erase_to_eol() {  // \x1b[K
+        std::string& l = line(cy);
+        if (static_cast<int>(l.size()) < cols)
+            l.resize(static_cast<std::size_t>(cols), ' ');
+        for (int x = cx; x < cols; ++x) l[static_cast<std::size_t>(x)] = ' ';
+    }
+
+    void erase_to_eos() {  // \x1b[J — erase cursor->EOL on this row, then
+        erase_to_eol();    // every row below it.
+        for (int y = cy + 1; y < rows; ++y)
+            line(y).assign(static_cast<std::size_t>(cols), ' ');
+    }
+
+    void full_wipe() {  // \x1b[2J\x1b[3J\x1b[H — clear screen + scrollback
+        for (auto& l : screen) l.assign(static_cast<std::size_t>(cols), ' ');
+        scrollback.clear();
+        cx = cy = 0;
+    }
+
+    // Feed a chunk of maya's wire bytes.
+    void feed(const std::string& b) {
+        std::size_t i = 0, n = b.size();
+        while (i < n) {
+            unsigned char ch = static_cast<unsigned char>(b[i]);
+            if (ch == '\r') { carriage_return(); ++i; continue; }
+            if (ch == '\n') { carriage_return_optional_then_lf(); ++i; continue; }
+            if (ch == 0x1b) { i = parse_esc(b, i); continue; }
+            // printable (treat any >= 0x20 byte as a glyph; multibyte
+            // UTF-8 lead/continuation bytes each occupy a cell slot in
+            // our coarse model — fine for ASCII-only test prose).
+            if (ch >= 0x20) { put(static_cast<char>(ch < 128 ? ch : '?')); ++i; continue; }
+            ++i; // ignore other C0
+        }
+    }
+
+    // Plain \n in maya output advances the line (it precedes content with
+    // \r where needed). Maya emits \r\n between rows; the \r already reset
+    // cx. A bare \n during the scroll loop must scroll at the bottom.
+    void carriage_return_optional_then_lf() { cursor_newline(); }
+
+    // Parse one CSI/escape sequence starting at b[i] (b[i] == ESC).
+    // Returns the index just past the sequence.
+    std::size_t parse_esc(const std::string& b, std::size_t i) {
+        const std::size_t n = b.size();
+        if (i + 1 >= n) return n;
+        if (b[i + 1] != '[') return i + 2;   // non-CSI esc: skip 2
+        std::size_t j = i + 2;
+        bool priv = false;
+        if (j < n && b[j] == '?') { priv = true; ++j; }
+        int param = 0; bool have_param = false;
+        while (j < n && b[j] >= '0' && b[j] <= '9') {
+            param = param * 10 + (b[j] - '0'); have_param = true; ++j;
+        }
+        if (j >= n) return n;
+        char final = b[j];
+        const int p = have_param ? param : 0;
+        switch (final) {
+            case 'A': cursor_up(p ? p : 1); break;
+            case 'B': cursor_down(p ? p : 1); break;
+            case 'C': cursor_fwd(p ? p : 1); break;
+            case 'D': cx -= (p ? p : 1); if (cx < 0) cx = 0; break;
+            case 'G': cx = (p ? p - 1 : 0); if (cx < 0) cx = 0; break;
+            case 'H': cy = 0; cx = 0; break;       // CUP (only home used here)
+            case 'K': erase_to_eol(); break;       // EL 0
+            case 'J':
+                if (p == 2 || p == 3) {            // ED 2/3 — clear screen
+                    if (p == 3) scrollback.clear();
+                    for (auto& l : screen)
+                        l.assign(static_cast<std::size_t>(cols), ' ');
+                } else {
+                    erase_to_eos();                // ED 0
+                }
+                break;
+            case 'h': if (priv && p == 7) decawm = true; break;  // DECAWM on
+            case 'l': if (priv && p == 7) decawm = false; break; // DECAWM off
+            case 'm': break;                        // SGR — ignore styling
+            default: break;                         // ?25h/l, ?2026h/l, etc.
+        }
+        return j + 1;
+    }
+
+    // The full visible-to-the-user transcript: scrollback then screen.
+    std::vector<std::string> transcript() const {
+        std::vector<std::string> t = scrollback;
+        for (const auto& l : screen) {
+            std::string s = l;
+            while (!s.empty() && s.back() == ' ') s.pop_back();
+            t.push_back(std::move(s));
+        }
+        return t;
+    }
+};
+
+// Wire harness: carry maya's Synced frame across frames, model the
+// committed (immutable) scrollback rows, and check R1/R2/R3 every frame.
+struct Harness {
+    int width, term_h;
+    StylePool pool;
+    Writer writer;
+    int rfd;
+    std::optional<InlineFrame<Synced>> synced;
+    std::vector<std::string> wire;   // committed rows (immutable forever)
+    std::size_t commits = 0;
+    bool dead = false;
+    TermEmu emu;                     // real terminal: scrollback + viewport
+
+    Harness(int w, int th)
+        : width(w), term_h(th), emu(w, th) {
+        auto pw = make_pipe_writer();
+        writer = std::move(pw.first);
+        rfd = pw.second;
+    }
+    ~Harness() { close(rfd); }
+
+    // R5: run the duplication check over the FULL cumulative terminal
+    // transcript (native scrollback + current viewport) — exactly what
+    // the user sees. A unique test-prose line appearing at two distinct
+    // absolute rows of the live screen+scrollback is the screenshot bug:
+    // the same body painted in two places at once. We only flag lines
+    // that are simultaneously present in the on-screen VIEWPORT region
+    // (the visible duplicate the user reported) — a line legitimately in
+    // deep scrollback AND re-shown live is the corruption.
+    void check_emu(const std::string& tag) {
+        auto scr = emu.scrollback;
+        // viewport (trailing) rows, blank-trimmed:
+        std::vector<std::string> view;
+        for (const auto& l : emu.screen) {
+            std::string s = l;
+            while (!s.empty() && s.back() == ' ') s.pop_back();
+            view.push_back(std::move(s));
+        }
+        auto is_prose = [](const std::string& ln) {
+            return ln.find("tracing call path-")     != std::string::npos
+                || ln.find("serializes runs batch-") != std::string::npos
+                || ln.find("diffs canvas-")          != std::string::npos
+                || ln.find("builds tree-")           != std::string::npos;
+        };
+        // Full transcript = scrollback ++ viewport. Index space is
+        // absolute (scrollback first). A unique prose line must appear
+        // at most once across the WHOLE transcript.
+        std::vector<std::string> all = scr;
+        for (auto& v : view) all.push_back(v);
+        std::vector<std::pair<std::string,int>> seen;
+        for (int y = 0; y < static_cast<int>(all.size()); ++y) {
+            const std::string& ln = all[static_cast<std::size_t>(y)];
+            if (!is_prose(ln)) continue;
+            for (auto& [s, py] : seen) {
+                if (s == ln) {
+                    CHK(false,
+                        "R5: line duplicated in terminal transcript @" + tag
+                        + " abs-rows " + std::to_string(py) + " and "
+                        + std::to_string(y)
+                        + " (scrollback=" + std::to_string(scr.size())
+                        + ")\n      |" + ln + "|");
+                    std::fprintf(stderr,
+                        "    --- terminal transcript (%zu sb + %zu view) ---\n",
+                        scr.size(), view.size());
+                    for (int yy = 0; yy < static_cast<int>(all.size()); ++yy)
+                        std::fprintf(stderr, "    %3d|%s%s\n", yy,
+                            yy < static_cast<int>(scr.size()) ? "" : "V ",
+                            all[static_cast<std::size_t>(yy)].c_str());
+                    dead = true;
+                    return;
+                }
+            }
+            seen.emplace_back(ln, y);
+        }
+    }
+
+    // Apply a trim's commit_scrollback(N) Cmd to maya's Synced state
+    // BEFORE the next render — exactly what the runtime does. meta.cpp /
+    // modal.cpp forward the trim Cmd and the driver turns it into
+    // synced.commit(scrollback_marker(min(N, prev_rows-term_h))) against
+    // the PRIOR frame's still-valid Synced state (commit_inline_overflow
+    // semantics). Without this the harness diverges from production and
+    // the freeze frame re-emits the whole turn — but that divergence is
+    // ALSO the real bug surface, so we keep both code paths exercised.
+    void apply_trim(maya::Cmd<agentty::Msg>& cmd) {
+        if (dead || !synced) return;
+        using Cmd = maya::Cmd<agentty::Msg>;
+        const auto* c = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+        if (!c) return;
+        const int prev_rows = synced->rows();
+        const int safe = std::min(c->rows, std::max(0, prev_rows - term_h));
+        if (safe <= 0) return;
+        synced = std::move(*synced).commit(synced->scrollback_marker(safe));
+        commits += static_cast<std::size_t>(safe);
+    }
+
+    void frame(const Model& m, const std::string& tag) {
+        if (dead) return;
+        Canvas c = paint_view(m, width, term_h, pool);
+        auto cur = rows_of(c, width);
+        const int R = static_cast<int>(cur.size());
+        if (R <= 0) return;
+
+        // R4: WITHIN-FRAME duplicate detection. The same distinctive prose
+        // line must not appear at two different rows of a SINGLE rendered
+        // canvas. This is the screenshot symptom directly: "Let me check
+        // the diagram source:" visible twice at once means the element
+        // tree itself carries the text twice (frozen prefix AND live tail,
+        // or two live sub-turns) — a view-layer bug the wire invariants
+        // (R1-R3) can't see because each frame is internally consistent.
+        {
+            std::vector<std::pair<std::string,int>> seen;
+            for (int y = 0; y < R; ++y) {
+                const std::string& ln = cur[static_cast<std::size_t>(y)];
+                // Only check the test's UNIQUE prose body lines. Every
+                // paragraph/step the scenarios stream carries a unique
+                // integer tag ("tracing call path-N", "diffs canvas-N"),
+                // so a TRUE within-frame duplicate of one of these means
+                // the same message body got rendered twice (frozen prefix
+                // AND live tail, or a sub-turn rendered in two places) —
+                // the exact screenshot bug. Tool-card chrome ("Read 8
+                // lines", "ACTIONS") legitimately repeats per panel and is
+                // intentionally excluded.
+                const bool is_test_prose =
+                    ln.find("tracing call path-") != std::string::npos
+                 || ln.find("serializes runs batch-") != std::string::npos
+                 || ln.find("diffs canvas-") != std::string::npos
+                 || ln.find("builds tree-") != std::string::npos;
+                if (!is_test_prose) continue;
+                bool is_dup = false;
+                for (auto& [s, py] : seen) {
+                    if (s == ln) {
+                        CHK(false,
+                            "R4: line duplicated within one frame @" + tag
+                            + " rows " + std::to_string(py) + " and "
+                            + std::to_string(y) + "\n      |" + ln + "|");
+                        std::fprintf(stderr, "    --- full frame (%d rows) ---\n", R);
+                        for (int yy = 0; yy < R; ++yy)
+                            std::fprintf(stderr, "    %3d|%s\n", yy,
+                                         cur[static_cast<std::size_t>(yy)].c_str());
+                        is_dup = true;
+                        dead = true;
+                        break;
+                    }
+                }
+                if (is_dup) return;
+                seen.emplace_back(ln, y);
+            }
+        }
+
+        if (!synced) {
+            auto o = InlineFrame<Empty>{}.seed().render(
+                c, content_rows(c), term_rows_for_test(term_h), pool,
+                writer, false);
+            emu.feed(read_fd(rfd));
+            synced = std::visit(
+                [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                    using T = std::decay_t<decltype(a)>;
+                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                        return std::move(a);
+                    else return std::nullopt;
+                }, std::move(o));
+            CHK(synced.has_value(), "R2: first frame not Synced @" + tag);
+            if (!synced) { dead = true; return; }
+        } else {
+            // Mirror maya's own shrink-while-overflowed reconciliation so
+            // the harness prev_rows tracks the wire exactly.
+            const int prev_rows = synced->rows();
+            if (prev_rows > term_h && R < prev_rows) {
+                const int overflow = prev_rows - term_h;
+                if (!synced->scrollback_prefix_matches(c, overflow)) {
+                    synced = std::move(*synced).commit(
+                        synced->scrollback_marker(overflow));
+                    commits += static_cast<std::size_t>(overflow);
+                }
+            }
+            auto wit = synced->verify();
+            CHK(wit.has_value(), "R3: shadow verify failed @" + tag);
+            if (!wit) { dead = true; return; }
+            auto o = std::move(*synced).render(
+                c, content_rows(c), term_rows_for_test(term_h), pool,
+                writer, std::move(*wit), false);
+            emu.feed(read_fd(rfd));
+            synced = std::visit(
+                [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                    using T = std::decay_t<decltype(a)>;
+                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                        return std::move(a);
+                    else return std::nullopt;
+                }, std::move(o));
+            CHK(synced.has_value(), "R2: render demoted out of Synced @" + tag);
+            if (!synced) { dead = true; return; }
+        }
+
+        // R1: wire-model byte check. Canvas row y → absolute wire index
+        // commits + y. Rows past the viewport top (R - term_h) are
+        // committed from now on; any already-captured index must match.
+        const int over = R > term_h ? R - term_h : 0;
+        for (int y = 0; y < over; ++y) {
+            const std::size_t wi = commits + static_cast<std::size_t>(y);
+            if (wi < wire.size()) {
+                if (wire[wi] != cur[static_cast<std::size_t>(y)]) {
+                    CHK(false,
+                        "R1: committed wire row " + std::to_string(wi)
+                        + " REWRITTEN @" + tag
+                        + "\n      was |" + wire[wi]
+                        + "|\n      now |" + cur[static_cast<std::size_t>(y)] + "|");
+                    dead = true;
+                    return;
+                }
+            } else if (wi == wire.size()) {
+                wire.push_back(cur[static_cast<std::size_t>(y)]);
+            } else {
+                wire.resize(wi, std::string{});
+                wire.push_back(cur[static_cast<std::size_t>(y)]);
+            }
+        }
+
+        // R5: the screenshot symptom — run duplication detection over the
+        // REAL terminal transcript (native scrollback + viewport) built
+        // from the actual bytes maya wrote, not the canvas reconstruction.
+        check_emu(tag);
+    }
+};
+
+// Sleep a beat so the reveal overlay's wall clock advances between
+// frames — that's what makes the animated trailing edge mutate even on a
+// frame where no new bytes arrived (the production RAF cadence).
+static void tick() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+}
+
+// Drive the production streaming cadence with reveal_fx ON (the real
+// ui::view builds the StreamingMarkdown with set_reveal_fx(true), so we
+// just feed the model and render — the view installs the widget).
+static void run_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"reveal"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "welcome");
+
+    // 1) A settled user turn, frozen — gives the stream a committed
+    //    prefix above it so subsequent overflow has somewhere to land.
+    {
+        Message u; u.role = Role::User;
+        u.text = "Please walk through the whole rendering pipeline in detail.";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "submit");
+    }
+
+    // 2) Start streaming an assistant reply.
+    Message a; a.role = Role::Assistant;
+    a.streaming_text = "Let me check the diagram source:";
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Render the opening several times WITHOUT new bytes — this is the
+    // critical window: the reveal overlay animates the live edge on its
+    // own clock while the byte content is frozen. If the overlay or its
+    // implied height perturbs an already-committed row, R1 fires.
+    for (int f = 0; f < 6; ++f) { tick(); h.frame(m, "open" + std::to_string(f)); }
+
+    // 3) Stream a long body that overflows the small viewport so the
+    //    opening line ("Let me check the diagram source:") scrolls past
+    //    the top and commits to scrollback. Keep rendering with reveal
+    //    animating between every delta.
+    auto& back = m.d.current.messages.back();
+    for (int d = 0; d < 60; ++d) {
+        back.streaming_text +=
+            "\n\nParagraph " + std::to_string(d)
+            + " (#" + std::to_string(d * 7 + 3) + "): the renderer stage "
+            + std::to_string(d) + " builds tree-" + std::to_string(d)
+            + ", lays out region-" + std::to_string(d * 2)
+            + ", diffs canvas-" + std::to_string(d * 3)
+            + " and serializes runs batch-" + std::to_string(d * 5) + ".";
+        tick();
+        h.frame(m, "delta" + std::to_string(d));
+        // An extra no-byte animation frame between deltas — pure reveal
+        // motion over a committed prefix (the production RAF tick).
+        tick();
+        h.frame(m, "anim" + std::to_string(d));
+        if (h.dead) return;
+    }
+
+    // 4) Settle: move streaming_text → text, settle the md cache, idle,
+    //    paint the deferred-freeze frame, then freeze.
+    {
+        auto& b = m.d.current.messages.back();
+        b.text += b.streaming_text;
+        b.streaming_text.clear();
+        agentty::app::detail::settle_message_md(m, b);
+        m.s.phase = agentty::phase::Idle{};
+        // Deferred settle paint(s) — reveal finalize ramp drains over
+        // ~200ms; render a few frames so it completes before freeze.
+        for (int f = 0; f < 12; ++f) { tick(); h.frame(m, "settle" + std::to_string(f)); }
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "freeze");
+    }
+}
+
+// Multi-sub-turn scenario — the screenshot shape: text → ACTIONS panel →
+// continuation text → ACTIONS panel … all inside ONE live (un-frozen)
+// assistant run. When a tool sub-turn lands, the prior text message's
+// streaming_text is settled into `.text` (production: settle_message_md)
+// but the message STAYS in the live tail because the run isn't terminal
+// (a continuation is pending). A fresh StreamingMarkdown widget is built
+// for the continuation. Reveal_fx is ON for every widget. The whole run
+// grows past the viewport so early sub-turns overflow + commit. If any
+// settled-but-still-live earlier sub-turn re-lays-out or its reveal
+// overlay perturbs a committed row, R1 fires — the visible duplicate.
+static ToolUse done_tool(const std::string& tag) {
+    ToolUse t;
+    auto now = std::chrono::steady_clock::now();
+    t.id = agentty::ToolCallId{"read_" + tag};
+    t.name = agentty::ToolName{"read"};
+    std::string out;
+    for (int i = 0; i < 8; ++i)
+        out += std::to_string(i) + ": " + tag + " source line\n";
+    t.status = ToolUse::Done{now - std::chrono::milliseconds{5}, now,
+                             std::move(out)};
+    return t;
+}
+
+static void run_multiturn_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"revealmt"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "mt-welcome");
+
+    // Frozen user turn so the live run has a committed prefix above it.
+    {
+        Message u; u.role = Role::User;
+        u.text = "Investigate the rendering pipeline end to end.";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "mt-submit");
+    }
+
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Several text→tool→continuation sub-turns inside ONE live run.
+    for (int turn = 0; turn < 6 && !h.dead; ++turn) {
+        const std::string st = std::to_string(turn);
+
+        // New assistant sub-turn message: stream prose into it.
+        Message a; a.role = Role::Assistant;
+        a.streaming_text = "Let me check diagram source " + st + ":";
+        m.d.current.messages.push_back(std::move(a));
+        for (int f = 0; f < 4; ++f) { tick(); h.frame(m, "mt" + st + "-open" + std::to_string(f)); }
+
+        // Grow the prose a bit (overflow accumulates across sub-turns).
+        auto& back = m.d.current.messages.back();
+        for (int d = 0; d < 4; ++d) {
+            back.streaming_text +=
+                "\n\nStep " + st + "." + std::to_string(d)
+                + " (read-" + std::to_string(turn * 10 + d)
+                + "): tracing call path-" + std::to_string(turn * 4 + d)
+                + " through layout-" + std::to_string(turn)
+                + " and serialize-" + std::to_string(d) + ".";
+            tick(); h.frame(m, "mt" + st + "-d" + std::to_string(d));
+        }
+
+        // Tool sub-turn lands: production settles the prior text into
+        // `.text` (it stays in the live tail) and pushes the tool message.
+        {
+            auto& b = m.d.current.messages.back();
+            b.text += b.streaming_text;
+            b.streaming_text.clear();
+            agentty::app::detail::settle_message_md(m, b);
+        }
+        Message tmsg; tmsg.role = Role::Assistant;
+        tmsg.tool_calls.push_back(done_tool("mt" + st));
+        m.d.current.messages.push_back(std::move(tmsg));
+        for (int f = 0; f < 3; ++f) { tick(); h.frame(m, "mt" + st + "-tool" + std::to_string(f)); }
+    }
+
+    // Final settle + freeze.
+    {
+        auto& b = m.d.current.messages.back();
+        if (!b.streaming_text.empty()) {
+            b.text += b.streaming_text;
+            b.streaming_text.clear();
+            agentty::app::detail::settle_message_md(m, b);
+        }
+        m.s.phase = agentty::phase::Idle{};
+        for (int f = 0; f < 12; ++f) { tick(); h.frame(m, "mt-settle" + std::to_string(f)); }
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "mt-freeze");
+    }
+}
+
+// Submit-mid-reveal scenario — mirrors modal.cpp's submit path, which
+// force-freezes the prior assistant turn (settle_message_md + freeze_
+// through) the instant the user hits Enter, EVEN IF the reveal is still
+// mid-glide (pending_settle_freeze). If the frozen snapshot captures a
+// live-overlay tree that diverges from what the next frame paints, the
+// prior turn's body can land in BOTH the frozen prefix and a re-render —
+// the duplicate. We stream a body that overflows, then submit WITHOUT any
+// reveal-drain wait, and render. R1/R4 catch any duplication.
+static void run_submit_mid_reveal_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"revealsub"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "sub-welcome");
+
+    for (int turn = 0; turn < 4 && !h.dead; ++turn) {
+        const std::string st = std::to_string(turn);
+
+        // User submits (first turn: just push; later turns: this is the
+        // mid-reveal submit that force-freezes the prior assistant turn).
+        Message u; u.role = Role::User;
+        u.text = "Question " + st + ": explain a subsystem.";
+        m.d.current.messages.push_back(std::move(u));
+        // Mirror modal.cpp submit: settle prior assistant turns then
+        // freeze through, WITHOUT waiting for reveal drain.
+        for (std::size_t i = m.ui.frozen_through;
+             i + 1 < m.d.current.messages.size(); ++i) {
+            auto& mm = m.d.current.messages[i];
+            if (mm.role != Role::Assistant || mm.text.empty()) continue;
+            agentty::app::detail::settle_message_md(m, mm);
+        }
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        m.ui.pending_settle_freeze = false;
+        h.frame(m, "sub" + st + "-submit");
+
+        // Stream the assistant reply, overflowing the viewport. Render
+        // with reveal animating between deltas. Do NOT drain reveal at
+        // the end — the NEXT loop's submit fires mid-glide.
+        Message a; a.role = Role::Assistant;
+        a.streaming_text = "Diagram lookup " + st + " begins now:";
+        m.d.current.messages.push_back(std::move(a));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        auto& back = m.d.current.messages.back();
+        for (int d = 0; d < 30; ++d) {
+            back.streaming_text +=
+                "\n\nPara " + st + "-" + std::to_string(d)
+                + ": builds tree-" + std::to_string(turn * 100 + d)
+                + ", lays region-" + std::to_string(turn * 100 + d)
+                + ", diffs canvas-" + std::to_string(turn * 100 + d)
+                + ", serializes runs batch-" + std::to_string(turn * 100 + d)
+                + ".";
+            tick(); h.frame(m, "sub" + st + "-d" + std::to_string(d));
+            if (h.dead) return;
+        }
+        // Settle the text into .text (so the next submit's settle path is
+        // a no-op shape-wise) but leave reveal possibly still live and do
+        // NOT freeze — the next iteration's submit does the freeze.
+        back.text += back.streaming_text;
+        back.streaming_text.clear();
+        // Intentionally NOT calling settle_message_md here — reveal stays
+        // live, exactly the pending_settle_freeze state modal.cpp guards.
+        m.s.phase = agentty::phase::Idle{};
+        m.ui.pending_settle_freeze = true;
+        h.frame(m, "sub" + st + "-idle");
+    }
+}
+
+int main() {
+    std::printf("reveal_scrollback_test\n");
+    const struct { int w, th; } shapes[] = {
+        {80, 24}, {60, 16}, {100, 20}, {72, 12},
+    };
+    for (auto s : shapes) {
+        run_scenario(s.w, s.th);
+        if (g_failures) break;
+    }
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_multiturn_scenario(s.w, s.th);
+    }
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_submit_mid_reveal_scenario(s.w, s.th);
+    }
+    std::printf("%d checks, %d failures\n", g_checks, g_failures);
+    if (g_failures) { std::printf("FAILED\n"); return 1; }
+    std::printf("PASSED\n");
+    return 0;
+}
