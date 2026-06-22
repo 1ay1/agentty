@@ -1,6 +1,9 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/agent_timeline.hpp"
 
+#include <list>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -11,6 +14,77 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
 namespace agentty::ui {
+namespace {
+
+// ── Settled-tool body cache ───────────────────────────────────────────
+//
+// tool_body_preview_config() is O(body): it parses the tool's JSON args
+// (safe_arg over the full `content`), materializes output(), and for an
+// Edit scans the diff body for the ```diff fence + substr's the hunk
+// text. For a write/edit with thousands of lines that's ~tens of ms.
+//
+// In an edit/write-heavy turn the in-flight assistant run carries MANY
+// already-terminal cards (each sub-turn settles before the next
+// continuation arrives). build_live_tail gives the whole in-flight run
+// NO hash_id (the latest tool is still pending), so the host rebuilds
+// every settled card's body EVERY frame — O(Σ body sizes) per frame at
+// 10-60 fps. That is the climbing CPU as the turn grows.
+//
+// A terminal tool's body bytes are immutable: status is fixed,
+// output().size() is fixed. So we memoize the built Config under the
+// EXACT content-address the per-event hash_id already trusts —
+// (id, status.index(), output().size(), highlight_lines signature).
+// On hit we copy the cached Config (a plain string/vector copy) instead
+// of re-parsing JSON + re-scanning the diff. Emitted bytes are
+// byte-identical to a fresh build, so the freeze handoff (freeze_range
+// stamps the same assistant_run_hash_id) stays a pure maya cache hit —
+// no scrollback-corruption surface.
+//
+// Single-threaded by construction (runtime serializes update+view on one
+// thread), so a thread_local store needs no locking. Bounded LRU so it
+// can't grow with session length; settled cards that scroll out get
+// frozen into m.ui.frozen and never query this again, so their entries
+// fall out under LRU pressure naturally.
+class BodyConfigCache {
+public:
+    static constexpr std::size_t kCap = 256;
+
+    // Returns the cached Config for `key`, or nullptr on miss.
+    std::shared_ptr<const maya::ToolBodyPreview::Config> get(const std::string& key) {
+        auto it = map_.find(key);
+        if (it == map_.end()) return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        return it->second.cfg;
+    }
+
+    void put(const std::string& key,
+             std::shared_ptr<const maya::ToolBodyPreview::Config> cfg) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            it->second.cfg = std::move(cfg);
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+            return;
+        }
+        lru_.push_front(key);
+        map_.emplace(key, Entry{std::move(cfg), lru_.begin()});
+        while (map_.size() > kCap) {
+            map_.erase(lru_.back());
+            lru_.pop_back();
+        }
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<const maya::ToolBodyPreview::Config> cfg;
+        std::list<std::string>::iterator                     lru_it;
+    };
+    std::unordered_map<std::string, Entry> map_;
+    std::list<std::string>                 lru_;
+};
+
+thread_local BodyConfigCache g_body_cache;
+
+} // namespace
 
 maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_calls,
                                                   int spinner_frame,
@@ -44,6 +118,32 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
     // flagged earlier in the same turn instead of forcing a re-scan.
     // Mirrors agent_session.cpp's grep_hits → FileRead wiring in maya.
     const GrepHits grep_hits = collect_grep_hits(tool_calls);
+
+    // Signature of the grep-hits index, folded into every terminal tool's
+    // body-cache key. grep_hits feed a Read/find_definition body's
+    // `highlight_lines`, which change the rendered HEIGHT without changing
+    // output().size() — so a Read that settled before a same-path Grep
+    // landed must NOT serve a stale (no-highlight) cached body once the
+    // Grep indexes its path. Keying on the whole index is conservative
+    // (any grep change re-mints all entries) but grep hits are stable
+    // once the Greps settle, so the steady state stays a permanent hit.
+    // Cheap to build: just the line numbers, no body bytes.
+    std::string grep_sig;
+    {
+        // Deterministic order: unordered_map iteration order is unstable,
+        // but we only need the signature to CHANGE when the contents do,
+        // and to be identical across frames with identical contents —
+        // which holds because the map is rebuilt identically each frame.
+        for (const auto& [path, lines] : grep_hits) {
+            grep_sig += path;
+            grep_sig.push_back(':');
+            for (int ln : lines) {
+                grep_sig += std::to_string(ln);
+                grep_sig.push_back(',');
+            }
+            grep_sig.push_back(';');
+        }
+    }
 
     maya::AgentTimeline::Config cfg;
     cfg.frame = spinner_frame;
@@ -106,7 +206,39 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         // shifting every row below and bleeding stale cells (the
         // screenshot corruption). Fold the highlight signature into the
         // key so the height change mints a fresh entry.
-        auto body = tool_body_preview_config(tc, &grep_hits);
+        // Body build cache (terminal tools only). A terminal tool's body
+        // bytes are immutable, so we memoize the O(body) Config build
+        // under a content-address that captures every input the build
+        // depends on: id + status + output size + the grep-hits signature
+        // (which feeds Read/find_definition highlight_lines). On hit we
+        // copy the cached Config instead of re-parsing JSON + re-scanning
+        // the diff — turning O(Σ body sizes)/frame on a long in-flight run
+        // into a cheap copy per settled card. Emitted bytes are identical
+        // to a fresh build, so the freeze handoff stays a pure maya hit.
+        maya::ToolBodyPreview::Config body;
+        std::string body_key;
+        const bool cacheable = tc.is_terminal();
+        if (cacheable) {
+            body_key.reserve(tc.id.value.size() + grep_sig.size() + 48);
+            body_key += "t:";
+            body_key += tc.id.value;
+            body_key.push_back('|');
+            body_key += std::to_string(tc.status.index());
+            body_key.push_back('|');
+            body_key += std::to_string(tc.output().size());
+            body_key.push_back('|');
+            body_key += grep_sig;
+            if (auto hit = g_body_cache.get(body_key)) {
+                body = *hit;  // copy the cached (immutable) build
+            } else {
+                body = tool_body_preview_config(tc, &grep_hits);
+                g_body_cache.put(
+                    body_key,
+                    std::make_shared<const maya::ToolBodyPreview::Config>(body));
+            }
+        } else {
+            body = tool_body_preview_config(tc, &grep_hits);
+        }
 
         // Key: tool-call id + status + output size + body-height inputs
         // that aren't implied by output().size() (highlight_lines).
