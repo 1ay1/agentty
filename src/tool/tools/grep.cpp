@@ -238,6 +238,120 @@ enum class Backend { Ripgrep, BuiltIn };
 
 // ── Ripgrep path ────────────────────────────────────────────────────────
 
+// Find the nearest enclosing "declaration" line for a 1-based match line,
+// scanning a slice of file content. Tree-sitter-free heuristic that works
+// across agentty's primary languages (C/C++/Rust/Go/JS/TS/Python/Java):
+// walk UP from the match line and return the FIRST preceding non-blank
+// line whose indentation is strictly less than the match line's AND which
+// looks like a definition (contains a construct keyword or ends in `{` or
+// `(`). Returns the trimmed signature, or empty if none found within a
+// bounded look-back. Cheap: pure byte scan, no regex, bounded window.
+//
+// This is the "symbol breadcrumb" Zed gets from its AST `symbols_containing`
+// — we approximate it from indentation + a keyword sniff, which is good
+// enough to label a match block with the function/class it sits inside.
+[[nodiscard]] std::string enclosing_symbol(std::string_view content,
+                                           int match_line_1based) {
+    if (match_line_1based < 2) return {};
+    // Split into line views lazily up to the match line. We only need
+    // lines [1 .. match_line]. Bounded look-back keeps a 50k-line file
+    // from being fully indexed for one header.
+    constexpr int kMaxLookback = 400;
+    std::vector<std::pair<std::size_t,std::size_t>> lines;  // [start,end)
+    lines.reserve(static_cast<std::size_t>(match_line_1based) + 1);
+    std::size_t ls = 0;
+    int ln = 0;
+    for (std::size_t i = 0; i <= content.size(); ++i) {
+        if (i == content.size() || content[i] == '\n') {
+            ++ln;
+            std::size_t le = i;
+            if (le > ls && content[le - 1] == '\r') --le;
+            lines.emplace_back(ls, le);
+            if (ln >= match_line_1based) break;
+            ls = i + 1;
+        }
+    }
+    if (static_cast<int>(lines.size()) < match_line_1based) return {};
+    auto indent_of = [&](std::pair<std::size_t,std::size_t> r) -> int {
+        int w = 0;
+        for (std::size_t i = r.first; i < r.second; ++i) {
+            char c = content[i];
+            if (c == ' ') ++w;
+            else if (c == '\t') w += 4;
+            else break;
+        }
+        return w;
+    };
+    auto is_blank = [&](std::pair<std::size_t,std::size_t> r) {
+        for (std::size_t i = r.first; i < r.second; ++i)
+            if (content[i] != ' ' && content[i] != '\t') return false;
+        return true;
+    };
+    // Keyword sniff — a declaration-ish line. Substring scan, no regex.
+    // Returns: 2 = a NAMED definition (fn/class/…), 1 = a bare
+    // block-opener (ends in `{`/`(` but no decl keyword), 0 = not a
+    // scope opener. We prefer a named definition for the breadcrumb and
+    // keep climbing past anonymous/control-flow block-openers (for / if /
+    // while / lambda body) so the header names the enclosing FUNCTION,
+    // not the innermost loop.
+    auto classify = [&](std::string_view s) -> int {
+        static constexpr std::string_view kw[] = {
+            "fn ", "def ", "class ", "struct ", "enum ", "impl ", "trait ",
+            "interface ", "namespace ", "function", "func ", "public ",
+            "private ", "protected ", "static ", "void ", "template",
+            "module ", "export ", "type ",
+        };
+        // Control-flow / anonymous block openers we do NOT want to name.
+        static constexpr std::string_view ctrl[] = {
+            "for ", "for(", "while ", "while(", "if ", "if(", "else",
+            "switch ", "switch(", "do ", "do{", "try", "catch", "} else",
+            "} catch", "loop ", "loop{", "match ", "match(",
+        };
+        for (auto k : kw)
+            if (s.find(k) != std::string_view::npos) return 2;
+        for (auto c : ctrl)
+            if (s.starts_with(c)) return 0;   // climb past these
+        if (!s.empty() && (s.back() == '{' || s.back() == '(')) return 1;
+        return 0;
+    };
+    const int mi = match_line_1based - 1;          // 0-based match index
+    const int match_indent = indent_of(lines[static_cast<std::size_t>(mi)]);
+    int lo = std::max(0, mi - kMaxLookback);
+    int best_indent = match_indent;                // climb to ever-shallower
+    std::string fallback;                          // a tier-1 opener, if any
+    for (int i = mi - 1; i >= lo; --i) {
+        auto r = lines[static_cast<std::size_t>(i)];
+        if (is_blank(r)) continue;
+        int ind = indent_of(r);
+        if (ind >= best_indent) continue;          // not a shallower scope
+        std::string_view s{content.data() + r.first, r.second - r.first};
+        std::size_t l = 0;
+        while (l < s.size() && (s[l] == ' ' || s[l] == '\t')) ++l;
+        s.remove_prefix(l);
+        int kind = classify(s);
+        if (kind == 2) {
+            std::string out{s};
+            if (out.size() > 100) { out.resize(99); out += "\xe2\x80\xa6"; }
+            return out;                            // named def wins outright
+        }
+        if (kind == 1) {
+            // Remember the first (innermost) bare opener as a fallback,
+            // then keep climbing to look for a named def above it.
+            if (fallback.empty()) {
+                fallback.assign(s);
+                if (fallback.size() > 100) { fallback.resize(99); fallback += "\xe2\x80\xa6"; }
+            }
+            best_indent = ind;                     // tighten the climb
+            continue;
+        }
+        // kind == 0: control-flow opener or a non-opener at lower indent.
+        // Tighten the climb bound but keep scanning upward for the
+        // enclosing named definition.
+        best_indent = ind;
+    }
+    return fallback;
+}
+
 ExecResult run_ripgrep(const GrepArgs& a) {
     std::vector<std::string> argv = {"rg", "--json", "--no-config"};
     if (!a.case_sensitive) argv.push_back("-i");
@@ -341,6 +455,21 @@ ExecResult run_ripgrep(const GrepArgs& a) {
             }
         }
 
+        // Lazily load the file body the first time a block in this file is
+        // actually emitted — needed for the enclosing-symbol breadcrumb,
+        // which rg's ±2 context window can't give us. Bounded to the ≤20
+        // files we show per page, so at most 20 reads.
+        std::string file_body;
+        bool body_loaded = false;
+        auto breadcrumb_for = [&](int match_line) -> std::string {
+            if (!body_loaded) {
+                file_body = util::read_file(fs::path{f.path});
+                body_loaded = true;
+            }
+            if (file_body.empty()) return {};
+            return enclosing_symbol(file_body, match_line);
+        };
+
         bool emitted_header = false;
         for (auto& b : blocks) {
             if (b.matches == 0) continue;
@@ -357,7 +486,14 @@ ExecResult run_ripgrep(const GrepArgs& a) {
                 out << "## Matches in " << f.path << "\n\n";
                 emitted_header = true;
             }
-            out << "### L" << b.s << "-" << b.e << "\n```\n";
+            // First matching row in this block drives the breadcrumb.
+            int first_match_line = b.s;
+            for (const auto* row : b.rows)
+                if (row->is_match) { first_match_line = row->line_no; break; }
+            std::string sym = breadcrumb_for(first_match_line);
+            out << "### ";
+            if (!sym.empty()) out << sym << " \xe2\x80\xba ";
+            out << "L" << b.s << "-" << b.e << "\n```\n";
             for (const auto* row : b.rows) out << row->text << "\n";
             out << "```\n\n";
             shown += b.matches;
@@ -557,7 +693,13 @@ ExecResult run_builtin(const GrepArgs& a) {
         out << "## Matches in " << h.path.string() << "\n\n";
         for (auto [s, e] : page_ranges) {
             int es = std::min(e, last_line);
-            out << "### L" << (s + 1) << "-" << (es + 1) << "\n```\n";
+            // Breadcrumb keyed off the first line of the merged window
+            // (the match sits at/after the window start). h.content is
+            // already fully in memory here, so this is free.
+            std::string sym = enclosing_symbol(h.content, s + 1);
+            out << "### ";
+            if (!sym.empty()) out << sym << " \xe2\x80\xba ";
+            out << "L" << (s + 1) << "-" << (es + 1) << "\n```\n";
             for (int i = s; i <= es; ++i) {
                 std::size_t ls = line_starts[static_cast<std::size_t>(i)];
                 std::size_t le = line_starts[static_cast<std::size_t>(i) + 1] - 1;
@@ -631,9 +773,10 @@ ToolDef tool_grep() {
     constexpr const auto& kSpec = spec::require<"grep">();
     t.name = ToolName{std::string{kSpec.name}};
     t.description = "Search for a regex pattern across files. Returns matches grouped by "
-                    "file with 2 lines of context, paginated 20 results per page. "
-                    "Case-insensitive by default; pass case_sensitive=true for exact case. "
-                    "Use offset for subsequent pages.";
+                    "file with 2 lines of context, each block headed by the enclosing "
+                    "function/class when detectable (e.g. `### fn foo \xe2\x80\xba L12-14`). "
+                    "Paginated 20 results per page. Case-insensitive by default; pass "
+                    "case_sensitive=true for exact case. Use offset for subsequent pages.";
     t.input_schema = json{
         {"type","object"},
         {"required", {"pattern"}},

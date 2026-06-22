@@ -320,17 +320,24 @@ ExecResult run_read(const ReadArgs& a) {
     // files where the body itself is cheap enough that an extra
     // round-trip is the worse trade.
     if (a.no_explicit_range && content.size() > kAutoOutlineSize) {
+        std::size_t kib = content.size() / 1024;
         std::string outline = render_outline(content);
+        // The synthetic body we ship in place of the full file: either a
+        // symbol outline, or — when the file has no recognisable
+        // declarations (README / log / JSON dump / minified blob) — the
+        // first 1 KiB so the model still gets a useful peek instead of a
+        // multi-hundred-KiB dump. Mirrors Zed's outline.rs empty-outline
+        // first-1KB fallback (is_synthetic path).
+        std::string out;
         if (!outline.empty()) {
-            std::size_t kib = content.size() / 1024;
-            std::string out = std::format(
+            out = std::format(
                 "SUCCESS: File outline retrieved. This file is {} KiB "
                 "and was returned as a structural overview instead "
                 "of full content to save context.\n\n"
-                "IMPORTANT: Do NOT retry this call without a line "
-                "range \xe2\x80\x94 you'll get the same outline back. "
-                "Use start_line / end_line (or offset / limit) on a "
-                "follow-up read to fetch the section you want.\n\n"
+                "IMPORTANT: Do NOT retry this read without a line range "
+                "\xe2\x80\x94 you will get the exact same outline back "
+                "and waste a turn. To see real file content you MUST "
+                "pass start_line + end_line (or offset + limit).\n\n"
                 "# Outline of {}\n\n{}\n"
                 "NEXT STEPS: to read a specific symbol's body, call "
                 "read again with this path plus start_line and "
@@ -338,32 +345,60 @@ ExecResult run_read(const ReadArgs& a) {
                 "(e.g. for `[L120] fn foo()`, try start_line=120, "
                 "end_line=180).",
                 kib, a.path.string(), outline);
-            if (!a.display_description.empty())
-                out = a.display_description + "\n" + out;
-
-            // Still record the read in the staleness cache so a
-            // re-read of the same (path, offset=1, limit=2000) tuple
-            // collapses to the unchanged-sentinel. The outline body
-            // is what the prior tool_result held; the model "refers
-            // to that" exactly the same way as for a full read.
-            if (current_mtime.time_since_epoch().count() != 0) {
-                std::error_code canon_ec;
-                auto canon = fs::weakly_canonical(p, canon_ec);
-                if (!canon_ec) {
-                    ReadCacheKey key{canon.string(), a.offset, a.limit};
-                    std::lock_guard lk{read_cache().mu};
-                    read_cache().seen[std::move(key)] = current_mtime;
-                }
-            }
-            // Snapshot the file content so edit/write staleness checks
-            // work even when the model only saw the outline.
-            util::record_file_seen(p, current_mtime,
-                                   static_cast<std::uintmax_t>(content.size()),
-                                   util::content_fnv1a(content));
-            return ToolOutput{std::move(out), std::nullopt};
+        } else {
+            // No declarations found. Ship the first 1 KiB, snapped to a
+            // UTF-8 boundary AND the last newline so we never cut a
+            // multibyte char or strand a half line. Total line count is
+            // reported so the model knows how much more there is.
+            constexpr std::size_t kPeekBytes = 1024;
+            std::size_t cut = std::min(kPeekBytes, content.size());
+            // Back up off a UTF-8 continuation byte.
+            while (cut > 0
+                   && (static_cast<unsigned char>(content[cut]) & 0xC0) == 0x80)
+                --cut;
+            // Prefer cutting at the last newline within the window so the
+            // peek ends on a whole line (only if one exists past byte 0).
+            std::size_t nl = content.rfind('\n', cut == 0 ? 0 : cut - 1);
+            if (nl != std::string::npos && nl > 0) cut = nl + 1;
+            int total_lines = 0;
+            for (char c : content) if (c == '\n') ++total_lines;
+            if (!content.empty() && content.back() != '\n') ++total_lines;
+            std::string_view peek{content.data(), cut};
+            out = std::format(
+                "SUCCESS: First 1 KiB of a {} KiB file with no "
+                "recognisable code structure (README / log / data dump). "
+                "Returned a leading slice instead of the full body to "
+                "save context.\n\n"
+                "IMPORTANT: Do NOT retry this read without a line range "
+                "\xe2\x80\x94 you will get the exact same slice back. To "
+                "see more, pass start_line + end_line (or offset + "
+                "limit); the file has {} lines total.\n\n"
+                "# First 1 KiB of {}\n\n{}",
+                kib, total_lines, a.path.string(), peek);
         }
-        // Empty outline (no recognisable definitions — README, log
-        // file, JSON dump) falls through to the normal slicing path.
+        if (!a.display_description.empty())
+            out = a.display_description + "\n" + out;
+
+        // Still record the read in the staleness cache so a re-read of
+        // the same (path, offset=1, limit=2000) tuple collapses to the
+        // unchanged-sentinel. The synthetic body is what the prior
+        // tool_result held; the model "refers to that" the same way as
+        // for a full read.
+        if (current_mtime.time_since_epoch().count() != 0) {
+            std::error_code canon_ec;
+            auto canon = fs::weakly_canonical(p, canon_ec);
+            if (!canon_ec) {
+                ReadCacheKey key{canon.string(), a.offset, a.limit};
+                std::lock_guard lk{read_cache().mu};
+                read_cache().seen[std::move(key)] = current_mtime;
+            }
+        }
+        // Snapshot the file content so edit/write staleness checks work
+        // even when the model only saw the outline / peek.
+        util::record_file_seen(p, current_mtime,
+                               static_cast<std::uintmax_t>(content.size()),
+                               util::content_fnv1a(content));
+        return ToolOutput{std::move(out), std::nullopt};
     }
     std::string out;
     // Reserve the full content size on small files (one big alloc, no
@@ -465,10 +500,12 @@ ToolDef tool_read() {
                     "starting at an optional offset. For files over 32 KiB, "
                     "reading without an explicit line range returns a SYMBOL "
                     "OUTLINE (function / class / heading names with line "
-                    "numbers) instead of the full content; use start_line + "
-                    "end_line (or offset + limit) on a follow-up read to "
-                    "fetch the specific section you want. Include a brief "
-                    "`display_description` so the user sees why you're reading.";
+                    "numbers) \xe2\x80\x94 or, if the file has no code "
+                    "structure, its first 1 KiB \xe2\x80\x94 instead of the "
+                    "full content; use start_line + end_line (or offset + "
+                    "limit) on a follow-up read to fetch the specific section "
+                    "you want. Include a brief `display_description` so the "
+                    "user sees why you're reading.";
     t.input_schema = json{
         {"type", "object"},
         {"required", {"path"}},

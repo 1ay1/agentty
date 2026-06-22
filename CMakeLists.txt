@@ -1237,6 +1237,45 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME tool_result_budget_test COMMAND tool_result_budget_test)
 
+    # read_grep_features_test — verifies the two Zed-derived tool
+    # enhancements: read's structureless-big-file "First 1 KiB" fallback
+    # (vs the symbol OUTLINE for code files) and grep's enclosing-symbol
+    # breadcrumb in each match block header. Drives the real registered
+    # ToolDefs (find("read") / find("grep")) over temp-dir fixtures.
+    add_executable(read_grep_features_test EXCLUDE_FROM_ALL
+        tests/read_grep_features_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(read_grep_features_test PRIVATE include)
+    target_compile_definitions(read_grep_features_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(read_grep_features_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(read_grep_features_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(read_grep_features_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME read_grep_features_test COMMAND read_grep_features_test)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
@@ -1513,6 +1552,7 @@ if(AGENTTY_BUILD_TESTS)
         openai_transport_test
         visual_hash_coverage_test
         tool_result_budget_test
+        read_grep_features_test
         salvage_dedup_test
         acp_integration_test
         frozen_invariant_fuzz
