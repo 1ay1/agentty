@@ -6,11 +6,14 @@
 #include "agentty/tool/util/tool_args.hpp"
 #include "agentty/domain/refined.hpp"
 
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <format>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -60,31 +63,68 @@ ExecResult run_glob(const GlobArgs& a) {
     const auto& pat = a.pattern.value();
     bool has_glob = pat.find_first_of("*?[") != std::string::npos;
 
-    std::ostringstream out;
-    int n = 0;
+    struct Entry {
+        std::string path;
+        bool is_dir;
+        bool is_link;
+        uintmax_t size;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(512);
+
     std::error_code ec;
     for (auto it = fs::recursive_directory_iterator(wp->path(),
                 fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (ec) { ec.clear(); continue; }
         auto fn = it->path().filename().string();
-        if (it->is_directory(ec)) {
+        bool is_dir_entry = it->is_directory(ec);
+        if (is_dir_entry) {
             if (util::should_skip_dir(fn)) { it.disable_recursion_pending(); continue; }
-            continue;
         }
-        if (!it->is_regular_file(ec)) continue;
         bool hit = has_glob ? util::glob_match(pat, fn)
                             : fn.find(pat) != std::string::npos;
         if (hit) {
-            out << it->path().string() << "\n";
-            if (++n > 500) { out << "[>500, truncated]\n"; break; }
+            bool is_link = it->is_symlink(ec);
+            uintmax_t sz = 0;
+            if (!is_dir_entry && !is_link) {
+                std::error_code sec;
+                sz = it->file_size(sec);
+            }
+            entries.push_back({it->path().string(), is_dir_entry, is_link, sz});
+            if (entries.size() > 500) break;
         }
     }
-    if (n == 0)
+
+    if (entries.empty())
         return ToolOutput{"no matches. Try a different pattern, or `list_dir` "
                           "on parent directories to see what exists.",
                           std::nullopt};
-    std::string body = "Found " + std::to_string(n) + " file(s):\n" + out.str();
+
+    // Sort: directories first, then by path.
+    std::sort(entries.begin(), entries.end(), [](const Entry& x, const Entry& y) {
+        if (x.is_dir != y.is_dir) return x.is_dir > y.is_dir;
+        return x.path < y.path;
+    });
+
+    auto format_size = [](uintmax_t bytes) -> std::string {
+        char buf[16];
+        if (bytes < 1024) { std::snprintf(buf, sizeof(buf), "%juB", bytes); return buf; }
+        if (bytes < 1024*1024) { std::snprintf(buf, sizeof(buf), "%.1fK", bytes/1024.0); return buf; }
+        std::snprintf(buf, sizeof(buf), "%.1fM", bytes/(1024.0*1024.0)); return buf;
+    };
+
+    std::ostringstream out;
+    for (const auto& e : entries) {
+        out << e.path;
+        if (e.is_dir) out << "/";
+        else if (e.is_link) out << "@";
+        else if (e.size > 0) out << "  " << format_size(e.size);
+        out << "\n";
+    }
+
+    std::string body = "Found " + std::to_string(entries.size()) + " file(s):\n" + out.str();
+    if (entries.size() > 500) body += "[>500, truncated]\n";
     if (!a.display_description.empty())
         body = a.display_description + "\n" + body;
     return ToolOutput{std::move(body), std::nullopt};

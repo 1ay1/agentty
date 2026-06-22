@@ -2,8 +2,10 @@
 #include "agentty/tool/tools.hpp"
 #include "agentty/tool/util/arg_reader.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/subprocess.hpp"
 #include "agentty/tool/util/tool_args.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -40,8 +42,10 @@ std::expected<FindDefinitionArgs, ToolError> parse_find_definition_args(const js
 }
 
 ExecResult run_find_definition(const FindDefinitionArgs& a) {
-    // Regex-escape the symbol. Operator names (`operator*`, `operator<<`)
-    // and templated forms otherwise explode the regex parser.
+    auto wp = util::make_workspace_path_checked(a.root, "find_definition");
+    if (!wp) return std::unexpected(std::move(wp.error()));
+
+    // Regex-escape the symbol for both ripgrep and std::regex.
     std::string esc;
     esc.reserve(a.symbol.size() * 2);
     for (char c : a.symbol) {
@@ -55,6 +59,45 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
         }
     }
 
+    // ── Ripgrep fast path (10-100x faster than std::regex walk) ─────────
+    // Combined pattern covers C/C++/Python/JS/TS/Go/Rust definitions.
+    // ripgrep's PCRE2 handles the alternation efficiently.
+    std::string rg_pattern =
+        "\\b(class|struct|enum|union|namespace|typedef|using|def|function|"
+        "const|let|var|type|interface|export|func|fn|trait|mod|static)\\s+"
+        + esc + "\\b|#define\\s+" + esc + "\\b|\\b\\w[\\w:*&<> ]*\\s+" + esc + "\\s*\\(";
+
+    // Check if ripgrep is available (cached after first check).
+    static int rg_available = -1;  // -1 = unknown, 0 = no, 1 = yes
+    if (rg_available < 0) {
+        auto r = util::run_command_s("rg --version", 5000, std::chrono::seconds{2});
+        rg_available = (r.started && r.exit_code == 0) ? 1 : 0;
+    }
+
+    if (rg_available == 1) {
+        // Build ripgrep command. -n = line numbers, -H = filenames,
+        // --no-heading = grep-style output, -M 500 = max line length,
+        // -m 50 = max matches, --type-add for code extensions.
+        std::string cmd = "rg -n -H --no-heading -M 500 -m 50 "
+            "--type-add 'code:*.{cpp,hpp,c,h,cc,hh,cxx,hxx,py,js,ts,jsx,tsx,go,rs,java,kt,rb,swift,zig,lua}' "
+            "-t code -e '" + rg_pattern + "' '" + wp->path().string() + "'";
+        auto r = util::run_command_s(cmd, 100000, std::chrono::seconds{30});
+        if (r.started && (r.exit_code == 0 || r.exit_code == 1)) {
+            // exit_code 1 = no matches (normal for rg)
+            if (r.output.empty() || r.exit_code == 1) {
+                return ToolOutput{"no definitions found for '" + a.symbol + "'", std::nullopt};
+            }
+            std::string body = r.output;
+            // Trim trailing newline for cleaner output.
+            while (!body.empty() && body.back() == '\n') body.pop_back();
+            if (!a.display_description.empty())
+                body = a.display_description + "\n" + body;
+            return ToolOutput{std::move(body), std::nullopt};
+        }
+        // ripgrep failed (maybe bad regex) — fall through to std::regex.
+    }
+
+    // ── Fallback: std::regex walk ────────────────────────────────────────
     std::vector<std::regex> patterns;
     try {
         // C/C++
@@ -72,9 +115,6 @@ ExecResult run_find_definition(const FindDefinitionArgs& a) {
     } catch (...) {
         return std::unexpected(ToolError::invalid_regex("invalid symbol name for regex"));
     }
-
-    auto wp = util::make_workspace_path_checked(a.root, "find_definition");
-    if (!wp) return std::unexpected(std::move(wp.error()));
 
     std::ostringstream out;
     int matches = 0;

@@ -6,6 +6,7 @@
 #include "agentty/tool/util/tool_args.hpp"
 
 #include <filesystem>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -73,15 +74,56 @@ ExecResult run_diagnostics(const DiagnosticsArgs& a) {
     // are well-known but still write to disk; sandbox lets them write
     // inside the workspace and nowhere else).
     auto sub = auto_argv.empty()
-        ? util::sandbox::run_shell_command(a.command, /*max_bytes*/30'000,
-                                           std::chrono::seconds{60})
-        : util::sandbox::run_argv(auto_argv, /*max_bytes*/30'000,
-                                  std::chrono::seconds{60});
-    auto output = util::legacy_format(sub, std::chrono::seconds{60});
+        ? util::sandbox::run_shell_command(a.command, /*max_bytes*/100'000,
+                                           std::chrono::seconds{120})
+        : util::sandbox::run_argv(auto_argv, /*max_bytes*/100'000,
+                                  std::chrono::seconds{120});
+    auto output = util::legacy_format(sub, std::chrono::seconds{120});
     if (output.empty()) return ToolOutput{"no diagnostics (clean build)", std::nullopt};
+
+    // Parse output for error/warning counts and highlight first errors.
+    // Common patterns: "error:", "Error:", " error ", "warning:", etc.
+    int errors = 0, warnings = 0;
+    std::vector<std::string> error_lines;
+    error_lines.reserve(10);
+    std::istringstream iss(output);
+    std::string line;
+    while (std::getline(iss, line)) {
+        // Case-insensitive search for error/warning.
+        bool is_error = (line.find("error:") != std::string::npos ||
+                         line.find("Error:") != std::string::npos ||
+                         line.find("ERROR:") != std::string::npos ||
+                         line.find(" error ") != std::string::npos ||
+                         line.find("error[") != std::string::npos);  // Rust
+        bool is_warning = (line.find("warning:") != std::string::npos ||
+                           line.find("Warning:") != std::string::npos ||
+                           line.find("WARNING:") != std::string::npos ||
+                           line.find("warn[") != std::string::npos);  // Rust
+        if (is_error) {
+            ++errors;
+            if (error_lines.size() < 10) error_lines.push_back(line);
+        }
+        if (is_warning) ++warnings;
+    }
+
+    std::ostringstream result;
+    if (errors > 0 || warnings > 0) {
+        result << "❌ " << errors << " error(s), " << warnings << " warning(s)\n\n";
+        if (!error_lines.empty()) {
+            result << "First errors:\n";
+            for (const auto& el : error_lines) {
+                result << "  " << el << "\n";
+            }
+            result << "\n";
+        }
+        result << "Full output:\n";
+    }
+    result << output;
+
+    std::string body = result.str();
     if (!a.display_description.empty())
-        output = a.display_description + "\n" + output;
-    return ToolOutput{std::move(output), std::nullopt};
+        body = a.display_description + "\n" + body;
+    return ToolOutput{std::move(body), std::nullopt};
 }
 
 } // namespace
