@@ -14,6 +14,7 @@
 #include <utility>
 #include <variant>
 
+#include <maya/core/animation.hpp>
 #include <maya/widget/spinner.hpp>
 
 namespace agentty::http { class CancelToken; }
@@ -478,6 +479,14 @@ struct StreamState {
     std::array<float, kRateSamples> rate_history{};
     std::size_t rate_history_pos = 0;
     bool rate_history_full = false;
+
+    // Spring-smoothed version of the BIG displayed tok/s readout. The raw
+    // instantaneous rate (live_delta_bytes/4 ÷ elapsed) is recomputed every
+    // frame and jitters hard — the number visibly flickers. We retarget this
+    // spring at the raw value each frame and display its settled value, so
+    // the readout glides instead of strobing. Ticked in the Tick handler
+    // alongside the spinner; reset to 0 when no stream is in flight.
+    maya::anim::Spring<double> disp_rate_spring{0.0, maya::anim::spring_presets::gentle};
 
     // ── Phase predicates ─────────────────────────────────────────────
     [[nodiscard]] bool is_idle()                const noexcept { return std::holds_alternative<phase::Idle>(phase); }

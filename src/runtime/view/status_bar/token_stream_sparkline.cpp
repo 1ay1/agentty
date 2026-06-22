@@ -43,16 +43,17 @@ maya::TokenStreamSparkline::Config token_stream_sparkline_config(const Model& m)
         ? std::chrono::duration_cast<std::chrono::milliseconds>(
               now - a->first_delta_at).count()
         : 0;
-    double sec        = std::max(0.001, static_cast<double>(ts_ms) / 1000.0);
     double approx_tok = a ? static_cast<double>(a->live_delta_bytes) / 4.0 : 0.0;
 
     // Pick the displayed rate: live during streaming (after a 250 ms
     // warm-up so the first frame isn't a divide-by-tiny-time spike),
     // freeze on most recent sample otherwise (so the number doesn't
-    // decay during tool execution), 0 before any data.
+    // decay during tool execution), 0 before any data. While streaming
+    // we show the Spring-smoothed value (ticked in the Tick handler) so
+    // the readout glides instead of strobing frame-to-frame.
     float disp_rate;
     if (is_streaming && ts_ms >= 250) {
-        disp_rate = static_cast<float>(approx_tok / sec);
+        disp_rate = static_cast<float>(m.s.disp_rate_spring.value());
     } else if (!hist.empty()) {
         disp_rate = hist.back();
     } else {

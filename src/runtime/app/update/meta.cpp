@@ -103,6 +103,29 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.last_tick = now;
             if (m.s.active()) m.s.spinner.advance(dt);
 
+            // Glide the BIG tok/s readout. Retarget the smoothing spring at
+            // the same raw instantaneous rate the status bar would show, then
+            // advance it by dt. The view reads disp_rate_spring.value() so the
+            // number eases between samples instead of strobing frame-to-frame.
+            // When nothing is in flight, pull it to rest at 0.
+            {
+                double raw_target = 0.0;
+                if (auto* ra = active_ctx(m.s.phase);
+                    ra && m.s.is_streaming()
+                    && ra->first_delta_at.time_since_epoch().count() != 0) {
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  now - ra->first_delta_at).count();
+                    if (ms >= 250) {
+                        double sec = std::max(0.001, static_cast<double>(ms) / 1000.0);
+                        raw_target = (static_cast<double>(ra->live_delta_bytes) / 4.0) / sec;
+                    } else {
+                        raw_target = m.s.disp_rate_spring.target();  // hold during warm-up
+                    }
+                }
+                m.s.disp_rate_spring.set_target(raw_target);
+                m.s.disp_rate_spring.tick(dt);
+            }
+
             // Post-freeze settling window countdown. Keeps the tick
             // subscription armed (subscribe.cpp gates on it) for a few
             // frames after the settle-freeze so maya's renderer fully
