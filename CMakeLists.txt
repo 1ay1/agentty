@@ -472,15 +472,145 @@ set(AGENTTY_RUNTIME_SOURCES
     ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
 )
 
+# ── Shared compile flags ────────────────────────────────────────────────
+# All agentty TUs (the main binary, the shared OBJECT libraries below, and
+# every test) MUST compile with byte-identical flags. The arch flag
+# (-march / /arch) bakes intrinsic selection and ABI into each .o; mixing
+# objects built with different flags is undefined. Centralise here so the
+# OBJECT libs and the exe can't drift.
+function(agentty_apply_compile_flags tgt)
+if(MSVC)
+    target_compile_options(${tgt} PRIVATE
+        /W4
+        /utf-8                 # treat source and exec charsets as UTF-8
+        /std:c++latest         # opt into C++26 library bits beyond /std:c++23
+        /permissive-           # strict conformance
+        /Zc:preprocessor       # conforming preprocessor
+        /Zc:__cplusplus        # report real __cplusplus value
+        /Zc:inline             # drop unreferenced COMDATs at compile time
+        /Zc:throwingNew        # assume ::new never returns null
+        /EHsc
+        /bigobj                # maya's templates blow past default sections
+        /MP                    # parallel compilation across TUs
+        /wd4100                # unreferenced formal parameter — common in lambdas
+        /wd4127                # conditional expression is constant (if constexpr paths)
+        /wd4324                # structure padded due to alignment specifier
+        # ── Release-only aggressive optimization ─────────────────────
+        $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:
+            /O2                #  max-speed optimization
+            /Ob3               #  aggressive inlining beyond /Ob2
+            /Oi                #  intrinsic functions
+            /Ot                #  favor speed over size
+            /Oy                #  omit frame pointer (frees a GPR)
+            /GL                #  whole-program optimization (pairs with /LTCG)
+            /GF                #  eliminate duplicate strings
+            /Gy                #  function-level linking (linker /OPT:ICF/REF fodder)
+            /Gw                #  package globals for linker to fold/strip
+            /GS-               #  no stack-buffer cookies — TUI, not a daemon
+            /GR                #  keep RTTI (context.hpp uses typeid)
+            /fp:fast           #  relax FP strictness — no errno / reassociation
+            $<$<STREQUAL:${AGENTTY_ARCH},avx2>:/arch:AVX2>    # Haswell+ / Zen1+
+            $<$<STREQUAL:${AGENTTY_ARCH},avx>:/arch:AVX>      # Sandy/Ivy Bridge
+            # MSVC has no /arch:SSE2 (it's the default on x64) or /arch:native;
+            # both map to "no flag" — the default x64 codegen already assumes
+            # SSE2. `native` on MSVC degrades to the default baseline.
+            /Qpar              #  enable auto-parallelizer for hot loops
+        >
+    )
+    target_compile_definitions(${tgt} PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:NDEBUG>
+    )
+else()
+    target_compile_options(${tgt} PRIVATE
+        -Wall -Wextra -Wpedantic
+        -Wno-deprecated-declarations
+        # Designated init like `TextElement{.content=…, .style=…}` is the
+        # intentional pattern across the view layer — leaving cache fields
+        # default-initialized is correct, not a bug. -Wmissing-field-
+        # initializers (a -Wextra default) doesn't model that.
+        -Wno-missing-field-initializers
+    )
+    # GCC -Wmaybe-uninitialized produces false positives on std::variant moves
+    # of designated-initialized aggregates (maya's Element{TextElement{...}} pattern).
+    # The warnings escape -isystem because they fire during late optimization.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${tgt} PRIVATE -Wno-maybe-uninitialized)
+    endif()
+
+    # macOS SDK + GCC: <mach/port.h> uses `_Static_assert` (C keyword) in
+    # arm64 macros that fire from any TU pulling in mach headers (e.g.
+    # subprocess.cpp via <spawn.h>). Alias the C spelling to its C++
+    # equivalent so the SDK headers parse under GCC's C++ frontend.
+    if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_definitions(${tgt} PRIVATE
+            _Static_assert=static_assert)
+    endif()
+endif()
+endfunction()
+
+# ── Shared OBJECT libraries ─────────────────────────────────────────────
+# Compile every shared TU EXACTLY ONCE into an OBJECT library, then reuse
+# the objects (via $<TARGET_OBJECTS:...>) in the main binary AND every
+# test. Before this, each of the ~20 test targets recompiled the full
+# provider+tool+runtime source set into its own object dir — a clean
+# `--target tests` rebuilt the entire codebase ~20 times. With OBJECT
+# libraries the shared cost is paid once; a test rebuild is just its own
+# .cpp + a link.
+#
+# `agentty_objlib(NAME src...)` defines the lib, wires the include dir +
+# AGENTTY_VERSION define + the project compile flags, and links the
+# header-providing libs as INTERFACE deps so transitive #includes resolve
+# during compilation (OBJECT libs don't link, but they DO need the
+# headers). maya/json/simdjson/nghttp2/openssl all expose their include
+# dirs through their imported targets.
+function(agentty_objlib name)
+    add_library(${name} OBJECT ${ARGN})
+    target_include_directories(${name} PRIVATE include)
+    target_compile_definitions(${name} PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+    agentty_apply_compile_flags(${name})
+    # Header-only access to the linked libs (no actual linking for OBJECT).
+    target_link_libraries(${name} PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+endfunction()
+
+agentty_objlib(agentty_io_obj        ${AGENTTY_IO_SOURCES})
+agentty_objlib(agentty_workspace_obj ${AGENTTY_WORKSPACE_SOURCES})
+agentty_objlib(agentty_airgap_obj    ${AGENTTY_AIRGAP_SOURCES})
+agentty_objlib(agentty_provider_obj  ${AGENTTY_PROVIDER_SOURCES})
+agentty_objlib(agentty_diff_obj      ${AGENTTY_DIFF_SOURCES})
+agentty_objlib(agentty_tool_obj      ${AGENTTY_TOOL_SOURCES})
+agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
+# ACP glue is only needed by the exe + acp_integration_test. It also
+# needs the acp::acp include dir (acp/acp.hpp) on top of the standard set.
+agentty_objlib(agentty_acp_obj       ${AGENTTY_ACP_SOURCES})
+target_link_libraries(agentty_acp_obj PRIVATE acp::acp)
+
+# The shared object set every "full" test (and the exe) consumes — the
+# whole runtime minus main.cpp and minus the ACP glue.
+set(AGENTTY_SHARED_OBJECTS
+    $<TARGET_OBJECTS:agentty_io_obj>
+    $<TARGET_OBJECTS:agentty_workspace_obj>
+    $<TARGET_OBJECTS:agentty_airgap_obj>
+    $<TARGET_OBJECTS:agentty_provider_obj>
+    $<TARGET_OBJECTS:agentty_diff_obj>
+    $<TARGET_OBJECTS:agentty_tool_obj>
+    $<TARGET_OBJECTS:agentty_runtime_obj>
+)
+
 add_executable(agentty
-    ${AGENTTY_IO_SOURCES}
-    ${AGENTTY_WORKSPACE_SOURCES}
-    ${AGENTTY_AIRGAP_SOURCES}
-    ${AGENTTY_PROVIDER_SOURCES}
-    ${AGENTTY_ACP_SOURCES}
-    ${AGENTTY_DIFF_SOURCES}
-    ${AGENTTY_TOOL_SOURCES}
-    ${AGENTTY_RUNTIME_SOURCES}
+    src/runtime/main.cpp
+    ${AGENTTY_SHARED_OBJECTS}
+    $<TARGET_OBJECTS:agentty_acp_obj>
 )
 
 target_include_directories(agentty PRIVATE include)
@@ -621,44 +751,12 @@ elseif(AGENTTY_STATIC_RUNTIME AND MSVC)
     message(STATUS "agentty: static MSVC runtime (/MT).")
 endif()
 
+# ── Shared compile flags applied to agentty ─────────────────────────
+# (agentty_apply_compile_flags is defined up top, before the OBJECT libs.)
+agentty_apply_compile_flags(agentty)
+
+# agentty-exe-only MSVC link-time codegen (consumes the /GL objects).
 if(MSVC)
-    target_compile_options(agentty PRIVATE
-        /W4
-        /utf-8                 # treat source and exec charsets as UTF-8
-        /std:c++latest         # opt into C++26 library bits beyond /std:c++23
-        /permissive-           # strict conformance
-        /Zc:preprocessor       # conforming preprocessor
-        /Zc:__cplusplus        # report real __cplusplus value
-        /Zc:inline             # drop unreferenced COMDATs at compile time
-        /Zc:throwingNew        # assume ::new never returns null
-        /EHsc
-        /bigobj                # maya's templates blow past default sections
-        /MP                    # parallel compilation across TUs
-        /wd4100                # unreferenced formal parameter — common in lambdas
-        /wd4127                # conditional expression is constant (if constexpr paths)
-        /wd4324                # structure padded due to alignment specifier
-        # ── Release-only aggressive optimization ─────────────────────
-        $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:
-            /O2                #  max-speed optimization
-            /Ob3               #  aggressive inlining beyond /Ob2
-            /Oi                #  intrinsic functions
-            /Ot                #  favor speed over size
-            /Oy                #  omit frame pointer (frees a GPR)
-            /GL                #  whole-program optimization (pairs with /LTCG)
-            /GF                #  eliminate duplicate strings
-            /Gy                #  function-level linking (linker /OPT:ICF/REF fodder)
-            /Gw                #  package globals for linker to fold/strip
-            /GS-               #  no stack-buffer cookies — TUI, not a daemon
-            /GR                #  keep RTTI (context.hpp uses typeid)
-            /fp:fast           #  relax FP strictness — no errno / reassociation
-            $<$<STREQUAL:${AGENTTY_ARCH},avx2>:/arch:AVX2>    # Haswell+ / Zen1+
-            $<$<STREQUAL:${AGENTTY_ARCH},avx>:/arch:AVX>      # Sandy/Ivy Bridge
-            # MSVC has no /arch:SSE2 (it's the default on x64) or /arch:native;
-            # both map to "no flag" — the default x64 codegen already assumes
-            # SSE2. `native` on MSVC degrades to the default baseline.
-            /Qpar              #  enable auto-parallelizer for hot loops
-        >
-    )
     target_link_options(agentty PRIVATE
         $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:
             /LTCG              # link-time codegen (consumes /GL .obj files)
@@ -668,47 +766,16 @@ if(MSVC)
             /DEBUG:NONE        # no PDB in Release
         >
     )
-    target_compile_definitions(agentty PRIVATE
-        _CRT_SECURE_NO_WARNINGS
-        NOMINMAX
-        WIN32_LEAN_AND_MEAN
-        $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:NDEBUG>
-    )
-else()
-    target_compile_options(agentty PRIVATE
-        -Wall -Wextra -Wpedantic
-        -Wno-deprecated-declarations
-        # Designated init like `TextElement{.content=…, .style=…}` is the
-        # intentional pattern across the view layer — leaving cache fields
-        # default-initialized is correct, not a bug. -Wmissing-field-
-        # initializers (a -Wextra default) doesn't model that.
-        -Wno-missing-field-initializers
-    )
-    # GCC -Wmaybe-uninitialized produces false positives on std::variant moves
-    # of designated-initialized aggregates (maya's Element{TextElement{...}} pattern).
-    # The warnings escape -isystem because they fire during late optimization.
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_compile_options(agentty PRIVATE -Wno-maybe-uninitialized)
-    endif()
-
-    # macOS SDK + GCC: <mach/port.h> uses `_Static_assert` (C keyword) in
-    # arm64 macros that fire from any TU pulling in mach headers (e.g.
-    # subprocess.cpp via <spawn.h>). Alias the C spelling to its C++
-    # equivalent so the SDK headers parse under GCC's C++ frontend.
-    if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        target_compile_definitions(agentty PRIVATE
-            _Static_assert=static_assert)
-    endif()
 endif()
 
 # nghttp2.h is a C header whose multi-line function signatures trip MSVC's
 # conforming preprocessor (/Zc:preprocessor). Revert to the legacy
 # preprocessor for just this TU; the rest of the build keeps /Zc:preprocessor.
+# Applied directory-wide so the io OBJECT library's http.cpp gets it too.
 if(MSVC)
     set_source_files_properties(src/io/http.cpp PROPERTIES
         COMPILE_FLAGS "/Zc:preprocessor- /DNGHTTP2_STATICLIB")
 endif()
-
 # Opt-in sanitizer build: `cmake -B build-san -DAGENTTY_SANITIZE=address,undefined`.
 # Separate from CMAKE_BUILD_TYPE so CI / contributors can flip it without
 # redefining the whole toolchain.
@@ -791,120 +858,81 @@ if(AGENTTY_BUILD_TESTS)
         add_compile_definitions(_Static_assert=static_assert)
     endif()
 
+    # ── Full-runtime test helper ────────────────────────────────────────
+    # agentty_add_full_test(<name> [EXTRA_SRCS...] [EXTRA_LIBS...])
+    # Builds a test executable that REUSES the precompiled shared OBJECT
+    # libraries (no recompilation of the provider/tool/runtime stack) plus
+    # its own .cpp (tests/<name>.cpp) and any EXTRA_SRCS. Links the
+    # standard lib set + EXTRA_LIBS, applies the platform link blocks, and
+    # registers the ctest entry. Replaces ~40 lines of boilerplate per
+    # test with one call. Pass extra source files after the name; pass
+    # extra link libs after the keyword LIBS.
+    function(agentty_add_full_test name)
+        set(_extra_srcs "")
+        set(_extra_libs "")
+        set(_no_test FALSE)
+        set(_mode SRCS)
+        foreach(arg IN LISTS ARGN)
+            if(arg STREQUAL "LIBS")
+                set(_mode LIBS)
+            elseif(arg STREQUAL "NO_TEST")
+                set(_no_test TRUE)
+            elseif(_mode STREQUAL "LIBS")
+                list(APPEND _extra_libs ${arg})
+            else()
+                list(APPEND _extra_srcs ${arg})
+            endif()
+        endforeach()
+        add_executable(${name} EXCLUDE_FROM_ALL
+            tests/${name}.cpp
+            ${_extra_srcs}
+            ${AGENTTY_SHARED_OBJECTS}
+        )
+        target_include_directories(${name} PRIVATE include)
+        target_compile_definitions(${name} PRIVATE
+            AGENTTY_VERSION="${PROJECT_VERSION}")
+        target_link_libraries(${name} PRIVATE
+            maya::maya
+            nlohmann_json::nlohmann_json
+            simdjson::simdjson
+            nghttp2::nghttp2
+            OpenSSL::SSL
+            OpenSSL::Crypto
+            Threads::Threads
+            ${_extra_libs}
+        )
+        if(WIN32)
+            target_link_libraries(${name} PRIVATE
+                ws2_32 crypt32 shell32 winmm
+                user32 gdi32 gdiplus shlwapi)
+        endif()
+        if(APPLE)
+            target_link_libraries(${name} PRIVATE
+                "-framework Security"
+                "-framework CoreFoundation")
+        endif()
+        if(NOT _no_test)
+            add_test(NAME ${name} COMMAND ${name})
+        endif()
+    endfunction()
+
     # long_session_bench — perf stress for the resume/render hot paths
     # exercised by the seven pins in docs/INLINE_SCROLLBACK.md. Builds
     # synthetic tool-heavy Threads of varying shape and times every
     # phase from Thread construction through warm render.
-    add_executable(long_session_bench EXCLUDE_FROM_ALL
-        tests/long_session_bench.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(long_session_bench PRIVATE include)
-    target_compile_definitions(long_session_bench PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(long_session_bench PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(long_session_bench PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(long_session_bench PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
+    agentty_add_full_test(long_session_bench)
     # CTest entry — runs the bench with default scenarios. Exits non-zero
     # if any scenario throws; perf regressions are reported via stdout,
     # not via a CTest fail, because absolute timings vary by machine.
-    add_test(NAME long_session_bench COMMAND long_session_bench)
     set_tests_properties(long_session_bench PROPERTIES TIMEOUT 600)
 
     # o1_probe — measures steady-state per-frame warm render AFTER the
-    # live-session freeze+trim flow (the path long_session_bench's
-    # rehydrate-based render phase does NOT cover). Used to verify the
-    # frozen row-cap keeps warm render flat regardless of thread length.
-    add_executable(o1_probe EXCLUDE_FROM_ALL
-        tests/o1_probe.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(o1_probe PRIVATE include)
-    target_compile_definitions(o1_probe PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(o1_probe PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(o1_probe PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(o1_probe PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
+    # live-session freeze+trim flow. Build-only probe (not a ctest entry).
+    agentty_add_full_test(o1_probe NO_TEST)
 
     # realthread_probe — loads a real on-disk thread JSON and times the
-    # resume hot path (rehydrate_frozen + cold/warm render) to locate
-    # where a long thread's open time actually goes.
-    add_executable(realthread_probe EXCLUDE_FROM_ALL
-        tests/realthread_probe.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(realthread_probe PRIVATE include)
-    target_compile_definitions(realthread_probe PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(realthread_probe PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(realthread_probe PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(realthread_probe PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
+    # resume hot path (rehydrate_frozen + cold/warm render). Build-only.
+    agentty_add_full_test(realthread_probe NO_TEST)
 
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
@@ -958,115 +986,19 @@ if(AGENTTY_BUILD_TESTS)
     # midrun_freeze_test — correctness for freeze_settled_subturns: the
     # mid-run split (frozen prefix + live continuation tail) must be
     # visually seamless (one header, all content present, no elision).
-    add_executable(midrun_freeze_test EXCLUDE_FROM_ALL
-        tests/midrun_freeze_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(midrun_freeze_test PRIVATE include)
-    target_compile_definitions(midrun_freeze_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(midrun_freeze_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(midrun_freeze_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(midrun_freeze_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME midrun_freeze_test COMMAND midrun_freeze_test)
+    agentty_add_full_test(midrun_freeze_test)
 
     # midrun_seam_test — scrollback-duplication regression: across the
     # incremental mid-run freeze cadence, the committed row PREFIX must
     # stay byte-stable (a rewritten committed row = a duplicated turn in
     # native scrollback).
-    add_executable(midrun_seam_test EXCLUDE_FROM_ALL
-        tests/midrun_seam_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(midrun_seam_test PRIVATE include)
-    target_compile_definitions(midrun_seam_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(midrun_seam_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(midrun_seam_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(midrun_seam_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME midrun_seam_test COMMAND midrun_seam_test)
+    agentty_add_full_test(midrun_seam_test)
 
     # midrun_wire_test — WIRE-LEVEL scrollback-duplication regression.
     # Drives maya's REAL inline compose across the live->freeze handoff
     # and asserts no committed scrollback row is rewritten (the stranded
     # duplicate the seam test's render_tree comparison can't catch).
-    add_executable(midrun_wire_test EXCLUDE_FROM_ALL
-        tests/midrun_wire_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(midrun_wire_test PRIVATE include)
-    target_compile_definitions(midrun_wire_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(midrun_wire_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(midrun_wire_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(midrun_wire_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME midrun_wire_test COMMAND midrun_wire_test)
+    agentty_add_full_test(midrun_wire_test)
 
     # stream_liveness_test — UX-critical caret-liveness regression. The
     # live-edge typewriter caret must stay armed (request_animation_frame
@@ -1074,39 +1006,7 @@ if(AGENTTY_BUILD_TESTS)
     # 10 s inter-delta gap — and must disarm after settle + finalize
     # ramp. Locks the phase-authoritative RAF gate in turn.cpp
     # (commit a9760e7); a fixed byte-recency timeout would fail it.
-    add_executable(stream_liveness_test EXCLUDE_FROM_ALL
-        tests/stream_liveness_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(stream_liveness_test PRIVATE include)
-    target_compile_definitions(stream_liveness_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(stream_liveness_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(stream_liveness_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(stream_liveness_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME stream_liveness_test COMMAND stream_liveness_test)
+    agentty_add_full_test(stream_liveness_test)
     set_tests_properties(stream_liveness_test PROPERTIES TIMEOUT 30)
 
     # table_render_test — pins maya's GFM table classification: a
@@ -1122,41 +1022,8 @@ if(AGENTTY_BUILD_TESTS)
     # translation layer with NO network: build_tools / build_messages JSON
     # shaping, and a scripted-SSE → agentty-Msg parse (text deltas, streamed
     # tool-call assembly, finish_reason→StopReason, usage, error frames,
-    # endpoint presets). Links the provider + tool TUs (same set the
-    # tool_result_budget_test uses).
-    add_executable(openai_transport_test EXCLUDE_FROM_ALL
-        tests/openai_transport_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(openai_transport_test PRIVATE include)
-    target_compile_definitions(openai_transport_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(openai_transport_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(openai_transport_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(openai_transport_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME openai_transport_test COMMAND openai_transport_test)
+    # endpoint presets).
+    agentty_add_full_test(openai_transport_test)
 
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
@@ -1164,375 +1031,67 @@ if(AGENTTY_BUILD_TESTS)
     # the hash; every non-visual axis (tick clock, token counters) must
     # not. Catches the "forgot to mix() a new field" footgun at CI time
     # instead of as a silent dead region in production.
-    add_executable(visual_hash_coverage_test EXCLUDE_FROM_ALL
-        tests/visual_hash_coverage_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(visual_hash_coverage_test PRIVATE include)
-    target_compile_definitions(visual_hash_coverage_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(visual_hash_coverage_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(visual_hash_coverage_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(visual_hash_coverage_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME visual_hash_coverage_test COMMAND visual_hash_coverage_test)
+    agentty_add_full_test(visual_hash_coverage_test)
 
     # tool_result_budget_test — wire-only byte-budget cap on tool
     # results. Drives the real messages_json_string serializer and
     # asserts oversized outputs are bounded (head+tail kept, marker
-    # spliced, UTF-8 boundary respected) while small outputs ship
-    # verbatim. No maya / no runtime — links the provider + tool TUs.
-    add_executable(tool_result_budget_test EXCLUDE_FROM_ALL
-        tests/tool_result_budget_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(tool_result_budget_test PRIVATE include)
-    target_compile_definitions(tool_result_budget_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(tool_result_budget_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(tool_result_budget_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(tool_result_budget_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME tool_result_budget_test COMMAND tool_result_budget_test)
+    # spliced, UTF-8 boundary respected) while small outputs ship verbatim.
+    agentty_add_full_test(tool_result_budget_test)
 
     # read_grep_features_test — verifies the two Zed-derived tool
     # enhancements: read's structureless-big-file "First 1 KiB" fallback
     # (vs the symbol OUTLINE for code files) and grep's enclosing-symbol
     # breadcrumb in each match block header. Drives the real registered
     # ToolDefs (find("read") / find("grep")) over temp-dir fixtures.
-    add_executable(read_grep_features_test EXCLUDE_FROM_ALL
-        tests/read_grep_features_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(read_grep_features_test PRIVATE include)
-    target_compile_definitions(read_grep_features_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(read_grep_features_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(read_grep_features_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(read_grep_features_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME read_grep_features_test COMMAND read_grep_features_test)
+    agentty_add_full_test(read_grep_features_test)
 
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
-    add_executable(salvage_dedup_test EXCLUDE_FROM_ALL
-        tests/salvage_dedup_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(salvage_dedup_test PRIVATE include)
-    target_compile_definitions(salvage_dedup_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(salvage_dedup_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(salvage_dedup_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(salvage_dedup_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME salvage_dedup_test COMMAND salvage_dedup_test)
+    agentty_add_full_test(salvage_dedup_test)
 
     # acp_integration_test — end-to-end ACP agent exercise. Drives a real
     # agentty::acp::AgentServer (on the acp-cpp library) through
     # initialize → session/new → session/prompt over an in-memory transport
-    # with a scripted provider. Verifies the deferred-prompt + outbound
-    # permission round-trip (the path that would deadlock a blocking handler),
-    # tool execution, history feedback, and the final stopReason. Links the
-    # ACP server TU + acp::acp on top of the tool/provider stack.
-    add_executable(acp_integration_test EXCLUDE_FROM_ALL
-        tests/acp_integration_test.cpp
-        ${AGENTTY_ACP_SOURCES}
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(acp_integration_test PRIVATE include)
-    target_compile_definitions(acp_integration_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(acp_integration_test PRIVATE
-        maya::maya
-        acp::acp
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(acp_integration_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(acp_integration_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME acp_integration_test COMMAND acp_integration_test)
+    # with a scripted provider. Adds the ACP glue objects + acp::acp on
+    # top of the shared stack.
+    agentty_add_full_test(acp_integration_test
+        $<TARGET_OBJECTS:agentty_acp_obj>
+        LIBS acp::acp)
     set_tests_properties(acp_integration_test PROPERTIES TIMEOUT 60)
 
     # frozen_invariant_fuzz — randomized property test for the frozen-
     # scrollback subsystem. Drives arbitrary sequences of conversation
     # growth + freeze/trim/rehydrate ops and asserts the structural
-    # invariants (array lockstep, row-total accounting, no leading
-    # separator, never-freeze-mutable-back, row-exact trim commit) after
-    # EVERY op. Complements the curated midrun_* scenario tests. A
-    # failure prints SEED=<n> for a deterministic repro.
-    add_executable(frozen_invariant_fuzz EXCLUDE_FROM_ALL
-        tests/frozen_invariant_fuzz.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(frozen_invariant_fuzz PRIVATE include)
-    target_compile_definitions(frozen_invariant_fuzz PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(frozen_invariant_fuzz PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(frozen_invariant_fuzz PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(frozen_invariant_fuzz PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME frozen_invariant_fuzz COMMAND frozen_invariant_fuzz)
+    # invariants after EVERY op. A failure prints SEED=<n> for repro.
+    agentty_add_full_test(frozen_invariant_fuzz)
 
     # scrollback_wire_fuzz — randomized WIRE-LEVEL anti-corruption fuzz.
     # Drives arbitrary interleavings of streaming / tool cards / settle
-    # freeze+trim / picker open-close through the REAL ui::view (overlays
-    # included) and maya's REAL inline compose, asserting after EVERY
-    # frame: prefix-match on shrink (W1), shadow verify (W2), stays
-    # Synced (W3), no committed wire row ever rewritten (W4), trim commit
-    # row-exact / never clamped (W5). A failure prints SEED + op trace.
-    add_executable(scrollback_wire_fuzz EXCLUDE_FROM_ALL
-        tests/scrollback_wire_fuzz.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(scrollback_wire_fuzz PRIVATE include)
-    target_compile_definitions(scrollback_wire_fuzz PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(scrollback_wire_fuzz PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(scrollback_wire_fuzz PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(scrollback_wire_fuzz PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME scrollback_wire_fuzz COMMAND scrollback_wire_fuzz)
+    # freeze+trim / picker open-close through the REAL ui::view + maya's
+    # REAL inline compose, asserting W1-W5 after EVERY frame. A failure
+    # prints SEED + op trace.
+    agentty_add_full_test(scrollback_wire_fuzz)
     set_tests_properties(scrollback_wire_fuzz PROPERTIES TIMEOUT 120)
 
     # reveal_scrollback_test — streaming scrollback DUPLICATION repro with
-    # reveal_fx ON (the production view path the fuzz forces OFF). Streams a
-    # long prose body that overflows a small viewport, then keeps rendering
-    # frames (advancing wall-clock so the live-edge overlay animates) and
-    # asserts no already-committed scrollback row is ever rewritten (R1),
-    # every render stays Synced (R2), the shadow verifies (R3).
-    add_executable(reveal_scrollback_test EXCLUDE_FROM_ALL
-        tests/reveal_scrollback_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(reveal_scrollback_test PRIVATE include)
-    target_compile_definitions(reveal_scrollback_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(reveal_scrollback_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(reveal_scrollback_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(reveal_scrollback_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
+    # reveal_fx ON. Streams a long body that overflows a small viewport,
+    # keeps rendering frames (advancing wall-clock), and asserts no
+    # already-committed scrollback row is ever rewritten (R1/R5) across
+    # four terminal shapes x five streaming scenarios.
+    agentty_add_full_test(reveal_scrollback_test)
     if(UNIX AND NOT APPLE)
         # openpty() lives in libutil on glibc.
         target_link_libraries(reveal_scrollback_test PRIVATE util)
     endif()
-    add_test(NAME reveal_scrollback_test COMMAND reveal_scrollback_test)
-    # Regression guard for the streaming scrollback DUPLICATION bug: a
-    # tall code block streamed with reveal_fx ON corrupted native
-    # scrollback via (1) the line-number gutter widening at power-of-ten
-    # boundaries, (2) the gutter appearing at the >=5-line threshold, and
-    # (3) the reveal clip cutting a partial line that scrolled off then
-    # completed. All three fixed in maya (syntax_highlight gutter floor +
-    # always-on gutter, reveal_fx line-aligned clip). Drives the REAL
-    # ui::view through maya's REAL inline compose into a real ANSI
-    # terminal emulator (scrollback + viewport) and asserts no on-screen
-    # duplication (R5) and no committed-row rewrite (R1) across four
-    # terminal shapes x five streaming scenarios.
     set_tests_properties(reveal_scrollback_test PROPERTIES TIMEOUT 180)
 
     # anthropic_md_stream — dev tool, NOT a ctest entry. Captures a real
     # Anthropic SSE markdown stream to a .jsonl fixture (network +
     # credentials required), or replays a captured fixture through
-    # maya's StreamingMarkdown reveal-fx path so we can visually verify
-    # the typewriter animation against authentic delta sizes / timing.
-    add_executable(anthropic_md_stream EXCLUDE_FROM_ALL
-        tests/anthropic_md_stream.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(anthropic_md_stream PRIVATE include)
-    target_compile_definitions(anthropic_md_stream PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(anthropic_md_stream PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(WIN32)
-        target_link_libraries(anthropic_md_stream PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(anthropic_md_stream PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
+    # maya's StreamingMarkdown reveal-fx path.
+    agentty_add_full_test(anthropic_md_stream NO_TEST)
     # Aggregate target so CI can build every ctest-registered binary in one
     # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
     # default `cmake --build` so a plain build stays lean), which means
