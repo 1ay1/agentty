@@ -79,6 +79,17 @@ struct Request {
     AuthHeader auth;
     int retry_count = 0;
     Endpoint endpoint;
+    // First-class weak-model support (agent-zero style). When true the Ollama
+    // transport does NOT send a native `tools` array; instead it inlines the
+    // tool catalog into the system prompt and instructs the model to answer
+    // with ONE JSON object `{"thoughts":[...], "tool_name":"...",
+    // "tool_args":{...}}`. Tiny models (<=8B) follow "emit one JSON object"
+    // far more reliably than the native function-call channel, which they
+    // tend to ignore or fill with malformed JSON. The salvage/extraction
+    // path (forgiving first-`{`..last-`}` parse with tool_name/tool_args
+    // aliases) then turns that object into a real tool call. Set per-model
+    // by launch_stream for weak Ollama models.
+    bool json_protocol = false;
 };
 
 using EventSink = std::function<void(Msg)>;

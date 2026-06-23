@@ -254,6 +254,107 @@ static void test_ndjson_error_frame() {
     CHECK(saw_err);
 }
 
+// ── 4. JSON-protocol mode (very weak models, agent-zero style) ───────────────
+// Concatenate every StreamToolUseDelta payload (the salvaged args JSON).
+static std::string joined_tool_args(const std::vector<Msg>& msgs) {
+    std::string s;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) s += d->args;
+    return s;
+}
+static std::string first_tool_name(const std::vector<Msg>& msgs) {
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m)) return s->name.value;
+    return {};
+}
+
+// Clean single-object {thoughts, tool_name, tool_args} → one tool call.
+static void test_jp_clean_object() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"thoughts\\\":[\\\"list files\\\"],\\\"tool_name\\\":"
+        "\\\"bash\\\",\\\"tool_args\\\":{\\\"command\\\":\\\"ls -la\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(joined_tool_args(msgs).find("ls -la") != std::string::npos);
+    // The reasoning JSON must NOT be emitted as prose.
+    CHECK(joined_text(msgs).find("thoughts") == std::string::npos);
+}
+
+// Leading narration before the object ("Sure! {...}") still salvages.
+static void test_jp_object_with_leading_prose() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"Sure, here goes: {\\\"tool_name\\\":\\\"bash\\\","
+        "\\\"tool_args\\\":{\\\"command\\\":\\\"pwd\\\"}} done!\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(joined_tool_args(msgs).find("pwd") != std::string::npos);
+}
+
+// `tool`/`args` aliases (loose schema) are accepted.
+static void test_jp_tool_args_aliases() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"tool\\\":\\\"write\\\",\\\"args\\\":"
+        "{\\\"file_path\\\":\\\"/tmp/x\\\",\\\"content\\\":\\\"hi\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"write", "bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "write");
+    CHECK(joined_tool_args(msgs).find("/tmp/x") != std::string::npos);
+}
+
+// tool_name with a `tool:action` suffix → args.action injected.
+static void test_jp_action_suffix() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"tool_name\\\":\\\"bash:run\\\",\\\"tool_args\\\":"
+        "{\\\"command\\\":\\\"echo hi\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(joined_tool_args(msgs).find("\"action\":\"run\"") != std::string::npos);
+}
+
+// Plain chat (no tool) in JSON-protocol mode → prose, no phantom call.
+static void test_jp_plain_chat_no_tool() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello! How can I help?\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    CHECK(joined_text(msgs).find("How can I help") != std::string::npos);
+}
+
+// A tool_args object that itself contains a `}` inside a quoted string must
+// not truncate the balanced-object extraction.
+static void test_jp_brace_in_string_value() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"tool_name\\\":\\\"bash\\\",\\\"tool_args\\\":"
+        "{\\\"command\\\":\\\"echo '}'\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(joined_tool_args(msgs).find("echo '}'") != std::string::npos);
+}
+
+// An unknown tool_name in JSON-protocol mode is NOT salvaged into a call.
+static void test_jp_unknown_tool_not_salvaged() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"tool_name\\\":\\\"frobnicate\\\",\\\"tool_args\\\":{}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+}
+
 // ── 3. system_prompt ─────────────────────────────────────────────────────────
 static void test_system_prompt_shape() {
     auto p = oll::system_prompt();
@@ -277,6 +378,13 @@ int main() {
     test_ndjson_rescue_tool_from_prose();
     test_ndjson_unknown_tool_in_prose_not_salvaged();
     test_ndjson_error_frame();
+    test_jp_clean_object();
+    test_jp_object_with_leading_prose();
+    test_jp_tool_args_aliases();
+    test_jp_action_suffix();
+    test_jp_plain_chat_no_tool();
+    test_jp_brace_in_string_value();
+    test_jp_unknown_tool_not_salvaged();
     test_system_prompt_shape();
 
     if (g_failures == 0) {

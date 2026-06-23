@@ -25,6 +25,7 @@ public:
         oreq.max_tokens    = req.max_tokens;
         oreq.auth          = std::move(req.auth);
         oreq.retry_count   = req.retry_count;
+        oreq.json_protocol = req.json_protocol;
         oreq.endpoint      = endpoint_;
         ollama::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
     }

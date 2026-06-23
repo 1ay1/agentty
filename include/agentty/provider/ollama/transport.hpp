@@ -13,9 +13,15 @@
 //   NDJSON: {"message":{role,content,tool_calls,images,thinking}, "done":bool,
 //            "done_reason", "prompt_eval_count", "eval_count"}
 //
-// Unlike the OpenAI-compat path there is NO content-salvage: we trust the
-// structured tool_calls channel. Weak models that can't fill it simply chat
-// in plain text, which is the correct behaviour.
+// Tool calls arrive on TWO channels, by model strength:
+//   1. Capable models  — native structured `message.tool_calls` (trusted as-is).
+//   2. Weak models      — JSON-protocol mode (agent-zero style): no native
+//      `tools` array is sent; the tool catalog is inlined in the system prompt
+//      and the model answers with ONE {thoughts, tool_name, tool_args} object,
+//      which the forgiving extractor turns into a real call. Plus a salvage
+//      net for models that leak a tool-call JSON into `content` despite the
+//      native channel. launch_stream picks the channel per model id
+//      (is_weak_model) so tiny local models (3B/7B) work first-class.
 //
 // The transport reuses openai::Endpoint / openai::Request (so provider
 // selection plumbing is unchanged — Ollama is still a Kind::OpenAI preset with
@@ -53,9 +59,12 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 [[nodiscard]] nlohmann::json build_messages(const std::vector<Message>& msgs);
 
 // Test-only: feed an NDJSON byte buffer through the live parser and collect
-// every dispatched Msg (no network round-trip).
+// every dispatched Msg (no network round-trip). Pass json_protocol=true to
+// exercise the weak-model single-object protocol (no native tools array; the
+// whole reply is one {tool_name,tool_args} object, possibly noise-wrapped).
 [[nodiscard]] std::vector<Msg> parse_ndjson_for_test(
     std::string_view ndjson_bytes,
-    std::vector<std::string> known_tools = {});
+    std::vector<std::string> known_tools = {},
+    bool json_protocol = false);
 
 } // namespace agentty::provider::ollama

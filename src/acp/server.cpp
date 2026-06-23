@@ -692,6 +692,13 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
             req.system_prompt = provider::openai::local_model_system_prompt();
         else
             req.system_prompt = provider::anthropic::default_system_prompt();
+        // First-class weak-model support (agent-zero style): weak models on
+        // the Ollama native endpoint use the JSON-protocol path (inline tool
+        // catalog, single {tool_name,tool_args} object) instead of the native
+        // tools array. Mirrors cmd_factory's launch_stream.
+        req.json_protocol = is_weak_model(req.model)
+            && sel.kind == provider::Kind::OpenAI
+            && sel.openai_endpoint.native_api;
     }
     req.cancel        = sess.cancel;
     req.auth          = auth_;

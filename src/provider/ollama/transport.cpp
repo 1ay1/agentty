@@ -108,6 +108,14 @@ struct StreamCtx {
     std::vector<std::string> known_tools;  // tool names we may salvage to
     std::string full_content;              // every content byte (rescue scan)
 
+    // JSON-protocol mode (agent-zero style, very weak models). No native
+    // tools array was sent; the WHOLE response is expected to be one
+    // `{"thoughts":[...],"tool_name":"...","tool_args":{...}}` object (or
+    // plain prose for a chat-only turn). Enables the forgiving first-`{`..
+    // last-`}` extraction in the terminal salvage so leading/trailing
+    // narration around the object doesn't defeat the tool call.
+    bool        json_protocol   = false;
+
     StreamCtx() { buf.reserve(64 * 1024); }
 };
 
@@ -220,17 +228,31 @@ constexpr std::size_t kCompactThreshold = 256 * 1024;
         name = j["name"].get<std::string>();
     else if (j.contains("function") && j["function"].is_string())
         name = j["function"].get<std::string>();
+    else if (j.contains("tool_name") && j["tool_name"].is_string())
+        name = j["tool_name"].get<std::string>();
     else if (j.contains("tool") && j["tool"].is_string())
         name = j["tool"].get<std::string>();
     else
         return false;
-    if (!j.contains("arguments") && !j.contains("parameters")) return false;
+    if (!j.contains("arguments") && !j.contains("parameters")
+            && !j.contains("tool_args") && !j.contains("args")) return false;
+    // Strip any `tool:action` suffix before the known-tool check.
+    if (auto colon = name.find(':'); colon != std::string::npos)
+        name = name.substr(0, colon);
     for (const auto& t : known) if (t == name) return false;
     return true;
 }
 
 // Emit one salvaged tool call from a JSON object. Returns true if consumed
 // (emitted OR deliberately swallowed as a never-salvage footgun tool).
+//
+// Accepts every shape weak models produce for a tool request:
+//   • native-ish:   {"name":"bash","arguments":{...}}  (or "function")
+//   • agent-zero:   {"tool_name":"bash","tool_args":{...}}
+//   • loose:        {"tool":"bash","args":{...}}
+//   • action suffix:{"tool_name":"x:run",...} → args.action="run"
+// This mirrors agent-zero's normalize_tool_request: the model only has to
+// emit SOME recognisable {name, args} object, not the exact native schema.
 [[nodiscard]] bool emit_salvaged_tool(StreamCtx& ctx, std::string_view sv) {
     json j;
     try { j = json::parse(sv); } catch (...) { return false; }
@@ -240,10 +262,22 @@ constexpr std::size_t kCompactThreshold = 256 * 1024;
         name = j["name"].get<std::string>();
     else if (j.contains("function") && j["function"].is_string())
         name = j["function"].get<std::string>();
+    else if (j.contains("tool_name") && j["tool_name"].is_string())
+        name = j["tool_name"].get<std::string>();
     else if (j.contains("tool") && j["tool"].is_string())
         name = j["tool"].get<std::string>();
     else
         return false;
+
+    // `tool_name` may carry a `tool:action` suffix (agent-zero method dispatch).
+    // Split it off; the action becomes an arg the tool reads.
+    std::string action_suffix;
+    if (auto colon = name.find(':'); colon != std::string::npos
+            && colon > 0 && colon + 1 < name.size()) {
+        action_suffix = name.substr(colon + 1);
+        name = name.substr(0, colon);
+    }
+
     bool known = false;
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
     if (!known) return false;
@@ -252,16 +286,31 @@ constexpr std::size_t kCompactThreshold = 256 * 1024;
         "remember", "forget", "wipe_memory", "skill"};
     for (auto t : kNeverSalvage) if (t == name) return true;
 
-    std::string args = "{}";
-    if (j.contains("arguments")) {
-        const auto& a = j["arguments"];
-        if (a.is_string())      args = a.get<std::string>();
-        else if (!a.is_null())  args = a.dump();
-    } else if (j.contains("parameters")) {
-        const auto& p = j["parameters"];
-        if (p.is_string())      args = p.get<std::string>();
-        else if (!p.is_null())  args = p.dump();
-    }
+    // Arguments under any of the accepted keys; default to {}.
+    json args_obj = json::object();
+    bool have_args = false;
+    auto take_args = [&](const char* key) {
+        if (have_args || !j.contains(key)) return;
+        const auto& a = j[key];
+        if (a.is_string()) {
+            try { args_obj = json::parse(a.get<std::string>()); have_args = true; }
+            catch (...) {}
+        } else if (a.is_object()) {
+            args_obj = a; have_args = true;
+        } else if (!a.is_null()) {
+            args_obj = a; have_args = true;
+        }
+    };
+    take_args("arguments");
+    take_args("tool_args");
+    take_args("args");
+    take_args("parameters");
+    if (!action_suffix.empty() && args_obj.is_object()
+            && !args_obj.contains("action"))
+        args_obj["action"] = action_suffix;
+    std::string args = args_obj.is_object() || args_obj.is_array()
+        ? args_obj.dump() : "{}";
+
     std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
     ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
     ctx.sink(StreamToolUseDelta{args});
@@ -338,6 +387,60 @@ bool rescue_tool_from_prose(StreamCtx& ctx) {
     return false;
 }
 
+// Find the first BALANCED top-level JSON object substring in `sv`, honouring
+// string literals + escapes (so a `}` inside a quoted value doesn't close the
+// object early). Returns the [first '{' .. matching '}'] span, or empty if no
+// balanced object exists. This is agent-zero's extract_json_root_string: weak
+// models in JSON-protocol mode wrap their `{tool_name,tool_args}` object in
+// stray narration ("Sure! {"tool_name":...}  Let me know!"); pulling the
+// balanced object out makes the call survive that noise.
+[[nodiscard]] std::string_view extract_first_json_object(std::string_view sv) noexcept {
+    std::size_t start = sv.find('{');
+    if (start == std::string_view::npos) return {};
+    int depth = 0;
+    bool in_str = false, esc = false;
+    for (std::size_t i = start; i < sv.size(); ++i) {
+        char c = sv[i];
+        if (in_str) {
+            if (esc)            esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"')  in_str = false;
+            continue;
+        }
+        if (c == '"')      in_str = true;
+        else if (c == '{') ++depth;
+        else if (c == '}') {
+            if (--depth == 0) return sv.substr(start, i - start + 1);
+        }
+    }
+    return {};  // never balanced (wire cut mid-object)
+}
+
+// JSON-protocol terminal rescue (very weak models, agent-zero style). The
+// whole response was meant to be ONE {thoughts, tool_name, tool_args} object.
+// Pull the first balanced object out of full_content and try to emit it as a
+// tool call. If it carries a `thoughts`/`headline` field but no usable tool,
+// surface those as prose so the user still sees the model's reasoning. Returns
+// true if a tool call fired.
+bool rescue_json_protocol(StreamCtx& ctx) {
+    if (!ctx.json_protocol) return false;
+    if (ctx.any_structured_tool) return false;
+    if (ctx.stop_reason == StopReason::ToolUse) return false;
+    std::string_view obj = extract_first_json_object(ctx.full_content);
+    if (obj.empty()) return false;
+    json j;
+    try { j = json::parse(obj); } catch (...) { return false; }
+    if (!j.is_object()) return false;
+
+    // A tool request? emit it.
+    const bool has_tool =
+        (j.contains("tool_name") && j["tool_name"].is_string()) ||
+        (j.contains("tool")      && j["tool"].is_string())      ||
+        (j.contains("name")      && j["name"].is_string());
+    if (has_tool && emit_salvaged_tool(ctx, obj)) return true;
+    return false;
+}
+
 // Handle one native `message` object from an NDJSON frame.
 void handle_message(StreamCtx& ctx, const json& message) {
     // Structured tool calls. Ollama returns them fully-formed in one frame
@@ -408,9 +511,19 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         handle_message(ctx, j["message"]);
 
     if (j.value("done", false)) {
+        // JSON-protocol (very weak models): the ENTIRE reply is meant to be
+        // one {thoughts, tool_name, tool_args} object. Try to pull a tool
+        // call out of the full content FIRST (before flushing the hold as
+        // prose) so leading narration like "Sure, I'll do that:" doesn't
+        // get emitted ahead of — and visually compete with — the action.
+        bool jp_fired = false;
+        if (ctx.json_protocol) {
+            jp_fired = rescue_json_protocol(ctx);
+            if (jp_fired) { ctx.text_hold.clear(); ctx.holding = false; }
+        }
         // Final decision on any still-held content: try to salvage it as a
         // leaked tool call, else flush as prose (dropping garbage JSON).
-        if (ctx.holding && !ctx.text_hold.empty()) {
+        if (!jp_fired && ctx.holding && !ctx.text_hold.empty()) {
             if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
             else { ctx.text_hold.clear(); ctx.holding = false; }
         } else if (ctx.holding) {
@@ -560,6 +673,59 @@ json build_tools(const std::vector<provider::ToolSpec>& tools) {
     }
     return arr;
 }
+
+// JSON-protocol addendum (agent-zero style) for very weak models. Appended to
+// the system prompt INSTEAD of sending a native `tools` array. Inlines the
+// tool catalog (name + description + parameter names) and pins the exact
+// single-object response format the extractor parses. Kept terse — tiny
+// models drown in long schemas, so we give names + a one-line param hint, not
+// the full JSON Schema.
+std::string json_protocol_addendum(const std::vector<provider::ToolSpec>& tools) {
+    std::string s;
+    s += "\n\n## How to act (IMPORTANT — read carefully)\n";
+    s += "You do NOT have a function-calling API. To use a tool you MUST reply "
+         "with ONE single JSON object and NOTHING else — no prose before or "
+         "after it, no markdown fences. The JSON object has exactly these "
+         "fields:\n";
+    s += "  - \"thoughts\": array of short strings, your reasoning\n";
+    s += "  - \"tool_name\": the EXACT name of one tool from the list below\n";
+    s += "  - \"tool_args\": an object of arguments for that tool\n\n";
+    s += "Example (run a shell command):\n";
+    s += "{\"thoughts\":[\"I need to list files\"],\"tool_name\":\"bash\","
+         "\"tool_args\":{\"command\":\"ls -la\"}}\n\n";
+    s += "Rules:\n";
+    s += "- Output the JSON object ALONE, valid JSON, double quotes.\n";
+    s += "- Use ONE tool per reply, then wait for its result in the next "
+         "message before the next step.\n";
+    s += "- `tool_name` must be one of the listed names, never an action verb "
+         "like read/write/run.\n";
+    s += "- If you do NOT need a tool (a greeting, a question you can answer "
+         "from the conversation), reply in plain text instead — no JSON.\n\n";
+    s += "## Available tools\n";
+    for (const auto& t : tools) {
+        s += "- " + t.name;
+        if (!t.description.empty()) {
+            // First sentence / first line of the description keeps it short.
+            std::string d = t.description;
+            if (auto nl = d.find('\n'); nl != std::string::npos) d = d.substr(0, nl);
+            if (d.size() > 160) d = d.substr(0, 160);
+            s += ": " + d;
+        }
+        // Parameter name hints from the JSON Schema's `properties`.
+        if (t.input_schema.is_object() && t.input_schema.contains("properties")
+                && t.input_schema["properties"].is_object()) {
+            std::string params;
+            for (auto it = t.input_schema["properties"].begin();
+                 it != t.input_schema["properties"].end(); ++it) {
+                if (!params.empty()) params += ", ";
+                params += it.key();
+            }
+            if (!params.empty()) s += "  (args: " + params + ")";
+        }
+        s += "\n";
+    }
+    return s;
+}
 } // namespace
 
 std::string system_prompt() {
@@ -630,19 +796,30 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // Salvage may only synthesise calls to tools we actually advertised.
     ctx.known_tools.reserve(req.tools.size());
     for (const auto& t : req.tools) ctx.known_tools.push_back(t.name);
+    ctx.json_protocol = req.json_protocol && !req.tools.empty();
     // No tools advertised → nothing to salvage to; treat all content as prose.
     if (req.tools.empty()) { ctx.holding = false; ctx.salvage_eligible = false; }
+    // JSON-protocol: the whole reply is one tool-request object, so always
+    // hold + stay salvage-eligible (no native channel will arrive).
+    if (ctx.json_protocol) { ctx.holding = true; ctx.salvage_eligible = true; }
 
     auto emit_terminal = [](StreamCtx& c, std::optional<std::string> err,
                             std::optional<std::chrono::seconds> retry_after = {}) {
         if (c.terminated) return;
         // Stream ended without a `done` frame (e.g. wire cut) but content may
         // still be held — salvage or flush it before the terminal event.
-        if (!err && c.holding && !c.text_hold.empty()) {
-            if (!try_salvage_hold(c)) flush_text_hold(c);
-            else { c.text_hold.clear(); c.holding = false; }
+        if (!err) {
+            bool jp_fired = false;
+            if (c.json_protocol) {
+                jp_fired = rescue_json_protocol(c);
+                if (jp_fired) { c.text_hold.clear(); c.holding = false; }
+            }
+            if (!jp_fired && c.holding && !c.text_hold.empty()) {
+                if (!try_salvage_hold(c)) flush_text_hold(c);
+                else { c.text_hold.clear(); c.holding = false; }
+            }
+            rescue_tool_from_prose(c);
         }
-        if (!err) rescue_tool_from_prose(c);
         if (err) c.sink(StreamError{*err, retry_after});
         else     c.sink(StreamFinished{c.stop_reason});
         c.terminated = true;
@@ -660,14 +837,22 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     body["options"] = {{"num_predict", req.max_tokens}};
 
     json messages = json::array();
-    if (!req.system_prompt.empty())
+    std::string sys = req.system_prompt;
+    // JSON-protocol: append the tool catalog + single-object response spec to
+    // the system prompt, and do NOT send a native `tools` array below.
+    if (ctx.json_protocol)
+        sys += json_protocol_addendum(req.tools);
+    if (!sys.empty())
         messages.push_back({{"role", "system"},
-                            {"content", scrub_utf8(req.system_prompt)}});
+                            {"content", scrub_utf8(sys)}});
     for (auto& m : build_messages(req.messages))
         messages.push_back(std::move(m));
     body["messages"] = std::move(messages);
 
-    if (!req.tools.empty()) body["tools"] = build_tools(req.tools);
+    // Native tools array ONLY when not in JSON-protocol mode. Weak models get
+    // the inline catalog instead (the native schema confuses them).
+    if (!req.tools.empty() && !ctx.json_protocol)
+        body["tools"] = build_tools(req.tools);
 
     std::string body_str;
     try {
@@ -751,20 +936,30 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
 }
 
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
-                                       std::vector<std::string> known_tools) {
+                                       std::vector<std::string> known_tools,
+                                       bool json_protocol) {
     std::vector<Msg> out;
     StreamCtx ctx;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     ctx.known_tools = std::move(known_tools);
+    ctx.json_protocol = json_protocol && !ctx.known_tools.empty();
     if (ctx.known_tools.empty()) { ctx.holding = false; ctx.salvage_eligible = false; }
+    if (ctx.json_protocol) { ctx.holding = true; ctx.salvage_eligible = true; }
     feed_ndjson(ctx, ndjson_bytes.data(), ndjson_bytes.size());
     // Mirror run_stream_sync's terminal flush so tests see the live sequence.
-    if (ctx.holding && !ctx.text_hold.empty()) {
-        if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
-        else { ctx.text_hold.clear(); ctx.holding = false; }
+    if (!ctx.terminated) {
+        bool jp_fired = false;
+        if (ctx.json_protocol) {
+            jp_fired = rescue_json_protocol(ctx);
+            if (jp_fired) { ctx.text_hold.clear(); ctx.holding = false; }
+        }
+        if (!jp_fired && ctx.holding && !ctx.text_hold.empty()) {
+            if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
+            else { ctx.text_hold.clear(); ctx.holding = false; }
+        }
+        rescue_tool_from_prose(ctx);
+        ctx.sink(StreamFinished{ctx.stop_reason});
     }
-    rescue_tool_from_prose(ctx);
-    if (!ctx.terminated) ctx.sink(StreamFinished{ctx.stop_reason});
     return out;
 }
 

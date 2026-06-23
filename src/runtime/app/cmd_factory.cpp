@@ -504,6 +504,15 @@ Cmd<Msg> launch_stream(Model& m) {
         // Weak models (small local / coder ids) still hide a few footgun
         // tools below; the prompt no longer branches on it.
         const bool weak_model = is_weak_model(req.model);
+        // First-class weak-model support (agent-zero style): on the Ollama
+        // native endpoint, weak models get the JSON-protocol path — no native
+        // `tools` array, the tool catalog is inlined in the prompt and the
+        // model answers with one {tool_name,tool_args} object. Tiny models
+        // follow "emit one JSON object" far more reliably than the native
+        // function-call channel. Capable/large local models keep the native
+        // structured channel.
+        req.json_protocol =
+            weak_model && openai_provider && sel_now.openai_endpoint.native_api;
         req.cancel        = cancel;
         req.auth          = std::move(auth);
         req.retry_count   = retry_count;

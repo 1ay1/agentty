@@ -69,6 +69,13 @@ struct Request {
     // every retry look like a fresh first attempt and can land us on the
     // same overloaded pop. Cheap to set correctly.
     int retry_count = 0;
+
+    // Weak-model JSON-protocol mode (agent-zero style). Set by launch_stream
+    // for tiny local models on the Ollama native endpoint: the transport
+    // drops the native `tools` array and instead inlines the tool catalog
+    // into the prompt, expecting ONE {tool_name,tool_args} JSON object back.
+    // Ignored by providers that don't implement it (Anthropic, OpenAI-compat).
+    bool json_protocol = false;
 };
 
 using EventSink = std::function<void(Msg)>;
