@@ -97,21 +97,30 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](Tick) -> Step {
             auto now = std::chrono::steady_clock::now();
-            // Wall-clock gap since the previous Tick — used ONLY by the
-            // clock-skew stall watchdog below (it must see the TRUE elapsed
-            // time, even a multi-second slow-frame stall, to rebase
-            // last_event_at). Animation dt comes from the framework clock
-            // instead (clamped/remount-aware), so the two concerns no longer
-            // share one hand-rolled delta.
+            // Wall-clock gap since the previous Tick. This is the ONE true dt
+            // for everything the TICK subscription drives (the spinner, the
+            // tok/s smoothing spring): those advance once per Tick, so their
+            // per-step delta is exactly the inter-Tick interval.
+            //
+            // Do NOT route this through maya::anim::default_clock().dt(): that
+            // clock is the VIEW-loop frame clock, and its `last_` is bumped by
+            // every view() read (the reveal pulse, every Motion). During an
+            // active turn view() reads it at ~60fps, so by the time the Tick
+            // reducer reads dt() the "frame" gap has already been consumed —
+            // the reducer sees a few stray ms instead of the real 33-100ms
+            // Tick interval, and the spinner crawls / advances unevenly. That
+            // coupling is exactly what made tools "feel slower". The Tick gap
+            // is self-contained and correct; keep the two clocks separate.
             if (m.s.last_tick.time_since_epoch().count() == 0) m.s.last_tick = now;
             const auto tick_gap = now - m.s.last_tick;
             m.s.last_tick = now;
 
-            // dt for the frame's animations (spinner, smoothing spring) comes
-            // from the framework's single process-wide clock — the same one
-            // every maya Motion/Timeline ticks against. It self-computes the
-            // delta (dropped-frame clamp + remount detect, cached per frame).
-            const float dt = static_cast<float>(maya::anim::default_clock().dt());
+            // dt for Tick-driven animations: the real inter-Tick interval,
+            // clamped so a slow-frame / stall recovery can't teleport the
+            // spinner or spring on the first Tick back.
+            float dt = std::chrono::duration<float>(tick_gap).count();
+            if (dt < 0.0f)  dt = 0.0f;
+            if (dt > 0.25f) dt = 0.25f;   // dropped-frame clamp (250ms)
             if (m.s.active()) m.s.spinner.advance(dt);
 
             // Glide the BIG tok/s readout. Retarget the smoothing spring at
