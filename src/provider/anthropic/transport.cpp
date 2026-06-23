@@ -1843,8 +1843,22 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
 }
 
 std::vector<ModelInfo> list_models(const AuthHeader& auth) {
+    // Built-in catalog. Anthropic's ids are stable and few, so unlike the
+    // OpenAI/Ollama path we always have a trustworthy fallback. Returned
+    // only when the network probe genuinely yields nothing (offline, or a
+    // transient non-200) so the picker is never stranded empty. With valid
+    // creds the real /v1/models below returns the full upstream catalog —
+    // the seed is just the floor, not the ceiling.
+    auto seed = [] {
+        return std::vector<ModelInfo>{
+            ModelInfo{ModelId{"claude-opus-4-5"},   "Claude Opus 4.5",   "anthropic", 200000, true},
+            ModelInfo{ModelId{"claude-sonnet-4-5"}, "Claude Sonnet 4.5", "anthropic", 200000, true},
+            ModelInfo{ModelId{"claude-haiku-4-5"},  "Claude Haiku 4.5",  "anthropic", 200000, false},
+        };
+    };
+
     std::vector<ModelInfo> result;
-    if (is_empty(auth)) return result;
+    if (is_empty(auth)) return seed();
 
     const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
@@ -1872,7 +1886,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     tos.total   = std::chrono::milliseconds(10'000);
 
     auto resp = http::default_client().send(hreq, tos);
-    if (!resp || resp->status != 200) return result;
+    if (!resp || resp->status != 200) return seed();
 
     try {
         auto j = json::parse(resp->body);
@@ -1888,6 +1902,9 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
         }
     } catch (...) {}
 
+    // Network said 200 but we parsed nothing usable — fall back to the seed
+    // so the picker is never left empty after a provider switch.
+    if (result.empty()) return seed();
     return result;
 }
 
