@@ -67,21 +67,27 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // a near-constant cruising speed and lets the buffer absorb the wire's
         // burstiness — instead of tracking the (spiky) backlog. So the args
         // mean:
-        //   • floor_cps = the CRUISING speed (≈45 cp/s ≈ a brisk, readable
-        //     typewriter). This is the speed the text actually glides at
-        //     almost all the time. The cursor auto-tunes UP from here when a
-        //     fast model sustains a big buffer, but drifts slowly (base_tau)
+        //   • floor_cps = the CRUISING speed. This is the speed the text
+        //     actually glides at almost all the time. It must be at LEAST
+        //     the rate a fast cloud model sustains (~80-200 cp/s) or the
+        //     cursor falls permanently behind the wire and the finalize ramp
+        //     has to sprint a huge backlog at settle — which reads as "it
+        //     hung, then dumped the whole reply at once". 90 cp/s cruises
+        //     fast enough to track most models in real time while still
+        //     looking like a deliberate typewriter glide, not an instant
+        //     paste. The cursor auto-tunes UP from here for a model that
+        //     sustains an even bigger buffer, but drifts slowly (base_tau)
         //     so the speed never steps at a chunk boundary.
         //   • drain_secs = the target LEAD window (how far behind the live
-        //     edge the cursor comfortably rides). 0.4s of buffer is enough to
-        //     smooth out SSE chunk jitter without the reveal lagging the wire
-        //     noticeably.
+        //     edge the cursor comfortably rides). 0.3s of buffer is enough to
+        //     smooth out SSE chunk jitter while keeping the reveal tight to
+        //     the wire so it never visibly lags.
         // The instantaneous rate is hard-capped at 1.8× cruising (set in
         // RateCursor) so even a huge burst can't make the cursor sprint — it
         // just leans forward briefly and keeps gliding. The settle deadline
         // ramp still bypasses all caps so the tail always lands on time.
-        cache.streaming->set_reveal_pacing(/*cruise_cps=*/45.0,
-                                           /*lead_secs=*/0.4);
+        cache.streaming->set_reveal_pacing(/*cruise_cps=*/90.0,
+                                           /*lead_secs=*/0.3);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
