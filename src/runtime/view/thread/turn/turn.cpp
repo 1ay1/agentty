@@ -64,31 +64,21 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         cache.streaming->set_reveal_fx(true);
         // Reveal pacing. floor_cps is a CEILING under sparse arrival and a
         // FLOOR otherwise: the cursor walks at max(backlog/drain_secs,
-        // floor_cps).
+        // floor_cps), then that RATE is velocity-smoothed by the RateCursor
+        // so chunky SSE arrival no longer reads as the cursor SPRINTING then
+        // IDLING ("bursts, not smooth").
         //
-        // These were retuned when the typewriter became genuinely VISIBLE
-        // (ghost_blank: not-yet-typed text renders as invisible spaces rather
-        // than dim-but-readable glyphs). Before, the reveal could lag the
-        // wire by ~0.7s and nobody noticed (the text was already on screen,
-        // just dim) — but every lagging frame re-arms a 60fps repaint, and
-        // now that the eye TRACKS the cursor that sustained repaint load reads
-        // as "slow / high CPU" for the whole turn. Tracking the wire tightly
-        // (small drain) keeps the cursor at the live edge, so the reveal is
-        // 'in motion' only for the brief trailing run — the loop drops to the
-        // calm 33ms color bucket the instant the wire pauses instead of
-        // holding 60fps for a quarter-second tail after every burst.
-        //
-        //   • floor 80 cps: still spreads a sparse ~9 cp opening across its
-        //     ~330 ms gap (9/80 ≈ 110 ms of typing, then a short pin under
-        //     the perception threshold) — the floor only applies when backlog
-        //     < floor*drain ≈ 5 cp, so steady typing speed is set by the wire.
-        //   • drain 0.06 s: the cursor converges to within ~0.06 s of the live
-        //     edge, so the 60fps 'in motion' window closes almost immediately
-        //     after the wire goes quiet (vs 0.25 s before). Mid-stream the
-        //     cursor rides the live edge, so the reveal is a short bright
-        //     trailing run, not a cursor crawling seconds behind.
+        // With the smoothing low-pass (RateCursor::smooth_tau_, ~0.18 s) the
+        // old razor-tight drain (0.06 s) is counter-productive: it spiked the
+        // raw rate on every chunk, and the smoother then spent its whole
+        // budget chasing those spikes. A relaxed drain (0.5 s) keeps the
+        // backlog-driven target stable across chunks so the smoothed velocity
+        // glides — the cursor accelerates into a burst and eases back out
+        // instead of teleporting. floor 80 cps still sets the steady minimum
+        // typing speed under sparse arrival; the deadline ramp at settle
+        // still bypasses smoothing so the tail always lands on time.
         cache.streaming->set_reveal_pacing(/*floor_cps=*/80.0,
-                                           /*drain_secs=*/0.06);
+                                           /*drain_secs=*/0.5);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
