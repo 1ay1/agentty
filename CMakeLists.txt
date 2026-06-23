@@ -1120,6 +1120,7 @@ if(AGENTTY_BUILD_TESTS)
         visual_hash_coverage_test
         tool_result_budget_test
         read_grep_features_test
+        edit_minimal_splice_test
         salvage_dedup_test
         acp_integration_test
         frozen_invariant_fuzz
