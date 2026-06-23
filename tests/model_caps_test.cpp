@@ -107,6 +107,24 @@ static void test_bare_size_signal() {
     CHECK(!weak("bigbird"));                 // no leading digits
 }
 
+static void test_max_output_tokens() {
+    // Claude 4.x Sonnet/Opus → 64000 (the edit-truncation fix).
+    CHECK(max_output_tokens_for("claude-sonnet-4-5") == 64000);
+    CHECK(max_output_tokens_for("claude-opus-4-5") == 64000);
+    CHECK(max_output_tokens_for("claude-sonnet-4-5-20250101") == 64000);
+    CHECK(max_output_tokens_for("claude-opus-4-5[1m]") == 64000);
+    // Haiku caps at 8k at every generation.
+    CHECK(max_output_tokens_for("claude-haiku-4-5") == 8192);
+    CHECK(max_output_tokens_for("claude-3-5-haiku-20241022") == 8192);
+    // Legacy 3.x Sonnet/Opus cap at 8k.
+    CHECK(max_output_tokens_for("claude-3-5-sonnet-20241022") == 8192);
+    CHECK(max_output_tokens_for("claude-3-opus-20240229") == 8192);
+    // Non-Claude (local / OpenAI-compat / unknown) → conservative default.
+    CHECK(max_output_tokens_for("qwen2.5-coder:7b") == 16384);
+    CHECK(max_output_tokens_for("gpt-4o") == 16384);
+    CHECK(max_output_tokens_for("") == 16384);
+}
+
 int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
@@ -116,6 +134,7 @@ int main() {
     test_tiny_strong_family_still_weak();
     test_unknown_id_defaults_strong();
     test_bare_size_signal();
+    test_max_output_tokens();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");

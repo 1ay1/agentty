@@ -2,6 +2,7 @@
 // agentty catalog — describes an LLM the user can select.
 
 #include <cstddef>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -114,9 +115,16 @@ struct ModelCapabilities {
                 else if (tok == "sonnet") caps.family = Family::Sonnet;
                 else if (tok == "opus")   caps.family = Family::Opus;
                 else if (prev == "haiku" || prev == "sonnet" || prev == "opus") {
-                    // Generation token — parse as int (no allocations).
+                    // Generation token — parse as int (no allocations). Only
+                    // the NEW id schema puts the generation right after the
+                    // family (`claude-sonnet-4-5-...`). The LEGACY schema
+                    // (`claude-3-5-sonnet-20241022`) puts a date there
+                    // instead; an 8-digit date must NOT be read as
+                    // generation 20241022 (which would falsely look like a
+                    // 4-or-later model). Reject any token that isn't a
+                    // plausible 1- or 2-digit generation.
                     int g = 0;
-                    bool ok = !tok.empty();
+                    bool ok = !tok.empty() && tok.size() <= 2;
                     for (char c : tok) {
                         if (c < '0' || c > '9') { ok = false; break; }
                         g = g * 10 + (c - '0');
@@ -253,6 +261,65 @@ private:
 // Used by the provider/runtime paths that only hold the id, not the caps.
 [[nodiscard]] inline bool is_weak_model(std::string_view model_id) noexcept {
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
+}
+
+// Per-model max OUTPUT-token budget for a normal turn.
+//
+// WHY this exists: the global default (provider::kSafeMaxTokens = 16384) is
+// shared across a whole turn — reasoning prose AND the tool-call JSON come out
+// of the same budget. An `edit` is the worst case: the model reproduces the
+// existing `old_text` VERBATIM (for the fuzzy match) plus the `new_text`, so a
+// single edit can be ~2x the tokens of a `write` over the same span. When the
+// reasoning + the edit JSON together overrun 16384, the provider stops the
+// stream mid-`input_json` with stop_reason=max_tokens and the args arrive
+// truncated — surfacing as "Tool call arguments look incomplete". Subagents
+// already dodge this (task.cpp hard-codes 32000); the main turn never did.
+//
+// ROBUSTNESS: we set the ceiling HIGH, matching what shipping agents do rather
+// than guessing conservatively — a too-low cap silently truncates edits, which
+// is the failure we're fixing. References (verified against real source):
+//   • Claude Code  default 32000 for Sonnet/Opus, raisable via
+//                  CLAUDE_CODE_MAX_OUTPUT_TOKENS; Opus 4.6 → 64k–128k.
+//   • Aider        Claude 3.7 Sonnet → 64000 (output-128k beta header);
+//                  3.5 Sonnet/Haiku → 8192; DeepSeek-V3 → 128000.
+// Modern Claude 4.x Sonnet/Opus officially support 64k output tokens, so that
+// is our default for the family. Older 3.5 Haiku/Sonnet cap at 8k; we detect
+// the legacy ids and clamp so we never request more than the model allows
+// (Anthropic 400s a max_tokens above the model ceiling).
+//
+// OVERRIDE: AGENTTY_MAX_OUTPUT_TOKENS (mirrors Claude Code's env knob). A
+// positive integer wins for every model — the escape hatch for a user on a
+// model/endpoint we don't have hard-coded, or who wants 128k beta output.
+[[nodiscard]] inline int max_output_tokens_for(std::string_view model_id) noexcept {
+    if (const char* env = std::getenv("AGENTTY_MAX_OUTPUT_TOKENS")) {
+        int v = 0;
+        for (const char* p = env; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (*p - '0');
+        if (v > 0) return v;
+    }
+
+    const auto caps = ModelCapabilities::from_id(model_id);
+    if (caps.is_known_family()) {
+        // Claude family. Generation drives the ceiling:
+        //   4.x Sonnet/Opus  -> 64000 (officially supported output ceiling)
+        //   Haiku (any gen)  -> 8192  (Haiku's real output cap is 8k)
+        //   <= 3.x           -> 8192  (older models 400 above this)
+        //   unknown gen      -> 16384 (roomy but universally accepted)
+        if (caps.is_haiku()) return 8192;
+        if (caps.generation >= 4) return 64000;
+        // Legacy schema (`claude-3-5-sonnet-...`, `claude-3-opus-...`) puts
+        // the generation BEFORE the family, so caps.generation is 0 here.
+        // Detect the `claude-3-` prefix and treat the whole 3.x Sonnet/Opus
+        // line as 8k-capped — requesting more 400s on those models.
+        if (model_id.find("claude-3") != std::string_view::npos) return 8192;
+        if (caps.generation == 3) return 8192;
+        return 16384;
+    }
+
+    // Non-Claude (local Ollama / OpenAI-compat / unknown). Maps onto
+    // num_predict / max_tokens. Keep the conservative shared default —
+    // already ~4x a typical edit, and weak local models don't emit huge
+    // bodies.
+    return 16384;
 }
 
 } // namespace agentty

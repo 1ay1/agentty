@@ -488,6 +488,12 @@ Cmd<Msg> launch_stream(Model& m) {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = std::move(model_id);
+        // Per-model output-token ceiling. The default (kSafeMaxTokens=16384)
+        // is shared across reasoning + tool JSON for the whole turn; a large
+        // `edit` (verbatim old_text + new_text) can overrun it and arrive
+        // truncated as "arguments look incomplete". Raise it to the model's
+        // real output capacity. See max_output_tokens_for in catalog.hpp.
+        req.max_tokens    = max_output_tokens_for(req.model);
         // System prompt is chosen PER PROVIDER. Anthropic (Claude) gets the
         // full Claude agentic prompt. Ollama (native /api/chat) gets its own
         // local-tuned prompt. Other OpenAI-compatible backends get the
