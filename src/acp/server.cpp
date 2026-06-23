@@ -681,6 +681,13 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                                           bool suppress_tools) {
     provider::Request req;
     req.model         = sess.model.empty() ? model_id_ : sess.model;
+    // Per-model output-token ceiling (mirrors cmd_factory::launch_stream).
+    // Without this the default 16384 is shared across reasoning + tool JSON
+    // and a large `edit` truncates mid-input_json. context_window is left 0
+    // here (no per-session /api/show probe on the ACP path); the Ollama
+    // transport then applies its safe agent-sized num_ctx default, still 4x
+    // Ollama's truncating floor.
+    req.max_tokens    = max_output_tokens_for(req.model);
     // System prompt is chosen per provider (mirrors cmd_factory): Anthropic
     // gets the full Claude agentic prompt, Ollama (native /api/chat) its own
     // local-tuned prompt, other OpenAI-compatible backends the openai local

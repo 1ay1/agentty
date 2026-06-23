@@ -470,9 +470,11 @@ Cmd<Msg> launch_stream(Model& m) {
     // entirely (Zed-style: the model can only be used for plain chat).
     // std::nullopt = unknown/not probed = fall through to heuristic.
     std::optional<bool> model_supports_tools;
+    int model_context_window = 0;
     for (const auto& mi : m.d.available_models) {
         if (mi.id.value == model_id) {
             model_supports_tools = mi.supports_tools;
+            model_context_window = mi.context_window;
             break;
         }
     }
@@ -482,6 +484,7 @@ Cmd<Msg> launch_stream(Model& m) {
          compacting, context_max, retry_count,
          model_id = std::move(model_id),
          model_supports_tools,
+         model_context_window,
          auth = std::move(auth),
          cancel]
         (std::function<void(Msg)> dispatch) mutable {
@@ -494,6 +497,10 @@ Cmd<Msg> launch_stream(Model& m) {
         // truncated as "arguments look incomplete". Raise it to the model's
         // real output capacity. See max_output_tokens_for in catalog.hpp.
         req.max_tokens    = max_output_tokens_for(req.model);
+        // Model's real context window (probed from Ollama /api/show; 0 for
+        // hosted models). The Ollama transport turns this into options.num_ctx
+        // so long agent conversations aren't truncated to Ollama's tiny default.
+        req.context_window = model_context_window;
         // System prompt is chosen PER PROVIDER. Anthropic (Claude) gets the
         // full Claude agentic prompt. Ollama (native /api/chat) gets its own
         // local-tuned prompt. Other OpenAI-compatible backends get the

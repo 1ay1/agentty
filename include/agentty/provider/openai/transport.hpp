@@ -79,6 +79,13 @@ struct Request {
     AuthHeader auth;
     int retry_count = 0;
     Endpoint endpoint;
+    // Model's real context window (input+output token budget), e.g. 32768 for
+    // qwen2.5-coder:7b. Probed from Ollama's /api/show model_info and carried
+    // on ModelInfo.context_window; launch_stream copies it here. The Ollama
+    // transport uses it to set `options.num_ctx` so a long agent conversation
+    // isn't silently truncated to Ollama's tiny default window (~2k/4k). 0 =
+    // unknown → transport falls back to a safe agent-sized default.
+    int context_window = 0;
     // First-class weak-model support (agent-zero style). When true the Ollama
     // transport does NOT send a native `tools` array; instead it inlines the
     // tool catalog into the system prompt and instructs the model to answer
