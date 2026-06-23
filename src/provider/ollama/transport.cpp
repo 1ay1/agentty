@@ -432,11 +432,49 @@ bool rescue_json_protocol(StreamCtx& ctx) {
     try { j = json::parse(obj); } catch (...) { return false; }
     if (!j.is_object()) return false;
 
+    // Plain-chat escape hatch: tool_name=="response" means the model chose to
+    // talk, not act. Unwrap its text out of tool_args and stream it as prose.
+    // (Grammar-forced JSON would otherwise dump a raw object at the user.)
+    auto name_of = [&](const char* k) -> std::string {
+        return (j.contains(k) && j[k].is_string()) ? j[k].get<std::string>()
+                                                   : std::string{};
+    };
+    std::string tname = name_of("tool_name");
+    if (tname.empty()) tname = name_of("tool");
+    if (tname.empty()) tname = name_of("name");
+    if (tname == "response") {
+        std::string text;
+        const json* args = nullptr;
+        if (j.contains("tool_args") && j["tool_args"].is_object()) args = &j["tool_args"];
+        else if (j.contains("args") && j["args"].is_object())      args = &j["args"];
+        if (args) {
+            for (const char* k : {"text", "response", "content", "message", "answer"}) {
+                if (args->contains(k) && (*args)[k].is_string()) {
+                    text = (*args)[k].get<std::string>();
+                    break;
+                }
+            }
+        }
+        // Fall back to top-level keys some models use instead of nesting.
+        if (text.empty()) {
+            for (const char* k : {"response", "content", "message", "answer"}) {
+                if (j.contains(k) && j[k].is_string()) { text = j[k].get<std::string>(); break; }
+            }
+        }
+        if (!text.empty()) {
+            ctx.sink(StreamTextDelta{text});
+            ctx.any_text_flushed = true;
+            ctx.stop_reason = StopReason::EndTurn;
+        }
+        // Consume the held buffer either way: the object was the whole reply,
+        // so it must NOT also be flushed as raw-JSON prose by the caller.
+        ctx.text_hold.clear();
+        ctx.holding = false;
+        return false;  // not a tool call; let terminal flush proceed
+    }
+
     // A tool request? emit it.
-    const bool has_tool =
-        (j.contains("tool_name") && j["tool_name"].is_string()) ||
-        (j.contains("tool")      && j["tool"].is_string())      ||
-        (j.contains("name")      && j["name"].is_string());
+    const bool has_tool = !tname.empty();
     if (has_tool && emit_salvaged_tool(ctx, obj)) return true;
     return false;
 }
@@ -699,8 +737,9 @@ std::string json_protocol_addendum(const std::vector<provider::ToolSpec>& tools)
          "message before the next step.\n";
     s += "- `tool_name` must be one of the listed names, never an action verb "
          "like read/write/run.\n";
-    s += "- If you do NOT need a tool (a greeting, a question you can answer "
-         "from the conversation), reply in plain text instead — no JSON.\n\n";
+    s += "- If you do NOT need a tool (a greeting, or a question you can answer "
+         "from the conversation), set \"tool_name\" to \"response\" and put your "
+         "reply text in \"tool_args\": {\"text\": \"...\"}.\n\n";
     s += "## Available tools\n";
     for (const auto& t : tools) {
         s += "- " + t.name;
@@ -725,6 +764,40 @@ std::string json_protocol_addendum(const std::vector<provider::ToolSpec>& tools)
         s += "\n";
     }
     return s;
+}
+
+// Grammar-constrained decoding schema (Ollama `format` field). Ollama compiles
+// a JSON Schema into a GBNF grammar and masks every non-conforming next-token
+// during sampling, forcing the model to emit a parseable object matching this
+// shape regardless of size. tool_name is an ENUM of the advertised tools plus
+// a "response" pseudo-tool (plain-chat escape hatch: the model puts its prose
+// in tool_args.text, which rescue_json_protocol unwraps into a text delta).
+json json_protocol_schema(const std::vector<provider::ToolSpec>& tools) {
+    json tool_names = json::array();
+    for (const auto& t : tools) tool_names.push_back(t.name);
+    tool_names.push_back("response");
+
+    json thoughts_prop;
+    thoughts_prop["type"] = "array";
+    thoughts_prop["items"]["type"] = "string";
+
+    json name_prop;
+    name_prop["type"] = "string";
+    name_prop["enum"] = std::move(tool_names);
+
+    json args_prop;
+    args_prop["type"] = "object";
+
+    json props;
+    props["thoughts"]  = std::move(thoughts_prop);
+    props["tool_name"] = std::move(name_prop);
+    props["tool_args"] = std::move(args_prop);
+
+    json schema;
+    schema["type"]       = "object";
+    schema["properties"] = std::move(props);
+    schema["required"]   = json::array({"tool_name", "tool_args"});
+    return schema;
 }
 } // namespace
 
@@ -853,6 +926,15 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // the inline catalog instead (the native schema confuses them).
     if (!req.tools.empty() && !ctx.json_protocol)
         body["tools"] = build_tools(req.tools);
+
+    // Grammar-constrained decoding for weak models: a JSON Schema in `format`
+    // makes Ollama compile a GBNF grammar and mask every non-conforming
+    // next-token while sampling — the reply is FORCED into a parseable
+    // {thoughts, tool_name, tool_args} object regardless of model size. The
+    // salvage/rescue path below stays as a backstop for a truncated stream
+    // (Ollama constrains per-token but does not validate the full response).
+    if (ctx.json_protocol)
+        body["format"] = json_protocol_schema(req.tools);
 
     std::string body_str;
     try {

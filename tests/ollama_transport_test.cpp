@@ -259,7 +259,7 @@ static void test_ndjson_error_frame() {
 static std::string joined_tool_args(const std::vector<Msg>& msgs) {
     std::string s;
     for (const auto& m : msgs)
-        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) s += d->args;
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) s += d->partial_json;
     return s;
 }
 static std::string first_tool_name(const std::vector<Msg>& msgs) {
@@ -355,6 +355,49 @@ static void test_jp_unknown_tool_not_salvaged() {
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
+// Grammar `response` pseudo-tool: tool_name=="response" with text in tool_args
+// is unwrapped into a plain text delta — no phantom tool call, no raw JSON.
+static void test_jp_response_pseudo_tool() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"thoughts\\\":[\\\"hi\\\"],\\\"tool_name\\\":\\\"response\\\","
+        "\\\"tool_args\\\":{\\\"text\\\":\\\"Hello there!\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(joined_text(msgs).find("Hello there!") != std::string::npos);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    // The raw protocol JSON must NOT leak into the prose.
+    CHECK(joined_text(msgs).find("tool_name") == std::string::npos);
+}
+
+// Grammar-forced tool call: tool_name=="bash" with command in tool_args fires
+// a real bash tool-use start/delta/end carrying the args.
+static void test_jp_grammar_tool_call() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"thoughts\\\":[\\\"list files\\\"],\\\"tool_name\\\":\\\"bash\\\","
+        "\\\"tool_args\\\":{\\\"command\\\":\\\"ls\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(joined_tool_args(msgs).find("ls") != std::string::npos);
+}
+
+// The `response` text may also be carried under the `response` key in
+// tool_args (some models pick that alias instead of `text`).
+static void test_jp_response_alias_key() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"tool_name\\\":\\\"response\\\","
+        "\\\"tool_args\\\":{\\\"response\\\":\\\"hey\\\"}}\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(joined_text(msgs).find("hey") != std::string::npos);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+}
+
 // ── 3. system_prompt ─────────────────────────────────────────────────────────
 static void test_system_prompt_shape() {
     auto p = oll::system_prompt();
@@ -385,6 +428,9 @@ int main() {
     test_jp_plain_chat_no_tool();
     test_jp_brace_in_string_value();
     test_jp_unknown_tool_not_salvaged();
+    test_jp_response_pseudo_tool();
+    test_jp_grammar_tool_call();
+    test_jp_response_alias_key();
     test_system_prompt_shape();
 
     if (g_failures == 0) {
