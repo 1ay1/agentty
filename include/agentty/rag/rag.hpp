@@ -41,6 +41,8 @@
 #include <utility>
 #include <vector>
 
+#include "agentty/rag/hnsw.hpp"
+
 namespace agentty::rag {
 
 // One retrievable unit: a bounded, line-aligned slice of a source document.
@@ -137,6 +139,8 @@ private:
     std::filesystem::path  root_;
     std::vector<Chunk>     chunks_;
     Bm25Index              bm25_;
+    HnswIndex              hnsw_;
+    bool                   hnsw_built_ = false;
     std::size_t            embed_dim_ = 0;
 };
 

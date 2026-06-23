@@ -279,6 +279,32 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
 
     // ── Rebuild BM25 + persist the cache. ─────────────────────────────────
     bm25_ = build_bm25(chunks_);
+
+    // Build an HNSW ANN index over the embeddings when the corpus is large
+    // enough that brute-force cosine per query would hurt. Below the
+    // threshold, exact brute force is both faster and exact, so skip it.
+    // NOTE: we do NOT persist the HNSW graph into the on-disk cache — the
+    // expensive part (embeddings) IS cached, and rebuilding the in-memory
+    // graph from those vectors is fast, so we rebuild it per session rather
+    // than risk entangling the existing cache format. The graph references
+    // chunk ids as the i-th chunk index (matching how search() materializes
+    // hits via &chunks_[id]); do NOT reorder chunks_ after building HNSW.
+    hnsw_built_ = false;
+    constexpr std::size_t kHnswThreshold = 2000;
+    if (embed_dim_ > 0 && chunks_.size() >= kHnswThreshold) {
+        std::vector<std::uint32_t> ids;
+        std::vector<const std::vector<float>*> embs;
+        ids.reserve(chunks_.size());
+        embs.reserve(chunks_.size());
+        for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+            if (chunks_[i].embedding.size() == embed_dim_) {
+                ids.push_back(i);
+                embs.push_back(&chunks_[i].embedding);
+            }
+        }
+        if (!ids.empty()) { hnsw_.build(ids, embs); hnsw_built_ = !hnsw_.empty(); }
+    }
+
     write_cache_();
 }
 
@@ -304,21 +330,29 @@ std::vector<Hit> Corpus::search(std::string_view query,
         auto qv = embed_texts(embed, {std::string{query}});
         if (qv && qv->size() == 1 && (*qv)[0].size() == embed_dim_) {
             const auto& q = (*qv)[0];
-            std::vector<std::pair<std::uint32_t, double>> sims;
-            sims.reserve(chunks_.size());
-            for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
-                if (chunks_[i].embedding.size() != embed_dim_) continue;
-                sims.push_back({i, cosine(q, chunks_[i].embedding)});
-            }
-            std::sort(sims.begin(), sims.end(), [](auto& a, auto& b) {
-                if (a.second != b.second) return a.second > b.second;
-                return a.first < b.first;
-            });
-            if (sims.size() > pool) sims.resize(pool);
             std::vector<std::uint32_t> dense_rank;
-            dense_rank.reserve(sims.size());
-            for (auto& [id, s] : sims) dense_rank.push_back(id);
-            lists.push_back(std::move(dense_rank));
+            if (hnsw_built_) {
+                // ANN candidate generation — O(log n) vs the brute-force
+                // O(n) scan below. Widen ef beyond the pool for recall.
+                for (auto& [id, sim] : hnsw_.search(
+                         q, pool, std::max<std::size_t>(pool * 2, 64)))
+                    dense_rank.push_back(id);
+            } else {
+                std::vector<std::pair<std::uint32_t, double>> sims;
+                sims.reserve(chunks_.size());
+                for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+                    if (chunks_[i].embedding.size() != embed_dim_) continue;
+                    sims.push_back({i, cosine(q, chunks_[i].embedding)});
+                }
+                std::sort(sims.begin(), sims.end(), [](auto& a, auto& b) {
+                    if (a.second != b.second) return a.second > b.second;
+                    return a.first < b.first;
+                });
+                if (sims.size() > pool) sims.resize(pool);
+                dense_rank.reserve(sims.size());
+                for (auto& [id, s] : sims) dense_rank.push_back(id);
+            }
+            if (!dense_rank.empty()) lists.push_back(std::move(dense_rank));
         }
     }
 
