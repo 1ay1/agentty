@@ -369,6 +369,7 @@ set(AGENTTY_AIRGAP_SOURCES
 set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
     src/provider/openai/transport.cpp
+    src/provider/ollama/transport.cpp
     src/provider/selection.cpp
 )
 
@@ -1025,6 +1026,44 @@ if(AGENTTY_BUILD_TESTS)
     # endpoint presets).
     agentty_add_full_test(openai_transport_test)
 
+    # ollama_transport_test — verifies the DEDICATED Ollama /api/chat
+    # transport: native build_messages (object-form tool args + role:tool
+    # results + images), NDJSON parse (structured tool_calls, plain text,
+    # NO content-salvage, error frames), and the local system prompt shape.
+    add_executable(ollama_transport_test EXCLUDE_FROM_ALL
+        tests/ollama_transport_test.cpp
+        ${AGENTTY_IO_SOURCES}
+        ${AGENTTY_WORKSPACE_SOURCES}
+        ${AGENTTY_AIRGAP_SOURCES}
+        ${AGENTTY_PROVIDER_SOURCES}
+        ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
+    )
+    target_include_directories(ollama_transport_test PRIVATE include)
+    target_compile_definitions(ollama_transport_test PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(ollama_transport_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(WIN32)
+        target_link_libraries(ollama_transport_test PRIVATE
+            ws2_32 crypt32 shell32 winmm
+            user32 gdi32 gdiplus shlwapi)
+    endif()
+    if(APPLE)
+        target_link_libraries(ollama_transport_test PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
+    add_test(NAME ollama_transport_test COMMAND ollama_transport_test)
+
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
     # declarative tables: every view-affecting model axis must advance
@@ -1117,6 +1156,7 @@ if(AGENTTY_BUILD_TESTS)
         stream_liveness_test
         table_render_test
         openai_transport_test
+        ollama_transport_test
         visual_hash_coverage_test
         tool_result_budget_test
         read_grep_features_test

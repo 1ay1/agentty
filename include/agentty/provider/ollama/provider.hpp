@@ -1,20 +1,20 @@
 #pragma once
-// agentty::provider::openai::OpenAIProvider — concrete adapter satisfying the
+// agentty::provider::ollama::OllamaProvider — concrete adapter satisfying the
 // `provider::Provider` concept by translating the abstract request into an
-// openai::transport call. Holds an Endpoint (base URL / port / tls) so one
-// process can target OpenAI, Groq, OpenRouter, a local Ollama, etc.
+// ollama::transport /api/chat call. Holds the Endpoint (host/port) of the
+// local Ollama server.
 
 #include <utility>
 
 #include "agentty/provider/provider.hpp"
-#include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/ollama/transport.hpp"
 
-namespace agentty::provider::openai {
+namespace agentty::provider::ollama {
 
-class OpenAIProvider {
+class OllamaProvider {
 public:
-    OpenAIProvider() = default;
-    explicit OpenAIProvider(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
+    OllamaProvider() = default;
+    explicit OllamaProvider(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
 
     void stream(provider::Request req, provider::EventSink sink) {
         Request oreq;
@@ -26,7 +26,7 @@ public:
         oreq.auth          = std::move(req.auth);
         oreq.retry_count   = req.retry_count;
         oreq.endpoint      = endpoint_;
-        openai::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
+        ollama::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
     }
 
     [[nodiscard]] const Endpoint& endpoint() const noexcept { return endpoint_; }
@@ -35,6 +35,6 @@ private:
     Endpoint endpoint_;
 };
 
-static_assert(provider::Provider<OpenAIProvider>);
+static_assert(provider::Provider<OllamaProvider>);
 
-} // namespace agentty::provider::openai
+} // namespace agentty::provider::ollama

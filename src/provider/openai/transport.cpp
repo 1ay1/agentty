@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -34,7 +35,6 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/runtime/composer_attachment.hpp"
-#include "agentty/tool/skills.hpp"
 #include "agentty/util/base64.hpp"
 
 namespace agentty::provider::openai {
@@ -275,6 +275,9 @@ void close_active_tool(StreamCtx& ctx) {
     // Likewise a fence-word-only remnant the stripper left (e.g. the model
     // emitted exactly "json" or "```json" with nothing parseable).
     if (sv == "json" || sv == "```" || sv == "`") return true;
+    // Empty object "{}" — qwen2.5-coder:14b outputs this when tools are
+    // passed but it doesn't want to call any. It's garbage, not prose.
+    if (sv == "{}") return true;
     if (sv.empty() || sv.front() != '{') return false;
     try { auto _ = json::parse(sv); (void)_; return false; }   // complete — keep as text
     catch (...) { return true; }                    // truncated — drop
@@ -1312,8 +1315,9 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
 
     if (native) {
         // Ollama native /api/chat: system prompt as a role:"system" message,
-        // structured tool_calls, NDJSON response. No max_tokens/stream_options
-        // (Ollama uses `options.num_predict`); default generation is fine.
+        // structured tool_calls, NDJSON response.
+        // num_predict = max output tokens (Ollama default is low ~128).
+        body["options"] = {{"num_predict", req.max_tokens}};
         json messages = json::array();
         if (!req.system_prompt.empty())
             messages.push_back({{"role", "system"},
@@ -1466,6 +1470,53 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     emit_terminal(ctx, std::nullopt);
 }
 
+namespace {
+
+[[nodiscard]] std::filesystem::path lm_home_dir() noexcept {
+    if (auto* h = std::getenv("HOME"); h && *h) return std::filesystem::path{h};
+#if defined(_WIN32)
+    if (auto* h = std::getenv("USERPROFILE"); h && *h)
+        return std::filesystem::path{h};
+#endif
+    return {};
+}
+
+[[nodiscard]] std::string lm_read_file(const std::filesystem::path& p) {
+    std::error_code ec;
+    if (p.empty() || !std::filesystem::exists(p, ec)) return {};
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return {};
+    std::string s((std::istreambuf_iterator<char>(f)),
+                   std::istreambuf_iterator<char>());
+    if (s.size() > 64 * 1024) s.resize(64 * 1024);
+    return s;
+}
+
+// CLAUDE.md tiers only. The Anthropic prompt also injects agent-authored
+// learned-memory (load_recent_*) and the skills catalog, but those can run to
+// thousands of tokens and demonstrably confuse small local models on simple
+// prompts (a 14b answered "hi" with "I didn't understand" once the learned
+// facts were present). Local models get the concise user-authored CLAUDE.md
+// guidance and nothing else.
+[[nodiscard]] std::string local_memory_blocks() {
+    std::string user    = lm_read_file(lm_home_dir() / "CLAUDE.md");
+    std::string project = lm_read_file(std::filesystem::path{"CLAUDE.md"});
+    std::string local   = lm_read_file(std::filesystem::path{"CLAUDE.local.md"});
+
+    if (user.empty() && project.empty() && local.empty()) return {};
+
+    std::string m = "\n\n<memory>\n"
+        "Project-specific guidance the user has authored. Treat these as "
+        "persistent context for THIS workspace and user.\n";
+    if (!user.empty())    m += "<user-memory>\n"    + user    + "\n</user-memory>\n";
+    if (!project.empty()) m += "<project-memory>\n" + project + "\n</project-memory>\n";
+    if (!local.empty())   m += "<local-memory>\n"   + local   + "\n</local-memory>\n";
+    m += "</memory>";
+    return m;
+}
+
+} // namespace
+
 std::string_view local_model_prompt_addendum() {
     return
         "\n\nMost messages are answered in plain words — greetings, small "
@@ -1476,41 +1527,62 @@ std::string_view local_model_prompt_addendum() {
 }
 
 std::string local_model_system_prompt() {
-#if defined(_WIN32)
-    constexpr const char* os_name = "Windows";
-    constexpr const char* shell   = "cmd.exe";
-#elif defined(__APPLE__)
-    constexpr const char* os_name = "macOS";
-    constexpr const char* shell   = "sh";
-#else
-    constexpr const char* os_name = "Linux";
-    constexpr const char* shell   = "sh";
-#endif
     std::string cwd;
     try { cwd = std::filesystem::current_path().string(); } catch (...) {}
 
+#if defined(_WIN32)
+    const char* os_name = "Windows";
+    const char* shell   = "cmd.exe";
+#elif defined(__APPLE__)
+    const char* os_name = "macOS";
+    const char* shell   = "sh";
+#else
+    const char* os_name = "Linux";
+    const char* shell   = "sh";
+#endif
+
+    // Tuned for OpenAI-compatible / local models (Ollama, llama.cpp, vLLM).
+    // Plainer and firmer than the Claude prompt: local models follow short
+    // imperative rules better than long prose, and they read recent history
+    // less reliably so the recall reminder is explicit.
     std::string out;
-    out.reserve(2048);
-    out += "You are agentty, a concise, friendly terminal assistant. Answer "
-           "directly and naturally.\n";
-    out += local_model_prompt_addendum();
-    out += "\n\n<tools>\n"
-           "When you DO need a tool: read/write/edit operate on files; bash "
-           "runs a shell command; grep/glob/list_dir search the project. "
-           "Use exact paths. Make ONE call, wait for its result, then "
-           "continue or answer.\n"
-           "</tools>\n";
-    out += "\n<environment>\n  os: ";
-    out += os_name;
-    out += "\n  shell: ";
-    out += shell;
-    out += "\n";
-    if (!cwd.empty()) { out += "  cwd: "; out += cwd; out += "\n"; }
-    out += "</environment>\n";
-    // No skills catalog here on purpose. Weak local models hallucinate a
-    // `skill` tool call from the catalog listing (even on a greeting), which
-    // then fails / loops. On-demand skills stay available via the explicit
-    // /skill-name slash command; they're just not advertised to the model.
+    out += "You are agentty, a terminal coding assistant. You are helpful, "
+           "direct, and act on requests instead of asking which option to "
+           "pick. Keep replies concise.\n\n";
+
+    out += "CONVERSATION MEMORY\n"
+           "- The full conversation so far is provided in the messages. "
+           "ALWAYS use earlier messages to answer follow-up questions "
+           "(names, files, decisions the user already gave you).\n"
+           "- If the user told you a fact earlier (e.g. their name), recall "
+           "it from the conversation; do not say you don't have it.\n\n";
+
+    out += "TOOLS\n"
+           "- Tools let you read/edit files and run commands. Call a tool "
+           "ONLY when the task needs it (touch files, run a command, search "
+           "the codebase). For greetings, chit-chat, or questions you can "
+           "answer from the conversation, reply in plain text \u2014 do NOT call "
+           "a tool.\n"
+           "- To edit an existing file use `edit` (targeted change). Use "
+           "`write` only to create a new file.\n"
+           "- Make ONE tool call at a time and wait for its result before "
+           "the next. Never invent a tool result.\n"
+           "- Never call remember/forget/wipe_memory unless the user asks "
+           "you to remember or forget something.\n\n";
+
+    out += "OUTPUT\n"
+           "- Output is rendered as GitHub-flavoured markdown in a terminal. "
+           "Use fenced code blocks for code. Keep tables small.\n\n";
+
+    out += "ENVIRONMENT\n";
+    out += "- os: "; out += os_name; out += "\n";
+    out += "- shell: "; out += shell; out += "\n";
+    if (!cwd.empty()) { out += "- cwd: "; out += cwd; out += "\n"; }
+
+    // User/project CLAUDE.md tiers only. Skills catalog + learned-memory are
+    // omitted for local models (token bloat + confusion on small models);
+    // skills still activate explicitly via /skill-name.
+    out += local_memory_blocks();
     return out;
 }
 
