@@ -48,12 +48,18 @@ static void test_small_local_coder_weak() {
 }
 
 static void test_large_models_strong() {
-    // >= ~14B follows tool schemas regardless of family.
-    CHECK(!weak("qwen2.5-coder:32b"));        // weak family but large
+    // Large models with NO weak-family signal follow tool schemas reliably.
     CHECK(!weak("llama3.1:70b"));
-    CHECK(!weak("codellama:34b"));
-    CHECK(!weak("mixtral:8x22b"));            // 22b matched
-    CHECK(!weak("deepseek-coder:33b"));
+    CHECK(!weak("mixtral:8x22b"));            // 22b matched, no weak family
+}
+
+static void test_weak_family_wins_over_size() {
+    // Known weak / coder-only families leak tool JSON at ANY size — the
+    // weak-family signal beats the raw >= 14B size shortcut.
+    CHECK(weak("qwen2.5-coder:14b"));         // the live case
+    CHECK(weak("qwen2.5-coder:32b"));
+    CHECK(weak("codellama:34b"));
+    CHECK(weak("deepseek-coder:33b"));
 }
 
 static void test_tool_trained_families_strong() {
@@ -105,6 +111,7 @@ int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
     test_large_models_strong();
+    test_weak_family_wins_over_size();
     test_tool_trained_families_strong();
     test_tiny_strong_family_still_weak();
     test_unknown_id_defaults_strong();

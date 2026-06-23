@@ -25,6 +25,7 @@
 #include "agentty/io/persistence.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/ollama/transport.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -679,14 +680,19 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                                           bool suppress_tools) {
     provider::Request req;
     req.model         = sess.model.empty() ? model_id_ : sess.model;
-    // Weak models (small local / coder models, inferred from the model id)
-    // get a slim, decision-first prompt — the full Anthropic agentic prompt
-    // primes them to over-call tools even on a greeting. Strong models
-    // (Claude, large/tool-trained local models) keep the full prompt. The
-    // decision is per-model via ModelCapabilities, mirroring cmd_factory.
-    req.system_prompt = is_weak_model(req.model)
-        ? provider::openai::local_model_system_prompt()
-        : provider::anthropic::default_system_prompt();
+    // System prompt is chosen per provider (mirrors cmd_factory): Anthropic
+    // gets the full Claude agentic prompt, Ollama (native /api/chat) its own
+    // local-tuned prompt, other OpenAI-compatible backends the openai local
+    // prompt (verbose Claude prose breaks small models).
+    {
+        const auto& sel = provider::active();
+        if (sel.kind == provider::Kind::OpenAI && sel.openai_endpoint.native_api)
+            req.system_prompt = provider::ollama::system_prompt();
+        else if (sel.kind == provider::Kind::OpenAI)
+            req.system_prompt = provider::openai::local_model_system_prompt();
+        else
+            req.system_prompt = provider::anthropic::default_system_prompt();
+    }
     req.cancel        = sess.cancel;
     req.auth          = auth_;
     req.messages      = sess.thread.messages;

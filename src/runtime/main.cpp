@@ -49,6 +49,7 @@
 #include "agentty/io/persistence.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
+#include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -354,8 +355,17 @@ int main(int argc, char** argv) {
         (provider::Request req, provider::EventSink sink) {
             const auto& sel = provider::active();
             if (sel.kind == provider::Kind::OpenAI) {
-                provider::openai::OpenAIProvider p{sel.openai_endpoint};
-                p.stream(std::move(req), std::move(sink));
+                // Ollama speaks its own native /api/chat dialect — route it to
+                // the dedicated provider (structured tool_calls, keep_alive,
+                // num_predict). Every other OpenAI-family backend uses the
+                // compat /v1/chat/completions transport.
+                if (sel.openai_endpoint.native_api) {
+                    provider::ollama::OllamaProvider p{sel.openai_endpoint};
+                    p.stream(std::move(req), std::move(sink));
+                } else {
+                    provider::openai::OpenAIProvider p{sel.openai_endpoint};
+                    p.stream(std::move(req), std::move(sink));
+                }
             } else {
                 anthropic_provider.stream(std::move(req), std::move(sink));
             }

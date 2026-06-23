@@ -14,6 +14,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/ollama/transport.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
@@ -487,19 +488,22 @@ Cmd<Msg> launch_stream(Model& m) {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = std::move(model_id);
-        // Weak models (small local / coder models inferred from the model id)
-        // choke on the full Claude agentic prompt — the verbose "Act, don't
-        // ask" + memory-tools sections prime them to over-call tools and leak
-        // them as content text, even on a bare "hi". Send a slim decision-
-        // first prompt instead. Strong models (Claude, large/tool-trained
-        // local models) get the full prompt. The decision is per-model via
-        // ModelCapabilities, not per-provider — a 70B llama on Ollama is
-        // treated as strong, a 7B coder on any endpoint as weak.
-        const bool weak_model = is_weak_model(req.model);
-        if (weak_model)
+        // System prompt is chosen PER PROVIDER. Anthropic (Claude) gets the
+        // full Claude agentic prompt. Ollama (native /api/chat) gets its own
+        // local-tuned prompt. Other OpenAI-compatible backends get the
+        // openai local-model prompt. The verbose Claude prose primes small
+        // local models to over-call tools and some break outright on it.
+        const auto& sel_now = provider::active();
+        const bool openai_provider = sel_now.kind == provider::Kind::OpenAI;
+        if (openai_provider && sel_now.openai_endpoint.native_api)
+            req.system_prompt = provider::ollama::system_prompt();
+        else if (openai_provider)
             req.system_prompt = provider::openai::local_model_system_prompt();
         else
             req.system_prompt = provider::anthropic::default_system_prompt();
+        // Weak models (small local / coder ids) still hide a few footgun
+        // tools below; the prompt no longer branches on it.
+        const bool weak_model = is_weak_model(req.model);
         req.cancel        = cancel;
         req.auth          = std::move(auth);
         req.retry_count   = retry_count;

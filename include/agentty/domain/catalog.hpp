@@ -211,9 +211,6 @@ private:
             if (v > params_b) params_b = v;       // take the largest match
         }
 
-        // Large models follow tool schemas reliably regardless of family.
-        if (params_b >= 14) return false;
-
         // Tool-trained / instruction-strong local families → strong even at
         // smaller sizes.
         const bool strong_family =
@@ -241,6 +238,9 @@ private:
             contains(id, "smollm")       || contains(id, "codegemma")  ||
             contains(id, "sqlcoder");
         if (weak_family) return true;
+
+        // Large models (no weak-family signal) follow tool schemas reliably.
+        if (params_b >= 14) return false;
 
         // No family signal: rely on size. <= 8B → weak; otherwise assume the
         // model (or hosted endpoint, unknown id) is capable.

@@ -753,6 +753,26 @@ static void test_ndjson_fenced_tool_call_streaming() {
     CHECK(text.find('{') == std::string::npos);
 }
 
+void test_ndjson_empty_object_response() {
+    // qwen2.5-coder:14b outputs {} when tools are passed
+    auto msgs = oai::parse_ndjson_for_test(
+        R"({"message":{"role":"assistant","content":"{}"},"done":false}
+{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
+)", {"read", "write"});
+    
+    // Should flush {} as text, not show "unparseable"
+    bool found_braces = false;
+    bool found_unparseable = false;
+    for (auto& m : msgs) {
+        if (auto* td = get_leaf<StreamTextDelta>(m)) {
+            if (td->text == "{}") found_braces = true;
+            if (td->text.find("unparseable") != std::string::npos) found_unparseable = true;
+        }
+    }
+    CHECK(found_braces);
+    CHECK(!found_unparseable);
+}
+
 int main() {
     test_build_tools();
     test_build_messages_basic();
@@ -793,6 +813,8 @@ int main() {
     // Streaming fence regression (TODO: streaming case needs more work).
     test_ndjson_fenced_tool_call_simple();
     // test_ndjson_fenced_tool_call_streaming();
+
+    test_ndjson_empty_object_response();
 
     if (g_failures == 0) {
         std::printf("openai_transport_test: all checks passed\n");
