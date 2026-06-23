@@ -20,6 +20,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/auth/auth.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/view/cache.hpp"
@@ -193,8 +194,19 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // silently-broken state (every request 401s with no key). For
             // Anthropic we reuse the session creds; for OpenAI-family we
             // resolve from the registry's env-var chain; local needs none.
+            //
+            // CRITICAL: pass the Anthropic creds loaded FRESH from disk, NOT
+            // deps().auth. deps().auth holds whatever provider is currently
+            // active — if the user is on Ollama (empty key) and switches BACK
+            // to Anthropic, resolve_auth_for would echo that empty key as the
+            // "anthropic creds" and every Anthropic request (incl. the model
+            // list fetch) would see is_empty(auth) and silently no-op. The
+            // real login creds live on disk and survive provider hops.
+            auth::AuthHeader anthropic_creds = deps().auth;
+            if (auto saved = auth::load_credentials())
+                anthropic_creds = auth::make_auth_header(*saved);
             auth::AuthHeader new_auth =
-                provider::resolve_auth_for(spec, deps().auth);
+                provider::resolve_auth_for(spec, anthropic_creds);
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
             // key can't stream. Instead of a dead-end error, open the in-app
