@@ -97,10 +97,21 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](Tick) -> Step {
             auto now = std::chrono::steady_clock::now();
+            // Wall-clock gap since the previous Tick — used ONLY by the
+            // clock-skew stall watchdog below (it must see the TRUE elapsed
+            // time, even a multi-second slow-frame stall, to rebase
+            // last_event_at). Animation dt comes from the framework clock
+            // instead (clamped/remount-aware), so the two concerns no longer
+            // share one hand-rolled delta.
             if (m.s.last_tick.time_since_epoch().count() == 0) m.s.last_tick = now;
-            auto tick_gap = now - m.s.last_tick;
-            float dt = std::chrono::duration<float>(tick_gap).count();
+            const auto tick_gap = now - m.s.last_tick;
             m.s.last_tick = now;
+
+            // dt for the frame's animations (spinner, smoothing spring) comes
+            // from the framework's single process-wide clock — the same one
+            // every maya Motion/Timeline ticks against. It self-computes the
+            // delta (dropped-frame clamp + remount detect, cached per frame).
+            const float dt = static_cast<float>(maya::anim::default_clock().dt());
             if (m.s.active()) m.s.spinner.advance(dt);
 
             // Glide the BIG tok/s readout. Retarget the smoothing spring at
