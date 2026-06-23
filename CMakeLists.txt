@@ -390,6 +390,7 @@ set(AGENTTY_RAG_SOURCES
     src/rag/corpus.cpp
     src/rag/hnsw.cpp
     src/rag/rerank.cpp
+    src/rag/expand.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES
@@ -1082,6 +1083,7 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(rag_test)
     agentty_add_full_test(rag_hnsw_test)
     agentty_add_full_test(rag_rerank_test)
+    agentty_add_full_test(rag_expand_test)
 
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
@@ -1179,6 +1181,7 @@ if(AGENTTY_BUILD_TESTS)
         rag_test
         rag_hnsw_test
         rag_rerank_test
+        rag_expand_test
         visual_hash_coverage_test
         tool_result_budget_test
         read_grep_features_test

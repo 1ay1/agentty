@@ -126,6 +126,15 @@ public:
                                           const EmbedConfig& embed,
                                           std::size_t k) const;
 
+    // Multi-query RAG-Fusion: retrieve for EACH query (BM25 + dense when
+    // available) and fuse ALL the ranked lists with a single RRF pass. A
+    // passage relevant under multiple phrasings rises to the top. Used by
+    // the OPT-IN query-expansion path; the variants come from expand_query.
+    // Returns {} when the corpus/queries are empty or k == 0.
+    [[nodiscard]] std::vector<Hit> search_fused(
+        const std::vector<std::string>& queries,
+        const EmbedConfig& embed, std::size_t k) const;
+
     [[nodiscard]] std::size_t chunk_count() const noexcept { return chunks_.size(); }
     [[nodiscard]] bool        has_embeddings() const noexcept { return embed_dim_ > 0; }
     [[nodiscard]] std::size_t embed_dim() const noexcept { return embed_dim_; }
@@ -135,6 +144,14 @@ public:
 
 private:
     void write_cache_() const;
+
+    // Append this query's ranked candidate lists (BM25, plus dense when the
+    // corpus AND query embed) to `lists`, each as a vector of chunk ids.
+    // Shared by search() and search_fused() so the per-query retrieval logic
+    // lives in exactly one place.
+    void ranked_lists_for_query_(
+        std::string_view query, const EmbedConfig& embed, std::size_t pool,
+        std::vector<std::vector<std::uint32_t>>& lists) const;
 
     std::filesystem::path  root_;
     std::vector<Chunk>     chunks_;
