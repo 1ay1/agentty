@@ -116,6 +116,7 @@ std::vector<ToolDef> build_registry() {
     // when delegation is appropriate.
     r.push_back(tool_task());
     r.push_back(tool_skill());
+    r.push_back(tool_search_docs());
     return r;
 }
 

@@ -229,6 +229,9 @@ std::string_view missing_required_field(std::string_view tool_name,
         case K::FindDefinition:
             if (!is_nonempty_string("symbol")) return "symbol";
             return {};
+        case K::SearchDocs:
+            if (!is_nonempty_string("query")) return "query";
+            return {};
         case K::WebFetch:
             if (!is_nonempty_string("url")) return "url";
             return {};

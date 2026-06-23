@@ -30,5 +30,6 @@ namespace agentty::tools {
 [[nodiscard]] ToolDef tool_wipe_memory();
 [[nodiscard]] ToolDef tool_task();
 [[nodiscard]] ToolDef tool_skill();
+[[nodiscard]] ToolDef tool_search_docs();
 
 } // namespace agentty::tools

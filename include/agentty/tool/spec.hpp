@@ -154,6 +154,7 @@ enum class Kind : std::uint8_t {
     Wipe,
     Task,
     Skill,
+    SearchDocs,
 };
 
 inline constexpr std::array kCatalog = {
@@ -197,6 +198,12 @@ inline constexpr std::array kCatalog = {
     // 64000 char budget is generous headroom. Head: a skill doc reads
     // top-down.
     ToolSpec{"skill",           Kind::Skill,          {Effect::ReadFs},                     false,   detail::sec{10},   64000,  ToolSpec::TruncStrategy::Head},
+    // search_docs — agentic document/knowledge RAG. Reads the corpus
+    // files (ReadFs) and queries the local Ollama embed endpoint (Net)
+    // for hybrid BM25+dense retrieval. HeadTail keeps the top hits AND
+    // the trailing lower-ranked block; 60s covers a first-call index
+    // build + batch embed of a modest corpus.
+    ToolSpec{"search_docs",     Kind::SearchDocs,     {Effect::ReadFs, Effect::Net},        false,   detail::sec{60},   30000,  ToolSpec::TruncStrategy::HeadTail},
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
@@ -279,6 +286,7 @@ consteval bool kinds_bijective() {
         Kind::Wipe,
         Kind::Task,
         Kind::Skill,
+        Kind::SearchDocs,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto k : kAll) {
@@ -365,12 +373,13 @@ static_assert(readonly_invariants(),
 consteval bool only_web_is_net() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Net)) continue;
-        if (s.name != "web_fetch" && s.name != "web_search") return false;
+        if (s.name != "web_fetch" && s.name != "web_search" &&
+            s.name != "search_docs") return false;
     }
     return true;
 }
 static_assert(only_web_is_net(),
-              "Only web_fetch/web_search may carry Effect::Net");
+              "Only web_fetch/web_search/search_docs may carry Effect::Net");
 
 // ── Per-tool timeout proofs ─────────────────────────────────────────────
 // Pin the wall-clock-watchdog values so a careless edit (set 0 on the

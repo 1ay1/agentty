@@ -385,6 +385,11 @@ set(AGENTTY_DIFF_SOURCES
     src/diff/diff.cpp
 )
 
+set(AGENTTY_RAG_SOURCES
+    src/rag/bm25.cpp
+    src/rag/corpus.cpp
+)
+
 set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
     src/tool/util/utf8.cpp
@@ -414,6 +419,7 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/tools/wipe.cpp
     src/tool/tools/task.cpp
     src/tool/tools/skill.cpp
+    src/tool/tools/search_docs.cpp
     src/tool/subagent.cpp
     src/tool/skills.cpp
     src/tool/memory_store.cpp
@@ -589,6 +595,7 @@ agentty_objlib(agentty_workspace_obj ${AGENTTY_WORKSPACE_SOURCES})
 agentty_objlib(agentty_airgap_obj    ${AGENTTY_AIRGAP_SOURCES})
 agentty_objlib(agentty_provider_obj  ${AGENTTY_PROVIDER_SOURCES})
 agentty_objlib(agentty_diff_obj      ${AGENTTY_DIFF_SOURCES})
+agentty_objlib(agentty_rag_obj       ${AGENTTY_RAG_SOURCES})
 agentty_objlib(agentty_tool_obj      ${AGENTTY_TOOL_SOURCES})
 agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
 # ACP glue is only needed by the exe + acp_integration_test. It also
@@ -604,6 +611,7 @@ set(AGENTTY_SHARED_OBJECTS
     $<TARGET_OBJECTS:agentty_airgap_obj>
     $<TARGET_OBJECTS:agentty_provider_obj>
     $<TARGET_OBJECTS:agentty_diff_obj>
+    $<TARGET_OBJECTS:agentty_rag_obj>
     $<TARGET_OBJECTS:agentty_tool_obj>
     $<TARGET_OBJECTS:agentty_runtime_obj>
 )
@@ -1037,6 +1045,7 @@ if(AGENTTY_BUILD_TESTS)
         ${AGENTTY_AIRGAP_SOURCES}
         ${AGENTTY_PROVIDER_SOURCES}
         ${AGENTTY_DIFF_SOURCES}
+        ${AGENTTY_RAG_SOURCES}
         ${AGENTTY_TOOL_SOURCES}
         ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
     )
@@ -1063,6 +1072,12 @@ if(AGENTTY_BUILD_TESTS)
             "-framework CoreFoundation")
     endif()
     add_test(NAME ollama_transport_test COMMAND ollama_transport_test)
+
+    # rag_test — document/knowledge RAG unit tests (chunker, BM25 ranking,
+    # RRF fusion, cosine, Corpus BM25-only search). No network: the embed
+    # path is exercised only with an empty model so no Ollama server is
+    # needed. Links the full shared stack (rag + io objs included).
+    agentty_add_full_test(rag_test)
 
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
@@ -1157,6 +1172,7 @@ if(AGENTTY_BUILD_TESTS)
         table_render_test
         openai_transport_test
         ollama_transport_test
+        rag_test
         visual_hash_coverage_test
         tool_result_budget_test
         read_grep_features_test
