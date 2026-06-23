@@ -308,21 +308,13 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     write_cache_();
 }
 
-std::vector<Hit> Corpus::search(std::string_view query,
-                                const EmbedConfig& embed,
-                                std::size_t k) const {
-    if (chunks_.empty() || k == 0) return {};
-
-    // Pull a generous candidate pool from each retriever, then fuse + cut to
-    // k (SOTA pattern: retrieve wide, fuse, return narrow).
-    const std::size_t pool = std::max<std::size_t>(k * 8, 32);
-
+void Corpus::ranked_lists_for_query_(
+    std::string_view query, const EmbedConfig& embed, std::size_t pool,
+    std::vector<std::vector<std::uint32_t>>& lists) const {
     // BM25 ranked list (always available).
     std::vector<std::uint32_t> bm25_rank;
     for (auto& [id, score] : bm25_search(bm25_, query, pool))
         bm25_rank.push_back(id);
-
-    std::vector<std::vector<std::uint32_t>> lists;
     lists.push_back(std::move(bm25_rank));
 
     // Dense ranked list (only when the corpus AND the query can be embedded).
@@ -355,9 +347,38 @@ std::vector<Hit> Corpus::search(std::string_view query,
             if (!dense_rank.empty()) lists.push_back(std::move(dense_rank));
         }
     }
+}
+
+std::vector<Hit> Corpus::search(std::string_view query,
+                                const EmbedConfig& embed,
+                                std::size_t k) const {
+    if (chunks_.empty() || k == 0) return {};
+
+    // Pull a generous candidate pool from each retriever, then fuse + cut to
+    // k (SOTA pattern: retrieve wide, fuse, return narrow).
+    const std::size_t pool = std::max<std::size_t>(k * 8, 32);
+
+    std::vector<std::vector<std::uint32_t>> lists;
+    ranked_lists_for_query_(query, embed, pool, lists);
 
     // Fuse with RRF (k=60 canonical) and materialize the hits.
     auto fused = reciprocal_rank_fusion(lists, /*k=*/60.0, k);
+    std::vector<Hit> hits;
+    hits.reserve(fused.size());
+    for (auto& [id, score] : fused)
+        hits.push_back(Hit{&chunks_[id], score});
+    return hits;
+}
+
+std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
+                                      const EmbedConfig& embed,
+                                      std::size_t k) const {
+    if (chunks_.empty() || k == 0 || queries.empty()) return {};
+    const std::size_t pool = std::max<std::size_t>(k * 8, 32);
+    std::vector<std::vector<std::uint32_t>> lists;
+    for (const auto& q : queries)
+        ranked_lists_for_query_(q, embed, pool, lists);  // BM25(+dense) each
+    auto fused = reciprocal_rank_fusion(lists, 60.0, k);
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)

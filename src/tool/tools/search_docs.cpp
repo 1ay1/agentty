@@ -12,6 +12,7 @@
 
 #include "agentty/rag/rag.hpp"
 #include "agentty/rag/rerank.hpp"
+#include "agentty/rag/expand.hpp"
 
 #include <cstdlib>
 #include <cstdio>
@@ -91,6 +92,41 @@ rag::EmbedConfig embed_config_from_env() {
     return cfg;
 }
 
+// Multi-query expansion is OPT-IN: each variant costs an extra retrieval
+// pass plus one local LLM call. Enabled when AGENTTY_RAG_EXPAND is set to a
+// non-empty value other than "0"/"false".
+bool expand_enabled() {
+    const char* v = std::getenv("AGENTTY_RAG_EXPAND");
+    if (!v || v[0] == '\0') return false;
+    std::string s{v};
+    return s != "0" && s != "false" && s != "FALSE" && s != "False";
+}
+
+// Build the expansion config. Reuses the embed host/port (same Ollama
+// server). The model is GENERATIVE (not the embedding model): prefer
+// AGENTTY_RAG_EXPAND_MODEL, then AGENTTY_MODEL, else a small default.
+rag::ExpandConfig expand_config_from_env(const rag::EmbedConfig& embed) {
+    rag::ExpandConfig cfg;
+    cfg.host = embed.host;
+    cfg.port = embed.port;
+    if (const char* m = std::getenv("AGENTTY_RAG_EXPAND_MODEL"); m && m[0])
+        cfg.model = m;
+    else if (const char* gm = std::getenv("AGENTTY_MODEL"); gm && gm[0])
+        cfg.model = gm;
+    else
+        cfg.model = "llama3.2";
+    cfg.n = 4;
+    if (const char* ns = std::getenv("AGENTTY_RAG_EXPAND_N"); ns && ns[0]) {
+        try {
+            int n = std::stoi(ns);
+            if (n < 1) n = 1;
+            if (n > 8) n = 8;
+            cfg.n = static_cast<std::size_t>(n);
+        } catch (...) { /* keep default */ }
+    }
+    return cfg;
+}
+
 ExecResult run_search_docs(const SearchDocsArgs& a) {
     try {
         auto root = resolve_docs_root();
@@ -126,9 +162,22 @@ ExecResult run_search_docs(const SearchDocsArgs& a) {
         // top; a wide pool gives the feature-fusion reranker enough
         // candidates to lift precision@k. Then compress each survivor so a
         // weak small-context model isn't flooded with irrelevant chunk text.
-        auto pool = corpus.search(a.query, embed,
-                                  std::max<std::size_t>(
-                                      static_cast<std::size_t>(a.k) * 5, 30));
+        const std::size_t pool_k =
+            std::max<std::size_t>(static_cast<std::size_t>(a.k) * 5, 30);
+
+        std::vector<rag::Hit> pool;
+        std::size_t variant_count = 0;  // # of EXTRA variants beyond original
+        if (expand_enabled()) {
+            // Multi-query RAG-Fusion: rewrite the query into several
+            // phrasings, retrieve for each, fuse all ranked lists. Rerank
+            // against the ORIGINAL query so variants only boost recall.
+            rag::ExpandConfig ecfg = expand_config_from_env(embed);
+            auto queries = rag::expand_query(ecfg, a.query);
+            if (queries.size() > 1) variant_count = queries.size() - 1;
+            pool = corpus.search_fused(queries, embed, pool_k);
+        } else {
+            pool = corpus.search(a.query, embed, pool_k);
+        }
         auto hits = rag::rerank(a.query, std::move(pool),
                                 static_cast<std::size_t>(a.k));
 
@@ -144,7 +193,10 @@ ExecResult run_search_docs(const SearchDocsArgs& a) {
 
         const char* mode = corpus.has_embeddings() ? "hybrid" : "BM25-only";
         body += std::to_string(hits.size()) + " results from " + root_str
-              + " (mode: " + mode + ", reranked)\n";
+              + " (mode: " + mode + ", reranked";
+        if (variant_count > 0)
+            body += ", +" + std::to_string(variant_count) + " query variants";
+        body += ")\n";
 
         char score_buf[32];
         for (std::size_t i = 0; i < hits.size(); ++i) {
