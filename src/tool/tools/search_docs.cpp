@@ -11,9 +11,11 @@
 #include "agentty/tool/util/tool_args.hpp"
 
 #include "agentty/rag/rag.hpp"
+#include "agentty/rag/rerank.hpp"
 
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -119,8 +121,16 @@ ExecResult run_search_docs(const SearchDocsArgs& a) {
             indexed_root = root_str;
         }
 
-        auto hits = corpus.search(a.query, embed,
-                                  static_cast<std::size_t>(a.k));
+        // Retrieve WIDE → rerank → narrow → compress (SOTA RAG pipeline).
+        // The first-pass hybrid fusion is recall-oriented and noisy at the
+        // top; a wide pool gives the feature-fusion reranker enough
+        // candidates to lift precision@k. Then compress each survivor so a
+        // weak small-context model isn't flooded with irrelevant chunk text.
+        auto pool = corpus.search(a.query, embed,
+                                  std::max<std::size_t>(
+                                      static_cast<std::size_t>(a.k) * 5, 30));
+        auto hits = rag::rerank(a.query, std::move(pool),
+                                static_cast<std::size_t>(a.k));
 
         std::string body;
         if (!a.display_description.empty())
@@ -134,7 +144,7 @@ ExecResult run_search_docs(const SearchDocsArgs& a) {
 
         const char* mode = corpus.has_embeddings() ? "hybrid" : "BM25-only";
         body += std::to_string(hits.size()) + " results from " + root_str
-              + " (mode: " + mode + ")\n";
+              + " (mode: " + mode + ", reranked)\n";
 
         char score_buf[32];
         for (std::size_t i = 0; i < hits.size(); ++i) {
@@ -145,7 +155,9 @@ ExecResult run_search_docs(const SearchDocsArgs& a) {
                   + std::to_string(h.chunk->line_start) + "-"
                   + std::to_string(h.chunk->line_end)
                   + "  (score " + score_buf + ")\n";
-            body += h.chunk->text;
+            std::string passage = rag::compress(a.query, h.chunk->text,
+                                                 /*target_chars=*/600);
+            body += passage;
             if (!body.empty() && body.back() != '\n') body += "\n";
         }
 
