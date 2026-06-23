@@ -847,7 +847,12 @@ std::string system_prompt() {
            "- Make ONE tool call at a time and wait for its result. Never "
            "invent a tool result.\n"
            "- Never call remember/forget/wipe_memory unless the user asks you "
-           "to remember or forget something.\n\n";
+           "to remember or forget something.\n"
+           "- For questions about the user's OWN docs, manuals, specs, or "
+           "notes (anything you can't reliably answer from general knowledge), "
+           "call `search_docs` FIRST to retrieve the relevant passages, then "
+           "answer from what it returns. Do NOT guess from memory when the "
+           "answer should come from their documents.\n\n";
 
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "
