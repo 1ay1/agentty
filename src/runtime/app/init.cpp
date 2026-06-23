@@ -46,11 +46,35 @@ std::pair<Model, maya::Cmd<Msg>> init() {
             provider::active().kind == provider::Kind::Anthropic;
         bool honour = true;
         if (anthropic_active) {
-            honour = false;
-            for (const auto& mi : m.d.available_models)
-                if (mi.id == settings.model_id) { honour = true; break; }
+            // Honour the saved id if it's a known seeded model OR any
+            // `claude-*` id. The seed list is a small hardcoded snapshot
+            // (opus/sonnet/haiku 4.5); a NEWER Claude the user selected
+            // (e.g. claude-opus-4-8) is a perfectly valid Anthropic id but
+            // isn't seeded, and rejecting it here is exactly why the last
+            // picked model was forgotten every launch — we fell back to the
+            // built-in default. Any `claude-` prefix is an Anthropic id and
+            // is safe to send; only a foreign id (e.g. a leftover Ollama
+            // "qwen2.5-coder:7b") must be dropped so it doesn't 404.
+            honour = settings.model_id.value.starts_with("claude-");
+            if (!honour) {
+                for (const auto& mi : m.d.available_models)
+                    if (mi.id == settings.model_id) { honour = true; break; }
+            }
         }
-        if (honour) m.d.model_id = settings.model_id;
+        if (honour) {
+            m.d.model_id = settings.model_id;
+            // Ensure the honoured id is in the picker list (a newer Claude
+            // won't be in the seed snapshot) so the model picker shows the
+            // active model selected instead of nothing.
+            bool present = false;
+            for (const auto& mi : m.d.available_models)
+                if (mi.id == m.d.model_id) { present = true; break; }
+            if (!present)
+                m.d.available_models.insert(
+                    m.d.available_models.begin(),
+                    ModelInfo{m.d.model_id, m.d.model_id.value,
+                              "anthropic", 200000, false});
+        }
     }
     // Set the per-model context window now (before any stream runs) so
     // the ctx % bar uses the right denominator from frame 1, not after
