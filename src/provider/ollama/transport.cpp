@@ -116,6 +116,18 @@ struct StreamCtx {
     // narration around the object doesn't defeat the tool call.
     bool        json_protocol   = false;
 
+    // ── Reasoning-model <think> stripping ───────────────────────────────
+    // Reasoning models (deepseek-r1, qwen3, …) that are NOT driven through
+    // Ollama's native `thinking` field dump their chain-of-thought into
+    // `content` wrapped in <think>…</think>. We must NOT emit that as user-
+    // visible prose, and a leading <think> block would otherwise defeat the
+    // could_be_tool_json hold (it doesn't start with `{`) and flush the
+    // reasoning as text ahead of the real tool call. While `in_think` we
+    // swallow content until the closing </think>, then resume normal
+    // hold/classify on whatever follows.
+    bool        in_think        = false;
+    bool        think_seen      = false;  // ever entered a think block this turn
+
     StreamCtx() { buf.reserve(64 * 1024); }
 };
 
@@ -479,6 +491,38 @@ bool rescue_json_protocol(StreamCtx& ctx) {
     return false;
 }
 
+// Filter reasoning-model <think>…</think> out of a streamed content chunk,
+// tracking open/close state across frames in ctx. Returns only the visible
+// (non-think) text. The native `thinking` field is the clean path; this is the
+// fallback for models that inline their CoT into `content`. We also accept
+// <thinking>…</thinking> (some templates use the long form).
+[[nodiscard]] std::string filter_think(StreamCtx& ctx, std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    std::size_t i = 0;
+    while (i < s.size()) {
+        if (ctx.in_think) {
+            // Look for a closing tag.
+            std::size_t close = s.find("</think>", i);
+            std::size_t close2 = s.find("</thinking>", i);
+            std::size_t c = std::min(close, close2);
+            if (c == std::string_view::npos) return out;  // still inside think
+            ctx.in_think = false;
+            i = c + (c == close ? 8 : 11);
+        } else {
+            std::size_t open = s.find("<think>", i);
+            std::size_t open2 = s.find("<thinking>", i);
+            std::size_t o = std::min(open, open2);
+            if (o == std::string_view::npos) { out.append(s.substr(i)); break; }
+            out.append(s.substr(i, o - i));
+            ctx.in_think   = true;
+            ctx.think_seen = true;
+            i = o + (o == open ? 7 : 10);
+        }
+    }
+    return out;
+}
+
 // Handle one native `message` object from an NDJSON frame.
 void handle_message(StreamCtx& ctx, const json& message) {
     // Structured tool calls. Ollama returns them fully-formed in one frame
@@ -521,8 +565,14 @@ void handle_message(StreamCtx& ctx, const json& message) {
     // Assistant prose. Held-and-classified while salvage is still eligible so
     // a leaked tool-call JSON can be recovered instead of dumped as text.
     if (message.contains("content") && message["content"].is_string()) {
-        const auto& s = message["content"].get_ref<const std::string&>();
-        if (s.empty()) return;
+        const auto& raw = message["content"].get_ref<const std::string&>();
+        if (raw.empty()) return;
+        // Strip any inline <think>…</think> reasoning (deepseek-r1, qwen3 when
+        // not driven through the native `thinking` field) before it reaches
+        // the hold/classify path or the user. Ollama's native `thinking` field
+        // (message.thinking) is handled separately and never enters content.
+        std::string s = filter_think(ctx, raw);
+        if (s.empty()) return;  // entire chunk was inside a think block
         ctx.full_content += s;
         if (!ctx.holding) { ctx.sink(StreamTextDelta{s}); return; }
         ctx.text_hold += s;
@@ -801,6 +851,91 @@ json json_protocol_schema(const std::vector<provider::ToolSpec>& tools) {
 }
 } // namespace
 
+// Build the Ollama `options` object: num_ctx, num_predict, and sampling. This
+// is the single highest-leverage robustness lever for local models. Exposed
+// (non-anonymous) so a unit test can assert the chosen values without a
+// network round-trip. Reads AGENTTY_OLLAMA_NUM_CTX / _NUM_PREDICT overrides.
+json build_options(const Request& req) {
+    auto env_int = [](const char* name) -> int {
+        if (const char* v = std::getenv(name)) {
+            int n = 0;
+            for (const char* p = v; *p >= '0' && *p <= '9'; ++p) n = n * 10 + (*p - '0');
+            return n;
+        }
+        return 0;
+    };
+
+    // ── num_ctx (context window) ── THE critical option for agents ───────────
+    //
+    // Ollama's default num_ctx is a tiny 2048 (4096 on newer builds),
+    // INDEPENDENT of the model's real window. Since agentty never set it, every
+    // request silently truncated to that floor — after a few tool round-trips
+    // the system prompt + tool catalog + early conversation scroll off the
+    // front and the model "forgets" its tools/instructions mid-session. This is
+    // the #1 cause of weak-model agent failure on Ollama.
+    //
+    // Precedence:
+    //   1. AGENTTY_OLLAMA_NUM_CTX env override (power-user escape hatch).
+    //   2. The model's real context window probed from /api/show model_info
+    //      (req.context_window), clamped to a sane agent ceiling so we don't
+    //      try to allocate a 128k-token KV cache on a laptop and OOM the
+    //      Ollama server (which would fail the whole request).
+    //   3. A safe agent-sized default (8192) when the window is unknown — 4x
+    //      Ollama's floor, enough to hold the prompt + a few tool turns,
+    //      small enough to load on modest hardware.
+    int num_ctx = env_int("AGENTTY_OLLAMA_NUM_CTX");
+    if (num_ctx <= 0) {
+        constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
+        constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
+        if (req.context_window > 0) {
+            num_ctx = req.context_window;
+            if (num_ctx < kAgentCtxFloor)   num_ctx = kAgentCtxFloor;
+            if (num_ctx > kAgentCtxCeiling) num_ctx = kAgentCtxCeiling;
+        } else {
+            num_ctx = kAgentCtxFloor;
+        }
+    }
+
+    // ── num_predict (max output tokens) ────────────────────────────────
+    //
+    // Ollama's default is a low ~128 which truncates real answers. But blindly
+    // sending the hosted-model cap (16384) is also wrong locally: num_predict
+    // tokens are reserved OUT OF num_ctx, so a 16k num_predict on an 8k window
+    // leaves almost no room for the prompt. Cap num_predict at half the context
+    // window so the prompt always has room, with a floor of 2048 (enough for a
+    // substantial answer or a tool call's args) and honour an explicit
+    // override / the request's own max_tokens as the upper bound.
+    int num_predict = env_int("AGENTTY_OLLAMA_NUM_PREDICT");
+    if (num_predict <= 0) {
+        num_predict = req.max_tokens > 0 ? req.max_tokens : 4096;
+        const int half_ctx = num_ctx / 2;
+        if (num_predict > half_ctx) num_predict = half_ctx;
+        if (num_predict < 2048)     num_predict = std::min(2048, num_ctx);
+    }
+
+    json opts;
+    opts["num_ctx"]     = num_ctx;
+    opts["num_predict"] = num_predict;
+
+    // ── Sampling ── deterministic-leaning for tool-calling reliability ───────
+    //
+    // Weak models emit far more parseable tool calls at low temperature — high
+    // temperature is what makes a 7B model improvise a malformed `{"tool":...}`
+    // or wander into prose mid-call. A low (not zero) temperature keeps a
+    // little diversity for chat while sharply reducing tool-JSON corruption.
+    // Only set when the model is on the weak/json-protocol path; capable models
+    // keep their Modelfile defaults. Override via AGENTTY_OLLAMA_TEMPERATURE.
+    if (req.json_protocol) {
+        opts["temperature"] = 0.2;
+        opts["top_p"]       = 0.9;
+    }
+    if (const char* t = std::getenv("AGENTTY_OLLAMA_TEMPERATURE")) {
+        try { opts["temperature"] = std::stod(t); } catch (...) {}
+    }
+
+    return opts;
+}
+
 std::string system_prompt() {
     std::string cwd;
     try { cwd = std::filesystem::current_path().string(); } catch (...) {}
@@ -909,10 +1044,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     body["stream"] = true;
     // Keep the model resident between turns so the next prompt is instant.
     body["keep_alive"] = "10m";
-    // num_predict = max output tokens (Ollama default is a low ~128, which
-    // truncates real answers). num_ctx is left to the model's Modelfile /
-    // server default so we don't shrink a model's window by guessing.
-    body["options"] = {{"num_predict", req.max_tokens}};
+    body["options"] = build_options(req);
 
     json messages = json::array();
     std::string sys = req.system_prompt;

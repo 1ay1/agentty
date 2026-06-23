@@ -23,6 +23,7 @@ public:
         oreq.messages      = std::move(req.messages);
         oreq.tools         = std::move(req.tools);
         oreq.max_tokens    = req.max_tokens;
+        oreq.context_window = req.context_window;
         oreq.auth          = std::move(req.auth);
         oreq.retry_count   = req.retry_count;
         oreq.endpoint      = endpoint_;

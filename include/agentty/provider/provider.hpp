@@ -52,6 +52,13 @@ struct Request {
     std::vector<ToolSpec> tools;
     int max_tokens = kSafeMaxTokens;
 
+    // Model's real context window (input+output token budget). Used by the
+    // Ollama transport to set options.num_ctx so long agent conversations
+    // aren't silently truncated to Ollama's tiny default window. 0 = unknown
+    // (the transport falls back to a safe agent-sized default). Hosted
+    // providers ignore it. Set by launch_stream from the selected ModelInfo.
+    int context_window = 0;
+
     // Typed credential — the variant arm names the wire header. See
     // agentty/auth/auth.hpp for the AuthHeader definition; transports
     // never see a loose (header, style) pair.

@@ -398,6 +398,96 @@ static void test_jp_response_alias_key() {
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
+// ── 5. build_options (num_ctx / num_predict / sampling) ──────────────────────
+static void test_options_unknown_window_default() {
+    // No probed context window → safe agent-sized default 8192, well above
+    // Ollama's 2k/4k floor that silently truncates long conversations.
+    oll::Request r;
+    r.max_tokens = 16384;
+    r.context_window = 0;
+    auto o = oll::build_options(r);
+    CHECK(o["num_ctx"].get<int>() == 8192);
+    // num_predict is clamped to half the window so the prompt always fits.
+    CHECK(o["num_predict"].get<int>() == 4096);
+}
+
+static void test_options_probed_window() {
+    // A real 32768-window model gets that window (clamped to the 32768 ceiling).
+    oll::Request r;
+    r.max_tokens = 16384;
+    r.context_window = 32768;
+    auto o = oll::build_options(r);
+    CHECK(o["num_ctx"].get<int>() == 32768);
+    CHECK(o["num_predict"].get<int>() == 16384);  // half of 32768, == max_tokens
+}
+
+static void test_options_huge_window_clamped() {
+    // A 128k-window model is clamped to the agent ceiling so we don't try to
+    // allocate a giant KV cache and OOM the local Ollama server.
+    oll::Request r;
+    r.max_tokens = 16384;
+    r.context_window = 131072;
+    auto o = oll::build_options(r);
+    CHECK(o["num_ctx"].get<int>() == 32768);
+}
+
+static void test_options_small_window_floored() {
+    // A model that reports a tiny window still gets the agent floor.
+    oll::Request r;
+    r.max_tokens = 16384;
+    r.context_window = 2048;
+    auto o = oll::build_options(r);
+    CHECK(o["num_ctx"].get<int>() == 8192);
+}
+
+static void test_options_json_protocol_sampling() {
+    // Weak/json-protocol path gets a low temperature for tool-call reliability.
+    oll::Request r;
+    r.max_tokens = 16384;
+    r.context_window = 8192;
+    r.json_protocol = true;
+    auto o = oll::build_options(r);
+    CHECK(o.contains("temperature"));
+    CHECK(o["temperature"].get<double>() < 0.5);
+    // Capable (non-json-protocol) models keep their Modelfile defaults.
+    oll::Request r2;
+    r2.max_tokens = 16384;
+    r2.context_window = 8192;
+    auto o2 = oll::build_options(r2);
+    CHECK(!o2.contains("temperature"));
+}
+
+// ── 6. <think> reasoning stripping ───────────────────────────────────────────
+static void test_think_block_stripped_from_prose() {
+    // A reasoning model inlines <think>…</think> then answers. Only the answer
+    // is shown; the reasoning never reaches the user.
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"<think>let me reason</think>The answer is 42.\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd);
+    CHECK(joined_text(msgs).find("The answer is 42") != std::string::npos);
+    CHECK(joined_text(msgs).find("let me reason") == std::string::npos);
+    CHECK(joined_text(msgs).find("<think>") == std::string::npos);
+}
+
+static void test_think_then_tool_call_salvaged() {
+    // The model thinks, then leaks a tool call in content. The <think> block
+    // must NOT defeat the hold/salvage path — the tool call still fires.
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"<think>I should list files</think>"
+        "{\\\"name\\\":\\\"bash\\\",\\\"arguments\\\":"
+        "{\\\"command\\\":\\\"ls\\\"}}\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash", "write"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(joined_text(msgs).find("should list files") == std::string::npos);
+}
+
 // ── 3. system_prompt ─────────────────────────────────────────────────────────
 static void test_system_prompt_shape() {
     auto p = oll::system_prompt();
@@ -431,6 +521,13 @@ int main() {
     test_jp_response_pseudo_tool();
     test_jp_grammar_tool_call();
     test_jp_response_alias_key();
+    test_options_unknown_window_default();
+    test_options_probed_window();
+    test_options_huge_window_clamped();
+    test_options_small_window_floored();
+    test_options_json_protocol_sampling();
+    test_think_block_stripped_from_prose();
+    test_think_then_tool_call_salvaged();
     test_system_prompt_shape();
 
     if (g_failures == 0) {

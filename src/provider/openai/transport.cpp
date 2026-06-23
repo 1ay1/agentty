@@ -1590,9 +1590,15 @@ std::string local_model_system_prompt() {
 // Fetches a model's capabilities from Ollama. Returns std::nullopt on failure.
 // Zed-style: only models that report "tools" in capabilities[] get tools.
 namespace {
-std::optional<bool> probe_ollama_supports_tools(const AuthHeader& auth,
-                                                 const Endpoint& ep,
-                                                 const std::string& model_name) {
+struct OllamaProbe {
+    std::optional<bool> supports_tools;
+    int context_window = 0;  // real model window from model_info.*.context_length
+};
+
+OllamaProbe probe_ollama_model(const AuthHeader& auth,
+                               const Endpoint& ep,
+                               const std::string& model_name) {
+    OllamaProbe out;
     http::Request hreq;
     hreq.method     = http::HttpMethod::Post;
     hreq.host       = ep.host;
@@ -1608,19 +1614,37 @@ std::optional<bool> probe_ollama_supports_tools(const AuthHeader& auth,
     tos.total   = std::chrono::milliseconds(5'000);
 
     auto resp = http::default_client().send(hreq, tos);
-    if (!resp || resp->status != 200) return std::nullopt;
+    if (!resp || resp->status != 200) return out;
 
     try {
         auto j = json::parse(resp->body);
+        // Tool capability (Zed-style): only models advertising "tools" get the
+        // native function-call channel.
         if (j.contains("capabilities") && j["capabilities"].is_array()) {
-            for (const auto& cap : j["capabilities"]) {
+            bool has_tools = false;
+            for (const auto& cap : j["capabilities"])
                 if (cap.is_string() && cap.get<std::string>() == "tools")
-                    return true;
+                    has_tools = true;
+            out.supports_tools = has_tools;
+        }
+        // Real context window. /api/show returns model_info as a flat map of
+        // arch-prefixed keys; the window lives under "<arch>.context_length"
+        // (e.g. "qwen2.context_length": 32768, "llama.context_length": 8192).
+        // The arch prefix varies per model, so scan for any key ending in
+        // ".context_length" rather than hard-coding the architecture.
+        if (j.contains("model_info") && j["model_info"].is_object()) {
+            for (auto it = j["model_info"].begin(); it != j["model_info"].end(); ++it) {
+                const std::string& key = it.key();
+                if (key.size() >= 15
+                    && key.compare(key.size() - 15, 15, ".context_length") == 0
+                    && it.value().is_number_integer()) {
+                    out.context_window = it.value().get<int>();
+                    break;
+                }
             }
-            return false;  // capabilities present but "tools" not in list
         }
     } catch (...) {}
-    return std::nullopt;  // parse failure or no capabilities field
+    return out;
 }
 } // namespace
 
@@ -1666,13 +1690,16 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
             // supports structured tool calls (Ollama's capabilities[].
             // "tools") vs. just leaking tool JSON into content.
             for (const auto& id : names) {
-                auto supports_tools = probe_ollama_supports_tools(auth, endpoint, id);
-                result.push_back(ModelInfo{
+                auto probe = probe_ollama_model(auth, endpoint, id);
+                ModelInfo info{
                     .id             = ModelId{id},
                     .display_name   = id,
                     .provider       = endpoint.label,
-                    .supports_tools = supports_tools,
-                });
+                    .supports_tools = probe.supports_tools,
+                };
+                if (probe.context_window > 0)
+                    info.context_window = probe.context_window;
+                result.push_back(std::move(info));
             }
         } else {
             for (const auto& m : j.value("data", json::array())) {

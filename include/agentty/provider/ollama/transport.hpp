@@ -58,6 +58,13 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 // Build the native messages array from our Thread. Exposed for tests.
 [[nodiscard]] nlohmann::json build_messages(const std::vector<Message>& msgs);
 
+// Build the Ollama `options` object (num_ctx, num_predict, sampling) from a
+// Request. The single highest-leverage robustness lever for local models:
+// num_ctx defends against Ollama's tiny default context window silently
+// truncating long agent conversations. Exposed for tests. Honours
+// AGENTTY_OLLAMA_NUM_CTX / _NUM_PREDICT / _TEMPERATURE overrides.
+[[nodiscard]] nlohmann::json build_options(const Request& req);
+
 // Test-only: feed an NDJSON byte buffer through the live parser and collect
 // every dispatched Msg (no network round-trip). Pass json_protocol=true to
 // exercise the weak-model single-object protocol (no native tools array; the
