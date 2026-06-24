@@ -187,6 +187,20 @@ void open_browser(const std::string& url);
 // immediately instead of waiting on a synchronous network round trip.
 [[nodiscard]] Credentials resolve(const std::string& cli_api_key);
 
+// ── Synchronous fresh credential (for off-reducer worker threads) ────────
+// Returns a ready-to-use wire header, refreshing an expired OAuth token
+// IN PLACE via a blocking network round trip and persisting the new token
+// to disk so the whole process picks it up. Unlike `resolve()` (which is
+// non-blocking and defers refresh to the reducer), this is for contexts
+// that run on a worker thread and have no reducer to hand the refresh off
+// to — chiefly the `task` subagent loop, which would otherwise reuse a
+// frozen OAuth access token captured at startup and 401 once it expires.
+//
+// `fallback` is returned unchanged when no saved/env credential is usable
+// (e.g. a CLI -k key was the only auth) so callers that already hold a
+// known-good header don't regress. Thread-safe to call from any worker.
+[[nodiscard]] AuthHeader fresh_auth_header(const AuthHeader& fallback);
+
 // ── Pending OAuth refresh handoff ────────────────────────────────────────
 // One-shot channel from `auth::resolve()` (called pre-TUI from main()) to
 // `AgenttyApp::init()` (called from inside maya::run()). resolve() writes the
