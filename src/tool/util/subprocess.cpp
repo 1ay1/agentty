@@ -1,6 +1,7 @@
 #include "agentty/tool/util/subprocess.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/util/utf8.hpp"
+#include "agentty/io/fsm.hpp"
 
 #include <algorithm>
 #include <array>
@@ -375,6 +376,69 @@ bool drain_pipe(int fd, std::ostringstream& out, std::size_t& total,
 
 } // namespace
 
+// -----------------------------------------------------------------------
+// Spawn-lifecycle RAII + typestate (POSIX).
+// -----------------------------------------------------------------------
+// run_posix's prologue acquires resources in sequence — a pipe (two fds),
+// a posix_spawn_file_actions_t, then the child pid — and EVERY early
+// failure path used to hand-unwind whatever was acquired so far
+// (::close(pipefd[0]); ::close(pipefd[1]); posix_spawn_file_actions_destroy).
+// That ladder is correct but fragile: a new early-return added mid-prologue
+// silently leaks an fd. Model it as move-only owning guards + a two-state
+// typestate (Piped ─spawn─▶ Spawned) so cleanup is RAII and the legal
+// ordering is compiler-checked. Zero overhead: the guards are thin
+// fd/handle wrappers, the states are empty move-only tokens.
+namespace {
+
+// Owns one fd; closes on destruction unless released. Move-only.
+struct FdGuard {
+    int fd = -1;
+    FdGuard() = default;
+    explicit FdGuard(int f) noexcept : fd(f) {}
+    FdGuard(FdGuard&& o) noexcept : fd(std::exchange(o.fd, -1)) {}
+    FdGuard& operator=(FdGuard&& o) noexcept {
+        if (this != &o) { reset(); fd = std::exchange(o.fd, -1); }
+        return *this;
+    }
+    ~FdGuard() { reset(); }
+    void reset() noexcept { if (fd >= 0) ::close(fd); fd = -1; }
+    [[nodiscard]] int release() noexcept { return std::exchange(fd, -1); }
+    [[nodiscard]] bool valid() const noexcept { return fd >= 0; }
+};
+
+// Owns a posix_spawn_file_actions_t; destroys on scope exit. Move-only.
+struct SpawnFileActions {
+    posix_spawn_file_actions_t a{};
+    bool inited = false;
+    SpawnFileActions() = default;
+    SpawnFileActions(SpawnFileActions&& o) noexcept
+        : a(o.a), inited(std::exchange(o.inited, false)) {}
+    SpawnFileActions& operator=(SpawnFileActions&&) = delete;
+    ~SpawnFileActions() { if (inited) ::posix_spawn_file_actions_destroy(&a); }
+    [[nodiscard]] bool init() noexcept {
+        inited = (::posix_spawn_file_actions_init(&a) == 0);
+        return inited;
+    }
+};
+
+// Typestate: a wired-up pipe + file_actions, ready to spawn. OWNS both pipe
+// ends and the file_actions until spawn consumes it.
+struct Piped : io::fsm::State<struct PipedTag> {
+    using fsm_to = io::fsm::to<struct Spawned>;
+    FdGuard          read_end;    // parent reads child stdout/stderr here
+    FdGuard          write_end;   // dup'd into child stdout/stderr, then closed
+    SpawnFileActions actions;
+};
+
+// Typestate: child is running. OWNS the read fd (parent side) and the pid.
+// The write end is closed by the spawn transition (parent never writes).
+struct Spawned : io::fsm::State<struct SpawnedTag> {
+    FdGuard read_end;
+    pid_t   pid = -1;
+};
+
+} // namespace
+
 // argv form: arguments passed verbatim, no shell. shell_command form:
 // `/bin/sh -c <cmd>`. Either way, env is inherited.
 SubprocessResult run_posix(const std::vector<std::string>& argv_in,
@@ -382,42 +446,47 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
                            const SubprocessOptions&       opts) {
     SubprocessResult r;
 
-    // Pipe (child stdout+stderr → parent). Set the parent end non-blocking
-    // so drain_pipe returns instead of stalling on partial reads. Use
-    // pipe2(O_CLOEXEC) where available so the fd doesn't leak to nested
-    // posix_spawns; fall back to fcntl on macOS.
-    int pipefd[2] = {-1, -1};
+    // ── Piped: create the pipe + file_actions ───────────────────────────
+    // Set the parent end non-blocking so drain_pipe returns instead of
+    // stalling on partial reads. Use pipe2(O_CLOEXEC) where available so the
+    // fd doesn't leak to nested posix_spawns; fall back to fcntl on macOS.
+    Piped piped;
+    {
+        int pipefd[2] = {-1, -1};
 #if defined(__linux__)
-    if (::pipe2(pipefd, O_CLOEXEC) != 0) {
-        r.started = false; r.start_error = "pipe2 failed: " + std::string{std::strerror(errno)};
-        return r;
-    }
+        if (::pipe2(pipefd, O_CLOEXEC) != 0) {
+            r.started = false; r.start_error = "pipe2 failed: " + std::string{std::strerror(errno)};
+            return r;
+        }
 #else
-    if (::pipe(pipefd) != 0) {
-        r.started = false; r.start_error = "pipe failed: " + std::string{std::strerror(errno)};
-        return r;
-    }
-    (void)::fcntl(pipefd[0], F_SETFD, ::fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
-    (void)::fcntl(pipefd[1], F_SETFD, ::fcntl(pipefd[1], F_GETFD) | FD_CLOEXEC);
+        if (::pipe(pipefd) != 0) {
+            r.started = false; r.start_error = "pipe failed: " + std::string{std::strerror(errno)};
+            return r;
+        }
+        (void)::fcntl(pipefd[0], F_SETFD, ::fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
+        (void)::fcntl(pipefd[1], F_SETFD, ::fcntl(pipefd[1], F_GETFD) | FD_CLOEXEC);
 #endif
-    (void)::fcntl(pipefd[0], F_SETFL, ::fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+        (void)::fcntl(pipefd[0], F_SETFL, ::fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+        // From here on both fds are owned by RAII guards: any early return
+        // below closes them automatically (no hand-written close ladder).
+        piped.read_end  = FdGuard{pipefd[0]};
+        piped.write_end = FdGuard{pipefd[1]};
+    }
 
     // file_actions: redirect stdin from /dev/null (so the child can't
     // steal terminal input from the TUI), and stdout+stderr to the pipe
     // write end. Close the read end in the child so grandchildren that
     // inherit fds don't hold it open after the child itself exits.
-    posix_spawn_file_actions_t actions;
-    if (::posix_spawn_file_actions_init(&actions) != 0) {
-        ::close(pipefd[0]); ::close(pipefd[1]);
+    if (!piped.actions.init()) {
         r.started = false; r.start_error = "posix_spawn_file_actions_init failed";
-        return r;
+        return r;   // ~Piped closes both pipe fds
     }
-    ::posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,
+    ::posix_spawn_file_actions_addopen(&piped.actions.a, STDIN_FILENO,
         "/dev/null", O_RDONLY, 0);
-    ::posix_spawn_file_actions_adddup2 (&actions, pipefd[1], STDOUT_FILENO);
-    ::posix_spawn_file_actions_adddup2 (&actions, pipefd[1], STDERR_FILENO);
-    ::posix_spawn_file_actions_addclose(&actions, pipefd[1]);
-    ::posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+    ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDOUT_FILENO);
+    ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDERR_FILENO);
+    ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.write_end.fd);
+    ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.read_end.fd);
 
     // Build child argv. Shell form goes through `/bin/sh -c <cmd>` so
     // pipes / redirects / globs work; argv form bypasses the shell for
@@ -426,10 +495,8 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     std::vector<std::string> argv_storage;
     if (use_shell) {
         if (argv_in.empty()) {
-            ::posix_spawn_file_actions_destroy(&actions);
-            ::close(pipefd[0]); ::close(pipefd[1]);
             r.started = false; r.start_error = "empty shell command";
-            return r;
+            return r;   // ~Piped closes fds + destroys actions
         }
         argv_storage = {"sh", "-c", argv_in[0]};
     } else {
@@ -440,19 +507,36 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     for (auto& s : argv_storage) arg_ptrs.push_back(s.data());
     arg_ptrs.push_back(nullptr);
 
+    // ── Piped ─spawn─▶ Spawned ──────────────────────────────────────────
+    io::fsm::assert_legal_edge<Piped, Spawned>();
     pid_t pid = -1;
-    int rc = ::posix_spawnp(&pid, arg_ptrs[0], &actions, nullptr,
+    int rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, nullptr,
                             arg_ptrs.data(), environ);
-    ::posix_spawn_file_actions_destroy(&actions);
-    ::close(pipefd[1]);   // parent never writes
-    pipefd[1] = -1;
+    // file_actions no longer needed; the write end is parent-side dead
+    // weight (the child has its dup'd copy). Releasing them here mirrors
+    // the original eager teardown — ~Piped would do it too, but we want
+    // the write end gone BEFORE the supervise loop so EOF is observable.
+    piped.write_end.reset();
+    // (piped.actions is destroyed when `piped` leaves scope below.)
 
     if (rc != 0) {
-        ::close(pipefd[0]);
         r.started = false;
         r.start_error = "spawn failed: " + std::string{std::strerror(rc)};
-        return r;
+        return r;   // ~Piped closes the read end
     }
+
+    // Hand the read fd + pid to the running-child token. After this `piped`
+    // owns nothing but its (now-destroyed-on-scope-exit) file_actions.
+    Spawned child;
+    child.read_end = FdGuard{piped.read_end.release()};
+    child.pid      = pid;
+
+    // The supervise loop drives the genuinely-concurrent phase (poll +
+    // drain + idle-deadline SIGTERM/SIGKILL + reap). It is a select-loop,
+    // not a state sequence, so it stays a loop — but it now reads the
+    // child's read fd / pid through the owning Spawned token.
+    int read_fd = child.read_end.fd;
+    const pid_t cpid = child.pid;
 
     using clock = std::chrono::steady_clock;
     const auto start    = clock::now();
@@ -509,13 +593,13 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         // successful drain below, so reaching it means the child has
         // gone silent for at least `opts.timeout` seconds.
         if (!sent_term && has_idle_window && now >= idle_deadline) {
-            ::kill(pid, SIGTERM);
+            ::kill(cpid, SIGTERM);
             sent_term = true;
             timed_out = true;
             kill_at   = now + kKillGrace;
         }
         if (sent_term && !sent_kill && now >= kill_at) {
-            ::kill(pid, SIGKILL);
+            ::kill(cpid, SIGKILL);
             sent_kill = true;
         }
 
@@ -532,11 +616,11 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         if (wait_ms > 100) wait_ms = 100;
 
         if (!eof) {
-            struct pollfd pfd{pipefd[0], POLLIN, 0};
+            struct pollfd pfd{read_fd, POLLIN, 0};
             int pn = ::poll(&pfd, 1, static_cast<int>(wait_ms));
             if (pn > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
                 const auto bytes_before = total;
-                if (drain_pipe(pipefd[0], out, total, opts.max_bytes, truncated))
+                if (drain_pipe(read_fd, out, total, opts.max_bytes, truncated))
                     eof = true;
                 // Any forward progress in stdout/stderr resets the idle
                 // window — a chatty child (build with progress lines, log
@@ -561,16 +645,16 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         // instead of waiting forever on a phantom writer.
         if (!reaped) {
             int status = 0;
-            pid_t w = ::waitpid(pid, &status, WNOHANG);
-            if (w == pid) {
+            pid_t w = ::waitpid(cpid, &status, WNOHANG);
+            if (w == cpid) {
                 wait_status = status;
                 reaped = true;
                 if (!eof) {
                     // One last best-effort drain of buffered bytes the
                     // child wrote between its final flush and exit.
-                    drain_pipe(pipefd[0], out, total, opts.max_bytes, truncated);
-                    ::close(pipefd[0]);
-                    pipefd[0] = -1;
+                    drain_pipe(read_fd, out, total, opts.max_bytes, truncated);
+                    child.read_end.reset();
+                    read_fd = -1;
                     eof = true;
                 }
             } else if (w < 0 && errno != EINTR && errno != ECHILD) {
@@ -584,7 +668,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
             emit_progress();
     }
 
-    if (pipefd[0] >= 0) ::close(pipefd[0]);
+    if (read_fd >= 0) child.read_end.reset();
     emit_progress();   // final flush so the UI sees the last bytes
 
     if      (WIFEXITED  (wait_status)) r.exit_code = WEXITSTATUS(wait_status);
