@@ -760,7 +760,8 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
 // transcript over the current agent run (everything after the last real User
 // message that isn't a synthetic TOOL-RESULT carrier) and applies two caps.
 std::optional<LoopBreak> agent_loop_should_break(
-        const std::vector<Message>& messages) {
+        const std::vector<Message>& messages,
+        bool enforce_step_cap) {
     // Tunables. Generous enough that a legitimate multi-step task (search →
     // read → edit → verify …) never trips, tight enough that a stuck model
     // bails in seconds rather than spinning until the user hits Esc.
@@ -811,7 +812,12 @@ std::optional<LoopBreak> agent_loop_should_break(
                 "already know."};
         }
     }
-    if (tool_turns >= kMaxToolTurns) {
+    // RUNAWAY step cap. Only enforced for weak local models (caller passes
+    // enforce_step_cap). Capable models (Claude, hosted GPT) are NEVER step-
+    // capped — matches Claude Code (max_turns unlimited by default) and aider
+    // (no step cap). A long, legitimate search→read→edit→verify run must not be
+    // cut off at an arbitrary count.
+    if (enforce_step_cap && tool_turns >= kMaxToolTurns) {
         return LoopBreak{
             "Stopped after " + std::to_string(tool_turns) + " tool steps "
             "without finishing. Summarise what you found and answer the user "
@@ -944,13 +950,32 @@ Cmd<Msg> kick_pending_tools(Model& m) {
         if (has_results) {
             // ── Doom-loop circuit breaker ────────────────────────────────
             // Before spending another model completion, check whether this
-            // agent run has stopped converging (a weak model re-trying a dead
-            // call, or a runaway tool-step count). If so, DON'T re-stream:
-            // surface the nudge as the run's final assistant turn and drop to
-            // Idle, so the loop ends in seconds instead of spinning until the
-            // user hits Esc. The nudge text also lands in history, so if the
-            // user follows up the model sees why it stopped.
-            if (auto brk = agent_loop_should_break(m.d.current.messages)) {
+            // agent run has stopped converging. Two independent caps, each
+            // matching what production agent tools ship:
+            //
+            //   • REPEAT-FAILURE cap — the same call failed 3× in a row. This
+            //     is the UNIVERSAL pattern (aider's max_reflections=3,
+            //     MindStudio's "2–3 attempts then stop"). Applied to EVERY
+            //     model, Claude included: a capable model genuinely stuck on a
+            //     dead call (bad path, wrong tool) is helped by it too.
+            //
+            //   • RUNAWAY step cap (25 tool turns) — NOT something production
+            //     tools impose on a capable model: Claude Code's max_turns is
+            //     UNLIMITED by default, aider never step-caps. So it's enforced
+            //     ONLY for weak local models (qwen2.5-coder/codellama on the
+            //     Ollama native path) that doom-loop without a completion
+            //     signal. Claude (Kind::Anthropic) and capable hosted models
+            //     run as long as the task legitimately needs.
+            //
+            // If a cap trips, DON'T re-stream: surface the nudge as the run's
+            // final assistant turn and drop to Idle so the loop ends in seconds
+            // instead of spinning until the user hits Esc. The nudge also lands
+            // in history, so a follow-up shows the model why it stopped.
+            const bool weak_step_cap =
+                provider::active().kind == provider::Kind::OpenAI
+                && is_weak_model(m.d.model_id.value);
+            if (auto brk = agent_loop_should_break(m.d.current.messages,
+                                                   /*enforce_step_cap=*/weak_step_cap)) {
                 m.s.phase = phase::Idle{};
                 Message note;
                 note.role = Role::Assistant;
