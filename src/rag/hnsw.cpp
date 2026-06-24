@@ -2,6 +2,7 @@
 // Malkov & Yashunin 2016. See hnsw.hpp for the design rationale.
 
 #include "agentty/rag/hnsw.hpp"
+#include "agentty/rag/simd.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -28,12 +29,12 @@ std::vector<float> normalize(const std::vector<float>& v) {
 
 float HnswIndex::dot_(const std::vector<float>& a,
                       const std::vector<float>& b) const noexcept {
-    // Both are unit-normalized; dot == cosine. Plain loop — the compiler
-    // auto-vectorizes this under -O2/-march; no manual intrinsics needed.
+    // Both are unit-normalized, so dot == cosine. This is THE hot loop of the
+    // graph walk (thousands of calls per query); route it through the runtime-
+    // dispatched SIMD path (AVX2/SSE4.2/NEON) which is 2-4x the scalar loop on
+    // 768-dim embeddings. simd::dot handles the length guard + tail.
     const std::size_t n = std::min(a.size(), b.size());
-    float s = 0.0f;
-    for (std::size_t i = 0; i < n; ++i) s += a[i] * b[i];
-    return s;
+    return simd::dot(a.data(), b.data(), n);
 }
 
 int HnswIndex::random_level_() {

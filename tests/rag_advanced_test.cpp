@@ -393,6 +393,51 @@ static void test_mcp_resource_source() {
     CHECK(empty.indexed_chunks() == 0);
 }
 
+// ── 11. neural_rerank graceful degradation (no backend) ───────────────
+static void test_neural_rerank_degrades() {
+    std::vector<rag::Chunk> store;
+    store.push_back({"a.md", 1, 1, "alpha document about networking", {}});
+    store.push_back({"b.md", 1, 1, "beta document about storage", {}});
+    store.push_back({"c.md", 1, 1, "gamma document about compute", {}});
+
+    std::vector<rag::Hit> hits;
+    for (std::size_t i = 0; i < store.size(); ++i)
+        hits.push_back(rag::Hit{&store[i], 1.0 - i * 0.1});
+
+    // (a) Empty model → must NOT touch the network; returns the input order
+    //     truncated to out_k, untouched.
+    {
+        rag::NeuralRerankConfig cfg;  // model empty
+        auto r = rag::neural_rerank("networking", hits, 2, cfg);
+        CHECK(r.size() == 2);
+        CHECK(r[0].chunk->path == "a.md");
+        CHECK(r[1].chunk->path == "b.md");
+    }
+
+    // (b) Model set but backend unreachable (dead port) → every score fails,
+    //     so the function degrades to the upstream order (no crash, no hang
+    //     beyond the short connect timeout).
+    {
+        rag::NeuralRerankConfig cfg;
+        cfg.model = "does-not-exist";
+        cfg.host  = "127.0.0.1";
+        cfg.port  = 1;            // nothing listens here → connect refused fast
+        cfg.batch_size = 2;
+        cfg.timeout_s = 1.0;
+        auto r = rag::neural_rerank("networking", hits, 3, cfg);
+        CHECK(r.size() == 3);    // degraded, not dropped
+        // Upstream order preserved on total backend outage.
+        CHECK(r[0].chunk->path == "a.md");
+    }
+
+    // (c) Empty input → empty output.
+    {
+        rag::NeuralRerankConfig cfg;
+        cfg.model = "x";
+        CHECK(rag::neural_rerank("q", {}, 5, cfg).empty());
+    }
+}
+
 int main() {
     test_porter_stemmer();
     test_mmr_diversification();
@@ -404,6 +449,7 @@ int main() {
     test_metadata_filtering();
     test_build_from_memory();
     test_mcp_resource_source();
+    test_neural_rerank_degrades();
 
     if (g_failures == 0) {
         std::printf("rag_advanced_test: all checks passed\n");

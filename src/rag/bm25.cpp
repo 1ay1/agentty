@@ -2,25 +2,44 @@
 // Pure C++/STL; no third-party deps. See rag.hpp for the design rationale.
 
 #include "agentty/rag/rag.hpp"
+#include "agentty/rag/simd.hpp"
+#include "agentty/rag/stemmer.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace agentty::rag {
 
 namespace {
 
-// Lowercase alphanumeric-run tokenizer. No stemming, no stopword list —
-// BM25's IDF term already down-weights ubiquitous tokens, and keeping the
-// tokenizer trivial keeps indexing fast and predictable. Tokens shorter
-// than 2 chars are dropped (single letters carry no retrieval signal).
+// Porter stemming is OPT-IN (off by default): it collapses morphological
+// variants ("deploy/deployment/deploying") to one term, improving recall on
+// natural-language docs but occasionally over-conflating. Enable with
+// BM25_USE_STEMMER=1. The flag is read ONCE and cached — the same setting
+// MUST hold for index build AND query (both go through tokenize() below), so
+// a process-lifetime constant is exactly right.
+bool stemmer_enabled() noexcept {
+    static const bool on = [] {
+        const char* v = std::getenv("BM25_USE_STEMMER");
+        return v && v[0] && v[0] != '0' &&
+               std::string_view{v} != "false" && std::string_view{v} != "FALSE";
+    }();
+    return on;
+}
+
+// Lowercase alphanumeric-run tokenizer. Tokens shorter than 2 chars are
+// dropped (single letters carry no retrieval signal). When BM25_USE_STEMMER
+// is set, each token is Porter-stemmed; applied identically at index + query
+// time so postings and probe terms stay in the same vocabulary.
 void tokenize(std::string_view s, std::vector<std::string>& out) {
+    const bool do_stem = stemmer_enabled();
     std::string cur;
     cur.reserve(24);
     auto flush = [&] {
-        if (cur.size() >= 2) out.push_back(cur);
+        if (cur.size() >= 2) out.push_back(do_stem ? stem(cur) : cur);
         cur.clear();
     };
     for (unsigned char c : s) {
@@ -123,12 +142,14 @@ bm25_search(const Bm25Index& idx, std::string_view query, std::size_t k) {
 
 double cosine(const std::vector<float>& a, const std::vector<float>& b) noexcept {
     if (a.size() != b.size() || a.empty()) return 0.0;
-    double dot = 0.0, na = 0.0, nb = 0.0;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        dot += static_cast<double>(a[i]) * b[i];
-        na  += static_cast<double>(a[i]) * a[i];
-        nb  += static_cast<double>(b[i]) * b[i];
-    }
+    // Dense brute-force similarity (used below the HNSW threshold). All three
+    // accumulators are dot products, so route them through the runtime-
+    // dispatched SIMD path. Accumulate in float (SIMD) then widen for the
+    // final divide — ample precision for ranking 768-dim unit-ish vectors.
+    const std::size_t n = a.size();
+    const double dot = static_cast<double>(simd::dot(a.data(), b.data(), n));
+    const double na  = static_cast<double>(simd::dot(a.data(), a.data(), n));
+    const double nb  = static_cast<double>(simd::dot(b.data(), b.data(), n));
     if (na <= 0.0 || nb <= 0.0) return 0.0;
     return dot / (std::sqrt(na) * std::sqrt(nb));
 }
