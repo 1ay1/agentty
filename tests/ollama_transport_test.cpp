@@ -499,6 +499,76 @@ static void test_system_prompt_shape() {
     CHECK(p.find("<learned-memory") == std::string::npos);
 }
 
+// ── NEW: JSON-protocol history round-trip ────────────────────────────────────
+// In JSON-protocol mode build_messages must render the tool call as the
+// model's own {tool_name,tool_args} object (assistant role) and the result as
+// a plain USER "TOOL RESULT (name):" turn — NOT the native tool_calls[]/
+// role:"tool" shape a prose-only model can't read.
+static void test_build_messages_json_protocol_roundtrip() {
+    std::vector<Message> msgs;
+    Message a; a.role = Role::Assistant; a.text = "";
+    ToolUse tc;
+    tc.id   = ToolCallId{"call_1"};
+    tc.name = ToolName{"bash"};
+    tc.args = nlohmann::json{{"command", "ls -la"}};
+    tc.status = ToolUse::Done{{}, {}, "file1\nfile2"};
+    a.tool_calls.push_back(std::move(tc));
+    msgs.push_back(std::move(a));
+
+    auto arr = oll::build_messages(msgs, /*json_protocol=*/true);
+    // assistant prose-JSON object + user TOOL RESULT turn (no native shapes).
+    CHECK(arr.size() == 2);
+    CHECK(arr[0]["role"] == "assistant");
+    CHECK(!arr[0].contains("tool_calls"));               // NOT native
+    {
+        auto obj = nlohmann::json::parse(arr[0]["content"].get<std::string>());
+        CHECK(obj["tool_name"] == "bash");
+        CHECK(obj["tool_args"]["command"] == "ls -la");
+    }
+    CHECK(arr[1]["role"] == "user");                     // NOT role:"tool"
+    CHECK(arr[1]["content"].get<std::string>().find("TOOL RESULT (bash)")
+          != std::string::npos);
+    CHECK(arr[1]["content"].get<std::string>().find("file1") != std::string::npos);
+}
+
+// ── NEW: arg-key repair on the NATIVE structured channel ─────────────────────
+// A weak model on the native channel emits `bash` with {"cmd":...} instead of
+// {"command":...}; the parser must remap it to the canonical key.
+static void test_ndjson_native_arg_key_repair() {
+    const char* nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\","
+        "\"tool_calls\":[{\"function\":{\"name\":\"bash\","
+        "\"arguments\":{\"cmd\":\"ls\"}}}]}}\n"
+        "{\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/false);
+    std::string args;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) args += d->partial_json;
+    auto j = nlohmann::json::parse(args);
+    CHECK(j.contains("command"));        // remapped
+    CHECK(j["command"] == "ls");
+    CHECK(!j.contains("cmd"));            // alias erased
+}
+
+// ── NEW: arg-key repair on the SALVAGE channel ───────────────────────────────
+// A leaked {"tool_name":"read","tool_args":{"file":"x.c"}} must land as
+// {"path":"x.c"} so the read tool actually finds its argument.
+static void test_jp_salvage_arg_key_repair() {
+    const char* nd =
+        "{\"message\":{\"role\":\"assistant\","
+        "\"content\":\"{\\\"tool_name\\\":\\\"read\\\","
+        "\\\"tool_args\\\":{\\\"file\\\":\\\"x.c\\\"}}\"}}\n"
+        "{\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"read"}, /*json_protocol=*/true);
+    std::string args;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) args += d->partial_json;
+    auto j = nlohmann::json::parse(args);
+    CHECK(j.contains("path"));           // file → path
+    CHECK(j["path"] == "x.c");
+    CHECK(!j.contains("file"));
+}
+
 int main() {
     test_build_messages_text();
     test_build_messages_tool_calls();
@@ -529,6 +599,9 @@ int main() {
     test_think_block_stripped_from_prose();
     test_think_then_tool_call_salvaged();
     test_system_prompt_shape();
+    test_build_messages_json_protocol_roundtrip();
+    test_ndjson_native_arg_key_repair();
+    test_jp_salvage_arg_key_repair();
 
     if (g_failures == 0) {
         std::printf("ollama_transport_test: all checks passed\n");

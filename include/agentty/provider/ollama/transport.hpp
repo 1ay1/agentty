@@ -56,7 +56,13 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 [[nodiscard]] std::string system_prompt();
 
 // Build the native messages array from our Thread. Exposed for tests.
-[[nodiscard]] nlohmann::json build_messages(const std::vector<Message>& msgs);
+// `json_protocol`: render tool calls + results in the weak-model prose-JSON
+// vocabulary (assistant emits a {tool_name,tool_args} object; the result comes
+// back as a USER "TOOL RESULT (name): …" turn) instead of the native
+// tool_calls[]/role:"tool" shape, so a model taught only the prose protocol
+// can read its own conversation history on a multi-step task.
+[[nodiscard]] nlohmann::json build_messages(const std::vector<Message>& msgs,
+                                            bool json_protocol = false);
 
 // Build the Ollama `options` object (num_ctx, num_predict, sampling) from a
 // Request. The single highest-leverage robustness lever for local models:

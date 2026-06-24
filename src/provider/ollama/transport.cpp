@@ -135,6 +135,58 @@ constexpr std::size_t kCompactThreshold = 256 * 1024;
 
 // ── Salvage helpers (ported from openai/transport.cpp) ──────────────────
 
+// Arg-key repair for weak local models. They routinely emit the RIGHT tool
+// with the WRONG argument key — `bash` with {"cmd":"ls"} instead of
+// {"command":"ls"}, `read` with {"file":"x"} instead of {"path":"x"},
+// `grep` with {"query":"foo"} instead of {"pattern":"foo"}. The tool then
+// sees no required arg, errors, and the weak model loops re-emitting the same
+// broken call. We remap a small set of well-known aliases to their canonical
+// key PER TOOL — but ONLY when the canonical key is absent and the alias is
+// present, so a model that got it right is never touched. Conservative: a
+// tool not in the table is left exactly as-is.
+void repair_arg_keys(const std::string& tool, json& args) {
+    if (!args.is_object()) return;
+    // (canonical, {aliases...}) per tool. First alias found wins.
+    struct Alias { const char* canon; std::vector<const char*> from; };
+    auto remap = [&](const std::vector<Alias>& table) {
+        for (const auto& a : table) {
+            if (args.contains(a.canon)) continue;          // already correct
+            for (const char* f : a.from) {
+                if (args.contains(f)) {
+                    args[a.canon] = args[f];
+                    args.erase(f);
+                    break;
+                }
+            }
+        }
+    };
+    if (tool == "bash" || tool == "diagnostics") {
+        remap({{"command", {"cmd", "shell", "script", "run", "cmdline"}}});
+    } else if (tool == "read" || tool == "list_dir" || tool == "find_definition") {
+        remap({{"path", {"file", "filepath", "file_path", "filename", "dir",
+                          "directory", "target"}}});
+    } else if (tool == "write") {
+        remap({{"file_path", {"path", "file", "filepath", "filename", "target"}},
+               {"content",   {"text", "body", "data", "contents", "code"}}});
+    } else if (tool == "edit") {
+        remap({{"path",     {"file", "filepath", "file_path", "filename", "target"}},
+               {"old_text", {"old", "old_string", "search", "find", "from"}},
+               {"new_text", {"new", "new_string", "replace", "replacement", "to"}}});
+    } else if (tool == "grep") {
+        remap({{"pattern", {"query", "q", "regex", "search", "text", "term"}},
+               {"path",    {"dir", "directory", "root", "file"}}});
+    } else if (tool == "glob") {
+        remap({{"pattern", {"query", "q", "glob", "pat", "match"}},
+               {"path",    {"dir", "directory", "root"}}});
+    } else if (tool == "web_fetch") {
+        remap({{"url", {"uri", "link", "address", "href"}}});
+    } else if (tool == "web_search") {
+        remap({{"query", {"q", "search", "term", "text", "prompt"}}});
+    } else if (tool == "search_docs") {
+        remap({{"query", {"q", "search", "term", "text", "question"}}});
+    }
+}
+
 // Could `s` be the START of a leaked tool-call? Only meaningful at the start
 // of a response (salvage_eligible). Detects: bare `{`, `[{`, `<tool_call>`,
 // or a ```json fence. Anything else is prose.
@@ -320,6 +372,10 @@ constexpr std::size_t kCompactThreshold = 256 * 1024;
     if (!action_suffix.empty() && args_obj.is_object()
             && !args_obj.contains("action"))
         args_obj["action"] = action_suffix;
+    // Repair common wrong arg keys (cmd→command, file→path, query→pattern, …)
+    // before the tool sees them — the #1 weak-model loop cause after a leaked
+    // call is finally salvaged but names its one required arg wrong.
+    repair_arg_keys(name, args_obj);
     std::string args = args_obj.is_object() || args_obj.is_array()
         ? args_obj.dump() : "{}";
 
@@ -550,6 +606,18 @@ void handle_message(StreamCtx& ctx, const json& message) {
                 call_id = "call_ollama_" + std::to_string(ctx.tool_seq++)
                         + "_" + std::to_string(idx);
             ++idx;
+            // Repair common wrong arg keys even on the NATIVE channel — a weak
+            // model that earned the structured path can still name `command`
+            // as `cmd` etc. Only remaps when the canonical key is absent.
+            if (!args.empty() && args != "{}") {
+                try {
+                    json aj = json::parse(args);
+                    if (aj.is_object()) {
+                        repair_arg_keys(name, aj);
+                        args = aj.dump();
+                    }
+                } catch (...) { /* leave args as-is on parse failure */ }
+            }
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             ctx.sink(StreamToolUseDelta{args});
             ctx.sink(StreamToolUseEnd{});
@@ -689,7 +757,20 @@ std::string memory_blocks() {
 // ── Messages array (native shape) ───────────────────────────────────────────
 // Ollama wants tool arguments as a JSON OBJECT (not a serialized string) and
 // tool results as role:"tool" with `tool_name`.
-json build_messages(const std::vector<Message>& msgs) {
+//
+// `json_protocol`: when true the model was NEVER shown a native `tools` array
+// — it was taught (json_protocol_addendum) to emit a `{tool_name,tool_args}`
+// JSON object and "wait for its result in the next message." Feeding the
+// history back in the NATIVE shape (assistant.tool_calls[] + role:"tool")
+// breaks that contract: a tiny model that only knows the prose-JSON protocol
+// has no idea what a role:"tool" message is, so on a multi-step task it loses
+// the thread, re-issues the call it already ran, or hallucinates a result.
+// In JSON-protocol mode we therefore render the round-trip in the model's OWN
+// taught vocabulary: the assistant turn becomes the literal
+// {thoughts?,tool_name,tool_args} object it emitted, and the result comes back
+// as a plain USER message ("TOOL RESULT (name): …"). The loop now closes in
+// exactly the shape the system prompt promised.
+json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
     json arr = json::array();
     for (const auto& m : msgs) {
         const bool has_text  = !m.text.empty();
@@ -698,6 +779,35 @@ json build_messages(const std::vector<Message>& msgs) {
         if (m.role == Role::User)
             for (const auto& img : m.images)
                 if (!img.bytes.empty()) { has_images = true; break; }
+
+        // ── JSON-protocol round-trip: assistant tool call rendered as the
+        //    model's own {tool_name,tool_args} object, result as a user turn.
+        if (json_protocol && has_tools) {
+            // Prose the assistant emitted alongside the call (rare in JP mode,
+            // but keep it so reasoning isn't lost).
+            if (has_text) {
+                arr.push_back({{"role", "assistant"},
+                               {"content", scrub_utf8(m.text)}});
+            }
+            for (const auto& tc : m.tool_calls) {
+                json obj;
+                obj["tool_name"] = tc.name.value;
+                obj["tool_args"] = tc.args.is_null() ? json::object() : tc.args;
+                // Echo the call back as the assistant's prose-JSON reply.
+                arr.push_back({{"role", "assistant"},
+                               {"content", scrub_utf8(obj.dump())}});
+                // Result as a USER turn the model was taught to read next.
+                std::string out = tc.output();
+                if (out.empty()) {
+                    if (tc.is_rejected())       out = "(rejected by user)";
+                    else if (!tc.is_terminal()) out = "(no output)";
+                }
+                std::string body = "TOOL RESULT (" + tc.name.value + "):\n" + out;
+                arr.push_back({{"role", "user"},
+                               {"content", scrub_utf8(body)}});
+            }
+            continue;   // handled this message fully
+        }
 
         if (has_text || has_images || has_tools) {
             json msg;
@@ -785,6 +895,9 @@ std::string json_protocol_addendum(const std::vector<provider::ToolSpec>& tools)
     s += "- Output the JSON object ALONE, valid JSON, double quotes.\n";
     s += "- Use ONE tool per reply, then wait for its result in the next "
          "message before the next step.\n";
+    s += "- The tool's result comes back as a user message beginning "
+         "`TOOL RESULT (toolname):` — read it, then emit your NEXT JSON object "
+         "(another tool call, or a \"response\" object when the task is done).\n";
     s += "- `tool_name` must be one of the listed names, never an action verb "
          "like read/write/run.\n";
     s += "- If you do NOT need a tool (a greeting, or a question you can answer "
@@ -1055,7 +1168,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     if (!sys.empty())
         messages.push_back({{"role", "system"},
                             {"content", scrub_utf8(sys)}});
-    for (auto& m : build_messages(req.messages))
+    for (auto& m : build_messages(req.messages, ctx.json_protocol))
         messages.push_back(std::move(m));
     body["messages"] = std::move(messages);
 
