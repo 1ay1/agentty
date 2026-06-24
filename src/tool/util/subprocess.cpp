@@ -45,6 +45,27 @@ constexpr std::chrono::milliseconds kEmitGap{80};
 
 #ifdef _WIN32
 
+// Owns one Win32 HANDLE; closes on scope exit unless released. Move-only.
+// Mirrors the POSIX FdGuard — collapses the CreatePipe/CreateFile/
+// CreateProcess failure ladders (each previously had to CloseHandle every
+// handle acquired so far) into RAII so a new early-return can't leak one.
+struct HandleGuard {
+    HANDLE h = nullptr;
+    HandleGuard() = default;
+    explicit HandleGuard(HANDLE x) noexcept : h(x) {}
+    HandleGuard(HandleGuard&& o) noexcept : h(std::exchange(o.h, nullptr)) {}
+    HandleGuard& operator=(HandleGuard&& o) noexcept {
+        if (this != &o) { reset(); h = std::exchange(o.h, nullptr); }
+        return *this;
+    }
+    ~HandleGuard() { reset(); }
+    void reset() noexcept {
+        if (h && h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
+        h = nullptr;
+    }
+    [[nodiscard]] HANDLE release() noexcept { return std::exchange(h, nullptr); }
+};
+
 // UTF-8 → UTF-16. Win32 process APIs are UTF-16 natively; anything narrower
 // routes through the ANSI code page and silently corrupts non-ASCII bytes.
 std::wstring utf8_to_wide(std::string_view s) {
@@ -137,32 +158,35 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
         ~Restore() { if (active) ::SetConsoleMode(h, mode); }
     } restore{h_stdin, saved_in_mode, have_saved_mode};
 
-    HANDLE rd = nullptr, wr = nullptr;
+    HANDLE rd_raw = nullptr, wr_raw = nullptr;
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     // 64 KiB pipe buffer instead of the default (4 KiB). A chatty child
     // (cmake/clang/msbuild, test runners, npm) fills a 4 KiB pipe in a
     // single printf and blocks on write until our reader thread drains it,
     // serializing the child's stdout with our UI loop. 64 KiB soaks a full
     // compile-step's output so the child keeps running while we read.
-    if (!::CreatePipe(&rd, &wr, &sa, 64 * 1024)) {
+    if (!::CreatePipe(&rd_raw, &wr_raw, &sa, 64 * 1024)) {
         r.started = false; r.start_error = "CreatePipe failed"; return r;
     }
-    ::SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    // Own both pipe ends via RAII: every early return below closes whatever
+    // is still live, no hand-written CloseHandle ladder.
+    HandleGuard rd{rd_raw};
+    HandleGuard wr{wr_raw};
+    ::SetHandleInformation(rd.h, HANDLE_FLAG_INHERIT, 0);
 
-    HANDLE nul = ::CreateFileW(L"NUL", GENERIC_READ,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                               OPEN_EXISTING, 0, nullptr);
-    if (nul == INVALID_HANDLE_VALUE) {
-        ::CloseHandle(rd); ::CloseHandle(wr);
+    HandleGuard nul{::CreateFileW(L"NUL", GENERIC_READ,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                                  OPEN_EXISTING, 0, nullptr)};
+    if (nul.h == INVALID_HANDLE_VALUE) {
         r.started = false; r.start_error = "CreateFile(NUL) failed"; return r;
     }
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput  = nul;
-    si.hStdOutput = wr;
-    si.hStdError  = wr;
+    si.hStdInput  = nul.h;
+    si.hStdOutput = wr.h;
+    si.hStdError  = wr.h;
 
     // CreateProcessW takes a mutable LPWSTR — widen the UTF-8 cmdline and
     // give it a writable buffer.
@@ -177,15 +201,21 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
                                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                                nullptr, nullptr,
                                &si, &pi);
-    ::CloseHandle(wr);
-    ::CloseHandle(nul);
+    // The child has its own dup'd copies now; drop the parent's write end +
+    // NUL handle (RAII no-ops them at scope exit too, but eager release
+    // matches the original ordering so the child's EOF is observable).
+    wr.reset();
+    nul.reset();
     if (!ok) {
-        ::CloseHandle(rd);
         DWORD e = ::GetLastError();
         r.started = false;
         r.start_error = "CreateProcess failed (" + std::to_string(e) + ")";
-        return r;
+        return r;   // ~rd closes the read end
     }
+    // The read end is handed to the reader thread below and force-closed
+    // after join(); take it out of RAII so the guard's dtor doesn't
+    // double-close. `rd` (the raw HANDLE) is the owner from here on.
+    HANDLE rd_h = rd.release();
 
     // Reader thread drains the pipe into `shared_buf` under a mutex. The
     // previous single-thread loop read synchronously with no deadline —
@@ -207,11 +237,11 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     bool                shared_truncated = false;
     std::atomic<bool>   reader_done{false};
 
-    std::thread reader([&, rd]{
+    std::thread reader([&, rd_h]{
         char tmp[4096];
         for (;;) {
             DWORD n = 0;
-            if (!::ReadFile(rd, tmp, sizeof(tmp), &n, nullptr) || n == 0) break;
+            if (!::ReadFile(rd_h, tmp, sizeof(tmp), &n, nullptr) || n == 0) break;
             std::lock_guard lk(buf_mu);
             if (shared_truncated) continue;
             std::size_t room = (shared_total < (std::size_t)opts.max_bytes)
@@ -313,7 +343,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
            && now_ms() < grace_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    ::CloseHandle(rd);   // safe: even if reader is mid-ReadFile, it returns false
+    ::CloseHandle(rd_h);   // safe: even if reader is mid-ReadFile, it returns false
     reader.join();
 
     if (opts.on_progress) {
