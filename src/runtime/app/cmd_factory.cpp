@@ -781,68 +781,29 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     std::vector<Cmd<Msg>> cmds;
     bool any_pending = false;
 
-    // Effect-based scheduler. When the assistant emits multiple tool
-    // calls in one turn they all start Pending; maya's BG worker pool
-    // runs Task cmds on independent threads, so any set of tools we
-    // dispatch in this tick runs concurrently. `is_parallel_safe`
-    // (agentty/tool/effects.hpp) encodes the capability rule: Pure /
-    // ReadFs / Net compose freely; WriteFs and Exec demand exclusive
-    // access. We accumulate `active_effects` across the sweep so each
-    // candidate is checked against *everything* already running AND
-    // the siblings we've just promoted within this same batch.
+    // Effect- and path-aware scheduler. When the assistant emits multiple
+    // tool calls in one turn they all start Pending; maya's BG worker pool
+    // runs Task cmds on independent threads, so any set of tools we dispatch
+    // in this tick runs concurrently. The scheduling decision — which
+    // pending/approved calls may join the in-flight wave — is computed by
+    // the PURE planner `schedule_parallel_batch` (defined just above, unit-
+    // tested in scheduler_path_test). Keeping the live gate as a thin
+    // consumer of that planner means the test exercises the real rule, not a
+    // parallel reimplementation that could silently drift.
     //
-    // Deferred (conflicted) tools stay Pending. When the blocking
-    // tool's ToolExecOutput lands, update.cpp re-fires
-    // kick_pending_tools and the now-unblocked siblings advance.
-    tools::EffectSet active_effects;
-    auto effects_of = [](const ToolName& n) -> tools::EffectSet {
-        if (const auto* sp = tools::spec::lookup(n.value)) return sp->effects;
-        // Unknown tool: treat as if it requires exclusive access so we
-        // never parallelise something whose effects we can't reason about.
-        return tools::EffectSet{{tools::Effect::Exec}};
-    };
-    // Path-aware refinement state. `active_paths` is every fs target a
-    // running/promoted tool touches; `active_unbounded` is set when any active
-    // tool's blast radius can't be bounded by a path set (Exec, or a writer
-    // whose target we couldn't extract). A candidate writer/reader may run
-    // concurrently with the active set when active_unbounded is false AND none
-    // of its paths overlap an active path.
-    std::vector<std::string> active_paths;
-    bool active_unbounded = false;
-    auto note_active = [&](const ToolUse& tc, tools::EffectSet fx) {
-        active_effects |= fx;
-        auto ps = tc_paths(tc);
-        if (fx.has(tools::Effect::Exec)
-            || (fx.has(tools::Effect::WriteFs) && ps.empty()))
-            active_unbounded = true;
-        for (auto& p : ps) active_paths.push_back(std::move(p));
-    };
-    // Can this candidate share the wave with everything already active?
-    auto can_run_now = [&](const ToolUse& tc, tools::EffectSet want) -> bool {
-        // Fast path: the coarse effect rule already says yes (both sides are
-        // read/net only, or nothing is active). No path analysis needed.
-        if (tools::is_parallel_safe(active_effects, want)) return true;
-        // A writer/exec is involved. Exec never parallelises; an active
-        // unbounded tool blocks everything.
-        if (want.has(tools::Effect::Exec) || active_unbounded) return false;
-        // Candidate must name its target(s) to be reasoned about; a blind
-        // writer keeps the conservative exclusive behaviour.
-        auto ps = tc_paths(tc);
-        if (ps.empty()) return false;
-        // Safe iff no candidate path overlaps any active path.
-        for (const auto& cp : ps)
-            for (const auto& ap : active_paths)
-                if (paths_overlap(cp, ap)) return false;
-        return true;
-    };
-    for (const auto& tc : last.tool_calls)
-        if (tc.is_running()) note_active(tc, effects_of(tc.name));
+    // Deferred (conflicted) tools stay Pending. When the blocking tool's
+    // ToolExecOutput lands, update.cpp re-fires kick_pending_tools and the
+    // now-unblocked siblings advance.
+    const auto plan = schedule_parallel_batch(last.tool_calls);
+    std::vector<bool> promote(last.tool_calls.size(), false);
+    for (auto i : plan.promote) promote[i] = true;
 
-    for (auto& tc : last.tool_calls) {
+    for (std::size_t i = 0; i < last.tool_calls.size(); ++i) {
+        auto& tc = last.tool_calls[i];
         // Approved: user already granted permission; advance it exactly
         // like a Pending-but-no-permission-needed tool, minus the
-        // permission check. Keeps the effect-parallel gate as the single
-        // source of truth for scheduling.
+        // permission check. Keeps the planner as the single source of
+        // truth for scheduling.
         const bool ready = tc.is_pending() || tc.is_approved();
         if (ready) {
             const bool needs_perm = tc.is_approved()
@@ -863,14 +824,13 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 return Cmd<Msg>::none();
             }
             if (!needs_perm) {
-                // Effect-compatibility gate. Defer this tool if another
-                // running sibling demands exclusive access or this tool
-                // itself demands exclusive access while anything is
-                // already running. kick_pending_tools re-fires on every
-                // terminal ToolExecOutput, so deferred siblings advance
+                // Effect/path-compatibility gate: the planner decided this
+                // tool conflicts with the in-flight wave (or an earlier
+                // sibling promoted this same tick). Leave it Pending;
+                // kick_pending_tools re-fires on every terminal
+                // ToolExecOutput, so deferred siblings advance
                 // automatically without explicit requeueing.
-                const auto want = effects_of(tc.name);
-                if (!can_run_now(tc, want)) {
+                if (!promote[i]) {
                     any_pending = true;
                     continue;
                 }
@@ -879,7 +839,6 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // timer covers the full card lifetime (args streaming +
                 // execution). Preserve it as we move into Running.
                 tc.status = ToolUse::Running{tc.started_at(), {}};
-                note_active(tc, want);
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
 
                 // Tool wall-clock watchdog removed at user request.
