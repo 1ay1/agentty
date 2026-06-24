@@ -136,6 +136,30 @@ bool get_str(std::string_view& b, std::string& s) {
     return true;
 }
 
+// A cheap, order-sensitive fingerprint of the chunk array's STRUCTURE
+// (path + line span + embedding dim per chunk, in order). The HNSW graph
+// stores POSITIONAL node ids (search() materializes via &chunks_[id]), so a
+// cache-loaded graph is only safe to reuse if this session rebuilt chunks_
+// into the exact same order/shape. A single changed file shifts later
+// positions; recursive_directory_iterator order isn't even guaranteed stable
+// run-to-run. Hashing the structure and persisting it next to the graph lets
+// build() detect any drift and rebuild instead of returning wrong chunks.
+// FNV-1a/64 — no allocation, deterministic, dependency-free.
+std::uint64_t corpus_signature(const std::vector<Chunk>& chunks) noexcept {
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&h](const void* p, std::size_t n) noexcept {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; }
+    };
+    for (const auto& c : chunks) {
+        mix(c.path.data(), c.path.size());
+        std::int32_t ls = c.line_start, le = c.line_end;
+        std::uint32_t ed = static_cast<std::uint32_t>(c.embedding.size());
+        mix(&ls, sizeof ls); mix(&le, sizeof le); mix(&ed, sizeof ed);
+    }
+    return h;
+}
+
 } // namespace
 
 void Corpus::set_chunks_for_test(std::vector<Chunk> chunks) {
@@ -166,6 +190,7 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     };
     std::unordered_map<std::string, CachedFile> cache;
     bool hnsw_loaded = false;
+    std::uint64_t cached_sig = 0;   // corpus signature stored with the graph
     {
         std::string blob = read_file(root / kCacheName, 512ull * 1024 * 1024);
         std::string_view b{blob};
@@ -204,9 +229,13 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
                 if (!ok) break;
                 cache.emplace(std::move(path), std::move(cf));
             }
-            // v2 cache: HNSW graph follows the chunk data.
+            // v2 cache: HNSW graph follows the chunk data, preceded by the
+            // corpus signature it was built against (so a stale graph whose
+            // positional ids no longer match this session's chunk order is
+            // detected and rebuilt below rather than returning wrong chunks).
             if (is_v2 && !b.empty()) {
-                hnsw_loaded = hnsw_.deserialize(b);
+                if (get(b, cached_sig))
+                    hnsw_loaded = hnsw_.deserialize(b);
                 if (hnsw_loaded) embed_dim_ = dim;
             }
         }
@@ -297,7 +326,8 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     // keep it; otherwise rebuild_hnsw_() builds fresh from the embeddings.
     constexpr std::size_t kHnswThreshold = 2000;
     if (embed_dim_ > 0 && chunks_.size() >= kHnswThreshold &&
-        !hnsw_.empty() && hnsw_.dim() == embed_dim_) {
+        hnsw_loaded && !hnsw_.empty() && hnsw_.dim() == embed_dim_ &&
+        cached_sig != 0 && corpus_signature(chunks_) == cached_sig) {
         hnsw_built_ = true;          // reuse the cache-loaded graph
     } else {
         rebuild_hnsw_();
@@ -539,8 +569,11 @@ void Corpus::write_cache_() const {
         }
     }
 
-    // v2: append HNSW graph after chunk data.
+    // v2: append the corpus signature + HNSW graph after chunk data. The
+    // signature is the structural fingerprint the graph's positional node ids
+    // were built against; build() compares it before reusing the graph.
     if (hnsw_built_ && !hnsw_.empty()) {
+        put(blob, corpus_signature(chunks_));
         hnsw_.serialize(blob);
     }
 

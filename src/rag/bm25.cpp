@@ -320,9 +320,6 @@ chunk_document(const std::string& path, const std::string& body,
         }
 
         std::size_t end = i;  // exclusive
-        // Update global context to the end of this chunk.
-        for (std::size_t j = begin; j < end; ++j)
-            update_context(lines[j], ctx);
 
         // Assemble the chunk text.
         std::string text;
@@ -344,12 +341,22 @@ chunk_document(const std::string& path, const std::string& body,
 
         // Overlap: step back a few lines so a boundary-spanning fact lands
         // in both chunks. Always make forward progress.
+        std::size_t next;
         if (end < n && overlap_lines > 0 && end > begin + overlap_lines) {
-            i = end - overlap_lines;
+            next = end - overlap_lines;
         } else {
-            i = end;
+            next = end;
         }
-        if (i <= begin) i = begin + 1;
+        if (next <= begin) next = begin + 1;
+
+        // Advance the global context to the NEXT chunk's true start (`next`),
+        // NOT to `end`. With overlap, `next < end`: re-running update_context
+        // over the overlapped lines would double-toggle code fences / list
+        // state and start the following chunk in a corrupted context.
+        for (std::size_t j = begin; j < next && j < end; ++j)
+            update_context(lines[j], ctx);
+
+        i = next;
     }
 
     return out;

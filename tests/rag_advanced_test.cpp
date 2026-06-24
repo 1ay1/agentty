@@ -11,6 +11,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -156,6 +158,37 @@ static void test_semantic_chunking() {
     auto list_chunks = rag::chunk_document("features.md", doc_with_list, 10, 400, 0);
     CHECK(!list_chunks.empty());
     // List should be kept together until next heading.
+
+    // Regression: with overlap > 0, the chunker steps back a few lines for
+    // the next chunk. The global fence/list context must advance only to the
+    // NEXT chunk's true start, not to the previous chunk's end — otherwise a
+    // code fence that opened inside the overlapped region gets double-counted
+    // and a later chunk thinks it's outside a fence (so it splits mid-code).
+    // Force small chunks + overlap over a document whose code fence straddles
+    // a chunk boundary; every fenced block must stay intact in some chunk.
+    std::string fenced =
+        "# Title\n\n"
+        "intro paragraph one line\n"
+        "intro paragraph two line\n"
+        "intro paragraph three line\n"
+        "```python\n"
+        "def a():\n"
+        "    return 1\n"
+        "def b():\n"
+        "    return 2\n"
+        "```\n"
+        "trailing prose after the fence\n";
+    auto fc = rag::chunk_document("f.md", fenced, /*max_lines=*/5,
+                                  /*max_chars=*/200, /*overlap_lines=*/2);
+    CHECK(!fc.empty());
+    // The opening ``` and closing ``` must appear an EVEN number of times in
+    // aggregate is not enough — assert one chunk holds the whole block.
+    bool whole_block = false;
+    for (const auto& c : fc)
+        if (c.text.find("```python") != std::string::npos &&
+            c.text.find("return 2") != std::string::npos &&
+            c.text.find("```\n") != std::string::npos) { whole_block = true; break; }
+    CHECK(whole_block);
 }
 
 // ── 5. Hot Reload API ────────────────────────────────────────────────────────
@@ -438,6 +471,76 @@ static void test_neural_rerank_degrades() {
     }
 }
 
+// ── 12. Folder build + incremental cache round-trip (signature gate) ────
+// Guards the disk-cache path that the corpus-signature gate protects: build
+// over a directory, mutate one file, rebuild (which reuses cached chunks for
+// unchanged files and re-chunks the changed one), and verify search stays
+// correct. BM25-only (no network); HNSW won't activate below threshold, but
+// this exercises the cache read/write + per-file reuse that the signature
+// fingerprints, ensuring a changed file never strands a stale mapping.
+static void test_folder_cache_roundtrip() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path root = fs::temp_directory_path(ec) / "agentty_rag_folder_test";
+    fs::remove_all(root, ec);
+    fs::create_directories(root, ec);
+    auto write = [](const fs::path& p, const std::string& body) {
+        std::ofstream f(p, std::ios::binary | std::ios::trunc);
+        f << body;
+    };
+    write(root / "k8s.md",  "# K8s\n\nkubernetes deployment replicas pods scaling\n");
+    write(root / "db.md",   "# DB\n\ndatabase transactions isolation btree indexes\n");
+    write(root / "auth.md", "# Auth\n\noauth tokens authentication authorization scopes\n");
+
+    rag::EmbedConfig embed;  // BM25-only.
+
+    rag::Corpus c1;
+    c1.build(root, embed);
+    CHECK(c1.chunk_count() > 0);
+    CHECK(fs::exists(root / ".agentty_rag_cache.bin", ec));
+    {
+        auto hits = c1.search("kubernetes scaling", embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "k8s.md");
+    }
+
+    // Second build over the SAME dir reuses the cache; results identical.
+    rag::Corpus c2;
+    c2.build(root, embed);
+    CHECK(c2.chunk_count() == c1.chunk_count());
+    {
+        auto hits = c2.search("oauth authorization", embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "auth.md");
+    }
+
+    // Mutate one file (changes its size) then rebuild: the changed file is
+    // re-chunked, the others reused from cache. Search must reflect the new
+    // content and still resolve to the correct source path.
+    write(root / "db.md",
+          "# DB\n\ndatabase WALWALWAL write ahead logging recovery checkpoint durability\n");
+    rag::Corpus c3;
+    c3.build(root, embed);
+    {
+        auto hits = c3.search("write ahead logging checkpoint", embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "db.md");
+        // Old db.md term is gone from that path's content.
+        auto old = c3.search("btree isolation", embed, 5);
+        for (const auto& h : old)
+            if (h.chunk->path == "db.md")
+                CHECK(h.chunk->text.find("btree") == std::string::npos);
+    }
+    // Unchanged files still resolve correctly after the partial rebuild.
+    {
+        auto hits = c3.search("kubernetes pods", embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "k8s.md");
+    }
+
+    fs::remove_all(root, ec);
+}
+
 int main() {
     test_porter_stemmer();
     test_mmr_diversification();
@@ -450,6 +553,7 @@ int main() {
     test_build_from_memory();
     test_mcp_resource_source();
     test_neural_rerank_degrades();
+    test_folder_cache_roundtrip();
 
     if (g_failures == 0) {
         std::printf("rag_advanced_test: all checks passed\n");
