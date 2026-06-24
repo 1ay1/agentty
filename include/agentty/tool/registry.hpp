@@ -105,6 +105,21 @@ struct ToolDef {
 [[nodiscard]] const std::vector<ToolDef>& registry();
 [[nodiscard]] const ToolDef* find(std::string_view name);
 
+// The tool set to advertise on the wire for THIS turn. Equals registry()
+// plus any MCP tools that appeared after startup via a `tools/list_changed`
+// notification (and minus any that vanished). When MCP is unconfigured or no
+// server has changed its list since startup, this returns registry() verbatim
+// (no allocation, no copy). The per-turn provider walk should iterate this,
+// not registry(), so a server adding a tool mid-session reaches the model on
+// the next turn. Dispatch (`find`) already resolves these names live.
+[[nodiscard]] const std::vector<ToolDef>& wire_tools();
+
+// The MCP tool-list generation counter, surfaced through the tools namespace
+// so callers (ACP server, wire walks) don't need to link the mcp TU or know
+// whether MCP is compiled in. Returns 0 when MCP is disabled or no server has
+// re-listed. Bumps on every `tools/list_changed` (and resources/prompts).
+[[nodiscard]] unsigned long mcp_generation() noexcept;
+
 // ── Live progress sink (thread-local) ────────────────────────────────────
 //
 // Set by the cmd runner (cmd_factory::run_tool) before dispatching a tool

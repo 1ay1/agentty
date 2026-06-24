@@ -138,7 +138,9 @@ private:
     std::string               model_id_;
     Profile                   profile_;
 
-    std::once_flag                  tools_once_;
+    std::once_flag                  tools_once_;   // unused (kept for ABI sanity)
+    bool                            wire_tools_built_ = false;
+    unsigned long                   wire_tools_gen_   = 0;
     std::vector<provider::ToolSpec> wire_tools_;
 
     std::mutex                                   session_mtx_;

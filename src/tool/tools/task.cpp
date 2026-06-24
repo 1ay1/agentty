@@ -213,17 +213,19 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
             if (!listed) return false;
         }
         if (type.read_only) {
-            if (const auto* sp = tools::spec::lookup(t.name.value)) {
-                using tools::Effect;
-                if (sp->effects.has(Effect::WriteFs)
-                    || sp->effects.has(Effect::Exec)
-                    || sp->effects.has(Effect::Net))
-                    return false;
-            }
+            // Prefer the compile-time spec; fall back to the ToolDef's own
+            // declared effects for tools the spec table doesn't know (MCP
+            // tools synthesised at runtime). A read-only subagent must never
+            // get a WriteFs/Exec/Net tool, MCP or not.
+            tools::EffectSet eff = t.effects;
+            if (const auto* sp = tools::spec::lookup(t.name.value)) eff = sp->effects;
+            using tools::Effect;
+            if (eff.has(Effect::WriteFs) || eff.has(Effect::Exec) || eff.has(Effect::Net))
+                return false;
         }
         return true;
     };
-    for (const auto& t : tools::registry()) {
+    for (const auto& t : tools::wire_tools()) {
         if (!allowed(t)) continue;
         req.tools.push_back({t.name.value, t.description, t.input_schema,
                              t.eager_input_streaming});

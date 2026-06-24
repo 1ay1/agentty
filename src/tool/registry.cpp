@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <format>
+#include <mutex>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -174,10 +175,101 @@ const std::unordered_map<std::string, const ToolDef*>& index() {
 }
 } // namespace
 
+#if AGENTTY_MCP
+namespace detail { const ToolDef* find_live_mcp(std::string_view name); }
+#endif
+
 const ToolDef* find(std::string_view name) {
     const auto& m = index();
     if (auto it = m.find(std::string{name}); it != m.end()) return it->second;
+#if AGENTTY_MCP
+    // Live fallback: an MCP server may have advertised a NEW tool after
+    // startup via tools/list_changed, so it isn't in the static index. The
+    // wire_tools() snapshot owns stable storage for those; search it.
+    if (const auto* td = detail::find_live_mcp(name)) return td;
+#endif
     return nullptr;
+}
+
+#if AGENTTY_MCP
+namespace {
+// Process-wide snapshot of (static registry ∪ live MCP tools), rebuilt only
+// when the MCP generation moves (a *_list_changed notification). The vector
+// is stable between rebuilds so `find()` can hand out `const ToolDef*` into
+// it. Guarded by a mutex; the rebuild is O(static + mcp) and runs at most
+// once per turn (callers read mcp_generation() which is O(1)).
+struct WireCache {
+    std::mutex                       mu;
+    unsigned long                    gen     = static_cast<unsigned long>(-1);
+    bool                             built   = false;
+    bool                             has_live = false;   // cache differs from registry()
+    std::vector<ToolDef>             tools;     // owns the merged set
+    std::unordered_map<std::string, const ToolDef*> idx;
+};
+WireCache& wire_cache() { static WireCache c; return c; }
+
+// Rebuild the merged snapshot if MCP's generation moved. Sets c.has_live to
+// true iff live MCP tools made the cache differ from the static registry
+// (whose MCP tools were captured at startup). Returns c.has_live.
+bool refresh_wire_cache_locked(WireCache& c) {
+    const unsigned long g = mcp::mcp_generation();
+    if (c.built && c.gen == g) return c.has_live;
+    c.gen   = g;
+    c.built = true;
+    c.tools.clear();
+    c.idx.clear();
+    c.has_live = false;
+
+    // Live MCP set (already namespaced, includes the generic resource/prompt
+    // tools). At generation 0 this equals what the static registry already
+    // captured, so there's nothing to merge — the registry IS the wire set.
+    if (g == 0) return false;
+    auto live = mcp::mcp_tools_live();
+    if (live.empty()) return false;
+
+    const auto& base = registry();
+    std::unordered_map<std::string, std::size_t> live_names;
+    for (std::size_t i = 0; i < live.size(); ++i) live_names.emplace(live[i].name.value, i);
+    // Carry over static tools; drop any superseded by a live MCP tool of the
+    // same name (so a re-listed server replaces, never duplicates).
+    for (const auto& t : base) {
+        if (live_names.contains(t.name.value)) continue;
+        c.tools.push_back(t);
+    }
+    for (auto& t : live) c.tools.push_back(std::move(t));
+    c.idx.reserve(c.tools.size());
+    for (const auto& t : c.tools) c.idx.emplace(t.name.value, &t);
+    c.has_live = true;
+    return true;
+}
+} // namespace
+
+namespace detail {
+const ToolDef* find_live_mcp(std::string_view name) {
+    auto& c = wire_cache();
+    std::lock_guard<std::mutex> lk(c.mu);
+    if (!refresh_wire_cache_locked(c)) return nullptr;
+    if (auto it = c.idx.find(std::string{name}); it != c.idx.end()) return it->second;
+    return nullptr;
+}
+} // namespace detail
+#endif // AGENTTY_MCP
+
+const std::vector<ToolDef>& wire_tools() {
+#if AGENTTY_MCP
+    auto& c = wire_cache();
+    std::lock_guard<std::mutex> lk(c.mu);
+    if (refresh_wire_cache_locked(c)) return c.tools;
+#endif
+    return registry();
+}
+
+unsigned long mcp_generation() noexcept {
+#if AGENTTY_MCP
+    return mcp::mcp_generation();
+#else
+    return 0;
+#endif
 }
 
 } // namespace agentty::tools

@@ -24,7 +24,9 @@
 //     grafted onto the render/stream loop.
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "agentty/tool/registry.hpp"   // ToolDef
@@ -70,5 +72,52 @@ using PoolHandle = std::shared_ptr<ConnectionPool>;
 // True when an MCP config file is present (cheap stat, no connection). Lets
 // the registry decide whether to even attempt mcp_tools(). Pure I/O probe.
 [[nodiscard]] bool mcp_config_present();
+
+// ── Dynamic tool surface (tools/list_changed) ────────────────────────────
+// MCP servers may emit `notifications/tools/list_changed` at any time. The
+// connection pool keeps a LIVE snapshot of the synthesized ToolDefs, rebuilt
+// whenever any server's tool list changes. `mcp_tools_live()` returns the
+// current snapshot for the process-wide pool (the one mcp_tools() populated).
+// Empty when MCP is unconfigured or nothing is connected.
+//
+// `mcp_generation()` bumps every time the snapshot changes; a caller that
+// caches the tool list can compare generations to know when to re-pull. Both
+// are O(1) and lock-guarded — safe to poll from the render/turn loop.
+[[nodiscard]] std::vector<tools::ToolDef> mcp_tools_live();
+[[nodiscard]] unsigned long mcp_generation() noexcept;
+
+// ── Resources (MCP resources/*) ──────────────────────────────────────────
+// A resource the agent can read by URI (file, db row, API doc, …).
+struct ResourceInfo {
+    std::string uri;
+    std::string name;
+    std::string title;        // human label (falls back to name)
+    std::string description;
+    std::string mime_type;
+    std::string server;       // origin ("mcp:github")
+};
+[[nodiscard]] std::vector<ResourceInfo> mcp_resources();
+// Read a resource. On success returns the flattened text (text contents
+// concatenated; blob contents summarised as "[blob <mime> <bytes>B]").
+// On failure the optional is empty and `err` carries a human message.
+[[nodiscard]] std::optional<std::string> mcp_read_resource(const std::string& uri, std::string& err);
+
+// ── Prompts (MCP prompts/*) ──────────────────────────────────────────────
+struct PromptArgInfo { std::string name; std::string description; bool required = false; };
+struct PromptInfo {
+    std::string name;          // exposed (possibly namespaced) name
+    std::string title;
+    std::string description;
+    std::vector<PromptArgInfo> arguments;
+    std::string server;
+};
+[[nodiscard]] std::vector<PromptInfo> mcp_prompts();
+// Render a prompt to a flattened string (role-tagged messages joined). `args`
+// is a name→value map for the prompt's template arguments. On failure returns
+// empty optional + `err`.
+[[nodiscard]] std::optional<std::string> mcp_get_prompt(
+    const std::string& name,
+    const std::vector<std::pair<std::string, std::string>>& args,
+    std::string& err);
 
 } // namespace agentty::mcp

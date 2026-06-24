@@ -403,6 +403,7 @@ set(AGENTTY_ACP_SOURCES
 # confined to these TUs (linked as mcp::mcp). Only compiled when AGENTTY_MCP.
 set(AGENTTY_MCP_SOURCES
     src/mcp/bridge.cpp
+    src/mcp/http_server.cpp
 )
 
 set(AGENTTY_DIFF_SOURCES
@@ -1000,6 +1001,10 @@ if(AGENTTY_BUILD_TESTS)
     # resume hot path (rehydrate_frozen + cold/warm render). Build-only.
     agentty_add_full_test(realthread_probe NO_TEST)
 
+    # tallcard_probe — isolates the tall-card live-tail cache-miss
+    # regime (canvas-height vs card-height). Build-only.
+    agentty_add_full_test(tallcard_probe NO_TEST)
+
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime), so it compiles against just the fuzzy_match TU.
@@ -1196,6 +1201,13 @@ if(AGENTTY_BUILD_TESTS)
         # The test still SKIPs gracefully if the binary isn't there.
         set_tests_properties(mcp_bridge_test PROPERTIES
             ENVIRONMENT "AGENTTY_MCP_E2E_SERVER=${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/build/examples/mcp_server_example")
+
+        # mcp_http_test — e2e for the Streamable HTTP transport. Stands up a
+        # tiny in-process HTTP/1.1 MCP server and drives make_http_provider()
+        # over http://127.0.0.1:PORT/mcp. No external binary needed; SKIPs on
+        # Windows (POSIX sockets).
+        agentty_add_full_test(mcp_http_test LIBS mcp::mcp)
+        set_tests_properties(mcp_http_test PROPERTIES TIMEOUT 60)
     endif()
 
     # frozen_invariant_fuzz — randomized property test for the frozen-

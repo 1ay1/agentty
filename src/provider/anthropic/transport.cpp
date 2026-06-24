@@ -1550,7 +1550,7 @@ std::string default_system_prompt() {
 
 std::vector<ToolSpec> default_tools() {
     std::vector<ToolSpec> out;
-    for (const auto& td : tools::registry()) {
+    for (const auto& td : tools::wire_tools()) {
         out.push_back({td.name.value, td.description, td.input_schema});
     }
     return out;

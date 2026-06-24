@@ -578,7 +578,7 @@ Cmd<Msg> launch_stream(Model& m) {
                     return n == "skill" || n == "remember"
                         || n == "forget" || n == "wipe_memory";
                 };
-                for (const auto& t : tools::registry()) {
+                for (const auto& t : tools::wire_tools()) {
                     if (weak_model && weak_hidden(t.name.value)) continue;
                     req.tools.push_back({t.name.value, t.description, t.input_schema,
                                          t.eager_input_streaming});
