@@ -134,6 +134,40 @@ void test_runaway_step_cap_breaks() {
           "runaway reason mentions step count");
 }
 
+// ── 5b. CAPABLE model (enforce_step_cap=false): 25 healthy turns do NOT break.
+//       Matches Claude Code (max_turns unlimited) / aider (no step cap). A
+//       long, legitimate run on Claude must never be cut off by the count.
+void test_runaway_step_cap_skipped_for_capable() {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    for (int i = 0; i < 40; ++i)
+        msgs.push_back(asst_call("bash", json{{"command", "echo " + std::to_string(i)}},
+                                 Term::Done));
+    check(!agent_loop_should_break(msgs, /*enforce_step_cap=*/false).has_value(),
+          "40 healthy turns with step cap OFF (Claude) does NOT break");
+    // Same history WITH the cap on (weak model) still breaks — proves the only
+    // difference is the flag, not the history.
+    check(agent_loop_should_break(msgs, /*enforce_step_cap=*/true).has_value(),
+          "same history with step cap ON (weak model) breaks");
+}
+
+// ── 5c. REPEAT-FAILURE is UNIVERSAL: fires even when the step cap is OFF.
+//       aider/MindStudio apply the repeated-dead-call cap to every model;
+//       a capable model stuck re-trying an identical failing call still stops.
+void test_repeat_failure_breaks_even_for_capable() {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "/nope"}};
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    auto brk = agent_loop_should_break(msgs, /*enforce_step_cap=*/false);
+    check(brk.has_value(),
+          "3x identical failing call breaks even with step cap OFF (Claude)");
+    check(brk && brk->reason.find("read") != std::string::npos,
+          "repeat-failure reason names the tool");
+}
+
 // ── 6. A modest healthy multi-step task does NOT break ───────────────────────
 void test_healthy_progress_no_break() {
     std::vector<Message> msgs;
@@ -180,6 +214,8 @@ int main() {
     test_repeat_succeeding_no_break();
     test_distinct_failing_calls_no_break();
     test_runaway_step_cap_breaks();
+    test_runaway_step_cap_skipped_for_capable();
+    test_repeat_failure_breaks_even_for_capable();
     test_healthy_progress_no_break();
     test_user_boundary_resets_run();
     test_empty_and_text_only_no_break();

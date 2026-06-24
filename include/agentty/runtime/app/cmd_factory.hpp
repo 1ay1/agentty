@@ -86,15 +86,25 @@ struct SchedDecision {
 // should be force-stopped, or std::nullopt to keep going. Two triggers:
 //   (1) REPEAT: the same (tool, args) call appears >= kRepeatLimit times and
 //       its results were failures — the model is stuck re-trying a dead call.
+//       ALWAYS enforced (every production tool does this: aider's
+//       max_reflections, MindStudio's "2–3 attempts then stop"). A capable
+//       model that genuinely loops on a dead call benefits from it too.
 //   (2) RUNAWAY: the run has made >= kMaxToolTurns assistant tool-call turns
-//       without ever producing a plain-text answer — unbounded spend.
+//       without ever producing a plain-text answer — unbounded spend. Gated
+//       behind `enforce_step_cap`. No production tool applies a hard
+//       successful-step cap to a CAPABLE model by default: Claude Code's
+//       max_turns is UNLIMITED by default, aider never step-caps. So the
+//       caller passes enforce_step_cap=true ONLY for weak local models
+//       (qwen2.5-coder/codellama) and false for Claude / capable hosted
+//       models, which run until they finish on their own.
 // The returned text is surfaced to the model as the final assistant turn so
 // it can recover gracefully (and the user sees why the loop stopped).
 struct LoopBreak {
     std::string reason;     // user/model-facing explanation
 };
 [[nodiscard]] std::optional<LoopBreak> agent_loop_should_break(
-    const std::vector<Message>& messages);
+    const std::vector<Message>& messages,
+    bool enforce_step_cap = true);
 
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
