@@ -547,18 +547,16 @@ static void test_single_write_stream_to_freeze() {
               "settled turn did not freeze whole at the settle boundary");
     }
 
-    // The FROZEN snapshot (frame_c) must carry the WHOLE file. So must
-    // frame_b: once the write SETTLES (terminal) the live card renders
-    // the FULL body (show_all) — no head+tail cap, regardless of size.
-    // The user must see exactly what was written. Bounding per-frame
-    // render cost is the trim's job (it graduates tall frozen entries
-    // into native scrollback), NOT the card's. The seam invariant is
-    // unchanged: the live settled card and the frozen card render the
-    // IDENTICAL full body (pure function of the final bytes), so the
-    // committed prefix stays byte-stable across the handoff (checked via
-    // first_committed_divergence below). Here we assert the full body:
-    // the last line, a deep-middle line, AND the first line are ALL
-    // present in both renders.
+    // Both the FROZEN snapshot (frame_c) and the LIVE settled card
+    // (frame_b) carry the WHOLE file — byte-identical. A settled write
+    // renders its FULL body (show_all) in the live tail too, NOT only the
+    // frozen snapshot: feeding the same bytes to both keeps the freeze
+    // handoff a pure cache hit (the per-event hash_id in agent_timeline.
+    // cpp makes the tall card a paint-once blit, so the full body is free
+    // per frame after the first paint — no windowing needed). Live ==
+    // frozen body is exactly what keeps the committed prefix byte-stable
+    // across the handoff (checked via first_committed_divergence below).
+    // Assert the full body in BOTH: last, deep-middle, and first lines.
     {
         auto joined = [](const std::vector<std::string>& rows) {
             std::string s;
@@ -577,6 +575,10 @@ static void test_single_write_stream_to_freeze() {
         CHECK(b.find("line 85: some plausible") != std::string::npos,
               "settled-live write card elided a deep-middle line — settled "
               "write must show the FULL body, not a capped preview");
+        CHECK(c.find("line 0: some plausible") != std::string::npos,
+              "frozen write snapshot missing the FIRST (head) line");
+        CHECK(b.find("line 0: some plausible") != std::string::npos,
+              "settled-live write card missing the FIRST (head) line");
     }
 
     int d_ab = first_committed_divergence(frame_a, frame_b, kTermH);

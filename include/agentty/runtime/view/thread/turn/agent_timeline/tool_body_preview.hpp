@@ -32,18 +32,26 @@ using GrepHits = std::unordered_map<std::string, std::set<int>>;
 [[nodiscard]] maya::ToolBodyPreview::Config tool_body_preview_config(
     const ToolUse& tc, const GrepHits* grep_hits = nullptr);
 
-// Build-phase flag. When a terminal write/edit/read card is being built
-// for the FROZEN snapshot (freeze_range), the full body is rendered with
-// show_all=true because that Element is painted exactly ONCE and then
-// blitted forever. When it's being built for the LIVE tail (an in-flight
-// run whose prior sub-turn carries a big completed card, re-rendered
-// every frame until the run settles), the body is elided to a bounded
-// window so per-frame cost stays O(window) instead of O(file) — a
-// 3000-line read in the live tail measured ~21ms/frame fully expanded,
-// ~0.2ms windowed. The frozen snapshot still shows the full body.
+// Build-phase flag. Set true (via FrozenBuildScope) while freeze_range
+// builds the frozen snapshot; false (default) while the live tail is
+// built each frame.
 //
-// freeze_range sets this true for the duration of its build; everywhere
-// else (default false) means "live".
+// HISTORY: this used to switch the tool-card body between a FULL render
+// (frozen) and a bounded head+tail WINDOW (live) to keep per-frame cost
+// O(window). That was REMOVED — windowing the live card made it commit
+// DIFFERENT rows to native scrollback than the full frozen card, shifting
+// the committed prefix at the freeze handoff (the duplicated/wiped-card
+// scrollback corruption). The body is now the FULL content in BOTH phases,
+// byte-identical, so the handoff is a pure cache hit. Per-frame cost stays
+// bounded a different way: every terminal tool card carries a content-
+// addressed per-event hash_id (agent_timeline.cpp), so maya captures its
+// painted cells once and BLITS them every subsequent frame — a tall
+// settled card in the live tail is paint-once, not re-laid-out per frame.
+//
+// The flag is retained (still scoped by freeze_range) as a no-op-by-
+// default hook: nothing branches on it for body CONTENT anymore, but it
+// gives a future divergent-build path a place to key off without
+// reintroducing a live/frozen body mismatch.
 class FrozenBuildScope {
 public:
     FrozenBuildScope() noexcept;

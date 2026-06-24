@@ -121,32 +121,14 @@ constexpr std::size_t kStreamTailLines = 64;
     return out;
 }
 
-// Body for a terminal line-oriented tool (FileRead, GitDiff, Json,
-// CodeBlock, Failure). These callsites all gate on tc.is_done(), so the
-// output is FINAL — it arrives whole when the tool completes, never
-// streamed line-by-line like a write `content`. Render the full body
-// whether or not we're building the frozen snapshot: the live card and
-// the frozen card key on the same Turn hash_id, so a windowed live card
-// (last N lines) vs a full-body frozen card is a seam mismatch — the
-// rows the live card already committed to native scrollback won't match
-// the full-body frozen card that replaces them on freeze (the duplicated
-// / wiped card). maya's tail_only renderer still elides the DISPLAY to
-// its head/tail budget; feeding the full body just keeps the live and
-// frozen inputs identical so the elided output is byte-for-byte the same.
-[[nodiscard]] std::string live_tail_body(std::string_view body) {
-    return std::string{body};
-}
-
 } // namespace
 
-// ── Frozen-build scope ──────────────────────────────────────────────
-// A terminal write/edit/read card that lives in the LIVE tail (an
-// in-flight run whose earlier sub-turn already finished a big card) is
-// re-rendered every frame until the run settles and freeze_range
-// snapshots it. Rendering its FULL body each frame is the dominant live
-// cost (a 3000-line read measured ~21ms/frame). The frozen snapshot is
-// painted once and blitted, so it keeps the full body; the live render
-// elides to a window. This thread-local says which phase we're in.
+// ── Frozen-build scope ─────────────────────────────────────
+// Retained as a no-op-by-default phase flag for callers that still ask
+// `building_frozen()`. The body is now IDENTICAL in both phases (full,
+// seam-safe — see the comment above tool_body_preview_config), so no
+// renderer path branches on it for content; freeze_range still scopes it
+// for clarity and so a future divergent-build path has a hook.
 namespace {
 bool& frozen_build_flag() noexcept {
     thread_local bool v = false;
@@ -213,22 +195,15 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 auto b = body.find(kClose, a);
                 if (b == std::string::npos) b = body.size();
                 out.kind = Kind::GitDiff;
-                // Full diff as soon as the edit is terminal — in the live
-                // tail too, not only the frozen snapshot. The output is
-                // FINAL the instant the tool settles, so eliding to a
-                // tail window here just to expand it one tick later (when
-                // freeze_range rebuilds with show_all) is the visible
-                // "diff squeezes, then pops to full size" lag. Per-frame
-                // split_lines over a stable body for the one-or-two
-                // frames before the freeze handoff is negligible, and the
-                // frozen snapshot emits the same full body so the handoff
-                // is seamless (no height jump).
-                out.text     = body.substr(a, b - a);
-                // Settled edit ALWAYS renders the full diff (show_all).
-                // The user reviews exactly what changed — no head+tail
-                // elision regardless of size. Bounding per-frame cost is
-                // the trim's job, not the card's. Pure function of the
-                // final bytes, so live and frozen agree (seamless handoff).
+                // Settled edit ALWAYS renders the full diff (show_all) — in
+                // the live tail AND the frozen snapshot, byte-identical.
+                // The user reviews exactly what changed; the per-event
+                // hash_id cell-cache (agent_timeline.cpp) makes the tall
+                // card a paint-once blit even while it sits in the live
+                // tail, so a full body costs nothing per frame after the
+                // first. Live == frozen body => the freeze handoff is a
+                // pure cache hit (no committed-row shift).
+                out.text       = std::string{body.substr(a, b - a)};
                 out.show_all   = true;
                 out.tail_only  = false;
                 out.text_color = text_tertiary;
@@ -265,11 +240,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                     auto nt = e.value("new_text", e.value("new_string", std::string{}));
                     out.hunks.push_back({std::move(ot), std::move(nt)});
                 }
-                // Settled: full hunks (show_all). The user reviews the
-                // whole change — no per-hunk elision regardless of size.
-                // Only STREAMING stays elided (hunks grow line-by-line,
-                // would balloon height every frame). Pure function of the
-                // final hunks → live and frozen agree (seamless handoff).
+                // Settled hunks render in FULL (show_all) in BOTH the
+                // live tail and the frozen snapshot — byte-identical, so
+                // the freeze handoff is a pure cache hit. Only STREAMING
+                // stays elided (hunks grow line-by-line, would balloon
+                // height every frame). The tall settled card is a
+                // paint-once blit via its per-event hash_id, so a full
+                // body is free per frame after the first paint.
                 out.show_all = !streaming_now;
                 return out;
             }
@@ -279,6 +256,8 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             if (nt.empty()) nt = safe_arg(tc.args, "new_string");
             if (!ot.empty() || !nt.empty()) {
                 out.kind = Kind::EditDiff;
+                // Full hunk in both live and frozen (settled); only
+                // streaming stays elided. Live == frozen body.
                 out.show_all     = !streaming_now;
                 out.is_streaming = streaming_now;
                 out.hunks.push_back({std::move(ot), std::move(nt)});
@@ -347,33 +326,28 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             // scrollback, and it's painted once.
             out.is_streaming = streaming_now;
             // Settled write renders the FULL body (show_all) in the live
-            // tail too — NOT only the frozen snapshot. The freeze handoff
-            // keys both renders on the same Turn hash_id, so they MUST be
-            // byte-identical or the rows the live card already committed
-            // to native scrollback won't match the full-body frozen card
-            // that replaces them (the duplicated / wiped card). A windowed
-            // live card (3-line code_tail) vs a full-body frozen card is
-            // exactly that mismatch. Only STREAMING stays windowed: the
-            // body is still growing, would balloon height every frame.
+            // tail AND the frozen snapshot — byte-identical, so the freeze
+            // handoff keys both on the same hash_id and is a pure cache
+            // hit (no committed-row shift = no duplicated/wiped card). The
+            // user sees exactly what was written. The tall card is a
+            // paint-once blit via its per-event hash_id (agent_timeline.
+            // cpp), so the full body costs nothing per frame after the
+            // first paint — no need to window the live card. Only
+            // STREAMING stays windowed: the body is still growing and
+            // would balloon height every frame.
             out.show_all = !streaming_now;
             if (streaming_now) {
                 // Small tail slice → O(window) per frame and a fixed
-                // compact card height. show_all=false above makes maya
-                // render just its `code_tail` lines from this slice.
-                // Footer totals would be wrong on a partial body, so
-                // suppress mid-stream (status bar carries the live rate);
-                // it returns with the true total the instant we settle.
+                // compact card height. show_all=false makes maya render
+                // just its `code_tail` lines from this slice. Footer
+                // totals would be wrong on a partial body, so suppress
+                // mid-stream (status bar carries the live rate); it
+                // returns with the true total the instant we settle.
+                out.show_all = false;
                 out.text = tail_window(content, kStreamTailLines);
                 out.show_footer_stats = false;
             } else {
-                // Terminal: ALWAYS the full body (show_all). The user
-                // must see exactly what was written — no "⋯ N more"
-                // elision on a settled write, regardless of size. Bounding
-                // per-frame render cost is the trim's job (it graduates
-                // tall frozen entries into native scrollback), NOT the
-                // card's — hiding content to save render time is the wrong
-                // trade. Same bytes + same show_all live and frozen, so
-                // the freeze handoff stays seamless.
+                // Terminal: the FULL body, live and frozen alike.
                 out.text = std::move(content);
             }
         } else if (tc.is_running()) {
@@ -389,7 +363,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         const auto& body = tc.output();
         if (!body.empty() && body != "no changes") {
             out.kind = Kind::GitDiff;
-            out.text = live_tail_body(body);
+            out.text = std::string{body};
             out.text_color = text_tertiary;
         }
         return out;
@@ -406,7 +380,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         const auto& body = tc.output();
         if (!body.empty()) {
             out.kind = Kind::FileRead;
-            out.text = live_tail_body(body);
+            out.text = std::string{body};
             out.text_color = text_tertiary;    // bright cyan — file content rendered as code
             // Anchor the gutter to the real source line numbers the tool
             // returned, not 1. The read tool accepts both `offset` and the
@@ -447,7 +421,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
         const auto& body = tc.output();
         if (!body.empty()) {
             out.kind = Kind::Json;
-            out.text = live_tail_body(body);
+            out.text = std::string{body};
             out.text_color = text_tertiary;
         }
         return out;
@@ -474,7 +448,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     {
         if (!tc.output().empty()) {
             out.kind = Kind::CodeBlock;
-            out.text = live_tail_body(tc.output());
+            out.text = std::string{tc.output()};
             out.text_color = text_tertiary;
         }
         return out;
@@ -531,7 +505,7 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    matches the card's failure cue; body content stays dim.
     if (tc.is_failed() && !tc.output().empty()) {
         out.kind = Kind::Failure;
-        out.text = live_tail_body(tc.output());
+        out.text = std::string{tc.output()};
         out.chrome_color = status_error;
         return out;
     }
