@@ -660,6 +660,98 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
         });
 }
 
+namespace {
+
+// ── Path-aware parallel scheduling ───────────────────────────────────────────
+//
+// The effect-only gate (is_parallel_safe) is coarse: ANY writer forces
+// exclusive access, so two edits to DIFFERENT files serialise, and a read of
+// a.c blocks behind an unrelated write to b.c. That's correct but leaves
+// latency on the table — the model routinely emits a fan of edits across
+// disjoint files in one turn.
+//
+// We refine it the same way mcp-cpp's cap::scheduler does: track the SET OF
+// PATHS each running/promoted tool touches, and let a writer (or reader)
+// proceed concurrently when its paths don't OVERLAP any active path. A tool
+// whose target path can't be extracted, or any Exec (bash — unbounded blast
+// radius), keeps the conservative exclusive behaviour.
+
+// Pull the fs target(s) out of a tool call's args, mirroring the built-in
+// tool vocabulary (read/write/edit/find_definition use path|file_path;
+// grep/glob/list_dir scope under an optional dir). Empty ⇒ unknown target.
+[[nodiscard]] std::vector<std::string> tc_paths(const ToolUse& tc) {
+    std::vector<std::string> out;
+    if (!tc.args.is_object()) return out;
+    auto take = [&](const char* k) {
+        if (auto it = tc.args.find(k); it != tc.args.end() && it->is_string()) {
+            auto s = it->get<std::string>();
+            if (!s.empty()) out.push_back(std::move(s));
+        }
+    };
+    take("path"); take("file_path"); take("filepath"); take("filename");
+    const auto& n = tc.name.value;
+    if (n == "grep" || n == "glob" || n == "list_dir") {
+        take("dir"); take("directory"); take("root");
+    }
+    return out;
+}
+
+// Prefix-aware path overlap: identical, or one is a directory ancestor of the
+// other (with a separator at the boundary so "src" doesn't match "srcfoo").
+[[nodiscard]] bool paths_overlap(std::string_view a, std::string_view b) {
+    if (a == b) return true;
+    auto under = [](std::string_view shorter, std::string_view longer) {
+        return longer.size() > shorter.size()
+            && longer.substr(0, shorter.size()) == shorter
+            && (shorter.back() == '/' || longer[shorter.size()] == '/');
+    };
+    return a.size() < b.size() ? under(a, b) : under(b, a);
+}
+
+} // namespace
+
+SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
+    auto effects_of = [](const ToolName& n) -> tools::EffectSet {
+        if (const auto* sp = tools::spec::lookup(n.value)) return sp->effects;
+        return tools::EffectSet{{tools::Effect::Exec}};
+    };
+    tools::EffectSet active_effects;
+    std::vector<std::string> active_paths;
+    bool active_unbounded = false;
+    auto note = [&](const ToolUse& tc, tools::EffectSet fx) {
+        active_effects |= fx;
+        auto ps = tc_paths(tc);
+        if (fx.has(tools::Effect::Exec)
+            || (fx.has(tools::Effect::WriteFs) && ps.empty()))
+            active_unbounded = true;
+        for (auto& p : ps) active_paths.push_back(std::move(p));
+    };
+    auto can_run = [&](const ToolUse& tc, tools::EffectSet want) -> bool {
+        if (tools::is_parallel_safe(active_effects, want)) return true;
+        if (want.has(tools::Effect::Exec) || active_unbounded) return false;
+        auto ps = tc_paths(tc);
+        if (ps.empty()) return false;
+        for (const auto& cp : ps)
+            for (const auto& ap : active_paths)
+                if (paths_overlap(cp, ap)) return false;
+        return true;
+    };
+    // Seed with whatever's already running.
+    for (const auto& tc : batch)
+        if (tc.is_running()) note(tc, effects_of(tc.name));
+    // Greedily promote pending/approved calls in submission order.
+    SchedDecision out;
+    for (std::size_t i = 0; i < batch.size(); ++i) {
+        const auto& tc = batch[i];
+        if (!tc.is_pending() && !tc.is_approved()) continue;
+        const auto want = effects_of(tc.name);
+        if (!can_run(tc, want)) continue;   // stays pending; advances next kick
+        note(tc, want);
+        out.promote.push_back(i);
+    }
+    return out;
+}
+
 Cmd<Msg> kick_pending_tools(Model& m) {
     if (m.d.current.messages.empty()) return Cmd<Msg>::none();
     auto& last = m.d.current.messages.back();
@@ -709,8 +801,42 @@ Cmd<Msg> kick_pending_tools(Model& m) {
         // never parallelise something whose effects we can't reason about.
         return tools::EffectSet{{tools::Effect::Exec}};
     };
+    // Path-aware refinement state. `active_paths` is every fs target a
+    // running/promoted tool touches; `active_unbounded` is set when any active
+    // tool's blast radius can't be bounded by a path set (Exec, or a writer
+    // whose target we couldn't extract). A candidate writer/reader may run
+    // concurrently with the active set when active_unbounded is false AND none
+    // of its paths overlap an active path.
+    std::vector<std::string> active_paths;
+    bool active_unbounded = false;
+    auto note_active = [&](const ToolUse& tc, tools::EffectSet fx) {
+        active_effects |= fx;
+        auto ps = tc_paths(tc);
+        if (fx.has(tools::Effect::Exec)
+            || (fx.has(tools::Effect::WriteFs) && ps.empty()))
+            active_unbounded = true;
+        for (auto& p : ps) active_paths.push_back(std::move(p));
+    };
+    // Can this candidate share the wave with everything already active?
+    auto can_run_now = [&](const ToolUse& tc, tools::EffectSet want) -> bool {
+        // Fast path: the coarse effect rule already says yes (both sides are
+        // read/net only, or nothing is active). No path analysis needed.
+        if (tools::is_parallel_safe(active_effects, want)) return true;
+        // A writer/exec is involved. Exec never parallelises; an active
+        // unbounded tool blocks everything.
+        if (want.has(tools::Effect::Exec) || active_unbounded) return false;
+        // Candidate must name its target(s) to be reasoned about; a blind
+        // writer keeps the conservative exclusive behaviour.
+        auto ps = tc_paths(tc);
+        if (ps.empty()) return false;
+        // Safe iff no candidate path overlaps any active path.
+        for (const auto& cp : ps)
+            for (const auto& ap : active_paths)
+                if (paths_overlap(cp, ap)) return false;
+        return true;
+    };
     for (const auto& tc : last.tool_calls)
-        if (tc.is_running()) active_effects |= effects_of(tc.name);
+        if (tc.is_running()) note_active(tc, effects_of(tc.name));
 
     for (auto& tc : last.tool_calls) {
         // Approved: user already granted permission; advance it exactly
@@ -744,7 +870,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // terminal ToolExecOutput, so deferred siblings advance
                 // automatically without explicit requeueing.
                 const auto want = effects_of(tc.name);
-                if (!tools::is_parallel_safe(active_effects, want)) {
+                if (!can_run_now(tc, want)) {
                     any_pending = true;
                     continue;
                 }
@@ -753,7 +879,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // timer covers the full card lifetime (args streaming +
                 // execution). Preserve it as we move into Running.
                 tc.status = ToolUse::Running{tc.started_at(), {}};
-                active_effects |= want;
+                note_active(tc, want);
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
 
                 // Tool wall-clock watchdog removed at user request.

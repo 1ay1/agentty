@@ -51,6 +51,23 @@ namespace agentty::app::cmd {
 // kick_pending_tools before any promotion to Running; exposed for tests.
 std::size_t dedup_releaked_salvage_calls(Model& m);
 
+// ── Path-aware parallel tool scheduling (pure; exposed for tests) ────────────
+// Given a batch of tool calls (the model's emission for one turn) and the set
+// already RUNNING, decide which currently-pending calls may be promoted to run
+// CONCURRENTLY this tick. The decision refines the coarse effect-only rule
+// (is_parallel_safe) with PATH analysis: two writers to disjoint files — or a
+// read of a.c alongside a write of b.c — run in parallel instead of
+// serialising. Conflicts (overlapping paths, any Exec, or a writer whose path
+// can't be extracted) stay pending and advance on the next kick once the
+// blocker settles. Submission order is preserved: a call never jumps ahead of
+// an earlier conflicting call. `running` and `pending` index into the same
+// logical batch; returns the subset of `pending` indices safe to start now.
+struct SchedDecision {
+    std::vector<std::size_t> promote;   // pending indices to start this tick
+};
+[[nodiscard]] SchedDecision schedule_parallel_batch(
+    const std::vector<ToolUse>& batch);
+
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
 // ── In-app login modal ──────────────────────────────────────────────────

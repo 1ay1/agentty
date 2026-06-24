@@ -1114,6 +1114,13 @@ if(AGENTTY_BUILD_TESTS)
     # detail::composer_update directly (no maya / no I/O).
     agentty_add_full_test(composer_edit_test)
 
+    # scheduler_path_test — path-aware parallel tool scheduling. Pins the
+    # refinement of the effect-only gate: disjoint-path writers / a read
+    # alongside an unrelated write run concurrently, while overlapping /
+    # exec / blind-writer cases serialise. Pure planner
+    # (cmd::schedule_parallel_batch) — no maya / no phase machinery.
+    agentty_add_full_test(scheduler_path_test)
+
     # table_render_test — pins maya's GFM table classification: a
     # well-formed table (header line starts at '|', blank line before)
     # is a Table block; a malformed one with lead-in prose on the header
@@ -1284,6 +1291,7 @@ if(AGENTTY_BUILD_TESTS)
         midrun_wire_test
         stream_liveness_test
         composer_edit_test
+        scheduler_path_test
         table_render_test
         openai_transport_test
         ollama_transport_test
