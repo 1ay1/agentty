@@ -1282,5 +1282,12 @@ if(AGENTTY_BUILD_TESTS)
         frozen_invariant_fuzz
         scrollback_wire_fuzz
         reveal_scrollback_test)
+    # mcp_bridge_test / mcp_http_test are only registered as ctest entries
+    # when MCP is compiled in (AGENTTY_MCP), so they must be added to the
+    # aggregate under the same gate — otherwise `cmake --build --target
+    # tests` never builds them and ctest reports them "Not Run".
+    if(AGENTTY_MCP)
+        add_dependencies(tests mcp_bridge_test mcp_http_test)
+    endif()
 endif()
 
