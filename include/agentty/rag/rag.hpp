@@ -57,10 +57,21 @@ struct Chunk {
     std::vector<float> embedding;
 };
 
+// Forward decl so Hit can carry source provenance without a cycle.
+class KnowledgeSource;
+
 // A retrieval hit: a chunk plus its fused relevance score.
 struct Hit {
     const Chunk* chunk = nullptr;
     double       score = 0.0;   // fused RRF score (higher = more relevant)
+
+    // PROVENANCE (essay: "never discard where information came from").
+    // Which KnowledgeSource produced this hit. nullptr when retrieval went
+    // through a bare Corpus (single-source path) — only the KnowledgeRouter
+    // stamps it, so every existing single-source call site is unaffected.
+    // Non-owning: the source outlives the Hit (router owns its sources for
+    // the duration of a retrieve()).
+    const KnowledgeSource* source = nullptr;
 };
 
 // The embedding endpoint to call. Reuses the running Ollama server. When

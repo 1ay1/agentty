@@ -1,6 +1,10 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/tools.hpp"
 
+#if AGENTTY_MCP
+#include "agentty/mcp/client.hpp"
+#endif
+
 #include <algorithm>
 #include <format>
 #include <ranges>
@@ -117,6 +121,23 @@ std::vector<ToolDef> build_registry() {
     r.push_back(tool_task());
     r.push_back(tool_skill());
     r.push_back(tool_search_docs());
+
+#if AGENTTY_MCP
+    // ── MCP capability providers (essay §2/§10) ──────────────────────────
+    // Connect to any configured MCP servers and append their tools as plain
+    // ToolDefs — the model can't tell them from local tools. LAZY + OPT-IN:
+    // with no .agentty/mcp.json this is a single stat() returning {}, so a
+    // user who doesn't use MCP pays nothing at startup. The connection pool
+    // (spawned server processes + transports) must outlive every synthesized
+    // tool's execute() closure, so it's parked in a function-local static
+    // with the same lifetime as the registry itself.
+    if (mcp::mcp_config_present()) {
+        static mcp::PoolHandle s_pool;       // process-lifetime keep-alive
+        auto mcp_tools = mcp::mcp_tools(s_pool);
+        for (auto& t : mcp_tools) r.push_back(std::move(t));
+    }
+#endif
+
     return r;
 }
 

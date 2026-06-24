@@ -223,6 +223,23 @@ if(TARGET acp)
     set_target_properties(acp PROPERTIES SYSTEM TRUE)
 endif()
 
+# mcp-cpp — header-only Model Context Protocol library (submodule). Lets
+# agentty connect to external MCP servers and expose THEIR tools as ordinary
+# agentty tools (see src/mcp/, include/agentty/mcp/client.hpp). Opt-in at
+# runtime (needs .agentty/mcp.json) AND at build time via AGENTTY_MCP, so a
+# build that doesn't want it pays zero — no link, no template instantiation.
+option(AGENTTY_MCP "Build MCP client integration (external tool servers)" ON)
+if(AGENTTY_MCP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
+    set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(MCP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory(mcp-cpp)
+    if(TARGET mcp)
+        set_target_properties(mcp PROPERTIES SYSTEM TRUE)
+    endif()
+else()
+    set(AGENTTY_MCP OFF)
+endif()
+
 if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
 endif()
@@ -381,6 +398,13 @@ set(AGENTTY_ACP_SOURCES
     src/acp/server.cpp
 )
 
+# MCP (Model Context Protocol) client glue — spawns external MCP servers and
+# exposes their tools as agentty ToolDefs. The heavy mcp-cpp templates are
+# confined to these TUs (linked as mcp::mcp). Only compiled when AGENTTY_MCP.
+set(AGENTTY_MCP_SOURCES
+    src/mcp/bridge.cpp
+)
+
 set(AGENTTY_DIFF_SOURCES
     src/diff/diff.cpp
 )
@@ -391,6 +415,7 @@ set(AGENTTY_RAG_SOURCES
     src/rag/hnsw.cpp
     src/rag/rerank.cpp
     src/rag/expand.cpp
+    src/rag/knowledge.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES
@@ -580,6 +605,18 @@ function(agentty_objlib name)
     add_library(${name} OBJECT ${ARGN})
     target_include_directories(${name} PRIVATE include)
     target_compile_definitions(${name} PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+    # MCP integration is compile-gated. When ON, every objlib sees the macro
+    # (registry.cpp branches on it) and the mcp-cpp INTERFACE include dir (so
+    # the agentty-facing header chain resolves); only agentty_mcp_obj actually
+    # pulls the heavy <mcp/*.hpp> templates in.
+    if(AGENTTY_MCP)
+        target_compile_definitions(${name} PRIVATE AGENTTY_MCP=1)
+        if(TARGET mcp::mcp)
+            target_link_libraries(${name} PRIVATE mcp::mcp)
+        endif()
+    else()
+        target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
+    endif()
     agentty_apply_compile_flags(${name})
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
@@ -606,6 +643,15 @@ agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
 agentty_objlib(agentty_acp_obj       ${AGENTTY_ACP_SOURCES})
 target_link_libraries(agentty_acp_obj PRIVATE acp::acp)
 
+# MCP glue — only built when AGENTTY_MCP is on. Confines the heavy mcp-cpp
+# template instantiation to these two TUs; everything else just sees the
+# light agentty-facing header. Added to the shared object set below so the
+# exe (and any full test that calls tools::registry()) links it.
+if(AGENTTY_MCP)
+    agentty_objlib(agentty_mcp_obj   ${AGENTTY_MCP_SOURCES})
+    target_link_libraries(agentty_mcp_obj PRIVATE mcp::mcp)
+endif()
+
 # The shared object set every "full" test (and the exe) consumes — the
 # whole runtime minus main.cpp and minus the ACP glue.
 set(AGENTTY_SHARED_OBJECTS
@@ -618,6 +664,11 @@ set(AGENTTY_SHARED_OBJECTS
     $<TARGET_OBJECTS:agentty_tool_obj>
     $<TARGET_OBJECTS:agentty_runtime_obj>
 )
+if(AGENTTY_MCP)
+    # registry.cpp (in agentty_tool_obj) references mcp::mcp_tools, so the MCP
+    # glue objects must be in the shared set the exe + every full test link.
+    list(APPEND AGENTTY_SHARED_OBJECTS $<TARGET_OBJECTS:agentty_mcp_obj>)
+endif()
 
 add_executable(agentty
     src/runtime/main.cpp
@@ -641,6 +692,9 @@ target_link_libraries(agentty PRIVATE
     OpenSSL::Crypto
     Threads::Threads
 )
+if(AGENTTY_MCP AND TARGET mcp::mcp)
+    target_link_libraries(agentty PRIVATE mcp::mcp)
+endif()
 if(AGENTTY_HAS_MIMALLOC)
     # Prefer the static target so operator new/delete routing is linked
     # into the exe without an accompanying DLL / dylib. BUT: some distros
@@ -1084,6 +1138,7 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(rag_hnsw_test)
     agentty_add_full_test(rag_rerank_test)
     agentty_add_full_test(rag_expand_test)
+    agentty_add_full_test(knowledge_test)
 
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
@@ -1128,6 +1183,20 @@ if(AGENTTY_BUILD_TESTS)
         $<TARGET_OBJECTS:agentty_acp_obj>
         LIBS acp::acp)
     set_tests_properties(acp_integration_test PROPERTIES TIMEOUT 60)
+
+    # mcp_bridge_test — e2e for the agentty↔mcp-cpp capability bridge. Spawns
+    # the mcp-cpp example server and drives mcp::mcp_tools() end to end. The
+    # test SKIPS (exit 0) when the example server isn't built. Only registered
+    # when MCP is compiled in.
+    if(AGENTTY_MCP)
+        agentty_add_full_test(mcp_bridge_test LIBS mcp::mcp)
+        set_tests_properties(mcp_bridge_test PROPERTIES TIMEOUT 60)
+        # Point the e2e at the mcp-cpp example server when it's been built, so
+        # ctest exercises the real spawn+handshake path instead of skipping.
+        # The test still SKIPs gracefully if the binary isn't there.
+        set_tests_properties(mcp_bridge_test PROPERTIES
+            ENVIRONMENT "AGENTTY_MCP_E2E_SERVER=${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/build/examples/mcp_server_example")
+    endif()
 
     # frozen_invariant_fuzz — randomized property test for the frozen-
     # scrollback subsystem. Drives arbitrary sequences of conversation
@@ -1182,6 +1251,7 @@ if(AGENTTY_BUILD_TESTS)
         rag_hnsw_test
         rag_rerank_test
         rag_expand_test
+        knowledge_test
         visual_hash_coverage_test
         tool_result_budget_test
         read_grep_features_test

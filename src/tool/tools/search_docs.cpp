@@ -13,6 +13,7 @@
 #include "agentty/rag/rag.hpp"
 #include "agentty/rag/rerank.hpp"
 #include "agentty/rag/expand.hpp"
+#include "agentty/rag/knowledge.hpp"
 
 #include <cstdlib>
 #include <cstdio>
@@ -157,59 +158,83 @@ ExecResult run_search_docs(const SearchDocsArgs& a) {
             indexed_root = root_str;
         }
 
-        // Retrieve WIDE → rerank → narrow → compress (SOTA RAG pipeline).
-        // The first-pass hybrid fusion is recall-oriented and noisy at the
-        // top; a wide pool gives the feature-fusion reranker enough
-        // candidates to lift precision@k. Then compress each survivor so a
-        // weak small-context model isn't flooded with irrelevant chunk text.
+        // ── KNOWLEDGE LAYER ───────────────────────────────────────────
+        // The docs folder is ONE KnowledgeSource behind a KnowledgeRouter.
+        // Today there's a single source so the router short-circuits with
+        // zero fusion overhead; a second source (remote API, second folder,
+        // MCP resource) plugs in here with no change to the rest of this
+        // function — that's the whole point of the seam.
+        rag::CorpusSource docs_source("docs", corpus, embed);
+        rag::KnowledgeRouter router;
+        // shared_ptr with a no-op deleter: docs_source lives on this stack
+        // frame for the duration of the call; the router never outlives it.
+        router.add(std::shared_ptr<rag::KnowledgeSource>(
+            &docs_source, [](rag::KnowledgeSource*) {}));
+
+        // Retrieve WIDE → rerank → narrow → compress (SOTA RAG pipeline),
+        // now expressed as composable RetrievalStages. The first-pass hybrid
+        // fusion is recall-oriented and noisy at the top; a wide pool gives
+        // the feature-fusion reranker enough candidates to lift precision@k.
+        // Then compress each survivor so a weak small-context model isn't
+        // flooded with irrelevant chunk text.
         const std::size_t pool_k =
             std::max<std::size_t>(static_cast<std::size_t>(a.k) * 5, 30);
 
-        std::vector<rag::Hit> pool;
         std::size_t variant_count = 0;  // # of EXTRA variants beyond original
+
+        // Seed the pipeline's Context. Query expansion (RAG-Fusion) is an
+        // upstream concern: when enabled we retrieve the wide pool via the
+        // source's fused path, then feed it straight into rerank+compress.
+        rag::Context ctx;
+        ctx.query = a.query;
         if (expand_enabled()) {
-            // Multi-query RAG-Fusion: rewrite the query into several
-            // phrasings, retrieve for each, fuse all ranked lists. Rerank
-            // against the ORIGINAL query so variants only boost recall.
             rag::ExpandConfig ecfg = expand_config_from_env(embed);
             auto queries = rag::expand_query(ecfg, a.query);
             if (queries.size() > 1) variant_count = queries.size() - 1;
-            pool = corpus.search_fused(queries, embed, pool_k);
+            ctx = rag::Context::from_hits(
+                a.query, docs_source.retrieve_fused(queries, pool_k));
         } else {
-            pool = corpus.search(a.query, embed, pool_k);
+            ctx = rag::Context::from_hits(
+                a.query, router.retrieve(a.query, pool_k));
         }
-        auto hits = rag::rerank(a.query, std::move(pool),
-                                static_cast<std::size_t>(a.k));
+
+        // rerank → compress as a composable Pipeline.
+        rag::Pipeline pipe;
+        pipe.add(std::make_shared<rag::RerankStage>(static_cast<std::size_t>(a.k)))
+            .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
+        ctx = pipe.run(std::move(ctx));
 
         std::string body;
         if (!a.display_description.empty())
             body += a.display_description + "\n";
 
-        if (hits.empty()) {
+        if (ctx.empty()) {
             return ToolOutput{
                 body + "No matching documents found for: " + a.query,
                 std::nullopt};
         }
 
         const char* mode = corpus.has_embeddings() ? "hybrid" : "BM25-only";
-        body += std::to_string(hits.size()) + " results from " + root_str
+        body += std::to_string(ctx.size()) + " results from " + root_str
               + " (mode: " + mode + ", reranked";
         if (variant_count > 0)
             body += ", +" + std::to_string(variant_count) + " query variants";
         body += ")\n";
 
         char score_buf[32];
-        for (std::size_t i = 0; i < hits.size(); ++i) {
-            const auto& h = hits[i];
-            if (!h.chunk) continue;
-            std::snprintf(score_buf, sizeof(score_buf), "%.4f", h.score);
-            body += "\n── " + h.chunk->path + ":"
-                  + std::to_string(h.chunk->line_start) + "-"
-                  + std::to_string(h.chunk->line_end)
+        for (const auto& c : ctx.chunks) {
+            if (!c.hit.chunk) continue;
+            std::snprintf(score_buf, sizeof(score_buf), "%.4f", c.hit.score);
+            // Provenance (essay: never discard the source). With a single
+            // docs source the tag is "docs"; with multiple sources each hit
+            // carries which one produced it.
+            std::string src_tag = c.hit.source
+                ? std::string{c.hit.source->name()} + ":" : std::string{};
+            body += "\n── " + src_tag + c.hit.chunk->path + ":"
+                  + std::to_string(c.hit.chunk->line_start) + "-"
+                  + std::to_string(c.hit.chunk->line_end)
                   + "  (score " + score_buf + ")\n";
-            std::string passage = rag::compress(a.query, h.chunk->text,
-                                                 /*target_chars=*/600);
-            body += passage;
+            body += std::string{c.text()};   // compressed span (CompressStage)
             if (!body.empty() && body.back() != '\n') body += "\n";
         }
 
