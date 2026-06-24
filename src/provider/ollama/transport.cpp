@@ -325,6 +325,11 @@ void repair_arg_keys(const std::string& tool, json& args) {
     // Strip any `tool:action` suffix before the known-tool check.
     if (auto colon = name.find(':'); colon != std::string::npos)
         name = name.substr(0, colon);
+    // The `response` pseudo-tool is the JSON-protocol chat escape hatch — it
+    // is NOT in known_tools (we never advertise it) but its payload is the
+    // user-visible reply, so it must NEVER be dropped here. rescue_json_protocol
+    // unwraps its text into prose; report it as "not an unknown tool call".
+    if (name == "response") return false;
     for (const auto& t : known) if (t == name) return false;
     return true;
 }
@@ -439,6 +444,12 @@ void flush_text_hold(StreamCtx& ctx) {
     if (hold_is_unknown_tool_call(ctx.text_hold, ctx.known_tools)) {
         ctx.text_hold.clear(); return;
     }
+    // Whitespace-only hold is not a real reply — leave it for the
+    // never-blank-turn net to render an explicit `(empty response)` rather
+    // than emitting a blank-looking text delta.
+    if (ctx.text_hold.find_first_not_of(" \t\r\n") == std::string::npos) {
+        ctx.text_hold.clear(); return;
+    }
     ctx.sink(StreamTextDelta{ctx.text_hold});
     ctx.any_text_flushed = true;
     ctx.text_hold.clear();
@@ -551,6 +562,23 @@ bool rescue_json_protocol(StreamCtx& ctx) {
                 if (j.contains(k) && j[k].is_string()) { text = j[k].get<std::string>(); break; }
             }
         }
+        // Last resort: the model chose `response` but left text empty and put
+        // its actual words in `thoughts` (common with grammar-forced output
+        // on tiny models). Surface the thoughts as prose — the user must see
+        // SOMETHING, never a blank turn (Aider's discipline: never drop a
+        // non-empty model reply).
+        if (text.empty() && j.contains("thoughts")) {
+            const auto& th = j["thoughts"];
+            if (th.is_array()) {
+                for (const auto& t : th)
+                    if (t.is_string()) {
+                        if (!text.empty()) text += '\n';
+                        text += t.get<std::string>();
+                    }
+            } else if (th.is_string()) {
+                text = th.get<std::string>();
+            }
+        }
         if (!text.empty()) {
             ctx.sink(StreamTextDelta{text});
             ctx.any_text_flushed = true;
@@ -567,6 +595,92 @@ bool rescue_json_protocol(StreamCtx& ctx) {
     const bool has_tool = !tname.empty();
     if (has_tool && emit_salvaged_tool(ctx, obj)) return true;
     return false;
+}
+
+// Final safety net — NEVER let an assistant turn render blank (Aider's
+// `if not received_content` discipline). Called at every terminal path after
+// salvage/flush. If the turn produced NO text and NO tool call, surface
+// whatever the model actually sent so the user always sees a reply:
+//   • a JSON-protocol object → its `response`/`text`/`thoughts` payload,
+//     stripped of the protocol scaffolding (extract_first_json_object +
+//     the same field walk rescue uses);
+//   • otherwise the raw captured content, verbatim;
+//   • if even that is empty, a clear `(empty response)` marker (Aider's
+//     exact placeholder) so the turn isn't a silent void.
+void flush_unhandled_content(StreamCtx& ctx) {
+    if (ctx.any_text_flushed) return;
+    if (ctx.any_structured_tool) return;
+    if (ctx.stop_reason == StopReason::ToolUse) return;
+
+    auto emit = [&](std::string s) {
+        // Trim leading/trailing whitespace so a lone newline doesn't count.
+        std::size_t a = 0, b = s.size();
+        while (a < b && (s[a]==' '||s[a]=='\t'||s[a]=='\n'||s[a]=='\r')) ++a;
+        while (b > a && (s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\n'||s[b-1]=='\r')) --b;
+        s = s.substr(a, b - a);
+        if (s.empty()) return false;
+        ctx.sink(StreamTextDelta{s});
+        ctx.any_text_flushed = true;
+        if (ctx.stop_reason != StopReason::ToolUse)
+            ctx.stop_reason = StopReason::EndTurn;
+        return true;
+    };
+
+    // Try to pull a human reply out of a JSON-protocol object first so the
+    // user sees the words, not the {tool_name:response,...} scaffolding.
+    std::string_view obj = extract_first_json_object(ctx.full_content);
+    if (!obj.empty()) {
+        json j;
+        try { j = json::parse(obj); } catch (...) { j = json{}; }
+        if (j.is_object()) {
+            std::string text;
+            const json* args = nullptr;
+            if (j.contains("tool_args") && j["tool_args"].is_object()) args = &j["tool_args"];
+            else if (j.contains("args") && j["args"].is_object())      args = &j["args"];
+            if (args)
+                for (const char* k : {"text","response","content","message","answer"})
+                    if (args->contains(k) && (*args)[k].is_string())
+                        { text = (*args)[k].get<std::string>(); break; }
+            if (text.empty())
+                for (const char* k : {"response","content","message","answer","text"})
+                    if (j.contains(k) && j[k].is_string())
+                        { text = j[k].get<std::string>(); break; }
+            if (text.empty() && j.contains("thoughts")) {
+                const auto& th = j["thoughts"];
+                if (th.is_array()) {
+                    for (const auto& t : th) if (t.is_string()) {
+                        if (!text.empty()) text += '\n';
+                        text += t.get<std::string>();
+                    }
+                } else if (th.is_string()) text = th.get<std::string>();
+            }
+            if (emit(std::move(text))) return;
+        }
+    }
+
+    // No JSON payload (or it was empty) — show the raw content verbatim,
+    // UNLESS it's a tool-call-shaped object that was deliberately swallowed
+    // (a footgun tool like `remember`, an unadvertised tool, or truncated
+    // tool JSON). Surfacing that raw would leak `{"name":"remember",…}` at
+    // the user — exactly the garbage the salvage path exists to hide.
+    std::string_view rc{ctx.full_content};
+    const bool rc_blank = rc.find_first_not_of(" \t\r\n") == std::string_view::npos;
+    const bool swallowed_tool_json =
+        !rc_blank && (hold_is_truncated_tool_json(rc) ||
+                      hold_is_unknown_tool_call(rc, ctx.known_tools) ||
+                      could_be_tool_json(rc));
+    if (!swallowed_tool_json && emit(ctx.full_content)) return;
+
+    // Deliberately-swallowed tool JSON: the turn has no user-facing text by
+    // design — stay silent, don't show a placeholder.
+    if (swallowed_tool_json) return;
+
+    // Genuinely nothing came back. Mirror Aider's placeholder so the turn is
+    // never a silent blank.
+    ctx.sink(StreamTextDelta{"(empty response)"});
+    ctx.any_text_flushed = true;
+    if (ctx.stop_reason != StopReason::ToolUse)
+        ctx.stop_reason = StopReason::EndTurn;
 }
 
 // Filter reasoning-model <think>…</think> out of a streamed content chunk,
@@ -850,7 +964,11 @@ void handle_message(StreamCtx& ctx, const json& message) {
         // (`"}}` / pretty-print whitespace). Swallow them — emitting them as
         // text would tack ` }` onto the reply (the trailing-brace leak).
         if (ctx.resp_active && ctx.resp_done) return;
-        if (!ctx.holding) { ctx.sink(StreamTextDelta{s}); return; }
+        if (!ctx.holding) {
+            ctx.sink(StreamTextDelta{s});
+            ctx.any_text_flushed = true;
+            return;
+        }
         ctx.text_hold += s;
         // JSON-protocol chat reply? Stream the `response` text incrementally
         // as it arrives so reveal_fx animates it (and the freeze handoff is
@@ -903,6 +1021,7 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
             su.input_tokens  = j.value("prompt_eval_count", 0);
             su.output_tokens = j.value("eval_count", 0);
             if (su.input_tokens || su.output_tokens) ctx.sink(su);
+            flush_unhandled_content(ctx);
             return;
         }
         // JSON-protocol (very weak models): the ENTIRE reply is meant to be
@@ -925,6 +1044,9 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         }
         // Mid-prose buried tool call (narration + ```fenced``` JSON).
         rescue_tool_from_prose(ctx);
+        // Never-blank-turn net: if nothing was emitted, surface the model's
+        // content (or an explicit `(empty response)`).
+        flush_unhandled_content(ctx);
         StreamUsage su;
         su.input_tokens  = j.value("prompt_eval_count", 0);
         su.output_tokens = j.value("eval_count", 0);
@@ -1401,6 +1523,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
                 }
                 rescue_tool_from_prose(c);
             }
+            flush_unhandled_content(c);
         }
         if (err) c.sink(StreamError{*err, retry_after});
         else     c.sink(StreamFinished{c.stop_reason});
@@ -1555,6 +1678,7 @@ std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
             }
             rescue_tool_from_prose(ctx);
         }
+        flush_unhandled_content(ctx);
         ctx.sink(StreamFinished{ctx.stop_reason});
     }
     return out;

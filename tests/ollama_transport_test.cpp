@@ -700,6 +700,51 @@ static void test_jp_salvage_arg_key_repair() {
     CHECK(!j.contains("file"));
 }
 
+// ── Never-blank-turn safety net (Aider's `if not received_content`) ──────────
+// A qwen `response` object whose `text` is empty but whose `thoughts` carry
+// the real words must surface the thoughts as prose — never a blank turn.
+static void test_jp_response_empty_text_falls_back_to_thoughts() {
+    // Single content frame carrying the whole {thoughts,tool_name:response,
+    // tool_args:{text:""}} object, then a separate done frame. text is empty
+    // so the fallback must surface `thoughts` as prose.
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"thoughts\\\":[\\\"You are Ayush\\\"],\\\"tool_name\\\":"
+        "\\\"response\\\",\\\"tool_args\\\":{\\\"text\\\":\\\"\\\"}}\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    std::string txt = joined_text(msgs);
+    CHECK(txt.find("You are Ayush") != std::string::npos);
+    CHECK(txt.find("tool_name") == std::string::npos);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+}
+
+// A JSON-protocol turn that produced NOTHING usable (model emitted only
+// whitespace) must still render a visible turn: Aider's exact
+// `(empty response)` placeholder, never a silent void.
+static void test_jp_truly_empty_shows_placeholder() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"   \"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(joined_text(msgs).find("(empty response)") != std::string::npos);
+    CHECK(count_leaf<StreamFinished>(msgs) == 1);
+}
+
+// Plain prose that merely STARTED life looking like it could be JSON but is
+// not a tool call must STILL reach the user — never a silent blank turn.
+static void test_prose_starting_with_brace_not_dropped() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"Here is the answer: 42.\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"});
+    CHECK(joined_text(msgs).find("42") != std::string::npos);
+}
+
 int main() {
     test_build_messages_text();
     test_build_messages_tool_calls();
@@ -737,6 +782,9 @@ int main() {
     test_build_messages_json_protocol_roundtrip();
     test_ndjson_native_arg_key_repair();
     test_jp_salvage_arg_key_repair();
+    test_jp_response_empty_text_falls_back_to_thoughts();
+    test_jp_truly_empty_shows_placeholder();
+    test_prose_starting_with_brace_not_dropped();
 
     if (g_failures == 0) {
         std::printf("ollama_transport_test: all checks passed\n");
