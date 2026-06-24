@@ -60,6 +60,35 @@ static ToolUse write_tool(int n_lines) {
     return t;
 }
 
+// A STREAMING write: status Running, content grown to n_lines. No
+// hash_id is minted for non-terminal tools, so each frame re-lays-out
+// the whole growing body from line 1 — the uncached cost the per-event
+// cache can't touch. This is the case the reveal tick competes with.
+static ToolUse streaming_write_tool(int n_lines) {
+    ToolUse t;
+    static int c = 0;
+    t.id   = ToolCallId{"scall_" + std::to_string(++c)};
+    t.name = ToolName{"write"};
+    t.args = {{"file_path", "src/foo.cpp"}, {"content", code_block(n_lines)}};
+    t.status = ToolUse::Running{steady_clock::now() - milliseconds{200}, {}};
+    t.expanded = true;
+    return t;
+}
+
+static Model build_streaming_model(int write_lines) {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"sprobe"};
+    Message u; u.role = Role::User; u.text = "write the file";
+    m.d.current.messages.push_back(std::move(u));
+    Message a; a.role = Role::Assistant;
+    a.text = "Writing.";
+    a.tool_calls.push_back(streaming_write_tool(write_lines));
+    m.d.current.messages.push_back(std::move(a));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);   // freeze only the User
+    return m;
+}
+
 // Live-tail model: frozen User + one or more terminal Assistant
 // sub-turns each carrying a big write card, left UNFROZEN (live tail).
 static Model build_live_tail_model(int n_subturns, int write_lines) {
@@ -169,6 +198,16 @@ int main() {
         auto r = render_cost(m, 4000 * n);   // canvas grows with content
         std::printf("%-12d | %9.3f | %9.3f\n", n, r.cold, r.warm);
     }
+    std::printf("\nSTREAMING re-layout (Running tool, NO hash_id) — per-tick cost\n");
+    std::printf("the reveal animation competes with, canvas grown to content:\n");
+    std::printf("%-8s | %-12s\n", "lines", "per_tick_ms");
+    std::printf("---------+--------------\n");
+    for (int n : {100, 300, 1000, 3000}) {
+        auto m = build_streaming_model(n);
+        double r = render_rebuild_ms(m, std::max(200, n + 1000));
+        std::printf("%-8d | %12.3f\n", n, r);
+    }
+
     std::printf("\nREBUILD-each-frame (production view loop), 3000-line card:\n");
     std::printf("%-9s | %-14s\n", "canvas_h", "rebuild_ms");
     std::printf("----------+---------------\n");
