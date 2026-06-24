@@ -65,6 +65,19 @@ bool has_avx2() noexcept {
 }
 #endif
 
+// Function-level ISA targeting. GCC/Clang need [[gnu::target("avx2")]] to
+// emit AVX2/SSE4.2 inside a binary built for a baseline ISA (function
+// multiversioning). MSVC has no equivalent and instead compiles every
+// intrinsic unconditionally, so the attribute must be ELIDED there (an
+// unknown [[gnu::...]] attribute is at best a warning, at worst an error
+// under /permissive-). Define a portable macro that expands to the attribute
+// only on the compilers that understand it.
+#if defined(__GNUC__) || defined(__clang__)
+    #define RAG_TARGET(isa) [[gnu::target(isa)]]
+#else
+    #define RAG_TARGET(isa)
+#endif
+
 // Scalar fallback.
 float dot_scalar(const float* a, const float* b, std::size_t n) noexcept {
     float sum = 0.0f;
@@ -74,7 +87,7 @@ float dot_scalar(const float* a, const float* b, std::size_t n) noexcept {
 
 #ifdef RAG_X86
 // SSE4.2 implementation (128-bit, 4 floats at a time).
-[[gnu::target("sse4.2")]]
+RAG_TARGET("sse4.2")
 float dot_sse42(const float* a, const float* b, std::size_t n) noexcept {
     __m128 sum = _mm_setzero_ps();
     std::size_t i = 0;
@@ -95,7 +108,7 @@ float dot_sse42(const float* a, const float* b, std::size_t n) noexcept {
 }
 
 // AVX2 implementation (256-bit, 8 floats at a time).
-[[gnu::target("avx2")]]
+RAG_TARGET("avx2")
 float dot_avx2(const float* a, const float* b, std::size_t n) noexcept {
     __m256 sum = _mm256_setzero_ps();
     std::size_t i = 0;
