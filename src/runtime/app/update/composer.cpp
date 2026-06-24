@@ -489,6 +489,36 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.cursor = q;
             return done(std::move(m));
         },
+        [&](ComposerDeleteWordBack) -> Step {
+            // Ctrl+W — readline unix-word-rubout. Delete from the
+            // previous word boundary up to the cursor. Reuses the
+            // chip-aware word_left boundary so a Ctrl+W at the right
+            // edge of an attachment chip removes the whole token in
+            // one stroke (same mental model as chip-aware Backspace).
+            int p = m.ui.composer.cursor;
+            if (p <= 0) return done(std::move(m));
+            int q = word_left(m.ui.composer.text, p);
+            if (q >= p) return done(std::move(m));
+            begin_edit(m.ui.composer);
+            m.ui.composer.text.erase(static_cast<std::size_t>(q),
+                                     static_cast<std::size_t>(p - q));
+            m.ui.composer.cursor = q;
+            return done(std::move(m));
+        },
+        [&](ComposerDeleteWordForward) -> Step {
+            // Alt+D — readline kill-word. Delete from the cursor up to
+            // the next word boundary; cursor stays put. Symmetric to
+            // Ctrl+W and chip-aware via word_right.
+            const auto& s = m.ui.composer.text;
+            int p = m.ui.composer.cursor;
+            if (p >= static_cast<int>(s.size())) return done(std::move(m));
+            int q = word_right(s, p);
+            if (q <= p) return done(std::move(m));
+            begin_edit(m.ui.composer);
+            m.ui.composer.text.erase(static_cast<std::size_t>(p),
+                                     static_cast<std::size_t>(q - p));
+            return done(std::move(m));
+        },
         [&](ComposerUndo) -> Step {
             if (m.ui.composer.undo_stack.empty()) return done(std::move(m));
             ComposerState::Snapshot cur;

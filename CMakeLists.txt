@@ -1103,8 +1103,16 @@ if(AGENTTY_BUILD_TESTS)
     # 10 s inter-delta gap — and must disarm after settle + finalize
     # ramp. Locks the phase-authoritative RAF gate in turn.cpp
     # (commit a9760e7); a fixed byte-recency timeout would fail it.
+    # stream_liveness_test
     agentty_add_full_test(stream_liveness_test)
     set_tests_properties(stream_liveness_test PROPERTIES TIMEOUT 30)
+
+    # composer_edit_test — reducer-level coverage for the composer's
+    # word-wise delete keys (Ctrl+W unix-word-rubout / Alt+D kill-word),
+    # including the chip-aware boundary that drops a whole attachment
+    # token in one stroke and undo integration. Drives
+    # detail::composer_update directly (no maya / no I/O).
+    agentty_add_full_test(composer_edit_test)
 
     # table_render_test — pins maya's GFM table classification: a
     # well-formed table (header line starts at '|', blank line before)
@@ -1275,6 +1283,7 @@ if(AGENTTY_BUILD_TESTS)
         midrun_seam_test
         midrun_wire_test
         stream_liveness_test
+        composer_edit_test
         table_render_test
         openai_transport_test
         ollama_transport_test
