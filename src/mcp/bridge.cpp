@@ -99,6 +99,13 @@ fs::path resolve_config() {
 
 // Build a cap provider from one server config entry. Returns nullptr (and logs)
 // on any failure so the caller can skip it.
+//
+// STDIO transport is POSIX-only: mcp-cpp's StdioServerProvider needs a
+// ChildProcess (fork/exec) and only exists when MCP_CAP_HAVE_PROCESS is set
+// (__unix__/__APPLE__). On Windows the symbol is absent, so this whole
+// function compiles to a graceful "unsupported" stub — HTTP MCP servers,
+// which need no child process, still work everywhere.
+#if MCP_CAP_HAVE_PROCESS
 std::shared_ptr<::mcp::cap::CapabilityProvider>
 make_provider(const std::string& name, const json& spec) {
     const std::string command = spec.value("command", std::string{});
@@ -127,6 +134,16 @@ make_provider(const std::string& name, const json& spec) {
         return nullptr;
     }
 }
+#else
+std::shared_ptr<::mcp::cap::CapabilityProvider>
+make_provider(const std::string& name, const json& /*spec*/) {
+    std::fprintf(stderr,
+        "mcp: server '%s' uses stdio transport, which is unsupported on this "
+        "platform (no child-process spawn); use an http/sse server instead\n",
+        name.c_str());
+    return nullptr;
+}
+#endif // MCP_CAP_HAVE_PROCESS
 
 // ── effects from tool annotations ─────────────────────────────────────────
 // A remote tool's annotations tell us how dangerous it is. The MCP spec
@@ -432,7 +449,9 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
         std::ifstream f(cfg);
         f >> doc;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "mcp: failed to parse %s: %s\n", cfg.c_str(), e.what());
+        // cfg.c_str() is wchar_t* on Windows — narrow it for %s.
+        std::fprintf(stderr, "mcp: failed to parse %s: %s\n",
+                     cfg.string().c_str(), e.what());
         return out;
     }
 
