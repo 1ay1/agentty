@@ -405,6 +405,7 @@ set(AGENTTY_MCP_SOURCES
     src/mcp/bridge.cpp
     src/mcp/http_server.cpp
     src/mcp/serve.cpp
+    src/tool/mcp_tools_bridge.cpp
 )
 
 set(AGENTTY_DIFF_SOURCES
@@ -652,6 +653,9 @@ target_link_libraries(agentty_acp_obj PRIVATE acp::acp)
 if(AGENTTY_MCP)
     agentty_objlib(agentty_mcp_obj   ${AGENTTY_MCP_SOURCES})
     target_link_libraries(agentty_mcp_obj PRIVATE mcp::mcp)
+    if(TARGET mcp::tools)
+        target_link_libraries(agentty_mcp_obj PRIVATE mcp::tools)
+    endif()
 endif()
 
 # The shared object set every "full" test (and the exe) consumes — the
@@ -704,6 +708,9 @@ target_link_libraries(agentty PRIVATE
 )
 if(AGENTTY_MCP AND TARGET mcp::mcp)
     target_link_libraries(agentty PRIVATE mcp::mcp)
+endif()
+if(AGENTTY_MCP AND TARGET mcp::tools)
+    target_link_libraries(agentty PRIVATE mcp::tools)
 endif()
 if(AGENTTY_HAS_MIMALLOC)
     # Prefer the static target so operator new/delete routing is linked
