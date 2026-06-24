@@ -190,7 +190,13 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
     ap::Request req;
     req.model         = cfg.model;
     req.system_prompt = subagent_system_prompt(type);
-    req.auth          = cfg.auth;
+    // Re-resolve the wire credential on every completion rather than reusing
+    // the header captured at startup. For OAuth (Pro/Max), the access token
+    // is short-lived; the frozen cfg.auth goes stale and 401s with no
+    // reducer here to refresh it. fresh_auth_header() refreshes + persists
+    // an expired token in place (blocking is fine — we're on a worker
+    // thread), and is a no-op pass-through for static API keys.
+    req.auth          = auth::fresh_auth_header(cfg.auth);
     // Subagents do real, multi-step investigation/implementation; a tight
     // token cap truncates long reports. Give them headroom — the turn
     // budget (kMaxTurns) bounds total spend, not per-completion size.

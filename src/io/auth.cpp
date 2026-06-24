@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <string>
@@ -599,6 +600,60 @@ Credentials resolve(const std::string& cli_api_key) {
             return Credentials{std::move(v)};
         }
     }, *loaded);
+}
+
+// ---------------------------------------------------------------------------
+// Synchronous fresh credential (worker-thread safe)
+// ---------------------------------------------------------------------------
+
+AuthHeader fresh_auth_header(const AuthHeader& fallback) {
+    using namespace agentty::util;
+
+    // CLI/env API keys are static — nothing to refresh. The env OAuth token
+    // (CLAUDE_CODE_OAUTH_TOKEN) is opaque with no refresh token, so also
+    // returned as-is.
+    if (env::get_or_null<env::Var::AnthropicApiKey>()
+     || env::get_or_null<env::Var::ClaudeOAuthToken>())
+        return fallback;
+
+    // Serialize refreshes: several subagent worker threads can land here at
+    // once when a captured OAuth token expires. The first to win the lock
+    // refreshes + persists; the rest re-read the freshly-saved token below.
+    static std::mutex g_refresh_mu;
+    std::scoped_lock lock(g_refresh_mu);
+
+    auto loaded = load_credentials();
+    if (!loaded) return fallback;
+
+    auto* oauth = std::get_if<cred::OAuth>(&*loaded);
+    if (!oauth) {
+        // A saved API key: hand back its header (also covers the case where
+        // creds changed on disk since startup).
+        return make_auth_header(*loaded);
+    }
+
+    // Refresh a bit early (60s skew) so a token that expires mid-request
+    // doesn't 401. No expiry info (expires_at_ms == 0) → trust it as-is.
+    const bool stale = oauth->expires_at_ms != 0
+                    && now_ms() >= oauth->expires_at_ms - 60'000;
+    if (!stale || oauth->refresh_token.empty())
+        return make_auth_header(*loaded);
+
+    auto tr = refresh_access_token(RefreshToken{oauth->refresh_token});
+    if (!tr) {
+        // Refresh failed (network / revoked). Return whatever we have; the
+        // transport will surface the eventual 401 with the login hint.
+        return make_auth_header(*loaded);
+    }
+
+    Credentials refreshed{cred::OAuth{
+        std::move(tr->access_token),
+        tr->refresh_token.empty() ? oauth->refresh_token
+                                  : std::move(tr->refresh_token),
+        tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0,
+    }};
+    save_credentials(refreshed);   // best-effort; the in-memory copy is authoritative
+    return make_auth_header(refreshed);
 }
 
 // ---------------------------------------------------------------------------
