@@ -1,4 +1,5 @@
 #include "agentty/io/http.hpp"
+#include "agentty/io/fsm.hpp"
 #include "agentty/io/tls.hpp"
 #include "agentty/util/env.hpp"
 
@@ -1192,36 +1193,145 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     return {};
 }
 
+// =======================================================================
+// Connection-lifecycle typestate machine.
+// =======================================================================
+// The fresh-dial path is a strictly linear lifecycle:
+//
+//     Dialing ──connect──▶ TcpConnected ──tls──▶ TlsUp ──h2──▶ H2Ready
+//
+// Each arrow is the only legal way to advance, and each state is a
+// move-only *capability token* that OWNS the transport handles acquired so
+// far (the socket fd, then the SSL*, then the nghttp2 session). The owning
+// state's destructor frees whatever it still holds, so an early
+// `std::unexpected` return on ANY step unwinds the partially-built
+// connection automatically — no per-error-path `sock_close`/`free_ssl`
+// ladders, and no leak if a future edit adds a return between steps.
+//
+// Transition functions consume the previous state by value (sink) and
+// return `fsm::Result<NextState, HttpError>`. They begin with
+// `fsm::assert_legal_edge<From,To>()`, a consteval guard: calling a
+// transition the machine doesn't declare (e.g. skipping TLS) fails to
+// COMPILE. The edges are declared via AGENTTY_FSM_EDGE below.
+//
+// This is the SAME sequence of syscalls/library calls as the old
+// straight-line dial_new — the bodies are moved verbatim into the
+// transitions. The types add compile-time ordering guarantees and
+// exception-free RAII cleanup at zero runtime cost (empty move-only
+// bases, no vtables, no heap).
 // -----------------------------------------------------------------------
-// Dial a fresh connection: TCP, TLS, nghttp2 preamble + SETTINGS.  Returns
-// a ready-to-go Connection.
-// -----------------------------------------------------------------------
-std::expected<std::unique_ptr<Connection>, HttpError>
-dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
-    auto fd_or = dial_tcp(ep, tos, cancel.get());
+namespace {
+
+// Forward declarations so each state can name its successor in `fsm_to`.
+struct Dialing;
+struct TcpConnected;
+struct TlsUp;
+struct H2Ready;
+
+// State 0 — inputs gathered, nothing acquired yet.
+struct Dialing : io::fsm::State<struct DialingTag> {
+    using fsm_to = io::fsm::to<TcpConnected>;
+    const Endpoint& ep;
+    Timeouts        tos;
+    CancelToken*    cancel;   // borrowed; lifetime owned by the caller
+};
+
+// State 1 — TCP (and SOCKS5 tunnel, if configured) established. OWNS fd.
+struct TcpConnected : io::fsm::State<struct TcpConnectedTag> {
+    using fsm_to = io::fsm::to<TlsUp>;
+    socket_t        fd = kBadSocket;
+    const Endpoint& ep;
+    Timeouts        tos;
+    CancelToken*    cancel;
+
+    TcpConnected(socket_t f, const Endpoint& e, Timeouts t, CancelToken* c)
+        : fd(f), ep(e), tos(t), cancel(c) {}
+    TcpConnected(TcpConnected&& o) noexcept
+        : fd(std::exchange(o.fd, kBadSocket)),
+          ep(o.ep), tos(o.tos), cancel(o.cancel) {}
+    TcpConnected& operator=(TcpConnected&&) = delete;
+    ~TcpConnected() { if (fd != kBadSocket) sock_close(fd); }
+
+    [[nodiscard]] socket_t release_fd() noexcept {
+        return std::exchange(fd, kBadSocket);
+    }
+};
+
+// State 2 — TLS handshake done AND ALPN-confirmed h2. OWNS fd + ssl.
+struct TlsUp : io::fsm::State<struct TlsUpTag> {
+    using fsm_to = io::fsm::to<H2Ready>;
+    socket_t        fd  = kBadSocket;
+    tls::SSL*       ssl = nullptr;
+    const Endpoint& ep;
+    Timeouts        tos;
+
+    TlsUp(socket_t f, tls::SSL* s, const Endpoint& e, Timeouts t)
+        : fd(f), ssl(s), ep(e), tos(t) {}
+    TlsUp(TlsUp&& o) noexcept
+        : fd(std::exchange(o.fd, kBadSocket)),
+          ssl(std::exchange(o.ssl, nullptr)),
+          ep(o.ep), tos(o.tos) {}
+    TlsUp& operator=(TlsUp&&) = delete;
+    ~TlsUp() {
+        if (ssl) tls::free_ssl(ssl);
+        if (fd != kBadSocket) sock_close(fd);
+    }
+};
+
+// State 3 — terminal: a fully-built, SETTINGS-exchanged Connection. The
+// nghttp2 session, ssl, and fd have all been handed to the Connection,
+// which now owns them. This token just carries it out of the pipeline.
+// No `fsm_to` — H2Ready is the terminal state, no edge leaves it.
+struct H2Ready : io::fsm::State<struct H2ReadyTag> {
+    std::unique_ptr<Connection> conn;
+};
+
+// Dialing ─connect─▶ TcpConnected.  TCP connect + optional SOCKS5 tunnel.
+io::fsm::Result<TcpConnected, HttpError> connect_tcp(Dialing&& s) {
+    io::fsm::assert_legal_edge<Dialing, TcpConnected>();
+    auto fd_or = dial_tcp(s.ep, s.tos, s.cancel);
     if (!fd_or) return std::unexpected(std::move(fd_or).error());
-    socket_t fd = *fd_or;
+    return TcpConnected{ *fd_or, s.ep, s.tos, s.cancel };
+}
+
+// TcpConnected ─tls─▶ TlsUp.  TLS handshake, then require ALPN=h2.  On any
+// failure the returned `unexpected` propagates and ~TcpConnected closes fd.
+io::fsm::Result<TlsUp, HttpError> negotiate_tls(TcpConnected&& s) {
+    io::fsm::assert_legal_edge<TcpConnected, TlsUp>();
 
     // SOCKET is a 64-bit handle on Win64, but OpenSSL's BIO_new_socket takes
     // int. The kernel only ever hands out small values (well under 2^31), so
     // the truncation is safe — make it explicit to silence C4244.
-    tls::SSL* ssl = tls::wrap_client(static_cast<int>(fd), ep.host);
-    if (!ssl) { sock_close(fd); return std::unexpected(HttpError::tls("SSL_new failed")); }
+    tls::SSL* ssl = tls::wrap_client(static_cast<int>(s.fd), s.ep.host);
+    if (!ssl) return std::unexpected(HttpError::tls("SSL_new failed"));
 
-    if (auto r = tls_handshake(fd, ssl, tos, cancel.get()); !r) {
-        tls::free_ssl(ssl); sock_close(fd);
+    // Hand fd+ssl to the next state token NOW so that any error below
+    // unwinds via ~TlsUp (frees both) and ~TcpConnected becomes a no-op.
+    const Endpoint& ep = s.ep;
+    Timeouts tos = s.tos;
+    CancelToken* cancel = s.cancel;
+    TlsUp up{ s.release_fd(), ssl, ep, tos };
+
+    if (auto r = tls_handshake(up.fd, up.ssl, tos, cancel); !r)
         return std::unexpected(std::move(r).error());
-    }
 
     // Require the peer to have negotiated h2 via ALPN.  Anthropic's edge does;
     // a proxy that strips ALPN back to http/1.1 would need separate support,
     // and loudly erroring here is better than a silent nghttp2 protocol error.
     const unsigned char* alpn = nullptr; unsigned int alpn_len = 0;
-    SSL_get0_alpn_selected(ssl, &alpn, &alpn_len);
-    if (alpn_len != 2 || !alpn || alpn[0] != 'h' || alpn[1] != '2') {
-        tls::free_ssl(ssl); sock_close(fd);
+    SSL_get0_alpn_selected(up.ssl, &alpn, &alpn_len);
+    if (alpn_len != 2 || !alpn || alpn[0] != 'h' || alpn[1] != '2')
         return std::unexpected(HttpError::tls("peer did not negotiate h2 (ALPN)"));
-    }
+
+    return up;
+}
+
+// TlsUp ─h2─▶ H2Ready.  Build the nghttp2 session, submit SETTINGS, drive
+// the initial exchange.  Once make_unique<Connection> succeeds the
+// Connection owns fd+ssl+session, so we clear them out of the TlsUp token
+// to keep ~TlsUp from double-freeing.
+io::fsm::Result<H2Ready, HttpError> establish_h2(TlsUp&& s) {
+    io::fsm::assert_legal_edge<TlsUp, H2Ready>();
 
     // --- nghttp2 session ---
     nghttp2_session_callbacks* cbs = nullptr;
@@ -1234,11 +1344,9 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     nghttp2_session* session = nullptr;
     int rc = nghttp2_session_client_new(&session, cbs, /*user_data=*/nullptr);
     nghttp2_session_callbacks_del(cbs);
-    if (rc != 0 || !session) {
-        tls::free_ssl(ssl); sock_close(fd);
+    if (rc != 0 || !session)
         return std::unexpected(HttpError::protocol(
             std::string{"nghttp2_session_client_new: "} + nghttp2_strerror(rc)));
-    }
 
     // Client preface + SETTINGS.  We bump INITIAL_WINDOW_SIZE to 8 MiB on
     // our side so long response bodies (SSE for a 32k-token message) don't
@@ -1257,9 +1365,34 @@ dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
     nghttp2_session_set_local_window_size(session, NGHTTP2_FLAG_NONE, 0,
                                           kConnectionWindow);
 
-    auto conn = std::make_unique<Connection>(fd, ssl, session, ep);
-    if (auto r = conn->pump_initial(tos); !r) return std::unexpected(std::move(r).error());
-    return conn;
+    // Transfer ownership of fd+ssl into the Connection. After this, ~TlsUp
+    // must NOT free them — null them out of the token. `session` is freshly
+    // ours; if make_unique throws (it won't: noexcept path) it would leak,
+    // but allocation failure here aborts the process anyway.
+    Timeouts tos = s.tos;
+    socket_t fd  = std::exchange(s.fd, kBadSocket);
+    tls::SSL* ssl = std::exchange(s.ssl, nullptr);
+    auto conn = std::make_unique<Connection>(fd, ssl, session, s.ep);
+    if (auto r = conn->pump_initial(tos); !r)
+        return std::unexpected(std::move(r).error());
+    return H2Ready{ .conn = std::move(conn) };
+}
+
+} // namespace
+
+// -----------------------------------------------------------------------
+// Dial a fresh connection: TCP, TLS, nghttp2 preamble + SETTINGS.  Returns
+// a ready-to-go Connection.  Drives the typestate pipeline above: each
+// `and_then` advances exactly one declared edge, and a failure at any step
+// short-circuits with the typed error while the move-only state tokens
+// unwind whatever was acquired.
+// -----------------------------------------------------------------------
+std::expected<std::unique_ptr<Connection>, HttpError>
+dial_new(const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
+    return connect_tcp(Dialing{ {}, ep, tos, cancel.get() })
+        .and_then(negotiate_tls)
+        .and_then(establish_h2)
+        .transform([](H2Ready&& r) { return std::move(r.conn); });
 }
 
 // -----------------------------------------------------------------------

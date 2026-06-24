@@ -1062,6 +1062,15 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json)
     add_test(NAME model_caps_test COMMAND model_caps_test)
 
+    # fsm_test — generic typestate machinery (include/agentty/io/fsm.hpp):
+    # compile-time edge legality from in-class `fsm_to` successor lists,
+    # the assert_legal_edge guard, and move-only RAII cleanup-exactly-once.
+    # Pure header, zero deps — the same machinery that drives the HTTP/2
+    # connection lifecycle's Dialing→TcpConnected→TlsUp→H2Ready pipeline.
+    add_executable(fsm_test EXCLUDE_FROM_ALL tests/fsm_test.cpp)
+    target_include_directories(fsm_test PRIVATE include)
+    add_test(NAME fsm_test COMMAND fsm_test)
+
     # model_label_test — pretty_model_label() turn-header normalization
     # across every provider id shape (Ollama :tag, OpenAI, OpenRouter
     # namespaced, Gemini/xAI, the agentty [1m] marker). Reuses the shared
@@ -1261,6 +1270,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        fsm_test
         model_label_test
         skills_engine_test
         midrun_freeze_test
