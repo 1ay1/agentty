@@ -58,6 +58,9 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
+#if AGENTTY_MCP
+#include "agentty/tool/mcp_tools_bridge.hpp"
+#endif
 
 namespace {
 
@@ -293,6 +296,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "agentty: %s\n",
                      tools::util::sandbox::describe_state().c_str());
     }
+
+#if AGENTTY_MCP
+    // ── Mirror the tool runtime into mcp-cpp ────────────────────────────
+    // The local tool set is now served by mcp-cpp's batteries-included
+    // toolset (see build_registry / mcp_tools_bridge). Mirror agentty's
+    // workspace-root boundary + sandbox mode into mcp's util layer so the
+    // bridged read/write/edit/bash/git tools enforce the SAME --workspace
+    // gate and bwrap/sandbox-exec isolation the native tools did. Must run
+    // before any tool can dispatch (TUI, ACP, and mcp-serve all reach this).
+    tools::wire_mcp_runtime(args.cli_sandbox);
+#endif
 
     // ── Resolve the active provider ─────────────────────────────────────
     // --provider wins; otherwise the saved setting; otherwise Anthropic.

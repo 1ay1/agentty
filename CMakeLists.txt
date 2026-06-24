@@ -223,21 +223,30 @@ if(TARGET acp)
     set_target_properties(acp PROPERTIES SYSTEM TRUE)
 endif()
 
-# mcp-cpp — header-only Model Context Protocol library (submodule). Lets
-# agentty connect to external MCP servers and expose THEIR tools as ordinary
-# agentty tools (see src/mcp/, include/agentty/mcp/client.hpp). Opt-in at
-# runtime (needs .agentty/mcp.json) AND at build time via AGENTTY_MCP, so a
-# build that doesn't want it pays zero — no link, no template instantiation.
-option(AGENTTY_MCP "Build MCP client integration (external tool servers)" ON)
-if(AGENTTY_MCP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
-    set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-    set(MCP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    add_subdirectory(mcp-cpp)
-    if(TARGET mcp)
-        set_target_properties(mcp PROPERTIES SYSTEM TRUE)
-    endif()
-else()
-    set(AGENTTY_MCP OFF)
+# mcp-cpp — the Model Context Protocol library (submodule), and now the SOLE
+# source of agentty's local tool implementations. agentty's entire tool set
+# (read/write/edit/list_dir, bash, grep/glob/find_definition, diagnostics,
+# git_*, web_*, plus the host-coupled remember/forget/wipe/todo/skill/
+# search_docs/task SHELLS) is served by mcp-cpp's batteries-included toolset
+# and re-wrapped through src/tool/mcp_tools_bridge.cpp. It is therefore a HARD
+# build requirement — there is no native tool path to fall back to.
+option(AGENTTY_MCP "Build MCP integration (REQUIRED — agentty's tools live in mcp-cpp)" ON)
+if(NOT AGENTTY_MCP)
+    message(FATAL_ERROR
+        "agentty: AGENTTY_MCP=OFF is no longer supported — the tool set is "
+        "served exclusively by the mcp-cpp toolset. Configure with "
+        "-DAGENTTY_MCP=ON (the default).")
+endif()
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
+    message(FATAL_ERROR
+        "agentty: the mcp-cpp submodule is missing but it now provides the "
+        "entire tool set. Run `git submodule update --init --recursive`.")
+endif()
+set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(MCP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(mcp-cpp)
+if(TARGET mcp)
+    set_target_properties(mcp PROPERTIES SYSTEM TRUE)
 endif()
 
 if(NOT TARGET maya::maya)
@@ -406,6 +415,7 @@ set(AGENTTY_MCP_SOURCES
     src/mcp/http_server.cpp
     src/mcp/serve.cpp
     src/tool/mcp_tools_bridge.cpp
+    src/tool/mcp_tools_backends.cpp
 )
 
 set(AGENTTY_DIFF_SOURCES
@@ -425,32 +435,11 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
-    src/tool/util/glob_match.cpp
     src/tool/util/subprocess.cpp
     src/tool/util/sandbox.cpp
-    src/tool/util/bash_validate.cpp
     src/tool/util/arg_reader.cpp
     src/tool/util/partial_json.cpp
     src/tool/util/fuzzy_match.cpp
-    src/tool/tools/read.cpp
-    src/tool/tools/write.cpp
-    src/tool/tools/edit.cpp
-    src/tool/tools/bash.cpp
-    src/tool/tools/grep.cpp
-    src/tool/tools/glob.cpp
-    src/tool/tools/list_dir.cpp
-    src/tool/tools/todo.cpp
-    src/tool/tools/web_fetch.cpp
-    src/tool/tools/web_search.cpp
-    src/tool/tools/find_definition.cpp
-    src/tool/tools/diagnostics.cpp
-    src/tool/tools/git.cpp
-    src/tool/tools/remember.cpp
-    src/tool/tools/forget.cpp
-    src/tool/tools/wipe.cpp
-    src/tool/tools/task.cpp
-    src/tool/tools/skill.cpp
-    src/tool/tools/search_docs.cpp
     src/tool/subagent.cpp
     src/tool/skills.cpp
     src/tool/memory_store.cpp
@@ -616,6 +605,12 @@ function(agentty_objlib name)
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=1)
         if(TARGET mcp::mcp)
             target_link_libraries(${name} PRIVATE mcp::mcp)
+        endif()
+        # The tool set is served by the mcp-cpp toolset; fs_helpers.cpp (in
+        # agentty_tool_obj) now mirrors the workspace root into mcp's util
+        # layer, so every objlib needs mcp::tools' include dir resolvable.
+        if(TARGET mcp::tools)
+            target_link_libraries(${name} PRIVATE mcp::tools)
         endif()
     else()
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
@@ -973,7 +968,8 @@ if(AGENTTY_BUILD_TESTS)
         )
         target_include_directories(${name} PRIVATE include)
         target_compile_definitions(${name} PRIVATE
-            AGENTTY_VERSION="${PROJECT_VERSION}")
+            AGENTTY_VERSION="${PROJECT_VERSION}"
+            AGENTTY_MCP=1)
         target_link_libraries(${name} PRIVATE
             maya::maya
             nlohmann_json::nlohmann_json
@@ -984,6 +980,16 @@ if(AGENTTY_BUILD_TESTS)
             Threads::Threads
             ${_extra_libs}
         )
+        # The shared object set bundles agentty_mcp_obj (registry.cpp now
+        # routes the whole tool set through the mcp-cpp bridge), so every
+        # full test must link mcp::mcp + mcp::tools to resolve make_provider /
+        # effects_for_builtin / the progress sink.
+        if(TARGET mcp::mcp)
+            target_link_libraries(${name} PRIVATE mcp::mcp)
+        endif()
+        if(TARGET mcp::tools)
+            target_link_libraries(${name} PRIVATE mcp::tools)
+        endif()
         if(WIN32)
             target_link_libraries(${name} PRIVATE
                 ws2_32 crypt32 shell32 winmm
@@ -1068,6 +1074,10 @@ if(AGENTTY_BUILD_TESTS)
     target_link_libraries(skills_engine_test PRIVATE
         maya::maya
         nlohmann_json::nlohmann_json)
+    # fs_helpers.cpp mirrors the workspace root into mcp-cpp's util layer.
+    if(TARGET mcp::tools)
+        target_link_libraries(skills_engine_test PRIVATE mcp::tools)
+    endif()
     add_test(NAME skills_engine_test COMMAND skills_engine_test)
 
     # midrun_freeze_test — correctness for freeze_settled_subturns: the
@@ -1125,11 +1135,13 @@ if(AGENTTY_BUILD_TESTS)
         ${AGENTTY_DIFF_SOURCES}
         ${AGENTTY_RAG_SOURCES}
         ${AGENTTY_TOOL_SOURCES}
+        ${AGENTTY_MCP_SOURCES}
         ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
     )
     target_include_directories(ollama_transport_test PRIVATE include)
     target_compile_definitions(ollama_transport_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
+        AGENTTY_VERSION="${PROJECT_VERSION}"
+        AGENTTY_MCP=1)
     target_link_libraries(ollama_transport_test PRIVATE
         maya::maya
         nlohmann_json::nlohmann_json
@@ -1139,6 +1151,12 @@ if(AGENTTY_BUILD_TESTS)
         OpenSSL::Crypto
         Threads::Threads
     )
+    if(TARGET mcp::mcp)
+        target_link_libraries(ollama_transport_test PRIVATE mcp::mcp)
+    endif()
+    if(TARGET mcp::tools)
+        target_link_libraries(ollama_transport_test PRIVATE mcp::tools)
+    endif()
     if(WIN32)
         target_link_libraries(ollama_transport_test PRIVATE
             ws2_32 crypt32 shell32 winmm
@@ -1174,21 +1192,6 @@ if(AGENTTY_BUILD_TESTS)
     # asserts oversized outputs are bounded (head+tail kept, marker
     # spliced, UTF-8 boundary respected) while small outputs ship verbatim.
     agentty_add_full_test(tool_result_budget_test)
-
-    # read_grep_features_test — verifies the two Zed-derived tool
-    # enhancements: read's structureless-big-file "First 1 KiB" fallback
-    # (vs the symbol OUTLINE for code files) and grep's enclosing-symbol
-    # breadcrumb in each match block header. Drives the real registered
-    # ToolDefs (find("read") / find("grep")) over temp-dir fixtures.
-    agentty_add_full_test(read_grep_features_test)
-
-    # edit_minimal_splice_test — verifies the char-level minimal-splice
-    # path in the `edit` tool: edits whose old_text/new_text share a
-    # common prefix+suffix produce a TIGHT unified diff (only the changed
-    # run, not a wholesale block delete+insert), and the splice is
-    # byte-correct across UTF-8 / prefix-only / suffix-only / no-share
-    # cases. Drives the real registered `edit` ToolDef.
-    agentty_add_full_test(edit_minimal_splice_test)
 
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
@@ -1282,8 +1285,6 @@ if(AGENTTY_BUILD_TESTS)
         knowledge_test
         visual_hash_coverage_test
         tool_result_budget_test
-        read_grep_features_test
-        edit_minimal_splice_test
         salvage_dedup_test
         acp_integration_test
         frozen_invariant_fuzz

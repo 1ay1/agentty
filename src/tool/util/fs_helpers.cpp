@@ -1,5 +1,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 
+#include <mcp/tools/util/fs_helpers.hpp>   // mirror the workspace root into mcp-cpp
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -308,7 +310,14 @@ fs::path& mutable_workspace_root() {
 void set_workspace_root(fs::path root) {
     std::error_code ec;
     auto canon = fs::weakly_canonical(root, ec);
-    mutable_workspace_root() = ec ? std::move(root) : std::move(canon);
+    auto resolved = ec ? std::move(root) : std::move(canon);
+    // Mirror into mcp-cpp's util layer: the local tool set is served by the
+    // mcp-cpp toolset (filesystem tools enforce the workspace boundary there),
+    // so agentty's root MUST be the same root mcp sees. Doing it here — in the
+    // single canonical setter — means every caller (main.cpp, ACP, tests)
+    // gets the boundary mirrored automatically, with no second seam to forget.
+    ::mcp::tools::util::set_workspace_root(resolved);
+    mutable_workspace_root() = std::move(resolved);
 }
 
 const fs::path& workspace_root() {

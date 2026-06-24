@@ -7,14 +7,19 @@
 // FileChange) back into agentty's ToolOutput.
 
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"
 
 #include "agentty/diff/diff.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/tool/util/fs_helpers.hpp"   // agentty workspace_root()
 
 #include <mcp/tools/toolset.hpp>
 #include <mcp/tools/host.hpp>
 #include <mcp/tools/meta.hpp>
 #include <mcp/tools/util/fs_helpers.hpp>
+#include <mcp/tools/util/progress.hpp>
+#include <mcp/tools/util/sandbox.hpp>
 #include <mcp/cap/capability.hpp>
 #include <mcp/cap/local.hpp>
 #include <mcp/codec.hpp>
@@ -194,9 +199,9 @@ std::vector<ToolDef> build_mcp_tool_defs() {
 
     mt::HostServices svc;
     svc.http = ka.http;
-    // The 5 host-coupled backends (memory/todo/skill/retriever/subagent)
-    // are injected in a follow-up; until then those tools continue to be
-    // served by agentty's native factories and are NOT advertised here.
+    // Inject the host-coupled backends (memory/skill/retriever/subagent).
+    // todo stays null — its shell renders identical text with no host state.
+    install_host_backends(svc);
 
     mt::ToolsetConfig cfg;   // all Tier-1 families on by default
     auto provider = mt::make_provider(svc, cfg, "local");
@@ -217,12 +222,60 @@ std::vector<ToolDef> build_mcp_tool_defs() {
 
         std::string tool_name = spec.name;
         def.execute = [provider, tool_name](const nlohmann::json& args) -> ExecResult {
+            // Bridge mcp's thread-local progress sink to agentty's on THIS
+            // worker thread: cmd_factory already installed an agentty
+            // progress::Scope here, so the subprocess runners inside the
+            // mcp tools (bash/diagnostics/git) and the subagent loop stream
+            // their live output straight to the parent tool card. RAII
+            // scope clears it after the call so no stale sink leaks across
+            // tool runs.
+            ::mcp::tools::util::progress::Scope mcp_progress{
+                [](std::string_view snap) { tools::progress::emit(snap); }};
             auto r = provider->execute(::mcp::cap::Request{tool_name, args});
             return decode_result(tool_name, std::move(r));
         };
         defs.push_back(std::move(def));
     }
+
+    // Reorder to agentty's recall-bias layout: the direct working tools
+    // first (edit ahead of write — the cheapest nudge against whole-file
+    // rewrites), the host-coupled tools (memory/task/skill/search_docs) last
+    // so the model's strong first-listed bias stays on read/edit/bash. The
+    // provider lists host-coupled shells first (registration order), so
+    // without this the working tools sink to the bottom of the wire payload.
+    static const std::vector<std::string_view> kOrder = {
+        "read", "edit", "write", "bash", "grep", "glob", "list_dir",
+        "todo", "web_fetch", "web_search", "find_definition", "diagnostics",
+        "git_status", "git_diff", "git_log", "git_commit",
+        "remember", "forget", "wipe_memory", "task", "skill", "search_docs",
+    };
+    auto rank = [](std::string_view n) -> std::size_t {
+        for (std::size_t i = 0; i < kOrder.size(); ++i)
+            if (kOrder[i] == n) return i;
+        return kOrder.size();   // unknown → after the known set, stable
+    };
+    std::stable_sort(defs.begin(), defs.end(),
+        [&](const ToolDef& a, const ToolDef& b) {
+            return rank(a.name.value) < rank(b.name.value);
+        });
     return defs;
+}
+
+void wire_mcp_runtime(std::string_view sandbox_mode) {
+    namespace mu = ::mcp::tools::util;
+
+    // The workspace-root boundary is already mirrored automatically by
+    // agentty's set_workspace_root() (it forwards into mcp's util layer in
+    // the single canonical setter). Here we only need to mirror the sandbox
+    // mode so bash/diagnostics/git run under the same bwrap / sandbox-exec
+    // isolation. agentty's main.cpp already validated the flag + probed a
+    // backend; translate the CLI string into mcp's Mode and let its sandbox
+    // cache the probe result.
+    auto mode = mu::sandbox::Mode::Auto;
+    if      (sandbox_mode == "off") mode = mu::sandbox::Mode::Off;
+    else if (sandbox_mode == "on")  mode = mu::sandbox::Mode::On;
+    // "auto" / "" → Auto. main.cpp already rejected any other value.
+    (void)mu::sandbox::init(mode);
 }
 
 } // namespace agentty::tools

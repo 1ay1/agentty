@@ -1,8 +1,8 @@
 #include "agentty/tool/registry.hpp"
-#include "agentty/tool/tools.hpp"
 
 #if AGENTTY_MCP
 #include "agentty/mcp/client.hpp"
+#include "agentty/tool/mcp_tools_bridge.hpp"
 #endif
 
 #include <algorithm>
@@ -91,37 +91,15 @@ namespace {
 // stop the model from rewriting whole files when a targeted substitution
 // would do — and edit's tiny input_json_delta bodies sidestep the long
 // mid-stream pause Anthropic's edge applies to multi-KB tool_use content.
+// Assemble the local tool set. The implementations live in mcp-cpp's
+// batteries-included toolset (mcp::tools::make_provider): build_mcp_tool_defs()
+// re-wraps each advertised tool as a ToolDef whose execute() dispatches into
+// the provider and decodes the `_mcp_tools` meta (effects + FileChange) back
+// into ToolOutput. The host-coupled SHELLS (remember/forget/wipe/todo/skill/
+// search_docs/task) are backed by agentty adapters injected via HostServices.
+// mcp-cpp is the SOLE source of truth for tools — there is no native path.
 std::vector<ToolDef> build_registry() {
-    std::vector<ToolDef> r;
-    r.push_back(tool_read());
-    r.push_back(tool_edit());
-    r.push_back(tool_write());
-    r.push_back(tool_bash());
-    r.push_back(tool_grep());
-    r.push_back(tool_glob());
-    r.push_back(tool_list_dir());
-    r.push_back(tool_todo());
-    r.push_back(tool_web_fetch());
-    r.push_back(tool_web_search());
-    r.push_back(tool_find_definition());
-    r.push_back(tool_diagnostics());
-    r.push_back(tool_git_status());
-    r.push_back(tool_git_diff());
-    r.push_back(tool_git_log());
-    r.push_back(tool_git_commit());
-    // Memory tools — listed last so the model's recall bias stays
-    // on the working tools (read/edit/bash/…). The system-prompt
-    // <memory-tools> block is what actually drives "remember when
-    // asked"; ordering here is cosmetic for the wire payload.
-    r.push_back(tool_remember());
-    r.push_back(tool_forget());
-    r.push_back(tool_wipe_memory());
-    // Subagent dispatch — last so the model's recall bias stays on the
-    // direct working tools. The system-prompt + tool description steer
-    // when delegation is appropriate.
-    r.push_back(tool_task());
-    r.push_back(tool_skill());
-    r.push_back(tool_search_docs());
+    std::vector<ToolDef> r = build_mcp_tool_defs();
 
 #if AGENTTY_MCP
     // ── MCP capability providers (essay §2/§10) ──────────────────────────

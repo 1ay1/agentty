@@ -15,6 +15,7 @@
 //   HostServices adapters built here.
 
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "agentty/tool/registry.hpp"
@@ -28,5 +29,13 @@ namespace agentty::tools {
 // returned ToolDef::execute closures), and returns one ToolDef per advertised
 // tool. Tool order follows the provider's list() order.
 [[nodiscard]] std::vector<ToolDef> build_mcp_tool_defs();
+
+// Mirror agentty's process-global tool runtime into mcp-cpp's util layer so
+// the bridged tools behave identically to the native ones: the same
+// workspace-root boundary (filesystem tools refuse paths outside it) and the
+// same sandbox mode (bash/diagnostics/git wrapped in bwrap / sandbox-exec).
+// Call once at startup, AFTER agentty's set_workspace_root + sandbox::init.
+// `sandbox_mode` is the agentty CLI value ("auto" | "on" | "off" | "").
+void wire_mcp_runtime(std::string_view sandbox_mode);
 
 } // namespace agentty::tools
