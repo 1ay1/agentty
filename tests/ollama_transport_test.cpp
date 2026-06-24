@@ -398,6 +398,137 @@ static void test_jp_response_alias_key() {
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
+// Progressive `response` streaming: a grammar-forced chat reply object that
+// arrives across MANY content frames (the real Ollama wire) must be decoded
+// and emitted INCREMENTALLY (one delta per frame as bytes arrive) so maya's
+// reveal_fx animates the typewriter — and the full reply text must appear
+// EXACTLY ONCE (no duplication at the done/freeze handoff). This is the fix
+// for the qwen2.5-coder "Hi Ayush!Hi Ayush!" duplication + frozen-md bug.
+static void test_jp_response_streamed_incrementally() {
+    // {"tool_name":"response","tool_args":{"text":"Hello Ayush!"}}
+    // delivered char-by-char like Ollama's grammar-constrained stream.
+    auto frame = [](const std::string& c) {
+        std::string esc;
+        for (char ch : c) {
+            if (ch == '"') esc += "\\\"";
+            else if (ch == '\\') esc += "\\\\";
+            else if (ch == '\n') esc += "\\n";
+            else if (ch == '\t') esc += "\\t";
+            else if (ch == '\r') esc += "\\r";
+            else esc += ch;
+        }
+        return "{\"message\":{\"role\":\"assistant\",\"content\":\""
+             + esc + "\"}}\n";
+    };
+    std::vector<std::string> chunks = {
+        "{\n ", " \"tool", "_name", "\": ", " \"", "response", "\",\n",
+        " ", " \"tool", "_args", "\": ", " {\n", "   ", " \"", "text",
+        "\": ", " \"", "Hello", " Ay", "ush", "!\"\n", " ", " }\n", "}",
+    };
+    std::string nd;
+    for (const auto& c : chunks) nd += frame(c);
+    nd += "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+          "\"done\":true,\"done_reason\":\"stop\"}\n";
+
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    // Full reply, exactly once — no duplication.
+    std::string txt = joined_text(msgs);
+    CHECK(txt == "Hello Ayush!");
+    // The protocol scaffolding must NOT leak into prose.
+    CHECK(txt.find("tool_name") == std::string::npos);
+    CHECK(txt.find("tool_args") == std::string::npos);
+    CHECK(txt.find('{') == std::string::npos);
+    // No phantom tool call.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+    // Emitted as MULTIPLE deltas (incremental reveal), not one settle dump.
+    CHECK(count_leaf<StreamTextDelta>(msgs) >= 2);
+}
+
+// Escaped characters inside the streamed reply (\n, \", \\) must be decoded
+// correctly even when the escape straddles a frame boundary.
+static void test_jp_response_streamed_escapes() {
+    // tool_args.text == 'line1\nsay "hi"'  (a newline + an escaped quote)
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"tool_name\\\":\\\"response\\\",\\\"tool_args\\\":"
+        "{\\\"text\\\":\\\"line1\\\\nsay \\\\\\\"hi\\\\\\\"\\\"}}\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    std::string txt = joined_text(msgs);
+    CHECK(txt == "line1\nsay \"hi\"");
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
+}
+
+// A REAL tool call streamed char-by-char must NOT be hijacked by the
+// progressive-response path — it still fires a tool-use, no text leaks.
+static void test_jp_streamed_tool_call_not_hijacked() {
+    auto frame = [](const std::string& esc) {
+        return "{\"message\":{\"role\":\"assistant\",\"content\":\""
+             + esc + "\"}}\n";
+    };
+    std::string nd;
+    nd += frame("{\\\"tool_name\\\":\\\"");
+    nd += frame("bash\\\",\\\"tool_args\\\":");
+    nd += frame("{\\\"command\\\":\\\"ls\\\"}}");
+    nd += "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+          "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(first_tool_name(msgs) == "bash");
+    CHECK(joined_tool_args(msgs).find("ls") != std::string::npos);
+    CHECK(joined_text(msgs).find("tool_name") == std::string::npos);
+}
+
+// A REAL captured qwen2.5-coder:latest grammar-constrained stream (24 frames,
+// curl /api/chat with the response pseudo-tool). The reply was
+//   { "tool_name": "response", "tool_args": { "text": "Hi Ayush!" } }
+// emitted char-by-char, INCLUDING the model's trailing " }" frame that used to
+// leak a stray brace onto the reply. This replays the exact bytes off the wire
+// so the fix is proven against the model, not just a hand-written fixture.
+static void test_jp_live_capture_qwen() {
+    static const char* kFrames[] = {
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"{\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" \\\"\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"tool\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"_name\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\\\":\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" \\\"\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"response\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\\\",\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" \\\"\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"tool\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"_args\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\\\":\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" {\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" \\\"\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"text\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\\\":\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" \\\"\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" Ay\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"ush\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"!\\\"\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" }\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\" }\"}}",
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\","
+        "\"prompt_eval_count\":51,\"eval_count\":24}",
+    };
+    std::string nd;
+    for (const char* f : kFrames) { nd += f; nd += '\n'; }
+
+    auto msgs = oll::parse_ndjson_for_test(nd, {"bash"}, /*json_protocol=*/true);
+    std::string txt = joined_text(msgs);
+    CHECK(txt == "Hi Ayush!");                       // exact, ONCE (no dup)
+    CHECK(txt.find('{') == std::string::npos);        // no scaffolding leak
+    CHECK(txt.find('}') == std::string::npos);        // no trailing-brace leak
+    CHECK(txt.find("tool_name") == std::string::npos);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 0); // it's a chat reply
+    CHECK(count_leaf<StreamTextDelta>(msgs) >= 2);     // streamed incrementally
+    CHECK(count_leaf<StreamUsage>(msgs) == 1);
+}
+
 // ── 5. build_options (num_ctx / num_predict / sampling) ──────────────────────
 static void test_options_unknown_window_default() {
     // No probed context window → safe agent-sized default 8192, well above
@@ -591,6 +722,10 @@ int main() {
     test_jp_response_pseudo_tool();
     test_jp_grammar_tool_call();
     test_jp_response_alias_key();
+    test_jp_response_streamed_incrementally();
+    test_jp_response_streamed_escapes();
+    test_jp_streamed_tool_call_not_hijacked();
+    test_jp_live_capture_qwen();
     test_options_unknown_window_default();
     test_options_probed_window();
     test_options_huge_window_clamped();

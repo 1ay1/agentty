@@ -128,6 +128,28 @@ struct StreamCtx {
     bool        in_think        = false;
     bool        think_seen      = false;  // ever entered a think block this turn
 
+    // ── Progressive `response` streaming (JSON-protocol chat replies) ───
+    // In json_protocol mode a plain chat reply arrives as a grammar-forced
+    // object {"tool_name":"response","tool_args":{"text":"…"}} streamed
+    // char-by-char. The old path held the WHOLE object and emitted the text
+    // in one StreamTextDelta at `done` — so the body appeared and settled in
+    // a single frame, giving maya's reveal_fx nothing to animate (no
+    // typewriter) and forcing a one-frame freeze handoff (the duplicated
+    // body). Instead we detect tool_name=="response" mid-hold, find the
+    // value string of the reply field, and stream its DECODED characters
+    // incrementally as the wire delivers them — exactly like a native text
+    // stream. resp_active gates the path; resp_scan_pos is how far into
+    // text_hold we've scanned for the value-string opening; resp_in_value
+    // means we're inside the string and resp_value_pos is the index of the
+    // next undecoded byte; resp_esc tracks a pending backslash escape.
+    bool        resp_active   = false;  // confirmed tool_name=="response"
+    bool        resp_done     = false;  // streamed through the closing quote
+    bool        resp_in_value = false;  // cursor is inside the value string
+    bool        resp_esc      = false;  // last byte was an unconsumed '\\'
+    std::size_t resp_scan_pos = 0;      // scan cursor while locating value
+    std::size_t resp_value_pos = 0;     // next byte to decode inside value
+    std::string resp_emitted;           // decoded text already streamed
+
     StreamCtx() { buf.reserve(64 * 1024); }
 };
 
@@ -579,6 +601,187 @@ bool rescue_json_protocol(StreamCtx& ctx) {
     return out;
 }
 
+// Progressive `response` streaming for JSON-protocol chat replies. While the
+// hold buffer accumulates a grammar-forced {"tool_name":"response",
+// "tool_args":{"text":"…"}} object char-by-char, this decodes and emits the
+// reply text INCREMENTALLY so maya's reveal_fx animates it like a normal text
+// stream — instead of the old behaviour (hold the whole object, emit one giant
+// StreamTextDelta at `done`, which gave the typewriter nothing to animate and
+// forced a one-frame freeze handoff that duplicated the body in scrollback).
+//
+// State machine over ctx.text_hold (which only grows):
+//   1. Not yet active: scan for `"tool_name"` : `"response"`. Until we SEE the
+//      tool_name value we can't commit — the model might be emitting a real
+//      tool call. If we positively see a non-"response" tool_name, give up
+//      (return false forever) and let the normal salvage path handle it.
+//   2. Active: locate the reply field's opening quote (text|response|content|
+//      message|answer), then stream decoded characters of that string value
+//      until its closing (unescaped) quote, emitting StreamTextDelta per chunk.
+//
+// Returns true once it has taken ownership of the response (active), so the
+// caller stops feeding text_hold to could_be_tool_json / flush. Conservative:
+// emits nothing until the value string actually opens, and stops cleanly at
+// the closing quote (trailing object bytes `"}}` are ignored).
+bool try_progressive_response(StreamCtx& ctx) {
+    if (ctx.resp_done) return true;
+    std::string_view hold{ctx.text_hold};
+
+    // ── Phase 1: confirm tool_name == "response" ───────────────────
+    if (!ctx.resp_active) {
+        // Find the tool_name key. Accept "tool_name" / "tool" / "name".
+        // On success, resp_scan_pos is set just past the tool_name VALUE so
+        // Phase 2's reply-key search never trips over the literal
+        // "response" that appears as the tool_name value itself.
+        auto find_key_val = [&](std::string_view key) -> int {
+            // returns: 1 == response, 0 == other tool (abort), -1 == unknown yet
+            std::size_t k = hold.find(key);
+            if (k == std::string_view::npos) return -1;
+            std::size_t p = k + key.size();
+            // skip ws + ':' + ws
+            while (p < hold.size() && (hold[p]==' '||hold[p]=='\t'
+                   ||hold[p]=='\n'||hold[p]=='\r')) ++p;
+            if (p >= hold.size()) return -1;
+            if (hold[p] != ':') return -1;   // not the key:value we want
+            ++p;
+            while (p < hold.size() && (hold[p]==' '||hold[p]=='\t'
+                   ||hold[p]=='\n'||hold[p]=='\r')) ++p;
+            if (p >= hold.size()) return -1;
+            if (hold[p] != '"') return -1;   // value string not open yet
+            std::size_t vs = p + 1;
+            std::size_t ve = hold.find('"', vs);
+            if (ve == std::string_view::npos) return -1;  // value incomplete
+            std::string_view val = hold.substr(vs, ve - vs);
+            ctx.resp_scan_pos = ve + 1;  // just past the closing value quote
+            return val == "response" ? 1 : 0;
+        };
+        int r = find_key_val("\"tool_name\"");
+        if (r == -1) r = find_key_val("\"tool\"");
+        if (r == -1) r = find_key_val("\"name\"");
+        if (r == 0)  { ctx.resp_done = true; return false; }  // real tool call
+        if (r != 1)  return false;                            // undecided
+        ctx.resp_active = true;
+    }
+
+    // ── Phase 2: locate the reply value string's opening quote ──────────
+    // Search only AFTER the tool_name value (resp_scan_pos) so the literal
+    // "response" / "name" that is the tool_name value isn't mistaken for the
+    // reply key.
+    if (!ctx.resp_in_value) {
+        std::string_view tail = ctx.resp_scan_pos < hold.size()
+            ? hold.substr(ctx.resp_scan_pos) : std::string_view{};
+        std::size_t best = std::string_view::npos;
+        for (std::string_view key : {"\"text\"", "\"response\"", "\"content\"",
+                                     "\"message\"", "\"answer\""}) {
+            std::size_t k = tail.find(key);
+            if (k == std::string_view::npos) continue;
+            std::size_t p = k + key.size();
+            while (p < tail.size() && (tail[p]==' '||tail[p]=='\t'
+                   ||tail[p]=='\n'||tail[p]=='\r')) ++p;
+            if (p >= tail.size() || tail[p] != ':') continue;
+            ++p;
+            while (p < tail.size() && (tail[p]==' '||tail[p]=='\t'
+                   ||tail[p]=='\n'||tail[p]=='\r')) ++p;
+            if (p >= tail.size() || tail[p] != '"') continue;  // not open yet
+            if (k < best) {
+                best = k;
+                ctx.resp_value_pos = ctx.resp_scan_pos + p + 1;
+            }
+        }
+        if (best == std::string_view::npos) return true;  // active, value pending
+        ctx.resp_in_value = true;
+    }
+
+    // ── Phase 3: decode + emit newly-arrived value bytes ────────────────
+    // Walk from resp_value_pos honouring JSON string escapes; stop at the
+    // first unescaped closing quote. Buffer decoded output and emit it in
+    // one StreamTextDelta per call (per wire frame) so the reveal cursor
+    // advances smoothly.
+    std::string out;
+    std::size_t i = ctx.resp_value_pos;
+    bool closed = false;
+    while (i < hold.size()) {
+        char c = hold[i];
+        if (ctx.resp_esc) {
+            ctx.resp_esc = false;
+            switch (c) {
+                case 'n':  out += '\n'; break;
+                case 't':  out += '\t'; break;
+                case 'r':  out += '\r'; break;
+                case 'b':  out += '\b'; break;
+                case 'f':  out += '\f'; break;
+                case '/':  out += '/';  break;
+                case '\\': out += '\\'; break;
+                case '"':  out += '"';  break;
+                case 'u': {
+                    // \uXXXX — need 4 more hex digits available. If not all
+                    // here yet, leave resp_esc set and stop; resume next frame
+                    // once the digits arrive. Cursor stays just past the 'u'.
+                    if (i + 4 >= hold.size()) {
+                        ctx.resp_esc = true;
+                        ctx.resp_value_pos = i;  // re-read 'u' (and digits) next frame
+                        // We were mid-escape: i points AT 'u'. Persist and bail.
+                        goto done_decode;
+                    }
+                    auto hexval = [](char h) -> int {
+                        if (h>='0'&&h<='9') return h-'0';
+                        if (h>='a'&&h<='f') return h-'a'+10;
+                        if (h>='A'&&h<='F') return h-'A'+10;
+                        return -1;
+                    };
+                    int h0=hexval(hold[i+1]),h1=hexval(hold[i+2]),
+                        h2=hexval(hold[i+3]),h3=hexval(hold[i+4]);
+                    if (h0<0||h1<0||h2<0||h3<0) { out += 'u'; break; }
+                    unsigned cp = (h0<<12)|(h1<<8)|(h2<<4)|h3;
+                    // Encode BMP code point as UTF-8 (surrogate pairs are
+                    // rare in chat replies; lone surrogates pass through as
+                    // replacement-ish bytes, harmless for display).
+                    if (cp < 0x80) out += static_cast<char>(cp);
+                    else if (cp < 0x800) {
+                        out += static_cast<char>(0xC0 | (cp >> 6));
+                        out += static_cast<char>(0x80 | (cp & 0x3F));
+                    } else {
+                        out += static_cast<char>(0xE0 | (cp >> 12));
+                        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                        out += static_cast<char>(0x80 | (cp & 0x3F));
+                    }
+                    i += 4;
+                    break;
+                }
+                default:   out += c;    break;
+            }
+            ++i;
+            continue;
+        }
+        if (c == '\\') {
+            // Escape lead. If it's the LAST byte we have, stop here keeping the
+            // cursor AT the backslash so the escape completes next frame.
+            if (i + 1 >= hold.size()) { ctx.resp_value_pos = i; goto done_decode; }
+            ctx.resp_esc = true;
+            ++i;
+            continue;
+        }
+        if (c == '"') { closed = true; ++i; break; }
+        out += c;
+        ++i;
+    }
+    // Cursor sits past the last fully-decoded byte (or the closing quote).
+    ctx.resp_value_pos = i;
+done_decode:
+    if (!out.empty()) {
+        ctx.resp_emitted += out;
+        ctx.sink(StreamTextDelta{out});
+        ctx.any_text_flushed = true;
+    }
+    if (closed) {
+        ctx.resp_done       = true;
+        ctx.holding         = false;
+        ctx.salvage_eligible = false;
+        ctx.stop_reason     = StopReason::EndTurn;
+        ctx.text_hold.clear();
+    }
+    return true;
+}
+
 // Handle one native `message` object from an NDJSON frame.
 void handle_message(StreamCtx& ctx, const json& message) {
     // Structured tool calls. Ollama returns them fully-formed in one frame
@@ -642,8 +845,21 @@ void handle_message(StreamCtx& ctx, const json& message) {
         std::string s = filter_think(ctx, raw);
         if (s.empty()) return;  // entire chunk was inside a think block
         ctx.full_content += s;
+        // Progressive `response` already streamed + closed this turn's reply:
+        // any further content frames are just the object's trailing structure
+        // (`"}}` / pretty-print whitespace). Swallow them — emitting them as
+        // text would tack ` }` onto the reply (the trailing-brace leak).
+        if (ctx.resp_active && ctx.resp_done) return;
         if (!ctx.holding) { ctx.sink(StreamTextDelta{s}); return; }
         ctx.text_hold += s;
+        // JSON-protocol chat reply? Stream the `response` text incrementally
+        // as it arrives so reveal_fx animates it (and the freeze handoff is
+        // gradual, not a single-frame dump that duplicates the body). Once
+        // this takes ownership it owns the rest of the hold; bail out so the
+        // bytes aren't ALSO classified/flushed as prose below.
+        if (ctx.json_protocol && !ctx.any_structured_tool) {
+            if (try_progressive_response(ctx)) return;
+        }
         // Still could be a tool call? keep holding until `done` decides.
         if (ctx.salvage_eligible && could_be_tool_json(ctx.text_hold)) return;
         // Decided it's prose — release the buffer and stream the rest live.
@@ -667,6 +883,28 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         handle_message(ctx, j["message"]);
 
     if (j.value("done", false)) {
+        // If the progressive-response streamer already took ownership of this
+        // turn's reply (json_protocol chat reply streamed incrementally), the
+        // text is already emitted. Don't let rescue_json_protocol re-emit it
+        // (that double-streamed the body — the duplication bug). If the value
+        // string never closed (wire cut mid-reply), flush whatever decoded
+        // bytes are pending and finish.
+        if (ctx.resp_active) {
+            if (!ctx.resp_done) {
+                // Drain any remaining decodable bytes (no closing quote seen).
+                try_progressive_response(ctx);
+                ctx.resp_done = true;
+                ctx.holding   = false;
+                ctx.text_hold.clear();
+                if (ctx.stop_reason != StopReason::ToolUse)
+                    ctx.stop_reason = StopReason::EndTurn;
+            }
+            StreamUsage su;
+            su.input_tokens  = j.value("prompt_eval_count", 0);
+            su.output_tokens = j.value("eval_count", 0);
+            if (su.input_tokens || su.output_tokens) ctx.sink(su);
+            return;
+        }
         // JSON-protocol (very weak models): the ENTIRE reply is meant to be
         // one {thoughts, tool_name, tool_args} object. Try to pull a tool
         // call out of the full content FIRST (before flushing the hold as
@@ -1142,16 +1380,27 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         // Stream ended without a `done` frame (e.g. wire cut) but content may
         // still be held — salvage or flush it before the terminal event.
         if (!err) {
-            bool jp_fired = false;
-            if (c.json_protocol) {
-                jp_fired = rescue_json_protocol(c);
-                if (jp_fired) { c.text_hold.clear(); c.holding = false; }
+            // Progressive-response already owned the turn — just drain any
+            // pending decoded bytes; never re-run rescue (would duplicate).
+            if (c.resp_active) {
+                if (!c.resp_done) {
+                    try_progressive_response(c);
+                    c.resp_done = true; c.holding = false; c.text_hold.clear();
+                    if (c.stop_reason != StopReason::ToolUse)
+                        c.stop_reason = StopReason::EndTurn;
+                }
+            } else {
+                bool jp_fired = false;
+                if (c.json_protocol) {
+                    jp_fired = rescue_json_protocol(c);
+                    if (jp_fired) { c.text_hold.clear(); c.holding = false; }
+                }
+                if (!jp_fired && c.holding && !c.text_hold.empty()) {
+                    if (!try_salvage_hold(c)) flush_text_hold(c);
+                    else { c.text_hold.clear(); c.holding = false; }
+                }
+                rescue_tool_from_prose(c);
             }
-            if (!jp_fired && c.holding && !c.text_hold.empty()) {
-                if (!try_salvage_hold(c)) flush_text_hold(c);
-                else { c.text_hold.clear(); c.holding = false; }
-            }
-            rescue_tool_from_prose(c);
         }
         if (err) c.sink(StreamError{*err, retry_after});
         else     c.sink(StreamFinished{c.stop_reason});
@@ -1287,16 +1536,25 @@ std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
     feed_ndjson(ctx, ndjson_bytes.data(), ndjson_bytes.size());
     // Mirror run_stream_sync's terminal flush so tests see the live sequence.
     if (!ctx.terminated) {
-        bool jp_fired = false;
-        if (ctx.json_protocol) {
-            jp_fired = rescue_json_protocol(ctx);
-            if (jp_fired) { ctx.text_hold.clear(); ctx.holding = false; }
+        if (ctx.resp_active) {
+            if (!ctx.resp_done) {
+                try_progressive_response(ctx);
+                ctx.resp_done = true; ctx.holding = false; ctx.text_hold.clear();
+                if (ctx.stop_reason != StopReason::ToolUse)
+                    ctx.stop_reason = StopReason::EndTurn;
+            }
+        } else {
+            bool jp_fired = false;
+            if (ctx.json_protocol) {
+                jp_fired = rescue_json_protocol(ctx);
+                if (jp_fired) { ctx.text_hold.clear(); ctx.holding = false; }
+            }
+            if (!jp_fired && ctx.holding && !ctx.text_hold.empty()) {
+                if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
+                else { ctx.text_hold.clear(); ctx.holding = false; }
+            }
+            rescue_tool_from_prose(ctx);
         }
-        if (!jp_fired && ctx.holding && !ctx.text_hold.empty()) {
-            if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
-            else { ctx.text_hold.clear(); ctx.holding = false; }
-        }
-        rescue_tool_from_prose(ctx);
         ctx.sink(StreamFinished{ctx.stop_reason});
     }
     return out;
