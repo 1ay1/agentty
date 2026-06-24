@@ -47,7 +47,7 @@ namespace {
 // fall out under LRU pressure naturally.
 class BodyConfigCache {
 public:
-    static constexpr std::size_t kCap = 256;
+    static constexpr std::size_t kCap = 512;
 
     // Returns the cached Config for `key`, or nullptr on miss.
     std::shared_ptr<const maya::ToolBodyPreview::Config> get(const std::string& key) {
@@ -83,6 +83,66 @@ private:
 };
 
 thread_local BodyConfigCache g_body_cache;
+
+// ── Settled-panel ELEMENT cache ───────────────────────────────────────
+//
+// One tier above the body cache. The body cache memoizes each terminal
+// tool's O(body) ToolBodyPreview::Config; THIS cache memoizes the WHOLE
+// built panel Element for an all-terminal batch. A long in-flight
+// autopilot turn accumulates many settled sub-turn panels in the live
+// tail; the run has no hash_id while the tail streams, so without this
+// the host re-ran agent_timeline_config (grep scan, per-event detail +
+// CacheIdBuilder, footer/title assembly) AND maya re-laid-out the panel
+// for every settled card on every frame — O(Σ batches) per frame, the
+// linear lag the o1_probe "in-flight run, N accumulated edits" table
+// shows. On hit we copy the prebuilt Element (a variant copy whose
+// committed sub-trees still carry their per-event hash_ids, so maya keeps
+// blitting their cells) instead of rebuilding anything.
+//
+// Same LRU + thread_local single-threaded discipline as g_body_cache.
+class PanelElementCache {
+public:
+    // Sized to cover a very long single in-flight autopilot turn without
+    // evicting panels still on screen. Entries are lightweight Element
+    // handles (the heavy body cells live once in maya's component cache,
+    // keyed by the per-event/panel hash_ids), so a high cap is cheap.
+    // Below this, a 300-edit turn thrashed the cache (evicting panels
+    // still in the live tail) and per-frame cost climbed again — the
+    // 160→320 knee in the o1_probe scaling table.
+    static constexpr std::size_t kCap = 512;
+
+    const maya::Element* get(const std::string& key) {
+        auto it = map_.find(key);
+        if (it == map_.end()) return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        return &it->second.el;
+    }
+
+    void put(const std::string& key, maya::Element el) {
+        auto it = map_.find(key);
+        if (it != map_.end()) {
+            it->second.el = std::move(el);
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+            return;
+        }
+        lru_.push_front(key);
+        map_.emplace(key, Entry{std::move(el), lru_.begin()});
+        while (map_.size() > kCap) {
+            map_.erase(lru_.back());
+            lru_.pop_back();
+        }
+    }
+
+private:
+    struct Entry {
+        maya::Element                    el;
+        std::list<std::string>::iterator lru_it;
+    };
+    std::unordered_map<std::string, Entry> map_;
+    std::list<std::string>                 lru_;
+};
+
+thread_local PanelElementCache g_panel_cache;
 
 } // namespace
 
@@ -334,7 +394,94 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
     cfg.title        = std::move(title);
     cfg.title_end    = std::move(title_end);
     cfg.border_color = all_done ? muted : rail_color;
+
+    // Panel-level cache key for an ALL-TERMINAL batch. Settled tool bytes
+    // are immutable and no chrome animates (every elapsed is final, no
+    // spinner), so maya can blit the whole panel's cells across frames
+    // instead of re-laying-out its rows. Content-address every input the
+    // panel shape depends on: tool count + rail color + each tool's id,
+    // status, output size, and render key. Leave empty when any tool is
+    // still in-flight so the spinner/elapsed keep animating. The freeze
+    // handoff stays a pure cache hit because freeze_range builds the same
+    // batch under the same key.
+    {
+        bool all_terminal = total > 0;
+        for (const auto& tc : tool_calls)
+            if (!tc.is_terminal()) { all_terminal = false; break; }
+        if (all_terminal) {
+            maya::CacheIdBuilder kb;
+            kb.add(std::string_view{"agentty.tool_panel"})
+              .add(static_cast<std::uint64_t>(tool_calls.size()))
+              .add(static_cast<std::uint64_t>(rail_color.kind()))
+              .add(static_cast<std::uint64_t>(rail_color.r()))
+              .add(static_cast<std::uint64_t>(rail_color.g()))
+              .add(static_cast<std::uint64_t>(rail_color.b()));
+            for (const auto& tc : tool_calls) {
+                kb.add(std::string_view{tc.id.value})
+                  .add(static_cast<std::uint64_t>(tc.status.index()))
+                  .add(static_cast<std::uint64_t>(tc.output().size()))
+                  .add(tc.compute_render_key());
+            }
+            cfg.hash_id = kb.build();
+        }
+    }
     return cfg;
+}
+
+maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
+                                     int spinner_frame,
+                                     maya::Color rail_color) {
+    // An all-terminal batch is byte-stable: every tool's status, output,
+    // and args are fixed, and no spinner/elapsed counter animates (all
+    // durations are final). So the WHOLE built Element is content-addressed
+    // and identical across every later frame. A non-terminal batch carries
+    // a running/pending tool (live elapsed counter, animated spinner via
+    // `frame`) and MUST rebuild each frame — fall straight through.
+    bool all_terminal = !tool_calls.empty();
+    for (const auto& tc : tool_calls) {
+        if (!tc.is_terminal()) { all_terminal = false; break; }
+    }
+    if (!all_terminal) {
+        return maya::AgentTimeline{
+            agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build();
+    }
+
+    // Content-address: tool count + rail color + each tool's id, status,
+    // output size, and render key (which folds args_streaming / progress /
+    // output sizes — every input the panel body depends on). spinner_frame
+    // is deliberately EXCLUDED: a settled panel has no animated glyph, so
+    // the frame index doesn't affect its bytes; including it would defeat
+    // the cache (the index ticks every frame).
+    std::string key;
+    key.reserve(tool_calls.size() * 40 + 16);
+    key += "p|";
+    key += std::to_string(static_cast<unsigned>(rail_color.kind()));
+    key.push_back('.');
+    key += std::to_string(rail_color.r());
+    key.push_back('.');
+    key += std::to_string(rail_color.g());
+    key.push_back('.');
+    key += std::to_string(rail_color.b());
+    key.push_back('|');
+    key += std::to_string(tool_calls.size());
+    for (const auto& tc : tool_calls) {
+        key.push_back('|');
+        key += tc.id.value;
+        key.push_back(':');
+        key += std::to_string(tc.status.index());
+        key.push_back(':');
+        key += std::to_string(tc.output().size());
+        key.push_back(':');
+        key += std::to_string(tc.compute_render_key());
+    }
+
+    if (const maya::Element* hit = g_panel_cache.get(key))
+        return *hit;   // copy the prebuilt, byte-stable panel Element
+
+    maya::Element el = maya::AgentTimeline{
+        agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build();
+    g_panel_cache.put(key, el);
+    return el;
 }
 
 } // namespace agentty::ui

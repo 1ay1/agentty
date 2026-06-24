@@ -657,8 +657,7 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
 {
     if (tool_calls.empty()) return;
     const int frame = m.s.spinner.frame_index();
-    cfg.body.emplace_back(maya::AgentTimeline{
-        agent_timeline_config(tool_calls, frame, style.color)}.build());
+    cfg.body.emplace_back(agent_timeline_element(tool_calls, frame, style.color));
 }
 
 // Single-message body slot append: text (if any) then this message's
