@@ -64,4 +64,46 @@ compress(std::string_view query, std::string_view text,
 // deduplicated, preserving first-seen order.
 [[nodiscard]] std::vector<std::string> query_terms(std::string_view query);
 
+// ── Neural (cross-encoder style) reranking via Ollama ─────────────────────
+//
+// A cross-encoder is the SOTA reranker: for each (query, doc) pair it runs a
+// full transformer pass and outputs a relevance score. We approximate this
+// using a generative model (already running on Ollama) with a scoring prompt.
+// Each chunk is scored independently, then re-sorted. This beats lexical
+// reranking by 10-20% precision@k but costs one LLM call per chunk.
+//
+// OPT-IN: expensive (N LLM calls for N chunks). Only call when the user
+// explicitly enables it or the corpus is small. On any failure, degrades to
+// the lexical feature-fusion reranker above.
+
+struct NeuralRerankConfig {
+    std::string host  = "127.0.0.1";
+    std::uint16_t port = 11434;
+    std::string model;        // generative model (e.g. "llama3.2"); empty → skip
+    std::size_t batch_size = 4;  // parallel scoring (bounded by Ollama concurrency)
+    double timeout_s = 30.0;  // per-batch timeout
+};
+
+// Neural rerank: score each hit via Ollama with a relevance prompt, re-sort.
+// Returns at most `out_k` hits. On any failure, returns the input truncated to
+// out_k (graceful degradation). The input should already be the narrow pool
+// from the lexical reranker (don't pass 1000 chunks — costs 1000 LLM calls).
+[[nodiscard]] std::vector<Hit>
+neural_rerank(std::string_view query, std::vector<Hit> hits,
+              std::size_t out_k, const NeuralRerankConfig& cfg);
+
+// ── MMR (Maximal Marginal Relevance) diversification ───────────────────────
+//
+// After reranking, the top-k can contain near-duplicate chunks (e.g. overlapping
+// windows from the same file). MMR greedily selects chunks that are both relevant
+// AND diverse: each selection penalizes candidates too similar to already-selected.
+//
+// MMR(d) = λ * sim(q, d) - (1-λ) * max_{d' ∈ S} sim(d, d')
+//
+// λ=1.0 → pure relevance (no diversification), λ=0.0 → pure diversity.
+// Default λ=0.7 balances relevance with diversity.
+
+[[nodiscard]] std::vector<Hit>
+mmr_diversify(std::vector<Hit> hits, std::size_t out_k, double lambda = 0.7);
+
 } // namespace agentty::rag

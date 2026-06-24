@@ -1,10 +1,19 @@
-// agentty::rag — feature-fusion reranker + extractive context compression.
-// Pure C++/STL, deterministic, no network. See rerank.hpp for rationale.
+// agentty::rag — feature-fusion reranker + extractive context compression,
+// plus the OPT-IN neural (Ollama) reranker and MMR diversifier.
+// The lexical reranker/compressor is pure C++/STL, deterministic, no network.
+// neural_rerank() is the only network path here and is opt-in. See
+// rerank.hpp for rationale.
 
 #include "agentty/rag/rerank.hpp"
+#include "agentty/io/http.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <chrono>
+#include <future>
 #include <unordered_set>
 
 namespace agentty::rag {
@@ -264,6 +273,219 @@ compress(std::string_view query, std::string_view text,
     while (b < out.size() && (out[b] == ' ' || out[b] == '\n' ||
                               out[b] == '\t' || out[b] == '\r')) ++b;
     if (b) out.erase(0, b);
+    return out;
+}
+
+// ── Neural reranking via Ollama (OPT-IN) ───────────────────────────────────
+//
+// A true cross-encoder would run a single transformer forward pass per
+// (query, passage) pair. We approximate that with a deterministic
+// (temperature 0) generative scoring prompt against the already-running
+// Ollama server: each passage gets an integer relevance 0–10. This is the
+// only network path in this file and is explicitly opt-in (cfg.model set).
+
+namespace {
+
+using json = nlohmann::json;
+
+// Parse the first integer appearing in `txt`; std::nullopt if none. Uses
+// std::from_chars (no exceptions, no locale) per the no-throw convention.
+std::optional<int> first_int(std::string_view txt) noexcept {
+    std::size_t i = 0;
+    while (i < txt.size() && !std::isdigit(static_cast<unsigned char>(txt[i]))) ++i;
+    if (i >= txt.size()) return std::nullopt;
+    std::size_t j = i;
+    while (j < txt.size() && std::isdigit(static_cast<unsigned char>(txt[j]))) ++j;
+    int v = 0;
+    auto [ptr, ec] = std::from_chars(txt.data() + i, txt.data() + j, v);
+    if (ec != std::errc{}) return std::nullopt;
+    return v;
+}
+
+// Score one (query, passage) pair via Ollama /api/generate. Returns a score
+// in [0,1], or std::nullopt on ANY failure (network, parse, no number) so
+// the caller can detect a total backend outage and degrade. No exceptions
+// escape: json::parse is called in the no-throw (accept_invalid) form.
+std::optional<double> score_one(const NeuralRerankConfig& cfg,
+                                std::string_view query,
+                                std::string_view passage) noexcept {
+    // Bound the prompt: long passages neither help scoring nor are worth the
+    // tokens/latency.
+    std::string_view pass = passage.substr(0, std::min<std::size_t>(passage.size(), 2000));
+
+    json body;
+    body["model"]   = cfg.model;
+    body["prompt"]  = std::string(
+        "You are a relevance scoring assistant. Given a query and a passage, "
+        "output ONLY a single integer from 0 to 10 indicating how relevant "
+        "the passage is to the query. 0=completely irrelevant, 10=perfectly "
+        "relevant. Output NOTHING else, just the number.\n\nQuery: ")
+        + std::string(query) + "\n\nPassage: " + std::string(pass) + "\n\nScore:";
+    body["stream"]  = false;
+    body["options"] = {{"temperature", 0.0}, {"num_predict", 8}};
+
+    http::Request req;
+    req.method         = http::HttpMethod::Post;
+    req.host           = cfg.host;
+    req.port           = cfg.port;
+    req.path           = "/api/generate";
+    req.plaintext      = true;
+    req.headers        = {{"content-type", "application/json"}};
+    req.body           = body.dump();
+    req.max_body_bytes = 64 * 1024;
+
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(3'000);
+    tos.total   = std::chrono::milliseconds(
+        static_cast<long long>(cfg.timeout_s * 1000.0));
+
+    auto resp = http::default_client().send(req, tos);
+    if (!resp || resp->status != 200) return std::nullopt;
+
+    json j = json::parse(resp->body, /*cb=*/nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded() || !j.contains("response") || !j["response"].is_string())
+        return std::nullopt;
+    auto n = first_int(j["response"].get_ref<const std::string&>());
+    if (!n) return std::nullopt;
+    return std::clamp(*n / 10.0, 0.0, 1.0);
+}
+
+} // namespace
+
+std::vector<Hit>
+neural_rerank(std::string_view query, std::vector<Hit> hits,
+              std::size_t out_k, const NeuralRerankConfig& cfg) {
+    auto truncate = [&](std::vector<Hit> h) {
+        if (h.size() > out_k) h.resize(out_k);
+        return h;
+    };
+    if (cfg.model.empty() || hits.empty() || out_k == 0) return truncate(std::move(hits));
+
+    // Bounded fan-out: at most `batch_size` concurrent requests in flight
+    // (clamped to a sane ceiling so a huge pool can't spawn hundreds of
+    // threads). We score in waves of `width`, joining each wave before the
+    // next — std::future fan-out without an unbounded thread explosion.
+    const std::size_t width =
+        std::clamp<std::size_t>(cfg.batch_size, 1, 16);
+
+    std::vector<std::optional<double>> scores(hits.size());
+    bool backend_alive = false;
+
+    for (std::size_t i = 0; i < hits.size(); i += width) {
+        const std::size_t hi = std::min(i + width, hits.size());
+        std::vector<std::future<std::optional<double>>> wave;
+        wave.reserve(hi - i);
+        for (std::size_t j = i; j < hi; ++j) {
+            if (!hits[j].chunk) { wave.emplace_back(); continue; }
+            std::string_view text = hits[j].chunk->text;
+            wave.push_back(std::async(std::launch::async,
+                [&cfg, query, text] { return score_one(cfg, query, text); }));
+        }
+        for (std::size_t j = i; j < hi; ++j) {
+            auto& f = wave[j - i];
+            if (!f.valid()) continue;
+            scores[j] = f.get();
+            if (scores[j]) backend_alive = true;
+        }
+    }
+
+    // Total backend outage — keep the upstream (lexical) order untouched.
+    if (!backend_alive) return truncate(std::move(hits));
+
+    // Stable sort by neural score desc; unscored chunks sink (score 0) but
+    // keep their upstream relative order via the original-score tiebreak.
+    std::vector<std::size_t> order(hits.size());
+    for (std::size_t i = 0; i < hits.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        double sa = scores[a].value_or(0.0);
+        double sb = scores[b].value_or(0.0);
+        if (sa != sb) return sa > sb;
+        return hits[a].score > hits[b].score;
+    });
+
+    std::vector<Hit> out;
+    out.reserve(std::min(out_k, order.size()));
+    for (std::size_t i = 0; i < order.size() && i < out_k; ++i) {
+        Hit h = hits[order[i]];
+        h.score = scores[order[i]].value_or(0.0);  // expose the neural score
+        out.push_back(h);
+    }
+    return out;
+}
+
+// ── MMR diversification ─────────────────────────────────────────────
+
+namespace {
+
+// Jaccard similarity between two token SETS. Cheap, embedding-free diversity
+// proxy. Both sets are precomputed once per chunk by the caller, so this is
+// a pure set-intersection — no per-comparison tokenization or set building.
+double jaccard_sim(const std::unordered_set<std::string>& a,
+                   const std::unordered_set<std::string>& b) noexcept {
+    if (a.empty() && b.empty()) return 1.0;
+    if (a.empty() || b.empty()) return 0.0;
+    // Iterate the smaller set for the intersection count.
+    const auto& small = a.size() <= b.size() ? a : b;
+    const auto& big   = a.size() <= b.size() ? b : a;
+    std::size_t inter = 0;
+    for (const auto& t : small) if (big.count(t)) ++inter;
+    std::size_t uni = a.size() + b.size() - inter;
+    return uni ? static_cast<double>(inter) / static_cast<double>(uni) : 0.0;
+}
+
+} // namespace
+
+std::vector<Hit>
+mmr_diversify(std::vector<Hit> hits, std::size_t out_k, double lambda) {
+    if (hits.empty() || out_k == 0) return {};
+    if (hits.size() <= out_k) return hits;
+    lambda = std::clamp(lambda, 0.0, 1.0);
+
+    // Precompute a token SET per chunk ONCE (not per comparison).
+    std::vector<std::unordered_set<std::string>> toks(hits.size());
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        if (hits[i].chunk) {
+            auto v = tokenize(hits[i].chunk->text);
+            toks[i] = std::unordered_set<std::string>(
+                std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+        }
+    }
+
+    // Normalize relevance to [0,1] so it composes with the [0,1] similarity.
+    double max_rel = 0.0;
+    for (const auto& h : hits) max_rel = std::max(max_rel, h.score);
+    if (max_rel <= 0.0) max_rel = 1.0;
+
+    std::vector<std::size_t> selected;
+    selected.reserve(out_k);
+    std::vector<char> used(hits.size(), 0);
+    // sim_to_sel[i] = max Jaccard of candidate i to ANY already-selected chunk.
+    // Maintained incrementally so each round only compares against the ONE
+    // newly selected chunk — total work O(out_k · n) instead of O(out_k · n²).
+    std::vector<double> sim_to_sel(hits.size(), 0.0);
+
+    while (selected.size() < out_k) {
+        double best_mmr = -1e18;
+        std::size_t best = hits.size();
+        for (std::size_t i = 0; i < hits.size(); ++i) {
+            if (used[i]) continue;
+            double rel = hits[i].score / max_rel;
+            double mmr = lambda * rel - (1.0 - lambda) * sim_to_sel[i];
+            if (mmr > best_mmr) { best_mmr = mmr; best = i; }
+        }
+        if (best == hits.size()) break;
+        used[best] = 1;
+        selected.push_back(best);
+        // Update each remaining candidate's max-similarity against `best` only.
+        for (std::size_t i = 0; i < hits.size(); ++i) {
+            if (used[i]) continue;
+            sim_to_sel[i] = std::max(sim_to_sel[i], jaccard_sim(toks[i], toks[best]));
+        }
+    }
+
+    std::vector<Hit> out;
+    out.reserve(selected.size());
+    for (std::size_t idx : selected) out.push_back(hits[idx]);
     return out;
 }
 

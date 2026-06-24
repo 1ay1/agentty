@@ -34,6 +34,40 @@ CorpusSource::retrieve_fused(const std::vector<std::string>& queries,
     return hits;
 }
 
+// ── McpResourceSource ─────────────────────────────────────────────
+
+void McpResourceSource::build_index_() const {
+    built_ = true;                 // mark built even on empty/failure: don't
+                                   // re-probe a dead server every retrieve().
+    if (!list_ || !read_) return;
+
+    std::vector<McpResourceSource::ResourceRef> refs = list_();
+    if (refs.empty()) return;
+
+    // Read each resource into a (path, body) doc. The URI is the chunk path
+    // so provenance/citations point back at the exact resource. A resource
+    // that fails to read is skipped — retrieval degrades, never blocks.
+    std::vector<std::pair<std::string, std::string>> docs;
+    docs.reserve(refs.size());
+    for (auto& r : refs) {
+        auto body = read_(r.uri);
+        if (!body || body->empty()) continue;
+        docs.emplace_back(r.uri, std::move(*body));
+    }
+    if (docs.empty()) return;
+
+    corpus_.build_from_memory(docs, embed_);
+}
+
+std::vector<Hit>
+McpResourceSource::retrieve(std::string_view query, std::size_t k) const {
+    if (!built_) build_index_();
+    if (corpus_.chunk_count() == 0) return {};
+    auto hits = corpus_.search(query, embed_, k);
+    for (auto& h : hits) h.source = this;   // stamp provenance
+    return hits;
+}
+
 // ── KnowledgeRouter ─────────────────────────────────────────────────────────
 
 void KnowledgeRouter::add(std::shared_ptr<KnowledgeSource> src) {
@@ -130,6 +164,60 @@ Context CompressStage::process(Context ctx) const {
         if (!c.hit.chunk) continue;
         c.compressed = compress(ctx.query, c.hit.chunk->text, target_chars_);
     }
+    return ctx;
+}
+
+Context NeuralRerankStage::process(Context ctx) const {
+    // Lift hits, run neural rerank, re-wrap.
+    std::vector<Hit> hits;
+    hits.reserve(ctx.chunks.size());
+    for (auto& c : ctx.chunks) hits.push_back(c.hit);
+
+    auto ranked = neural_rerank(ctx.query, std::move(hits), out_k_, cfg_);
+    return Context::from_hits(std::move(ctx.query), std::move(ranked));
+}
+
+Context MMRStage::process(Context ctx) const {
+    // Lift hits, run MMR diversification, re-wrap.
+    std::vector<Hit> hits;
+    hits.reserve(ctx.chunks.size());
+    for (auto& c : ctx.chunks) hits.push_back(c.hit);
+
+    auto diverse = mmr_diversify(std::move(hits), out_k_, lambda_);
+    return Context::from_hits(std::move(ctx.query), std::move(diverse));
+}
+
+Context NormalizeQueryStage::process(Context ctx) const {
+    std::string q = ctx.query;
+    
+    // Lowercase.
+    if (cfg_.lowercase) {
+        for (auto& c : q)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    
+    // Normalize whitespace: collapse runs, trim.
+    if (cfg_.normalize_whitespace) {
+        std::string out;
+        out.reserve(q.size());
+        bool in_space = true;  // Start true to skip leading space.
+        for (char c : q) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                if (!in_space && !out.empty()) {
+                    out.push_back(' ');
+                    in_space = true;
+                }
+            } else {
+                out.push_back(c);
+                in_space = false;
+            }
+        }
+        // Trim trailing space.
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        q = std::move(out);
+    }
+    
+    ctx.query = std::move(q);
     return ctx;
 }
 

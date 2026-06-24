@@ -29,6 +29,8 @@
 #include "agentty/rag/expand.hpp"
 #include "agentty/rag/knowledge.hpp"
 
+#include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
+
 #include <mcp/tools/host.hpp>
 
 #include <algorithm>
@@ -189,6 +191,18 @@ public:
             router.add(std::shared_ptr<rag::KnowledgeSource>(
                 &docs_source, [](rag::KnowledgeSource*) {}));
 
+            // OPT-IN second source: index this session's MCP `resources/*`
+            // and fuse them with the docs folder. Built once (process-wide,
+            // lazy) and reused. Enabled by AGENTTY_RAG_MCP=1; with no MCP
+            // configured the source self-indexes to empty and costs nothing.
+            std::shared_ptr<rag::McpResourceSource> mcp_source;
+            if (mcp_resources_enabled()) {
+                mcp_source = mcp_resource_source(embed);
+                if (mcp_source)
+                    router.add(std::shared_ptr<rag::KnowledgeSource>(
+                        mcp_source, mcp_source.get()));  // aliasing: shares ownership
+            }
+
             const std::size_t pool_k =
                 std::max<std::size_t>(static_cast<std::size_t>(q.k) * 5, 30);
 
@@ -199,8 +213,15 @@ public:
                 rag::ExpandConfig ecfg = expand_config_from_env(embed);
                 auto queries = rag::expand_query(ecfg, q.query);
                 if (queries.size() > 1) variant_count = queries.size() - 1;
-                ctx = rag::Context::from_hits(
-                    q.query, docs_source.retrieve_fused(queries, pool_k));
+                // Multi-query fusion over the docs corpus. When an MCP source
+                // is active, fold its best-of hits in via the router so the
+                // two sources still fuse (the docs side keeps RAG-Fusion).
+                auto fused = docs_source.retrieve_fused(queries, pool_k);
+                if (mcp_source) {
+                    auto extra = mcp_source->retrieve(q.query, pool_k);
+                    fused.insert(fused.end(), extra.begin(), extra.end());
+                }
+                ctx = rag::Context::from_hits(q.query, std::move(fused));
             } else {
                 ctx = rag::Context::from_hits(
                     q.query, router.retrieve(q.query, pool_k));
@@ -280,6 +301,51 @@ private:
         if (!v || v[0] == '\0') return false;
         std::string s{v};
         return s != "0" && s != "false" && s != "FALSE" && s != "False";
+    }
+
+    // OPT-IN: fold MCP `resources/*` into the search_docs corpus. Off unless
+    // AGENTTY_RAG_MCP is truthy AND an MCP config is present (cheap probe).
+    static bool mcp_resources_enabled() {
+        const char* v = std::getenv("AGENTTY_RAG_MCP");
+        if (!v || v[0] == '\0') return false;
+        std::string s{v};
+        if (s == "0" || s == "false" || s == "FALSE" || s == "False") return false;
+        return mcp::mcp_config_present();
+    }
+
+    // Process-wide, lazily-built MCP resource source. The list/read seams are
+    // bound to the mcp:: free functions; the RAG layer itself stays MCP-free.
+    // Rebuilt when the server's tool/resource generation changes.
+    static std::shared_ptr<rag::McpResourceSource>
+    mcp_resource_source(const rag::EmbedConfig& embed) {
+        static std::mutex mu;
+        static std::shared_ptr<rag::McpResourceSource> src;
+        static unsigned long built_gen = ~0UL;
+
+        std::lock_guard<std::mutex> lock(mu);
+        unsigned long gen = mcp::mcp_generation();
+        if (!src) {
+            auto list_fn = [] {
+                std::vector<rag::McpResourceSource::ResourceRef> refs;
+                for (auto& r : mcp::mcp_resources()) {
+                    std::string label = !r.title.empty() ? r.title
+                                      : !r.name.empty()  ? r.name : r.uri;
+                    refs.push_back({r.uri, std::move(label)});
+                }
+                return refs;
+            };
+            auto read_fn = [](const std::string& uri) -> std::optional<std::string> {
+                std::string err;
+                return mcp::mcp_read_resource(uri, err);
+            };
+            src = std::make_shared<rag::McpResourceSource>(
+                "mcp", std::move(list_fn), std::move(read_fn), embed);
+            built_gen = gen;
+        } else if (gen != built_gen) {
+            src->refresh();          // resource set changed → reindex on next use
+            built_gen = gen;
+        }
+        return src;
     }
 
     static rag::ExpandConfig expand_config_from_env(const rag::EmbedConfig& embed) {

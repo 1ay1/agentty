@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -55,6 +56,11 @@ struct Chunk {
     // Dense embedding. Empty when embeddings are unavailable (BM25-only
     // mode) or not yet computed. Length == Corpus::embed_dim when present.
     std::vector<float> embedding;
+
+    // Metadata for filtering/faceting. Key examples: "category", "author",
+    // "type" ("api", "tutorial", "reference"), "language", "date".
+    // Populated from frontmatter or directory structure during chunking.
+    std::unordered_map<std::string, std::string> metadata;
 };
 
 // Forward decl so Hit can carry source provenance without a cycle.
@@ -118,7 +124,57 @@ struct Bm25Index {
 [[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
 bm25_search(const Bm25Index& idx, std::string_view query, std::size_t k);
 
-// ── Corpus + hybrid retrieval ─────────────────────────────────────────────
+// ── Corpus + hybrid retrieval ─────────────────────────────────────────
+
+// Filter predicate for metadata-based filtering. Returns true to KEEP a chunk.
+using ChunkFilter = std::function<bool(const Chunk&)>;
+
+// Pre-built filters for common patterns.
+namespace filters {
+
+// Match chunks where metadata[key] == value.
+inline ChunkFilter meta_eq(const std::string& key, const std::string& value) {
+    return [=](const Chunk& c) {
+        auto it = c.metadata.find(key);
+        return it != c.metadata.end() && it->second == value;
+    };
+}
+
+// Match chunks where metadata[key] contains substr (case-insensitive).
+inline ChunkFilter meta_contains(const std::string& key, const std::string& substr) {
+    std::string lower_sub = substr;
+    for (auto& ch : lower_sub) ch = static_cast<char>(std::tolower((unsigned char)ch));
+    return [=](const Chunk& c) {
+        auto it = c.metadata.find(key);
+        if (it == c.metadata.end()) return false;
+        std::string lower_val = it->second;
+        for (auto& ch : lower_val) ch = static_cast<char>(std::tolower((unsigned char)ch));
+        return lower_val.find(lower_sub) != std::string::npos;
+    };
+}
+
+// Match chunks where path contains substr.
+inline ChunkFilter path_contains(const std::string& substr) {
+    return [=](const Chunk& c) { return c.path.find(substr) != std::string::npos; };
+}
+
+// Combine filters with AND.
+inline ChunkFilter all_of(std::vector<ChunkFilter> filters) {
+    return [filters = std::move(filters)](const Chunk& c) {
+        for (const auto& f : filters) if (f && !f(c)) return false;
+        return true;
+    };
+}
+
+// Combine filters with OR.
+inline ChunkFilter any_of(std::vector<ChunkFilter> filters) {
+    return [filters = std::move(filters)](const Chunk& c) {
+        for (const auto& f : filters) if (f && f(c)) return true;
+        return false;
+    };
+}
+
+} // namespace filters
 
 class Corpus {
 public:
@@ -150,11 +206,44 @@ public:
     [[nodiscard]] bool        has_embeddings() const noexcept { return embed_dim_ > 0; }
     [[nodiscard]] std::size_t embed_dim() const noexcept { return embed_dim_; }
 
+    // ── Hot reload API ───────────────────────────────────────────────────
+    // Add/remove individual documents without a full rebuild. Useful for
+    // live file watchers or editor integrations. Indices are rebuilt
+    // incrementally; cache is NOT updated (call flush_cache() explicitly).
+
+    // Add or update a document. Chunks, embeds (if embed model set), and
+    // updates BM25. Returns the number of chunks added.
+    std::size_t add_document(const std::string& path, const std::string& body,
+                             const EmbedConfig& embed);
+
+    // Remove all chunks for a document path. Returns the number removed.
+    std::size_t remove_document(const std::string& path);
+
+    // Flush current state to disk cache.
+    void flush_cache() { write_cache_(); }
+
+    // Build an in-memory corpus directly from raw (path, body) documents,
+    // with NO disk cache and NO filesystem walk. Chunks every body, batch-
+    // embeds (when `embed.model` is set), then builds BM25 + (above the size
+    // threshold) HNSW in ONE pass. This is the build path for non-folder
+    // sources — e.g. MCP resources, an API export, an in-memory test corpus
+    // — that already hold their documents as strings. Replaces any existing
+    // content. Returns the number of chunks indexed.
+    std::size_t build_from_memory(
+        const std::vector<std::pair<std::string, std::string>>& docs,
+        const EmbedConfig& embed);
+
     // Exposed for tests: install a prebuilt corpus without disk/network.
     void set_chunks_for_test(std::vector<Chunk> chunks);
 
 private:
     void write_cache_() const;
+
+    // (Re)build the HNSW ANN graph from the current chunks_ when the corpus
+    // is large enough to beat brute-force cosine; otherwise drop it. Keeps
+    // node ids aligned with chunk positions (search() materializes via
+    // &chunks_[id]), so it MUST run after any structural change to chunks_.
+    void rebuild_hnsw_();
 
     // Append this query's ranked candidate lists (BM25, plus dense when the
     // corpus AND query embed) to `lists`, each as a vector of chunk ids.

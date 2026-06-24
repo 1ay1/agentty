@@ -429,6 +429,8 @@ set(AGENTTY_RAG_SOURCES
     src/rag/rerank.cpp
     src/rag/expand.cpp
     src/rag/knowledge.cpp
+    src/rag/stemmer.cpp
+    src/rag/simd.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES
@@ -1159,6 +1161,7 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(rag_hnsw_test)
     agentty_add_full_test(rag_rerank_test)
     agentty_add_full_test(rag_expand_test)
+    agentty_add_full_test(rag_advanced_test)
     agentty_add_full_test(knowledge_test)
 
     # visual_hash_coverage_test — proves the render gate

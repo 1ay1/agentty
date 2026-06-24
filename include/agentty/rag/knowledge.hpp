@@ -27,7 +27,11 @@
 //   • Single-source retrieval (the default) bypasses the router entirely:
 //     one source, one Retriever, zero fusion overhead.
 
+#include <algorithm>
+#include <cmath>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -61,6 +65,11 @@ struct Context {
     std::string               query;   // the (possibly normalized) probe
     std::vector<ContextChunk> chunks;  // ranked, enrichable by each stage
 
+    // Confidence signal: derived from score distribution. High confidence
+    // when top scores are high and clustered; low when scores are weak or
+    // spread. Range [0,1]. Computed by compute_confidence() after ranking.
+    double confidence = 0.0;
+
     [[nodiscard]] bool        empty()  const noexcept { return chunks.empty(); }
     [[nodiscard]] std::size_t size()   const noexcept { return chunks.size(); }
 
@@ -70,7 +79,30 @@ struct Context {
         c.query = std::move(query);
         c.chunks.reserve(hits.size());
         for (auto& h : hits) c.chunks.push_back(ContextChunk{h, {}});
+        c.compute_confidence();
         return c;
+    }
+
+    // Compute confidence from the score distribution. Call after ranking.
+    void compute_confidence() noexcept {
+        if (chunks.empty()) { confidence = 0.0; return; }
+        if (chunks.size() == 1) { confidence = std::min(1.0, chunks[0].hit.score); return; }
+
+        // Confidence = f(top_score, score_variance). High top + low variance → confident.
+        double top = chunks[0].hit.score;
+        double sum = 0.0, sum_sq = 0.0;
+        for (const auto& c : chunks) {
+            sum    += c.hit.score;
+            sum_sq += c.hit.score * c.hit.score;
+        }
+        double mean = sum / static_cast<double>(chunks.size());
+        double var  = sum_sq / static_cast<double>(chunks.size()) - mean * mean;
+        double std_dev = (var > 0.0) ? std::sqrt(var) : 0.0;
+
+        // Heuristic: confidence = top_score * (1 - normalized_stddev).
+        // High top + tight cluster → confident. Low top OR high spread → uncertain.
+        double norm_std = (top > 0.0) ? std_dev / top : 1.0;
+        confidence = std::clamp(top * (1.0 - std::min(norm_std, 1.0)), 0.0, 1.0);
     }
 };
 
@@ -137,6 +169,74 @@ private:
     std::string   name_;
     const Corpus* corpus_;   // non-owning; outlives this adapter
     EmbedConfig   embed_;
+};
+
+// ── McpResourceSource: knowledge behind an MCP server (essay §6, §10) ──────
+//
+// "MCP and RAG are the same thing from the agent's view" — both are sources
+// of information behind one seam. This source makes the `resources/*` an MCP
+// server exposes SEARCHABLE through the exact same KnowledgeSource interface
+// as a local docs folder: list the resources, read each one, chunk + embed
+// the flattened text into a PRIVATE in-memory Corpus, and answer retrieve()
+// from it (hybrid BM25 + dense, same scoring as the folder corpus).
+//
+// DEPENDENCY DIRECTION (load-bearing): the RAG layer must NOT depend on the
+// MCP layer — keeping this header mcp-cpp-free AND mcp/client.hpp-free is
+// what lets RAG stay a leaf. So MCP is injected as two plain std::function
+// seams (list + read). The wiring layer (which already owns both) binds them
+// to agentty::mcp::mcp_resources / mcp_read_resource. With no binding (or no
+// MCP configured) the source is simply empty — zero cost, exactly like the
+// rest of MCP's opt-in contract.
+//
+// PERF: the private Corpus is built LAZILY on the first retrieve() (a cold,
+// user-initiated search_docs path) and reused for the process lifetime.
+// There is NO disk cache — resources are remote and may change; refresh()
+// drops the index so the next retrieve() rebuilds. Nothing here touches the
+// render/stream loop.
+class McpResourceSource final : public KnowledgeSource {
+public:
+    // One advertised resource: its URI and a human label (for provenance).
+    struct ResourceRef { std::string uri; std::string label; };
+
+    // Injection seams (bound by the wiring layer to the mcp::* free fns):
+    //   list_fn()      -> the resources to index (URI + label)
+    //   read_fn(uri)   -> flattened text, or std::nullopt on failure
+    using ListFn = std::function<std::vector<ResourceRef>()>;
+    using ReadFn = std::function<std::optional<std::string>(const std::string& uri)>;
+
+    // `name` is the provenance label (e.g. "mcp"). `embed` selects the dense
+    // endpoint (empty model → BM25-only). Both function seams may be empty,
+    // in which case the source indexes nothing and retrieve() returns {}.
+    McpResourceSource(std::string name, ListFn list_fn, ReadFn read_fn,
+                      EmbedConfig embed = {})
+        : name_(std::move(name)), list_(std::move(list_fn)),
+          read_(std::move(read_fn)), embed_(std::move(embed)) {}
+
+    [[nodiscard]] std::string_view name() const noexcept override { return name_; }
+
+    // Lazily builds the private Corpus on first call, then hybrid-retrieves.
+    // Stamps provenance. Never throws.
+    [[nodiscard]] std::vector<Hit>
+    retrieve(std::string_view query, std::size_t k) const override;
+
+    // Drop the cached index so the next retrieve() re-reads every resource.
+    // Call when the server emits resources/list_changed.
+    void refresh() noexcept { built_ = false; }
+
+    // Number of chunks currently indexed (0 before the first retrieve()).
+    [[nodiscard]] std::size_t indexed_chunks() const noexcept {
+        return corpus_.chunk_count();
+    }
+
+private:
+    void build_index_() const;   // populates corpus_ from list_()/read_()
+
+    std::string          name_;
+    ListFn               list_;
+    ReadFn               read_;
+    EmbedConfig          embed_;
+    mutable Corpus       corpus_;        // private, in-memory (no disk cache)
+    mutable bool         built_ = false;
 };
 
 // ── KnowledgeRouter: fan-out + fuse (essay §6, §10) ───────────────────────
@@ -232,6 +332,57 @@ public:
     [[nodiscard]] Context process(Context ctx) const override;
 private:
     std::size_t target_chars_;
+};
+
+// NeuralRerankStage — wraps rag::neural_rerank. Scores chunks via Ollama
+// using a cross-encoder-style relevance prompt. OPT-IN and expensive: only
+// enable when explicitly requested. Falls back to lexical rerank on failure.
+class NeuralRerankStage final : public RetrievalStage {
+public:
+    NeuralRerankStage(std::size_t out_k, NeuralRerankConfig cfg)
+        : out_k_(out_k), cfg_(std::move(cfg)) {}
+    [[nodiscard]] std::string_view name() const noexcept override { return "neural_rerank"; }
+    [[nodiscard]] Context process(Context ctx) const override;
+private:
+    std::size_t         out_k_;
+    NeuralRerankConfig  cfg_;
+};
+
+// MMRStage — wraps rag::mmr_diversify. Greedily re-selects chunks to balance
+// relevance and diversity. Useful after reranking when top-k contains
+// near-duplicate overlapping chunks.
+class MMRStage final : public RetrievalStage {
+public:
+    MMRStage(std::size_t out_k, double lambda = 0.7)
+        : out_k_(out_k), lambda_(lambda) {}
+    [[nodiscard]] std::string_view name() const noexcept override { return "mmr"; }
+    [[nodiscard]] Context process(Context ctx) const override;
+private:
+    std::size_t out_k_;
+    double      lambda_;
+};
+
+// NormalizeQueryStage — preprocesses the query before retrieval. Applies:
+//   1. Lowercasing
+//   2. Whitespace normalization
+//   3. Optional: stopword removal, spell correction, abbreviation expansion
+// Runs BEFORE retrieval to ensure consistent query representation.
+class NormalizeQueryStage final : public RetrievalStage {
+public:
+    struct Config {
+        bool lowercase            = true;
+        bool normalize_whitespace = true;
+        bool remove_stopwords     = false;  // TODO: implement
+        bool expand_abbreviations = false;  // TODO: implement
+        
+        Config() = default;
+    };
+    NormalizeQueryStage() : cfg_{} {}
+    explicit NormalizeQueryStage(Config cfg) : cfg_(cfg) {}
+    [[nodiscard]] std::string_view name() const noexcept override { return "normalize"; }
+    [[nodiscard]] Context process(Context ctx) const override;
+private:
+    Config cfg_;
 };
 
 } // namespace agentty::rag

@@ -85,7 +85,8 @@ embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts) {
 namespace {
 
 constexpr char kCacheName[] = ".agentty_rag_cache.bin";
-constexpr std::uint32_t kCacheMagic = 0x52414701;  // "RAG\x01"
+constexpr std::uint32_t kCacheMagic   = 0x52414702;  // "RAG\x02" — v2 adds HNSW
+constexpr std::uint32_t kCacheMagicV1 = 0x52414701;  // legacy v1 (no HNSW)
 
 // Which files we treat as knowledge documents. Code is intentionally
 // excluded — agentic search (grep/read) covers code better than embeddings.
@@ -164,11 +165,13 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
         std::vector<Chunk> chunks;
     };
     std::unordered_map<std::string, CachedFile> cache;
+    bool hnsw_loaded = false;
     {
         std::string blob = read_file(root / kCacheName, 512ull * 1024 * 1024);
         std::string_view b{blob};
         std::uint32_t magic = 0;
-        if (get(b, magic) && magic == kCacheMagic) {
+        if (get(b, magic) && (magic == kCacheMagic || magic == kCacheMagicV1)) {
+            bool is_v2 = (magic == kCacheMagic);
             std::uint32_t dim = 0, nfiles = 0;
             get(b, dim);
             get(b, nfiles);
@@ -200,6 +203,11 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
                 }
                 if (!ok) break;
                 cache.emplace(std::move(path), std::move(cf));
+            }
+            // v2 cache: HNSW graph follows the chunk data.
+            if (is_v2 && !b.empty()) {
+                hnsw_loaded = hnsw_.deserialize(b);
+                if (hnsw_loaded) embed_dim_ = dim;
             }
         }
     }
@@ -283,29 +291,41 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     // Build an HNSW ANN index over the embeddings when the corpus is large
     // enough that brute-force cosine per query would hurt. Below the
     // threshold, exact brute force is both faster and exact, so skip it.
-    // NOTE: we do NOT persist the HNSW graph into the on-disk cache — the
-    // expensive part (embeddings) IS cached, and rebuilding the in-memory
-    // graph from those vectors is fast, so we rebuild it per session rather
-    // than risk entangling the existing cache format. The graph references
-    // chunk ids as the i-th chunk index (matching how search() materializes
-    // hits via &chunks_[id]); do NOT reorder chunks_ after building HNSW.
-    hnsw_built_ = false;
+    // The HNSW graph is persisted in the v2 cache format alongside the
+    // embeddings, so large corpora don't rebuild the graph every session:
+    // if the cache loader already deserialized a graph of the right dim, we
+    // keep it; otherwise rebuild_hnsw_() builds fresh from the embeddings.
     constexpr std::size_t kHnswThreshold = 2000;
-    if (embed_dim_ > 0 && chunks_.size() >= kHnswThreshold) {
-        std::vector<std::uint32_t> ids;
-        std::vector<const std::vector<float>*> embs;
-        ids.reserve(chunks_.size());
-        embs.reserve(chunks_.size());
-        for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
-            if (chunks_[i].embedding.size() == embed_dim_) {
-                ids.push_back(i);
-                embs.push_back(&chunks_[i].embedding);
-            }
-        }
-        if (!ids.empty()) { hnsw_.build(ids, embs); hnsw_built_ = !hnsw_.empty(); }
+    if (embed_dim_ > 0 && chunks_.size() >= kHnswThreshold &&
+        !hnsw_.empty() && hnsw_.dim() == embed_dim_) {
+        hnsw_built_ = true;          // reuse the cache-loaded graph
+    } else {
+        rebuild_hnsw_();
     }
 
     write_cache_();
+}
+
+// (Re)build (or drop) the HNSW graph from the current chunks_. Single source
+// of truth for the ANN index lifecycle — every structural mutation routes
+// here so node ids stay aligned with chunk positions.
+void Corpus::rebuild_hnsw_() {
+    constexpr std::size_t kHnswThreshold = 2000;
+    hnsw_ = HnswIndex{};
+    hnsw_built_ = false;
+    if (embed_dim_ == 0 || chunks_.size() < kHnswThreshold) return;
+
+    std::vector<std::uint32_t> ids;
+    std::vector<const std::vector<float>*> embs;
+    ids.reserve(chunks_.size());
+    embs.reserve(chunks_.size());
+    for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+        if (chunks_[i].embedding.size() == embed_dim_) {
+            ids.push_back(i);
+            embs.push_back(&chunks_[i].embedding);
+        }
+    }
+    if (!ids.empty()) { hnsw_.build(ids, embs); hnsw_built_ = !hnsw_.empty(); }
 }
 
 void Corpus::ranked_lists_for_query_(
@@ -370,6 +390,102 @@ std::vector<Hit> Corpus::search(std::string_view query,
     return hits;
 }
 
+std::size_t Corpus::add_document(const std::string& path, const std::string& body,
+                                 const EmbedConfig& embed) {
+    // Remove existing chunks for this path first (update semantics).
+    remove_document(path);
+    
+    // Chunk the document.
+    auto new_chunks = chunk_document(path, body);
+    if (new_chunks.empty()) return 0;
+    
+    // Embed if model available.
+    if (!embed.model.empty()) {
+        std::vector<std::string> texts;
+        texts.reserve(new_chunks.size());
+        for (const auto& c : new_chunks) texts.push_back(c.text);
+        
+        auto vecs = embed_texts(embed, texts);
+        if (vecs && vecs->size() == texts.size()) {
+            for (std::size_t i = 0; i < new_chunks.size(); ++i) {
+                new_chunks[i].embedding = std::move((*vecs)[i]);
+                if (embed_dim_ == 0 && !new_chunks[i].embedding.empty())
+                    embed_dim_ = new_chunks[i].embedding.size();
+            }
+        }
+    }
+    
+    std::size_t added = new_chunks.size();
+    for (auto& c : new_chunks)
+        chunks_.push_back(std::move(c));
+
+    // Rebuild lexical + ANN indices over the full corpus (positions changed).
+    bm25_ = build_bm25(chunks_);
+    rebuild_hnsw_();
+    return added;
+}
+
+std::size_t Corpus::remove_document(const std::string& path) {
+    std::size_t before = chunks_.size();
+    chunks_.erase(
+        std::remove_if(chunks_.begin(), chunks_.end(),
+            [&path](const Chunk& c) { return c.path == path; }),
+        chunks_.end());
+
+    std::size_t removed = before - chunks_.size();
+    if (removed == 0) return 0;
+
+    // Chunk positions shifted — rebuild both indices so HNSW node ids stay
+    // aligned with chunks_ (search() materializes via &chunks_[id]).
+    bm25_ = build_bm25(chunks_);
+    rebuild_hnsw_();
+    return removed;
+}
+
+std::size_t Corpus::build_from_memory(
+    const std::vector<std::pair<std::string, std::string>>& docs,
+    const EmbedConfig& embed) {
+    // Wholesale replace: this is a non-folder build path (no disk cache, no
+    // root, no fs walk). Mirrors build()'s tail but sources documents from
+    // memory.
+    root_.clear();
+    chunks_.clear();
+    embed_dim_ = 0;
+    hnsw_ = HnswIndex{};
+    hnsw_built_ = false;
+
+    for (const auto& [path, body] : docs) {
+        if (body.empty()) continue;
+        auto cs = chunk_document(path, body);
+        for (auto& c : cs) chunks_.push_back(std::move(c));
+    }
+
+    // Batch-embed (bounded request size) when a model is configured.
+    if (!embed.model.empty() && !chunks_.empty()) {
+        constexpr std::size_t kBatch = 64;
+        for (std::size_t i = 0; i < chunks_.size(); i += kBatch) {
+            std::size_t hi = std::min(i + kBatch, chunks_.size());
+            std::vector<std::string> texts;
+            texts.reserve(hi - i);
+            for (std::size_t j = i; j < hi; ++j) texts.push_back(chunks_[j].text);
+            auto vecs = embed_texts(embed, texts);
+            if (!vecs || vecs->size() != texts.size()) break;  // degrade to BM25
+            for (std::size_t j = i; j < hi; ++j) {
+                chunks_[j].embedding = std::move((*vecs)[j - i]);
+                if (embed_dim_ == 0) embed_dim_ = chunks_[j].embedding.size();
+            }
+        }
+        // Enforce a single dim — drop ragged embeddings rather than misrank.
+        if (embed_dim_ > 0)
+            for (auto& c : chunks_)
+                if (c.embedding.size() != embed_dim_) c.embedding.clear();
+    }
+
+    bm25_ = build_bm25(chunks_);
+    rebuild_hnsw_();
+    return chunks_.size();
+}
+
 std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
                                       const EmbedConfig& embed,
                                       std::size_t k) const {
@@ -421,6 +537,11 @@ void Corpus::write_cache_() const {
                 blob.append(reinterpret_cast<const char*>(c->embedding.data()),
                             c->embedding.size() * sizeof(float));
         }
+    }
+
+    // v2: append HNSW graph after chunk data.
+    if (hnsw_built_ && !hnsw_.empty()) {
+        hnsw_.serialize(blob);
     }
 
     std::ofstream f(root_ / kCacheName, std::ios::binary | std::ios::trunc);

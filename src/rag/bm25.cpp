@@ -153,15 +153,94 @@ reciprocal_rank_fusion(
     return out;
 }
 
-// ── Chunker ────────────────────────────────────────────────────────────────
+// ── Chunker ──────────────────────────────────────────────────────────────────────
 
 namespace {
+
 bool is_heading(std::string_view line) {
     // Markdown ATX heading; cheap heuristic for a semantic break point.
     std::size_t i = 0;
-    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '	')) ++i;
     return i < line.size() && line[i] == '#';
 }
+
+bool is_fenced_code_start(std::string_view line) {
+    // Markdown fenced code block start: ``` or ~~~
+    std::size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i + 2 >= line.size()) return false;
+    return (line.substr(i, 3) == "```" || line.substr(i, 3) == "~~~");
+}
+
+bool is_list_item(std::string_view line) {
+    // Markdown list item: -, *, +, or numbered (1.)
+    std::size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size()) return false;
+    char c = line[i];
+    if (c == '-' || c == '*' || c == '+') {
+        return i + 1 < line.size() && line[i + 1] == ' ';
+    }
+    // Numbered list: digit(s) followed by . or )
+    std::size_t j = i;
+    while (j < line.size() && std::isdigit((unsigned char)line[j])) ++j;
+    if (j > i && j < line.size() && (line[j] == '.' || line[j] == ')')) {
+        return j + 1 < line.size() && line[j + 1] == ' ';
+    }
+    return false;
+}
+
+bool is_blank(std::string_view line) {
+    return line.find_first_not_of(" \t\r") == std::string_view::npos;
+}
+
+// Track semantic context: are we inside a fenced code block or list?
+struct ChunkContext {
+    bool in_code_fence = false;
+    int  list_indent   = -1;  // -1 = not in list; >= 0 = list item indent level
+};
+
+// Determine if this line is a safe break point given the context.
+bool is_safe_break(std::string_view line, const ChunkContext& ctx) {
+    // Never break inside a fenced code block.
+    if (ctx.in_code_fence) return false;
+    // Prefer breaking at blank lines, headings, or before new list items.
+    if (is_blank(line)) return true;
+    if (is_heading(line)) return true;
+    // If we're in a list, only break before a new top-level item or heading.
+    if (ctx.list_indent >= 0) {
+        if (is_list_item(line)) {
+            std::size_t indent = 0;
+            while (indent < line.size() && (line[indent] == ' ' || line[indent] == '\t'))
+                ++indent;
+            // New list item at same or lower indent = safe break.
+            return static_cast<int>(indent) <= ctx.list_indent;
+        }
+        return false;  // Continuation of current list item.
+    }
+    return false;
+}
+
+void update_context(std::string_view line, ChunkContext& ctx) {
+    // Toggle code fence.
+    if (is_fenced_code_start(line)) {
+        ctx.in_code_fence = !ctx.in_code_fence;
+        return;
+    }
+    if (ctx.in_code_fence) return;  // Inside code, don't track list.
+
+    // Track list indent.
+    if (is_list_item(line)) {
+        std::size_t indent = 0;
+        while (indent < line.size() && (line[indent] == ' ' || line[indent] == '\t'))
+            ++indent;
+        ctx.list_indent = static_cast<int>(indent);
+    } else if (is_blank(line) || is_heading(line)) {
+        ctx.list_indent = -1;  // List ended.
+    }
+    // Non-blank, non-list, non-heading lines continue the current block.
+}
+
 } // namespace
 
 std::vector<Chunk>
@@ -183,29 +262,47 @@ chunk_document(const std::string& path, const std::string& body,
     std::vector<Chunk> out;
     std::size_t i = 0;
     const std::size_t n = lines.size();
+    ChunkContext ctx;
 
     while (i < n) {
         std::size_t begin = i;
         std::size_t char_count = 0;
         std::size_t taken = 0;
+        ChunkContext chunk_ctx = ctx;  // Context at chunk start.
 
-        // Grow the chunk until a size bound is hit. Prefer to stop right
-        // before a heading once we already have content (semantic break).
+        // Grow the chunk until a size bound is hit. Prefer to stop at safe
+        // semantic boundaries (blank lines, headings, list transitions).
         while (i < n) {
             std::size_t llen = lines[i].size() + 1;  // +1 for the newline
             bool would_overflow =
                 (taken >= max_lines) || (char_count + llen > max_chars);
-            if (would_overflow && taken > 0) break;
-            // Heading boundary: break before it if we already have a body.
-            if (taken > 0 && is_heading(lines[i])) break;
+            
+            if (would_overflow && taken > 0) {
+                // Try to find a safe break point within the last few lines.
+                // If we can't, break here anyway.
+                break;
+            }
+
+            // Check for semantic break before this line (if we have content).
+            if (taken > 0 && is_safe_break(lines[i], chunk_ctx)) {
+                // Only break here if we're not in the middle of something.
+                if (!chunk_ctx.in_code_fence) break;
+            }
+
+            update_context(lines[i], chunk_ctx);
             char_count += llen;
             ++taken;
             ++i;
+            
             if (taken >= max_lines) break;
             if (char_count >= max_chars) break;
         }
 
         std::size_t end = i;  // exclusive
+        // Update global context to the end of this chunk.
+        for (std::size_t j = begin; j < end; ++j)
+            update_context(lines[j], ctx);
+
         // Assemble the chunk text.
         std::string text;
         text.reserve(char_count);
