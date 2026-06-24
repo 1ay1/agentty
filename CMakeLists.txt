@@ -1060,6 +1060,12 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json)
     add_test(NAME model_caps_test COMMAND model_caps_test)
 
+    # model_label_test — pretty_model_label() turn-header normalization
+    # across every provider id shape (Ollama :tag, OpenAI, OpenRouter
+    # namespaced, Gemini/xAI, the agentty [1m] marker). Reuses the shared
+    # runtime OBJECT lib so helpers.cpp isn't recompiled.
+    agentty_add_full_test(model_label_test)
+
     # skills_engine_test — Agent Skills (agentskills.io) engine: discovery
     # across native + interop roots (.agentty/.agents/.claude, project +
     # user), shadowing precedence, lenient frontmatter, tier-3 resource
@@ -1252,6 +1258,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        model_label_test
         skills_engine_test
         midrun_freeze_test
         midrun_seam_test

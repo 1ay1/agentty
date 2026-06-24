@@ -119,6 +119,111 @@ std::string format_duration_compact(float secs) {
     return buf;
 }
 
+std::string pretty_model_label(std::string_view id) {
+    // Drop the agentty extended-context marker anywhere in the id.
+    if (auto pos = id.find("[1m]"); pos != std::string_view::npos) {
+        std::string stripped{id.substr(0, pos)};
+        stripped += id.substr(pos + 4);
+        return pretty_model_label(stripped);
+    }
+
+    // Strip provider namespace: keep the segment after the last '/'.
+    if (auto slash = id.find_last_of('/'); slash != std::string_view::npos)
+        id.remove_prefix(slash + 1);
+
+    // Split off an optional `:tag` (Ollama size/quant selector).
+    std::string_view tag;
+    if (auto colon = id.find(':'); colon != std::string_view::npos) {
+        tag = id.substr(colon + 1);
+        id  = id.substr(0, colon);
+    }
+    // `:latest` carries no information — every Ollama pull defaults to it.
+    if (tag == "latest") tag = {};
+
+    auto is_alpha = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    };
+    auto is_upper = [](char c) { return c >= 'A' && c <= 'Z'; };
+    auto is_lower = [](char c) { return c >= 'a' && c <= 'z'; };
+    auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
+    auto lower_eq = [&](std::string_view w, std::string_view lit) {
+        if (w.size() != lit.size()) return false;
+        for (std::size_t i = 0; i < w.size(); ++i) {
+            char a = w[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (a != lit[i]) return false;
+        }
+        return true;
+    };
+
+    // Emit one word, title-cased, with these refinements:
+    //   • a word that's ALREADY an all-caps acronym (≤4 chars) is kept
+    //     verbatim (GPT, GLM, SQL).
+    //   • a curated set of well-known lowercase acronyms is upper-cased
+    //     (gpt → GPT, glm → GLM) — these read wrong title-cased.
+    //   • a DIGIT-LED word (4o, 8x7b, 70b, 9b, 2.5) keeps every letter
+    //     lowercase — these are version/size runs, not names.
+    //   • otherwise: upper-case the first letter, lower-case the rest
+    //     handled implicitly (we only touch the leading alpha).
+    auto emit_word = [&](std::string& out, std::string_view w) {
+        if (w.empty()) return;
+        bool all_caps = true, has_alpha = false;
+        for (char c : w) {
+            if (is_alpha(c)) { has_alpha = true; if (!is_upper(c)) all_caps = false; }
+        }
+        if (has_alpha && all_caps && w.size() <= 4) {
+            out.append(w);                       // GPT / GLM / SQL acronym
+            return;
+        }
+        if (lower_eq(w, "gpt") || lower_eq(w, "glm") || lower_eq(w, "sql") ||
+            lower_eq(w, "tts")  || lower_eq(w, "vl")) {
+            for (char c : w) out.push_back(
+                is_lower(c) ? static_cast<char>(c - 'a' + 'A') : c);
+            return;
+        }
+        // Digit-led word: version/size run — keep letters lowercase.
+        if (is_digit(w.front())) {
+            for (char c : w) out.push_back(
+                is_upper(c) ? static_cast<char>(c - 'A' + 'a') : c);
+            return;
+        }
+        // OpenAI o-series reasoning models (o1 / o3 / o4 / o4-mini): a
+        // lone 'o' followed by a digit is conventionally lowercase.
+        if (w.size() >= 2 && (w[0] == 'o' || w[0] == 'O') && is_digit(w[1])) {
+            out.push_back('o');
+            out.append(w.substr(1));
+            return;
+        }
+        bool cased = false;
+        for (char c : w) {
+            if (!cased && is_lower(c)) { c = static_cast<char>(c - 'a' + 'A'); cased = true; }
+            else if (is_alpha(c))      { cased = true; }
+            out.push_back(c);
+        }
+    };
+
+    std::string out;
+    out.reserve(id.size() + tag.size() + 1);
+    std::size_t w0 = 0;
+    for (std::size_t i = 0; i <= id.size(); ++i) {
+        const bool boundary =
+            (i == id.size() || id[i] == '-' || id[i] == '_' || id[i] == ' ');
+        if (!boundary) continue;
+        if (i > w0) {
+            if (!out.empty()) out.push_back(' ');
+            emit_word(out, id.substr(w0, i - w0));
+        }
+        w0 = i + 1;
+    }
+    if (out.empty()) out = std::string{id};   // pathological all-delim id
+
+    if (!tag.empty()) {
+        out.push_back(' ');
+        out.append(tag);
+    }
+    return out;
+}
+
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {
     auto tt = std::chrono::system_clock::to_time_t(tp);
     std::tm tm{};

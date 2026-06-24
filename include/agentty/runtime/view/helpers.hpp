@@ -64,6 +64,17 @@ namespace agentty::ui {
 // required and "234ms" / "4.2s" reads better than padded forms.
 [[nodiscard]] std::string format_duration_compact(float secs);
 
+// Normalize an arbitrary model id (Ollama / OpenAI-compat / OpenRouter /
+// Gemini / xAI / local …) into a short, human turn-header label:
+//   codellama:latest        → "Codellama"
+//   qwen2.5-coder:7b        → "Qwen2.5 Coder 7b"
+//   openai/gpt-4o-mini      → "GPT 4o Mini"
+//   claude-sonnet-4-5[1m]   → "Claude Sonnet 4 5"
+// Strips the provider namespace, a `:latest` tag, and the agentty `[1m]`
+// extended-context marker; title-cases word-by-word while preserving
+// all-caps acronyms (GPT/GLM/SQL) and version/size runs (4o, 2.5, 8x7b).
+[[nodiscard]] std::string pretty_model_label(std::string_view model_id);
+
 // Context window size for a given model id. Defaults to 200 K but bumps
 // to 1 M when the model id carries the agentty-internal `[1m]` tag (which
 // triggers the `context-1m-2025-08-07` beta on the wire). Used by the

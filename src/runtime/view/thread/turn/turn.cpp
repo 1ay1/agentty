@@ -528,18 +528,27 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
     // used to render in `success` (green) which collided with the ✓
     // done icon; bright_cyan keeps the "fast/agile" feel without the
     // status collision.
+    bool anthropic_known = true;
     if      (caps.is_opus())   { c = role_brand_alt; label = "Opus";   } // bright_magenta
     else if (caps.is_sonnet()) { c = role_info;      label = "Sonnet"; } // blue
     else if (caps.is_haiku())  { c = code_path;      label = "Haiku";  } // bright_cyan
-    else                       { c = highlight;      label = id;       } // cyan (fallback)
-    // Extract a short version run like "4-5" → "4.5" from model ids.
-    // Reject segments longer than 2 digits so date suffixes (8-digit
-    // YYYYMMDD on ids like "claude-sonnet-4-20250514") don't get
+    else {
+        // Non-Anthropic / local model: derive a short, title-cased name
+        // from the raw id (`codellama:latest` → "Codellama",
+        // `qwen2.5-coder:7b` → "Qwen2.5 Coder 7b"). No date-suffix
+        // version extraction — that's Anthropic-id specific.
+        c = highlight;                            // cyan (fallback)
+        label = pretty_model_label(id);
+        anthropic_known = false;
+    }
+    // Extract a short version run like "4-5" → "4.5" from Anthropic model
+    // ids only. Reject segments longer than 2 digits so date suffixes
+    // (8-digit YYYYMMDD on ids like "claude-sonnet-4-20250514") don't get
     // displayed as `Sonnet 4.20250514`. Segments are 1–2 digits
     // joined by `-`/`.`; once a 3-digit run appears we stop the
     // version at the boundary before it (so `4-5-20250514` → `4.5`,
     // `4-20250514` → `4` only).
-    for (std::size_t i = 0; i + 2 < id.size(); ++i) {
+    for (std::size_t i = 0; anthropic_known && i + 2 < id.size(); ++i) {
         char ch = id[i];
         if (ch >= '0' && ch <= '9') {
             char delim = id[i + 1];
@@ -590,7 +599,10 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
 std::string format_turn_meta(const Message& msg, int turn_num,
                              std::optional<float> elapsed_secs) {
     std::string meta = timestamp_hh_mm(msg.timestamp);
-    if (elapsed_secs && *elapsed_secs > 0.0f)
+    // Only surface elapsed when it's meaningful. A near-instant local-model
+    // reply yields ~0s wall-clock, which `format_duration_compact` renders
+    // as a useless "0ms"/"12ms" — drop anything under 100ms.
+    if (elapsed_secs && *elapsed_secs >= 0.1f)
         meta += "  \xc2\xb7  " + format_duration_compact(*elapsed_secs);
     if (turn_num > 0)
         meta += "  \xc2\xb7  turn " + std::to_string(turn_num);
