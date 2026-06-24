@@ -461,6 +461,11 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             switch (c) {
                 case U'k': return ComposerKillToEndOfLine{};
                 case U'u': return ComposerKillToBeginningOfLine{};
+                case U'w':
+                    // Ctrl+W — delete word backward (readline
+                    // unix-word-rubout). The universal "oops, drop
+                    // that word" key across every shell and editor.
+                    return ComposerDeleteWordBack{};
                 case U'z':
                     // Ctrl+Shift+Z is the alternate Redo binding (no
                     // Ctrl+Y on macOS muscle-memory). Plain Ctrl+Z is
@@ -492,6 +497,10 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             // both V and v should fire.
             if (c == U'v' || c == U'V')
                 return ComposerImagePasteFromClipboard{};
+            // Alt+D — delete word forward (readline kill-word).
+            // Symmetric to Ctrl+W; arrives as ESC d → CharKey{'d'}+alt.
+            if (c == U'd' || c == U'D')
+                return ComposerDeleteWordForward{};
         }
         if (ck->codepoint >= 0x20) return ComposerCharInput{ck->codepoint};
     }

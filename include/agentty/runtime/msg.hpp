@@ -104,6 +104,14 @@ struct ComposerCursorWordRight {};
 // deletes from the previous '\n' (or start-of-buffer) to the cursor.
 struct ComposerKillToEndOfLine {};
 struct ComposerKillToBeginningOfLine {};
+// Word-wise delete (Ctrl+W / Alt+D). Back deletes from the previous
+// word boundary to the cursor (readline `unix-word-rubout`); forward
+// deletes from the cursor to the next word boundary (`kill-word`).
+// Both reuse the same chip-aware word_left/word_right boundaries the
+// cursor jumps use, so a delete-word over a chip removes the whole
+// attachment token in one stroke.
+struct ComposerDeleteWordBack {};
+struct ComposerDeleteWordForward {};
 // Undo / redo (Ctrl+Z / Ctrl+Y). Each mutating composer op snapshots
 // the prior state into a per-composer stack; new edits clear redo.
 struct ComposerUndo {};
@@ -422,6 +430,7 @@ using ComposerMsg = std::variant<
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
     ComposerCursorWordLeft, ComposerCursorWordRight,
     ComposerKillToEndOfLine, ComposerKillToBeginningOfLine,
+    ComposerDeleteWordBack, ComposerDeleteWordForward,
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
