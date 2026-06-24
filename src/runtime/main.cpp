@@ -47,9 +47,7 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
-#if AGENTTY_MCP
 #include "agentty/mcp/serve.hpp"
-#endif
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
@@ -58,9 +56,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
-#if AGENTTY_MCP
 #include "agentty/tool/mcp_tools_bridge.hpp"
-#endif
 
 namespace {
 
@@ -297,7 +293,6 @@ int main(int argc, char** argv) {
                      tools::util::sandbox::describe_state().c_str());
     }
 
-#if AGENTTY_MCP
     // ── Mirror the tool runtime into mcp-cpp ────────────────────────────
     // The local tool set is now served by mcp-cpp's batteries-included
     // toolset (see build_registry / mcp_tools_bridge). Mirror agentty's
@@ -306,9 +301,8 @@ int main(int argc, char** argv) {
     // gate and bwrap/sandbox-exec isolation the native tools did. Must run
     // before any tool can dispatch (TUI, ACP, and mcp-serve all reach this).
     tools::wire_mcp_runtime(args.cli_sandbox);
-#endif
 
-    // ── Resolve the active provider ─────────────────────────────────────
+    // ── Resolve the active provider ──────────────────────────────
     // --provider wins; otherwise the saved setting; otherwise Anthropic.
     // "anthropic" (default) keeps the OAuth/Pro/Max path. Any other value
     // ("openai" | "groq" | "openrouter" | "ollama" | "host[:port]") routes
@@ -422,17 +416,10 @@ int main(int argc, char** argv) {
     // wired above, so `bash`, `task`, the git_* family, etc. behave exactly
     // as they do in the TUI (filesystem tools stay sandboxed to --workspace).
     if (args.subcommand == "mcp-serve") {
-#if AGENTTY_MCP
         auth::prewarm_anthropic();   // `task`/web tools reuse the warm session
         int rc = mcp::serve_stdio();
         persistence::flush_pending_saves();
         return rc;
-#else
-        std::fprintf(stderr,
-            "agentty: this build has MCP disabled (configure with "
-            "-DAGENTTY_MCP=ON to enable `mcp-serve`).\n");
-        return 2;
-#endif
     }
 
     // ── ACP mode: run as a headless agent over stdio (Zed et al.) ───────

@@ -1,9 +1,7 @@
 #include "agentty/tool/registry.hpp"
 
-#if AGENTTY_MCP
 #include "agentty/mcp/client.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
-#endif
 
 #include <algorithm>
 #include <format>
@@ -101,7 +99,6 @@ namespace {
 std::vector<ToolDef> build_registry() {
     std::vector<ToolDef> r = build_mcp_tool_defs();
 
-#if AGENTTY_MCP
     // ── MCP capability providers (essay §2/§10) ──────────────────────────
     // Connect to any configured MCP servers and append their tools as plain
     // ToolDefs — the model can't tell them from local tools. LAZY + OPT-IN:
@@ -115,7 +112,6 @@ std::vector<ToolDef> build_registry() {
         auto mcp_tools = mcp::mcp_tools(s_pool);
         for (auto& t : mcp_tools) r.push_back(std::move(t));
     }
-#endif
 
     return r;
 }
@@ -153,23 +149,18 @@ const std::unordered_map<std::string, const ToolDef*>& index() {
 }
 } // namespace
 
-#if AGENTTY_MCP
 namespace detail { const ToolDef* find_live_mcp(std::string_view name); }
-#endif
 
 const ToolDef* find(std::string_view name) {
     const auto& m = index();
     if (auto it = m.find(std::string{name}); it != m.end()) return it->second;
-#if AGENTTY_MCP
     // Live fallback: an MCP server may have advertised a NEW tool after
     // startup via tools/list_changed, so it isn't in the static index. The
     // wire_tools() snapshot owns stable storage for those; search it.
     if (const auto* td = detail::find_live_mcp(name)) return td;
-#endif
     return nullptr;
 }
 
-#if AGENTTY_MCP
 namespace {
 // Process-wide snapshot of (static registry ∪ live MCP tools), rebuilt only
 // when the MCP generation moves (a *_list_changed notification). The vector
@@ -231,23 +222,16 @@ const ToolDef* find_live_mcp(std::string_view name) {
     return nullptr;
 }
 } // namespace detail
-#endif // AGENTTY_MCP
 
 const std::vector<ToolDef>& wire_tools() {
-#if AGENTTY_MCP
     auto& c = wire_cache();
     std::lock_guard<std::mutex> lk(c.mu);
     if (refresh_wire_cache_locked(c)) return c.tools;
-#endif
     return registry();
 }
 
 unsigned long mcp_generation() noexcept {
-#if AGENTTY_MCP
     return mcp::mcp_generation();
-#else
-    return 0;
-#endif
 }
 
 } // namespace agentty::tools
