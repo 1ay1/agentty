@@ -47,6 +47,9 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
+#if AGENTTY_MCP
+#include "agentty/mcp/serve.hpp"
+#endif
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
@@ -84,6 +87,8 @@ void print_usage() {
         "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"
         "                    (`agentty airgap --help` for details)\n"
         "  acp               Run as an ACP agent over stdio (for Zed et al.)\n"
+        "  mcp-serve         Serve agentty's native tools over MCP (stdio).\n"
+        "                    Point any MCP client at `agentty mcp-serve`.\n"
         "  skills            List discovered skills with spec-lint diagnostics\n"
         "                    (exit 1 on warnings — CI-friendly validate)\n"
         "  version           Print the agentty version and exit\n"
@@ -135,7 +140,7 @@ Args parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "login" || a == "logout" || a == "status" || a == "help"
-         || a == "acp" || a == "skills") {
+         || a == "acp" || a == "skills" || a == "mcp-serve") {
             out.subcommand = std::move(a);
         } else if (a == "airgap") {
             // Hand the remaining argv tail to the airgap subcommand verbatim
@@ -394,6 +399,26 @@ int main(int argc, char** argv) {
           :                                 std::string{"claude-opus-4-5"};
         tools::subagent::install(tools::subagent::Config{
             provider_auth, std::move(sa_model), true});
+    }
+
+    // ── MCP server mode: serve agentty's native tools over MCP (stdio) ──
+    // No maya, no terminal UI. An external MCP client (Claude Desktop, an
+    // IDE, another agent) drives tools/list + tools/call over stdin/stdout;
+    // diagnostics go to stderr. Reuses the provider/subagent/sandbox seams
+    // wired above, so `bash`, `task`, the git_* family, etc. behave exactly
+    // as they do in the TUI (filesystem tools stay sandboxed to --workspace).
+    if (args.subcommand == "mcp-serve") {
+#if AGENTTY_MCP
+        auth::prewarm_anthropic();   // `task`/web tools reuse the warm session
+        int rc = mcp::serve_stdio();
+        persistence::flush_pending_saves();
+        return rc;
+#else
+        std::fprintf(stderr,
+            "agentty: this build has MCP disabled (configure with "
+            "-DAGENTTY_MCP=ON to enable `mcp-serve`).\n");
+        return 2;
+#endif
     }
 
     // ── ACP mode: run as a headless agent over stdio (Zed et al.) ───────
