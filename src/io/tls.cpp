@@ -332,6 +332,28 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     SSL* ssl = SSL_new(ctx);
     if (!ssl) return nullptr;
 
+    // RAII scaffold for the partially-built SSL: until we commit() at the
+    // end, any early return frees both the SSL and the owned SNI host key
+    // we stash in ex_data. Previously the SSL_set_fd failure path had to
+    // hand-unwind `delete host_key; SSL_free(ssl)`; a future early-return
+    // added above it would have leaked one or both. The guard makes the
+    // half-built handle a move-only resource that cleans itself up.
+    struct Building {
+        SSL*         ssl  = nullptr;
+        std::string* host = nullptr;   // owned ex_data key, freed unless committed
+        int          ex   = -1;
+        bool         live = true;
+        Building(SSL* s, int ex_idx) : ssl(s), ex(ex_idx) {}
+        Building(const Building&)            = delete;
+        Building& operator=(const Building&) = delete;
+        ~Building() {
+            if (!live) return;
+            if (host) { if (ex >= 0) SSL_set_ex_data(ssl, ex, nullptr); delete host; }
+            if (ssl)  SSL_free(ssl);
+        }
+        SSL* commit() noexcept { live = false; return ssl; }   // ownership escapes
+    } building{ssl, sni_ex_index()};
+
     // SNI: required for virtual-hosted edges (Anthropic's Cloudflare front).
     // null-terminate via a local string — string_view has no guarantee.
     std::string host{sni_host};
@@ -345,9 +367,9 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     // upcoming handshake is a 1-RTT resume. Also stash an owned copy of the
     // host in ex_data so new_session_cb knows which key to file the fresh
     // ticket under (it fires post-handshake, only sees the SSL*). The string
-    // is freed in free_ssl.
-    auto* host_key = new std::string{host};
-    SSL_set_ex_data(ssl, sni_ex_index(), host_key);
+    // is freed in free_ssl on the happy path, or by ~Building on failure.
+    building.host = new std::string{host};
+    SSL_set_ex_data(ssl, sni_ex_index(), building.host);
     {
         std::lock_guard<std::mutex> lk(sess_mu());
         auto& m = sess_map();
@@ -356,12 +378,10 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     }
 
     if (SSL_set_fd(ssl, fd) != 1) {
-        delete host_key;
-        SSL_free(ssl);
-        return nullptr;
+        return nullptr;   // ~Building frees host key + SSL
     }
     SSL_set_connect_state(ssl);
-    return ssl;
+    return building.commit();
 }
 
 void free_ssl(SSL* ssl) noexcept {
