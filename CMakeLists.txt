@@ -404,6 +404,7 @@ set(AGENTTY_ACP_SOURCES
 set(AGENTTY_MCP_SOURCES
     src/mcp/bridge.cpp
     src/mcp/http_server.cpp
+    src/mcp/serve.cpp
 )
 
 set(AGENTTY_DIFF_SOURCES
@@ -683,6 +684,14 @@ target_include_directories(agentty PRIVATE include)
 # `project(agentty VERSION X.Y.Z)`. Single source of truth — bumping
 # the project line bumps every site that reads the macro.
 target_compile_definitions(agentty PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+if(AGENTTY_MCP)
+    # main.cpp branches on AGENTTY_MCP (the `mcp-serve` subcommand). The objlibs
+    # get this macro via agentty_objlib(); main.cpp is compiled straight into
+    # the exe target, so define it here too.
+    target_compile_definitions(agentty PRIVATE AGENTTY_MCP=1)
+else()
+    target_compile_definitions(agentty PRIVATE AGENTTY_MCP=0)
+endif()
 target_link_libraries(agentty PRIVATE
     maya::maya
     acp::acp
