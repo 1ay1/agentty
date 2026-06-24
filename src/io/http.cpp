@@ -1345,7 +1345,10 @@ std::size_t plain_parse_head(std::string_view in, int& status, Headers& headers)
         head.substr(0, eol == std::string_view::npos ? head.size() : eol);
     status = 0;
     if (auto sp = status_line.find(' '); sp != std::string_view::npos) {
-        for (size_t k = sp + 1; k < status_line.size()
+        // HTTP status is exactly 3 digits; cap the accumulation so a hostile
+        // or broken server sending a long digit run can't overflow `int`
+        // (signed overflow is UB). Stop at the first non-digit or 4th digit.
+        for (size_t k = sp + 1; k < status_line.size() && k <= sp + 3
                  && status_line[k] >= '0' && status_line[k] <= '9'; ++k)
             status = status * 10 + (status_line[k] - '0');
     }
@@ -1387,15 +1390,21 @@ struct ChunkDecoder {
         while (p < pending.size()) {
             auto ln = pending.find("\r\n", p);
             if (ln == std::string::npos) break;            // need more bytes
-            size_t sz = 0; bool any = false;
+            size_t sz = 0; bool any = false; bool overflow = false;
             for (size_t k = p; k < ln; ++k) {
                 char c = pending[k];
                 int d = (c >= '0' && c <= '9') ? c - '0'
                       : (c >= 'a' && c <= 'f') ? c - 'a' + 10
                       : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
                 if (d < 0) break;          // chunk-ext (";...") or CRLF — stop
+                // Guard the accumulation: a hostile/garbled size field must
+                // not overflow size_t (which would wrap the full-chunk bounds
+                // check below and corrupt the decode). Cap well under any real
+                // chunk size; >256 MiB is malformed for our use.
+                if (sz > (static_cast<size_t>(1) << 28)) { overflow = true; break; }
                 sz = sz * 16 + static_cast<size_t>(d); any = true;
             }
+            if (overflow) { done = true; return false; }    // malformed: abort
             if (!any && ln == p) { p = ln + 2; continue; }  // stray CRLF
             size_t data_start = ln + 2;
             if (sz == 0) { done = true; return true; }       // last chunk
@@ -1727,7 +1736,11 @@ h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
     {
         auto sp = status_line.find(' ');
         if (sp != std::string_view::npos) {
-            for (size_t k = sp + 1; k < status_line.size() && status_line[k] >= '0' && status_line[k] <= '9'; ++k)
+            // Cap at 3 digits: HTTP status codes are 3 digits, and an
+            // unbounded accumulator overflows `int` (UB) on a broken/hostile
+            // status line.
+            for (size_t k = sp + 1; k < status_line.size() && k <= sp + 3
+                     && status_line[k] >= '0' && status_line[k] <= '9'; ++k)
                 status = status * 10 + (status_line[k] - '0');
         }
     }
@@ -1758,15 +1771,17 @@ h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
             while (p < body.size()) {
                 auto ln = body.find("\r\n", p);
                 if (ln == std::string::npos) break;
-                size_t sz = 0;
+                size_t sz = 0; bool overflow = false;
                 for (size_t k = p; k < ln; ++k) {
                     char c = body[k];
                     int d = (c >= '0' && c <= '9') ? c - '0'
                           : (c >= 'a' && c <= 'f') ? c - 'a' + 10
                           : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
                     if (d < 0) break;
+                    if (sz > (static_cast<size_t>(1) << 28)) { overflow = true; break; }
                     sz = sz * 16 + static_cast<size_t>(d);
                 }
+                if (overflow) break;          // malformed size field
                 p = ln + 2;
                 if (sz == 0) break;
                 if (p + sz > body.size()) break;
