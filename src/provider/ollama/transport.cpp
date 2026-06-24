@@ -900,6 +900,13 @@ std::string json_protocol_addendum(const std::vector<provider::ToolSpec>& tools)
          "(another tool call, or a \"response\" object when the task is done).\n";
     s += "- `tool_name` must be one of the listed names, never an action verb "
          "like read/write/run.\n";
+    s += "- Tools act on LOCAL files and commands only. `read` opens a local "
+         "file by path — it does NOT fetch a URL. To get a web page use "
+         "`web_fetch` with a `url`; to search the web use `web_search`. Never "
+         "pass an http(s):// address to `read`.\n";
+    s += "- If a tool result is an ERROR, do NOT re-issue the same call — it "
+         "will fail again. Fix the arguments (a path that doesn't exist, or "
+         "the wrong tool), or answer the user with what you already have.\n";
     s += "- If you do NOT need a tool (a greeting, or a question you can answer "
          "from the conversation), set \"tool_name\" to \"response\" and put your "
          "reply text in \"tool_args\": {\"text\": \"...\"}.\n\n";

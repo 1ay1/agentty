@@ -1213,6 +1213,12 @@ if(AGENTTY_BUILD_TESTS)
     # re-leaks a tool call it already ran this turn must not run it twice.
     agentty_add_full_test(salvage_dedup_test)
 
+    # doom_loop_test — agent_loop_should_break (cmd_factory.cpp): the
+    # circuit breaker that stops a non-converging weak-model tool loop
+    # (same failing call repeated, or a runaway tool-step count) before it
+    # spins until the user hits Esc.
+    agentty_add_full_test(doom_loop_test)
+
     # acp_integration_test — end-to-end ACP agent exercise. Drives a real
     # agentty::acp::AgentServer (on the acp-cpp library) through
     # initialize → session/new → session/prompt over an in-memory transport
@@ -1303,6 +1309,7 @@ if(AGENTTY_BUILD_TESTS)
         visual_hash_coverage_test
         tool_result_budget_test
         salvage_dedup_test
+        doom_loop_test
         acp_integration_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz

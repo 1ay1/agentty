@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <ranges>
+#include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -752,6 +754,72 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
     return out;
 }
 
+// ── Doom-loop circuit breaker ────────────────────────────────────────────────
+// Caps a non-converging weak-model tool loop. See the header doc on
+// agent_loop_should_break for the rationale. Walks BACK from the end of the
+// transcript over the current agent run (everything after the last real User
+// message that isn't a synthetic TOOL-RESULT carrier) and applies two caps.
+std::optional<LoopBreak> agent_loop_should_break(
+        const std::vector<Message>& messages) {
+    // Tunables. Generous enough that a legitimate multi-step task (search →
+    // read → edit → verify …) never trips, tight enough that a stuck model
+    // bails in seconds rather than spinning until the user hits Esc.
+    constexpr int kRepeatLimit  = 3;   // same failing call N times → stop
+    constexpr int kMaxToolTurns = 25;  // tool-call turns w/o a text answer
+
+    // Find the start of the current run: the last User message. (Sub-turn
+    // continuations push Assistant placeholders; tool results live inside the
+    // Assistant messages' tool_calls, so a User message only appears at a real
+    // human turn boundary.)
+    std::size_t run_start = 0;
+    for (std::size_t i = messages.size(); i-- > 0;) {
+        if (messages[i].role == Role::User) { run_start = i + 1; break; }
+    }
+
+    int tool_turns = 0;
+    // (name + canonical args) → [count, all_failed]. Detects a repeated dead
+    // call regardless of the synthetic id minted per attempt.
+    std::unordered_map<std::string, std::pair<int, bool>> seen;
+    for (std::size_t i = run_start; i < messages.size(); ++i) {
+        const auto& msg = messages[i];
+        if (msg.role != Role::Assistant || msg.tool_calls.empty()) continue;
+        ++tool_turns;
+        for (const auto& tc : msg.tool_calls) {
+            // Only settled calls inform the breaker; in-flight ones are the
+            // batch we're about to (re)kick.
+            if (!tc.is_terminal()) continue;
+            std::string key = tc.name.value + '\0'
+                + (tc.args.is_null() ? std::string{} : tc.args.dump());
+            auto& [count, all_failed] = seen[key];
+            if (count == 0) all_failed = true;
+            ++count;
+            if (!tc.is_failed()) all_failed = false;
+        }
+    }
+
+    for (const auto& [key, v] : seen) {
+        const auto& [count, all_failed] = v;
+        if (count >= kRepeatLimit && all_failed) {
+            auto nul = key.find('\0');
+            std::string name = nul == std::string::npos ? key : key.substr(0, nul);
+            return LoopBreak{
+                "Stopped: the `" + name + "` tool was called "
+                + std::to_string(count) + " times with the same arguments and "
+                "failed every time. Re-trying the identical call won't help — "
+                "change the arguments (check the path/target exists, or pick a "
+                "different tool), or answer the user directly with what you "
+                "already know."};
+        }
+    }
+    if (tool_turns >= kMaxToolTurns) {
+        return LoopBreak{
+            "Stopped after " + std::to_string(tool_turns) + " tool steps "
+            "without finishing. Summarise what you found and answer the user "
+            "directly, or ask them how to proceed."};
+    }
+    return std::nullopt;
+}
+
 Cmd<Msg> kick_pending_tools(Model& m) {
     if (m.d.current.messages.empty()) return Cmd<Msg>::none();
     auto& last = m.d.current.messages.back();
@@ -874,7 +942,24 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             return tc.is_terminal();
         });
         if (has_results) {
-            // Used to: abort the sub-turn and force a compaction round
+            // ── Doom-loop circuit breaker ────────────────────────────────
+            // Before spending another model completion, check whether this
+            // agent run has stopped converging (a weak model re-trying a dead
+            // call, or a runaway tool-step count). If so, DON'T re-stream:
+            // surface the nudge as the run's final assistant turn and drop to
+            // Idle, so the loop ends in seconds instead of spinning until the
+            // user hits Esc. The nudge text also lands in history, so if the
+            // user follows up the model sees why it stopped.
+            if (auto brk = agent_loop_should_break(m.d.current.messages)) {
+                m.s.phase = phase::Idle{};
+                Message note;
+                note.role = Role::Assistant;
+                note.text = std::move(brk->reason);
+                m.d.current.messages.push_back(std::move(note));
+                deps().save_thread(m.d.current);
+                return Cmd<Msg>::batch(std::move(cmds));
+            }
+
             // when the prefix estimate crossed 90% of context_max,
             // surfacing as a user-visible "context limit reached —
             // compacting before continuing…" toast that yanked the

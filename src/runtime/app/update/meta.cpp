@@ -332,8 +332,15 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // (or, for (a), just re-fire the scheduler) and call
             // kick_pending_tools, which either continues the turn
             // (post-tool sub-turn) or drops cleanly to Idle.
+            //
+            // kToolWedge is kept just ABOVE bash's own max self-timeout
+            // (300s, the `timeout` arg ceiling in mcp-cpp shell.cpp) so a
+            // legitimately long user-set bash command finishes on its own
+            // terms before this last-resort net ever trips. The real fix for
+            // a SPINNING weak-model loop is the doom-loop breaker in
+            // kick_pending_tools, not this hung-syscall net.
             constexpr auto kNoRunningGrace = std::chrono::seconds(30);
-            constexpr auto kToolWedge      = std::chrono::seconds(600);
+            constexpr auto kToolWedge      = std::chrono::seconds(330);
             if (m.s.is_executing_tool()
                 && !m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {

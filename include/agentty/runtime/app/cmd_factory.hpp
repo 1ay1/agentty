@@ -6,6 +6,10 @@
 
 #include <maya/maya.hpp>
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 
@@ -67,6 +71,30 @@ struct SchedDecision {
 };
 [[nodiscard]] SchedDecision schedule_parallel_batch(
     const std::vector<ToolUse>& batch);
+
+// ── Doom-loop circuit breaker (pure; exposed for tests) ──────────────────────
+// Weak local models (qwen2.5-coder, codellama, …) routinely fall into a
+// non-converging tool loop: they pick the wrong tool for a goal (e.g. `read`
+// on a URL or a file that doesn't exist), get an error result, and re-issue a
+// near-identical call indefinitely. With no native completion signal the main
+// agent loop would spin until the user hits Esc — the symptom behind the
+// "tool usage is fucked" reports. Mirrors the iteration / repeated-failure
+// caps every serious local-agent framework ships (Qwen-Agent, aider, cline).
+//
+// Given the full message history of the CURRENT agent turn (the run since the
+// last real User message), returns a non-empty nudge string when the loop
+// should be force-stopped, or std::nullopt to keep going. Two triggers:
+//   (1) REPEAT: the same (tool, args) call appears >= kRepeatLimit times and
+//       its results were failures — the model is stuck re-trying a dead call.
+//   (2) RUNAWAY: the run has made >= kMaxToolTurns assistant tool-call turns
+//       without ever producing a plain-text answer — unbounded spend.
+// The returned text is surfaced to the model as the final assistant turn so
+// it can recover gracefully (and the user sees why the loop stopped).
+struct LoopBreak {
+    std::string reason;     // user/model-facing explanation
+};
+[[nodiscard]] std::optional<LoopBreak> agent_loop_should_break(
+    const std::vector<Message>& messages);
 
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
