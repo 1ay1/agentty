@@ -1141,48 +1141,9 @@ if(AGENTTY_BUILD_TESTS)
     # transport: native build_messages (object-form tool args + role:tool
     # results + images), NDJSON parse (structured tool_calls, plain text,
     # NO content-salvage, error frames), and the local system prompt shape.
-    add_executable(ollama_transport_test EXCLUDE_FROM_ALL
-        tests/ollama_transport_test.cpp
-        ${AGENTTY_IO_SOURCES}
-        ${AGENTTY_WORKSPACE_SOURCES}
-        ${AGENTTY_AIRGAP_SOURCES}
-        ${AGENTTY_PROVIDER_SOURCES}
-        ${AGENTTY_DIFF_SOURCES}
-        ${AGENTTY_RAG_SOURCES}
-        ${AGENTTY_TOOL_SOURCES}
-        ${AGENTTY_MCP_SOURCES}
-        ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-    )
-    target_include_directories(ollama_transport_test PRIVATE include)
-    target_compile_definitions(ollama_transport_test PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}"
-        AGENTTY_MCP=1)
-    target_link_libraries(ollama_transport_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(TARGET mcp::mcp)
-        target_link_libraries(ollama_transport_test PRIVATE mcp::mcp)
-    endif()
-    if(TARGET mcp::tools)
-        target_link_libraries(ollama_transport_test PRIVATE mcp::tools)
-    endif()
-    if(WIN32)
-        target_link_libraries(ollama_transport_test PRIVATE
-            ws2_32 crypt32 shell32 winmm
-            user32 gdi32 gdiplus shlwapi)
-    endif()
-    if(APPLE)
-        target_link_libraries(ollama_transport_test PRIVATE
-            "-framework Security"
-            "-framework CoreFoundation")
-    endif()
-    add_test(NAME ollama_transport_test COMMAND ollama_transport_test)
+    # Reuses the shared OBJECT libs (no full-stack recompile) like the
+    # sibling openai_transport_test.
+    agentty_add_full_test(ollama_transport_test)
 
     # rag_test — document/knowledge RAG unit tests (chunker, BM25 ranking,
     # RRF fusion, cosine, Corpus BM25-only search). No network: the embed
