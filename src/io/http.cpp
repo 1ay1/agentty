@@ -1066,6 +1066,24 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     sctx.stream_id = sid;
 
     // --- I/O loop ---
+    //
+    // The request body is a single concurrent select-pump: each iteration
+    // flushes pending outbound frames, drains inbound frames, then waits in
+    // poll() for the next readiness edge. It is genuinely a loop, not a
+    // linear state sequence — send/recv/PING/idle-clock/cancel are all live
+    // every iteration — so it stays a loop. What WAS scattered across two
+    // enums (PumpOut/PumpIn) plus ad-hoc booleans is folded into ONE
+    // explicit per-iteration outcome, `PumpStep`, evaluated by step_io()
+    // below. The loop dispatches on that single value instead of
+    // re-deriving "are we done / blocked / dead" from five separate flags,
+    // so every exit reason is named and total (the switch is exhaustive).
+    enum class PumpStep {
+        Progress,    // made forward progress (or merely would-block); keep going
+        StreamDone,  // the stream closed cleanly (sctx.completed) — settle
+        PeerClosed,  // peer closed the TLS session mid-stream — error out
+        WantWrite,   // TLS couldn't flush all outbound bytes; add POLLOUT
+    };
+
     std::optional<clock_t_::time_point> deadline;
     if (tos.total.count() > 0) deadline = clock_t_::now() + tos.total;
 
@@ -1078,6 +1096,29 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     auto last_ping = start_at;
 
     std::string err;
+
+    // One pump iteration: flush outbound, drain inbound, classify. Returns
+    // the typed PumpStep, or a typed HttpError on a hard protocol failure.
+    // Refreshes last_rx when inbound bytes arrived. Pure transport — the
+    // poll()/liveness/cancel bookkeeping stays in the loop below.
+    auto step_io = [&]() -> std::expected<PumpStep, HttpError> {
+        auto out = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
+                                  pend_len_, &err);
+        if (out == PumpOut::Error) return std::unexpected(HttpError::protocol(err));
+        size_t bytes_in = 0;
+        auto in = pump_recv(ssl_, session_, &err, &bytes_in);
+        if (in == PumpIn::Error)   return std::unexpected(HttpError::protocol(err));
+        if (bytes_in > 0) last_rx = clock_t_::now();
+        if (in == PumpIn::Closed) {
+            // Peer closed the TLS session.  If the stream also closed,
+            // we're done; otherwise surface as an error.
+            return sctx.completed ? PumpStep::StreamDone : PumpStep::PeerClosed;
+        }
+        if (sctx.completed) return PumpStep::StreamDone;
+        if (out == PumpOut::WantWrite) return PumpStep::WantWrite;
+        return PumpStep::Progress;
+    };
+
     while (!sctx.completed) {
         if (cancel && cancel->is_cancelled()) {
             nghttp2_submit_rst_stream(session_, NGHTTP2_FLAG_NONE, sid,
@@ -1097,19 +1138,20 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
             }
         }
 
-        auto out = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
-                                  pend_len_, &err);
-        if (out == PumpOut::Error) return std::unexpected(HttpError::protocol(err));
-        size_t bytes_in = 0;
-        auto in = pump_recv(ssl_, session_, &err, &bytes_in);
-        if (in == PumpIn::Error)   return std::unexpected(HttpError::protocol(err));
-        if (bytes_in > 0) last_rx = clock_t_::now();
-        if (in == PumpIn::Closed) {
-            // Peer closed the TLS session.  If the stream also closed,
-            // we're done; otherwise surface as an error.
-            if (sctx.completed) break;
-            return std::unexpected(HttpError::peer_closed(
-                "connection closed by peer mid-stream"));
+        auto step = step_io();
+        if (!step) return std::unexpected(std::move(step).error());
+        bool want_write_block = false;
+        switch (*step) {
+            case PumpStep::StreamDone:
+                break;                       // loop guard / post-loop settles
+            case PumpStep::PeerClosed:
+                return std::unexpected(HttpError::peer_closed(
+                    "connection closed by peer mid-stream"));
+            case PumpStep::WantWrite:
+                want_write_block = true;
+                break;
+            case PumpStep::Progress:
+                break;
         }
 
         if (sctx.completed) break;
@@ -1131,9 +1173,10 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
 
         // Decide the poll mask.  Always want POLLIN so we can catch
         // unsolicited frames (WINDOW_UPDATE, PING) promptly.  Add POLLOUT
-        // only if nghttp2 has bytes ready to send.
+        // only if nghttp2 has bytes ready to send, or TLS left an outbound
+        // frame half-flushed this iteration (PumpStep::WantWrite).
         short mask = POLLIN;
-        if (nghttp2_session_want_write(session_) || out == PumpOut::WantWrite)
+        if (nghttp2_session_want_write(session_) || want_write_block)
             mask |= POLLOUT;
         if (!nghttp2_session_want_read(session_)
             && !nghttp2_session_want_write(session_))
