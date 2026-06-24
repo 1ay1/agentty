@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdint>
+#include <limits>
 #include <span>
 
 namespace agentty::tools::util {
@@ -100,8 +102,23 @@ std::optional<std::string> ArgReader::require_str(std::string_view key) const {
 int ArgReader::integer(std::string_view key, int def) const {
     const json* v = raw(key);
     if (!v || v->is_null()) return def;
-    if (v->is_number_integer()) return v->get<int>();
-    if (v->is_number_float())   return static_cast<int>(v->get<double>());
+    if (v->is_number_integer()) {
+        // Clamp out-of-range JSON integers to int bounds instead of letting
+        // get<int>() narrow/wrap (model-supplied; must never UB).
+        std::int64_t n = v->get<std::int64_t>();
+        if (n > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
+        if (n < std::numeric_limits<int>::min()) return std::numeric_limits<int>::min();
+        return static_cast<int>(n);
+    }
+    if (v->is_number_float()) {
+        // float -> int is UB when the value is outside int range; clamp first.
+        double d = v->get<double>();
+        if (d >= static_cast<double>(std::numeric_limits<int>::max()))
+            return std::numeric_limits<int>::max();
+        if (d <= static_cast<double>(std::numeric_limits<int>::min()))
+            return std::numeric_limits<int>::min();
+        return static_cast<int>(d);
+    }
     if (v->is_string()) {
         const auto& s = v->get_ref<const std::string&>();
         int out = def;
