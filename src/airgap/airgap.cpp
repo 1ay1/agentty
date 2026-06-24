@@ -40,7 +40,15 @@
 #include <utility>
 #include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
 #  include <spawn.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
@@ -53,7 +61,18 @@ namespace agentty::airgap {
 
 namespace {
 
-#if !defined(_WIN32)
+// Resolve the user's home directory portably: $HOME on POSIX, %USERPROFILE%
+// (or %HOMEDRIVE%%HOMEPATH%) on Windows. Empty when none is set.
+std::string home_dir() {
+    if (const char* h = std::getenv("HOME"); h && *h) return h;
+#if defined(_WIN32)
+    if (const char* up = std::getenv("USERPROFILE"); up && *up) return up;
+    const char* hd = std::getenv("HOMEDRIVE");
+    const char* hp = std::getenv("HOMEPATH");
+    if (hd && *hd && hp && *hp) return std::string{hd} + hp;
+#endif
+    return {};
+}
 
 void print_usage() {
     std::fprintf(stderr,
@@ -111,7 +130,60 @@ void print_usage() {
 
 // Synchronously spawn `argv[0]` with the given argv and wait for it.
 // Inherits stdin/stdout/stderr.  Returns the child's exit code, or -1 on
-// spawn failure.
+// spawn failure. PATH-resolved on both platforms.
+#if defined(_WIN32)
+// Quote one token per the MSVCRT/CommandLineToArgvW rules so the child
+// recovers the exact argument.
+std::string win_quote_arg(const std::string& a) {
+    if (!a.empty() && a.find_first_of(" \t\n\v\"") == std::string::npos)
+        return a;
+    std::string out = "\"";
+    for (auto it = a.begin();; ++it) {
+        std::size_t bs = 0;
+        while (it != a.end() && *it == '\\') { ++it; ++bs; }
+        if (it == a.end()) { out.append(bs * 2, '\\'); break; }
+        else if (*it == '"') { out.append(bs * 2 + 1, '\\'); out.push_back('"'); }
+        else { out.append(bs, '\\'); out.push_back(*it); }
+    }
+    out.push_back('"');
+    return out;
+}
+
+int run_sync(const std::vector<std::string>& argv) {
+    if (argv.empty()) return -1;
+    std::string cmdline = win_quote_arg(argv[0]);
+    for (std::size_t i = 1; i < argv.size(); ++i) {
+        cmdline.push_back(' ');
+        cmdline += win_quote_arg(argv[i]);
+    }
+
+    STARTUPINFOA si{};
+    si.cb      = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = ::GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = ::GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = ::GetStdHandle(STD_ERROR_HANDLE);
+
+    PROCESS_INFORMATION pi{};
+    // lpApplicationName=nullptr → CreateProcess does PATH + .exe resolution
+    // on the first cmdline token, matching execvp/posix_spawnp semantics.
+    BOOL ok = ::CreateProcessA(nullptr, cmdline.data(), nullptr, nullptr,
+                               /*bInheritHandles=*/TRUE, 0, nullptr, nullptr,
+                               &si, &pi);
+    if (!ok) {
+        std::fprintf(stderr,
+            "agentty airgap: failed to spawn `%s` (CreateProcess err %lu)\n",
+            argv[0].c_str(), static_cast<unsigned long>(::GetLastError()));
+        return -1;
+    }
+    ::CloseHandle(pi.hThread);
+    ::WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    ::GetExitCodeProcess(pi.hProcess, &code);
+    ::CloseHandle(pi.hProcess);
+    return static_cast<int>(code);
+}
+#else
 int run_sync(const std::vector<std::string>& argv) {
     if (argv.empty()) return -1;
 
@@ -143,14 +215,15 @@ int run_sync(const std::vector<std::string>& argv) {
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
 }
+#endif
 
 // Copy ~/.config/agentty/credentials.json from this laptop to the remote.
 // Three steps: ensure the remote directory exists, scp the file, fix
 // perms.  Each step is run synchronously; we abort on the first failure
 // so the user sees exactly which step blew up.
 int copy_credentials(const std::string& remote) {
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) {
+    std::string home = home_dir();
+    if (home.empty()) {
         std::fprintf(stderr, "agentty airgap: HOME is unset.\n");
         return 1;
     }
@@ -421,18 +494,19 @@ std::string sh_squote(std::string_view v) {
     argv.push_back(remote);
     argv.push_back(std::move(remote_cmd));
 
-    std::vector<char*> raw;
-    raw.reserve(argv.size() + 1);
-    for (auto& s : argv) raw.push_back(s.data());
-    raw.push_back(nullptr);
-
-    ::execvp("ssh", raw.data());
-    // Only reachable on execvp failure (PATH miss, etc.).
-    std::fprintf(stderr,
-        "agentty airgap: failed to exec `ssh`: %s\n"
-        "             ensure OpenSSH client is installed and on PATH.\n",
-        std::strerror(errno));
-    std::_Exit(1);
+    // Spawn ssh, inherit our stdio (so the remote TUI drives this terminal),
+    // wait, and exit with its code. We used to execvp() to replace this
+    // process, but spawn-and-forward-exit is identical from the user's shell
+    // and works on Windows too (no execvp there). PATH-resolves `ssh` on both
+    // platforms (OpenSSH ships with Windows 10+).
+    int rc = run_sync(argv);
+    if (rc < 0) {
+        std::fprintf(stderr,
+            "agentty airgap: failed to run `ssh`.\n"
+            "             ensure the OpenSSH client is installed and on PATH.\n");
+        std::exit(1);
+    }
+    std::exit(rc);
 }
 
 // Emit a ready-to-paste Zed `agent_servers` config that makes Zed itself
@@ -482,12 +556,13 @@ void print_acp_config(const std::string& remote,
 
     // Best-effort: tell the user exactly which file to paste into.
     std::string settings_hint;
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        // Linux: ~/.config/zed/settings.json. macOS uses the same path under
-        // ~/.config for Zed too. Print it if it exists, else still name it.
-        fs::path p = fs::path{home} / ".config" / "zed" / "settings.json";
-        settings_hint = p.string();
-    }
+#if defined(_WIN32)
+    if (const char* appdata = std::getenv("APPDATA"); appdata && *appdata)
+        settings_hint = (fs::path{appdata} / "Zed" / "settings.json").string();
+#else
+    if (std::string home = home_dir(); !home.empty())
+        settings_hint = (fs::path{home} / ".config" / "zed" / "settings.json").string();
+#endif
 
     std::fprintf(stderr,
         "agentty airgap --acp: add this to Zed's settings.json%s%s\n"
@@ -511,22 +586,9 @@ void print_acp_config(const std::string& remote,
         args_json.c_str(), remote.c_str(), remote.c_str());
 }
 
-#endif // !_WIN32
-
 } // namespace
 
 int cmd_airgap(int argc, char** argv) {
-#if defined(_WIN32)
-    (void)argc; (void)argv;
-    std::fprintf(stderr,
-        "agentty airgap: not yet supported on Windows.\n"
-        "             until Win32 plumbing lands, do it manually:\n"
-        "               ssh -R 1080 user@host\n"
-        "             then on the host:\n"
-        "               $env:AGENTTY_SOCKS_PROXY = \"localhost:1080\"\n"
-        "               agentty\n");
-    return 1;
-#else
     bool        setup_mode = false;
     bool        clipboard_relay = false;
     bool        acp_mode = false;
@@ -597,7 +659,6 @@ int cmd_airgap(int argc, char** argv) {
     }
 
     exec_ssh(remote, remote_agentty, clipboard_relay);  // [[noreturn]]
-#endif
 }
 
 } // namespace agentty::airgap
