@@ -75,4 +75,13 @@ void select(Selection s) { g_active = std::move(s); }
 
 const Selection& active() { return g_active; }
 
+std::string provider_display_name(const Selection& s) {
+    if (s.kind == Kind::Anthropic) return "Anthropic";
+    // OpenAI-family: map the endpoint label ("groq", "ollama", …) to its
+    // registry display name; fall back to the raw label for a custom host.
+    const std::string& lbl = s.openai_endpoint.label;
+    if (const auto* p = preset_for(lbl)) return std::string{p->label};
+    return lbl.empty() ? std::string{"OpenAI"} : lbl;
+}
+
 } // namespace agentty::provider

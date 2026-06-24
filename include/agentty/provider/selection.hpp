@@ -44,6 +44,11 @@ void select(Selection s);
 // Read the active selection. Defaults to Anthropic before select() runs.
 [[nodiscard]] const Selection& active();
 
+// Human display name for the active backend — "Anthropic", "Groq",
+// "Ollama", "OpenAI", or the raw endpoint label for a custom host with
+// no preset row. Used by the status bar provider badge.
+[[nodiscard]] std::string provider_display_name(const Selection& s);
+
 // Resolve the AuthHeader for a provider spec, registry-driven.
 //   • Anthropic   → derived from `anthropic_creds` (OAuth / x-api-key from
 //                   `agentty login`), passed in by the caller.
