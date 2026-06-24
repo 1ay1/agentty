@@ -83,6 +83,29 @@ private:
     rag::Chunk        chunk_;
 };
 
+// A source whose hit has a CONFIGURABLE identity (path + line span). Two of
+// these with the same identity simulate the same logical chunk surfacing from
+// two distinct sources (overlapping corpora) — the router must collapse them.
+class IdSource final : public rag::KnowledgeSource {
+public:
+    IdSource(std::string n, std::string path, int ls, int le, std::string body)
+        : name_(std::move(n)) {
+        chunk_.path = std::move(path);
+        chunk_.line_start = ls;
+        chunk_.line_end = le;
+        chunk_.text = std::move(body);
+    }
+    std::string_view name() const noexcept override { return name_; }
+    std::vector<rag::Hit> retrieve(std::string_view, std::size_t k) const override {
+        if (k == 0) return {};
+        rag::Hit h; h.chunk = &chunk_; h.score = 1.0; h.source = this;
+        return {h};
+    }
+private:
+    std::string name_;
+    rag::Chunk  chunk_;
+};
+
 const rag::EmbedConfig kNoEmbed{};  // empty model → BM25-only, no network
 
 // (a) CorpusSource adapts a Corpus and stamps provenance.
@@ -195,6 +218,40 @@ void test_context_chunk_text_fallback() {
     CHECK(c.text() == std::string_view{c.hit.chunk->text});  // full body
 }
 
+// (g) The SAME chunk (identical path + line span) surfaced by two sources is
+// collapsed to ONE fused entry, and its RRF score is REINFORCED (sum of both
+// per-list contributions) rather than duplicated. This is the whole point of
+// cross-source fusion; a regression here silently double-lists chunks.
+void test_router_cross_source_dedup() {
+    // Two sources advertising the identical logical chunk, plus one unique
+    // chunk only the second source has.
+    auto a = std::make_shared<IdSource>("a", "shared.md", 1, 5, "shared content");
+    auto b = std::make_shared<IdSource>("b", "shared.md", 1, 5, "shared content");
+    auto c = std::make_shared<IdSource>("c", "unique.md", 1, 3, "unique content");
+
+    rag::KnowledgeRouter router;
+    router.add(a);
+    router.add(b);
+    router.add(c);
+
+    auto hits = router.retrieve("content", 10);
+
+    // shared.md must appear EXACTLY once despite two sources returning it.
+    int shared_count = 0, unique_count = 0;
+    double shared_score = 0.0, unique_score = 0.0;
+    for (const auto& h : hits) {
+        if (h.chunk->path == "shared.md") { ++shared_count; shared_score = h.score; }
+        if (h.chunk->path == "unique.md") { ++unique_count; unique_score = h.score; }
+    }
+    CHECK(shared_count == 1);                 // collapsed, not duplicated
+    CHECK(unique_count == 1);
+    // Reinforced: shared chunk got RRF contributions from TWO lists (both at
+    // rank 0 → 2/(60+1)), the unique chunk from ONE (1/(60+1)). So the shared
+    // chunk's fused score must be (about) double and it must rank first.
+    CHECK(shared_score > unique_score);
+    CHECK(hits.front().chunk->path == "shared.md");
+}
+
 } // namespace
 
 int main() {
@@ -204,6 +261,7 @@ int main() {
     test_router_edge_cases();
     test_pipeline_rerank_compress();
     test_context_chunk_text_fallback();
+    test_router_cross_source_dedup();
 
     if (g_failures == 0) {
         std::printf("knowledge_test: all checks passed\n");

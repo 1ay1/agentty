@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace agentty::rag {
@@ -90,17 +91,49 @@ KnowledgeRouter::retrieve(std::string_view query, std::size_t k,
     // stable key so we can rebuild the fused list after RRF chooses ids.
     // RRF operates on per-list rank position, so we feed it integer ids that
     // index a flat pool of (source-stamped) hits.
+    //
+    // CRUCIAL: the SAME chunk surfaced by two sources (overlapping corpora,
+    // or one doc indexed in both a folder and an MCP source) must collapse to
+    // ONE pool id. Otherwise RRF sees two distinct documents and (a) can't
+    // reinforce a chunk that appears in multiple lists — the entire point of
+    // fusion — and (b) the output carries visible duplicate chunks. Key on
+    // (path, line span) so identical chunks share an id and their per-list
+    // rank contributions sum.
     std::vector<Hit>                       pool;     // id -> hit
     std::vector<std::vector<std::uint32_t>> lists;   // per-source ranked ids
+    std::unordered_map<std::string, std::uint32_t> id_of;  // chunk key -> id
     lists.reserve(sources_.size());
+
+    auto key_of = [](const Hit& h) {
+        const Chunk* c = h.chunk;
+        if (!c) return std::string{};
+        std::string k = c->path;
+        k.push_back('\0');
+        k += std::to_string(c->line_start);
+        k.push_back(':');
+        k += std::to_string(c->line_end);
+        return k;
+    };
 
     for (const auto& src : sources_) {
         auto hits = src->retrieve(query, per_source_k);
         std::vector<std::uint32_t> ids;
         ids.reserve(hits.size());
+        std::unordered_set<std::uint32_t> seen_this_list;  // de-dup within a source
         for (auto& h : hits) {
-            ids.push_back(static_cast<std::uint32_t>(pool.size()));
-            pool.push_back(h);   // already source-stamped by the source
+            std::string key = key_of(h);
+            std::uint32_t id;
+            auto it = key.empty() ? id_of.end() : id_of.find(key);
+            if (it != id_of.end()) {
+                id = it->second;
+            } else {
+                id = static_cast<std::uint32_t>(pool.size());
+                pool.push_back(h);   // already source-stamped by the source
+                if (!key.empty()) id_of.emplace(std::move(key), id);
+            }
+            // A source listing the same chunk twice must not double-count it
+            // in its own ranked list (RRF rank is per-list-position).
+            if (seen_this_list.insert(id).second) ids.push_back(id);
         }
         if (!ids.empty()) lists.push_back(std::move(ids));
     }
