@@ -45,10 +45,17 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+      - name: Init submodules (HTTPS, race-tolerant)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
       - name: Resolve version + tag
         id: meta
         run: |
@@ -88,10 +95,17 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+      - name: Init submodules (HTTPS, race-tolerant)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
         run: |
           docker run --rm --platform linux/amd64 \
@@ -126,10 +140,17 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+      - name: Init submodules (HTTPS, race-tolerant)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
@@ -166,10 +187,17 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+      - name: Init submodules (HTTPS, race-tolerant)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
@@ -201,11 +229,18 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+      - name: Init submodules (HTTPS, race-tolerant)
         shell: bash
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
       - name: Install deps (vcpkg static)
         shell: pwsh
         run: |
@@ -296,10 +331,17 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+      - name: Init submodules (HTTPS, race-tolerant)
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
       - name: Install deps (Homebrew)
         # GCC, NOT AppleClang: agentty + maya require C++26 (std::expected,
         # std::format) requested via CMake's cxx_std_26 compile feature, which
