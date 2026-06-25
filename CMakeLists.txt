@@ -1181,6 +1181,14 @@ if(AGENTTY_BUILD_TESTS)
     # instead of as a silent dead region in production.
     agentty_add_full_test(visual_hash_coverage_test)
 
+    # reveal_drain_integration_test — guards the post-stream reveal finalize
+    # ORDERING against the real maya::StreamingMarkdown: proves that calling
+    # finish() (via settle_message_md) before request_finalize kills the glide
+    # (reveal snaps), while arming request_finalize WHILE live lets the
+    # typewriter glide to the edge and flip live_ off on its own. This is the
+    # real long-turn "stuck/jumping md" fix.
+    agentty_add_full_test(reveal_drain_integration_test)
+
     # tool_result_budget_test — wire-only byte-budget cap on tool
     # results. Drives the real messages_json_string serializer and
     # asserts oversized outputs are bounded (head+tail kept, marker
@@ -1288,6 +1296,7 @@ if(AGENTTY_BUILD_TESTS)
         rag_expand_test
         knowledge_test
         visual_hash_coverage_test
+        reveal_drain_integration_test
         tool_result_budget_test
         salvage_dedup_test
         doom_loop_test
