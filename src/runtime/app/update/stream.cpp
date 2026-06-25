@@ -1544,7 +1544,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
 
                 auto klass = provider::classify(e.message);
-                if (m.s.in_stall_fired()
+                if (e.from_stall
                     && klass == provider::ErrorClass::Cancelled) {
                     klass = provider::ErrorClass::Transient;
                 }
@@ -1572,7 +1572,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (e.retry_after.has_value()) {
                         auto s = e.retry_after->count();
                         if (s < 1) s = 1;
-                        if (s > 120) s = 120;
+                        if (s > 600) s = 600;   // honor server backoff; bound garbage
                         delay = std::chrono::seconds(s);
                     } else {
                         delay = provider::backoff_with_jitter(klass, prior);
@@ -1677,12 +1677,18 @@ Step stream_update(Model m, msg::StreamMsg sm) {
 
             // Classify and decide retry vs terminal.
             auto klass = provider::classify(e.message);
-            // If the stall watchdog fired this turn, the worker thread
-            // will eventually unwind and emit StreamError("cancelled")
-            // — that's our doing, not the user's. Force-classify it as
-            // Transient so the retry machinery treats it as a recoverable
-            // upstream stall, not a user cancel.
-            if (m.s.in_stall_fired()
+            // A "cancelled" error is reclassified to Transient only when WE
+            // cancelled the stream via the stall watchdog (not the user).
+            // Two shapes carry that intent:
+            //   • the synthetic stall StreamError itself (e.from_stall), or
+            //   • the worker thread unwinding from the cancel the watchdog
+            //     tripped THIS turn — recognised by the ctx still sitting in
+            //     StallFired (the synthetic error hasn't scheduled a retry
+            //     yet, so we haven't moved to Scheduled/Fresh). Using the
+            //     flag for the synthetic error means a later turn re-entering
+            //     StallFired can't retroactively reclassify an unrelated
+            //     user-cancel from a different turn.
+            if ((e.from_stall || m.s.in_stall_fired())
                 && klass == provider::ErrorClass::Cancelled) {
                 klass = provider::ErrorClass::Transient;
             }
@@ -1792,9 +1798,21 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     && err_ctx->first_delta_at.time_since_epoch().count() != 0);
             const int retry_cap = provider::max_retries_for(klass, mid_stream);
 
+            // For mid-stream failures, gate on `mid_stream_failures` rather
+            // than `transient_retries`. The latter is reset to 0 by any
+            // heartbeat or first content delta, so a wire that delivers one
+            // byte/ping before each drop would reset its budget every attempt
+            // and retry forever. `mid_stream_failures` is monotonic per turn
+            // (never reset by wire-health signals), so the short mid-stream
+            // cap actually latches terminal on a flapping connection.
+            const int mid_prior = err_ctx ? err_ctx->mid_stream_failures : 0;
+            const bool budget_left =
+                mid_stream ? (mid_prior      < retry_cap)
+                           : (prior_transient < retry_cap);
+
             bool can_retry = (klass == provider::ErrorClass::Transient
                            || klass == provider::ErrorClass::RateLimit)
-                          && prior_transient < retry_cap
+                          && budget_left
                           && !has_committed
                           && err_ctx;   // can't retry from Idle (no ctx)
 
@@ -1804,21 +1822,30 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 if (e.retry_after.has_value()) {
                     auto s = e.retry_after->count();
                     if (s < 1)   s = 1;
-                    if (s > 120) s = 120;
+                    // Honor the server's backoff. Cap at 10 min only to bound
+                    // a pathological/garbage value — a 300 s Retry-After must
+                    // be respected, not silently shortened to 120 s (which
+                    // would re-hit the same 429 and burn the budget faster
+                    // than the server permits).
+                    if (s > 600) s = 600;
                     delay = std::chrono::seconds(s);
                 } else {
                     delay = provider::backoff_with_jitter(klass, attempt);
                 }
                 auto secs = std::chrono::duration_cast<std::chrono::seconds>(
                     delay + std::chrono::milliseconds{999}).count();
+                // The attempt counter shown to the user reflects whichever
+                // budget actually gates this failure.
+                const int shown_attempt = mid_stream ? mid_prior : prior_transient;
                 m.s.status = std::string{provider::to_string(klass)}
                            + " — retrying in " + std::to_string(secs) + "s"
-                           + " (attempt " + std::to_string(attempt + 1)
+                           + " (attempt " + std::to_string(shown_attempt + 1)
                            + "/" + std::to_string(retry_cap) + ")…";
                 m.s.status_until = std::chrono::steady_clock::now()
                                  + delay + std::chrono::milliseconds{1500};
                 auto ctx = take_active_ctx(std::move(m.s.phase)).value();
                 ctx.transient_retries = attempt + 1;
+                if (mid_stream) ctx.mid_stream_failures = mid_prior + 1;
                 ctx.last_failure_at   = std::chrono::steady_clock::now();
                 ctx.retry             = retry::Scheduled{};
                 m.s.phase = phase::Streaming{std::move(ctx)};

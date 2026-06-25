@@ -60,7 +60,11 @@ struct AgenttyHttpClient final : mt::HttpClient {
         out.path = (slash == std::string_view::npos) ? "/" : std::string{url.substr(slash)};
         if (auto colon = authority.find(':'); colon != std::string_view::npos) {
             out.host.assign(authority.substr(0, colon));
-            try { out.port = static_cast<uint16_t>(std::stoi(std::string{authority.substr(colon + 1)})); }
+            try {
+                int port_int = std::stoi(std::string{authority.substr(colon + 1)});
+                if (port_int <= 0 || port_int > 65535) return out;   // bad port → not ok
+                out.port = static_cast<uint16_t>(port_int);
+            }
             catch (...) { return out; }
         } else {
             out.host.assign(authority);

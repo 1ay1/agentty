@@ -88,6 +88,20 @@ struct Active {
     int truncation_retries = 0;
     int transient_retries  = 0;
 
+    // Mid-stream failure count — increments every time a retry is
+    // scheduled for a failure that happened AFTER the wire proved itself
+    // alive this turn (stall watchdog fired, or a content delta had
+    // already arrived). Unlike `transient_retries`, this is NEVER reset by
+    // a heartbeat or first-delta: a connection that keeps delivering one
+    // byte/ping and then dying is a real outage, and resetting the budget
+    // on that single byte would let it retry forever. The mid-stream retry
+    // cap (provider::max_retries_for(klass, mid_stream=true)) is checked
+    // against THIS counter so the "only N attempts once we've seen bytes"
+    // guarantee actually latches terminal instead of looping on a flapping
+    // wire. Connect-time (pre-delta, pre-stall) failures don't touch it —
+    // they're governed by the full transient_retries budget.
+    int mid_stream_failures = 0;
+
     // Wall-clock stamp of the last transient/stall failure. The retry
     // decision decays the budget: if the previous failure was more
     // than kRetryDecayWindow ago the connection has been healthy in

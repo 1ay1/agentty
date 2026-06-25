@@ -37,9 +37,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -82,19 +84,33 @@ std::chrono::milliseconds call_timeout() {
 }
 
 // Resolve the config path per the documented precedence. Empty if none.
-fs::path resolve_config() {
+// `out_project_local` is set true when the config came from the WORKSPACE
+// (./.agentty/mcp.json) — which can ride in on a cloned repo — vs. an
+// explicitly-pointed ($AGENTTY_MCP_CONFIG) or user-global (~/.agentty)
+// config the user themselves placed. Project-local stdio servers spawn
+// arbitrary commands, so they're gated behind an opt-in (see mcp_tools).
+fs::path resolve_config(bool& out_project_local) {
+    out_project_local = false;
     std::error_code ec;
     if (const char* e = std::getenv("AGENTTY_MCP_CONFIG"); e && e[0]) {
         fs::path p{e};
         return fs::is_regular_file(p, ec) ? p : fs::path{};
     }
-    if (auto local = fs::path{".agentty"} / "mcp.json"; fs::is_regular_file(local, ec))
+    if (auto local = fs::path{".agentty"} / "mcp.json"; fs::is_regular_file(local, ec)) {
+        out_project_local = true;
         return local;
+    }
     if (const char* home = std::getenv("HOME"); home && home[0]) {
         auto user = fs::path{home} / ".agentty" / "mcp.json";
         if (fs::is_regular_file(user, ec)) return user;
     }
     return {};
+}
+
+// Convenience overload for callers that don't care about the trust source.
+fs::path resolve_config() {
+    bool ignore = false;
+    return resolve_config(ignore);
 }
 
 // Build a cap provider from one server config entry. Returns nullptr (and logs)
@@ -114,11 +130,19 @@ make_provider(const std::string& name, const json& spec) {
     ::mcp::cap::StdioServerProvider::Config cfg;
     cfg.name           = name;
     cfg.spawn.command  = command;
+    // Coerce non-string args/env elements instead of throwing: a single
+    // numeric/bool element used to make `.get<std::string>()` throw
+    // json::type_error and skip the WHOLE server. Strings pass through
+    // verbatim; anything else is stringified via dump() so e.g.
+    // `"args": ["--port", 8080]` works as the user clearly intended.
+    auto as_str = [](const json& v) {
+        return v.is_string() ? v.get<std::string>() : v.dump();
+    };
     if (spec.contains("args") && spec["args"].is_array())
-        for (const auto& a : spec["args"]) cfg.spawn.args.push_back(a.get<std::string>());
+        for (const auto& a : spec["args"]) cfg.spawn.args.push_back(as_str(a));
     if (spec.contains("env") && spec["env"].is_object())
         for (auto it = spec["env"].begin(); it != spec["env"].end(); ++it)
-            cfg.spawn.env_kv.push_back(it.key() + "=" + it.value().get<std::string>());
+            cfg.spawn.env_kv.push_back(it.key() + "=" + as_str(it.value()));
     cfg.client_info  = ::mcp::Implementation{"agentty", AGENTTY_VERSION};
     cfg.call_timeout = call_timeout();
 
@@ -429,8 +453,29 @@ bool mcp_config_present() { return !resolve_config().empty(); }
 
 std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     std::vector<tools::ToolDef> out;
-    fs::path cfg = resolve_config();
+    bool project_local = false;
+    fs::path cfg = resolve_config(project_local);
     if (cfg.empty()) return out;          // no config → zero work, zero tools
+
+    // ── Untrusted-workspace spawn gate (security) ────────────────────────
+    // A project-local ./.agentty/mcp.json can ride in on a cloned repo, and
+    // its stdio servers spawn ARBITRARY commands at registry-build time with
+    // no per-tool permission prompt — bypassing the Exec gate every other
+    // code path honors. So when the config is workspace-local we require an
+    // explicit opt-in (AGENTTY_MCP_ALLOW_PROJECT=1). $AGENTTY_MCP_CONFIG and
+    // ~/.agentty/mcp.json are trusted (the user placed them) and never gated.
+    bool allow_project = false;
+    if (const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
+        e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y'))
+        allow_project = true;
+    if (project_local && !allow_project) {
+        std::fprintf(stderr,
+            "mcp: ignoring workspace-local %s (it can spawn arbitrary\n"
+            "     commands). Set AGENTTY_MCP_ALLOW_PROJECT=1 to enable it, or\n"
+            "     move trusted servers to ~/.agentty/mcp.json.\n",
+            cfg.string().c_str());
+        return out;
+    }
 
     json doc;
     try {
@@ -459,36 +504,74 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
             p->generation.fetch_add(1, std::memory_order_relaxed);
     });
 
+    // ── Connect every server IN PARALLEL with a global deadline ──────────
+    // Each provider's constructor blocks on a handshake (up to the SDK's
+    // per-server timeout). Connecting serially made first registry() access
+    // O(N × handshake) on the cold-start path, so one slow/hung server
+    // stalled the entire tool surface. Fan the connects out across threads
+    // and bound the whole batch with AGENTTY_MCP_CONNECT_TIMEOUT_MS (default
+    // 15 s); any server still handshaking past the deadline is skipped this
+    // session (its eventual result is dropped when the future detaches).
+    long connect_deadline_ms = 15'000;
+    if (const char* e = std::getenv("AGENTTY_MCP_CONNECT_TIMEOUT_MS"); e && e[0]) {
+        try { long v = std::stol(e); if (v > 0) connect_deadline_ms = v; } catch (...) {}
+    }
+
+    struct Pending {
+        std::string name;
+        std::shared_future<std::shared_ptr<::mcp::cap::CapabilityProvider>> fut;
+    };
+    std::vector<Pending> pending;
     for (auto it = servers->begin(); it != servers->end(); ++it) {
-        const std::string& sname = it.key();
-        const json& spec = it.value();
+        const std::string sname = it.key();
+        const json spec = it.value();   // copy: detached worker outlives `doc`
         // A server entry with a "url" (or type:"http"/"sse") is a remote
         // Streamable HTTP server; anything with a "command" is a spawned
         // stdio server. URL wins when both are present.
-        const std::string url  = spec.value("url", std::string{});
-        const std::string type = spec.value("type", std::string{});
-        const bool is_http = !url.empty() || type == "http" || type == "sse"
-                             || type == "streamable-http";
-        std::shared_ptr<::mcp::cap::CapabilityProvider> p;
-        if (is_http) {
-            HttpConfig hc;
-            hc.url = url;
-            if (spec.contains("headers") && spec["headers"].is_object())
-                for (auto h = spec["headers"].begin(); h != spec["headers"].end(); ++h)
-                    hc.headers.emplace_back(h.key(), h.value().is_string()
-                                                         ? h.value().get<std::string>()
-                                                         : h.value().dump());
-            hc.call_timeout = call_timeout();
-            std::string err;
-            p = make_http_provider(sname, hc, err);
-            if (!p) std::fprintf(stderr, "mcp: %s\n", err.c_str());
-        } else {
-            p = make_provider(sname, spec);
+        pending.push_back(Pending{sname, std::async(std::launch::async,
+            [sname, spec]() -> std::shared_ptr<::mcp::cap::CapabilityProvider> {
+                const std::string url  = spec.value("url", std::string{});
+                const std::string type = spec.value("type", std::string{});
+                const bool is_http = !url.empty() || type == "http" || type == "sse"
+                                     || type == "streamable-http";
+                if (is_http) {
+                    HttpConfig hc;
+                    hc.url = url;
+                    if (spec.contains("headers") && spec["headers"].is_object())
+                        for (auto h = spec["headers"].begin(); h != spec["headers"].end(); ++h)
+                            hc.headers.emplace_back(h.key(), h.value().is_string()
+                                                                 ? h.value().get<std::string>()
+                                                                 : h.value().dump());
+                    hc.call_timeout = call_timeout();
+                    std::string err;
+                    auto p = make_http_provider(sname, hc, err);
+                    if (!p) std::fprintf(stderr, "mcp: %s\n", err.c_str());
+                    return p;
+                }
+                return make_provider(sname, spec);
+            }).share()});
+    }
+
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds{connect_deadline_ms};
+    for (auto& pend : pending) {
+        auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining < std::chrono::milliseconds{0})
+            remaining = std::chrono::milliseconds{0};
+        if (pend.fut.wait_for(remaining) != std::future_status::ready) {
+            std::fprintf(stderr,
+                "mcp: server '%s' did not connect within the deadline — skipping\n",
+                pend.name.c_str());
+            // Detach so the still-handshaking worker can finish and clean up
+            // without blocking startup; its result is dropped.
+            std::thread([f = pend.fut]() mutable { f.wait(); }).detach();
+            continue;
         }
+        auto p = pend.fut.get();
         if (p) {
             std::fprintf(stderr,
                 "mcp: server '%s' connected (%zu tools, %zu resources, %zu prompts)\n",
-                sname.c_str(), p->list().size(), p->resources().size(), p->prompts().size());
+                pend.name.c_str(), p->list().size(), p->resources().size(), p->prompts().size());
             pool->registry.add(std::move(p));
         }
     }

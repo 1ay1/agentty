@@ -12,6 +12,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -451,7 +452,16 @@ void AgentServer::on_set_mode(const a::SetModeParams& p) {
 a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
     Session* s = find_session(p.sessionId.value);
     if (!s) throw std::runtime_error("session/set_config_option: unknown sessionId: " + p.sessionId.value);
-    if (p.configId == "model") s->model = p.value;
+    if (p.configId == "model") {
+        s->model = p.value;
+    } else {
+        // Surface an unknown config id rather than silently accepting and
+        // dropping it — a client setting e.g. "temperatuer" deserves an error,
+        // not a no-op that looks like success.
+        throw std::runtime_error(
+            "session/set_config_option: unknown configId '" + p.configId
+            + "' (supported: model)");
+    }
     return a::SetConfigOptionResult{{}, json::object()};
 }
 
@@ -481,8 +491,7 @@ void AgentServer::index_session(const Session& sess) {
         {"updatedAt", std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count()},
     };
-    std::ofstream ofs(path, std::ios::trunc);
-    if (ofs) ofs << j.dump();
+    (void)persistence::write_json_atomic(path, j.dump());
 }
 
 void AgentServer::unindex_session(const std::string& id) {
@@ -492,8 +501,7 @@ void AgentServer::unindex_session(const std::string& id) {
     { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (...) { return; } } }
     if (!j.is_object() || !j.contains(id)) return;
     j.erase(id);
-    std::ofstream ofs(path, std::ios::trunc);
-    if (ofs) ofs << j.dump();
+    (void)persistence::write_json_atomic(path, j.dump());
 }
 
 a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams& p) {
@@ -827,11 +835,28 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
 
     const Profile profile = sess.profile;
 
+    // Tool-scheduling note: unlike the TUI path (cmd_factory), which uses
+    // effects::is_parallel_safe(active, want) to fan out compose-safe tools
+    // (Pure/ReadFs/Net) and serialise exclusive ones (WriteFs/Exec), the ACP
+    // path runs every tool call STRICTLY SERIALLY in emission order. Serial
+    // execution is a subset of the parallel-safety rule — it never starts a
+    // second tool while another is in flight — so it can never violate the
+    // exclusivity the effect set demands; it just forgoes the latency win of
+    // overlapping independent reads. Kept serial deliberately: the ACP turn
+    // loop is already off the reader thread, tool results must be appended to
+    // `last.tool_calls` in a stable order for the wire tool_use↔result
+    // pairing, and Zed renders the cards sequentially anyway.
     for (auto& tc : last.tool_calls) {
         if (sess.cancel && sess.cancel->is_cancelled()) { out_cancelled = true; return false; }
 
+        // Resolve the tool ONCE so the permission gate and the execution run
+        // against the same definition (an mcp/tools/list_changed mid-turn can
+        // otherwise re-resolve the name to a ToolDef with different effects).
+        const tools::ToolDef* td =
+            tool::DynamicDispatch::resolve(tc.name.value);
+
         bool needs_perm =
-            tool::DynamicDispatch::needs_permission(tc.name.value, profile)
+            tool::DynamicDispatch::needs_permission_with(td, profile)
             && !sess.grants.contains(tc.name.value);
         if (needs_perm) {
             a::ToolCallUpdate u;
@@ -857,7 +882,44 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         running.status     = a::Just(a::ToolCallStatus::InProgress);
         send_update(sess.id, a::SU_ToolCallUpdate{std::move(running)});
 
-        auto result = tool::DynamicDispatch::execute(tc.name.value, tc.args);
+        // Run the tool on a worker so a session/cancel that lands mid-tool
+        // (on the engine's reader thread) makes THIS turn loop return
+        // promptly instead of blocking until a long bash/web_fetch finishes.
+        // The tool itself isn't interruptible (its interface is synchronous),
+        // so on cancel we detach the future and drop its result — the same
+        // "discard the late output" contract the TUI path uses via its
+        // idempotent tool-output guard. `shared_future` so the lambda below
+        // can keep the running task alive after we stop waiting on it.
+        auto fut = std::async(std::launch::async,
+            [td, name = tc.name.value, args = tc.args]() {
+                return tool::DynamicDispatch::execute_with(td, name, args);
+            }).share();
+
+        bool tool_cancelled = false;
+        for (;;) {
+            if (fut.wait_for(std::chrono::milliseconds(50))
+                    == std::future_status::ready)
+                break;
+            if (sess.cancel && sess.cancel->is_cancelled()) {
+                tool_cancelled = true;
+                break;
+            }
+        }
+
+        if (tool_cancelled) {
+            // Detach: keep the shared_future alive on a throwaway thread so
+            // the worker can finish and clean up without us blocking on it.
+            std::thread([fut]() mutable { fut.wait(); }).detach();
+            tc.status = ToolUse::Failed{{}, {}, "cancelled"};
+            a::ToolCallUpdate c;
+            c.toolCallId = a::ToolCallId{tc.id.value};
+            c.status     = a::Just(a::ToolCallStatus::Failed);
+            send_update(sess.id, a::SU_ToolCallUpdate{std::move(c)});
+            out_cancelled = true;
+            return false;
+        }
+
+        auto result = fut.get();
 
         a::ToolCallUpdate upd;
         upd.toolCallId = a::ToolCallId{tc.id.value};

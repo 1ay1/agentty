@@ -194,6 +194,17 @@ struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
 struct StreamError {
     std::string message;
     std::optional<std::chrono::seconds> retry_after;
+    // True only for the SYNTHETIC StreamError the stall watchdog dispatches
+    // after it trips the cancel token (see meta.cpp Tick). The handler must
+    // treat a `from_stall` error as a recoverable upstream stall (reclassify
+    // a resulting "cancelled" worker unwind as Transient) — but it must NOT
+    // infer that intent from the volatile `in_stall_fired()` phase state,
+    // because a later turn can re-enter StallFired and a genuinely
+    // user-cancelled error coinciding in that window would be wrongly
+    // reclassified. Carrying the intent ON the message ties it to the
+    // specific stall that produced it, immune to phase churn from other
+    // turns/retries that ran in between.
+    bool from_stall = false;
 };
 // Wire-alive heartbeat. Emitted by the transport for SSE frames that
 // carry no reducer-visible payload but prove the connection is healthy

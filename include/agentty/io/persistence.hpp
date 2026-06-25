@@ -73,6 +73,15 @@ void save_settings(const store::Settings& s);
 [[nodiscard]] ThreadId new_id();
 [[nodiscard]] std::string title_from_first_message(std::string_view text);
 
+// Atomic + durable write of `content` to `target`: writes to <target>.tmp,
+// fsyncs, then renames over the target. A crash or ctrl-C mid-write leaves
+// the previous file intact instead of a truncated one. Returns false on any
+// I/O failure (the temp file is cleaned up). Use this for every JSON sidecar
+// the runtime persists — e.g. the ACP session index — so they share the same
+// crash-safety guarantee as threads/settings.
+bool write_json_atomic(const std::filesystem::path& target,
+                       const std::string& content);
+
 } // namespace agentty::persistence
 
 namespace agentty::io {

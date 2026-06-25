@@ -1158,6 +1158,20 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(stream_liveness_test)
     set_tests_properties(stream_liveness_test PROPERTIES TIMEOUT 30)
 
+    # stream_md_lag_test — long-turn markdown LAG regression. Drives maya's
+    # StreamingMarkdown exactly as turn.cpp::cached_markdown_for does
+    # (reveal_fx ON, live ON, full content resent + build() every frame) and
+    # asserts the per-frame build() cost does NOT scale with total turn
+    # length: the committed prefix must make progress while live so only a
+    # small tail is reprocessed each frame. A deferred-commit O(N)-per-frame
+    # renderer (the bug the user feels as streaming stutter on a big reply)
+    # fails both the timing-ratio gate and the committed-progress assertion.
+    # Standalone against maya only — no agentty sources needed.
+    add_executable(stream_md_lag_test EXCLUDE_FROM_ALL tests/stream_md_lag_test.cpp)
+    target_link_libraries(stream_md_lag_test PRIVATE maya::maya)
+    add_test(NAME stream_md_lag_test COMMAND stream_md_lag_test)
+    set_tests_properties(stream_md_lag_test PROPERTIES TIMEOUT 60)
+
     # composer_edit_test — reducer-level coverage for the composer's
     # word-wise delete keys (Ctrl+W unix-word-rubout / Alt+D kill-word),
     # including the chip-aware boundary that drops a whole attachment
@@ -1180,6 +1194,18 @@ if(AGENTTY_BUILD_TESTS)
     add_executable(table_render_test EXCLUDE_FROM_ALL tests/table_render_test.cpp)
     target_link_libraries(table_render_test PRIVATE maya::maya)
     add_test(NAME table_render_test COMMAND table_render_test)
+
+    # reveal_pacing_test — guards the streaming-reveal CONSTANT-GLIDE
+    # invariant against the long-turn BURST regression. Drives
+    # maya::anim::RateCursor directly and asserts the auto-tuned cruise speed
+    # is clamped to a readable ceiling (no sprint to thousands of cp/s when a
+    # fast model outpaces the cruise), that a slow feed still tracks the wire,
+    # and that the finalize ramp still bypasses the cap to flush the tail.
+    # Header-only against maya — no agentty sources needed.
+    add_executable(reveal_pacing_test EXCLUDE_FROM_ALL tests/reveal_pacing_test.cpp)
+    target_link_libraries(reveal_pacing_test PRIVATE maya::maya)
+    add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
+    set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
 
     # openai_transport_test — verifies the OpenAI-compatible provider's pure
     # translation layer with NO network: build_tools / build_messages JSON
@@ -1311,6 +1337,8 @@ if(AGENTTY_BUILD_TESTS)
         midrun_seam_test
         midrun_wire_test
         stream_liveness_test
+        stream_md_lag_test
+        reveal_pacing_test
         composer_edit_test
         scheduler_path_test
         table_render_test

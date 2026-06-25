@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <format>
+#include <memory>
 #include <mutex>
 #include <ranges>
 #include <string>
@@ -163,39 +164,61 @@ const ToolDef* find(std::string_view name) {
 
 namespace {
 // Process-wide snapshot of (static registry ∪ live MCP tools), rebuilt only
-// when the MCP generation moves (a *_list_changed notification). The vector
-// is stable between rebuilds so `find()` can hand out `const ToolDef*` into
-// it. Guarded by a mutex; the rebuild is O(static + mcp) and runs at most
-// once per turn (callers read mcp_generation() which is O(1)).
-struct WireCache {
-    std::mutex                       mu;
-    unsigned long                    gen     = static_cast<unsigned long>(-1);
-    bool                             built   = false;
-    bool                             has_live = false;   // cache differs from registry()
-    std::vector<ToolDef>             tools;     // owns the merged set
+// when the MCP generation moves (a *_list_changed notification).
+//
+// ── Why snapshots are IMMORTAL ───────────────────────────────────────────
+// `find()` hands out a `const ToolDef*` into a snapshot, and `wire_tools()`
+// hands out a `const std::vector<ToolDef>&` — both with the cache mutex
+// DROPPED on return (it can't be held across a tool dispatch, which for an
+// MCP tool blocks on a network round-trip up to the call timeout). A naive
+// rebuild that `clear()`ed and refilled one vector would free the storage a
+// concurrent dispatch still points into → use-after-free.
+//
+// Instead each generation is an independent, never-mutated
+// `shared_ptr<const Snapshot>`. A rebuild constructs a NEW snapshot and
+// swaps `current` to point at it; the old snapshot stays alive in `retired`
+// for the process lifetime, so every pointer/reference ever handed out
+// remains valid forever. Tool snapshots are tiny (a few dozen ToolDefs) and
+// rebuilds happen at most once per `tools/list_changed`, so retaining them
+// costs negligible memory and buys lock-free, race-free lifetime for the
+// O(60 s) dispatch window.
+struct Snapshot {
+    std::vector<ToolDef>                            tools;
     std::unordered_map<std::string, const ToolDef*> idx;
+    bool                                            has_live = false;
+};
+
+struct WireCache {
+    std::mutex                              mu;
+    unsigned long                          gen   = static_cast<unsigned long>(-1);
+    bool                                   built = false;
+    std::shared_ptr<const Snapshot>        current;          // latest published
+    std::vector<std::shared_ptr<const Snapshot>> retired;    // keep-alive graveyard
 };
 WireCache& wire_cache() { static WireCache c; return c; }
 
-// Rebuild the merged snapshot if MCP's generation moved. Sets c.has_live to
-// true iff live MCP tools made the cache differ from the static registry
-// (whose MCP tools were captured at startup). Returns c.has_live.
-bool refresh_wire_cache_locked(WireCache& c) {
+// Rebuild the merged snapshot if MCP's generation moved. Returns the snapshot
+// to use (current), or nullptr when there are no live MCP tools (caller falls
+// back to the immortal static registry()). The returned shared_ptr keeps the
+// snapshot alive for as long as the caller holds it.
+std::shared_ptr<const Snapshot> refresh_wire_cache_locked(WireCache& c) {
     const unsigned long g = mcp::mcp_generation();
-    if (c.built && c.gen == g) return c.has_live;
+    if (c.built && c.gen == g) return c.current;
     c.gen   = g;
     c.built = true;
-    c.tools.clear();
-    c.idx.clear();
-    c.has_live = false;
 
     // Live MCP set (already namespaced, includes the generic resource/prompt
     // tools). At generation 0 this equals what the static registry already
     // captured, so there's nothing to merge — the registry IS the wire set.
-    if (g == 0) return false;
-    auto live = mcp::mcp_tools_live();
-    if (live.empty()) return false;
+    auto live = (g == 0) ? std::vector<ToolDef>{} : mcp::mcp_tools_live();
+    if (live.empty()) {
+        // Retire whatever was current; publish "no live snapshot".
+        if (c.current) c.retired.push_back(c.current);
+        c.current.reset();
+        return nullptr;
+    }
 
+    auto snap = std::make_shared<Snapshot>();
     const auto& base = registry();
     std::unordered_map<std::string, std::size_t> live_names;
     for (std::size_t i = 0; i < live.size(); ++i) live_names.emplace(live[i].name.value, i);
@@ -203,30 +226,48 @@ bool refresh_wire_cache_locked(WireCache& c) {
     // same name (so a re-listed server replaces, never duplicates).
     for (const auto& t : base) {
         if (live_names.contains(t.name.value)) continue;
-        c.tools.push_back(t);
+        snap->tools.push_back(t);
     }
-    for (auto& t : live) c.tools.push_back(std::move(t));
-    c.idx.reserve(c.tools.size());
-    for (const auto& t : c.tools) c.idx.emplace(t.name.value, &t);
-    c.has_live = true;
-    return true;
+    for (auto& t : live) snap->tools.push_back(std::move(t));
+    snap->idx.reserve(snap->tools.size());
+    for (const auto& t : snap->tools) snap->idx.emplace(t.name.value, &t);
+    snap->has_live = true;
+
+    // Publish: retire the old snapshot (never freed — a dispatch may still
+    // hold a pointer into it) and swap current to the new one.
+    if (c.current) c.retired.push_back(c.current);
+    c.current = snap;
+    return c.current;
 }
 } // namespace
 
 namespace detail {
 const ToolDef* find_live_mcp(std::string_view name) {
     auto& c = wire_cache();
-    std::lock_guard<std::mutex> lk(c.mu);
-    if (!refresh_wire_cache_locked(c)) return nullptr;
-    if (auto it = c.idx.find(std::string{name}); it != c.idx.end()) return it->second;
+    std::shared_ptr<const Snapshot> snap;
+    {
+        std::lock_guard<std::mutex> lk(c.mu);
+        snap = refresh_wire_cache_locked(c);
+    }
+    if (!snap) return nullptr;
+    // snap is immortal; the returned pointer outlives any concurrent rebuild.
+    if (auto it = snap->idx.find(std::string{name}); it != snap->idx.end())
+        return it->second;
     return nullptr;
 }
 } // namespace detail
 
 const std::vector<ToolDef>& wire_tools() {
     auto& c = wire_cache();
-    std::lock_guard<std::mutex> lk(c.mu);
-    if (refresh_wire_cache_locked(c)) return c.tools;
+    std::shared_ptr<const Snapshot> snap;
+    {
+        std::lock_guard<std::mutex> lk(c.mu);
+        snap = refresh_wire_cache_locked(c);
+    }
+    // The snapshot is immortal, so handing out a reference into its `tools`
+    // is safe even though the cache mutex is no longer held. Fall back to the
+    // immortal static registry() when there are no live MCP tools.
+    if (snap) return snap->tools;
     return registry();
 }
 

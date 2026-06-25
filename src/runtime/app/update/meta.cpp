@@ -299,9 +299,11 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                                  now - a->last_event_at).count();
                 std::string msg = "stream stalled — no events for "
                                 + std::to_string(since) + "s";
+                StreamError err{std::move(msg)};
+                err.from_stall = true;   // carry stall intent on the message
                 return {std::move(m), Cmd<Msg>::after(
                     std::chrono::milliseconds(0),
-                    Msg{StreamError{std::move(msg)}})};
+                    Msg{std::move(err)})};
             }
 
             // ── ExecutingTool wedge watchdog ───────────────────────────

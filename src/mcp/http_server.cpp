@@ -77,7 +77,11 @@ ParsedUrl parse_url(const std::string& url) {
         u.host = std::string{authority};
     } else {
         u.host = std::string{authority.substr(0, colon)};
-        try { u.port = static_cast<std::uint16_t>(std::stoul(std::string{authority.substr(colon + 1)})); }
+        try {
+            unsigned long port_val = std::stoul(std::string{authority.substr(colon + 1)});
+            if (port_val == 0 || port_val > 65535) return u;   // out of range → !ok
+            u.port = static_cast<std::uint16_t>(port_val);
+        }
         catch (...) { return u; }
     }
     if (u.host.empty()) return u;

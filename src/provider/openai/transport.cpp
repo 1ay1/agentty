@@ -1123,7 +1123,12 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
     std::string s{spec};
     if (auto colon = s.rfind(':'); colon != std::string::npos) {
         ep.host = s.substr(0, colon);
-        try { ep.port = static_cast<std::uint16_t>(std::stoi(s.substr(colon + 1))); }
+        try {
+            int port_int = std::stoi(s.substr(colon + 1));
+            ep.port = (port_int > 0 && port_int <= 65535)
+                ? static_cast<std::uint16_t>(port_int)
+                : 443;   // out of range → fall back to https default
+        }
         catch (...) { ep.port = 443; }
         ep.use_tls = (ep.port == 443);
     } else {

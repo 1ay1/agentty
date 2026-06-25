@@ -150,6 +150,52 @@ struct DynamicDispatch {
         return tools::find(name);
     }
 
+    // Resolve a tool to its (immortal, since registry.cpp's WireCache keeps
+    // every snapshot alive) ToolDef pointer ONCE, so a caller that gates and
+    // then executes does both against the SAME definition. This closes the
+    // TOCTOU where an `mcp/tools/list_changed` between needs_permission() and
+    // execute() could resolve the tool name to two different ToolDefs with
+    // different effect sets (gate against benign annotations, run with full
+    // effects, or vice-versa). Callers that gate-then-execute should resolve
+    // once and pass the pointer to the *_with overloads below.
+    [[nodiscard]] static const tools::ToolDef* resolve(std::string_view name) noexcept {
+        return tools::find(name);
+    }
+
+    // Execute against a pre-resolved ToolDef (see resolve()). Same body as
+    // execute(name, args) but skips the second name lookup.
+    [[nodiscard]] static ExecResult execute_with(const tools::ToolDef* td,
+                                                 std::string_view name,
+                                                 const nlohmann::json& args) noexcept {
+        if (!td) return std::unexpected(ToolError::not_found("unknown tool: " + std::string{name}));
+        static const nlohmann::json kEmpty = nlohmann::json::object();
+        const nlohmann::json& safe_args = args.is_object() ? args : kEmpty;
+        ExecResult result;
+        try {
+            result = td->execute(safe_args);
+        } catch (const std::exception& e) {
+            return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
+        }
+        if (result) {
+            if (const auto* sp = tools::spec::lookup(name)) {
+                if (sp->max_output_chars > 0) {
+                    result->text = detail::apply_output_budget(
+                        std::move(result->text), sp->max_output_chars,
+                        sp->trunc_strategy);
+                }
+            }
+        }
+        return result;
+    }
+
+    // Permission decision against a pre-resolved ToolDef (see resolve()).
+    [[nodiscard]] static bool needs_permission_with(const tools::ToolDef* td,
+                                                    Profile profile) noexcept {
+        if (!td) return true;   // unknown tool fails closed
+        return tools::policy::permission(td->effects, profile)
+               == tools::policy::Decision::Prompt;
+    }
+
     [[nodiscard]] static ExecResult execute(std::string_view name,
                                             const nlohmann::json& args) noexcept {
         const auto* td = tools::find(name);

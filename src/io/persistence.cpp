@@ -29,11 +29,12 @@ namespace agentty::persistence {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-namespace {
 // Atomic + durable write: write to <target>.tmp, fsync, rename. A crash
 // or ctrl-C mid-write leaves the previous version intact — the loader
 // never sees a truncated file that its `catch (...)` would silently drop.
 // Binary mode avoids CRLF translation so the on-disk bytes match dump(2).
+// Public (declared in persistence.hpp) so other JSON sidecars (ACP session
+// index, etc.) share the same crash-safety guarantee.
 bool write_json_atomic(const fs::path& target, const std::string& content) {
     fs::path tmp = target;
     tmp += ".tmp";
@@ -66,7 +67,6 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
     }
     return true;
 }
-} // namespace
 
 fs::path data_dir() {
     const char* home = std::getenv("USERPROFILE");
