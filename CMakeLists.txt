@@ -100,9 +100,30 @@ endif()
 # Link-time optimization — enabled by default in Release/RelWithDebInfo, off
 # in Debug (would drag build times without shipping value). Supported by
 # GCC, Clang, MSVC, and AppleClang; CMake picks the right flag per toolchain.
+# Set before the maya/acp-cpp/mcp-cpp subdirectories so the whole tree LTO-
+# links as one unit on the platforms where it pays off.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT AGENTTY_HAS_IPO OUTPUT AGENTTY_IPO_ERR)
-if(AGENTTY_HAS_IPO AND (CMAKE_BUILD_TYPE STREQUAL "Release"
+
+# macOS + GCC is the one toolchain where LTO is all cost and no benefit.
+# Apple's ld can't consume GCC's LTO bytecode, so `-flto` does NOT optimize
+# across modules — the fat objects' per-TU -O3 code is what actually links —
+# yet the GIMPLE IR rides along as a dead __GNU_LTO LOAD segment (tens of MB)
+# that `strip`/`strip -x` cannot remove (it's a load command, not symbols).
+# check_ipo_supported() passes (its probe link "works"), so without this
+# guard the macOS release ships ~3x its real size with zero speed gain.
+# Disable IPO for this combo only: the binary drops to its true code size and
+# is byte-for-byte as optimized. Linux GCC/Clang (where the shipping static
+# binaries are built — full LTO + maya's heavy flag set) and MSVC (/GL+/LTCG)
+# are unaffected. macOS's real ceiling is AppleClang+ThinLTO, which can't
+# build this tree yet (no cxx_std_26 advertised), so -O3 is the macOS max.
+set(AGENTTY_IPO_OK ${AGENTTY_HAS_IPO})
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(AGENTTY_IPO_OK FALSE)
+    message(STATUS "agentty: LTO disabled on macOS+GCC "
+                   "(Apple ld can't consume GCC LTO IR — would only bloat the binary)")
+endif()
+if(AGENTTY_IPO_OK AND (CMAKE_BUILD_TYPE STREQUAL "Release"
                      OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"
                      OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
@@ -121,6 +142,19 @@ set(MAYA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 # baseline (`-march=x86-64` / `armv8-a`).
 if(AGENTTY_STANDALONE)
     set(MAYA_NATIVE_TUNING OFF CACHE BOOL "" FORCE)
+endif()
+
+# macOS SDK + GCC, catch-all: the macOS 26 SDK's <mach/*.h> arm64
+# size-assert macros expand to `_Static_assert(...)`, a C keyword g++
+# rejects in C++ mode (only clang accepts it as an extension). ANY TU
+# pulling in mach headers (subprocess.cpp via <spawn.h>, tls.cpp, etc.)
+# trips it. Alias it directory-wide HERE — before every add_subdirectory
+# below (maya, acp-cpp, mcp-cpp) and before the agentty / test targets —
+# so all of them, including future submodules, inherit it from one place
+# instead of each re-discovering the breakage. AppleClang doesn't need it
+# (and can't build this tree — it doesn't advertise cxx_std_26).
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_definitions(_Static_assert=static_assert)
 endif()
 
 # Prefer the in-tree submodule when present; only fall back to fetch.
