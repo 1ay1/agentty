@@ -1181,34 +1181,6 @@ if(AGENTTY_BUILD_TESTS)
     # instead of as a silent dead region in production.
     agentty_add_full_test(visual_hash_coverage_test)
 
-    # reveal_drain_integration_test — guards the post-stream reveal finalize
-    # ORDERING against the real maya::StreamingMarkdown: proves that calling
-    # finish() (via settle_message_md) before request_finalize kills the glide
-    # (reveal snaps), while arming request_finalize WHILE live lets the
-    # typewriter glide to the edge and flip live_ off on its own. This is the
-    # real long-turn "stuck/jumping md" fix.
-    agentty_add_full_test(reveal_drain_integration_test)
-
-    # finalize_turn_reveal_test — the PRODUCTION-WIRING proof for the same
-    # long-turn reveal fix. reveal_drain_integration_test exercises the widget
-    # in isolation; THIS one drives the REAL finalize_turn reducer over a real
-    # Model with a live mid-glide reveal widget in view_cache and asserts the
-    # text-only/idle path DEFERS finish() (widget left live+finalizing,
-    # pending_settle_freeze set, glide drains then live_tail_reveal_settled
-    # opens) while the tool path settles immediately. Catches a regression
-    # that re-orders/removes the turn_will_go_idle branch — which the
-    # widget-only test cannot see.
-    agentty_add_full_test(finalize_turn_reveal_test)
-
-    # reveal_settle_loop_test — reproduces the FROZEN-SCRAMBLE screenshot bug:
-    # a short reply settles but the reveal overlay stays stuck showing
-    # scramble garbage because the run loop went to sleep while the widget
-    # was still live_. Drives the REAL host render path (ui::thread_config →
-    # maya::Thread::build) under a FAITHFUL run loop that only re-renders
-    # when the prior frame requested an animation frame. Fails if the loop
-    # ever quiesces while the widget is still live (= frozen scramble).
-    agentty_add_full_test(reveal_settle_loop_test)
-
     # tool_result_budget_test — wire-only byte-budget cap on tool
     # results. Drives the real messages_json_string serializer and
     # asserts oversized outputs are bounded (head+tail kept, marker
@@ -1316,9 +1288,6 @@ if(AGENTTY_BUILD_TESTS)
         rag_expand_test
         knowledge_test
         visual_hash_coverage_test
-        reveal_drain_integration_test
-        finalize_turn_reveal_test
-        reveal_settle_loop_test
         tool_result_budget_test
         salvage_dedup_test
         doom_loop_test

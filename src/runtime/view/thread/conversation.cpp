@@ -224,7 +224,41 @@ void build_live_tail(const Model& m, int& running_turn,
                         if (!tc.is_terminal()) return false;
                 return true;
             }();
-            if (run_terminal && !reserve_slot) {
+            // CRITICAL: do NOT stamp the cacheable key while the reveal
+            // overlay is still animating. assistant_run_hash_id is keyed on
+            // the message id + compute_render_key() (text content/size) — it
+            // is INVARIANT across the reveal's scramble→clean transition
+            // because the underlying text bytes don't change, only the
+            // per-frame overlay cells do. If we stamp it while the trailing
+            // edge is still showing scramble glyphs, maya paints those
+            // scramble cells into its hash_id-keyed component cache; when the
+            // reveal then settles to clean text the key is UNCHANGED, so the
+            // cache HITS and never repaints — stranding scramble garbage on
+            // the settled tail forever (the frozen-glyph screenshot:
+            // "just let me\u2423Z@o%"). And because freeze_range reuses the same
+            // key, the garbage is frozen permanently. Leave the run UNKEYED
+            // (rebuild + repaint every frame, like the in-flight run) until
+            // every message's reveal widget has fully drained — then the
+            // clean cells are what gets cached, and the freeze handoff hits a
+            // clean entry. The drain window is ~200 ms ramp + ~376 ms
+            // scramble settle, fully covered by the pending_settle_freeze
+            // RAF clock, so this costs at most a few extra rebuilds.
+            const bool reveal_settled = [&] {
+                for (std::size_t j = i; j < run_end && j < m.d.current.messages.size(); ++j) {
+                    const auto& mj = m.d.current.messages[j];
+                    if (mj.role != Role::Assistant || mj.text.empty()) continue;
+                    const auto& mc = m.ui.view_cache.message_md(
+                        m.d.current.id, mj.id);
+                    if (!mc.streaming) continue;
+                    if (mc.streaming->is_live()
+                     || mc.streaming->is_finalizing()
+                     || mc.streaming->reveal_in_progress()
+                     || mc.streaming->is_parsing())
+                        return false;
+                }
+                return true;
+            }();
+            if (run_terminal && !reserve_slot && reveal_settled) {
                 cfg.hash_id = assistant_run_hash_id(m, i, run_end);
             }
             // NOTE: the in-flight (streaming) run is deliberately NOT
