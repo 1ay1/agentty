@@ -846,8 +846,43 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // border fragments at the scrollback↔viewport seam.
         // Settling here matches agent_session's `m.md.finish() + push to
         // frozen` discipline: one coherent transition per update step.
+        //
+        // BUT NOT when this turn is about to go idle and take the
+        // deferred-finalize path below. settle_message_md() calls
+        // finish(), which flips the reveal widget live_ off IMMEDIATELY —
+        // and the idle block's request_finalize(200) then no-ops (it
+        // early-returns when !live_). The net effect is the typewriter
+        // never glides: on a long turn the whole final burst snaps to
+        // fully-revealed in one frame (the "long-turn md animation gets
+        // stuck / jumps instead of typing out" symptom). The deferred
+        // path WANTS the widget to stay live so request_finalize can ramp
+        // the cursor to the edge and the widget flips live_ off on its
+        // own; the REAL settle_message_md + freeze then runs in meta.cpp's
+        // Tick once live_tail_reveal_settled().
+        //
+        // A turn goes idle here iff it has no tool calls to dispatch
+        // (kick_pending_tools below leaves us Idle) — i.e. a text-only
+        // reply. When there ARE tool calls, the turn continues (phase
+        // stays active), there's no deferred-finalize, and the height-lock
+        // rationale above applies, so settle now.
+        const bool turn_will_go_idle =
+            last.role == Role::Assistant
+            && std::ranges::none_of(last.tool_calls, [](const auto& tc) {
+                   return tc.is_pending() || tc.is_running();
+               });
         if (last.role == Role::Assistant && !last.text.empty()) {
-            settle_message_md(m, last);
+            if (turn_will_go_idle) {
+                // Deferred finalize: arm the glide WHILE still live instead
+                // of finish()ing now. Mirrors the idle block below; the
+                // widget glides to the edge and flips live_ off itself, and
+                // meta.cpp's Tick does the real settle+freeze once drained.
+                auto& cache = m.ui.view_cache.message_md(
+                    m.d.current.id, last.id);
+                if (cache.streaming)
+                    cache.streaming->request_finalize(200);
+            } else {
+                settle_message_md(m, last);
+            }
         }
         // Flush any tool_calls whose StreamToolUseEnd never fired — Anthropic
         // normally sends content_block_stop per tool block, but proxies /
