@@ -226,16 +226,6 @@ const std::vector<Axis>& visual_axes() {
         {"login modal opens", [](Model& m) {
             m.ui.login = agentty::ui::login::Picking{};
         }},
-        {"pending_settle_freeze (post-stream reveal drain)", [](Model& m) {
-            // The reveal cursor is still gliding after StreamFinished;
-            // the 16ms reveal bucket must stay armed so build() keeps
-            // ticking it. Falling through to the coarse blink bucket
-            // freezes the typewriter mid-glide (the long-turn stuck-md bug).
-            m.ui.pending_settle_freeze = true;
-        }},
-        {"settle_cooldown_ticks (post-freeze reconcile window)", [](Model& m) {
-            m.ui.settle_cooldown_ticks = 6;
-        }},
     };
     return axes;
 }
