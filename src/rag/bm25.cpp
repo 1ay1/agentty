@@ -295,9 +295,16 @@ chunk_document(const std::string& path, const std::string& body,
         // semantic boundaries (blank lines, headings, list transitions).
         while (i < n) {
             std::size_t llen = lines[i].size() + 1;  // +1 for the newline
+            // A line-count overflow is a SOFT bound: never split mid-fence on
+            // it, or a fenced code block straddling the boundary lands in no
+            // single chunk (the closing ``` ends up in a later chunk). Keep
+            // growing until the fence closes. char_count is the HARD cap that
+            // still bounds a pathologically long unterminated fence.
+            bool line_overflow = (taken >= max_lines);
+            bool char_overflow = (char_count + llen > max_chars);
             bool would_overflow =
-                (taken >= max_lines) || (char_count + llen > max_chars);
-            
+                (line_overflow && !chunk_ctx.in_code_fence) || char_overflow;
+
             if (would_overflow && taken > 0) {
                 // Try to find a safe break point within the last few lines.
                 // If we can't, break here anyway.
@@ -314,8 +321,10 @@ chunk_document(const std::string& path, const std::string& body,
             char_count += llen;
             ++taken;
             ++i;
-            
-            if (taken >= max_lines) break;
+
+            // Same soft/hard split discipline for the post-take bounds: a
+            // line-count cap must not cut an open fence; char_count still can.
+            if (taken >= max_lines && !chunk_ctx.in_code_fence) break;
             if (char_count >= max_chars) break;
         }
 

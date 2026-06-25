@@ -1286,6 +1286,7 @@ if(AGENTTY_BUILD_TESTS)
         rag_hnsw_test
         rag_rerank_test
         rag_expand_test
+        rag_advanced_test
         knowledge_test
         visual_hash_coverage_test
         tool_result_budget_test
