@@ -265,40 +265,9 @@ struct AgenttyApp {
             && m.d.current.messages.back().role == Role::Assistant
             && (!m.d.current.messages.back().streaming_text.empty()
                 || !m.d.current.messages.back().pending_stream.empty());
-
-        // Post-stream reveal drain. When StreamFinished settles the turn,
-        // finalize_turn moves streaming_text → text (so `revealing_text`
-        // above goes false), flips phase → Idle (so m.s.active() goes
-        // false), and arms request_finalize(200) on the live tail while
-        // setting m.ui.pending_settle_freeze. maya's reveal cursor is STILL
-        // mid-glide at that instant — the bigger the final burst, the longer
-        // the typewriter still has to type out (worst on long turns). The
-        // widget keeps calling request_animation_frame() every 16 ms to play
-        // that glide + the finalize ramp, but if the hash falls through to
-        // the 265 ms blink-parity bucket here, the render gate (skip_render
-        // when the hash is unchanged, app.hpp) swallows those RAF wakes:
-        // view()/build() never runs, the reveal cursor never advances, and
-        // the text FREEZES half-revealed until an unrelated event (a Tick
-        // parity flip, a keystroke) happens to move the hash. That is the
-        // "long-turn md animation gets stuck" symptom.
-        //
-        // pending_settle_freeze is the exact model-side marker for this
-        // window: set in finalize_turn at stream end, cleared by meta.cpp's
-        // Tick only once live_tail_reveal_settled() (the reveal has fully
-        // drained and the settled shape is on screen). settle_cooldown_ticks
-        // covers the few frames after the freeze where maya is still
-        // reconciling the collapse. subscribe.cpp ALREADY keeps the Tick
-        // alive across both (so the loop wakes); we just have to keep the
-        // hash stepping at the RAF interval so those wakes actually render.
-        // No wall-clock timeout — it's anchored to a real reducer-set flag
-        // that clears on the real drain event, so it can't be out-run by a
-        // slow glide the way a fixed window could.
-        const bool reveal_draining =
-            m.ui.pending_settle_freeze
-            || m.ui.settle_cooldown_ticks > 0;
         const std::int64_t kRevealBucketMs = 16;   // == kAnimationFrameInterval
 
-        if (revealing_text || reveal_draining) {
+        if (revealing_text) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
         } else if (fine_anim_live) {
             mix(static_cast<std::uint64_t>(now_ms / kFineAnimMs));
