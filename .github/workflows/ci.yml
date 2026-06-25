@@ -33,10 +33,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Init maya submodule (HTTPS)
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        # Submodule pushes can lag GitHub replica propagation, so a fresh
+        # `submodule update` may hit "not our ref / Fetched ... but it did
+        # not contain <sha>". Retry a few times with a full (unshallow)
+        # fetch before giving up.
         run: |
           git config --global url."https://github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then
+              echo "submodules ready (attempt $attempt)"
+              break
+            fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
 
       - name: Install deps
         # GCC 14 for C++26 (std::expected / std::format). Mirrors the local
