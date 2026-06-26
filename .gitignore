@@ -27,3 +27,6 @@ dist/
 dotfiles/
 packaging/windows/license.rtf
 Testing/
+
+# Local scratchpad — repro/diag sources, build artifacts (.exe/.obj), logs
+scratch/
