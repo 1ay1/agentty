@@ -122,10 +122,18 @@ Element model_picker(const Model& m) {
         for (const auto& mi : m.d.available_models) {
             const bool sel    = i == picker->index;
             const bool active = mi.id == m.d.model_id;
+            const auto caps   = ModelCapabilities::from_id(mi.id.value);
             Picker::Config::Row row;
             row.leading        = mi.display_name;
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-            row.trailing       = mi.favorite ? "★" : "";
+            // Trailing: favourite star, plus the reasoning-effort tier on the
+            // highlighted row when the model supports it (←/→ cycles it).
+            std::string trailing = mi.favorite ? "★" : "";
+            if (sel && caps.supports_effort() && m.d.effort != Effort::None) {
+                if (!trailing.empty()) trailing += "  ";
+                trailing += "◇ " + std::string{effort_label(m.d.effort)};
+            }
+            row.trailing       = std::move(trailing);
             row.trailing_style = fg_of(warn);
             row.selected = sel;
             row.active   = active;
@@ -135,6 +143,20 @@ Element model_picker(const Model& m) {
     }
 
     cfg.footer.push_back(text(""));
+    // Reasoning-effort line: shown only when the highlighted model supports
+    // effort. Names the current tier and the ←/→ binding that cycles it.
+    if (!m.d.available_models.empty()) {
+        const int hi = std::clamp(picker->index, 0,
+            static_cast<int>(m.d.available_models.size()) - 1);
+        const auto caps = ModelCapabilities::from_id(
+            m.d.available_models[static_cast<std::size_t>(hi)].id.value);
+        if (caps.supports_effort())
+            cfg.footer.push_back(h(
+                text("←→", fg_of(fg)),
+                text(" reasoning effort: ", fg_dim(muted)),
+                text(std::string{effort_label(m.d.effort)}, fg_bold(accent))
+            ).build());
+    }
     cfg.footer.push_back(h(
         text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
         text("PgUp/PgDn", fg_of(fg)), text(" page  ", fg_dim(muted)),

@@ -1433,6 +1433,33 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
             return done(std::move(m));
         },
+        [&](StreamThinkingDelta& e) -> Step {
+            // Adaptive-thinking block delta. Two shapes arrive: a
+            // `thinking_delta` carries reasoning text (usually empty under
+            // display:omitted), a `signature_delta` carries the opaque
+            // per-block signature near the block's end. Accumulate both onto
+            // the in-flight assistant message so the block can be replayed
+            // verbatim next turn — Anthropic 400s a tool_use turn whose
+            // thinking block was dropped.
+            if (auto* a = active_ctx(m.s.phase)) {
+                // Liveness: a thinking delta proves the wire is alive during
+                // long silent reasoning passes. Bump last_event_at and reset
+                // the retry budget exactly like the heartbeat path so a
+                // connect→think→stall sequence gets a fresh ladder.
+                a->last_event_at = std::chrono::steady_clock::now();
+                a->transient_retries = 0;
+            }
+            // Captured for replay only — never rendered, and there's no
+            // assistant placeholder to attach to during compaction.
+            if (m.s.compacting) return done(std::move(m));
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& msg = m.d.current.messages.back();
+                if (!e.text.empty())      msg.thinking          += e.text;
+                if (!e.signature.empty()) msg.thinking_signature = e.signature;
+            }
+            return done(std::move(m));
+        },
         [&](StreamUsage& e) -> Step {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();

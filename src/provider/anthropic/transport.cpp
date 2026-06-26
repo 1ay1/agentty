@@ -356,9 +356,21 @@ bool dispatch_content_block_delta_fast(StreamCtx& ctx, const std::string& data) 
     // reducer's stall watchdog and fires a spurious "stream stalled"
     // error even though the wire is healthy and the model is producing
     // thinking tokens we've chosen not to render.
-    if (delta_type == "thinking_delta" || delta_type == "signature_delta") {
+    if (delta_type == "thinking_delta") {
+        // Capture the reasoning text (usually empty under display:omitted)
+        // so the block can be replayed next turn. Doubles as a liveness
+        // heartbeat — the reducer bumps last_event_at on this Msg too.
+        std::string_view text;
+        if (delta["thinking"].get_string().get(text)) return false;
         ++ctx.thinking_deltas;
-        ctx.sink(StreamHeartbeat{});
+        ctx.sink(StreamThinkingDelta{std::string{text}, {}});
+        return true;
+    }
+    if (delta_type == "signature_delta") {
+        std::string_view sig;
+        if (delta["signature"].get_string().get(sig)) return false;
+        ++ctx.thinking_deltas;
+        ctx.sink(StreamThinkingDelta{{}, std::string{sig}});
         return true;
     }
     return false;
@@ -528,14 +540,13 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, const std::string& da
                 ctx.sink(StreamTextDelta{delta.value("text", "")});
             } else if (type == "input_json_delta") {
                 ctx.sink(StreamToolUseDelta{delta.value("partial_json", "")});
-            } else if (type == "thinking_delta" || type == "signature_delta") {
-                // Extended-thinking models can emit thinking_delta blocks
-                // even when we don't enable thinking via the request body.
-                // We don't render thinking content in the UI yet, but
-                // emitting a StreamHeartbeat keeps the stall watchdog
-                // from tripping during long silent reasoning passes.
+            } else if (type == "thinking_delta") {
+                // Capture reasoning text for replay; also a liveness signal.
                 ++ctx.thinking_deltas;
-                ctx.sink(StreamHeartbeat{});
+                ctx.sink(StreamThinkingDelta{delta.value("thinking", ""), {}});
+            } else if (type == "signature_delta") {
+                ++ctx.thinking_deltas;
+                ctx.sink(StreamThinkingDelta{{}, delta.value("signature", "")});
             }
             break;
         }
@@ -1079,7 +1090,8 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
 
 } // namespace
 
-[[nodiscard]] std::string messages_json_string(const Thread& t) {
+[[nodiscard]] std::string messages_json_string(const Thread& t,
+                                               bool include_thinking) {
     // First pass: figure out where the cache breakpoints land. cli.js
     // pins BOTH the last and second-to-last *emitted* messages' last
     // content blocks (rolling cache reuse — turn N's last becomes turn
@@ -1120,6 +1132,16 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
         const bool has_text   = !m.text.empty();
         const bool has_images = (m.role == Role::User && has_wire_image(m));
         const bool has_tools  = (m.role == Role::Assistant && !m.tool_calls.empty());
+        // Replay a captured thinking block on assistant turns that also
+        // carry real content (text or tool_use). Anthropic requires the
+        // block be present and verbatim on the turn whose tool_use it
+        // precedes, or the request 400s. Gated on a present signature (an
+        // unsigned thinking block is rejected) and on the request enabling
+        // thinking (include_thinking).
+        const bool has_thinking = include_thinking
+                               && m.role == Role::Assistant
+                               && !m.thinking_signature.empty()
+                               && (has_text || has_tools);
         if (has_text || has_images || has_tools) {
             const int my_idx   = emitted;
             const bool do_pin  = pinning_for(my_idx);
@@ -1142,10 +1164,24 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
             if (has_images)
                 for (const auto& img : m.images)
                     if (!img.bytes.empty()) ++wire_images;
-            int blocks = wire_images
+            int blocks = (has_thinking ? 1 : 0)
+                       + wire_images
                        + (has_text ? 1 : 0)
                        + (has_tools ? static_cast<int>(m.tool_calls.size()) : 0);
             int block_emitted = 0;
+            // Thinking block goes FIRST — the model emits it before its
+            // text/tool_use, and the replay order must match. It is never
+            // the cache pin (content always follows it). json(...).dump()
+            // JSON-encodes the (possibly empty) thinking text + opaque
+            // signature; no cache_control on a thinking block.
+            if (has_thinking) {
+                if (block_emitted++ > 0) out.push_back(',');
+                out.append(R"({"type":"thinking","thinking":)");
+                out.append(json(scrub_utf8(m.thinking)).dump());
+                out.append(R"(,"signature":)");
+                out.append(json(m.thinking_signature).dump());
+                out.push_back('}');
+            }
             if (has_images) {
                 for (const auto& img : m.images) {
                     if (img.bytes.empty()) continue;
@@ -1209,7 +1245,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
 // outside transport.cpp's hot path may depend on it). The hot path uses
 // `messages_json_string` directly.
 json build_messages(const Thread& t) {
-    return json::parse(messages_json_string(t));
+    return json::parse(messages_json_string(t, /*include_thinking=*/false));
 }
 
 namespace {
@@ -1395,7 +1431,15 @@ std::string default_system_prompt() {
 #endif
 
     std::string cwd;
-    try { cwd = std::filesystem::current_path().string(); } catch (...) {}
+    // current_path().string() narrows the wide Windows path through the active
+    // code page (ANSI), so a non-ASCII path turns into invalid UTF-8 and would
+    // poison the whole system prompt on the JSON wire. u8string() converts the
+    // wide path to UTF-8 directly — no lossy ANSI round-trip. (No-op on POSIX,
+    // where the native encoding is already UTF-8.)
+    try {
+        auto u8 = std::filesystem::current_path().u8string();
+        cwd.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
+    } catch (...) {}
 
     std::ostringstream oss;
     oss << "You are agentty, a terminal coding assistant. Act, don't ask. "
@@ -1631,8 +1675,12 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // string back into a json tree just so body.dump() could
     // re-serialize it again. For a write-tool turn with 1 MiB of
     // content, the round-trip was the dominant request-build cost.
+    // Replay stored thinking blocks only when this request itself enables
+    // thinking (effort on). With thinking off, omit them — they're only
+    // required by, and valid for, thinking-enabled requests.
     std::string messages_str = messages_json_string(
-        Thread{ThreadId{""}, "", req.messages, {}, {}});
+        Thread{ThreadId{""}, "", req.messages, {}, {}},
+        /*include_thinking=*/!req.effort.empty());
     if (!req.tools.empty()) {
         json tools_j = json::array();
         for (const auto& t : req.tools) tools_j.push_back(tool_spec_to_json(t));
@@ -1644,6 +1692,19 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         body["tools"] = std::move(tools_j);
     }
     body["metadata"] = json{{"user_id", make_user_id()}};
+    // Reasoning effort + adaptive thinking. req.effort is pre-clamped to the
+    // model's capability by launch_stream; non-empty means the user picked a
+    // thinking tier in the model picker. Pair output_config.effort with
+    // adaptive thinking — the GA way to turn reasoning on for Opus 4.6+/4.7/
+    // 4.8 (budget_tokens is removed on 4.7/4.8). Omitted entirely when effort
+    // is off, preserving the default no-thinking, dead-air-free wire. The
+    // assistant thinking blocks the model emits in response are captured and
+    // replayed by messages_json_string (see below) so tool_use turns don't
+    // 400 for a dropped thinking block.
+    if (!req.effort.empty()) {
+        body["thinking"]       = json{{"type", "adaptive"}};
+        body["output_config"]  = json{{"effort", req.effort}};
+    }
     // Splice marker for the messages array. nlohmann gives the dumped
     // form `"messages":<unique-string>"`; we string-replace the
     // placeholder with messages_json_string. Picked a token that

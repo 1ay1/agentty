@@ -161,6 +161,9 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
             case SpecialKey::End:      return ModelPickerJump{ModelPickerJump::Where::End};
             case SpecialKey::PageUp:   return ModelPickerJump{ModelPickerJump::Where::PageUp};
             case SpecialKey::PageDown: return ModelPickerJump{ModelPickerJump::Where::PageDown};
+            // ←/→ cycle the reasoning-effort tier for the highlighted model.
+            case SpecialKey::Left:     return ModelPickerCycleEffort{-1};
+            case SpecialKey::Right:    return ModelPickerCycleEffort{+1};
             default: break;
         }
     }

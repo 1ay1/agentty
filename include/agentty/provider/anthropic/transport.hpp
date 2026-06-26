@@ -53,6 +53,12 @@ struct Request {
     // Per-turn retry attempt count, copied from provider::Request.
     // Stamped on the wire as x-stainless-retry-count. Default 0.
     int retry_count = 0;
+
+    // Reasoning effort wire value ("low".."max"), copied from
+    // provider::Request and already clamped to the model's capability.
+    // Empty = no thinking (default). Non-empty makes run_stream_sync send
+    // adaptive thinking + output_config.effort and replay thinking blocks.
+    std::string effort;
 };
 
 using EventSink = std::function<void(Msg)>;
@@ -70,7 +76,8 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 // Same as build_messages but emits the raw JSON string directly (hot
 // path; avoids the json tree round-trip). Applies the per-result wire
 // byte-budget cap on tool outputs. Exposed for tests.
-[[nodiscard]] std::string messages_json_string(const Thread& t);
+[[nodiscard]] std::string messages_json_string(const Thread& t,
+                                               bool include_thinking = false);
 
 // Standard system prompt with env info.
 [[nodiscard]] std::string default_system_prompt();

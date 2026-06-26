@@ -41,6 +41,9 @@ struct Settings {
     // model id that doesn't exist on the new provider. The global `model_id`
     // above stays the active model; this map is just the per-provider recall.
     std::map<std::string, std::string> provider_models;
+    // Reasoning effort tier (output_config.effort wire value, e.g. "high";
+    // empty = off, the default). Reloaded into Model::effort at startup.
+    std::string          effort;
 };
 
 template <class S>

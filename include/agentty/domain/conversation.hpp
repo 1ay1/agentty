@@ -279,6 +279,18 @@ struct Message {
     /// corresponding ImageContent's path.
     std::vector<Attachment>   attachments;
     std::string streaming_text;
+    // ── Extended/adaptive thinking (Assistant turns only) ──────────────
+    // When effort is on, the Claude provider enables adaptive thinking and
+    // the model emits a leading `thinking` content block (text — usually
+    // empty under the default `display:omitted` — plus an opaque
+    // `signature`). Anthropic REQUIRES that block be replayed verbatim on
+    // the follow-up turn that carries this assistant's tool_use, or it 400s
+    // the request. We capture both here during streaming, serialise them as
+    // the first content block of the assistant message on the wire, and
+    // persist them so a reloaded thread can still be continued. Empty for
+    // User turns and for Assistant turns produced without thinking.
+    std::string thinking;
+    std::string thinking_signature;
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,
     // and several can arrive in one TCP read. If we appended each

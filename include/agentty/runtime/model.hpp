@@ -144,6 +144,12 @@ struct Model {
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};
 
+        // Reasoning effort tier, selected live in the model picker (←/→).
+        // None = the default no-thinking wire; any other level makes the
+        // Claude provider send adaptive thinking + output_config.effort.
+        // Persisted in Settings; gated per-model at request-build time.
+        Effort                 effort = Effort::None;
+
         std::vector<FileChange>          pending_changes;
         std::optional<PendingPermission> pending_permission;
 

@@ -20,6 +20,7 @@ public:
         areq.max_tokens    = req.max_tokens;
         areq.auth          = std::move(req.auth);
         areq.retry_count   = req.retry_count;
+        areq.effort        = std::move(req.effort);
         areq.tools.reserve(req.tools.size());
         for (auto& t : req.tools)
             areq.tools.push_back({std::move(t.name),

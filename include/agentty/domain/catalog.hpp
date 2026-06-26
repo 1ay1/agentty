@@ -2,10 +2,12 @@
 // agentty catalog — describes an LLM the user can select.
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "agentty/domain/id.hpp"
 
@@ -63,6 +65,10 @@ struct ModelCapabilities {
     // Pre-decoded "Claude 4-or-later" — the threshold the wire uses to
     // decide whether to send the context-management beta header.
     bool generation_4_or_later = false;
+    // Minor/revision token: the integer immediately after the generation
+    // (e.g. `opus-4-8` → generation 4, revision 8). 0 = unknown. Lets the
+    // wire tell 4.5 from 4.8, which the effort-capability gates below need.
+    int  revision = 0;
     // agentty-internal: user opted into the 1M-context-window beta. The
     // tag is `[1m]` appended to the model id at selection time; the
     // upstream id has no such suffix.
@@ -88,6 +94,30 @@ struct ModelCapabilities {
         return weak_tool_use;
     }
 
+    // ── Effort (output_config.effort) capability gates ───────────────────
+    // Effort is GA on Opus 4.5+ and Sonnet 4.6+; it 400s on Sonnet 4.5,
+    // Haiku, and any pre-4 model. `max` lands on Opus 4.6+ / Sonnet 4.6;
+    // `xhigh` shipped with Opus 4.7 (Opus only). Gates read the decoded
+    // family + generation + revision so a new id only updates from_id().
+    [[nodiscard]] constexpr bool supports_effort() const noexcept {
+        if (family == Family::Opus)
+            return generation > 4 || (generation == 4 && revision >= 5);
+        if (family == Family::Sonnet)
+            return generation > 4 || (generation == 4 && revision >= 6);
+        return false;
+    }
+    [[nodiscard]] constexpr bool supports_effort_max() const noexcept {
+        if (!supports_effort()) return false;
+        if (family == Family::Opus)
+            return generation > 4 || (generation == 4 && revision >= 6);
+        return true;  // any effort-capable Sonnet (4.6+) also takes `max`
+    }
+    [[nodiscard]] constexpr bool supports_effort_xhigh() const noexcept {
+        if (!supports_effort()) return false;
+        return family == Family::Opus
+            && (generation > 4 || (generation == 4 && revision >= 7));
+    }
+
     // Decode an id string. Pure / noexcept / branchless on the hot path.
     // No allocations — the tokeniser uses string_view splits in place.
     [[nodiscard]] static constexpr ModelCapabilities from_id(std::string_view id) noexcept {
@@ -106,14 +136,31 @@ struct ModelCapabilities {
         // token immediately following.
         std::string_view prev{};
         std::size_t start = 0;
+        // True for the token immediately following the generation token —
+        // that's the revision (`opus-4-8` → revision 8). Reset by any other
+        // token so a later stray integer (a date, a size tag) isn't misread.
+        bool expect_revision = false;
         for (std::size_t i = 0; i <= id.size(); ++i) {
             const bool boundary = (i == id.size() || id[i] == '-');
             if (!boundary) continue;
             if (i > start) {
                 std::string_view tok = id.substr(start, i - start);
+                const bool was_expecting_revision = expect_revision;
+                expect_revision = false;
                 if (tok == "haiku")       caps.family = Family::Haiku;
                 else if (tok == "sonnet") caps.family = Family::Sonnet;
                 else if (tok == "opus")   caps.family = Family::Opus;
+                else if (was_expecting_revision) {
+                    // Revision token — same 1-/2-digit plausibility check as
+                    // the generation parse so a date can't slip through.
+                    int r = 0;
+                    bool ok = !tok.empty() && tok.size() <= 2;
+                    for (char c : tok) {
+                        if (c < '0' || c > '9') { ok = false; break; }
+                        r = r * 10 + (c - '0');
+                    }
+                    if (ok) caps.revision = r;
+                }
                 else if (prev == "haiku" || prev == "sonnet" || prev == "opus") {
                     // Generation token — parse as int (no allocations). Only
                     // the NEW id schema puts the generation right after the
@@ -132,6 +179,7 @@ struct ModelCapabilities {
                     if (ok) {
                         caps.generation = g;
                         caps.generation_4_or_later = (g >= 4);
+                        expect_revision = true;  // next int token is the revision
                     }
                 }
                 prev = tok;
@@ -261,6 +309,80 @@ private:
 // Used by the provider/runtime paths that only hold the id, not the caps.
 [[nodiscard]] inline bool is_weak_model(std::string_view model_id) noexcept {
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
+}
+
+// ============================================================================
+// Effort — user-selectable reasoning/spend tier (output_config.effort).
+// ============================================================================
+// `None` sends nothing — preserving the default no-thinking, replay-safe
+// wire. Any other level makes the Claude provider send adaptive thinking +
+// the matching `output_config.effort`. Selectable live from the model picker.
+enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
+
+// Wire value for output_config.effort. None → "" (the field is omitted).
+[[nodiscard]] constexpr std::string_view effort_wire(Effort e) noexcept {
+    switch (e) {
+        case Effort::None:   return "";
+        case Effort::Low:    return "low";
+        case Effort::Medium: return "medium";
+        case Effort::High:   return "high";
+        case Effort::Xhigh:  return "xhigh";
+        case Effort::Max:    return "max";
+    }
+    return "";
+}
+
+// Short label for the picker UI (None renders as "off").
+[[nodiscard]] constexpr std::string_view effort_label(Effort e) noexcept {
+    return e == Effort::None ? std::string_view{"off"} : effort_wire(e);
+}
+
+// Parse a persisted wire value back to Effort. Unknown / "" → None.
+[[nodiscard]] constexpr Effort effort_from_wire(std::string_view s) noexcept {
+    if (s == "low")    return Effort::Low;
+    if (s == "medium") return Effort::Medium;
+    if (s == "high")   return Effort::High;
+    if (s == "xhigh")  return Effort::Xhigh;
+    if (s == "max")    return Effort::Max;
+    return Effort::None;
+}
+
+// Clamp an Effort to what a model actually supports and return its wire
+// value. "" when the model can't take effort at all (or e == None). The
+// provider calls this so a stale high pick (e.g. Xhigh chosen, then a swap
+// to a model without xhigh) silently degrades to `high` instead of 400ing.
+[[nodiscard]] inline std::string_view effort_wire_for(
+        Effort e, const ModelCapabilities& caps) noexcept {
+    if (e == Effort::None || !caps.supports_effort()) return "";
+    if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
+    if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
+    return effort_wire(e);
+}
+
+// Ordered efforts the user may cycle for a given model: always
+// {None, Low, Medium, High}, plus Xhigh / Max where supported. The picker
+// cycles within this so the user never lands on a level the model 400s on.
+[[nodiscard]] inline std::vector<Effort> available_efforts(
+        const ModelCapabilities& caps) {
+    std::vector<Effort> out{Effort::None, Effort::Low,
+                            Effort::Medium, Effort::High};
+    if (caps.supports_effort_xhigh()) out.push_back(Effort::Xhigh);
+    if (caps.supports_effort_max())   out.push_back(Effort::Max);
+    return out;
+}
+
+// Step `cur` by `delta` (wrapping) within a model's available efforts.
+// Returns None when the model doesn't support effort at all.
+[[nodiscard]] inline Effort cycle_effort(
+        Effort cur, int delta, const ModelCapabilities& caps) {
+    if (!caps.supports_effort()) return Effort::None;
+    const auto list = available_efforts(caps);
+    const int n = static_cast<int>(list.size());
+    int idx = 0;
+    for (int i = 0; i < n; ++i)
+        if (list[static_cast<std::size_t>(i)] == cur) { idx = i; break; }
+    idx = ((idx + delta) % n + n) % n;
+    return list[static_cast<std::size_t>(idx)];
 }
 
 // Per-model max OUTPUT-token budget for a normal turn.
