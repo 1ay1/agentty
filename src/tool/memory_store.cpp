@@ -416,8 +416,10 @@ fs::path path_for(Scope s) {
     // EACCES for any non-root user and surfaces the unhelpful
     // "failed to create directory '/.agentty': Permission denied"
     // error. Treat root=="/" and other unwritable roots as if no
-    // project scope is available; the append-time fallback below
-    // redirects to user scope so the user's request still succeeds.
+    // project scope is available. append() then REFUSES the call with a
+    // guiding error rather than silently writing the fact to user scope —
+    // a silent promotion would leak a project fact into every OTHER
+    // workspace's system prompt (cross-workspace "memory bleed").
     const auto& root = util::workspace_root();
     if (root.empty()) return {};
     if (root == fs::path{"/"}) return {};
@@ -452,32 +454,25 @@ AppendResult append(Scope s, std::string_view text, AppendOptions opts) {
     auto p = path_for(s);
     Scope actual_scope = s;
     if (p.empty() && s == Scope::Project) {
-        // Project scope unavailable (root==/, unwritable, or unset).
-        // Transparently fall back to user scope so the user's request
-        // is fulfilled; surface the redirect in `note` so the caller
-        // can see what happened.
-        auto fallback = path_for(Scope::User);
-        if (!fallback.empty()) {
-            p = std::move(fallback);
-            actual_scope = Scope::User;
-            std::string add = "project scope unavailable (workspace root '"
-                            + util::workspace_root().string()
-                            + "' is not writable); stored under user scope instead";
-            if (res.note.empty()) res.note = std::move(add);
-            else { res.note += "; "; res.note += add; }
-        }
+        // Project scope unavailable (workspace root == "/", unwritable, or
+        // unset). Do NOT silently fall back to user scope: a project fact
+        // promoted to user scope loads into EVERY other workspace's system
+        // prompt — the cross-workspace "memory bleed" where a fact about
+        // project A surfaces while you're working on project B. Refuse, and
+        // tell the caller how to opt in to a global fact explicitly.
+        res.error =
+            "remember: project scope is unavailable here — workspace root '"
+            + util::workspace_root().string()
+            + "' is not writable, so there is nowhere to store a project-"
+              "scoped fact. Re-run with scope=\"user\" if you intended a "
+              "global fact (it will load into every workspace), or start "
+              "agentty in a writable project directory.";
+        return res;
     }
     if (p.empty()) {
-        res.error = "remember: can't resolve a writable "
-                  + std::string{to_string(s)}
-                  + " memory path. ";
-        if (s == Scope::User) {
-            res.error += "HOME is unset and getpwuid_r returned no home directory.";
-        } else {
-            res.error += "Workspace root '" + util::workspace_root().string()
-                       + "' is not writable, and the user-scope fallback was "
-                       + "also unresolvable (HOME unset).";
-        }
+        // s == Scope::User and even the user path is unresolvable.
+        res.error = "remember: can't resolve a writable user memory path "
+                    "(HOME is unset and getpwuid_r returned no home directory).";
         return res;
     }
 

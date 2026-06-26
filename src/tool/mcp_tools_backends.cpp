@@ -61,6 +61,16 @@ using json    = nlohmann::json;
 //   memory free functions. Scope vocabulary is ["project","user"] so the
 //   shell defaults to project (the safer default, matching the native
 //   remember tool) and accepts "user" for cross-project facts.
+// Drift guard for the parallel result structs bridged in append() below.
+// agentty::tools::memory::AppendResult and mcp::tools::MemoryAppendResult carry
+// identical fields in identical order; the bridge copies them one by one. If a
+// field is added/removed on either side their sizes diverge and this trips at
+// compile time — a reminder to update BOTH structs and the mapping. (The
+// designated-init mapping below separately guards renames/removals.)
+static_assert(sizeof(memory::AppendResult) == sizeof(mt::MemoryAppendResult),
+              "AppendResult / MemoryAppendResult drifted — update both structs "
+              "and the field mapping in AgenttyMemoryStore::append()");
+
 class AgenttyMemoryStore final : public mt::MemoryStore {
 public:
     std::vector<std::string> scopes() const override {
@@ -68,22 +78,26 @@ public:
     }
 
     mt::MemoryAppendResult append(const mt::MemoryAppendRequest& req) override {
-        mt::MemoryAppendResult out;
         auto scope = memory::parse_scope(req.scope);
-        if (!scope) { out.error = "unknown scope '" + req.scope + "'"; return out; }
+        if (!scope)
+            return mt::MemoryAppendResult{.error = "unknown scope '" + req.scope + "'"};
 
         memory::AppendOptions opts;
         opts.pinned        = req.pinned;
         opts.tags          = req.tags;
         opts.supersedes_id = req.supersedes_id;
-        auto r = memory::append(*scope, req.text, opts);
+        const auto r = memory::append(*scope, req.text, opts);
 
-        out.id      = r.id;
-        out.error   = r.error;
-        out.note    = r.note;
-        out.rolled  = r.rolled;
-        out.deduped = r.deduped;
-        return out;
+        // Bridge the agentty result onto the mcp result. Named designated
+        // initialisers so a renamed/removed field is a compile error rather
+        // than a silent miscopy; the static_assert above catches size drift.
+        return mt::MemoryAppendResult{
+            .id      = r.id,
+            .error   = r.error,
+            .note    = r.note,
+            .rolled  = r.rolled,
+            .deduped = r.deduped,
+        };
     }
 
     std::size_t forget_by_id(const std::string& id) override {

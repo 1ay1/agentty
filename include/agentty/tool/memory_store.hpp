@@ -151,11 +151,19 @@ struct AppendOptions {
     bool no_dedup = false;
 };
 
+// MIRROR of mcp::tools::MemoryAppendResult (mcp-cpp/include/mcp/tools/host.hpp):
+// the two carry identical fields and are bridged field-by-field in
+// AgenttyMemoryStore::append (src/tool/mcp_tools_backends.cpp), which holds a
+// static_assert that trips if their sizes drift. Every field needs an in-class
+// default: the no-rollover path returns without ever touching `rolled`, so an
+// uninitialised `rolled` was read as garbage and printed as e.g.
+// "(140696944861232 old record(s) rolled.)". Add/remove a field here and you
+// update the mirror + the bridge mapping.
 struct AppendResult {
     std::string id;          // 8 hex chars on success (may be an existing id on dedup)
     std::string error;       // empty on success
     std::string note;        // non-empty when text was truncated, deduped, supersede missed, etc.
-    std::size_t rolled;      // number of old records dropped to fit caps
+    std::size_t rolled = 0;  // number of old records dropped to fit caps
     bool deduped = false;    // true ⇒ hit an existing record; id is the existing one
 };
 [[nodiscard]] AppendResult append(Scope s, std::string_view text,
