@@ -33,6 +33,12 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     cfg.breadcrumb_min_width   = is_streaming ? 160 : 130;
     cfg.token_stream_min_width = 110;
     cfg.ctx_bar_min_width      = 55;
+    // CTX gauge is all-or-nothing: show the FULL gauge (bar + numbers) only
+    // when the terminal is wide enough to fit it, otherwise hide it entirely.
+    // Pinning the gauge's drop threshold to the bar's fit width removes the
+    // cramped "numbers only, no bar" middle state that crowded the status bar
+    // on a narrow (phone-width) viewport.
+    cfg.ctx_gauge_min_width    = cfg.ctx_bar_min_width;
     return cfg;
 }
 
