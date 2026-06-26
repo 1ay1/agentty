@@ -62,31 +62,28 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // caret on the streaming edge (maya reveal_fx). Only animates while
         // the widget is live_; the settled build is untouched.
         cache.streaming->set_reveal_fx(true);
-        // Reveal pacing for the constant-glide cursor (the ChatGPT / Vercel
-        // smoothStream model): the cursor drains the arrived-bytes BUFFER at
-        // a near-constant cruising speed and lets the buffer absorb the wire's
-        // burstiness — instead of tracking the (spiky) backlog. So the args
-        // mean:
-        //   • floor_cps = the CRUISING speed. This is the speed the text
-        //     actually glides at almost all the time. It must be at LEAST
-        //     the rate a fast cloud model sustains (~80-200 cp/s) or the
-        //     cursor falls permanently behind the wire and the finalize ramp
-        //     has to sprint a huge backlog at settle — which reads as "it
-        //     hung, then dumped the whole reply at once". 90 cp/s cruises
-        //     fast enough to track most models in real time while still
-        //     looking like a deliberate typewriter glide, not an instant
-        //     paste. The cursor auto-tunes UP from here for a model that
-        //     sustains an even bigger buffer, but drifts slowly (base_tau)
-        //     so the speed never steps at a chunk boundary.
-        //   • drain_secs = the target LEAD window (how far behind the live
-        //     edge the cursor comfortably rides). 0.3s of buffer is enough to
-        //     smooth out SSE chunk jitter while keeping the reveal tight to
-        //     the wire so it never visibly lags.
-        // The instantaneous rate is hard-capped at 1.8× cruising (set in
-        // RateCursor) so even a huge burst can't make the cursor sprint — it
-        // just leans forward briefly and keeps gliding. The settle deadline
-        // ramp still bypasses all caps so the tail always lands on time.
-        cache.streaming->set_reveal_pacing(/*cruise_cps=*/90.0,
+        // Reveal pacing for the rate-smoothed bounded-lag cursor (maya
+        // RateCursor). The cursor reveals at backlog / drain_secs, so it
+        // TRACKS the model's own speed with a fixed time lag, and low-passes
+        // that rate so a chunky wire slides in instead of teleporting. Args:
+        //   • floor_cps = the MINIMUM reveal speed. A trickle still types out
+        //     at >= this so a slow/local model doesn't inch in one char at a
+        //     time. It is NOT a ceiling — a fast model reveals FASTER, at its
+        //     own delivery rate (the cursor tracks the wire), so the reveal
+        //     never falls permanently behind and dumps at settle. 90 cp/s is
+        //     a brisk readable minimum.
+        //   • drain_secs = the target LAG: how far behind the live edge the
+        //     cursor rides, in seconds. rate = backlog / drain_secs holds the
+        //     reveal ~drain_secs behind the wire at the wire's own speed.
+        //     0.3s is tight enough to feel live, loose enough to smooth SSE
+        //     chunk jitter.
+        // A fat batched delta no longer teleports: the rate low-pass
+        // (rate_tau in RateCursor) accelerates the cursor into the chunk over
+        // a few frames so it reveals as an animated slide, not an instant
+        // paste — the fix for "streaming stops / text just appears on a long
+        // turn". The settle deadline ramp still bypasses the smoothing so the
+        // tail always lands on time.
+        cache.streaming->set_reveal_pacing(/*floor_cps=*/90.0,
                                            /*lead_secs=*/0.3);
     }
 
