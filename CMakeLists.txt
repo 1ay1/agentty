@@ -157,43 +157,56 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_definitions(_Static_assert=static_assert)
 endif()
 
+# ── Submodule auto-pull ────────────────────────────────────────────────────
+# When AGENTTY_AUTO_PULL_SUBMODULES is ON (default), every in-tree submodule
+# is synced to the tip of its tracking branch on each build before its library
+# target compiles. SAFE: the pull is skipped for any submodule that has
+# uncommitted changes, so local edits are never clobbered. Skipped entirely
+# if the parent isn't a git checkout (release tarballs / FetchContent paths).
+#
+# Call AFTER add_subdirectory(<sub>) so the library target exists to depend on.
+#   agentty_pull_submodule_latest(<dir> <branch> <library-target>)
+option(AGENTTY_AUTO_PULL_SUBMODULES
+       "Sync every in-tree submodule to its tracking branch on every build" ON)
+# Back-compat: the old maya-only switch still disables maya's pull when OFF.
+option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" ON)
+
+function(agentty_pull_submodule_latest sub branch lib)
+    if(NOT AGENTTY_AUTO_PULL_SUBMODULES)
+        return()
+    endif()
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+        return()
+    endif()
+    find_package(Git QUIET)
+    if(NOT GIT_FOUND)
+        return()
+    endif()
+    set(_sd "${CMAKE_CURRENT_SOURCE_DIR}/${sub}")
+    add_custom_target(${sub}_pull_latest ALL
+        COMMAND ${CMAKE_COMMAND} -E echo "[${sub}] checking origin/${branch}…"
+        COMMAND ${GIT_EXECUTABLE} -C ${_sd} diff --quiet HEAD
+            && ${GIT_EXECUTABLE} -C ${_sd} fetch --quiet origin ${branch}
+            && ${GIT_EXECUTABLE} -C ${_sd} reset --hard --quiet origin/${branch}
+            || ${CMAKE_COMMAND} -E echo
+               "[${sub}] local changes present — skipping auto-pull"
+        COMMENT "Syncing ${sub}/ to origin/${branch} (safe: skips if local changes)"
+        VERBATIM
+        USES_TERMINAL
+    )
+    # Build the pull BEFORE the library compiles so any changed sources are
+    # picked up in the same build. Ordering only; actual recompile depends on
+    # whether the git reset touched file timestamps.
+    if(TARGET ${lib})
+        add_dependencies(${lib} ${sub}_pull_latest)
+    endif()
+endfunction()
+
 # Prefer the in-tree submodule when present; only fall back to fetch.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
-    # Optional "always pull latest maya before each build" mode. When ON,
-    # a custom target syncs the submodule to `origin/master` and forces a
-    # rebuild of any maya translation unit that changed. SAFE: refuses to
-    # touch the submodule if it has uncommitted changes (so local maya
-    # edits never get clobbered). Skipped silently if the repo isn't a
-    # git checkout (release tarballs, FetchContent fallback paths).
-    option(AGENTTY_AUTO_PULL_MAYA "Pull latest maya from origin/master on every build" ON)
     add_subdirectory(maya)
-    if(AGENTTY_AUTO_PULL_MAYA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-        find_package(Git QUIET)
-        if(GIT_FOUND)
-            add_custom_target(maya_pull_latest ALL
-                COMMAND ${CMAKE_COMMAND} -E echo
-                    "[maya] checking origin/master…"
-                COMMAND ${GIT_EXECUTABLE}
-                    -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
-                    diff --quiet HEAD
-                    && ${GIT_EXECUTABLE}
-                       -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
-                       fetch --quiet origin master
-                    && ${GIT_EXECUTABLE}
-                       -C ${CMAKE_CURRENT_SOURCE_DIR}/maya
-                       reset --hard --quiet origin/master
-                    || ${CMAKE_COMMAND} -E echo
-                       "[maya] local changes present — skipping auto-pull"
-                COMMENT "Syncing maya/ to origin/master (safe: skips if local changes)"
-                VERBATIM
-                USES_TERMINAL
-            )
-            # Force maya the library to be rebuilt AFTER the pull (in case
-            # sources changed). add_dependencies wires the ordering;
-            # whether anything actually recompiles depends on file
-            # timestamps the git reset may have updated.
-            add_dependencies(maya maya_pull_latest)
-        endif()
+    if(AGENTTY_AUTO_PULL_MAYA)
+        agentty_pull_submodule_latest(maya master maya)
     endif()
 else()
     FetchContent_Declare(
@@ -253,6 +266,7 @@ endif()
 set(ACP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(ACP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(acp-cpp)
+agentty_pull_submodule_latest(acp-cpp main acp)
 if(TARGET acp)
     set_target_properties(acp PROPERTIES SYSTEM TRUE)
 endif()
@@ -279,6 +293,7 @@ endif()
 set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(MCP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(mcp-cpp)
+agentty_pull_submodule_latest(mcp-cpp master mcp)
 if(TARGET mcp)
     set_target_properties(mcp PROPERTIES SYSTEM TRUE)
 endif()
