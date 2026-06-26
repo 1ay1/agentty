@@ -465,6 +465,11 @@ Cmd<Msg> launch_stream(Model& m) {
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
+    // Reasoning effort, resolved + clamped to this model's capability here on
+    // the UI thread (where the live Model is readable). Empty = off; an
+    // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
+    std::string effort     = std::string{
+        effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
@@ -485,6 +490,7 @@ Cmd<Msg> launch_stream(Model& m) {
         [thread = std::move(thread_snapshot),
          compacting, context_max, retry_count,
          model_id = std::move(model_id),
+         effort = std::move(effort),
          model_supports_tools,
          model_context_window,
          auth = std::move(auth),
@@ -531,6 +537,9 @@ Cmd<Msg> launch_stream(Model& m) {
         req.cancel        = cancel;
         req.auth          = std::move(auth);
         req.retry_count   = retry_count;
+        // Reasoning effort (already clamped above). Empty = no thinking; the
+        // Anthropic transport turns a non-empty value into adaptive thinking.
+        req.effort        = std::move(effort);
 
         // Ollama capability gate: if /api/show reported the model does NOT
         // support tools (supports_tools == false), skip advertising ANY

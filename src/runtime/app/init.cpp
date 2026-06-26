@@ -81,6 +81,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // the user's first message lands.
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
+    m.d.effort  = effort_from_wire(settings.effort);
     for (auto& mi : m.d.available_models)
         for (const auto& fav : settings.favorite_models)
             if (mi.id == fav) mi.favorite = true;

@@ -83,6 +83,13 @@ struct Request {
     // into the prompt, expecting ONE {tool_name,tool_args} JSON object back.
     // Ignored by providers that don't implement it (Anthropic, OpenAI-compat).
     bool json_protocol = false;
+
+    // Reasoning effort (output_config.effort wire value: "low" | "medium" |
+    // "high" | "xhigh" | "max"). Empty = omit — no thinking, the default.
+    // Already clamped to the model's capability by launch_stream (see
+    // effort_wire_for). The Anthropic transport, when this is non-empty,
+    // additionally enables adaptive thinking. Other transports ignore it.
+    std::string effort;
 };
 
 using EventSink = std::function<void(Msg)>;

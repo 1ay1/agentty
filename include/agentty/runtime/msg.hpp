@@ -134,6 +134,14 @@ struct StreamTextDelta { std::string text; };
 struct StreamToolUseStart { ToolCallId id; ToolName name; };
 struct StreamToolUseDelta { std::string partial_json; };
 struct StreamToolUseEnd {};
+// A chunk of the assistant's thinking block (adaptive thinking). `text` is
+// the visible reasoning delta (empty under display:omitted); `signature` is
+// the opaque per-block signature that arrives once, near the block's end.
+// The reducer accumulates both onto the in-flight assistant Message so the
+// block can be replayed verbatim on the next turn (Anthropic requires it
+// when the turn also carries tool_use). Doubles as a liveness heartbeat —
+// the handler bumps last_event_at like StreamHeartbeat does.
+struct StreamThinkingDelta { std::string text; std::string signature; };
 // Mirrors Anthropic's message.usage shape. cache_* fields are non-zero only
 // when the request hit a cache_control breakpoint. Fields default to 0 so
 // callers that only care about input/output keep working.
@@ -270,6 +278,10 @@ struct ModelPickerMove { int delta; };
 struct ModelPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ModelPickerSelect {};
 struct ModelPickerToggleFavorite {};
+// Cycle the reasoning effort tier (←/→ in the model picker). delta steps
+// within the active model's supported efforts (wrapping); the new tier is
+// persisted immediately. No-op when the model doesn't support effort.
+struct ModelPickerCycleEffort { int delta; };
 struct ModelsLoaded { std::vector<ModelInfo> models; };
 
 // ── Provider picker ──────────────────────────────────────────────────────
@@ -451,6 +463,7 @@ using ComposerMsg = std::variant<
 using StreamMsg = std::variant<
     StreamStarted, StreamTextDelta,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
+    StreamThinkingDelta,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
     CancelStream, RetryStream>;
 
@@ -460,7 +473,8 @@ using ToolMsg = std::variant<
 
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
-    ModelPickerSelect, ModelPickerToggleFavorite, ModelsLoaded>;
+    ModelPickerSelect, ModelPickerToggleFavorite, ModelPickerCycleEffort,
+    ModelsLoaded>;
 
 using ProviderPickerMsg = std::variant<
     OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,

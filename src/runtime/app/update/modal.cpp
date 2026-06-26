@@ -353,6 +353,7 @@ void persist_settings(const Model& m) {
     // later switch back to it restores exactly this model.
     if (!m.d.model_id.empty())
         s.provider_models[active_provider_id()] = m.d.model_id.value;
+    s.effort = std::string{effort_wire(m.d.effort)};
     deps().save_settings(s);
 }
 

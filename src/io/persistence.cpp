@@ -162,6 +162,13 @@ static json message_to_json(const Message& m) {
     // turn died and why. UTF-8 scrubbed for the same reason as `text`.
     if (m.error) j["error"] = tools::util::to_valid_utf8(*m.error);
     if (m.is_compact_summary) j["is_compact_summary"] = true;
+    // Adaptive-thinking block (Assistant turns under an effort setting).
+    // Persisted so a reloaded thread can replay it on a follow-up turn —
+    // Anthropic 400s a tool_use turn whose thinking block was dropped.
+    if (!m.thinking.empty())
+        j["thinking"] = tools::util::to_valid_utf8(m.thinking);
+    if (!m.thinking_signature.empty())
+        j["thinking_signature"] = m.thinking_signature;
     // Non-image attachments (Paste / FileRef / Symbol). Persisted so a
     // reloaded thread can rebuild its wire payload — the user's `text`
     // carries chip placeholders, and the model only sees real content
@@ -255,6 +262,8 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
         m.id = MessageId{it->get<std::string>()};
     m.role = role_from_string(j.value("role", "user"));
     m.text = j.value("text", "");
+    m.thinking = j.value("thinking", "");
+    m.thinking_signature = j.value("thinking_signature", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
         && !it->get<std::string>().empty())
         m.error = it->get<std::string>();
@@ -745,6 +754,7 @@ store::Settings load_settings() {
             for (auto& [k, v] : j["provider_models"].items())
                 if (v.is_string()) s.provider_models[k] = v.get<std::string>();
         }
+        s.effort = j.value("effort", "");
     } catch (...) {}
     return s;
 }
@@ -767,6 +777,7 @@ void save_settings(const store::Settings& s) {
         for (const auto& [k, v] : s.provider_models) pm[k] = v;
         j["provider_models"] = std::move(pm);
     }
+    if (!s.effort.empty()) j["effort"] = s.effort;
     (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }
 

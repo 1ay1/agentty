@@ -131,6 +131,20 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             }
             return done(std::move(m));
         },
+        [&](ModelPickerCycleEffort& e) -> Step {
+            // Step the reasoning-effort tier within what the highlighted
+            // model supports (cycle_effort wraps and returns None for a
+            // model that can't reason). Persist immediately so the pick
+            // survives a restart; the request path re-clamps at send time.
+            auto* p = pick::opened(m.ui.model_picker);
+            if (p && !m.d.available_models.empty()) {
+                const auto caps = ModelCapabilities::from_id(
+                    m.d.available_models[p->index].id.value);
+                m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
+                persist_settings(m);
+            }
+            return done(std::move(m));
+        },
     }, pm);
 }
 
