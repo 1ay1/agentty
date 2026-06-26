@@ -259,16 +259,32 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         const auto& out = tc.output();
         std::string branch;
         int modified = 0, staged = 0, untracked = 0;
+        bool seen_branch = false;
         std::size_t lo = 0;
         while (lo < out.size()) {
             auto eol = out.find('\n', lo);
             std::string_view line{out.data() + lo,
                 (eol == std::string::npos ? out.size() : eol) - lo};
-            if (line.starts_with("# branch.head ")) branch = std::string{line.substr(14)};
-            else if (line.size() >= 4 && line[0] == '?')             ++untracked;
-            else if (line.size() >= 4 && (line[0] == '1' || line[0] == '2')) {
-                if (line[2] != '.') ++staged;
-                if (line[3] == 'M' || line[3] == 'D') ++modified;
+            // porcelain v1: optional prepended display_description line(s),
+            // then a "## branch...upstream [ahead/behind]" header, then one
+            // "XY path" row per change ("?? " = untracked). Anchor on the
+            // `## ` line so a description can't be miscounted as a change.
+            if (!seen_branch) {
+                if (line.starts_with("## ")) {
+                    seen_branch = true;
+                    std::string_view b = line.substr(3);
+                    std::size_t cut = b.size();
+                    if (auto d = b.find("..."); d != std::string_view::npos)
+                        cut = std::min(cut, d);
+                    if (auto s = b.find(' '); s != std::string_view::npos)
+                        cut = std::min(cut, s);
+                    branch = std::string{b.substr(0, cut)};
+                }
+            } else if (line.size() >= 2 && line[0] == '?' && line[1] == '?') {
+                ++untracked;
+            } else if (line.size() >= 3 && line[2] == ' ') {
+                if (line[0] != ' ' && line[0] != '?') ++staged;   // index side
+                if (line[1] == 'M' || line[1] == 'D') ++modified; // worktree side
             }
             if (eol == std::string::npos) break;
             lo = eol + 1;
