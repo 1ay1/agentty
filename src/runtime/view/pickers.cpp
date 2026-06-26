@@ -96,6 +96,66 @@ constexpr int kPickerChromeRows = 7;
     return std::clamp(avail, 4, kViewportH);
 }
 
+// One key-binding hint in a footer strip: a key glyph + a short label,
+// plus a priority that decides survival order when the picker is too
+// narrow to show them all (higher = kept longer).
+struct Hint {
+    std::string key;
+    std::string label;
+    int         priority = 0;
+};
+
+// Responsive key-hint footer. Renders the hints on a SINGLE line as
+// "key label   key label   …"; when the available width can't fit them
+// all, the lowest-priority hints drop out (rightmost wins ties) and the
+// survivors keep their original left-to-right order. Never wraps.
+//
+// The maya Picker already clips footers to one line, so this can't break
+// the modal even at width 1 — but dropping whole hints degrades far more
+// gracefully than truncating a binding mid-word. The component reads the
+// width maya allocated to the footer row, so the drop set re-evaluates
+// live as the terminal resizes.
+[[nodiscard]] Element key_hints(std::vector<Hint> hints) {
+    return component([hints = std::move(hints)](int w, int) -> Element {
+        if (w <= 0 || hints.empty()) return nothing();
+        constexpr int gap = 3;   // columns between adjacent hints
+        auto pair_w = [](const Hint& hn) {
+            return string_width(hn.key) + 1 + string_width(hn.label);
+        };
+        std::vector<bool> keep(hints.size(), true);
+        auto total = [&] {
+            int sum = 0, shown = 0;
+            for (std::size_t i = 0; i < hints.size(); ++i)
+                if (keep[i]) { sum += pair_w(hints[i]); ++shown; }
+            if (shown > 1) sum += gap * (shown - 1);
+            return sum;
+        };
+        // Greedily evict the lowest-priority kept hint until the strip
+        // fits (or nothing is left).
+        while (total() > w) {
+            int victim = -1;
+            for (std::size_t i = 0; i < hints.size(); ++i) {
+                if (!keep[i]) continue;
+                if (victim < 0 || hints[i].priority <= hints[static_cast<std::size_t>(victim)].priority)
+                    victim = static_cast<int>(i);
+            }
+            if (victim < 0) break;
+            keep[static_cast<std::size_t>(victim)] = false;
+        }
+        std::vector<Element> parts;
+        bool first = true;
+        for (std::size_t i = 0; i < hints.size(); ++i) {
+            if (!keep[i]) continue;
+            if (!first) parts.push_back(text(std::string(gap, ' ')));
+            first = false;
+            parts.push_back(text(hints[i].key + " ", fg_of(fg)));
+            parts.push_back(text(hints[i].label, fg_dim(muted)));
+        }
+        if (parts.empty()) return nothing();
+        return h(std::move(parts)).build();
+    });
+}
+
 } // namespace
 
 Element model_picker(const Model& m) {
@@ -157,13 +217,13 @@ Element model_picker(const Model& m) {
                 text(std::string{effort_label(m.d.effort)}, fg_bold(accent))
             ).build());
     }
-    cfg.footer.push_back(h(
-        text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
-        text("PgUp/PgDn", fg_of(fg)), text(" page  ", fg_dim(muted)),
-        text("Enter", fg_of(fg)), text(" select  ", fg_dim(muted)),
-        text("F", fg_of(fg)), text(" favorite  ", fg_dim(muted)),
-        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
-    ).build());
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
+        {"PgUp/PgDn", "page", 2},
+        {"Enter", "select", 5},
+        {"F", "favorite", 1},
+        {"Esc", "close", 4},
+    }));
 
     return Picker{std::move(cfg)}.build();
 }
@@ -253,11 +313,11 @@ Element provider_picker(const Model& m) {
         text("✓", fg_of(success)), text(" ready  ", fg_dim(muted)),
         text("⚠", fg_of(warn)),    text(" set the named key first  ", fg_dim(muted))
     ).build());
-    cfg.footer.push_back(h(
-        text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
-        text("Enter", fg_of(fg)), text(" switch  ", fg_dim(muted)),
-        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
-    ).build());
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
+        {"Enter", "switch", 5},
+        {"Esc", "close", 4},
+    }));
 
     return Picker{std::move(cfg)}.build();
 }
@@ -295,13 +355,13 @@ Element thread_list(const Model& m) {
     }
 
     cfg.footer.push_back(text(""));
-    cfg.footer.push_back(h(
-        text("↑↓", fg_of(fg)), text(" move  ", fg_dim(muted)),
-        text("PgUp/PgDn", fg_of(fg)), text(" page  ", fg_dim(muted)),
-        text("Enter", fg_of(fg)), text(" open  ", fg_dim(muted)),
-        text("N", fg_of(fg)), text(" new  ", fg_dim(muted)),
-        text("Esc", fg_of(fg)), text(" close", fg_dim(muted))
-    ).build());
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
+        {"PgUp/PgDn", "page", 2},
+        {"Enter", "open", 5},
+        {"N", "new", 3},
+        {"Esc", "close", 4},
+    }));
 
     return Picker{std::move(cfg)}.build();
 }
