@@ -29,7 +29,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
+#include <string>
 #include <utility>
 
 #include <maya/dsl.hpp>
@@ -141,6 +143,32 @@ maya::Element compaction_divider_row() {
     maya::Turn::Config cfg;
     cfg.glyph      = "\xe2\x89\xa1";   // ≡
     cfg.label      = "Conversation compacted";
+    cfg.rail_color = ui::muted;
+    return maya::Turn{std::move(cfg)}.build();
+}
+
+// Escape hatch for the rehydrate-time off-screen body collapse below. ON by
+// default; AGENTTY_FROZEN_COLLAPSE=0 (or false/no) renders every off-screen
+// body full again. An env, not a constant, so a user who wants full-fidelity
+// in-app scrollback — or who suspects the collapse — can opt out without a
+// rebuild.
+bool frozen_collapse_enabled() {
+    const char* v = std::getenv("AGENTTY_FROZEN_COLLAPSE");
+    if (!v || !*v) return true;
+    return !(v[0] == '0' || v[0] == 'f' || v[0] == 'F'
+             || v[0] == 'n' || v[0] == 'N');
+}
+
+// Compact placeholder for an OFF-SCREEN body collapsed out of the in-app
+// re-render window (see collapse_oversized_offscreen_entries). One dim ⋯ row,
+// identical chrome to compaction_divider_row, so measure_element_rows reports
+// ~1 row. The full body is untouched in the terminal's native scrollback
+// (painted there when it was live) and on disk.
+maya::Element collapsed_body_stub(std::size_t orig_rows) {
+    maya::Turn::Config cfg;
+    cfg.glyph      = "\xe2\x8b\xaf";   // ⋯
+    cfg.label      = std::to_string(orig_rows)
+                   + " rows collapsed \xe2\x80\x94 scroll up in your terminal to view";
     cfg.rail_color = ui::muted;
     return maya::Turn{std::move(cfg)}.build();
 }
@@ -552,6 +580,52 @@ void drop_leading_separators(Model& m) {
     (void)pop_front_frozen_leading_separators(m);
 }
 
+// Rehydrate-time collapse of OFF-SCREEN giant bodies. THE COLD-REPAINT BOUND.
+//
+// rehydrate_frozen rebuilds the in-app canvas on a FRESH paint (ThreadLoaded
+// only — never mid-session), so shrinking entries here is scrollback-safe by
+// construction: there is no committed prefix that must stay byte-accurate.
+// (The mid-session trim is the OPPOSITE — its commit accounting must not be
+// perturbed, so do NOT add a collapse there; that is the documented
+// corruption trap.) The dominant cold-render cost on resume / resize / Ctrl-L
+// is a single tool body taller than the whole frozen budget — e.g. a
+// 3000-line write. When such a body is NOT the trailing entry (it has scrolled
+// off-screen and the current result sits below it), re-rendering all its rows
+// on every full repaint buys nothing: it is intact in the terminal's own
+// scrollback. Replace it with a one-row stub; measure_element_rows re-stamps
+// the true (now tiny) height so frozen_rows[] / frozen_row_total stay ground
+// truth. The trailing entry (the result you're looking at) is ALWAYS full.
+void collapse_oversized_offscreen_entries(Model& m) {
+    if (!frozen_collapse_enabled())      return;
+    if (m.ui.frozen.size() < 2)          return;  // only the current result
+    const std::size_t budget = frozen_row_budget();
+    if (m.ui.frozen_row_total <= budget) return;  // already fits — leave full
+
+    // Trailing non-separator entry = the current result; never collapse it.
+    std::size_t last_real = m.ui.frozen.size();
+    for (std::size_t k = m.ui.frozen.size(); k-- > 0; )
+        if (!m.ui.frozen_is_separator[k]) { last_real = k; break; }
+
+    const int cols = measure_cols(term_dims().cols);
+    for (std::size_t k = 0; k < m.ui.frozen.size(); ++k) {
+        if (k == last_real)               continue;  // keep current result whole
+        if (m.ui.frozen_is_separator[k])  continue;  // gaps / dividers, not bodies
+        const std::size_t cur =
+            static_cast<std::size_t>(m.ui.frozen_rows[k]);
+        if (cur <= budget)                continue;  // not a giant — leave full
+
+        maya::Element stub = collapsed_body_stub(cur);
+        std::size_t h = measure_element_rows(stub, cols);
+        if (h < 1) h = 1;
+        const std::size_t clamped = std::min<std::size_t>(
+            h, static_cast<std::size_t>(std::numeric_limits<int>::max()));
+        m.ui.frozen[k]        = std::move(stub);
+        m.ui.frozen_row_total = m.ui.frozen_row_total - cur + clamped;
+        m.ui.frozen_rows[k]   = static_cast<int>(clamped);
+    }
+    assert_frozen_lockstep(m);
+}
+
 // Run-level safety gate: a frozen turn captures an Element snapshot
 // whose hash_id is stamped once and never recomputed. Two ways a
 // not-yet-settled run could poison that snapshot:
@@ -815,6 +889,11 @@ void rehydrate_frozen(Model& m) {
     // gap can land first — either opens the canvas on a hole. Strip any
     // leading separator so the prefix opens on a real turn.
     drop_leading_separators(m);
+
+    // Bound the cold-repaint cost: any OFF-SCREEN body taller than the whole
+    // frozen budget is replaced with a one-row stub (fresh-paint only, so
+    // scrollback-safe). The trailing entry — the current result — stays full.
+    collapse_oversized_offscreen_entries(m);
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {

@@ -290,6 +290,9 @@ struct Shape {
     std::string name;
     int  n_turns           = 0;     // assistant turns; user turn paired with each
     int  write_lines       = 0;     // lines per Write tool body
+    int  penult_write_lines = 0;    // override Write lines for the 2nd-to-last
+                                    // turn (reproduces an off-screen GIANT body
+                                    // kept by rehydrate behind a small result)
     int  edit_hunks        = 0;     // per Edit tool, 0 to skip
     int  bash_lines        = 0;     // per Bash tool, 0 to skip
     int  read_lines        = 0;     // per Read tool, 0 to skip
@@ -326,9 +329,12 @@ struct Shape {
         Message a;
         a.role = Role::Assistant;
         a.text = gen::assistant_prose(sh.assistant_prose_p);
-        if (sh.write_lines > 0)
+        int wl = sh.write_lines;
+        if (sh.penult_write_lines > 0 && turn == sh.n_turns - 2)
+            wl = sh.penult_write_lines;   // off-screen giant behind a small tail
+        if (wl > 0)
             a.tool_calls.push_back(tool::write_tool(
-                "src/auth/login.cpp", sh.write_lines));
+                "src/auth/login.cpp", wl));
         if (sh.edit_hunks > 0)
             a.tool_calls.push_back(tool::edit_tool(
                 "src/api/login.cpp", sh.edit_hunks));
@@ -378,7 +384,7 @@ namespace phase {
         for (auto& msg : m.d.current.messages) acc ^= msg.compute_render_key();
         auto t1 = Clock::now();
         samples.push_back(ms(t1 - t0));
-        asm volatile("" : : "r"(acc) : "memory");   // anti-DCE
+        volatile std::uint64_t anti_dce = acc; (void)anti_dce;   // anti-DCE (portable)
     }
     return summarise(samples);
 }
@@ -426,7 +432,7 @@ namespace phase {
         }}.build();
         auto t1 = Clock::now();
         samples.push_back(ms(t1 - t0));
-        asm volatile("" : : "r"(&root) : "memory");
+        volatile const void* anti_dce = &root; (void)anti_dce;   // anti-DCE (portable)
     }
     return summarise(samples);
 }
@@ -731,6 +737,14 @@ std::vector<Shape> all_scenarios(int iters_override) {
         // file" turn that ships ~3000 lines.
         apply_iters({.name = "H: 6t × 3000-line write",
                      .n_turns = 6, .write_lines = 3000, .iters = 3}),
+        // OFF-SCREEN giant: a 3000-line write as the 2nd-to-last turn, with
+        // small turns around it. rehydrate keeps the giant in-window (behind
+        // the small current result), so WITHOUT the collapse the canvas is
+        // ~3000 rows; WITH it the off-screen giant becomes a 1-row stub.
+        // A/B by toggling AGENTTY_FROZEN_COLLAPSE=0.
+        apply_iters({.name = "I: off-screen 3000-line write + small tail",
+                     .n_turns = 6, .write_lines = 8,
+                     .penult_write_lines = 3000, .iters = 3}),
     };
 }
 

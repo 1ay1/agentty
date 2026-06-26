@@ -25,14 +25,16 @@
 //
 //   2. live_tail_reprocess_stays_bounded — times STEADY (no-delta) repeat
 //      frames at 6 KB vs 70 KB. The view layer rebuilds every ~16 ms even
-//      when no new bytes arrived; with maya's deferred-commit reveal path
-//      the whole turn is the live tail, so each idle animation frame walks
-//      O(N) bytes. This is the cleaner, allocation-free signal of the lag.
+//      when no new bytes arrived; the failure mode this guards is a reveal
+//      path that leaves the whole turn in the live tail, so each idle frame
+//      walks O(N) bytes. Commit-behind-cursor keeps it O(tail); this is the
+//      cleaner, allocation-free signal if that ever regresses.
 //
-// A renderer whose per-frame cost is O(tail) keeps both ratios near 1; the
-// current widget defers ALL block commits while reveal_fx is live (commit.cpp
-// "DEFER ALL commits"), so the tail IS the whole body and the per-frame
-// reveal decoration scales with N — the stutter the user feels.
+// A renderer whose per-frame cost is O(tail) keeps both ratios near 1. The
+// widget commits completed blocks BEHIND the reveal cursor (commit.cpp
+// find_block_boundary), so the live tail stays bounded to ~one block and the
+// per-frame reveal decoration is O(tail), not O(turn). These tests GUARD that
+// bound — a regression to deferring all commits would blow both ratios.
 //
 // NOTE: timing-based, so it asserts a generous bound (not a tight number) to
 // stay stable across machines/CI. The point is to catch an ORDER-OF-MAGNITUDE
