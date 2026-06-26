@@ -739,9 +739,10 @@ std::vector<Shape> all_scenarios(int iters_override) {
                      .n_turns = 6, .write_lines = 3000, .iters = 3}),
         // OFF-SCREEN giant: a 3000-line write as the 2nd-to-last turn, with
         // small turns around it. rehydrate keeps the giant in-window (behind
-        // the small current result), so WITHOUT the collapse the canvas is
-        // ~3000 rows; WITH it the off-screen giant becomes a 1-row stub.
-        // A/B by toggling AGENTTY_FROZEN_COLLAPSE=0.
+        // the small current result), so the canvas is ~3000 rows. The
+        // rehydrate-time collapse (now OFF by default — it hid disk-loaded
+        // bodies behind a misleading stub) would turn the off-screen giant
+        // into a 1-row stub. A/B by setting AGENTTY_FROZEN_COLLAPSE=1.
         apply_iters({.name = "I: off-screen 3000-line write + small tail",
                      .n_turns = 6, .write_lines = 8,
                      .penult_write_lines = 3000, .iters = 3}),

@@ -147,16 +147,27 @@ maya::Element compaction_divider_row() {
     return maya::Turn{std::move(cfg)}.build();
 }
 
-// Escape hatch for the rehydrate-time off-screen body collapse below. ON by
-// default; AGENTTY_FROZEN_COLLAPSE=0 (or false/no) renders every off-screen
-// body full again. An env, not a constant, so a user who wants full-fidelity
-// in-app scrollback — or who suspects the collapse — can opt out without a
-// rebuild.
+// Escape hatch for the rehydrate-time off-screen body collapse below.
+//
+// OFF BY DEFAULT. The collapse only runs from rehydrate_frozen, whose ONLY
+// caller is ThreadLoaded — loading a thread from disk. In that path the giant
+// body is read from disk and was NEVER painted to THIS terminal's native
+// scrollback, so replacing it with "⋯ N rows collapsed — scroll up in your
+// terminal to view" hides content that simply is not there: scrolling up
+// shows the previous thread / the picker, not the collapsed rows. That is the
+// "wtf is this" regression — a loaded message silently swallowed behind a
+// stub. The perf win (bounding a one-off cold repaint of a just-loaded
+// oversized body) is not worth losing a loaded message, so the default is
+// now full fidelity.
+//
+// Opt IN with AGENTTY_FROZEN_COLLAPSE=1 (or t/y) only if your workflow
+// restarts agentty in the SAME terminal, where the body IS still in the
+// native scrollback and the stub's pointer is truthful.
 bool frozen_collapse_enabled() {
     const char* v = std::getenv("AGENTTY_FROZEN_COLLAPSE");
-    if (!v || !*v) return true;
-    return !(v[0] == '0' || v[0] == 'f' || v[0] == 'F'
-             || v[0] == 'n' || v[0] == 'N');
+    if (!v || !*v) return false;   // default OFF — render every body full
+    return v[0] == '1' || v[0] == 't' || v[0] == 'T'
+        || v[0] == 'y' || v[0] == 'Y';
 }
 
 // Compact placeholder for an OFF-SCREEN body collapsed out of the in-app
