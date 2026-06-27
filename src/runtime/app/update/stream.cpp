@@ -122,10 +122,23 @@ bool live_tail_reveal_settled(const Model& m) {
         if (mm.text.empty()) continue;   // no prose body to reveal
         const auto& cache = m.ui.view_cache.message_md(m.d.current.id, mm.id);
         if (!cache.streaming) continue;  // never rendered — nothing animating
-        // Reveal still gliding to the live edge, finalize ramp running, or a
-        // background markdown parse pending — any of these means the live
-        // frame in maya's prev_cells is NOT yet the settled shape. Wait.
-        if (cache.streaming->reveal_in_progress()
+        // The widget still live_, the reveal gliding to the edge, a finalize
+        // ramp running, or a background parse pending — any of these means
+        // the live frame in maya's prev_cells is NOT yet the settled shape.
+        // This predicate set MUST mirror build_live_tail's `reveal_settled`
+        // exactly: that one decides whether the live tail STAMPS the
+        // cacheable assistant_run_hash_id, this one decides whether the
+        // freeze fires. If they disagree the freeze can stamp a key the
+        // live tail never painted (cache MISS) → freeze_range rebuilds the
+        // run under FrozenBuildScope (show_all) at a possibly different
+        // height → the seam shifts and strands a duplicate. is_live() is a
+        // DISTINCT term from the other three: a widget can be live_ with the
+        // reveal cursor already at the edge (reveal_in_progress false, no
+        // ramp, no parse) during a mid-stream pause, so dropping it would
+        // re-open the asymmetry. finish() drops all four together, so once
+        // finalize_turn has settled the tail this returns true immediately.
+        if (cache.streaming->is_live()
+         || cache.streaming->reveal_in_progress()
          || cache.streaming->is_finalizing()
          || cache.streaming->is_parsing())
             return false;

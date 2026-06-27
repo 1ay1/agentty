@@ -267,24 +267,24 @@ struct AgenttyApp {
                 || !m.d.current.messages.back().pending_stream.empty());
         const std::int64_t kRevealBucketMs = 16;   // == kAnimationFrameInterval
 
-        // POST-STREAM REVEAL DRAIN bucket. After StreamFinished the phase
-        // goes Idle and streaming_text drains into `text`, so BOTH
-        // m.s.active() and `revealing_text` go false — but the reveal
-        // widget is STILL live: finalize_turn armed request_finalize(200)
-        // so the typewriter glides the last codepoints to the edge and
-        // flips live_ off ON ITS OWN over ~200 ms. That glide advances
-        // ONLY inside build(), which runs ONLY when the visual hash moves.
-        // Without a fast time term here the hash falls to the
-        // caret-blink PARITY bucket (one flip / 265 ms) — far too coarse
-        // for a 16 ms glide — so the render gate skips frames, the ramp
-        // cursor never advances, live_ never flips off, and the
-        // scramble/gradient overlay is STRANDED on screen at idle (and
-        // worse, gets frozen INTO scrollback when the settle-freeze fires
-        // — the frozen-garbage-glyph bug). pending_settle_freeze is set
-        // for exactly this drain window (finalize_turn sets it; meta.cpp's
-        // Tick clears it once live_tail_reveal_settled()), so key the fast
-        // bucket on it: keep ticking the 16 ms reveal clock until the
-        // glide drains and the freeze handoff lands.
+        // POST-STREAM SETTLE bucket. After StreamFinished the phase goes
+        // Idle and streaming_text drains into `text`, so BOTH m.s.active()
+        // and `revealing_text` go false. finalize_turn settles every tail
+        // message IMMEDIATELY (settle_message_md → finish(), the
+        // agent_session MessageStop discipline — NO ~200 ms glide) and sets
+        // pending_settle_freeze so meta.cpp's next Tick performs the freeze
+        // once live_tail_reveal_settled(). That deferred-freeze Tick — and
+        // maya's subsequent live-tail→frozen shrink reconciliation — advance
+        // ONLY inside frames that actually render, and the run loop's
+        // visual_hash gate skips any frame whose hash didn't move
+        // (maya/app/app.hpp). Without a fast time term here the hash falls
+        // to the caret-blink PARITY bucket (one flip / 265 ms): the freeze
+        // Tick and the post-freeze reconciliation frames get gated away,
+        // the collapse never finishes, and a duplicate turn is stranded in
+        // scrollback. pending_settle_freeze marks the one Tick until the
+        // freeze fires (finalize_turn sets it; meta.cpp's Tick clears it),
+        // so key the fast bucket on it to keep ticking the 16 ms clock
+        // until the freeze handoff lands.
         // The reveal-drain time bucket must keep ticking through BOTH the
         // pre-freeze settle (pending_settle_freeze) AND the post-freeze
         // settle cooldown (settle_cooldown_ticks). The cooldown frames are

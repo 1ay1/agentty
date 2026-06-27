@@ -235,19 +235,21 @@ static void test_freeze_gated_on_reveal_drain() {
     agentty::app::detail::clear_frozen(m);
     agentty::app::detail::freeze_through(m, 1);
 
-    // Settled assistant turn (text final), but the reveal has NOT been
-    // fed/drained yet — mimics finalize_turn having just moved
-    // streaming_text → text and armed the finalize ramp. A long body so
-    // the reveal cursor needs many frames to reach the live edge.
+    // Assistant turn whose reveal is mid-glide with a finalize ramp armed
+    // — the exact widget state the freeze gate must refuse to snapshot.
+    // ONE long paragraph (NO blank-line block boundary): the whole body
+    // stays in the uncommitted reveal tail, so reveal_cp starts at 0 and
+    // the typewriter has real distance to glide. (A \n\n-delimited body
+    // commits every block on set_content, and the committed-snap jumps
+    // reveal_cp straight to the edge — no animation to observe.)
     std::string body;
-    for (int i = 0; i < 40; ++i)
-        body += "This is line " + std::to_string(i)
-              + " of a multi-paragraph assistant reply.\n\n";
+    for (int i = 0; i < 80; ++i)
+        body += "word" + std::to_string(i) + " ";
     Message a; a.role = Role::Assistant; a.text = body;
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = agentty::phase::Idle{};
 
-    // Render one frame so the widget exists and begins its reveal.
+    // Build the widget by hand so we drive its reveal DIRECTLY below.
     auto& cache = m.ui.view_cache.message_md(
         m.d.current.id, m.d.current.messages.back().id);
     if (!cache.streaming)
@@ -257,7 +259,17 @@ static void test_freeze_gated_on_reveal_drain() {
     cache.streaming->set_content(body);
     cache.streaming->set_live(true);
     cache.streaming->request_finalize(200);
-    (void)frame_requests_animation(m);  // advance the reveal cursor once
+    // Drive the widget DIRECTLY (not through frame_requests_animation /
+    // the view): cached_markdown_for finish()es a SETTLED message on its
+    // first frame, which flips live_ off and orphans the finalize ramp
+    // (advance_reveal_cursor_ early-outs once !live_, so finalize_deadline_
+    // never clears and is_finalizing() sticks true forever). Building the
+    // widget directly lets the ramp run to completion and flip live_ off on
+    // its own — exactly the self-drain this test asserts on. (Production
+    // no longer arms a post-settle glide at all; settle_message_md calls
+    // finish() outright. request_finalize is kept here only to exercise the
+    // gate's is_finalizing() term in isolation.)
+    (void)cache.streaming->build();  // advance the reveal cursor once
 
     // While the reveal is mid-glide the gate MUST block the freeze.
     CHECK(cache.streaming->reveal_in_progress()
@@ -274,8 +286,9 @@ static void test_freeze_gated_on_reveal_drain() {
     while (std::chrono::steady_clock::now() < deadline
            && (cache.streaming->reveal_in_progress()
                || cache.streaming->is_finalizing()
+               || cache.streaming->is_live()
                || cache.streaming->is_parsing())) {
-        (void)frame_requests_animation(m);
+        (void)cache.streaming->build();
         std::this_thread::sleep_for(std::chrono::milliseconds{16});
     }
 
@@ -362,6 +375,74 @@ static void test_caret_armed_when_live_but_phase_not_streaming() {
     }
 }
 
+// ── (5) The freeze gate must BLOCK while a tail md widget is still live_,
+//        even when the reveal cursor is at the edge and nothing else is
+//        animating (reveal_in_progress / is_finalizing / is_parsing all
+//        false). live_tail_reveal_settled() must be the EXACT mirror of
+//        build_live_tail's `reveal_settled` (the hash-stamp gate), which
+//        ORs is_live(). If the freeze gate dropped the is_live() term it
+//        would green-light a freeze in a state where the live tail refused
+//        to stamp the cacheable assistant_run_hash_id — so freeze_range
+//        would stamp a key the live frame never painted (maya cache MISS),
+//        rebuild the run under FrozenBuildScope (show_all) at a possibly
+//        different height, and strand a duplicate in scrollback. This locks
+//        the two gates' predicate sets together so they can't drift. ─────
+static void test_freeze_gate_blocks_while_widget_live() {
+    std::printf("test_freeze_gate_blocks_while_widget_live\n");
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"freezegate_live"};
+    Message u; u.role = Role::User; u.text = "q";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    // Settled assistant turn: text FINAL, no streaming bytes in flight
+    // (so the `!streaming_text.empty()` guard can't be what blocks the
+    // gate — we need to isolate the is_live() term).
+    const std::string body = "Short settled reply body.";
+    Message a; a.role = Role::Assistant; a.text = body;
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Idle{};
+
+    auto& cache = m.ui.view_cache.message_md(
+        m.d.current.id, m.d.current.messages.back().id);
+    cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+    // reveal_fx OFF makes reveal_in_progress() false unconditionally; NOT
+    // calling request_finalize keeps is_finalizing() false; no async keeps
+    // is_parsing() false. The ONLY non-settled signal left is is_live(),
+    // armed here exactly as the live-tail render arms it for a streaming
+    // message that hasn't been finish()ed yet.
+    cache.streaming->set_reveal_fx(false);
+    cache.streaming->set_content(body);
+    cache.streaming->set_live(true);
+
+    // Precondition: the isolated is_live()-only state.
+    CHECK(cache.streaming->is_live(), "widget live_ (precondition)");
+    CHECK(!cache.streaming->reveal_in_progress(),
+          "reveal_in_progress false with reveal_fx off (precondition)");
+    CHECK(!cache.streaming->is_finalizing(),
+          "no finalize ramp armed (precondition)");
+    CHECK(!cache.streaming->is_parsing(), "no async parse (precondition)");
+
+    // THE CONTRACT: the freeze gate blocks while the widget is live_.
+    CHECK(!agentty::app::detail::live_tail_reveal_settled(m),
+          "freeze BLOCKED while the md widget is still live_ — the gate "
+          "must mirror build_live_tail's hash-stamp condition (is_live "
+          "term) or freeze_range stamps an unkeyed run and strands a "
+          "duplicate");
+
+    // finish() drops live_ (the other three were already false), so now
+    // build_live_tail WOULD stamp the cacheable key — the freeze gate must
+    // open in lockstep so the handoff is a maya cache HIT.
+    cache.streaming->finish();
+    CHECK(!cache.streaming->is_live(),
+          "finish() dropped live_ (precondition)");
+    CHECK(agentty::app::detail::live_tail_reveal_settled(m),
+          "freeze ALLOWED once finish() settles the widget (live tail has "
+          "stamped the cacheable key — freeze is a byte-identical cache HIT)");
+}
+
 int main() {
     std::printf("stream_liveness_test — the caret must never look "
                 "frozen while a response is in flight\n\n");
@@ -370,6 +451,7 @@ int main() {
     test_caret_disarms_after_settle();
     test_caret_armed_when_live_but_phase_not_streaming();
     test_freeze_gated_on_reveal_drain();
+    test_freeze_gate_blocks_while_widget_live();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
