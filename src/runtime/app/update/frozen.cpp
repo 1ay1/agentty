@@ -1044,42 +1044,61 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     }
     if (drop == 0) return maya::Cmd<Msg>::none();
 
+    // Identify the full set the trim will remove — the leading `drop`
+    // entries plus any separator the drop exposes at index 0 (a turn's
+    // leading gap is its own entry pushed BEFORE it, so dropping the turn
+    // above can leave that gap/divider at the top, a blank hole). Both
+    // feed the conservative commit count below.
+    // CONSERVATIVE COMMIT COUNT — measure the entries we are about to drop
+    // (the leading `drop` plus any separators the drop will expose) at an
+    // un-wrappably-wide width. maya renders the frozen prefix at
+    // term_cols - chrome; a wider measure can only wrap LESS, so this
+    // height is provably <= the rows maya actually drops, at ANY real
+    // terminal width. Computed BEFORE the pop, while the entries are still
+    // present.
+    //
+    // Why a LOWER bound and not the exact frozen_rows[] sum: the commit is
+    // a knife-edge. Committing MORE rows than maya physically scrolled off
+    // makes the next frame's content_rows exceed prev_rows — maya reads it
+    // as growth and re-emits the visible tail via bottom-edge \n's, pushing
+    // a duplicate copy into native scrollback (the "turn doubles in
+    // scrollback" bug, reproduced on a mobile soft-keyboard where the
+    // freeze-time ioctl width disagrees with maya's live render width by a
+    // column or two). Committing FEWER is harmless: the next frame shrinks,
+    // maya's render-time reconciliation (scrollback_prefix_matches → commit
+    // overflow + case-B soft repaint, app.cpp) detects the top-deletion and
+    // lands the boundary once, in place, no \x1b[3J wipe. Verified against
+    // real maya bytes: over-commit duplicates exactly (C - actual) rows;
+    // under-commit (down to zero) reconciles clean. This mirrors
+    // agent_session.cpp, the zero-corruption reference, which commits a
+    // deliberate `n * ROWS_PER_DROP_LOWER` under-estimate for the same
+    // reason.
+    constexpr int kUnwrappedWidth = 8192;   // wider than any real terminal
+    std::size_t total_drop = drop;
+    while (total_drop < m.ui.frozen_is_separator.size()
+           && m.ui.frozen_is_separator[total_drop])
+        ++total_drop;
+    std::size_t safe_commit = 0;
+    for (std::size_t k = 0; k < total_drop && k < m.ui.frozen.size(); ++k) {
+        std::size_t h = measure_element_rows(m.ui.frozen[k], kUnwrappedWidth);
+        safe_commit += (h < 1) ? 1 : h;   // every entry is at least one row
+    }
+
     // Drop the front in lockstep (frozen / frozen_rows /
     // frozen_is_separator / frozen_row_total), then strip any leading
-    // separator the drop exposed — a turn's leading gap is its own entry
-    // pushed BEFORE it, so dropping the turn above can leave that gap (or
-    // a divider) at index 0, a blank hole at the top of the canvas. Both
-    // removals feed the exact commit count below.
+    // separator the drop exposed.
     std::size_t removed_rows = pop_front_frozen(m, drop);
     removed_rows += pop_front_frozen_leading_separators(m);
-
-    // Commit EXACTLY the rows the trim deleted from the TOP of the frozen
-    // prefix. This is a top-DELETION, not a bottom-shrink, and maya's
-    // render-time shrink reconciliation cannot fix it: after the drop the
-    // new canvas's content shifts up, so canvas row 0 differs from
-    // prev_cells and scrollback_prefix_matches() returns false. maya's
-    // only recovery for a prefix mismatch is
-    // `scrollback_marker(prev_rows - term_h) + soft-repaint`, which
-    // commits the NEW canvas's prefix into the scrollback region that
-    // PHYSICALLY still holds the OLD content — stranding a duplicate copy
-    // of the trimmed boundary one screen up. Returning none() does not
-    // avoid that; it triggers it, because render-time reconciliation
-    // can't tell "scrolled because the bottom grew" (commit byte-
-    // accurate) from "deleted at the top" (commit byte-wrong).
-    //
-    // commit_scrollback(removed_rows) runs against the PRIOR frame's
-    // Synced state — i.e. the still-valid OLD content — advancing
-    // prev_rows/prev_cells by exactly the dropped rows in lockstep with
-    // the memmove. The trimmed entries were off-viewport (deep in
-    // scrollback), so removed_rows <= prev_rows - term_h and maya's
-    // internal clamp never truncates. The next render() then paints the
-    // shorter canvas against the already-advanced shadow: new_rows ==
-    // prev_rows, the shrink-while-overflowed guard never fires, and the
-    // boundary lands once, in place, with no \x1b[3J wipe.
     if (removed_rows == 0) return maya::Cmd<Msg>::none();
+
+    // Never commit more than the conservative lower bound, and never more
+    // than the model actually removed (defensive double-clamp).
+    const std::size_t commit_rows =
+        std::min<std::size_t>(safe_commit, removed_rows);
+    if (commit_rows == 0) return maya::Cmd<Msg>::none();
     return maya::Cmd<Msg>::commit_scrollback(
         static_cast<int>(std::min<std::size_t>(
-            removed_rows,
+            commit_rows,
             static_cast<std::size_t>(std::numeric_limits<int>::max()))));
 }
 

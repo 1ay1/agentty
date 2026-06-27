@@ -22,9 +22,17 @@
 //   I4  the frozen prefix never OPENS on a separator (gap) entry
 //   I5  during an ACTIVE stream, frozen_through never reaches the
 //       mutable back message (messages.size()) — the duplicated-card bug
-//   I6  a trim Cmd is either none, or a row-exact CommitScrollback whose
-//       count == the rows the trim actually dropped (never an over/under
-//       commit, never CommitScrollbackOverflow)
+//   I6  a trim Cmd is either none, or a CommitScrollback whose count is
+//       a conservative UNDER-estimate of the rows dropped (commit <=
+//       dropped, never an OVER-commit; never CommitScrollbackOverflow).
+//       Over-commit makes the next frame grow → maya scrolls the visible
+//       tail into native scrollback = a duplicate band. Under-commit is
+//       reconciled in place by maya's render-time shift recovery
+//       (scrollback_prefix_matches → commit overflow + case-B), so it is
+//       safe — verified against real maya bytes and mirrored by
+//       midrun_wire_test, which renders the trim through maya and accepts
+//       that reconciliation. This is agent_session's discipline (it
+//       commits a deliberate n*ROWS_PER_DROP_LOWER under-estimate).
 //   I7  frozen_rows entries are all >= 0
 //
 // Repro: a failure prints `SEED=<n>` — re-run pins that walk because the
@@ -180,18 +188,19 @@ static void check_invariants(const Model& m, bool stream_active,
             "froze the mutable streaming back message");
 
     // I6 trim Cmd contract. A front-trim (dropping the OLDEST frozen
-    // entries) is a top-DELETION that maya's render-time shrink
-    // reconciliation CANNOT fix: after the drop the canvas content
-    // shifts up, canvas row 0 differs from prev_cells, and maya's only
-    // recovery (scrollback_marker(prev_rows - term_h) + soft-repaint)
-    // commits the NEW prefix over the PHYSICAL old rows, stranding a
-    // duplicate. So the trim MUST host-commit EXACTLY the rows it
-    // dropped (commit b6f8dac; authoritative coverage in
-    // midrun_wire_test / midrun_freeze_test). Contract: the trim returns
-    // none() when it dropped nothing, OR a row-exact CommitScrollback
-    // whose count == the rows it actually removed; CommitScrollbackOverflow
-    // is never valid (it advances prev_rows past whatever maya thinks
-    // overflowed, which over-commits).
+    // entries) is a top-DELETION. maya's render-time shift reconciliation
+    // (scrollback_prefix_matches → commit overflow + case-B soft repaint)
+    // DOES reconcile it — but only safely when the host did not OVER-commit:
+    // committing MORE rows than maya physically scrolled off makes the next
+    // frame's content_rows exceed prev_rows, so maya reads it as growth and
+    // scrolls the still-visible tail into native scrollback = a duplicate
+    // band. Committing FEWER (or none) is reconciled in place. So the
+    // contract is: none() when nothing dropped, OR a CommitScrollback whose
+    // count is a conservative UNDER-estimate (<= rows dropped). Verified
+    // against real maya bytes (over-commit dupes exactly C-actual rows;
+    // under-commit reconciles clean) and mirrored by midrun_wire_test.
+    // CommitScrollbackOverflow is never valid (it advances prev_rows past
+    // whatever maya thinks overflowed, which over-commits).
     if (trim_cmd) {
         using Cmd = maya::Cmd<agentty::Msg>;
         const bool is_none =
@@ -200,15 +209,22 @@ static void check_invariants(const Model& m, bool stream_active,
             std::get_if<Cmd::CommitScrollback>(&trim_cmd->inner);
         INV(is_none || commit != nullptr, "I6",
             "trim returned an unexpected Cmd type — must be none() or a "
-            "row-exact commit_scrollback(N) (never CommitScrollbackOverflow).");
+            "conservative commit_scrollback(N) (never CommitScrollbackOverflow).");
         if (commit) {
-            // The commit count must equal the rows the trim dropped from
-            // the model this step (no over/under commit).
+            // Never OVER-commit: committing more rows than the trim dropped
+            // strands a duplicate of the visible tail. Under-commit is safe
+            // (maya reconciles it), so the bound is <=, not ==.
             INV(static_cast<std::size_t>(std::max(0, commit->rows))
-                    == expected_dropped_rows,
+                    <= expected_dropped_rows,
                 "I6",
-                "trim's commit_scrollback row count != rows actually "
-                "dropped (over/under commit strands a duplicate).");
+                "trim's commit_scrollback row count > rows actually "
+                "dropped (OVER-commit strands a duplicate band).");
+            // And it must commit SOMETHING when it dropped rows (a positive
+            // lower bound), so a real top-deletion is never left wholly
+            // uncommitted-via-overflow-misread.
+            INV(commit->rows >= 1, "I6",
+                "trim dropped rows but committed 0 — expected a positive "
+                "conservative count.");
         } else {
             // none() ⇒ nothing was dropped.
             INV(expected_dropped_rows == 0, "I6",
