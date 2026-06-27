@@ -32,17 +32,15 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     // the title.
     cfg.breadcrumb_min_width   = is_streaming ? 160 : 130;
     cfg.token_stream_min_width = 110;
-    cfg.ctx_bar_min_width      = 55;
-    // CTX is the LOWEST-priority piece in the activity row: it's the first to
-    // drop as the terminal narrows (highest min_width of the right-side trio,
-    // above the token stream's 110) and only reappears on a genuinely WIDE
-    // desktop-class terminal. All-or-nothing (full bar + numbers, or nothing)
-    // — never the cramped "numbers only, no bar" middle state.
-    cfg.ctx_gauge_min_width    = 120;
-    // Drop the provider badge on phone-class widths too: below ~65 cols the
-    // right side clears entirely so the narrow status bar is just the phase
-    // chip (what's happening now) with no right-side clutter. The badge
-    // returns on a normal-width terminal.
+    // CTX shows as a COMPACT gauge (bar graph + percent, no raw token counts)
+    // from ~40 cols up, so even the phone sees the fill bar and the % it cares
+    // about; the verbose "used/max" token counts only join on a wide desktop-
+    // class terminal. Below 40 cols CTX hides entirely.
+    cfg.ctx_gauge_min_width    = 40;   // show the gauge (compact) from here up
+    cfg.ctx_bar_min_width      = 40;   // bar graph rides along with the gauge
+    cfg.ctx_tokens_min_width   = 120;  // raw token counts only when really wide
+    // Provider badge stays gated to normal-width terminals so it doesn't crowd
+    // the phone; below ~65 cols only the phase chip + compact CTX show.
     cfg.model_badge_min_width  = 65;
     return cfg;
 }
