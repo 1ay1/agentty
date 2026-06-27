@@ -39,9 +39,10 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     cfg.ctx_gauge_min_width    = 40;   // show the gauge (compact) from here up
     cfg.ctx_bar_min_width      = 40;   // bar graph rides along with the gauge
     cfg.ctx_tokens_min_width   = 120;  // raw token counts only when really wide
-    // Provider badge stays gated to normal-width terminals so it doesn't crowd
-    // the phone; below ~65 cols only the phase chip + compact CTX show.
-    cfg.model_badge_min_width  = 65;
+    // Provider badge joins from ~50 cols up so even the phone shows which
+    // backend is active alongside the compact CTX; it only drops on the very
+    // narrowest widths (< 50) where it wouldn't fit beside the gauge.
+    cfg.model_badge_min_width  = 50;
     return cfg;
 }
 
