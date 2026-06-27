@@ -612,9 +612,11 @@ Cmd<Msg> launch_stream(Model& m) {
             dispatch(std::move(m));
         };
         try {
-            deps().stream(std::move(req), [guarded](Msg m) {
-                guarded(std::move(m));
-            });
+            // Pass `guarded` straight through as the EventSink instead of
+            // wrapping it in a second lambda that just forwards to it — the
+            // wrapper added one extra std::function indirection on every
+            // delta (the wire's hottest path) for no behavioural gain.
+            deps().stream(std::move(req), guarded);
         } catch (const std::exception& e) {
             // The stream backend threw before producing a terminal event —
             // surface it as StreamError so the UI doesn't hang on the spinner.

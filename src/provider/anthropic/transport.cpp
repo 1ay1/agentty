@@ -172,17 +172,22 @@ std::string scrub_utf8(std::string_view in) {
 // Env-var-gated request/SSE dump. Set AGENTTY_DEBUG_API=1 to write to
 // $AGENTTY_DEBUG_FILE (or ./agentty-api.log). Appends, never truncates.
 FILE* debug_log() {
-    static std::mutex m;
-    static FILE* fp = nullptr;
-    static bool tried = false;
-    std::lock_guard<std::mutex> lk(m);
-    if (tried) return fp;
-    tried = true;
-    const char* on = util::env::get_or_null<util::env::Var::DebugApi>();
-    if (!on || *on == '0') return nullptr;
-    const char* path = util::env::get_or_null<util::env::Var::DebugFile>();
-    std::string p = (path && *path) ? std::string{path} : std::string{"agentty-api.log"};
-    fp = std::fopen(p.c_str(), "ab");
+    // Initialised exactly once (C++ guarantees thread-safe init of a
+    // function-local static), then every subsequent call is a plain load
+    // of the cached pointer — no mutex. dispatch_event() calls this once
+    // per SSE event (i.e. per output token on a hot stream), so the old
+    // per-call std::lock_guard was a full acquire/release barrier on the
+    // wire's hottest path purely to re-check a write-once flag. The magic
+    // static collapses that to a guard-byte test the compiler hoists to a
+    // single load once initialisation has run.
+    static FILE* fp = [] () -> FILE* {
+        const char* on = util::env::get_or_null<util::env::Var::DebugApi>();
+        if (!on || *on == '0') return nullptr;
+        const char* path = util::env::get_or_null<util::env::Var::DebugFile>();
+        std::string p = (path && *path) ? std::string{path}
+                                        : std::string{"agentty-api.log"};
+        return std::fopen(p.c_str(), "ab");
+    }();
     return fp;
 }
 void dbg(const char* fmt, ...) {
