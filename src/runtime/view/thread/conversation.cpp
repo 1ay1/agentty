@@ -314,7 +314,19 @@ void build_live_tail(const Model& m, int& running_turn,
             i = run_end;
         } else {
             // User (or other non-Assistant) head: single-message Turn.
-            auto cfg = turn_config(head, i, turn_num, m,
+            // freeze_range numbers a user turn with the BARE frozen_turn
+            // (the count of assistant runs settled so far) — NOT
+            // frozen_turn+1 — so the user row carries the number of the
+            // assistant turn that preceded it. running_turn is seeded to
+            // frozen_turn+1 and tracks the NEXT assistant number, so the
+            // matching user number here is running_turn-1. Using
+            // running_turn (the old code) rendered the user row one turn
+            // ahead of what freeze_range stamps — a byte divergence at the
+            // freeze seam the instant a user/divider sits in the live tail
+            // (e.g. the post-compaction boundary), which strands the
+            // just-frozen turn in scrollback. See INLINE_SCROLLBACK.md
+            // pin #3 (live/frozen builders must agree byte-for-byte).
+            auto cfg = turn_config(head, i, turn_num - 1, m,
                                    /*continuation=*/false);
             out.push_back(maya::Turn{std::move(cfg)}.build());
             // User turns do not bump running_turn — the running count

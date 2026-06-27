@@ -216,6 +216,19 @@ This is the post-compaction duplicate-turn bug. `build_queued_previews`
 does NOT need it — queued previews are synthetic rows past
 `messages.size()` that are never frozen, so they have no freeze seam.
 
+**Symmetry includes the turn NUMBER, not just the divider glyph.** A
+user turn at the live-tail head (e.g. the post-compaction boundary)
+must render the *same* turn number live and frozen. `freeze_range`
+stamps a user turn with the bare `frozen_turn` (the count of assistant
+runs settled so far — a user row carries the number of the assistant
+turn that preceded it). `build_live_tail` seeds `running_turn =
+frozen_turn + 1` (the NEXT assistant number), so its user-turn branch
+must use `running_turn - 1` to match. Using `running_turn` renders the
+user row one turn ahead of the frozen copy — a byte divergence at the
+freeze seam, identical in effect to a missing divider. (Inert while
+every user message is frozen at submit, but load-bearing the moment a
+user/divider sits in the live tail.)
+
 ---
 
 ## 4. Freeze gate
