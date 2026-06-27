@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace agentty::diff {
@@ -19,27 +21,97 @@ std::vector<std::string> split_lines(const std::string& s) {
     return out;
 }
 
-// Myers-style LCS-based diff, good enough for hunking.
+// LCS-based diff, good enough for hunking.
 struct Edit { enum K { Keep, Del, Ins } k; int a_idx, b_idx; };
+
+// Worst-case DP table cap. Beyond this many cells the full O(N*M) table is
+// both too slow and too memory-hungry, so the middle region falls back to a
+// block replacement (delete-all-then-insert-all). The hunk still reconstructs
+// `after` exactly; it just isn't minimal. 6M cells ~= 24MB of int, ~ms-scale.
+constexpr std::size_t kCellCap = 6'000'000;
+
+// LCS edits for the interned ranges a[a0,a1) vs b[b0,b1), appended to `out`
+// in forward order. `ai`/`bi` are line ids (cheap int compares).
+void lcs_middle(const std::vector<int>& ai, const std::vector<int>& bi,
+                int a0, int a1, int b0, int b1, std::vector<Edit>& out) {
+    int nn = a1 - a0, mm = b1 - b0;
+    if (nn == 0) {
+        for (int j = b0; j < b1; ++j) out.push_back({Edit::Ins, -1, j});
+        return;
+    }
+    if (mm == 0) {
+        for (int i = a0; i < a1; ++i) out.push_back({Edit::Del, i, -1});
+        return;
+    }
+    if ((std::size_t)nn * (std::size_t)mm > kCellCap) {
+        for (int i = a0; i < a1; ++i) out.push_back({Edit::Del, i, -1});
+        for (int j = b0; j < b1; ++j) out.push_back({Edit::Ins, -1, j});
+        return;
+    }
+    const int stride = mm + 1;
+    std::vector<int> dp((std::size_t)(nn + 1) * (std::size_t)stride, 0);
+    for (int i = 1; i <= nn; ++i) {
+        const int av = ai[a0 + i - 1];
+        int* row = &dp[(std::size_t)i * stride];
+        const int* prev = &dp[(std::size_t)(i - 1) * stride];
+        for (int j = 1; j <= mm; ++j)
+            row[j] = (av == bi[b0 + j - 1]) ? prev[j - 1] + 1
+                                            : std::max(prev[j], row[j - 1]);
+    }
+    std::vector<Edit> rev;
+    int i = nn, j = mm;
+    while (i > 0 && j > 0) {
+        if (ai[a0 + i - 1] == bi[b0 + j - 1]) {
+            rev.push_back({Edit::Keep, a0 + i - 1, b0 + j - 1}); --i; --j;
+        } else if (dp[(std::size_t)(i - 1) * stride + j] >=
+                   dp[(std::size_t)i * stride + (j - 1)]) {
+            rev.push_back({Edit::Del, a0 + i - 1, -1}); --i;
+        } else {
+            rev.push_back({Edit::Ins, -1, b0 + j - 1}); --j;
+        }
+    }
+    while (i > 0) { rev.push_back({Edit::Del, a0 + (--i), -1}); }
+    while (j > 0) { rev.push_back({Edit::Ins, -1, b0 + (--j)}); }
+    out.insert(out.end(), rev.rbegin(), rev.rend());
+}
 
 std::vector<Edit> compute_edits(const std::vector<std::string>& a,
                                 const std::vector<std::string>& b) {
     int n = (int)a.size(), m = (int)b.size();
-    std::vector<std::vector<int>> dp(n + 1, std::vector<int>(m + 1, 0));
-    for (int i = 1; i <= n; ++i)
-        for (int j = 1; j <= m; ++j)
-            dp[i][j] = (a[i-1] == b[j-1]) ? dp[i-1][j-1] + 1
-                                          : std::max(dp[i-1][j], dp[i][j-1]);
-    std::vector<Edit> edits;
-    int i = n, j = m;
-    while (i > 0 && j > 0) {
-        if (a[i-1] == b[j-1]) { edits.push_back({Edit::Keep, i-1, j-1}); --i; --j; }
-        else if (dp[i-1][j] >= dp[i][j-1]) { edits.push_back({Edit::Del, i-1, -1}); --i; }
-        else { edits.push_back({Edit::Ins, -1, j-1}); --j; }
+
+    // Intern lines to ints so the DP and trims compare ids, not std::strings.
+    std::unordered_map<std::string_view, int> ids;
+    ids.reserve((std::size_t)(n + m) * 2);
+    std::vector<int> ai(n), bi(m);
+    int next_id = 0;
+    for (int i = 0; i < n; ++i) {
+        auto [it, inserted] = ids.emplace(std::string_view(a[i]), next_id);
+        if (inserted) ++next_id;
+        ai[i] = it->second;
     }
-    while (i > 0) { edits.push_back({Edit::Del, --i, -1}); }
-    while (j > 0) { edits.push_back({Edit::Ins, -1, --j}); }
-    std::reverse(edits.begin(), edits.end());
+    for (int j = 0; j < m; ++j) {
+        auto [it, inserted] = ids.emplace(std::string_view(b[j]), next_id);
+        if (inserted) ++next_id;
+        bi[j] = it->second;
+    }
+
+    std::vector<Edit> edits;
+    edits.reserve((std::size_t)(n + m));
+
+    // Common prefix: definitely in the LCS, emit as Keep and skip the DP.
+    int p = 0;
+    while (p < n && p < m && ai[p] == bi[p]) {
+        edits.push_back({Edit::Keep, p, p});
+        ++p;
+    }
+    // Common suffix: shrink both ends inward (also in the LCS).
+    int sa = n, sb = m;
+    while (sa > p && sb > p && ai[sa - 1] == bi[sb - 1]) { --sa; --sb; }
+
+    // Diff only the divergent middle, then re-attach the trimmed suffix.
+    lcs_middle(ai, bi, p, sa, p, sb, edits);
+    for (int k = 0; sa + k < n; ++k)
+        edits.push_back({Edit::Keep, sa + k, sb + k});
     return edits;
 }
 } // namespace
@@ -86,9 +158,24 @@ FileChange compute(const std::string& path,
         int old_start = -1, new_start = -1;
         int old_len = 0, new_len = 0;
         std::ostringstream patch;
+        // Emit deletions before insertions within each contiguous change run
+        // (git convention). The LCS backtrace can group inserts ahead of
+        // deletes; rendered through a two-column diff gutter that ordering
+        // makes the old/new line numbers read out of sequence (new line 2
+        // appearing above old line 2). Buffer each run and flush "-" before
+        // "+" on the next context line so both gutter columns stay monotonic
+        // and the changed lines line up.
+        std::string del_buf, ins_buf;
+        auto flush_run = [&] {
+            if (!del_buf.empty()) patch << del_buf;
+            if (!ins_buf.empty()) patch << ins_buf;
+            del_buf.clear();
+            ins_buf.clear();
+        };
         for (size_t i2 = start; i2 <= end; ++i2) {
             const auto& e = edits[i2];
             if (e.k == Edit::Keep) {
+                flush_run();
                 if (old_start < 0) old_start = e.a_idx + 1;
                 if (new_start < 0) new_start = e.b_idx + 1;
                 old_len++; new_len++;
@@ -96,15 +183,16 @@ FileChange compute(const std::string& path,
             } else if (e.k == Edit::Del) {
                 if (old_start < 0) old_start = e.a_idx + 1;
                 old_len++;
-                patch << "-" << a[e.a_idx] << "\n";
+                del_buf += "-"; del_buf += a[e.a_idx]; del_buf += "\n";
                 removed++;
             } else {
                 if (new_start < 0) new_start = e.b_idx + 1;
                 new_len++;
-                patch << "+" << b[e.b_idx] << "\n";
+                ins_buf += "+"; ins_buf += b[e.b_idx]; ins_buf += "\n";
                 added++;
             }
         }
+        flush_run();
         h.old_start = std::max(1, old_start);
         h.new_start = std::max(1, new_start);
         h.old_len = old_len;
