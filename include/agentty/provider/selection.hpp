@@ -38,11 +38,18 @@ struct Selection {
 //   "host[:port]" → OpenAI-compatible against a custom base URL
 [[nodiscard]] Selection parse_selection(std::string_view spec);
 
-// Install the active selection (process-global). Call once at startup.
+// Install the active selection (process-global). Called at startup and by
+// the provider-picker reducer for live switches (UI thread).
 void select(Selection s);
 
 // Read the active selection. Defaults to Anthropic before select() runs.
-[[nodiscard]] const Selection& active();
+// Returns a BY-VALUE snapshot taken under the selection mutex: the stream
+// worker thread reads this (launch_stream's task / run_stream_sync) while
+// the UI thread may be mid-`select()` from the provider picker. Handing
+// back a reference let the worker observe a torn move-assign of the
+// embedded endpoint strings (data race → possible crash); the snapshot
+// makes every read a consistent copy.
+[[nodiscard]] Selection active();
 
 // Human display name for the active backend — "Anthropic", "Groq",
 // "Ollama", "OpenAI", or the raw endpoint label for a custom host with

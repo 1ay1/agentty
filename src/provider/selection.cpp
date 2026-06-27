@@ -3,6 +3,7 @@
 #include "agentty/provider/selection.hpp"
 
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -11,7 +12,8 @@
 namespace agentty::provider {
 
 namespace {
-Selection g_active{};
+Selection  g_active{};
+std::mutex g_active_mu;   // guards g_active across the UI/worker thread split
 
 std::string env_or_empty(std::string_view name) {
     if (name.empty()) return {};
@@ -71,9 +73,15 @@ auth::AuthHeader resolve_auth_for(std::string_view spec,
     return auth::AuthHeader{auth::ApiKeyHeader{std::move(key)}};
 }
 
-void select(Selection s) { g_active = std::move(s); }
+void select(Selection s) {
+    std::lock_guard lk(g_active_mu);
+    g_active = std::move(s);
+}
 
-const Selection& active() { return g_active; }
+Selection active() {
+    std::lock_guard lk(g_active_mu);
+    return g_active;   // snapshot copy — see header for the race it closes
+}
 
 std::string provider_display_name(const Selection& s) {
     if (s.kind == Kind::Anthropic) return "Anthropic";
