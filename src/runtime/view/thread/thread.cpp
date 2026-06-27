@@ -5,14 +5,14 @@
 
 namespace agentty::ui {
 
-maya::Thread::Config thread_config(const Model& m) {
+maya::Thread::Config thread_config(const Model& m, bool include_frozen) {
     maya::Thread::Config cfg;
     if (m.d.current.messages.empty()) {
         cfg.is_empty = true;
         cfg.welcome  = welcome_screen_config(m);
         return cfg;
     }
-    cfg.conversation = conversation_config(m);
+    cfg.conversation = conversation_config(m, include_frozen);
     return cfg;
 }
 

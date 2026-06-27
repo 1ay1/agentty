@@ -66,9 +66,7 @@ maya::Element compose_overlay(maya::Element base, maya::Element overlay) {
     }}.build();
 }
 
-} // namespace
-
-maya::Element view(const Model& m) {
+maya::Element view_impl(const Model& m, bool include_frozen) {
     // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
     // installs the sized RenderContext (the only guard site), so any
@@ -102,7 +100,7 @@ maya::Element view(const Model& m) {
         maya::RenderContext ctx{cols, rows, maya::render_generation(),
                                 /*auto_height=*/true};
         maya::RenderContextGuard guard(ctx);
-        alc.thread        = thread_config(m);
+        alc.thread        = thread_config(m, include_frozen);
         alc.changes_strip = changes_strip_config(m);
         alc.composer      = composer_config(m);
         alc.status_bar    = status_bar_config(m);
@@ -133,6 +131,50 @@ maya::Element view(const Model& m) {
     auto base = maya::AppLayout{std::move(alc)}.build();
     if (!overlay) return base;
     return compose_overlay(std::move(base), std::move(*overlay));
+}
+
+} // namespace
+
+maya::Element view(const Model& m) {
+    // Classic monolithic path (tests, fallback): full tree incl. the
+    // borrowed frozen prefix.
+    return view_impl(m, /*include_frozen=*/true);
+}
+
+// ── Strata builders ──────────────────────────────────────────────────
+//
+// strata_nodes: [ frozen[0], …, frozen[n-1], LIVE ]. Each settled
+// m.ui.frozen Element is one terminal node keyed by its stable index
+// (immutable once pushed — the host appends, never reorders); the live
+// tail + chrome + overlay is one non-terminal LIVE node keyed
+// kStrataLiveKey whose hash bumps every frame so maya rebuilds it.
+std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
+    // Monotonic per-process generation — the LIVE node's content changes
+    // constantly (composer, streaming tail, spinner, overlay), so bump
+    // every call to force a rebuild. The run loop only calls this when
+    // something changed (visual_hash gate), so it never spins idle.
+    static std::uint64_t live_gen = 0;
+    ++live_gen;
+
+    std::vector<maya::strata::NodeRef> ns;
+    ns.reserve(m.ui.frozen.size() + 1);
+    for (std::size_t i = 0; i < m.ui.frozen.size(); ++i)
+        ns.push_back({static_cast<std::uint64_t>(i),
+                      static_cast<std::uint64_t>(i),   // immutable once sealed
+                      /*terminal=*/true});
+    ns.push_back({kStrataLiveKey, live_gen, /*terminal=*/false});
+    return ns;
+}
+
+// strata_build: LIVE → the live tail + chrome + overlay (the monolithic
+// view minus the frozen prefix); a frozen index → the cached settled
+// Element. Never invoked for a sealed node, so the index is always live.
+maya::Element strata_build(const Model& m, std::uint64_t key) {
+    if (key == kStrataLiveKey)
+        return view_impl(m, /*include_frozen=*/false);
+    if (key < m.ui.frozen.size())
+        return m.ui.frozen[static_cast<std::size_t>(key)];
+    return maya::detail::nothing();   // defensive — maya only builds live keys
 }
 
 } // namespace agentty::ui

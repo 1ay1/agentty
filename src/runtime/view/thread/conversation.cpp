@@ -395,14 +395,18 @@ std::optional<maya::Element> build_permission_row(const Model& m) {
 
 } // namespace
 
-maya::Conversation::Config conversation_config(const Model& m) {
+maya::Conversation::Config conversation_config(const Model& m, bool include_frozen) {
     maya::Conversation::Config cfg;
 
-    // ── Borrowed frozen prefix (zero-copy). ─────────────
+    // ── Borrowed frozen prefix (zero-copy). ───────────
     // maya renders this through list_ref, so growing m.ui.frozen does
     // not increase per-frame cost. Maya's hash_id-keyed cell cache
     // makes already-painted Elements hit on every subsequent frame.
-    cfg.frozen = &m.ui.frozen;
+    //
+    // Under Strata (include_frozen=false) the settled prefix is handed
+    // to maya as separate sealed NODES instead, so here we render ONLY
+    // the live tail — leave cfg.frozen null.
+    cfg.frozen = include_frozen ? &m.ui.frozen : nullptr;
 
     // ── Live tail. ─────────────────────────────────
     // The only thing rebuilt per frame. Bounded by one in-flight

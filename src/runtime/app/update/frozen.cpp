@@ -920,9 +920,31 @@ void rehydrate_frozen(Model& m) {
 }
 
 maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
-    // Soft cap on the frozen prefix. Above it, the oldest entries are
-    // dropped — maya's row diff sees a shorter live tree and the
-    // already-overflowed rows naturally commit to native scrollback.
+    // ── DISABLED under Strata. ────────────────────────────────────────
+    // The depositional renderer (maya::strata) now owns the whole
+    // scrollback discipline: it seals scrolled-off settled turns into
+    // native scrollback and drops them from its bounded active layer, so
+    // the renderer's prev_cells mirror stays O(viewport) for the whole
+    // session WITHOUT the host trimming m.ui.frozen or accounting any
+    // heights. This function used to drop the oldest frozen ENTRIES and
+    // emit a knife-edge commit_scrollback(N) sized from a freeze-time
+    // ioctl width — the exact computation that duplicated scrollback on a
+    // mobile soft-keyboard resize (the width disagreed with maya's live
+    // render width by a column or two and the commit over-counted).
+    //
+    // It is now a no-op: it must NOT pop m.ui.frozen, because each frozen
+    // Element is a Strata NODE keyed by its stable index — dropping the
+    // front would renumber every remaining node and force maya to rebuild
+    // (and re-emit) them. Memory of the host's settled-Element vector now
+    // grows with the session, but the RENDERER mirror — the actual leak
+    // this guarded — is bounded by maya. (A future host-memory bound can
+    // free sealed Elements in place via rt.strata_sealed_nodes() without
+    // disturbing the indices.)
+    (void)m;
+    return maya::Cmd<Msg>::none();
+}
+
+[[maybe_unused]] static maya::Cmd<Msg> trim_frozen_if_oversized_legacy(Model& m) {
     //
     // Why ROWS, not entries: the inline canvas auto-resizes to
     // `frozen_row_total + chrome`, and maya re-derives a full

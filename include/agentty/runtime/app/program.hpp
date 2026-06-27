@@ -34,6 +34,22 @@ struct AgenttyApp {
         return ::agentty::ui::view(m);
     }
 
+    // Strata depositional inline rendering (maya/app/app.hpp —
+    // detail::HasStrataView). When BOTH of these are present the inline
+    // run<P> loop drives a Strata renderer with this node list + lazy
+    // builder INSTEAD of view()+render(): the host stops issuing
+    // commit_scrollback and accounting frozen-prefix heights; maya seals
+    // scrolled-off settled turns into native scrollback itself, so per-
+    // frame cost is O(viewport) and a cache miss / resize can no longer
+    // duplicate sealed rows. view() above is retained for tests/fallback;
+    // it is NOT called by the runtime while these hooks exist.
+    static std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
+        return ::agentty::ui::strata_nodes(m);
+    }
+    static maya::Element strata_build(const Model& m, std::uint64_t key) {
+        return ::agentty::ui::strata_build(m, key);
+    }
+
     static auto subscribe(const Model& m) -> maya::Sub<Msg> {
         return ::agentty::app::subscribe(m);
     }
