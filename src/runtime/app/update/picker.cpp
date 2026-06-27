@@ -479,12 +479,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             auto t1 = std::chrono::steady_clock::now();
             rehydrate_frozen(m);
             stamp("rehydrate_frozen", t1);
-            // Frozen scrollback was just built from cold; the very
-            // first render() would otherwise pay full layout+paint
-            // over every frozen Turn. Flip the warmup flag so maya's
-            // run loop pre-warms the component cache before the
-            // wire-bound render — see Program::needs_warmup hook.
-            m.ui.needs_warmup_render = !m.ui.frozen.empty();
             auto t2 = std::chrono::steady_clock::now();
             release_to_kernel();
             stamp("release_to_kernel", t2);
@@ -492,11 +486,10 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 const auto _ts = maya::platform::query_terminal_size(
                     maya::platform::stdout_handle());
                 std::fprintf(prof_out,
-                    "[load-async] msgs=%zu frozen=%zu frozen_rows=%zu "
+                    "[load-async] msgs=%zu frozen=%zu "
                     "frozen_through=%zu term_h=%d\n",
                     m.d.current.messages.size(),
                     m.ui.frozen.size(),
-                    m.ui.frozen_row_total,
                     m.ui.frozen_through,
                     _ts.height.value);
                 std::fflush(prof_out);

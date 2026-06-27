@@ -408,6 +408,13 @@ maya::Conversation::Config conversation_config(const Model& m, bool include_froz
     // the live tail — leave cfg.frozen null.
     cfg.frozen = include_frozen ? &m.ui.frozen : nullptr;
 
+    // HUG mode for the Strata LIVE node: when the settled prefix is
+    // handed to maya as sealed nodes (include_frozen=false), this node
+    // must hug its live-tail height rather than grow-spacer to the
+    // viewport bottom (which would strand a blank void above the
+    // composer). Classic monolithic path keeps the fill (true).
+    cfg.fill_viewport = include_frozen;
+
     // ── Live tail. ─────────────────────────────────
     // The only thing rebuilt per frame. Bounded by one in-flight
     // agent turn (one User + possibly several Assistant continuations)

@@ -329,23 +329,6 @@ struct AgenttyApp {
 
         return k;
     }
-
-    // Optional Program hook (see maya/app/app.hpp — detail::HasNeedsWarmup).
-    // Returns true when the next view() result contains a freshly
-    // rehydrated frozen scrollback whose cells haven't been captured
-    // into maya's component cache yet. The runtime fires a one-shot
-    // off-wire warmup_render() before the wire-bound render, which
-    // converts the user-visible first frame from O(content) to O(blit)
-    // — typically 50–660 ms to <1 ms on tool-heavy thread resume.
-    //
-    // The flag is set in the reducer (e.g. ThreadLoaded handler in
-    // picker.cpp). Maya's loop edge-detects it (rising-edge fires
-    // warmup, falling-edge resets the latch), so it's safe to leave
-    // the flag set across subsequent reducer steps; we just won't
-    // re-warm until it goes false then true again.
-    static bool needs_warmup(const Model& m) {
-        return m.ui.needs_warmup_render;
-    }
 };
 
 static_assert(maya::Program<AgenttyApp>);

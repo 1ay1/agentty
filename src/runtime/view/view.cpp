@@ -105,6 +105,12 @@ maya::Element view_impl(const Model& m, bool include_frozen) {
         alc.composer      = composer_config(m);
         alc.status_bar    = status_bar_config(m);
         overlay = pick_overlay(m);
+        // Strata LIVE node (include_frozen=false): HUG mode. The settled
+        // turns are sealed nodes ABOVE this one, so the live node must
+        // hug its own content — no viewport-fill floor, no thread
+        // grow-spacer — or a blank void strands between the settled
+        // turns and the composer.
+        alc.fill_viewport = include_frozen;
     }
 
     // ── Phase 2: layout build under a HEIGHT-CAPPED context ──
