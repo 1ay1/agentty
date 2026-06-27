@@ -813,6 +813,275 @@ static void test_tall_card_live_to_frozen_seam() {
           "edit diff body rendered more than once after freeze (duplicate)");
 }
 
+// Compaction-boundary seam: after a WIRE-ONLY compaction, the live tail
+// of the post-compaction turn must already carry the `≡ Conversation
+// compacted` divider that freeze_range stamps at the boundary. If the
+// live tail omits it, the settle-freeze INSERTS the divider as a +1 row
+// shift at the top of the just-streamed turn — every committed row below
+// re-emits over its scrollback copy (the post-compaction duplicate-turn /
+// clipped-panel bug from the mobile screenshots). Models the production
+// state precisely: the pre-compaction prefix froze BEFORE any record
+// existed (so its frozen rows carry no divider), a CompactionRecord then
+// lands at up_to_index == frozen_through (compaction does NOT mutate
+// messages), and a tall post-compaction turn streams LIVE then settles.
+// See INLINE_SCROLLBACK.md pin #3 (divider symmetry).
+static void test_compaction_boundary_live_to_frozen_seam() {
+    constexpr int kTermH = 40;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"compact"};
+    agentty::app::detail::clear_frozen(m);
+    auto& msgs = m.d.current.messages;
+
+    // ── Pre-compaction history: a short user+assistant exchange that
+    //    froze before any compaction record existed, so its frozen prefix
+    //    carries NO divider (exactly how production reaches this state).
+    {
+        Message u; u.role = Role::User; u.text = "old question";
+        msgs.push_back(std::move(u));
+        Message a; a.role = Role::Assistant; a.text = "old answer";
+        msgs.push_back(std::move(a));
+    }
+    agentty::app::detail::freeze_through(m, msgs.size());
+    const std::size_t boundary = msgs.size();
+    CHECK(m.ui.frozen_through == boundary,
+          "pre-compaction prefix did not freeze");
+
+    // ── Wire-only compaction lands: a record covering [0, boundary).
+    //    Messages are NOT mutated; the view draws the divider at
+    //    index == up_to_index.
+    {
+        agentty::Thread::CompactionRecord rec;
+        rec.up_to_index = boundary;
+        rec.summary     = "summary of the old conversation";
+        m.d.current.compactions.push_back(std::move(rec));
+    }
+
+    // ── Post-compaction turn: the user asks again and the assistant
+    //    emits a settled edit whose diff body is FAR taller than the
+    //    viewport. The whole run stays LIVE (settle-freeze hasn't fired).
+    {
+        Message u; u.role = Role::User;
+        u.text = "new question after compaction";
+        msgs.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        ToolUse t;
+        t.id   = ToolCallId{"edit_post"};
+        t.name = ToolName{"edit"};
+        t.args = {{"path", "src/post.cpp"}};
+        auto now = steady_clock::now();
+        t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                 edit_diff_output("post", 120)};
+        a.tool_calls.push_back(std::move(t));
+        msgs.push_back(std::move(a));
+    }
+    Message ph; ph.role = Role::Assistant; ph.streaming_text = "done";
+    msgs.push_back(std::move(ph));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Frame LIVE: divider + post-compaction turn render in the live tail.
+    CHECK(m.ui.frozen_through == boundary,
+          "run unexpectedly frozen while still active");
+    auto live = render_rows(m);
+
+    // The divider MUST already be in the LIVE tail (the fix). Without it
+    // the divider would only materialise at freeze time.
+    int live_dividers = 0;
+    for (const auto& row : live)
+        if (row.find("Conversation compacted") != std::string::npos)
+            ++live_dividers;
+    CHECK(live_dividers == 1,
+          "live tail missing the compaction divider before freeze "
+          "(it would materialise at freeze time — the +1 row shift)");
+
+    // ── The turn settles — the single settle-time freeze fires.
+    {
+        auto& back = msgs.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+    }
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, msgs.size());
+    auto frozen = render_rows(m);
+
+    CHECK(m.ui.frozen_through == msgs.size(),
+          "settle freeze did not take the whole post-compaction run");
+
+    // Committed prefix (rows that overflowed the viewport top) must be
+    // byte-identical across the live->frozen handoff. Without the divider
+    // in the live tail, the freeze inserts it as a +1 shift right here.
+    int d = first_committed_divergence(live, frozen, kTermH);
+    if (d >= 0) {
+        std::fprintf(stderr,
+            "  --- compaction live->frozen committed divergence row %d ---\n", d);
+        for (int y = d; y < std::min<int>(d + 3,
+                 (int)std::max(live.size(), frozen.size())); ++y) {
+            const char* lv = (y < (int)live.size())   ? live[y].c_str()   : "<none>";
+            const char* fv = (y < (int)frozen.size()) ? frozen[y].c_str() : "<none>";
+            std::fprintf(stderr, "    row %2d LIVE   |%s|\n", y, lv);
+            std::fprintf(stderr, "    row %2d FROZEN |%s|\n", y, fv);
+        }
+    }
+    CHECK(d < 0,
+          "compaction divider shifted the committed prefix on freeze "
+          "(the post-compaction duplicate-turn bug)");
+
+    // The divider must appear EXACTLY once in the frozen frame.
+    int divider_copies = 0;
+    for (const auto& row : frozen)
+        if (row.find("Conversation compacted") != std::string::npos)
+            ++divider_copies;
+    CHECK(divider_copies == 1,
+          "compaction divider rendered != once after freeze");
+
+    // And the tall edit body appears exactly once (no stranded copy).
+    int body_copies = 0;
+    for (const auto& row : frozen)
+        if (row.find("compute(119) + offset") != std::string::npos)
+            ++body_copies;
+    CHECK(body_copies == 1,
+          "post-compaction edit body rendered more than once (duplicate)");
+}
+
+// Production-faithful compaction flow: submit_message (modal.cpp) pushes
+// the next user message, freeze_through()s it, THEN pushes the assistant
+// placeholder — so the `≡ Conversation compacted` divider is stamped into
+// the FROZEN prefix at submit, before the live tail exists. The live tail
+// therefore only ever holds the in-flight assistant run; the divider is
+// never in it. This guards the REAL user-reported path: the submit must be
+// a clean APPEND below the committed prefix, and the assistant settle
+// freeze must not shift a committed row. (Distinct from the unit-level
+// symmetry test above, which forces the boundary into the live tail to
+// exercise build_live_tail's divider+number code directly.)
+static void test_compaction_submit_freezes_divider() {
+    constexpr int kTermH = 40;
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"compact2"};
+    agentty::app::detail::clear_frozen(m);
+    auto& msgs = m.d.current.messages;
+
+    // Pre-compaction history, frozen before any record exists.
+    {
+        Message u; u.role = Role::User; u.text = "old question";
+        msgs.push_back(std::move(u));
+        Message a; a.role = Role::Assistant; a.text = "old answer";
+        msgs.push_back(std::move(a));
+    }
+    agentty::app::detail::freeze_through(m, msgs.size());
+    const std::size_t boundary = msgs.size();
+
+    // Wire-only compaction record at the boundary.
+    {
+        agentty::Thread::CompactionRecord rec;
+        rec.up_to_index = boundary;
+        rec.summary     = "summary of the old conversation";
+        m.d.current.compactions.push_back(std::move(rec));
+    }
+
+    // Before the next submit the divider is PENDING, not shown: it sits at
+    // index == frozen_through == total, so neither builder emits it yet.
+    auto pre_submit = render_rows(m);
+    int pre_dividers = 0;
+    for (const auto& row : pre_submit)
+        if (row.find("Conversation compacted") != std::string::npos)
+            ++pre_dividers;
+    CHECK(pre_dividers == 0,
+          "divider shown before the next submit (should be pending)");
+
+    // ── submit_message's exact order: push user, freeze_through (stamps
+    //    divider + user into FROZEN), then push the assistant placeholder.
+    {
+        Message u; u.role = Role::User;
+        u.text = "new question after compaction";
+        msgs.push_back(std::move(u));
+    }
+    agentty::app::detail::freeze_through(m, msgs.size());
+    CHECK(m.ui.frozen_through == boundary + 1,
+          "submit did not freeze through the new user message");
+    // The divider is now in the FROZEN prefix — above frozen_through, so
+    // build_live_tail's boundary check (up_to_index == i) can never fire.
+    CHECK(m.ui.frozen_through > boundary,
+          "frozen_through must pass the compaction boundary at submit");
+
+    Message ph; ph.role = Role::Assistant;   // empty placeholder, as submit pushes
+    msgs.push_back(std::move(ph));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // The submit only APPENDED (divider + user + placeholder) below the
+    // pre-submit committed prefix — nothing above may move.
+    auto after_submit = render_rows(m);
+    {
+        int d = first_committed_divergence(pre_submit, after_submit, kTermH);
+        CHECK(d < 0,
+              "post-compaction submit shifted a committed scrollback row");
+    }
+    // Divider is now visible exactly once — and it lives in the frozen
+    // prefix, never the live tail.
+    int submit_dividers = 0;
+    for (const auto& row : after_submit)
+        if (row.find("Conversation compacted") != std::string::npos)
+            ++submit_dividers;
+    CHECK(submit_dividers == 1,
+          "compaction divider not stamped exactly once at submit");
+
+    // ── The assistant emits a settled edit whose diff body overflows the
+    //    viewport. No streaming text on it: the deferred settle-freeze
+    //    (meta.cpp) fires only after the reveal has drained, so the freeze
+    //    instant compares a fully-settled body against the frozen one —
+    //    modelling a live reveal here would just race the animation clock
+    //    (that path is covered by reveal_scrollback_test).
+    {
+        auto& a = msgs.back();
+        ToolUse t;
+        t.id   = ToolCallId{"edit_post2"};
+        t.name = ToolName{"edit"};
+        t.args = {{"path", "src/post2.cpp"}};
+        auto now = steady_clock::now();
+        t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                 edit_diff_output("post2", 120)};
+        a.tool_calls.push_back(std::move(t));
+    }
+    auto live = render_rows(m);
+
+    // The turn settles — the single settle-time freeze fires.
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, msgs.size());
+    auto frozen = render_rows(m);
+
+    CHECK(m.ui.frozen_through == msgs.size(),
+          "settle freeze did not take the whole post-compaction run");
+
+    int d = first_committed_divergence(live, frozen, kTermH);
+    if (d >= 0) {
+        std::fprintf(stderr,
+            "  --- submit-compaction live->frozen divergence row %d ---\n", d);
+        for (int y = d; y < std::min<int>(d + 3,
+                 (int)std::max(live.size(), frozen.size())); ++y) {
+            const char* lv = (y < (int)live.size())   ? live[y].c_str()   : "<none>";
+            const char* fv = (y < (int)frozen.size()) ? frozen[y].c_str() : "<none>";
+            std::fprintf(stderr, "    row %2d LIVE   |%s|\n", y, lv);
+            std::fprintf(stderr, "    row %2d FROZEN |%s|\n", y, fv);
+        }
+    }
+    CHECK(d < 0,
+          "post-compaction assistant settle shifted the committed prefix");
+
+    int divider_copies = 0;
+    for (const auto& row : frozen)
+        if (row.find("Conversation compacted") != std::string::npos)
+            ++divider_copies;
+    CHECK(divider_copies == 1,
+          "compaction divider rendered != once after the settle freeze");
+
+    int body_copies = 0;
+    for (const auto& row : frozen)
+        if (row.find("compute(119) + offset") != std::string::npos)
+            ++body_copies;
+    CHECK(body_copies == 1,
+          "post-compaction edit body rendered more than once (duplicate)");
+}
+
 // A full write turn's body: the settled write tool + a short text
 // continuation, the exact (tool, text) pair shape the agent emits per
 // turn. `content` rows make the write card overflow the viewport.
@@ -989,6 +1258,8 @@ int main() {
     test_read_then_edit_batch_freeze();
     test_streaming_text_prefix_freeze();
     test_tall_card_live_to_frozen_seam();
+    test_compaction_boundary_live_to_frozen_seam();
+    test_compaction_submit_freezes_divider();
     test_multi_turn_write_pairs_seam();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures) { std::printf("FAILED\n"); return 1; }
