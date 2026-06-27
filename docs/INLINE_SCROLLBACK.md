@@ -34,6 +34,10 @@ If inline-mode rendering breaks, check these in order:
 3. **Divider symmetry.** `frozen.cpp`, `build_live_tail`, and
    `build_queued_previews` all push **the same** `maya::Conversation::divider()`
    row between turns. Any height delta at a freeze instant ghosts.
+   The `≡ Conversation compacted` divider obeys the same rule:
+   `build_live_tail` must emit it at the `up_to_index` boundary just
+   like `freeze_range`, or the post-compaction turn duplicates into
+   scrollback at freeze time.
 4. **Freeze gate.** `run_is_freezable` refuses to freeze a run that
    still contains a Pending / Approved / Running tool. Frozen
    Elements are immutable; freezing a non-terminal run would pin a
@@ -193,6 +197,24 @@ three sites.
 frozen↔live boundary the instant a turn settles. Usually visible as
 the composer “snapping” up or down by one row when an assistant
 turn finishes.
+
+**The compaction divider is a SECOND divider that obeys the same
+rule.** Besides the inter-turn `gap_row()`, `freeze_range` pushes a
+single-row `≡ Conversation compacted` rule (`compaction_divider_row()`)
+immediately before the run that begins on a `CompactionRecord`'s
+`up_to_index`. `build_live_tail` **must** push a byte-identical
+`compaction_divider_row()` at the same boundary, in the same order
+(divider before the gap). If only `freeze_range` pushes it, the
+divider does not exist in the live tail while the post-compaction turn
+streams — it materialises only at the freeze instant, adding one row
+at the TOP of an already-overflowed turn. Maya's row-diff repaints
+downward, and the pre-shift copy of the turn that already committed to
+native scrollback is stranded there permanently: a **duplicate of the
+entire post-compaction turn** (user bubble + assistant timeline), plus
+a clipped/empty neighbouring tool panel where the two paints overlap.
+This is the post-compaction duplicate-turn bug. `build_queued_previews`
+does NOT need it — queued previews are synthetic rows past
+`messages.size()` that are never frozen, so they have no freeze seam.
 
 ---
 

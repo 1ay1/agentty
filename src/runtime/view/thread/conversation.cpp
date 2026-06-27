@@ -53,6 +53,22 @@ maya::Element gap_row() {
              blank()).build();
 }
 
+// Compaction-boundary divider. MUST stay byte-identical to frozen.cpp's
+// compaction_divider_row(): freeze_range pushes this single-row
+// `≡ Conversation compacted` rule before a run that begins on a
+// compaction boundary, so the live tail has to push it too. Without the
+// match the divider materialises only at freeze time — a +1 row
+// shift that strands the pre-shift copy of the just-frozen turn in
+// native scrollback (the post-compaction duplicate-turn / clipped-panel
+// bug). See INLINE_SCROLLBACK.md pin #3 (divider symmetry).
+maya::Element compaction_divider_row() {
+    maya::Turn::Config cfg;
+    cfg.glyph      = "\xe2\x89\xa1";   // ≡
+    cfg.label      = "Conversation compacted";
+    cfg.rail_color = muted;
+    return maya::Turn{std::move(cfg)}.build();
+}
+
 // Sentinel-check: assistant message whose only content is tool_calls
 // (no prose). Kept for any future per-message classification; the
 // run-merge logic that previously used it now lives in the shared
@@ -81,6 +97,20 @@ void build_live_tail(const Model& m, int& running_turn,
 
     out.reserve(out.size() + (total - start) * 2);
 
+    // Mirror freeze_range's needs_compaction_divider exactly: a run that
+    // begins on a compaction boundary gets the `≡ Conversation
+    // compacted` divider pushed before it. The frozen builder does this;
+    // the live tail must match byte-for-byte or the divider only appears
+    // after the freeze, shifting the just-frozen turn down one row and
+    // duplicating it into native scrollback (INLINE_SCROLLBACK.md pin #3).
+    auto compaction_boundary_at = [&](std::size_t idx) {
+        for (const auto& rec : m.d.current.compactions) {
+            if (rec.up_to_index == idx && rec.up_to_index > 0
+                && rec.up_to_index <= total) return true;
+        }
+        return false;
+    };
+
     bool first_in_tail = true;
     std::size_t i = start;
     while (i < total) {
@@ -94,6 +124,13 @@ void build_live_tail(const Model& m, int& running_turn,
         // (freeze_settled_subturns / freeze_streaming_text_prefix) has
         // been deleted — finalize_turn is the only freeze site, so the
         // live tail always starts at a whole-turn boundary.
+
+        // Compaction divider FIRST (before the inter-turn gap), exactly
+        // as freeze_range orders it, so the live and frozen row
+        // sequences stay byte-identical across the freeze seam.
+        if (compaction_boundary_at(i)) {
+            out.push_back(compaction_divider_row());
+        }
 
         const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (!first_overall) {
