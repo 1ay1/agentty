@@ -87,20 +87,32 @@ int estimate_wrap_cols(int term_cols) {
 int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
 
 // EXACT content width a frozen Turn Element is laid out at by the real
-// render. The thread sits inside AppLayout's outer `.padding(1)` (one
-// column of pad on each side), so the Conversation — and every Turn /
-// list_ref(frozen) entry inside it — receives term_cols - 2 columns. The
-// Turn owns its own rail + inner padding in its FlexStyle, so the layout
-// engine subtracts that chrome itself when we hand it this width. This is
-// the width measure_element_rows MUST use: frozen_rows[] is the EXACT
-// wire height only when measured at the width maya actually wraps at. The
-// coarse one-sided estimate (estimate_wrap_cols, term_cols - 4) is for
-// estimate_msg_rows' budget-walk fallback, NOT for the real layout
-// measure — measuring the real Element at the estimate's narrower width
-// OVER-counts every entry (more wrapping), which over-commits at trim
-// time and strands a duplicate one screen up (per the trim commit proof).
+// render. A frozen entry is nested under TWO horizontal-padding boxes
+// before maya measures it, and BOTH must be subtracted here:
+//
+//   AppLayout::build:    vstack().padding(1)      -> left 1 + right 1 = 2
+//   Conversation::build: v(rows) | padding(0, 1)  -> left 1 + right 1 = 2
+//
+// (Thread::build is a pass-through and list_ref adds no chrome.) So the
+// frozen Element receives term_cols - 4 columns, NOT term_cols - 2. The
+// earlier -2 counted only AppLayout's pad and MISSED Conversation's
+// padding(0, 1); on a narrow viewport that 2-col over-estimate of the
+// wrap width UNDER-counts every wrapped entry's height (fewer rows than
+// maya actually paints), so the trim's commit_scrollback accounting
+// undershoots and strands a duplicate row one screen up — the
+// phone-over-SSH scrollback-duplication bug.
+//
+// The Turn owns its own rail + inner padding INSIDE the built Element
+// `e`; the layout engine subtracts that itself when measure_element_rows
+// runs compute() on `e`, identically to the real render — so only the
+// EXTERNAL 4 cols belong here. This is the width measure_element_rows
+// MUST use: frozen_rows[] equals the wire height by construction only
+// when measured at the width maya actually wraps at. Verified empirically
+// — for every width W, the real nested render assigns the frozen element
+// exactly the height it has at W-4 (and the coarse estimate_wrap_cols
+// already uses term_cols - 4 for the same reason).
 int measure_cols(int term_cols) {
-    return std::max(16, term_cols - 2);
+    return std::max(16, term_cols - 4);
 }
 
 // Live-canvas row budget = a small multiple of the terminal viewport,
