@@ -847,42 +847,22 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // Settling here matches agent_session's `m.md.finish() + push to
         // frozen` discipline: one coherent transition per update step.
         //
-        // BUT NOT when this turn is about to go idle and take the
-        // deferred-finalize path below. settle_message_md() calls
-        // finish(), which flips the reveal widget live_ off IMMEDIATELY —
-        // and the idle block's request_finalize(200) then no-ops (it
-        // early-returns when !live_). The net effect is the typewriter
-        // never glides: on a long turn the whole final burst snaps to
-        // fully-revealed in one frame (the "long-turn md animation gets
-        // stuck / jumps instead of typing out" symptom). The deferred
-        // path WANTS the widget to stay live so request_finalize can ramp
-        // the cursor to the edge and the widget flips live_ off on its
-        // own; the REAL settle_message_md + freeze then runs in meta.cpp's
-        // Tick once live_tail_reveal_settled().
-        //
-        // A turn goes idle here iff it has no tool calls to dispatch
-        // (kick_pending_tools below leaves us Idle) — i.e. a text-only
-        // reply. When there ARE tool calls, the turn continues (phase
-        // stays active), there's no deferred-finalize, and the height-lock
-        // rationale above applies, so settle now.
-        const bool turn_will_go_idle =
-            last.role == Role::Assistant
-            && std::ranges::none_of(last.tool_calls, [](const auto& tc) {
-                   return tc.is_pending() || tc.is_running();
-               });
+        // Settle NOW, unconditionally — agent_session's MessageStop does
+        // exactly this (m.md.finish()). The previous code armed a 200 ms
+        // request_finalize() GLIDE when the turn was about to go idle and
+        // deferred the finish() to meta.cpp's Tick once the glide drained.
+        // That animated handoff needs dense ~16 ms frames to hold the
+        // live-tail height steady while the reveal cursor rolls to the
+        // edge; at fps=0 over SSH/tmux the frames land ~80 ms apart, so the
+        // height drifts mid-glide and the eventual freeze diffs a moved
+        // tree against a stale prev_cells — stranding a duplicate turn in
+        // scrollback (the reported bug). finish() resolves the reveal
+        // overlay immediately, so the live height equals the settled/frozen
+        // height in the SAME frame and the freeze handoff is clean. The
+        // only thing lost is the ~200 ms post-stream typewriter glide —
+        // exactly the trade agent_session makes.
         if (last.role == Role::Assistant && !last.text.empty()) {
-            if (turn_will_go_idle) {
-                // Deferred finalize: arm the glide WHILE still live instead
-                // of finish()ing now. Mirrors the idle block below; the
-                // widget glides to the edge and flips live_ off itself, and
-                // meta.cpp's Tick does the real settle+freeze once drained.
-                auto& cache = m.ui.view_cache.message_md(
-                    m.d.current.id, last.id);
-                if (cache.streaming)
-                    cache.streaming->request_finalize(200);
-            } else {
-                settle_message_md(m, last);
-            }
+            settle_message_md(m, last);
         }
         // Flush any tool_calls whose StreamToolUseEnd never fired — Anthropic
         // normally sends content_block_stop per tool block, but proxies /
@@ -1091,39 +1071,32 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // of frozen via list_ref (zero-copy) and the live tail draws
     // nothing until the next submit pushes a fresh placeholder.
     if (m.s.is_idle()) {
-        // Kick the reveal cursor toward the live edge for every
-        // Assistant message in the live tail, but DO NOT finish() yet.
-        // finish() flips the widget live_ off immediately, collapsing the
-        // pre-finish overlay tree (prefix ComponentElement + animated
-        // tail) to the flat post-finish tree in ONE frame — a shape +
-        // hash flip that diverges from the last LIVE frame still in maya's
-        // prev_cells, which is the structural root cause of the
-        // post-stream duplicate-card / ghost in scrollback.
+        // Settle every Assistant message in the live tail NOW — finish()
+        // resolves the reveal overlay and locks the rendered height,
+        // exactly like agent_session at MessageStop (m.md.finish()). We
+        // then set pending_settle_freeze so meta.cpp's Tick performs the
+        // actual freeze on the very next frame — by which point one view()
+        // has already painted the settled (post-finish) tree into maya's
+        // prev_cells, so the live-tail→frozen handoff is a byte-identical
+        // cache HIT (zero re-emit, the cheapest possible transition over a
+        // slow SSH wire).
         //
-        // Instead, request_finalize() arms a short ramp: the reveal
-        // cursor glides to the edge over ~200 ms (or faster if the
-        // backlog is large) and the widget flips live_ off ON ITS OWN at
-        // the moment the cursor catches up. The live tail keeps animating
-        // the whole time (the typewriter never looks stuck), and the LAST
-        // live frame maya paints already IS the settled tree. The actual
-        // finalize+freeze is deferred to meta.cpp's Tick, GATED on
-        // live_tail_reveal_settled() so it never fires until that drained
-        // state is on screen — making the freeze a byte-and-hash-identical
-        // cache HIT (zero re-emit). This is the agent_session guarantee
-        // (live height == settled height at the freeze instant) achieved
-        // WITHOUT giving up the reveal animation.
+        // What changed: the old code armed a 200 ms request_finalize()
+        // GLIDE here and left the widget live_, deferring finish() to the
+        // Tick once the glide drained. That animation needs dense frames to
+        // hold the live height steady; at fps=0 over SSH the sparse ticks
+        // let the height drift mid-glide, so the freeze diffed a moved tree
+        // against a stale prev_cells and stranded a duplicate turn in
+        // scrollback. Finishing immediately removes the animation window.
         for (std::size_t i = m.ui.frozen_through;
              i < m.d.current.messages.size(); ++i) {
             auto& mm = m.d.current.messages[i];
             if (mm.role != Role::Assistant || mm.text.empty()) continue;
-            auto& cache = m.ui.view_cache.message_md(m.d.current.id, mm.id);
-            if (cache.streaming)
-                cache.streaming->request_finalize(200);
+            settle_message_md(m, mm);
         }
-        // Defer the freeze. meta.cpp's Tick checks pending_settle_freeze
-        // AND live_tail_reveal_settled() before finalizing+freezing, so
-        // the snapshot is taken only after the reveal has fully drained
-        // and the settled shape is in prev_cells.
+        // Freeze on the next Tick (meta.cpp), gated on
+        // live_tail_reveal_settled() — already true now that we finished,
+        // so the freeze fires immediately on the next frame.
         m.ui.pending_settle_freeze = true;
     }
 

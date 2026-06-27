@@ -304,7 +304,17 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // directly.
         if (!sizes_unchanged) {
             if (settled) {
-                cache.streaming->request_finalize(200);
+                // Finish IMMEDIATELY (no 200 ms request_finalize glide) so
+                // the live height equals the settled/frozen height in the
+                // same frame — agent_session's MessageStop discipline. The
+                // glide kept the widget live_ and animating after the
+                // stream ended; at fps=0 over SSH the sparse frames let the
+                // live-tail height drift between paints, so the freeze
+                // handoff diffed a moved tree and stranded a duplicate in
+                // scrollback. The reducer already pre-settles via
+                // settle_message_md; this keeps the view path in lockstep
+                // for any settled message still in the live tail.
+                cache.streaming->finish();
             } else {
                 cache.streaming->set_live(true);
             }

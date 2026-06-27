@@ -285,7 +285,19 @@ struct AgenttyApp {
         // Tick clears it once live_tail_reveal_settled()), so key the fast
         // bucket on it: keep ticking the 16 ms reveal clock until the
         // glide drains and the freeze handoff lands.
-        const bool draining_reveal = m.ui.pending_settle_freeze;
+        // The reveal-drain time bucket must keep ticking through BOTH the
+        // pre-freeze settle (pending_settle_freeze) AND the post-freeze
+        // settle cooldown (settle_cooldown_ticks). The cooldown frames are
+        // where maya reconciles the live-tail→frozen collapse (its
+        // detect→commit→demote→repaint shrink chain). request_animation_
+        // frame() alone CANNOT drive them: the run loop's visual_hash gate
+        // skips any frame whose hash didn't move (maya/app/app.hpp), so
+        // without advancing the hash here those frames are gated away and
+        // the collapse never finishes reconciling — leaving a stranded
+        // duplicate turn in scrollback. Advancing the hash while the
+        // cooldown counts down makes each armed Tick actually render.
+        const bool draining_reveal =
+            m.ui.pending_settle_freeze || m.ui.settle_cooldown_ticks > 0;
 
         if (revealing_text || draining_reveal) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
