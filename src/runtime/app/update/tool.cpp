@@ -77,13 +77,13 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         // Either way, dropping the late result keeps history
         // stable.
         //
-        // Frozen prefix: with_live_tool already skips messages with
-        // index < frozen_through, so a ToolExecOutput that races a
-        // freeze (turn settled, user submitted again, tool worker
-        // finally returned) silently no-ops here. Without the gate
-        // the mutation would land on a Message whose rendered
-        // Element in m.ui.frozen is immutable — visible as a
-        // permanently-Running spinner in scrollback.
+        // Sealed runs are immutable: with_live_tool already skips
+        // messages with index < live_run_start, so a ToolExecOutput
+        // that races a seal (run settled, user submitted again, tool
+        // worker finally returned) silently no-ops here. Without the
+        // gate the mutation would land on a Message whose rendered
+        // rows are owned by maya's scrollback (a sealed run) — visible
+        // as a permanently-Running spinner in scrollback.
         if (tc.is_terminal()) return;
         auto now = std::chrono::steady_clock::now();
         auto started = tc.started_at();
@@ -137,8 +137,8 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         // ExecutingTool) to re-render. Ignore if the tool has already
         // finalised (a late snapshot racing the terminal ToolExecOutput).
         [&](ToolExecProgress& e) -> Step {
-            // Frozen prefix is immutable — a late progress snapshot
-            // for a turn that's already settled into m.ui.frozen
+            // Sealed runs are immutable — a late progress snapshot
+            // for a run that's already settled into maya's scrollback
             // silently no-ops here.
             with_live_tool(m, e.id, [&](ToolUse& tc) {
                 if (auto* r = std::get_if<ToolUse::Running>(&tc.status)) {
@@ -209,20 +209,20 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                             sync_todo_state_from_args(m, tc.args);
             }
             apply_tool_output(m, e.id, std::move(e.result));
-            // No mid-run freeze or trim here. The single freeze site is
-            // finalize_turn (the agent_session MessageStop analog) — the
-            // whole agent turn is wrapped into one Turn Element and
-            // pushed to m.ui.frozen atomically there. Carving mid-run
-            // (the prior freeze_settled_subturns + trim_frozen_above_
-            // viewport calls that lived here) was the documented source
-            // of "redraws from top + scrollback corruption" at every
-            // tool→continuation seam: the freeze pushed an entry whose
-            // hash_id maya's component cache had not seen on the live
-            // tail's previous frame, so the cache missed and re-emitted
-            // those rows — sometimes over already-committed scrollback.
-            // agent_session never carves mid-stream and shows zero
-            // corruption / zero slowdown on long runs (proven by the
-            // long_session bench); we now do the same.
+            // No mid-run seal or trim here. Settled runs are sealed
+            // into maya's scrollback by the Strata renderer itself —
+            // the host enumerates the live tail [live_run_start..end)
+            // as lazy nodes and maya seals scrolled-off settled runs
+            // on its own. Carving mid-run (the prior
+            // freeze_settled_subturns + trim calls that lived here) was
+            // the documented source of "redraws from top + scrollback
+            // corruption" at every tool→continuation seam: it produced
+            // a snapshot whose hash_id maya's component cache had not
+            // seen on the live tail's previous frame, so the cache
+            // missed and re-emitted those rows — sometimes over
+            // already-committed scrollback. The Strata model never
+            // carves mid-stream and shows zero corruption / zero
+            // slowdown on long runs (proven by the long_session bench).
             auto kick = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(kick)};
         },
@@ -232,8 +232,8 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             if (!m.d.pending_permission) return done(std::move(m));
             auto id = m.d.pending_permission->id;
             // Permission only ever fires against a tool in the live
-            // tail — a frozen turn is by definition past every pending
-            // permission. with_live_tool's frozen-prefix gate is the
+            // tail — a sealed run is by definition past every pending
+            // permission. with_live_tool's sealed-run gate is the
             // structural guarantee of that invariant.
             with_live_tool(m, id, [&](ToolUse& tc) {
                 // Mark approval as type state: Pending → Approved.

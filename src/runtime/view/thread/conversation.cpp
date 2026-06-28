@@ -1,16 +1,17 @@
 // conversation.cpp — view adapter for the conversation viewport.
 //
-// agent_session-style fast path: hand maya a borrowed pointer to
-// m.ui.frozen (the append-only built-Element vector that grows on
-// every settled turn) plus a small live-tail of unfrozen Elements
-// (the in-flight assistant turn + any queued-message previews).
+// Strata depositional model: this builder emits ONLY the live tail
+// (runs at/after m.ui.live_run_start — the in-flight assistant turn plus
+// any queued-message previews). Settled runs above the live boundary are
+// handed to maya as separate sealed nodes (built lazily by
+// build_settled_run in view.cpp), which maya measures, caches, and seals
+// into native scrollback itself.
 //
-// The per-frame cost is therefore O(visible_live_tail) regardless of
-// how long the session has run. Settled turns are NEVER rebuilt:
-// they were built into Element values inside m.ui.frozen at the
-// moment they settled (see src/runtime/app/update/frozen.cpp) and
-// stay there until thread switch / NewThread / compaction triggers
-// a rebuild.
+// The per-frame cost is therefore O(visible_live_tail) regardless of how
+// long the session has run. Settled runs are NEVER rebuilt here: maya
+// keeps their cells and only re-invokes build_settled_run on a cache
+// miss for an on-screen settled run. The host carries no Element
+// snapshot vector and no freeze bookkeeping — just the live boundary.
 
 #include "agentty/runtime/view/thread/conversation.hpp"
 
@@ -89,10 +90,11 @@ maya::Element compaction_divider_row() {
 // builder uses (`freeze_range` calls the same `turn_run_end` /
 // `turn_config_for_assistant_run` helpers), so the live and frozen
 // row sequences are byte-identical for the same input.
-void build_live_tail(const Model& m, int& running_turn,
-                     std::vector<maya::Element>& out) {
+void build_live_tail_from(const Model& m, std::size_t start,
+                          int& running_turn,
+                          std::vector<maya::Element>& out) {
     const std::size_t total = m.d.current.messages.size();
-    const std::size_t start = std::min(m.ui.frozen_through, total);
+    start = std::min(start, total);
     if (start >= total) return;
 
     out.reserve(out.size() + (total - start) * 2);
@@ -132,7 +134,7 @@ void build_live_tail(const Model& m, int& running_turn,
             out.push_back(compaction_divider_row());
         }
 
-        const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
+        const bool first_overall = (start == 0) && first_in_tail && i == 0;
         if (!first_overall) {
             out.push_back(gap_row());
         }
@@ -372,7 +374,7 @@ const ToolUse* find_pending_tool(const Model& m) {
     if (!m.d.pending_permission) return nullptr;
     const auto& pp_id = m.d.pending_permission->id;
     const auto& msgs  = m.d.current.messages;
-    for (std::size_t i = m.ui.frozen_through; i < msgs.size(); ++i) {
+    for (std::size_t i = m.ui.live_run_start; i < msgs.size(); ++i) {
         for (const auto& tc : msgs[i].tool_calls) {
             if (tc.id == pp_id) return &tc;
         }
@@ -398,29 +400,47 @@ std::optional<maya::Element> build_permission_row(const Model& m) {
 maya::Conversation::Config conversation_config(const Model& m, bool include_frozen) {
     maya::Conversation::Config cfg;
 
-    // ── Borrowed frozen prefix (zero-copy). ───────────
-    // maya renders this through list_ref, so growing m.ui.frozen does
-    // not increase per-frame cost. Maya's hash_id-keyed cell cache
-    // makes already-painted Elements hit on every subsequent frame.
-    //
-    // Under Strata (include_frozen=false) the settled prefix is handed
-    // to maya as separate sealed NODES instead, so here we render ONLY
-    // the live tail — leave cfg.frozen null.
-    cfg.frozen = include_frozen ? &m.ui.frozen : nullptr;
+    // ── No borrowed frozen prefix. ───────────────────
+    // Under Strata the settled runs are handed to maya as separate
+    // sealed NODES (built lazily by build_settled_run), so there is no
+    // host-owned Element vector to borrow. cfg.frozen stays null on both
+    // paths.
+    //   • Strata path (include_frozen=false): render ONLY the live tail
+    //     (runs at/after m.ui.live_run_start); the settled runs above are
+    //     separate maya nodes.
+    //   • Classic/test path (include_frozen=true): render the WHOLE
+    //     transcript inline as the live tail (live_start forced to 0), so
+    //     view() remains a complete self-contained tree for tests.
+    cfg.frozen = nullptr;
 
-    // HUG mode for the Strata LIVE node: when the settled prefix is
-    // handed to maya as sealed nodes (include_frozen=false), this node
-    // must hug its live-tail height rather than grow-spacer to the
-    // viewport bottom (which would strand a blank void above the
-    // composer). Classic monolithic path keeps the fill (true).
+    // HUG mode for the Strata LIVE node: when the settled runs are
+    // separate sealed nodes (include_frozen=false), this node must hug
+    // its live-tail height rather than grow-spacer to the viewport bottom
+    // (which would strand a blank void above the composer). Classic
+    // monolithic path keeps the fill (true).
     cfg.fill_viewport = include_frozen;
 
+    // The live-tail start: the Strata boundary on the depositional path,
+    // 0 (render everything) on the classic path.
+    const std::size_t live_start =
+        include_frozen ? 0 : std::min(m.ui.live_run_start,
+                                      m.d.current.messages.size());
+
     // ── Live tail. ─────────────────────────────────
-    // The only thing rebuilt per frame. Bounded by one in-flight
-    // agent turn (one User + possibly several Assistant continuations)
-    // plus any queued-message previews.
-    int running_turn = m.ui.frozen_turn + 1;
-    build_live_tail(m, running_turn, cfg.live_tail);
+    // The only thing rebuilt per frame on the Strata path. Bounded by
+    // one in-flight agent turn (one User + possibly several Assistant
+    // continuations) plus any queued-message previews. The display turn
+    // number seeds from the count of assistant runs settled before the
+    // boundary — computed on demand from the messages, not a counter.
+    int settled_assistant_runs = 0;
+    for (std::size_t k = 0; k < live_start; ) {
+        const std::size_t re = turn_run_end(m.d.current.messages, k);
+        if (m.d.current.messages[k].role == Role::Assistant)
+            ++settled_assistant_runs;
+        k = re;
+    }
+    int running_turn = settled_assistant_runs + 1;
+    build_live_tail_from(m, live_start, running_turn, cfg.live_tail);
     build_queued_previews(m, running_turn, cfg.live_tail);
 
     // Pending permission floats as its own live_tail row below the
@@ -434,8 +454,8 @@ maya::Conversation::Config conversation_config(const Model& m, bool include_froz
     }
 
     // Optional shape probe. Set AGENTTY_VIEW_PROF=1 to log every
-    // conversation_config invocation's frozen/live_tail sizes plus
-    // a rough live-tail message-content sketch. One line per call.
+    // conversation_config invocation's live-tail size plus a rough
+    // live-tail message-content sketch. One line per call.
     static const bool view_prof = []{
         const char* e = std::getenv("AGENTTY_VIEW_PROF");
         return e && *e && *e != '0';
@@ -443,23 +463,22 @@ maya::Conversation::Config conversation_config(const Model& m, bool include_froz
     if (view_prof) {
         static std::FILE* out = std::fopen("/tmp/agentty-view-prof.log", "a");
         if (out) {
-            std::size_t live_msgs = (m.d.current.messages.size()
-                > m.ui.frozen_through)
-                ? (m.d.current.messages.size() - m.ui.frozen_through)
+            std::size_t live_msgs = (m.d.current.messages.size() > live_start)
+                ? (m.d.current.messages.size() - live_start)
                 : 0;
             std::size_t live_text_bytes = 0;
             std::size_t live_tool_count = 0;
-            for (std::size_t i = m.ui.frozen_through;
+            for (std::size_t i = live_start;
                  i < m.d.current.messages.size(); ++i) {
                 const auto& msg = m.d.current.messages[i];
                 live_text_bytes += msg.text.size() + msg.streaming_text.size();
                 live_tool_count += msg.tool_calls.size();
             }
             std::fprintf(out,
-                "[view] frozen=%zu live_tail=%zu live_msgs=%zu "
-                "live_text=%zu live_tools=%zu frozen_through=%zu msgs=%zu\n",
-                m.ui.frozen.size(), cfg.live_tail.size(), live_msgs,
-                live_text_bytes, live_tool_count, m.ui.frozen_through,
+                "[view] live_tail=%zu live_msgs=%zu "
+                "live_text=%zu live_tools=%zu live_start=%zu msgs=%zu\n",
+                cfg.live_tail.size(), live_msgs,
+                live_text_bytes, live_tool_count, live_start,
                 m.d.current.messages.size());
             std::fflush(out);
         }

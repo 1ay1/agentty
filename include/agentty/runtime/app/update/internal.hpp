@@ -96,90 +96,14 @@ std::string    active_provider_id();
 // will then auto-select the first available model).
 std::string    model_for_provider(std::string_view spec);
 
-// ── Frozen-scrollback prefix helpers (frozen.cpp) ────────────────────────
-//
-// freeze_through_prior_turn: walk m.d.current.messages[frozen_through..end)
-// and push built Turn Elements (with leading gaps) into m.ui.frozen,
-// up to (but NOT including) the message at `live_start`. Applies the
-// same tool-batch-merge logic conversation_config used to do at view
-// time, so the frozen visual matches the live visual byte-for-byte.
-//
-// Typical call: at submit_message, freeze through the just-finished
-// agent turn (live_start = messages.size() at the moment the new User
-// is about to be pushed).
-void freeze_through(Model& m, std::size_t live_start);
-
-// NOTE: the mid-stream carve API that used to be declared here
-// (freeze_settled_subturns, freeze_streaming_text_prefix,
-// trim_frozen_above_viewport) is DELETED. agent_session — the
-// reference implementation with zero scrollback corruption — freezes
-// exactly once per turn (MessageStop); the only production analog is
-// finalize_turn → pending_settle_freeze → freeze_through. Mid-stream
-// carves stamped frozen Turns whose hashes maya's cache had never
-// seen, forcing cache-miss re-emits over committed scrollback. Do
-// not reintroduce them.
-
-// rehydrate_frozen: rebuild m.ui.frozen from scratch from the current
-// thread's messages + compaction records. Used on thread switch /
-// thread load — anywhere the messages vector was replaced wholesale.
-// Resets frozen_through and frozen_turn.
-void rehydrate_frozen(Model& m);
-
-// clear_frozen: drop the entire frozen vector and reset counters.
-// For NewThread before a fresh-start submit.
-void clear_frozen(Model& m);
-
 // Settle one Assistant message's StreamingMarkdown widget: feed the
 // final bytes, finish() (flush tail → prefix, flip live_ off), apply the
 // same auto-fold preset cached_markdown_for uses, and stamp the cache
 // sizes so the per-frame settled fast-path engages. Defined in stream.cpp.
+// Still used to lock reveal height before a new submit; maya's Strata
+// renderer seals scrolled-off settled runs into native scrollback on its
+// own, so there is no host snapshot to build or freeze flag to set.
 void settle_message_md(Model& m, const Message& msg);
-
-// live_tail_reveal_settled: true iff EVERY Assistant message in the live
-// tail [frozen_through..end) has fully drained its reveal animation — the
-// widget flipped live_ off, the typewriter cursor reached the live edge,
-// the finalize ramp completed, and no async parse is in flight. At that
-// point the live tail painted the SETTLED tree into maya's prev_cells, so
-// a freeze taken now is byte-and-hash-identical to what's on screen (cache
-// HIT, zero re-emit). The predicate set is the EXACT mirror of
-// build_live_tail's `reveal_settled` (is_live || reveal_in_progress ||
-// is_finalizing || is_parsing): that gate decides whether the live tail
-// STAMPS the cacheable assistant_run_hash_id, this one decides whether the
-// freeze fires — they must agree or the freeze stamps a key the live tail
-// never painted and freeze_range rebuilds (show_all) at a divergent height.
-// Used to GATE the deferred settle-freeze: we never finalize+freeze a turn
-// whose reveal is still animating, which is the structural root cause of
-// the post-stream duplicate/ghost (freezing a post-finish shape that
-// diverges from the still-animating live frame in prev_cells). Returns
-// true when the tail has no Assistant md to drain (nothing to wait on).
-bool live_tail_reveal_settled(const Model& m);
-
-// ensure_frozen_width: re-measure every frozen entry's stored row count
-// (frozen_rows[]) at `term_cols` (the FULL terminal width) whenever it has
-// changed since the counts were stamped (m.ui.frozen_cols). No-op when the
-// width is unchanged — the common case.
-//
-// frozen_rows[k] equals what maya emits for entry k ONLY at the width it was
-// measured at; push_frozen measures through maya's real layout engine, so a
-// fresh stamp matches the wire by construction at that width. A terminal
-// resize re-wraps every entry to a new height. Both trims size their
-// commit_scrollback() off frozen_rows[]; a stale post-WIDEN stamp over-counts
-// the wire, the trim over-commits, maya shifts prev_cells up by more rows
-// than the live tree shrank, and the next compose "grows" — scrolling kept
-// content into native scrollback as a duplicate just above the viewport.
-// Re-measuring to the live width before each trim consumes the counts keeps
-// the exact commit exact under any resize, making that over-commit
-// structurally impossible. Called by push_frozen and both trims; exposed
-// (rather than file-local) so the resize path is unit-testable. O(entries)
-// layout, only on a width change.
-void ensure_frozen_width(Model& m, int term_cols);
-
-// trim_frozen_if_oversized: when frozen exceeds a soft cap, drop the
-// oldest N entries to keep maya's prev_cells working set bounded.
-// Returns a Cmd::commit_scrollback_overflow() to tell maya to release
-// the cells that have provably overflowed the viewport. No-op if
-// frozen is under the cap.
-maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a
 // Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer
@@ -200,25 +124,27 @@ void apply_tool_output(Model& m, const ToolCallId& id,
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 
-// ── Frozen-prefix immutability gate ──────────────────────────────────────
+// ── Sealed-run immutability gate ─────────────────────────────────────────
 //
-// `m.ui.frozen` is an append-only vector of fully-built Element
-// snapshots; their `hash_id` is stamped at freeze time and never
-// recomputed, so any post-freeze mutation of the underlying ToolUse
-// is invisible until thread switch / rehydrate. The five mutation
-// sites that locate a tool by ToolCallId (ToggleToolExpanded,
-// ToolExecOutput / apply_tool_output, ToolExecProgress, ToolTimeoutCheck,
+// Under the Strata depositional model maya seals settled runs into
+// native scrollback itself; once a message lands in a sealed
+// (pre-live_run_start) run its rendered rows are owned by maya's
+// scrollback and are immutable, so any post-seal mutation of the
+// underlying ToolUse would be invisible. The five mutation sites that
+// locate a tool by ToolCallId (ToggleToolExpanded, ToolExecOutput /
+// apply_tool_output, ToolExecProgress, ToolTimeoutCheck,
 // PermissionReject / mark_tool_rejected) must therefore refuse to touch
-// any tool whose enclosing message has index < frozen_through.
+// any message in a sealed run — i.e. any message with index <
+// live_run_start.
 //
 // `with_live_tool` is the only way to mutate a tool by id. It searches
-// ONLY the live tail [frozen_through .. end) and returns true iff the
-// mutation ran. A stale id (tool whose turn was already frozen) returns
+// ONLY the live tail [live_run_start .. end) and returns true iff the
+// mutation ran. A stale id (tool whose run was already sealed) returns
 // false — caller treats it as a no-op, matching the existing
 // "idempotent on terminal" behaviour of apply_tool_output.
 template <class F>
 bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
-    for (std::size_t i = m.ui.frozen_through;
+    for (std::size_t i = m.ui.live_run_start;
          i < m.d.current.messages.size(); ++i) {
         for (auto& tc : m.d.current.messages[i].tool_calls) {
             if (tc.id == id) {

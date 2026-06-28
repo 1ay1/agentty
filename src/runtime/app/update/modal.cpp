@@ -220,42 +220,34 @@ Step submit_message(Model m) {
         m.d.current.title = deps().title_from(title_src);
     }
 
-    // Freeze the prior turn AND the freshly-pushed User in one pass —
-    // the agent_session SessionStart analog (it pushes gap() + the user
-    // Turn into m.frozen the moment the user submits). The prior turn
-    // is fully settled by construction: submit only proceeds when
-    // m.s.is_idle(), so no tool is running and no stream is in flight.
-    // The user message is immutable from birth, so freezing it
-    // immediately is always safe. After this, the live tail contains
-    // ONLY the in-flight assistant run — exactly agent_session's shape:
-    // the user Turn paints once from frozen (zero-copy list_ref blit)
-    // instead of being re-built every frame for the whole run, and the
-    // settle-time freeze has one fewer seam to hand off.
+    // Settle the prior turn before the freshly-pushed User shifts the
+    // live tail forward. The prior turn is fully settled by
+    // construction: submit only proceeds when m.s.is_idle(), so no tool
+    // is running and no stream is in flight. The user message is
+    // immutable from birth. After this, the live tail contains ONLY the
+    // in-flight assistant run — the user Turn and prior turns become
+    // settled runs that maya's Strata renderer seals into native
+    // scrollback on its own, so they paint once instead of being
+    // re-built every frame for the whole run.
     m.d.current.messages.push_back(std::move(user));
-    // Force the prior turn's reveal to settle BEFORE the freeze snapshot.
-    // Normally the deferred settle-freeze (meta.cpp) waits for the reveal
-    // to drain on its own, but a user can submit while it's still mid-
-    // glide (pending_settle_freeze true). Freezing a still-`live_` widget
-    // would snapshot a tree whose hash diverges from the on-screen live
-    // frame — the post-stream duplicate. settle_message_md runs the
-    // (now harmless) finish() so the widget is in its settled shape; the
-    // freeze below then captures exactly what the next live frame would
-    // paint. By submit time msg.text is final and streaming_text empty,
-    // so this is shape-neutral for an already-drained turn and a clean
-    // collapse for a still-animating one (the user moved on; cutting the
-    // last ~100 ms of typewriter is the right call when they hit Enter).
-    for (std::size_t i = m.ui.frozen_through;
+    // Force the prior turn's reveal to settle BEFORE the new submit.
+    // settle_message_md locks the reveal height: it runs the (now
+    // harmless) finish() so each prior Assistant widget is in its
+    // settled shape before the live tail shifts forward. A user can
+    // submit while the prior turn is still mid-glide; settling here
+    // means the run maya seals into scrollback matches what the last
+    // live frame painted. By submit time msg.text is final and
+    // streaming_text empty, so this is shape-neutral for an already-
+    // drained turn and a clean collapse for a still-animating one (the
+    // user moved on; cutting the last ~100 ms of typewriter is the
+    // right call when they hit Enter). maya's Strata renderer seals the
+    // settled runs on its own — there is no freeze flag to set.
+    for (std::size_t i = m.ui.live_run_start;
          i + 1 < m.d.current.messages.size(); ++i) {
         auto& mm = m.d.current.messages[i];
         if (mm.role != Role::Assistant || mm.text.empty()) continue;
         settle_message_md(m, mm);
     }
-    freeze_through(m, m.d.current.messages.size());
-    // A deferred settle-freeze may still be pending from the prior turn
-    // (user submitted before the next idle Tick fired). The freeze above
-    // just covered it, so drop the flag to avoid a redundant no-op freeze
-    // on the next Tick.
-    m.ui.pending_settle_freeze = false;
 
     Message placeholder;
     placeholder.role = Role::Assistant;
@@ -281,7 +273,6 @@ Step submit_message(Model m) {
     m.s.status.clear();
     m.s.status_until  = {};
 
-    auto trim = trim_frozen_if_oversized(m);
     auto launch = cmd::launch_stream(m);
     // No commit_scrollback_overflow here. Submit is not a wholesale
     // model swap — it appends to the existing transcript, so maya's
@@ -294,13 +285,7 @@ Step submit_message(Model m) {
     // has actually overflowed, the bookkeeping turns valid scrollback
     // mirror rows into "forget these" and the next diff re-emits
     // them, surfacing as duplicate cards in scrollback.
-    std::vector<Cmd<Msg>> parts;
-    if (!trim.is_none()) parts.push_back(std::move(trim));
-    parts.push_back(std::move(launch));
-    auto cmd = parts.size() == 1
-        ? std::move(parts.front())
-        : Cmd<Msg>::batch(std::move(parts));
-    return {std::move(m), std::move(cmd)};
+    return {std::move(m), std::move(launch)};
 }
 
 std::string active_provider_id() {

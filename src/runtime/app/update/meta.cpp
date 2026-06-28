@@ -151,94 +151,16 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // frames after the settle-freeze so maya's renderer fully
             // reconciles the live-tail→frozen collapse before the clock
             // stops. Decrement here so each rendered frame burns one.
-            if (m.ui.settle_cooldown_ticks > 0) --m.ui.settle_cooldown_ticks;
-
-            // ── Deferred settle-freeze (post-stream redraw fix) ──────
-            // finalize_turn settled the just-finished assistant message
-            // (finish() on its StreamingMarkdown) but deferred the freeze
-            // to AVOID the post-settle redraw: finish() changes the md
-            // widget's build shape + prefix generation, so freezing in
-            // the same tick would diff a post-finish frozen tree against
-            // the last pre-finish live frame still in maya's prev_cells
-            // (cache miss = re-emit the whole turn from the top). By now
-            // one view() has painted the settled (post-finish) message
-            // via the live tail, so prev_cells holds the post-finish
-            // hash. Freezing the byte-and-hash-identical tree HERE is a
-            // cache hit (no re-emit). Trim in the same step, exactly as
-            // the old inline path did.
-            // ── Deferred settle-freeze (post-stream redraw fix) ──────
-            // finalize_turn armed the reveal finalize ramp on the
-            // just-finished assistant message(s) and set
-            // pending_settle_freeze WITHOUT calling finish(). We hold the
-            // freeze until the reveal has FULLY drained
-            // (live_tail_reveal_settled): the typewriter cursor reached
-            // the live edge, the finalize ramp completed, the widget
-            // flipped live_ off ON ITS OWN, and the live tail has painted
-            // the settled (post-finish-shape) tree into maya's prev_cells
-            // at least once. Only THEN do we run settle_message_md (a
-            // now-shape-neutral finish() that just stamps the cache
-            // fast-path) and freeze. Because the snapshot equals the
-            // on-screen frame byte-for-byte, the live-tail→frozen handoff
-            // is a maya component-cache HIT — zero re-emit, zero
-            // scrollback duplication. This is the agent_session guarantee
-            // (live height == settled height at the freeze instant) with
-            // the reveal animation fully intact.
-            //
-            // While the reveal is still animating we keep the flag set
-            // and arm an animation frame so the typewriter keeps gliding
-            // and the gate is re-checked next frame — it never looks
-            // stuck and the freeze never fires early.
-            maya::Cmd<Msg> settle_freeze_trim = maya::Cmd<Msg>::none();
-            if (m.ui.pending_settle_freeze && m.s.is_idle()) {
-                if (live_tail_reveal_settled(m)) {
-                    m.ui.pending_settle_freeze = false;
-                    for (std::size_t i = m.ui.frozen_through;
-                         i < m.d.current.messages.size(); ++i) {
-                        auto& mm = m.d.current.messages[i];
-                        if (mm.role != Role::Assistant || mm.text.empty())
-                            continue;
-                        settle_message_md(m, mm);
-                    }
-                    freeze_through(m, m.d.current.messages.size());
-                    // Drop oldest frozen entries past the budget. The
-                    // live-tail collapse and the front-trim are TWO
-                    // distinct shrinks with OPPOSITE wire requirements,
-                    // so they must not be lumped under one none():
-                    //
-                    //  • The collapse (live tail folds into the frozen
-                    //    prefix) is a BOTTOM-shrink with an unchanged
-                    //    overflowed prefix. maya's scrollback_prefix_
-                    //    matches branch falls through to the append-only
-                    //    per-row diff — corruption-free, NO host commit.
-                    //
-                    //  • The trim drops entries from the TOP of the
-                    //    frozen prefix — a top-DELETION maya cannot
-                    //    reconcile at render time (the shifted-up canvas
-                    //    fails the prefix memcmp and maya commits the NEW
-                    //    prefix over PHYSICAL old rows, stranding a
-                    //    duplicate). It MUST host-commit exactly the
-                    //    dropped rows. trim_frozen_if_oversized returns
-                    //    that commit_scrollback(N) when (and only when)
-                    //    it actually trimmed; none() when it didn't.
-                    //
-                    // Forward the trim's Cmd verbatim: none() on the
-                    // common collapse-only Tick, commit_scrollback(N) on
-                    // the rarer Tick that also trims the front.
-                    settle_freeze_trim = trim_frozen_if_oversized(m);
-
-                    // Keep the clock alive for a few frames so maya's
-                    // shrink reconciliation (its own diff-path collapse)
-                    // completes at fps=0, mirroring agent_session's
-                    // always-on clock.
-                    m.ui.settle_cooldown_ticks = 6;
-                    ::maya::request_animation_frame();
-                } else {
-                    // Reveal still draining — keep the frame armed so the
-                    // typewriter animates and we re-test the gate next
-                    // tick. Never freeze a still-animating turn.
-                    ::maya::request_animation_frame();
-                }
-            }
+            // ── Strata owns the freeze. ──────────────────────────────
+            // There is no host-side settle-freeze on Tick anymore. The
+            // reveal is settled synchronously in finalize_turn, and maya's
+            // Strata renderer promotes a settled run to a sealed scrollback
+            // node on its own (run_is_sealable + the terminal bit in
+            // strata_nodes). No pending_settle_freeze flag, no
+            // settle_cooldown_ticks window, no freeze_through call, no
+            // host scrollback trim — the whole post-stream redraw dance is
+            // gone. The tick subscription no longer needs to stay armed
+            // past MessageStop to drive a freeze.
 
             // ── pending_stream → streaming_text ──────────────────────
             // Move buffered wire bytes into streaming_text every tick.
@@ -271,9 +193,14 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // prose reply re-lays-out every frame") is in fact handled
             // by maya's component cache on a STABLE live-tail hash; the
             // mid-stream carves were the ones invalidating that cache.
-            // agent_session never carves mid-stream and shows zero
-            // corruption / zero slowdown on long runs.
-            maya::Cmd<Msg> midrun_trim = maya::Cmd<Msg>::none();
+            // No mid-stream freeze or trim on Tick. The single freeze
+            // site is finalize_turn's reveal settle; maya's Strata
+            // renderer owns the actual scrollback seal. Carving during
+            // streaming was the documented source of "redraws from top +
+            // scrollback corruption" (a mid-stream freeze stamped a Turn
+            // whose hash maya's cache hadn't seen, forcing a re-emit over
+            // committed scrollback). agent_session never carves mid-stream
+            // and shows zero corruption / zero slowdown on long runs.
 
             // ── Stream-stall watchdog ──────────────────────────────────
             // 120 s of total silence is overwhelmingly likely to be a
@@ -407,13 +334,6 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
-            if (!midrun_trim.is_none() && !settle_freeze_trim.is_none())
-                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                    std::move(midrun_trim), std::move(settle_freeze_trim)})};
-            if (!midrun_trim.is_none())
-                return {std::move(m), std::move(midrun_trim)};
-            if (!settle_freeze_trim.is_none())
-                return {std::move(m), std::move(settle_freeze_trim)};
             return done(std::move(m));
         },
         [&](Quit) -> Step {

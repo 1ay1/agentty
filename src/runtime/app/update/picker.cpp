@@ -398,7 +398,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             m.d.current = Thread{};
             m.d.current.id = deps().new_thread_id();
             m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
-            clear_frozen(m);
+            m.ui.live_run_start = 0;
             m.ui.thread_list = pick::Closed{};
             m.ui.command_palette = palette::Closed{};
             // Wipe the whole composer draft — a pasted-but-unsent image (or
@@ -477,8 +477,11 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // an empty image block and 400s the next submit.
             reset_composer_draft(m.ui.composer);
             auto t1 = std::chrono::steady_clock::now();
-            rehydrate_frozen(m);
-            stamp("rehydrate_frozen", t1);
+            // Reset the live-tail boundary to the whole transcript;
+            // strata_nodes recomputes the real boundary on the next
+            // frame from the loaded messages.
+            m.ui.live_run_start = 0;
+            stamp("reset_live_start", t1);
             auto t2 = std::chrono::steady_clock::now();
             release_to_kernel();
             stamp("release_to_kernel", t2);
@@ -486,11 +489,8 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 const auto _ts = maya::platform::query_terminal_size(
                     maya::platform::stdout_handle());
                 std::fprintf(prof_out,
-                    "[load-async] msgs=%zu frozen=%zu "
-                    "frozen_through=%zu term_h=%d\n",
+                    "[load-async] msgs=%zu term_h=%d\n",
                     m.d.current.messages.size(),
-                    m.ui.frozen.size(),
-                    m.ui.frozen_through,
                     _ts.height.value);
                 std::fflush(prof_out);
                 std::fclose(prof_out);

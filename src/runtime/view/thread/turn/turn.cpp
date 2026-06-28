@@ -645,14 +645,15 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 // because messages are append-only, and unique per merged group
 // because each group is anchored at the FIRST contributing Message.
 // Build the actions panel fresh every frame (agent_session pattern).
-// Settled assistant runs get snapshotted into m.ui.frozen by
-// freeze_range — they never re-enter this function. Live panels are
-// bounded by the in-flight turn's tool count, so per-frame cost is
+// Settled assistant runs are built lazily into sealed Strata nodes by
+// build_settled_run — maya calls that only on a cache miss for an
+// on-screen settled run, and never for a scrolled-off one. Live panels
+// are bounded by the in-flight turn's tool count, so per-frame cost is
 // O(active_tools). One AgentTimeline carrier per panel, born here,
 // dropped when cfg.body goes out of scope: no shared_ptr identity
 // flip races, no spinner-bucket cache, no freeze fast path. The old
-// freeze cache was dead weight — the Element it built is snapshotted
-// straight into m.ui.frozen the same frame the slot is populated.
+// freeze cache was dead weight — the Element it built is exactly what
+// build_settled_run reproduces on demand the frame a run seals.
 //
 // Permission card is NO LONGER appended here. The host floats it as
 // its own live_tail entry below the active assistant Turn (mirrors
@@ -692,10 +693,9 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                std::string_view meta_override,
                                std::span<const ToolUse> tool_calls_override) {
     // agent_session pattern: build a fresh Config every call. Settled
-    // turns get their Element snapshotted into m.ui.frozen at freeze
-    // time and rendered from there; the live tail rebuilds each frame
-    // but is bounded to the in-flight turn. No Config / Element
-    // memoization here.
+    // turns are built lazily into sealed Strata nodes (build_settled_run)
+    // and maya keeps the cells; the live tail rebuilds each frame but is
+    // bounded to the in-flight turn. No Config / Element memoization here.
     (void)msg_idx;
 
     // Tool-batch merge plumbing: when the caller passes an override

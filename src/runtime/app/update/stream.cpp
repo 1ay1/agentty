@@ -103,48 +103,10 @@ void settle_message_md(Model& m, const Message& msg) {
     cache.revealed_size     = msg.text.size();
 }
 
-// True iff every Assistant message in the live tail has fully drained its
-// reveal animation. See internal.hpp for the full rationale. The check is
-// purely a READ of each message's StreamingMarkdown widget state; it never
-// mutates. A message whose widget doesn't exist yet (never rendered) or
-// whose text is empty is treated as settled (nothing to animate). The
-// gate is what guarantees the freeze handoff is byte-identical to the
-// on-screen frame: we only freeze AFTER the widget itself flipped live_
-// off, so the last LIVE frame maya cached already IS the settled tree.
-bool live_tail_reveal_settled(const Model& m) {
-    for (std::size_t i = m.ui.frozen_through;
-         i < m.d.current.messages.size(); ++i) {
-        const auto& mm = m.d.current.messages[i];
-        if (mm.role != Role::Assistant) continue;
-        // Still has uncommitted wire bytes — not done arriving, let it ride.
-        if (!mm.streaming_text.empty() || !mm.pending_stream.empty())
-            return false;
-        if (mm.text.empty()) continue;   // no prose body to reveal
-        const auto& cache = m.ui.view_cache.message_md(m.d.current.id, mm.id);
-        if (!cache.streaming) continue;  // never rendered — nothing animating
-        // The widget still live_, the reveal gliding to the edge, a finalize
-        // ramp running, or a background parse pending — any of these means
-        // the live frame in maya's prev_cells is NOT yet the settled shape.
-        // This predicate set MUST mirror build_live_tail's `reveal_settled`
-        // exactly: that one decides whether the live tail STAMPS the
-        // cacheable assistant_run_hash_id, this one decides whether the
-        // freeze fires. If they disagree the freeze can stamp a key the
-        // live tail never painted (cache MISS) → freeze_range rebuilds the
-        // run under FrozenBuildScope (show_all) at a possibly different
-        // height → the seam shifts and strands a duplicate. is_live() is a
-        // DISTINCT term from the other three: a widget can be live_ with the
-        // reveal cursor already at the edge (reveal_in_progress false, no
-        // ramp, no parse) during a mid-stream pause, so dropping it would
-        // re-open the asymmetry. finish() drops all four together, so once
-        // finalize_turn has settled the tail this returns true immediately.
-        if (cache.streaming->is_live()
-         || cache.streaming->reveal_in_progress()
-         || cache.streaming->is_finalizing()
-         || cache.streaming->is_parsing())
-            return false;
-    }
-    return true;
-}
+// (live_tail_reveal_settled was removed: the reveal-drain check it
+// performed now lives in run_is_sealable (src/runtime/view/view.cpp),
+// computed per-frame as part of a run node's `terminal` bit rather than
+// gating a host-scheduled freeze event.)
 
 namespace {
 
@@ -1076,41 +1038,23 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{std::move(kp), std::move(sub_cmd)});
     }
 
-    // Settle freeze. agent_session pushes the assistant Turn into
-    // m.frozen at MessageStop; we do the same — once the stream is
-    // truly idle (no pending tools, no queued message), commit every
-    // message that's settled into m.ui.frozen and let the live tail
-    // shrink to empty. From here the next view() reads the turn out
-    // of frozen via list_ref (zero-copy) and the live tail draws
-    // nothing until the next submit pushes a fresh placeholder.
+    // Settle the reveal at turn end. agent_session calls m.md.finish() at
+    // MessageStop to resolve the reveal overlay and lock the rendered
+    // height; we do the same here so the LIVE Strata node renders the
+    // SETTLED bytes immediately. Once settled, run_is_sealable (in
+    // view.cpp) flips true for this run, so on the next frame strata_nodes
+    // promotes it to a terminal node and maya seals it into native
+    // scrollback the instant it scrolls past the fold — no host freeze
+    // event, no pending_settle_freeze, no cooldown ticks. The whole
+    // settle-freeze timing dance is gone: the `terminal` bit is a pure
+    // per-frame predicate maya reads, not a state machine the host runs.
     if (m.s.is_idle()) {
-        // Settle every Assistant message in the live tail NOW — finish()
-        // resolves the reveal overlay and locks the rendered height,
-        // exactly like agent_session at MessageStop (m.md.finish()). We
-        // then set pending_settle_freeze so meta.cpp's Tick performs the
-        // actual freeze on the very next frame — by which point one view()
-        // has already painted the settled (post-finish) tree into maya's
-        // prev_cells, so the live-tail→frozen handoff is a byte-identical
-        // cache HIT (zero re-emit, the cheapest possible transition over a
-        // slow SSH wire).
-        //
-        // What changed: the old code armed a 200 ms request_finalize()
-        // GLIDE here and left the widget live_, deferring finish() to the
-        // Tick once the glide drained. That animation needs dense frames to
-        // hold the live height steady; at fps=0 over SSH the sparse ticks
-        // let the height drift mid-glide, so the freeze diffed a moved tree
-        // against a stale prev_cells and stranded a duplicate turn in
-        // scrollback. Finishing immediately removes the animation window.
-        for (std::size_t i = m.ui.frozen_through;
+        for (std::size_t i = m.ui.live_run_start;
              i < m.d.current.messages.size(); ++i) {
             auto& mm = m.d.current.messages[i];
             if (mm.role != Role::Assistant || mm.text.empty()) continue;
             settle_message_md(m, mm);
         }
-        // Freeze on the next Tick (meta.cpp), gated on
-        // live_tail_reveal_settled() — already true now that we finished,
-        // so the freeze fires immediately on the next frame.
-        m.ui.pending_settle_freeze = true;
     }
 
     // Post-turn idle auto-compaction.

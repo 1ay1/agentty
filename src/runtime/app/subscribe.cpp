@@ -598,20 +598,15 @@ Sub<Msg> subscribe(const Model& m) {
     // SPEED is unchanged — the pacer is bytes/second, not bytes/tick, so
     // prose fills at the same wall-clock rate, just in fewer, larger
     // frames.
-    // The settle-freeze (meta.cpp Tick, the agent_session MessageStop
-    // analog) fires on a Tick while m.s.is_idle() and pending_settle_
-    // freeze is set. Gating the tick ONLY on active()/live-bytes drops
-    // the clock the instant the reveal drains its last bytes into the
-    // settled body — but the widget hasn't flipped live_ off yet, so
-    // pending_settle_freeze is still set with no tick left to fire it.
-    // The deferred freeze then strands until the next user keystroke and
-    // diffs against a stale prev_cells = cache-miss re-emit = the
-    // duplicated turn the user sees in scrollback. Keep ticking until the
-    // freeze has actually fired (flag cleared) so the live-tail→frozen
-    // handoff always lands on a fresh frame, exactly like agent_session's
-    // always-on 30fps clock reconciles the collapse the same frame.
-    if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
-        || m.ui.settle_cooldown_ticks > 0) {
+    // The reveal animation clock + the pending_stream→streaming_text
+    // drip both run on this Tick, so keep ticking while the stream is
+    // active OR the tail still carries undrained live bytes. Under the
+    // Strata depositional model there is no host freeze flag / settle
+    // cooldown to keep ticking for: maya's renderer seals scrolled-off
+    // settled runs into native scrollback itself, reconciling the
+    // live-tail shrink inside the render path. So the tick is armed
+    // purely by the legitimate stream-liveness conditions below.
+    if (m.s.active() || tail_has_live_bytes(m)) {
         auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
     }

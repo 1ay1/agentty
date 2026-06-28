@@ -7,17 +7,23 @@
 #include <maya/core/render_context.hpp>
 #include <maya/element/builder.hpp>
 #include <maya/platform/io.hpp>
+#include <maya/render/cache_id.hpp>
 #include <maya/widget/app_layout.hpp>
+#include <maya/widget/conversation.hpp>
 #include <maya/widget/overlay.hpp>
+#include <maya/widget/turn.hpp>
 
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
 #include "agentty/runtime/view/diff_review.hpp"
 #include "agentty/runtime/view/login.hpp"
+#include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/pickers.hpp"
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
+#include "agentty/runtime/view/thread/turn/turn.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
 namespace agentty::ui {
 
@@ -108,9 +114,24 @@ maya::Element view_impl(const Model& m, bool include_frozen) {
         // Strata LIVE node (include_frozen=false): HUG mode. The settled
         // turns are sealed nodes ABOVE this one, so the live node must
         // hug its own content — no viewport-fill floor, no thread
-        // grow-spacer — or a blank void strands between the settled
-        // turns and the composer.
-        alc.fill_viewport = include_frozen;
+        // grow-spacer, and flush-left so live turns byte-align with the
+        // bare sealed nodes — or a blank void / column shift appears at
+        // the freeze seam.
+        //
+        // EXCEPTION: when a modal overlay (picker / palette / login) is
+        // open, force FILL mode even on the strata path. A picker is a
+        // full-screen modal floated over the base via maya::Overlay,
+        // which z-stacks the float over the base and SIZES TO THE BASE.
+        // A hugged base is only a few rows tall, so a 15-row picker would
+        // overflow/clip and shove the composer around ("pickers mess up
+        // the layout"). Flooring the base to the viewport gives the
+        // overlay a full-height canvas to anchor against — the picker
+        // floats correctly and the sealed turns scroll above it, exactly
+        // as on the classic path. There is no live streaming turn whose
+        // geometry must stay seam-stable while a modal owns the screen,
+        // so the temporary fill is invisible to the user.
+        const bool overlay_present = overlay.has_value();
+        alc.fill_viewport = include_frozen || overlay_present;
     }
 
     // ── Phase 2: layout build under a HEIGHT-CAPPED context ──
@@ -147,40 +168,247 @@ maya::Element view(const Model& m) {
     return view_impl(m, /*include_frozen=*/true);
 }
 
-// ── Strata builders ──────────────────────────────────────────────────
+// Forward declaration — defined below the anonymous helpers it needs.
+maya::Element build_settled_run(const Model& m, std::size_t run_first);
+
+// ── Settled-run builder (shared by Strata's lazy build path) ─────────
 //
-// strata_nodes: [ frozen[0], …, frozen[n-1], LIVE ]. Each settled
-// m.ui.frozen Element is one terminal node keyed by its stable index
-// (immutable once pushed — the host appends, never reorders); the live
-// tail + chrome + overlay is one non-terminal LIVE node keyed
-// kStrataLiveKey whose hash bumps every frame so maya rebuilds it.
+// Builds ONE settled speaker-run [run_first, run_end) as a Turn Element,
+// preceded by the inter-turn gap (and a compaction divider when the run
+// opens on a compaction boundary) so a sealed node is byte-identical to
+// how the same run rendered in the live tail the frame before it sealed.
+// This is the lazy replacement for the old freeze_range push loop: maya
+// calls it only on a cache miss for an on-screen settled node, never for
+// a scrolled-off one, so there is no eager snapshot and no height math.
+//
+// The leading gap is omitted for the very first run in the transcript
+// (run_first == 0) so the top of the thread has no orphan gap — matching
+// build_live_tail's first_overall guard.
+namespace {
+
+maya::Element gap_row_v() {
+    using namespace maya::dsl;
+    return v(blank(),
+             maya::Conversation::divider(),
+             blank()).build();
+}
+
+maya::Element compaction_divider_row_v() {
+    maya::Turn::Config cfg;
+    cfg.glyph      = "\xe2\x89\xa1";   // ≡
+    cfg.label      = "Conversation compacted";
+    cfg.rail_color = muted;
+    return maya::Turn{std::move(cfg)}.build();
+}
+
+bool run_opens_on_compaction(const Model& m, std::size_t idx) {
+    const std::size_t total = m.d.current.messages.size();
+    for (const auto& rec : m.d.current.compactions)
+        if (rec.up_to_index == idx && rec.up_to_index > 0
+            && rec.up_to_index <= total) return true;
+    return false;
+}
+
+// Count of assistant runs strictly before `run_first` — the display turn
+// number a settled run carries. Computed on demand (cheap: a few integer
+// hops over run boundaries) instead of tracked in a persisted counter.
+int assistant_runs_before(const Model& m, std::size_t run_first) {
+    const auto& msgs = m.d.current.messages;
+    int n = 0;
+    for (std::size_t k = 0; k < run_first; ) {
+        const std::size_t re = ui::turn_run_end(msgs, k);
+        if (msgs[k].role == Role::Assistant) ++n;
+        k = re;
+    }
+    return n;
+}
+
+} // namespace
+
+maya::Element build_settled_run(const Model& m, std::size_t run_first) {
+    using namespace maya::dsl;
+    const auto& msgs = m.d.current.messages;
+    const std::size_t total = msgs.size();
+    if (run_first >= total) return maya::detail::nothing();
+
+    const std::size_t run_end = ui::turn_run_end(msgs, run_first);
+
+    // Settled runs render their tool bodies with full content (show_all),
+    // unlike the live tail which elides to a window for per-frame cheapness.
+    ui::FrozenBuildScope frozen_scope;
+
+    std::vector<maya::Element> rows;
+    rows.reserve(3);
+
+    if (run_first > 0 && run_opens_on_compaction(m, run_first))
+        rows.push_back(compaction_divider_row_v());
+    if (run_first > 0)
+        rows.push_back(gap_row_v());
+
+    const Message& head = msgs[run_first];
+    const int runs_before = assistant_runs_before(m, run_first);
+    if (head.role == Role::Assistant) {
+        const int turn_num = runs_before + 1;
+        auto cfg = ui::turn_config_for_assistant_run(
+            run_first, run_end, turn_num, m);
+        cfg.hash_id = ui::assistant_run_hash_id(m, run_first, run_end);
+        rows.push_back(maya::Turn{std::move(cfg)}.build());
+    } else {
+        // User / compaction-summary single-message run. Numbered with the
+        // count of assistant runs settled so far (the preceding turn's
+        // number), matching build_live_tail's turn_num - 1 policy.
+        auto cfg = ui::turn_config(head, run_first, runs_before, m,
+                                   /*continuation=*/false);
+        cfg.hash_id = maya::CacheIdBuilder{}
+            .add(std::string_view{"agentty.turn"})
+            .add(std::string_view{head.id.value})
+            .add(head.compute_render_key())
+            .build();
+        rows.push_back(maya::Turn{std::move(cfg)}.build());
+    }
+
+    if (rows.size() == 1) return std::move(rows.front());
+    return v(rows).build();
+}
+
+
+// ── Strata builders (lazy depositional node model) ───────────────────
+//
+// The host keeps NO snapshot vector, NO frozen-height accounting, and NO
+// settle-freeze timing. It enumerates the transcript as a flat list of
+// LOGICAL TURN nodes computed fresh from m.d.current.messages each frame:
+//
+//   [ run_0, run_1, …, run_{k-1}, LIVE ]
+//
+// Each settled speaker-run (the same boundary build_live_tail / the old
+// freeze_range used, via ui::turn_run_end) is ONE node keyed by its
+// run-start message index. A run node is `terminal` — eligible for maya
+// to seal into native scrollback — iff it is fully SETTLED *and* fully
+// DRAINED of reveal animation (see run_is_sealable). Until a run drains,
+// it stays non-terminal with a per-frame-bumping hash so Strata rebuilds
+// it and the typewriter reveal animates; the instant it drains it gains a
+// STABLE content hash (turn_run_key) and Strata caches the clean bytes.
+// That single `terminal` bit subsumes the entire old
+// pending_settle_freeze / settle_cooldown / reveal_settled ritual: the
+// freeze instant is no longer a stateful cross-frame event the host
+// schedules, it is a pure per-node predicate maya reads every frame.
+//
+// The trailing LIVE node is the in-flight run's live tail PLUS the bottom
+// chrome (composer, status bar, changes strip) and any modal overlay —
+// they must stay glued to the live turn so maya never seals the composer
+// away. Its hash bumps every frame (live content + spinner + caret), so
+// Strata always rebuilds it; everything above it that has drained is a
+// cache hit. Per-frame cost is therefore O(live turn + chrome), flat in
+// session length, with zero host bookkeeping.
+
+// A speaker-run [run_first, run_end) is sealable when every message in it
+// is settled (no streaming bytes, every tool terminal) AND every
+// assistant message's reveal animation has fully drained (the widget
+// flipped live_ off on its own, the finalize ramp + scramble settle
+// completed, no async parse in flight). This is the EXACT predicate the
+// old finalize→pending_settle_freeze→reveal_settled chain gated on,
+// collapsed to a stateless per-run check. A run that fails it stays a
+// non-terminal (rebuilt, animated) node instead of being sealed with
+// stale scramble cells.
+bool run_is_sealable(const Model& m, std::size_t run_first,
+                     std::size_t run_end) {
+    const auto& msgs = m.d.current.messages;
+    for (std::size_t j = run_first; j < run_end && j < msgs.size(); ++j) {
+        const Message& mm = msgs[j];
+        if (!mm.streaming_text.empty() || !mm.pending_stream.empty())
+            return false;
+        for (const auto& tc : mm.tool_calls)
+            if (!tc.is_terminal()) return false;
+        if (mm.role == Role::Assistant && !mm.text.empty()) {
+            const auto& mc = m.ui.view_cache.message_md(
+                m.d.current.id, mm.id);
+            if (mc.streaming
+                && (mc.streaming->is_live()
+                 || mc.streaming->is_finalizing()
+                 || mc.streaming->reveal_in_progress()
+                 || mc.streaming->is_parsing()))
+                return false;
+        }
+    }
+    return true;
+}
+
+// Stable content hash for a settled run node — folds the same message
+// render keys assistant_run_hash_id mixes, so a sealed run's hash is
+// invariant for the life of the entry (cache hit) yet changes if any
+// underlying message content does (cache miss → rebuild). Used only for
+// terminal nodes; the live run uses a bumping generation instead.
+std::uint64_t turn_run_key(const Model& m, std::size_t run_first,
+                           std::size_t run_end) {
+    std::uint64_t k = 1469598103934665603ULL;
+    auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
+    const auto& msgs = m.d.current.messages;
+    for (std::size_t j = run_first; j < run_end && j < msgs.size(); ++j) {
+        for (char c : msgs[j].id.value)
+            mix(static_cast<std::uint64_t>(static_cast<unsigned char>(c)));
+        mix(msgs[j].compute_render_key());
+    }
+    // Distinguish a run by its boundary so two structurally-identical
+    // adjacent runs (rare, but possible with empty turns) keep distinct
+    // keys and identities.
+    mix(run_first * 1000003ULL + run_end);
+    return k;
+}
+
 std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
-    // Monotonic per-process generation — the LIVE node's content changes
-    // constantly (composer, streaming tail, spinner, overlay), so bump
-    // every call to force a rebuild. The run loop only calls this when
-    // something changed (visual_hash gate), so it never spins idle.
+    // Monotonic per-process generation for the LIVE node — its content
+    // (composer, streaming tail, spinner, overlay) changes constantly, so
+    // bump every call to force a rebuild. The run loop only calls this
+    // behind the visual_hash gate, so it never spins idle.
     static std::uint64_t live_gen = 0;
     ++live_gen;
 
+    const auto& msgs  = m.d.current.messages;
+    const std::size_t total = msgs.size();
+
     std::vector<maya::strata::NodeRef> ns;
-    ns.reserve(m.ui.frozen.size() + 1);
-    for (std::size_t i = 0; i < m.ui.frozen.size(); ++i)
+    ns.reserve(total + 1);
+
+    // Walk whole speaker-runs front to back. Every run BEFORE the live
+    // boundary becomes its own node; the live boundary is the first run
+    // that is either the last run in the transcript or not yet sealable —
+    // from there on (the in-flight turn) everything folds into the single
+    // LIVE chrome node so the composer stays glued to it.
+    std::size_t i = 0;
+    while (i < total) {
+        const std::size_t run_end = ui::turn_run_end(msgs, i);
+        const bool is_last     = (run_end >= total);
+        const bool sealable    = !is_last && run_is_sealable(m, i, run_end);
+        if (!sealable) break;   // live boundary — fold the rest into LIVE
         ns.push_back({static_cast<std::uint64_t>(i),
-                      static_cast<std::uint64_t>(i),   // immutable once sealed
+                      turn_run_key(m, i, run_end),
                       /*terminal=*/true});
+        i = run_end;
+    }
+
+    // LIVE node: the live tail (runs [i, total)) + chrome + overlay,
+    // keyed by the boundary index so its identity is stable across frames
+    // (only its hash bumps). kStrataLiveKey distinguishes the chrome node
+    // unambiguously from any run-start index in strata_build.
     ns.push_back({kStrataLiveKey, live_gen, /*terminal=*/false});
+    // Stash the live boundary so strata_build / view_impl render exactly
+    // the live runs (and conversation_config knows where the live tail
+    // starts) without a persisted frozen_through cursor.
+    m.ui.live_run_start = i;
     return ns;
 }
 
-// strata_build: LIVE → the live tail + chrome + overlay (the monolithic
-// view minus the frozen prefix); a frozen index → the cached settled
-// Element. Never invoked for a sealed node, so the index is always live.
+// strata_build: LIVE key → the live tail + chrome + overlay (the
+// monolithic view minus the settled runs); a run-start index → that
+// settled run built lazily on demand. Strata invokes this only on a miss,
+// and never for a sealed (scrolled-off) node, so the build cost is
+// bounded by what is currently on screen.
 maya::Element strata_build(const Model& m, std::uint64_t key) {
     if (key == kStrataLiveKey)
         return view_impl(m, /*include_frozen=*/false);
-    if (key < m.ui.frozen.size())
-        return m.ui.frozen[static_cast<std::size_t>(key)];
-    return maya::detail::nothing();   // defensive — maya only builds live keys
+    if (key < m.d.current.messages.size())
+        return build_settled_run(m, static_cast<std::size_t>(key));
+    return maya::detail::nothing();   // defensive — out-of-range key
 }
 
 } // namespace agentty::ui

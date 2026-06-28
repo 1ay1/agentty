@@ -96,18 +96,17 @@ struct AgenttyApp {
 
         // ── Domain.
         //
-        // The frozen prefix — messages[0 .. ui.frozen_through) — is
-        // an immutable archaeology layer (see m.ui.frozen). Its
-        // contribution to the visual is fully captured by the
-        // structural pair (frozen.size(), frozen_turn) which advance
-        // only at freeze instants. Per-message render_keys for the
-        // frozen range cannot change — the with_live_tool gate
-        // refuses to mutate them — so iterating them every frame
-        // would burn CPU for zero signal. Hash only the live tail.
+        // Hash only the live tail [live_run_start .. end). Messages
+        // before live_run_start are sealed runs owned by maya's
+        // scrollback; their render_keys cannot change (the
+        // with_live_tool gate refuses to mutate them), so iterating
+        // them every frame would burn CPU for zero signal.
+        //
+        // NOTE: live_run_start is recomputed during strata_nodes (in
+        // the render path); here it may be stale by one frame, but
+        // that is fine for a skip gate that errs toward rendering.
         mix(m.d.current.messages.size());
-        mix(static_cast<std::uint64_t>(m.ui.frozen.size()));
-        mix(static_cast<std::uint64_t>(m.ui.frozen_turn));
-        for (std::size_t i = m.ui.frozen_through;
+        for (std::size_t i = m.ui.live_run_start;
              i < m.d.current.messages.size(); ++i) {
             mix(m.d.current.messages[i].compute_render_key());
         }
@@ -283,39 +282,22 @@ struct AgenttyApp {
                 || !m.d.current.messages.back().pending_stream.empty());
         const std::int64_t kRevealBucketMs = 16;   // == kAnimationFrameInterval
 
-        // POST-STREAM SETTLE bucket. After StreamFinished the phase goes
-        // Idle and streaming_text drains into `text`, so BOTH m.s.active()
-        // and `revealing_text` go false. finalize_turn settles every tail
-        // message IMMEDIATELY (settle_message_md → finish(), the
-        // agent_session MessageStop discipline — NO ~200 ms glide) and sets
-        // pending_settle_freeze so meta.cpp's next Tick performs the freeze
-        // once live_tail_reveal_settled(). That deferred-freeze Tick — and
-        // maya's subsequent live-tail→frozen shrink reconciliation — advance
-        // ONLY inside frames that actually render, and the run loop's
-        // visual_hash gate skips any frame whose hash didn't move
-        // (maya/app/app.hpp). Without a fast time term here the hash falls
-        // to the caret-blink PARITY bucket (one flip / 265 ms): the freeze
-        // Tick and the post-freeze reconciliation frames get gated away,
-        // the collapse never finishes, and a duplicate turn is stranded in
-        // scrollback. pending_settle_freeze marks the one Tick until the
-        // freeze fires (finalize_turn sets it; meta.cpp's Tick clears it),
-        // so key the fast bucket on it to keep ticking the 16 ms clock
-        // until the freeze handoff lands.
-        // The reveal-drain time bucket must keep ticking through BOTH the
-        // pre-freeze settle (pending_settle_freeze) AND the post-freeze
-        // settle cooldown (settle_cooldown_ticks). The cooldown frames are
-        // where maya reconciles the live-tail→frozen collapse (its
-        // detect→commit→demote→repaint shrink chain). request_animation_
-        // frame() alone CANNOT drive them: the run loop's visual_hash gate
-        // skips any frame whose hash didn't move (maya/app/app.hpp), so
-        // without advancing the hash here those frames are gated away and
-        // the collapse never finishes reconciling — leaving a stranded
-        // duplicate turn in scrollback. Advancing the hash while the
-        // cooldown counts down makes each armed Tick actually render.
-        const bool draining_reveal =
-            m.ui.pending_settle_freeze || m.ui.settle_cooldown_ticks > 0;
+        // POST-STREAM SETTLE. After StreamFinished the phase goes Idle
+        // and streaming_text drains into `text`, so BOTH m.s.active()
+        // and `revealing_text` go false. finalize_turn settles every
+        // tail message IMMEDIATELY (settle_message_md → finish(), the
+        // agent_session MessageStop discipline — NO ~200 ms glide).
+        //
+        // Under the Strata depositional model there is no host
+        // freeze-flag handoff to keep ticking for: maya's renderer
+        // enumerates the live tail as lazy nodes and seals scrolled-off
+        // settled runs into native scrollback itself, reconciling the
+        // shrink inside the render path. So no extra time term is needed
+        // here once the stream goes idle; the animation buckets below
+        // (revealing_text / fine_anim_live / caret_blinking) cover every
+        // remaining on-screen motion.
 
-        if (revealing_text || draining_reveal) {
+        if (revealing_text) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
         } else if (fine_anim_live) {
             mix(static_cast<std::uint64_t>(now_ms / kFineAnimMs));

@@ -175,119 +175,25 @@ struct Model {
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
         int                 thread_scroll = 0;
 
-        // ── Frozen scrollback prefix (agent_session pattern) ───────
+        // ── Strata depositional rendering (no host snapshot) ───────
         //
-        // Append-only vector of fully-built Element rows that
-        // represent the settled portion of the transcript. The view
-        // passes a borrowed pointer to maya's Conversation widget
-        // via `Config::frozen`, which renders it through `list_ref`
-        // — zero-copy across frames regardless of how large this
-        // grows. Each entry is one row in the conversation:
-        //   • a gap (one-row blank) before each fresh-speaker turn,
-        //   • a built Turn Element for a settled message (or run),
-        //   • a compaction divider for a CompactionRecord boundary.
+        // The host keeps NO frozen Element vector, NO frozen_through
+        // cursor, NO frozen_turn counter, and NO settle-freeze timing.
+        // strata_nodes() enumerates the transcript as logical-turn nodes
+        // straight from m.d.current.messages each frame and hands them to
+        // maya's Strata renderer, which measures, seals, bounds, and
+        // caches every node itself (see src/runtime/view/view.cpp).
         //
-        // The producer is `freeze_through_prior_turn()` (in
-        // src/runtime/app/update/internal.hpp), called from
-        // submit_message at the start of every new user turn. It
-        // walks m.d.current.messages[frozen_through .. end), applies
-        // the same tool-batch-merge logic as conversation_config used
-        // to do at view time, and pushes one Turn Element per visual
-        // unit — dividers and all.
-        //
-        // Cleared (and frozen_through reset) on thread switch /
-        // NewThread / OpenThread; rebuilt by `rehydrate_frozen()`
-        // when a saved thread is loaded.
-        std::vector<maya::Element> frozen;
-
-        // Parallel to `frozen`: estimated rendered-row count per entry,
-        // recorded at push time. The inline canvas is sized to the SUM
-        // of these rows, and maya re-derives a full O(rows x width)
-        // canvas witness (plus clear + render_tree) EVERY frame, so
-        // per-frame cost scales with total frozen rows, not entry
-        // count. One full write/edit body can be hundreds of rows in
-        // ONE entry, so an entry-count cap can't bound it.
-        // trim_frozen_if_oversized() trims by ROWS via this. The
-        // estimate MUST count a tool card's rendered body, which comes
-        // from tc.args (write content, edit hunks, read/grep results)
-        // — NOT tc.output(), which is only the one-line footer. Always
-        // the same length as `frozen`.
-        std::vector<int>           frozen_rows;
-
-        // Parallel to `frozen`: true iff the entry is an inter-turn
-        // SEPARATOR (gap row or compaction divider) rather than a real
-        // Turn. A separator only makes visual sense BETWEEN two turns;
-        // if a front-trim or a mid-run rehydrate cut leaves one at
-        // index 0 it renders as a blank gap (or an orphan rule) at the
-        // very top of the canvas — the "saved threads open with a hole"
-        // bug. Both trims and rehydrate strip leading separators so the
-        // frozen prefix always opens on a turn header. Always the same
-        // length as `frozen`.
-        std::vector<bool>          frozen_is_separator;
-
-        // Running sum of frozen_rows, maintained on push/trim so the
-        // oversize check is O(1).
-        std::size_t                frozen_row_total = 0;
-
-        // Full terminal width (cols) every frozen_rows[] count is
-        // currently measured at. push_frozen stamps it; the trims call
-        // ensure_frozen_width() to re-measure the whole prefix to the
-        // live width whenever it differs, BEFORE sizing their
-        // commit_scrollback(). frozen_rows[k] equals maya's emitted
-        // height only at the width it was measured at — a stale stamp
-        // after a resize lets the exact commit over-count the wire and
-        // strand a duplicate just above the viewport. 0 = unstamped
-        // (empty prefix / post-clear).
-        int                        frozen_cols = 0;
-
-        // Exclusive upper bound into m.d.current.messages. Every
-        // message with index < frozen_through has already been built
-        // into `frozen` and need not be rendered live. The suffix
-        // [frozen_through .. end) is the live tail — rebuilt every
-        // frame (with the per-Turn shared_ptr Element cache keeping
-        // settled-within-tail messages cheap).
-        std::size_t         frozen_through = 0;
-
-        // Running turn number for the next freshly-frozen Assistant
-        // turn. The live tail reads (frozen_turn + assistant_messages_in_tail)
-        // for its display numbers.
-        int                 frozen_turn = 0;
-
-        // Deferred settle-freeze. The post-stream settle (finish() on the
-        // StreamingMarkdown) flips the md widget's build shape + prefix
-        // generation, so the post-finish element tree's inner
-        // ComponentElement hash differs from every live (pre-finish)
-        // frame. If freeze_through ran in the SAME tick as finish(), the
-        // frozen tree (post-finish hash) would be diffed against
-        // prev_cells (last live, pre-finish hash) on the next paint = a
-        // maya component-cache miss = the whole turn re-emits from the
-        // top (the post-settle redraw). Instead finalize_turn settles
-        // here and sets this flag WITHOUT freezing; one view() paints the
-        // finished (still-unfrozen, live-tail) tree so prev_cells now
-        // holds the post-finish hash; the next idle Tick sees the flag,
-        // freezes the byte-and-hash-identical tree (cache HIT, no
-        // re-emit), and clears the flag.
-        bool                pending_settle_freeze = false;
-
-        // Post-freeze settling window. When the deferred settle-freeze
-        // fires, the live tail collapses into the frozen prefix in ONE
-        // reducer step. If that tail had overflowed the viewport (the
-        // common case for a long reply), maya's renderer needs SEVERAL
-        // frames to fully reconcile the shrink: detect the shrink-while-
-        // overflowed prefix, commit the off-viewport rows, demote to
-        // Stale, then soft-repaint the corrected viewport on the
-        // FOLLOWING render. At fps=0 the tick subscription drops the
-        // instant pending_settle_freeze clears, so without an explicit
-        // settling window maya might get only ONE post-collapse frame —
-        // not enough for the detect→commit→demote→repaint chain — and a
-        // stranded duplicate turn lingers until the next user keystroke.
-        // agent_session never has this problem: its always-on 30fps clock
-        // keeps rendering frames after MessageStop, so the reconciliation
-        // chain always completes. We emulate that by keeping the tick
-        // alive for a few frames after the freeze. Set to kSettleCooldown
-        // when the freeze fires; decremented each Tick; the tick
-        // subscription stays armed while > 0.
-        int                 settle_cooldown_ticks = 0;
+        // The ONLY surviving piece of host bookkeeping is this hint:
+        // the message index where the live (non-sealable) tail begins,
+        // recomputed by strata_nodes every frame and read by
+        // conversation_config / view_impl so the LIVE node renders
+        // exactly the runs at/after it. It is a pure function of the
+        // messages; persisting it is a convenience to avoid recomputing
+        // the run walk in three places, not a stateful cursor. `mutable`
+        // because strata_nodes runs under a const Model& (same
+        // logical-const pattern as view_cache / the picker scroll slots).
+        mutable std::size_t live_run_start = 0;
 
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
