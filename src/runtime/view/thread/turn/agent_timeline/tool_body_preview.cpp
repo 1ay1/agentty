@@ -123,24 +123,6 @@ constexpr std::size_t kStreamTailLines = 64;
 
 } // namespace
 
-// ── Settled-build scope ──────────────────────────
-// Retained as a no-op-by-default phase flag for callers that still ask
-// `building_frozen()`. The body is now IDENTICAL in both phases (full,
-// seam-safe — see the comment above tool_body_preview_config), so no
-// renderer path branches on it for content; build_settled_run still scopes
-// it for clarity and so a future divergent-build path has a hook.
-namespace {
-bool& frozen_build_flag() noexcept {
-    thread_local bool v = false;
-    return v;
-}
-} // namespace
-
-FrozenBuildScope::FrozenBuildScope() noexcept
-    : prev_(frozen_build_flag()) { frozen_build_flag() = true; }
-FrozenBuildScope::~FrozenBuildScope() { frozen_build_flag() = prev_; }
-bool building_frozen() noexcept { return frozen_build_flag(); }
-
 GrepHits collect_grep_hits(std::span<const ToolUse> tool_calls) {
     GrepHits out;
     for (const auto& tc : tool_calls) {

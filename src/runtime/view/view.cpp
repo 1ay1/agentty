@@ -233,10 +233,6 @@ maya::Element build_settled_run(const Model& m, std::size_t run_first) {
 
     const std::size_t run_end = ui::turn_run_end(msgs, run_first);
 
-    // Settled runs render their tool bodies with full content (show_all),
-    // unlike the live tail which elides to a window for per-frame cheapness.
-    ui::FrozenBuildScope frozen_scope;
-
     std::vector<maya::Element> rows;
     rows.reserve(3);
 

@@ -325,48 +325,25 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             }
             return done(std::move(m));
         },
-        // ── Model swap: commit overflow before swapping ──────────────
+        // ── Model swap: the renderer owns the scrollback reset ──────
         //
         // ThreadListSelect and NewThread replace m.d.current wholesale.
-        // Before the swap we dispatch Cmd::commit_scrollback_overflow()
-        // — NOT force_redraw (see history below).
+        // The host does NOTHING about scrollback for the swap — no
+        // commit_scrollback_overflow, no reset_inline, no force_redraw.
         //
-        // Why commit-overflow is required:
-        //   maya's inline diff treats rows [0, prev_rows - term_h) as
-        //   committed scrollback ("updatable_start" in serialize.cpp).
-        //   When the old thread overflowed (prev_rows > term_h) those
-        //   rows are skipped by the diff scan and per-row emit. After
-        //   a wholesale model swap the new thread's canvas rows at
-        //   those Y positions are entirely different content — but
-        //   the diff still considers them "scrollback, untouchable"
-        //   and never emits them. Result: visible seam mid-viewport
-        //   where the wire still holds old-thread bytes against the
-        //   new-thread canvas, manifesting as two unrelated text
-        //   fragments on adjacent rows.
+        // maya's Strata renderer detects the wholesale content swap on its
+        // own: it fingerprints the frontier node it last sealed into native
+        // scrollback, and when the next frame's node list no longer matches
+        // that fingerprint (different thread loaded) — or collapses shorter
+        // than the sealed frontier (^N into an empty thread) — it arms its
+        // own hard reset (\x1b[2J\x1b[3J\x1b[H) before repainting. The old
+        // transcript on screen AND the rows it pushed to native scrollback
+        // are wiped, so nothing strands above the new surface. See
+        // Strata::frame()'s "AUTONOMOUS WHOLESALE-SWAP DETECTION" block.
         //
-        //   commit_scrollback_overflow() calls into maya's
-        //   commit_inline_overflow which advances prev_cells by
-        //   max(0, prev_rows - term_h) rows. After it runs,
-        //   prev_rows ≤ term_h, updatable_start drops to 0, and the
-        //   diff scans the full common range — every visible row
-        //   gets correctly emitted against the new thread.
-        //
-        //   The rows that scroll out of prev_cells are bytes the
-        //   terminal already committed to its native scrollback
-        //   anyway (they were emitted via bottom-edge \r\n's during
-        //   streaming). commit just acknowledges that fact — zero
-        //   wire effect.
-        //
-        // Why NOT force_redraw:
-        //   Cmd::force_redraw demotes Synced → Stale, routing the
-        //   next render through compose case (B). Case (B)'s
-        //   scroll-to-fit branch (scroll_n > 0) emits \n at the
-        //   viewport bottom when the new frame is taller than the
-        //   old cursor's offset from viewport top — each \n there
-        //   scrolls a row of whatever was on screen (old thread
-        //   tail + host shell history above it) up into
-        //   terminal-owned scrollback, permanently. History: commit
-        //   8becb88 did exactly that and reverted in 0b24148.
+        // The host therefore just mutates the model and returns done();
+        // the renderer reconciles the terminal. No escape-level verb
+        // crosses the host/renderer boundary.
         [&](ThreadListSelect) -> Step {
             auto* p = pick::opened(m.ui.thread_list);
             Cmd<Msg> cmd = Cmd<Msg>::none();
@@ -413,28 +390,19 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             m.s.phase = phase::Idle{};
             release_to_kernel();
             // Wholesale model swap into a fresh (empty) thread. The old
-            // thread typically overflowed the viewport, committing many
-            // rows to the terminal's native scrollback. Those rows are
-            // off-viewport and OWNED by the terminal emulator — neither
-            // force_redraw (viewport-only case-B) nor
-            // commit_scrollback_overflow (advances prev_rows but leaves
-            // physical off-viewport rows on the wire) can erase them.
-            // Result without reset_inline: the previous thread's tail
-            // turns sit stranded above the new welcome screen, visible
-            // as a fake "continuation" of the new thread above it.
+            // thread typically overflowed the viewport, committing rows to
+            // native scrollback. Those rows must be wiped so they don't
+            // strand above the new welcome screen as a fake "continuation."
             //
-            // reset_inline emits `\x1b[2J\x1b[3J\x1b[H` — the ONLY path
-            // that reaches native scrollback. Per maya/app/app.hpp:
-            // "the correct recovery for a WHOLESALE CONTENT SWAP into
-            // shorter content (thread switch / new thread)."
-            //
-            // Cost: `\x1b[3J` wipes the terminal's saved-lines, including
-            // the user's pre-agentty shell history. This is an explicit,
-            // user-initiated content swap (^N / picker select) — wiping
-            // scrollback is acceptable here precisely because the user
-            // asked for it. Per maya's contract this is the ONE allowed
-            // wiring of reset_inline; do NOT extend it to per-turn paths.
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            // The host issues NO escape-level reset here: maya's Strata
+            // renderer AUTO-DETECTS the wholesale swap. Swapping m.d.current
+            // makes the next strata_nodes hand a node list whose sealed
+            // frontier no longer matches what Strata sealed (here the list
+            // collapses to just the LIVE node, shorter than the old
+            // frontier), so Strata arms its own hard reset
+            // (\x1b[2J\x1b[3J\x1b[H) and repaints the new surface fresh. The
+            // scrollback discipline lives entirely in the renderer.
+            return done(std::move(m));
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
@@ -495,19 +463,14 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
                 std::fclose(prof_out);
             }
-            // Wholesale model swap into the loaded thread. Same
-            // rationale as NewThread above: the previous thread's
-            // overflow rows are committed to native scrollback and only
-            // reset_inline (which emits `\x1b[2J\x1b[3J\x1b[H`) can
-            // erase them. Without it the previous thread's tail turns
-            // are visible above the rehydrated thread's first turn.
-            //
-            // Per maya/app/app.hpp reset_inline() docs: this is the
-            // sanctioned recovery for thread switch / new thread. The
-            // `\x1b[3J` cost (wipes the user's pre-agentty shell
-            // scrollback) is acceptable because the user explicitly
-            // asked for the content swap (picker select).
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            // Wholesale model swap into the loaded thread. Same as
+            // NewThread above: the host issues NO escape-level reset. maya's
+            // Strata renderer auto-detects the swap — the loaded thread's
+            // run nodes carry different content hashes than the sealed
+            // frontier of the thread being left, so Strata arms its own
+            // hard reset (\x1b[2J\x1b[3J\x1b[H) and repaints fresh. No
+            // stranded tail above the rehydrated thread.
+            return done(std::move(m));
         },
     }, tm);
 }

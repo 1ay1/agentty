@@ -32,35 +32,4 @@ using GrepHits = std::unordered_map<std::string, std::set<int>>;
 [[nodiscard]] maya::ToolBodyPreview::Config tool_body_preview_config(
     const ToolUse& tc, const GrepHits* grep_hits = nullptr);
 
-// Build-phase flag. Set true (via FrozenBuildScope) while a SETTLED run
-// is built (build_settled_run / the cached live-tail run); false
-// (default) while the in-flight live tail is built each frame.
-//
-// HISTORY: this used to switch the tool-card body between a FULL render
-// (frozen) and a bounded head+tail WINDOW (live) to keep per-frame cost
-// O(window). That was REMOVED — windowing the live card made it commit
-// DIFFERENT rows to native scrollback than the full frozen card, shifting
-// the committed prefix at the freeze handoff (the duplicated/wiped-card
-// scrollback corruption). The body is now the FULL content in BOTH phases,
-// byte-identical, so the handoff is a pure cache hit. Per-frame cost stays
-// bounded a different way: every terminal tool card carries a content-
-// addressed per-event hash_id (agent_timeline.cpp), so maya captures its
-// painted cells once and BLITS them every subsequent frame — a tall
-// settled card in the live tail is paint-once, not re-laid-out per frame.
-//
-// The flag is retained (still scoped by build_settled_run) as a no-op-by-
-// default hook: nothing branches on it for body CONTENT anymore, but it
-// gives a future divergent-build path a place to key off without
-// reintroducing a live/settled body mismatch.
-class FrozenBuildScope {
-public:
-    FrozenBuildScope() noexcept;
-    ~FrozenBuildScope();
-    FrozenBuildScope(const FrozenBuildScope&)            = delete;
-    FrozenBuildScope& operator=(const FrozenBuildScope&) = delete;
-private:
-    bool prev_;
-};
-[[nodiscard]] bool building_frozen() noexcept;
-
 } // namespace agentty::ui

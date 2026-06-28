@@ -29,34 +29,6 @@ namespace detail {
 // something genuinely broken upstream, not a real workload.
 inline constexpr std::size_t kMaxStreamingBytes = 8 * 1024 * 1024;
 
-// View virtualization thresholds — when the transcript exceeds kViewWindow
-// messages, slice kSliceChunk of the oldest into terminal scrollback so the
-// per-frame Yoga layout pass stays bounded.
-//
-// Per-Element caching (715679f) eliminated the per-frame Turn::build()
-// rebuild for settled turns — but maya still walks the full visible
-// element tree through Yoga every frame, and layout cost scales linearly
-// with node count. Tool-heavy sessions (Read / Grep / Bash cards stacked
-// under a single user message) easily blow past the per-message average:
-// one assistant message with 5+ tool rounds is 100-200 nodes on its own.
-// With kViewWindow = 40 the live canvas reached 5000+ nodes, render
-// latency hit ~Tick interval at the bottom of the visible window, and the
-// composer's redraw started to lag behind keystrokes (a "flicker that
-// becomes stuck hiding the composer" — the next frame falls behind the
-// terminal's actual cursor position).
-//
-// 20/8 caps the live tree to roughly 2-3 turns worth of tool cards (about
-// 1000-1500 nodes), which fits inside one Tick on modest hardware. The
-// trade-off is that the user sees fewer scrollback turns "above the fold"
-// in the live canvas — but committed turns remain in the terminal's
-// native scrollback, which is where Page-Up / mouse-wheel land anyway.
-//
-// History:
-//   60/20 → 40/15 (rendered-canvas-rows-bound spike on long sessions)
-//   40/15 → 20/8  (Yoga layout cost on tool-heavy turns)
-inline constexpr int kViewWindow = 20;
-inline constexpr int kSliceChunk = 8;
-
 // ── update_stream.cpp ────────────────────────────────────────────────────
 void update_stream_preview(ToolUse& tc);
 bool guard_truncated_tool_args(ToolUse& tc);
