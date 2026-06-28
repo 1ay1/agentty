@@ -54,13 +54,24 @@ namespace agentty::ui {
 
 // Build the maya hash_id (component-cache key) for the Assistant run
 // [run_start, run_end). SINGLE SOURCE OF TRUTH for the key shape, used
-// by both sites that must agree byte-for-byte so the freeze handoff is
-// a cache HIT (zero row shift): conversation.cpp's settled-run live
-// tail and freeze_range (the single idle-freeze site). A key-shape
-// mismatch between the two produces a cache miss and the duplication
-// ghost; centralising the build here means a future edit can't
-// silently desync one caller.
+// by both sites that must agree byte-for-byte so a sealed run stays a
+// cache HIT (zero row shift): conversation.cpp's settled-run live tail
+// and view.cpp's build_settled_run (the lazy Strata seal builder). A
+// key-shape mismatch between the two produces a cache miss and the
+// duplication ghost; centralising the build here means a future edit
+// can't silently desync one caller.
 [[nodiscard]] maya::CacheId assistant_run_hash_id(
+    const Model& m, std::size_t run_start, std::size_t run_end);
+
+// A speaker-run [run_start, run_end) is SEALABLE when every message in
+// it is fully settled (no streaming bytes, every tool terminal) AND
+// every assistant message's reveal animation has fully drained. This is
+// the single per-frame predicate that decides whether a run is safe to
+// turn into immutable scrollback — used by view.cpp's strata_nodes (to
+// set a node's `terminal` bit) and by conversation.cpp's live tail (to
+// stamp the stable cache key on a settled run before the boundary
+// advances). One definition so the two can never disagree.
+[[nodiscard]] bool run_is_sealable(
     const Model& m, std::size_t run_start, std::size_t run_end);
 
 

@@ -33,9 +33,9 @@ namespace agentty::ui {
 // sizes) per frame. A non-terminal batch (a tool still running/pending,
 // or an animated spinner) is built fresh every frame as before.
 //
-// Emitted bytes are byte-identical to a fresh build, so the freeze handoff
-// (freeze_range stamps the same assistant_run_hash_id) stays a pure maya
-// cache hit — no scrollback-corruption surface.
+// Emitted bytes are byte-identical to a fresh build, so when a run seals
+// (build_settled_run stamps the same assistant_run_hash_id) it stays a
+// pure maya cache hit — no scrollback-corruption surface.
 [[nodiscard]] maya::Element agent_timeline_element(
     std::span<const ToolUse> tool_calls,
     int spinner_frame,

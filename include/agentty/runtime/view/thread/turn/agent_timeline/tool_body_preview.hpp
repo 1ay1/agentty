@@ -32,9 +32,9 @@ using GrepHits = std::unordered_map<std::string, std::set<int>>;
 [[nodiscard]] maya::ToolBodyPreview::Config tool_body_preview_config(
     const ToolUse& tc, const GrepHits* grep_hits = nullptr);
 
-// Build-phase flag. Set true (via FrozenBuildScope) while freeze_range
-// builds the frozen snapshot; false (default) while the live tail is
-// built each frame.
+// Build-phase flag. Set true (via FrozenBuildScope) while a SETTLED run
+// is built (build_settled_run / the cached live-tail run); false
+// (default) while the in-flight live tail is built each frame.
 //
 // HISTORY: this used to switch the tool-card body between a FULL render
 // (frozen) and a bounded head+tail WINDOW (live) to keep per-frame cost
@@ -48,10 +48,10 @@ using GrepHits = std::unordered_map<std::string, std::set<int>>;
 // painted cells once and BLITS them every subsequent frame — a tall
 // settled card in the live tail is paint-once, not re-laid-out per frame.
 //
-// The flag is retained (still scoped by freeze_range) as a no-op-by-
+// The flag is retained (still scoped by build_settled_run) as a no-op-by-
 // default hook: nothing branches on it for body CONTENT anymore, but it
 // gives a future divergent-build path a place to key off without
-// reintroducing a live/frozen body mismatch.
+// reintroducing a live/settled body mismatch.
 class FrozenBuildScope {
 public:
     FrozenBuildScope() noexcept;

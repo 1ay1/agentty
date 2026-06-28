@@ -133,14 +133,14 @@ struct ToolUse {
     [[nodiscard]] bool is_rejected() const noexcept { return std::holds_alternative<Rejected>(status); }
     [[nodiscard]] bool is_terminal() const noexcept { return is_done() || is_failed() || is_rejected(); }
 
-    // Exhaustiveness pin for is_terminal(). The freeze gate
-    // (run_is_freezable) and the live-tail cache-key gate decide "is
-    // this run safe to freeze into immutable scrollback?" by calling
+    // Exhaustiveness pin for is_terminal(). The seal gate
+    // (run_is_sealable) and the live-tail cache-key gate decide "is
+    // this run safe to seal into immutable scrollback?" by calling
     // is_terminal(). That
     // predicate enumerates the three settled states (Done/Failed/Rejected)
     // by exclusion of the three in-flight ones (Pending/Approved/Running).
     // A 7th Status variant added without classifying it here would default
-    // to non-terminal silently — at best a run that never freezes (lag),
+    // to non-terminal silently — at best a run that never seals (lag),
     // at worst, if classified terminal-by-accident elsewhere, a spinner
     // pinned in scrollback forever. Pin the width so the omission is a
     // build error, not a runtime ghost.

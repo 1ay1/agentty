@@ -123,12 +123,12 @@ constexpr std::size_t kStreamTailLines = 64;
 
 } // namespace
 
-// ── Frozen-build scope ─────────────────────────────────────
+// ── Settled-build scope ──────────────────────────
 // Retained as a no-op-by-default phase flag for callers that still ask
 // `building_frozen()`. The body is now IDENTICAL in both phases (full,
 // seam-safe — see the comment above tool_body_preview_config), so no
-// renderer path branches on it for content; freeze_range still scopes it
-// for clarity and so a future divergent-build path has a hook.
+// renderer path branches on it for content; build_settled_run still scopes
+// it for clarity and so a future divergent-build path has a hook.
 namespace {
 bool& frozen_build_flag() noexcept {
     thread_local bool v = false;
@@ -196,13 +196,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 if (b == std::string::npos) b = body.size();
                 out.kind = Kind::GitDiff;
                 // Settled edit ALWAYS renders the full diff (show_all) — in
-                // the live tail AND the frozen snapshot, byte-identical.
-                // The user reviews exactly what changed; the per-event
-                // hash_id cell-cache (agent_timeline.cpp) makes the tall
-                // card a paint-once blit even while it sits in the live
-                // tail, so a full body costs nothing per frame after the
-                // first. Live == frozen body => the freeze handoff is a
-                // pure cache hit (no committed-row shift).
+                // the live tail AND when sealed, byte-identical. The user
+                // reviews exactly what changed; the per-event hash_id
+                // cell-cache (agent_timeline.cpp) makes the tall card a
+                // paint-once blit even while it sits in the live tail, so a
+                // full body costs nothing per frame after the first.
+                // Live == sealed body => the seal handoff is a pure cache
+                // hit (no committed-row shift).
                 out.text       = std::string{body.substr(a, b - a)};
                 out.show_all   = true;
                 out.tail_only  = false;
@@ -226,12 +226,12 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             {
                 out.kind = Kind::EditDiff;
                 // Full diff as soon as the edit is terminal — in the live
-                // tail too, not only the frozen snapshot. While STREAMING
-                // keep the elided per-side/per-hunk preview (hunks grow
-                // line-by-line, would balloon height every frame); once
-                // settled the hunks are final, so expanding immediately
-                // avoids the "stub then sudden expand" lag and matches
-                // what freeze_range will build (seamless handoff).
+                // tail too, not only when sealed. While STREAMING keep the
+                // elided per-side/per-hunk preview (hunks grow line-by-line,
+                // would balloon height every frame); once settled the hunks
+                // are final, so expanding immediately avoids the "stub then
+                // sudden expand" lag and matches what build_settled_run will
+                // build (seamless handoff).
                 out.is_streaming = streaming_now;
                 out.hunks.reserve(it->size());
                 for (const auto& e : *it) {
@@ -241,12 +241,12 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                     out.hunks.push_back({std::move(ot), std::move(nt)});
                 }
                 // Settled hunks render in FULL (show_all) in BOTH the
-                // live tail and the frozen snapshot — byte-identical, so
-                // the freeze handoff is a pure cache hit. Only STREAMING
-                // stays elided (hunks grow line-by-line, would balloon
-                // height every frame). The tall settled card is a
-                // paint-once blit via its per-event hash_id, so a full
-                // body is free per frame after the first paint.
+                // live tail and when sealed — byte-identical, so the seal
+                // handoff is a pure cache hit. Only STREAMING stays elided
+                // (hunks grow line-by-line, would balloon height every
+                // frame). The tall settled card is a paint-once blit via
+                // its per-event hash_id, so a full body is free per frame
+                // after the first paint.
                 out.show_all = !streaming_now;
                 return out;
             }

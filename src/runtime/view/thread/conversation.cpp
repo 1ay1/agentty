@@ -242,62 +242,29 @@ void build_live_tail_from(const Model& m, std::size_t start,
             // so the height step is small and happens once, mid-stream,
             // rather than as a jolt at every turn boundary.
 
-            // Cache the settled-but-not-yet-frozen run. A run sitting in
-            // the live tail with every tool terminal and no active
-            // stream is byte-stable: its body (which may include a
-            // multi-thousand-line write/edit card) won't change until
-            // freeze_through moves it into m.ui.frozen. Without a
-            // hash_id the live tail has no cache entry, so maya REBUILDS
-            // and REPAINTS that whole body every frame — a 3000-line
-            // write in the tail measured ~80ms/frame (o1_probe
-            // livetail_ms column). Stamping the SAME key freeze_range
-            // will use means: (a) the body paints once and blits
-            // thereafter while it waits to freeze, and (b) the cache
-            // entry survives the freeze handoff (identical key) so the
-            // freeze instant is seamless. Only when the run is fully
-            // terminal AND no indicator/spinner slot was added (those
-            // mutate per frame and must miss).
-            const bool run_terminal = [&] {
-                for (std::size_t j = i; j < run_end; ++j)
-                    for (const auto& tc : m.d.current.messages[j].tool_calls)
-                        if (!tc.is_terminal()) return false;
-                return true;
-            }();
-            // CRITICAL: do NOT stamp the cacheable key while the reveal
-            // overlay is still animating. assistant_run_hash_id is keyed on
-            // the message id + compute_render_key() (text content/size) — it
-            // is INVARIANT across the reveal's scramble→clean transition
-            // because the underlying text bytes don't change, only the
-            // per-frame overlay cells do. If we stamp it while the trailing
-            // edge is still showing scramble glyphs, maya paints those
-            // scramble cells into its hash_id-keyed component cache; when the
-            // reveal then settles to clean text the key is UNCHANGED, so the
-            // cache HITS and never repaints — stranding scramble garbage on
-            // the settled tail forever (the frozen-glyph screenshot:
-            // "just let me\u2423Z@o%"). And because freeze_range reuses the same
-            // key, the garbage is frozen permanently. Leave the run UNKEYED
-            // (rebuild + repaint every frame, like the in-flight run) until
-            // every message's reveal widget has fully drained — then the
-            // clean cells are what gets cached, and the freeze handoff hits a
-            // clean entry. The drain window is ~200 ms ramp + ~376 ms
-            // scramble settle, fully covered by the pending_settle_freeze
-            // RAF clock, so this costs at most a few extra rebuilds.
-            const bool reveal_settled = [&] {
-                for (std::size_t j = i; j < run_end && j < m.d.current.messages.size(); ++j) {
-                    const auto& mj = m.d.current.messages[j];
-                    if (mj.role != Role::Assistant || mj.text.empty()) continue;
-                    const auto& mc = m.ui.view_cache.message_md(
-                        m.d.current.id, mj.id);
-                    if (!mc.streaming) continue;
-                    if (mc.streaming->is_live()
-                     || mc.streaming->is_finalizing()
-                     || mc.streaming->reveal_in_progress()
-                     || mc.streaming->is_parsing())
-                        return false;
-                }
-                return true;
-            }();
-            if (run_terminal && !reserve_slot && reveal_settled) {
+            // Cache the settled-but-not-yet-sealed run. On the classic /
+            // test path (live_start == 0) the WHOLE transcript is rebuilt
+            // as the live tail, so without a hash_id maya would repaint
+            // every settled run's body — including multi-thousand-line
+            // write/edit cards — every frame. Stamping the stable
+            // assistant_run_hash_id lets maya paint each settled run once
+            // and blit thereafter. On the Strata path this also covers the
+            // single frame between a run draining and strata_nodes
+            // promoting it to a sealed terminal node: the SAME key is
+            // reused there, so the promotion is a pure cache hit.
+            //
+            // run_is_sealable gates the stamp: it is false while any tool
+            // is non-terminal OR any reveal overlay is still animating.
+            // The reveal guard is CRITICAL — assistant_run_hash_id is keyed
+            // on text content/size, INVARIANT across the reveal's
+            // scramble→clean transition. Stamping mid-scramble would let
+            // maya cache the scramble cells under a key that never changes,
+            // stranding garbage glyphs on the settled tail forever. Leaving
+            // an undrained run UNKEYED makes it rebuild + repaint every
+            // frame (like the in-flight run) until the clean cells are what
+            // gets cached.
+            const bool sealable = run_is_sealable(m, i, run_end);
+            if (sealable && !reserve_slot) {
                 cfg.hash_id = assistant_run_hash_id(m, i, run_end);
             }
             // NOTE: the in-flight (streaming) run is deliberately NOT
@@ -316,23 +283,20 @@ void build_live_tail_from(const Model& m, std::size_t start,
             i = run_end;
         } else {
             // User (or other non-Assistant) head: single-message Turn.
-            // freeze_range numbers a user turn with the BARE frozen_turn
-            // (the count of assistant runs settled so far) — NOT
-            // frozen_turn+1 — so the user row carries the number of the
-            // assistant turn that preceded it. running_turn is seeded to
-            // frozen_turn+1 and tracks the NEXT assistant number, so the
-            // matching user number here is running_turn-1. Using
-            // running_turn (the old code) rendered the user row one turn
-            // ahead of what freeze_range stamps — a byte divergence at the
-            // freeze seam the instant a user/divider sits in the live tail
-            // (e.g. the post-compaction boundary), which strands the
-            // just-frozen turn in scrollback. See INLINE_SCROLLBACK.md
-            // pin #3 (live/frozen builders must agree byte-for-byte).
+            // A user row carries the number of the assistant turn that
+            // PRECEDED it (running_turn - 1), not the next assistant
+            // number. running_turn tracks the NEXT assistant run, seeded
+            // from the count of runs already settled before live_start, so
+            // the matching user number here is running_turn - 1. This is
+            // the SAME numbering build_settled_run uses for a settled user
+            // run (assistant_runs_before), so a user turn renders
+            // byte-identically whether it sits in the live tail or has been
+            // sealed — no row shift at the seal boundary, no duplication.
             auto cfg = turn_config(head, i, turn_num - 1, m,
                                    /*continuation=*/false);
             out.push_back(maya::Turn{std::move(cfg)}.build());
-            // User turns do not bump running_turn — the running count
-            // is over Assistant turns (matches frozen.cpp's policy).
+            // User turns do not bump running_turn — the running count is
+            // over Assistant turns only.
             i = run_end;
         }
     }
@@ -368,8 +332,9 @@ void build_queued_previews(const Model& m, int& running_turn,
     }
 }
 
-// Locate the live ToolUse a pending_permission is targeting. Walks
-// the unfrozen tail (the only place a tool can still be pre-terminal).
+// Locate the live ToolUse a pending_permission is targeting. Walks the
+// live tail (runs at/after live_run_start) — the only place a tool can
+// still be pre-terminal.
 const ToolUse* find_pending_tool(const Model& m) {
     if (!m.d.pending_permission) return nullptr;
     const auto& pp_id = m.d.pending_permission->id;

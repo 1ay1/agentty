@@ -36,15 +36,15 @@ namespace {
 // (id, status.index(), output().size(), highlight_lines signature).
 // On hit we copy the cached Config (a plain string/vector copy) instead
 // of re-parsing JSON + re-scanning the diff. Emitted bytes are
-// byte-identical to a fresh build, so the freeze handoff (freeze_range
-// stamps the same assistant_run_hash_id) stays a pure maya cache hit —
+// byte-identical to a fresh build, so when a run seals (build_settled_run
+// stamps the same assistant_run_hash_id) it stays a pure maya cache hit —
 // no scrollback-corruption surface.
 //
 // Single-threaded by construction (runtime serializes update+view on one
 // thread), so a thread_local store needs no locking. Bounded LRU so it
-// can't grow with session length; settled cards that scroll out get
-// frozen into m.ui.frozen and never query this again, so their entries
-// fall out under LRU pressure naturally.
+// can't grow with session length; settled cards that scroll out are
+// sealed by Strata into native scrollback and never query this again, so
+// their entries fall out under LRU pressure naturally.
 class BodyConfigCache {
 public:
     static constexpr std::size_t kCap = 512;
