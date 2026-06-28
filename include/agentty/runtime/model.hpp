@@ -195,6 +195,19 @@ struct Model {
         // logical-const pattern as view_cache / the picker scroll slots).
         mutable std::size_t live_run_start = 0;
 
+        // True when live_run_start lands MID-RUN: the in-flight assistant
+        // run's settled sub-turn prefix [run head, live_run_start) was
+        // split off into its own sealed strata node, so the live tail must
+        // render its first run as a CONTINUATION rail (header suppressed,
+        // lead-gap seam blank) of that sealed head — not as a fresh turn
+        // with a duplicate header. Set by strata_nodes alongside
+        // live_run_start; read by conversation.cpp's build_live_tail_from.
+        // The matching sealed head node is built by build_settled_run with
+        // the same [head, live_run_start) sub-range, so the two rails join
+        // row-identically to the un-split single rail. `mutable` for the
+        // same logical-const reason as live_run_start.
+        mutable bool        live_run_is_continuation = false;
+
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
         //     alive across frames so its block boundary cache survives

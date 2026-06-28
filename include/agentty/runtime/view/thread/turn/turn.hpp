@@ -41,9 +41,17 @@ namespace agentty::ui {
 //
 // Header (glyph, label, meta) is taken from the head message; meta carries
 // the head's timestamp + (optionally) elapsed since the last user message.
+//
+// `continuation` suppresses the header (the run's settled head was split
+// off into a separate sibling rail — e.g. a sealed strata node — and this
+// builds the remaining sub-turns as a continuation of it). `lead_gap` then
+// emits the one-row seam blank that would have separated the two slot
+// groups inside a single rail, so [head rail | continuation rail] is
+// row-identical to the combined rail. Both default false (whole-run rail).
 [[nodiscard]] maya::Turn::Config turn_config_for_assistant_run(
     std::size_t run_first, std::size_t run_end,
-    int turn_num, const Model& m);
+    int turn_num, const Model& m,
+    bool continuation = false, bool lead_gap = false);
 
 // Decide where the current speaker-run ends. For an Assistant head this
 // walks forward over consecutive Assistant messages; for User / other roles

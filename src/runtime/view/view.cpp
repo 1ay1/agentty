@@ -170,6 +170,11 @@ maya::Element view(const Model& m) {
 
 // Forward declaration — defined below the anonymous helpers it needs.
 maya::Element build_settled_run(const Model& m, std::size_t run_first);
+// Range variant: render an assistant run's HEAD rail over a sub-range
+// [run_first, range_end) (the settled sub-turn prefix of an in-flight
+// run). Header shown (it is the run start); body covers only the prefix.
+maya::Element build_settled_run_range(const Model& m, std::size_t run_first,
+                                      std::size_t range_end);
 
 // ── Settled-run builder (shared by Strata's lazy build path) ─────────
 //
@@ -226,12 +231,29 @@ int assistant_runs_before(const Model& m, std::size_t run_first) {
 } // namespace
 
 maya::Element build_settled_run(const Model& m, std::size_t run_first) {
+    const auto& msgs = m.d.current.messages;
+    if (run_first >= msgs.size()) return maya::detail::nothing();
+    return build_settled_run_range(m, run_first,
+                                   ui::turn_run_end(msgs, run_first));
+}
+
+// Render an assistant run's HEAD rail over [run_first, range_end). For a
+// whole settled run range_end == turn_run_end(run_first); for the
+// in-flight run's settled sub-turn prefix range_end == live_run_start
+// (< run_end), and the live tail renders [range_end, run_end) as a
+// continuation of this rail. Header always shown (run_first is the run
+// start). NO trailing seam blank: when this is a prefix, the seam blank
+// between it and the live tail is emitted by the live continuation's
+// lead_gap, so [prefix rail | continuation rail] == the un-split rail.
+maya::Element build_settled_run_range(const Model& m, std::size_t run_first,
+                                      std::size_t range_end) {
     using namespace maya::dsl;
     const auto& msgs = m.d.current.messages;
     const std::size_t total = msgs.size();
     if (run_first >= total) return maya::detail::nothing();
-
-    const std::size_t run_end = ui::turn_run_end(msgs, run_first);
+    range_end = std::min(range_end, total);
+    if (range_end <= run_first)
+        range_end = ui::turn_run_end(msgs, run_first);
 
     std::vector<maya::Element> rows;
     rows.reserve(3);
@@ -246,8 +268,8 @@ maya::Element build_settled_run(const Model& m, std::size_t run_first) {
     if (head.role == Role::Assistant) {
         const int turn_num = runs_before + 1;
         auto cfg = ui::turn_config_for_assistant_run(
-            run_first, run_end, turn_num, m);
-        cfg.hash_id = ui::assistant_run_hash_id(m, run_first, run_end);
+            run_first, range_end, turn_num, m);
+        cfg.hash_id = ui::assistant_run_hash_id(m, run_first, range_end);
         rows.push_back(maya::Turn{std::move(cfg)}.build());
     } else {
         // User / compaction-summary single-message run. Numbered with the
@@ -351,6 +373,39 @@ std::uint64_t turn_run_key(const Model& m, std::size_t run_first,
     return k;
 }
 
+// Within an in-flight assistant run [run_first, run_end) that is NOT yet
+// whole-run sealable (its last sub-turn is still streaming), find the end
+// of the maximal SETTLED sub-turn prefix: the largest p such that every
+// message in [run_first, p) is individually settled (no streaming bytes,
+// every tool terminal, reveal drained). [run_first, p) is then safe to
+// split off as its own sealed strata node while [p, run_end) stays live.
+// Returns run_first when the head sub-turn itself is still mutating (no
+// splittable prefix). Per-message mirror of run_is_sealable's body.
+std::size_t settled_subturn_prefix_end(const Model& m, std::size_t run_first,
+                                       std::size_t run_end) {
+    const auto& msgs = m.d.current.messages;
+    std::size_t p = run_first;
+    for (; p < run_end && p < msgs.size(); ++p) {
+        const Message& mm = msgs[p];
+        if (mm.role != Role::Assistant) break;
+        if (!mm.streaming_text.empty() || !mm.pending_stream.empty()) break;
+        bool tool_live = false;
+        for (const auto& tc : mm.tool_calls)
+            if (!tc.is_terminal()) { tool_live = true; break; }
+        if (tool_live) break;
+        if (!mm.text.empty()) {
+            const auto& mc = m.ui.view_cache.message_md(m.d.current.id, mm.id);
+            if (mc.streaming
+                && (mc.streaming->is_live()
+                 || mc.streaming->is_finalizing()
+                 || mc.streaming->reveal_in_progress()
+                 || mc.streaming->is_parsing()))
+                break;
+        }
+    }
+    return p;
+}
+
 std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
     // Monotonic per-process generation for the LIVE node — its content
     // (composer, streaming tail, spinner, overlay) changes constantly, so
@@ -382,6 +437,41 @@ std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
         i = run_end;
     }
 
+    // ── In-flight run sub-turn split. ───────────────────────────────
+    // `i` is now the head of the in-flight run (the first non-sealable
+    // whole run — by construction the LAST run, still streaming). A long
+    // autopilot turn is ONE run of many sub-turns where only the tail
+    // streams; the head sub-turns have already settled. Split that
+    // settled sub-turn prefix [i, p) off as its OWN sealed strata node so
+    // strata deposits it into native scrollback and never rebuilds it —
+    // making the live tail O(streaming sub-turn) instead of O(whole run).
+    // The remaining [p, total) renders as a continuation rail in the LIVE
+    // node (header suppressed, lead-gap seam blank) so the two rails join
+    // row-identically to the un-split single rail.
+    //
+    // Only split assistant runs, and only when the prefix is >=1 settled
+    // sub-turn AND the live tail is non-empty (p < run_end): a fully
+    // settled run is handled by the whole-run seal above; a run whose head
+    // sub-turn is still streaming has no splittable prefix (p == i).
+    bool live_continuation = false;
+    if (i < total && msgs[i].role == Role::Assistant) {
+        const std::size_t run_end = ui::turn_run_end(msgs, i);
+        const std::size_t p = settled_subturn_prefix_end(m, i, run_end);
+        if (p > i && p < run_end) {
+            // Sealed prefix node [i, p). Keyed by kStrataPrefixKey - i so
+            // its identity is stable across frames; its hash folds [i, p)
+            // so it rebuilds once each time a sub-turn newly settles (p
+            // advances) and is a cache hit otherwise. terminal=true: the
+            // prefix is settled by construction, so strata may deposit it
+            // the instant it scrolls past the fold.
+            ns.push_back({kStrataPrefixKey - static_cast<std::uint64_t>(i),
+                          turn_run_key(m, i, p),
+                          /*terminal=*/true});
+            live_continuation = true;
+            i = p;   // the live tail now starts at the first live sub-turn
+        }
+    }
+
     // LIVE node: the live tail (runs [i, total)) + chrome + overlay,
     // keyed by the boundary index so its identity is stable across frames
     // (only its hash bumps). kStrataLiveKey distinguishes the chrome node
@@ -390,7 +480,8 @@ std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
     // Stash the live boundary so strata_build / view_impl render exactly
     // the live runs (and conversation_config knows where the live tail
     // starts) without a persisted frozen_through cursor.
-    m.ui.live_run_start = i;
+    m.ui.live_run_start          = i;
+    m.ui.live_run_is_continuation = live_continuation;
     return ns;
 }
 
@@ -402,6 +493,15 @@ std::vector<maya::strata::NodeRef> strata_nodes(const Model& m) {
 maya::Element strata_build(const Model& m, std::uint64_t key) {
     if (key == kStrataLiveKey)
         return view_impl(m, /*include_frozen=*/false);
+    // Sealed sub-turn prefix node of the in-flight run: render the run's
+    // head sub-turns [run_head, live_run_start) as the run's HEAD rail
+    // (header shown, it IS the run start) but covering only the settled
+    // prefix. The live tail renders [live_run_start, total) as a
+    // continuation of this.
+    if (key <= kStrataPrefixKey && key > kStrataPrefixKey - m.d.current.messages.size()) {
+        const std::size_t run_head = static_cast<std::size_t>(kStrataPrefixKey - key);
+        return build_settled_run_range(m, run_head, m.ui.live_run_start);
+    }
     if (key < m.d.current.messages.size())
         return build_settled_run(m, static_cast<std::size_t>(key));
     return maya::detail::nothing();   // defensive — out-of-range key

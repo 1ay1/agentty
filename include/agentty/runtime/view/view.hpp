@@ -26,6 +26,14 @@ namespace agentty::ui {
 // sealed). Distinct from any frozen index.
 inline constexpr std::uint64_t kStrataLiveKey = ~std::uint64_t{0};
 
+// Key for the in-flight run's SETTLED sub-turn prefix node (the head
+// sub-turns of a streaming autopilot turn that have already settled and
+// can seal while the tail still streams). Encoded as kStrataPrefixKey -
+// run_head_index so it is stable across frames yet never collides with a
+// real run-start index (which is a small message index) or kStrataLiveKey.
+// build_settled_run renders [run_head, live_run_start) for this key.
+inline constexpr std::uint64_t kStrataPrefixKey = ~std::uint64_t{0} - 1;
+
 [[nodiscard]] std::vector<maya::strata::NodeRef> strata_nodes(const Model& m);
 [[nodiscard]] maya::Element strata_build(const Model& m, std::uint64_t key);
 

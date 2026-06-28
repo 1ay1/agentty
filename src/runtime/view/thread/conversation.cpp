@@ -92,7 +92,8 @@ maya::Element compaction_divider_row() {
 // row sequences are byte-identical for the same input.
 void build_live_tail_from(const Model& m, std::size_t start,
                           int& running_turn,
-                          std::vector<maya::Element>& out) {
+                          std::vector<maya::Element>& out,
+                          bool allow_continuation) {
     const std::size_t total = m.d.current.messages.size();
     start = std::min(start, total);
     if (start >= total) return;
@@ -130,12 +131,26 @@ void build_live_tail_from(const Model& m, std::size_t start,
         // Compaction divider FIRST (before the inter-turn gap), exactly
         // as freeze_range orders it, so the live and frozen row
         // sequences stay byte-identical across the freeze seam.
-        if (compaction_boundary_at(i)) {
+        //
+        // The continuation first-run is the EXCEPTION: it is the tail of
+        // an in-flight run whose settled head was split into a separate
+        // sealed node. It must flow straight out of that head rail with
+        // NO inter-rail gap and NO compaction divider (mid-run can't open
+        // on a compaction boundary) — the one-row seam blank lives inside
+        // the continuation rail (lead_gap) instead.
+        const bool is_split_continuation =
+            allow_continuation
+            && m.ui.live_run_is_continuation && first_in_tail
+            && i == m.ui.live_run_start
+            && i < m.d.current.messages.size()
+            && m.d.current.messages[i].role == Role::Assistant;
+
+        if (!is_split_continuation && compaction_boundary_at(i)) {
             out.push_back(compaction_divider_row());
         }
 
         const bool first_overall = (start == 0) && first_in_tail && i == 0;
-        if (!first_overall) {
+        if (!first_overall && !is_split_continuation) {
             out.push_back(gap_row());
         }
         first_in_tail = false;
@@ -153,7 +168,9 @@ void build_live_tail_from(const Model& m, std::size_t start,
             //    assistant Turn body until the first text/tool/etc.
             //    slot lands, then content replaces it.
             auto cfg = turn_config_for_assistant_run(
-                i, run_end, turn_num, m);
+                i, run_end, turn_num, m,
+                /*continuation=*/is_split_continuation,
+                /*lead_gap=*/is_split_continuation);
             // Reserve an indicator-height slot for the WHOLE active
             // phase. When the tail is an empty placeholder we paint
             // the breathing "thinking…" widget; once real content
@@ -405,7 +422,8 @@ maya::Conversation::Config conversation_config(const Model& m, bool include_froz
         k = re;
     }
     int running_turn = settled_assistant_runs + 1;
-    build_live_tail_from(m, live_start, running_turn, cfg.live_tail);
+    build_live_tail_from(m, live_start, running_turn, cfg.live_tail,
+                         /*allow_continuation=*/!include_frozen);
     build_queued_previews(m, running_turn, cfg.live_tail);
 
     // Pending permission floats as its own live_tail row below the
