@@ -561,13 +561,41 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
 
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(sh.iters));
+    double clear_sum = 0, render_sum = 0;
+    // Mirror the production inline path: after the first (priming)
+    // frame, preserve the immutable frozen prefix above the viewport
+    // and clear only the live window, so render_tree's cached blit can
+    // skip the unchanged prefix. Assume an 80-row terminal viewport
+    // (the fallback geometry) with the same 8-row margin app.cpp uses.
+    constexpr int kTermH = 80;
+    constexpr int kPreserveMargin = 8;
+    const bool no_preserve = std::getenv("BENCH_NOPRESERVE") != nullptr;
     for (int i = 0; i < sh.iters; ++i) {
-        canvas.clear();
-        auto t0 = Clock::now();
+        auto tc0 = Clock::now();
+        const int prev_ch = maya::content_height(canvas);
+        int keep_top = 0;
+        if (!no_preserve && prev_ch > kTermH) {
+            keep_top = prev_ch - kTermH - kPreserveMargin;
+            if (keep_top < 0) keep_top = 0;
+        }
+        if (keep_top > 0) canvas.clear_below(keep_top);
+        else              canvas.clear();
+        auto tc1 = Clock::now();
         maya::render_tree(root, canvas, pool, maya::theme::dark,
                           /*auto_height=*/true);
         auto t1 = Clock::now();
-        samples.push_back(ms(t1 - t0));
+        clear_sum  += ms(tc1 - tc0);
+        render_sum += ms(t1 - tc1);
+        samples.push_back(ms(t1 - tc0));
+    }
+    if (std::getenv("BENCH_SPLIT") && sh.iters > 0) {
+        std::fprintf(stderr, "    [split] %-30s clear=%.3f render=%.3f ms/frame\n",
+                     sh.name.c_str(), clear_sum / sh.iters, render_sum / sh.iters);
+    }
+    if (std::getenv("BENCH_DUMP")) {
+        std::fprintf(stderr, "    [dump] %s frames:", sh.name.c_str());
+        for (double s : samples) std::fprintf(stderr, " %.2f", s);
+        std::fprintf(stderr, "\n");
     }
     MidrunStats out;
     out.frame                = summarise(samples);
