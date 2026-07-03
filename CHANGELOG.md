@@ -4,6 +4,24 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.2]
+
+### Fixed
+- **Scrollback duplication / ghosting across streaming, height-grow, compaction, and narrow viewports — the whole class, closed.** A cluster of inline-render bugs could leave stale or duplicated rows in the terminal's native scrollback when the live tail transitioned to a frozen (immutable) block. Fixes: the freeze gate (`live_tail_reveal_settled`) now mirrors `build_live_tail`'s `is_live()` hash-stamp condition so the two seam gates can't drift; frozen-measure width subtracts the full 4-column chrome (`AppLayout` + `Conversation` padding), not 2, so narrow terminals freeze at the same width maya renders; the case-B height-grow cursor anchors to full content height; the compaction divider is now emitted symmetrically in the live tail so the freeze seam stays height-stable across a compaction; and frozen-trim commits a *conservative under-estimate* of scrolled rows (never the exact count) — an over-commit re-scrolls the visible tail, but an under-commit is reconciled by maya, mirroring the proven `agent_session` behaviour. At `fps=0`, markdown now finishes immediately and `visual_hash` is driven through the settle cooldown so no duplicate paints slip through. Each fix ships with a regression test.
+- **Streaming reveal no longer bursts, stalls, or scrambles on long turns.** The maya reveal effect glides tables and code blocks left-to-right with a commit-safe seam (no eager scramble of not-yet-typed cells), holds final table column widths during reveal (no horizontal reflow), and reveals the newest table row with the same positional comet gradient as prose. Tall tables no longer ghost-duplicate into scrollback.
+- **Data race on `provider::active()`.** A worker thread read the active provider while the UI move-assigned it, tearing the read. The value is now snapshotted under the mutex.
+- **Memory tool: garbage rollover count + silent scope downgrade.** The rollover counter could print garbage, and a `remember` could silently downgrade its scope; both are fixed (the scope downgrade is now refused).
+
+### Changed
+- **Inline render is bounded to the viewport window for tall transcripts.** A giant frozen or streaming block used to pay O(content-height) every frame (full-canvas clear + a memcpy-per-row blit). The paint path now clears only the rows below the immutable prefix (`clear_below`, gated on a Synced coherence state, no canvas realloc, and an 8-row margin above the viewport) and skips the per-row blit when the destination is already byte-identical to the source (`blit_packed_row_cached` via SIMD `bulk_eq`). Single-authority scrollback accounting (`overflow = prev_rows − term_h`) is fully preserved — the worst case is a perf non-improvement, never corruption. Steady per-frame cost on tall blocks drops ~30%.
+- **Tool-diff bands: GitHub-dark styling.** `write`/`edit` diffs render dark-but-saturated green/red backgrounds with bright same-hue text and a sign rail, readable as green/red (not gray) even on low-gamma panels; clean single-filename header, no git plumbing.
+- **Responsive status bar.** The CTX gauge is lowest-priority (drops first, desktop widths only); the provider badge shows from ~50 columns; compact CTX (bar graph + percent) shows from ~40 columns so phone-width terminals keep the fill graph and %, with raw token counts only on wide terminals. Picker footer hints drop responsively to fit.
+
+### Performance
+- **Diff is trimmed-LCS, not O(N·M).** Common prefix/suffix are trimmed before the LCS, the SSE debug gate is lock-free, and a redundant stream-sink hop was dropped.
+- Off-screen giant message bodies collapse on rehydrate (default off — it was hiding loaded messages, now opt-in), and settled tool panels are cached in long in-flight turns.
+- Build auto-pulls all submodules (maya, acp-cpp, mcp-cpp) to latest.
+
 ## [0.2.0]
 
 ### Added
