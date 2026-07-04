@@ -1330,6 +1330,28 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     set_tests_properties(reveal_scrollback_test PROPERTIES TIMEOUT 180)
 
+    # scrollback_oracle_test — the APPEND-ONLY SCROLLBACK ORACLE. Drives
+    # the REAL maya Runtime::render through a PTY with the REAL agentty
+    # view + freeze/trim + tool-card lifecycle and enforces, at EVERY
+    # frame, that the emulator's committed scrollback is a prefix-
+    # extension of the previous frame's (any rewrite / reorder /
+    # duplication / shrink of a committed row = FAIL, no scenario
+    # enumeration needed). Hostile coverage: wrapping prose straddling
+    # the seam, tool cards growing past 2× the viewport while live
+    # (chrome commits mid-flight), parallel tool batches where one tool
+    # settles while another's committed chrome is off-viewport, burst
+    # frames (3 mutations per render), post-tool continuation sub-turn
+    # messages, and the frozen front-trim across 4 terminal shapes.
+    # Caught (fail-before) both field corruption classes: mid-reveal
+    # prose rewrites above tool cards, and the live ACTIONS panel's
+    # title counter / title_end / spinner / border-color mutating a
+    # committed row.
+    agentty_add_full_test(scrollback_oracle_test)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(scrollback_oracle_test PRIVATE util)
+    endif()
+    set_tests_properties(scrollback_oracle_test PROPERTIES TIMEOUT 600)
+
     # anthropic_md_stream — dev tool, NOT a ctest entry. Captures a real
     # Anthropic SSE markdown stream to a .jsonl fixture (network +
     # credentials required), or replays a captured fixture through
@@ -1372,7 +1394,8 @@ if(AGENTTY_BUILD_TESTS)
         acp_integration_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz
-        reveal_scrollback_test)
+        reveal_scrollback_test
+        scrollback_oracle_test)
     # mcp_bridge_test / mcp_http_test are only registered as ctest entries
     # when MCP is compiled in (AGENTTY_MCP), so they must be added to the
     # aggregate under the same gate — otherwise `cmake --build --target

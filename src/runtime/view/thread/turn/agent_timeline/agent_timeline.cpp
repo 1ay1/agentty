@@ -380,20 +380,67 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
     //    or the total elapsed once settled — splitting the two pins the
     //    elapsed to the right edge instead of leaving it left-glued to
     //    the action count.
-    std::string title = " " + small_caps("Actions") + "  \xc2\xb7  "
-                      + std::to_string(done) + "/" + std::to_string(total) + " ";
+    //
+    // ── SCROLLBACK-SEAM IMMUTABILITY (live panels) ─────────────────
+    //
+    // THE SCROLLBACK INVARIANT (maya app.cpp): a row that has scrolled
+    // into native terminal scrollback is immutable. agentty keeps a
+    // TALL live tail while streaming, so a panel's TOP rows — the
+    // bordered title row and the first event/stats rows — can cross the
+    // viewport top the moment enough prose streams in below them. Once
+    // that title row is committed to scrollback, ANY later change to its
+    // bytes is a committed-row rewrite: maya's gate detects the prefix
+    // mismatch and, on the growing frame that caused it, can only recover
+    // by a destructive HardReset (\x1b[2J\x1b[3J wipe + repaint) which
+    // re-strands the panel's chrome one screen up — the reported
+    // "stacked ACTIONS · 1/1 MUTATE fragments in scrollback" corruption.
+    //
+    // The animating header inputs are exactly three:
+    //   • the `done/total` counter (ticks 1/2 → 2/2 as tools finish),
+    //   • `title_end` (the running tool name, or a live elapsed),
+    //   • the spinner `frame` (animates Pending/Running status glyphs on
+    //     the first event rows, which sit directly under the title).
+    // For a LIVE (any-tool-non-terminal) panel every one of those can
+    // mutate a row that already committed. So freeze all three to a
+    // batch-stable form while the panel is live: drop the count, the
+    // ticking title_end, and the animated spinner. The panel still
+    // updates its BOTTOM (new event rows, the footer running→done flip)
+    // — all appends below the seam, which the invariant permits.
+    // ── Title. A SINGLE byte-stable string for the panel's ENTIRE
+    //    lifetime — live, settling, and frozen. This is the load-bearing
+    //    invariant: the freeze handoff converts the LIVE panel into the
+    //    all-terminal (settled) panel in place, and if their titles
+    //    differ by even one byte the freeze REWRITES the title row —
+    //    which, once that row has crossed into native scrollback, is a
+    //    committed-row rewrite that trips maya's gate into a destructive
+    //    HardReset (the "card duplicated one screen up" corruption).
+    //    So live and settled MUST render the same title bytes. We carry
+    //    NO count and NO elapsed in the title (both animate / differ
+    //    live vs settled); the exact done/total + duration live in the
+    //    FOOTER, which is always a bottom append below the seam. The
+    //    spinner `frame` is zeroed for any not-yet-all-terminal panel so
+    //    a top event row's status glyph can't animate a committed row.
+    std::string title = " " + small_caps("Actions") + " ";
     std::string title_end;
-    if (running_idx >= 0) {
-        title_end = " " + tool_display_name(
-            tool_calls[static_cast<std::size_t>(running_idx)].name.value) + " ";
-    } else if (done == total && total > 0) {
-        title_end = " " + format_duration_compact(total_elapsed) + " ";
-    }
 
-    bool all_done = (done == total && total > 0);
+    bool all_terminal_title = total > 0;
+    for (const auto& tc : tool_calls)
+        if (!tc.is_terminal()) { all_terminal_title = false; break; }
+
     cfg.title        = std::move(title);
     cfg.title_end    = std::move(title_end);
-    cfg.border_color = all_done ? muted : rail_color;
+    // Border color is part of EVERY panel row's bytes (left/right border
+    // cells + the title row), so it falls under the same lifecycle-
+    // stability rule as the title: the live→settled flip used to swap
+    // rail_color → muted, restyling every committed row of a panel
+    // straddling the seam — a style-only committed-row rewrite that the
+    // gate treats identically to a glyph rewrite (the memcmp covers
+    // style ids). Fixed muted for the whole lifetime; liveness is
+    // carried by the footer's `● running` and the per-event category
+    // colors, both of which are seam-safe (footer = bottom append,
+    // category colors are fixed per tool from first render).
+    cfg.border_color = muted;
+    if (!all_terminal_title) cfg.frame = 0;
 
     // Panel-level cache key for an ALL-TERMINAL batch. Settled tool bytes
     // are immutable and no chrome animates (every elapsed is final, no
