@@ -1299,6 +1299,97 @@ static void run_toolgrow_scenario(int width, int term_h) {
     if (pty_master >= 0) close(pty_master);
 }
 
+// TRIM-STORM scenario — the FRONT-DELETION path that the fix corrects.
+// Every other scenario overflows the viewport but keeps the frozen
+// prefix UNDER frozen_row_budget(), so trim_frozen_if_oversized never
+// drops entries from the FRONT — it returns none() and the render-time
+// gate handles the bottom-shrink collapse. That left the trim's
+// commit_scrollback(N) accounting completely un-exercised end-to-end.
+//
+// Here we run MANY complete turns, each tall enough that the frozen
+// prefix blows past frozen_row_budget() (max(48, term_h*3)). Once it
+// does, the trim drops the oldest entries from the front — a TOP-
+// deletion maya cannot reconcile at render time — and issues
+// commit_scrollback(N). If N under-counts the rows actually dropped
+// (the old 8192-width conservative estimate), the dropped entries'
+// physical rows strand in native scrollback: R6 sees the composer /
+// prior turn duplicated one screen up. If N is exact (the fix), the
+// boundary lands once and R1/R5/R6 stay clean across every trim.
+static void run_trimstorm_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"revealts"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "ts-welcome");
+
+    // Enough turns that the accumulated frozen prefix exceeds
+    // frozen_row_budget() several times over, forcing repeated
+    // front-trims. Each turn: user submit (frozen), assistant streams a
+    // body that overflows the viewport, settle + freeze + trim.
+    const int kTurns = 14;
+    for (int turn = 0; turn < kTurns && !h.dead; ++turn) {
+        const std::string st = std::to_string(turn);
+
+        {
+            Message u; u.role = Role::User;
+            u.text = "Turn " + st + ": walk the whole pipeline in detail please.";
+            m.d.current.messages.push_back(std::move(u));
+            agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+            h.frame(m, "ts" + st + "-submit");
+        }
+
+        Message a; a.role = Role::Assistant;
+        a.streaming_text = "Beginning turn " + st + " investigation:";
+        m.d.current.messages.push_back(std::move(a));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        for (int f = 0; f < 3; ++f) { tick(); h.frame(m, "ts" + st + "-open" + std::to_string(f)); }
+
+        auto& back = m.d.current.messages.back();
+        // ~1.2 viewports of body per turn so a couple of turns already
+        // exceed the budget and every later turn triggers a front-trim.
+        const int body_lines = term_h + term_h / 4 + 6;
+        for (int d = 0; d < body_lines && !h.dead; ++d) {
+            back.streaming_text +=
+                "\n\nStep " + st + "." + std::to_string(d)
+                + ": builds tree-" + std::to_string(turn * 1000 + d)
+                + ", diffs canvas-" + std::to_string(turn * 1000 + d)
+                + ", serializes runs batch-" + std::to_string(turn * 1000 + d) + ".";
+            tick(); h.frame(m, "ts" + st + "-d" + std::to_string(d));
+        }
+        if (h.dead) break;
+
+        // Settle + freeze + trim through the production gate.
+        auto& b = m.d.current.messages.back();
+        b.text += b.streaming_text;
+        b.streaming_text.clear();
+        agentty::app::detail::settle_message_md(m, b);
+        m.s.phase = agentty::phase::Idle{};
+        int guard = 0;
+        do {
+            tick();
+            h.frame(m, "ts" + st + "-settle" + std::to_string(guard));
+        } while (!agentty::app::detail::live_tail_reveal_settled(m)
+                 && ++guard < 200 && !h.dead);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        // THE PATH UNDER TEST: this trim drops front entries once the
+        // prefix exceeds the budget and returns commit_scrollback(N).
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "ts" + st + "-freeze");
+        // A few idle frames so any stranded duplicate becomes visible to
+        // R6 while the composer repaints post-trim.
+        for (int f = 0; f < 3 && !h.dead; ++f) { tick(); h.frame(m, "ts" + st + "-idle" + std::to_string(f)); }
+    }
+    if (pty_master >= 0) close(pty_master);
+}
+
 int main() {
     // Each scenario dup2's a PTY over STDOUT to give term_dims() real
     // geometry; save the original so the summary is visible afterward.
@@ -1368,6 +1459,18 @@ int main() {
     for (auto s : tall_shapes) {
         if (g_failures) break;
         run_toolgrow_scenario(s.w, s.th);
+    }
+    // The FRONT-DELETION trim path: many tall turns overflow the frozen
+    // budget and force real front-trims whose commit_scrollback(N) must
+    // be EXACT. Under-commit strands a duplicate (R6); the fix makes N
+    // exact. Both normal and TALL shapes.
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_trimstorm_scenario(s.w, s.th);
+    }
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_trimstorm_scenario(s.w, s.th);
     }
     if (saved_stdout >= 0) { dup2(saved_stdout, STDOUT_FILENO); close(saved_stdout); }
     std::fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);

@@ -1044,61 +1044,43 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
     }
     if (drop == 0) return maya::Cmd<Msg>::none();
 
-    // Identify the full set the trim will remove — the leading `drop`
-    // entries plus any separator the drop exposes at index 0 (a turn's
-    // leading gap is its own entry pushed BEFORE it, so dropping the turn
-    // above can leave that gap/divider at the top, a blank hole). Both
-    // feed the conservative commit count below.
-    // CONSERVATIVE COMMIT COUNT — measure the entries we are about to drop
-    // (the leading `drop` plus any separators the drop will expose) at an
-    // un-wrappably-wide width. maya renders the frozen prefix at
-    // term_cols - chrome; a wider measure can only wrap LESS, so this
-    // height is provably <= the rows maya actually drops, at ANY real
-    // terminal width. Computed BEFORE the pop, while the entries are still
-    // present.
+    // EXACT COMMIT COUNT — a frozen-front trim is a TOP-DELETION, and the
+    // only corruption-free commit for a top-deletion is EXACTLY the number
+    // of rows removed. `pop_front_frozen` returns that number as the sum of
+    // frozen_rows[] for the dropped entries — and frozen_rows[] is maya's
+    // OWN measured render height at the live width (push_frozen measures
+    // through the real layout engine at measure_cols(term_cols), and
+    // ensure_frozen_width above healed any resize drift). So removed_rows is
+    // byte-for-byte what maya physically painted and scrolled off; it is the
+    // ground truth, not an estimate.
     //
-    // Why a LOWER bound and not the exact frozen_rows[] sum: the commit is
-    // a knife-edge. Committing MORE rows than maya physically scrolled off
-    // makes the next frame's content_rows exceed prev_rows — maya reads it
-    // as growth and re-emits the visible tail via bottom-edge \n's, pushing
-    // a duplicate copy into native scrollback (the "turn doubles in
-    // scrollback" bug, reproduced on a mobile soft-keyboard where the
-    // freeze-time ioctl width disagrees with maya's live render width by a
-    // column or two). Committing FEWER is harmless: the next frame shrinks,
-    // maya's render-time reconciliation (scrollback_prefix_matches → commit
-    // overflow + case-B soft repaint, app.cpp) detects the top-deletion and
-    // lands the boundary once, in place, no \x1b[3J wipe. Verified against
-    // real maya bytes: over-commit duplicates exactly (C - actual) rows;
-    // under-commit (down to zero) reconciles clean. This mirrors
-    // agent_session.cpp, the zero-corruption reference, which commits a
-    // deliberate `n * ROWS_PER_DROP_LOWER` under-estimate for the same
-    // reason.
-    constexpr int kUnwrappedWidth = 8192;   // wider than any real terminal
-    std::size_t total_drop = drop;
-    while (total_drop < m.ui.frozen_is_separator.size()
-           && m.ui.frozen_is_separator[total_drop])
-        ++total_drop;
-    std::size_t safe_commit = 0;
-    for (std::size_t k = 0; k < total_drop && k < m.ui.frozen.size(); ++k) {
-        std::size_t h = measure_element_rows(m.ui.frozen[k], kUnwrappedWidth);
-        safe_commit += (h < 1) ? 1 : h;   // every entry is at least one row
-    }
-
+    // Why EXACT and not the old 8192-width conservative UNDER-estimate:
+    // commit_inline_prefix shifts maya's prev_cells up by the committed
+    // count BEFORE the next render. If we commit FEWER than removed_rows,
+    // prev_cells keeps (removed_rows - committed) stale top rows that the
+    // dropped entries left behind — rows that no longer exist anywhere in
+    // the new (shorter) canvas. The next render's prefix memcmp then
+    // mismatches, and maya's overflow-recovery commits+repaints leaving
+    // those stale physical rows STRANDED one screen up in native scrollback:
+    // the exact "duplicate composer / turn one screen up" symptom. The
+    // over-commit-duplicates fear that motivated the under-estimate was a
+    // WIDTH-DRIFT artifact (freeze-time ioctl width ≠ maya's render width on
+    // a mobile soft-keyboard); ensure_frozen_width + measured frozen_rows[]
+    // now make removed_rows exact at the live width, so neither direction of
+    // drift remains. Commit exactly what was dropped; maya's
+    // scrollback_marker clamps it to prev_rows so an over-count is
+    // structurally impossible at the maya boundary too.
+    //
     // Drop the front in lockstep (frozen / frozen_rows /
     // frozen_is_separator / frozen_row_total), then strip any leading
-    // separator the drop exposed.
+    // separator the drop exposed — both count toward the exact commit.
     std::size_t removed_rows = pop_front_frozen(m, drop);
     removed_rows += pop_front_frozen_leading_separators(m);
     if (removed_rows == 0) return maya::Cmd<Msg>::none();
 
-    // Never commit more than the conservative lower bound, and never more
-    // than the model actually removed (defensive double-clamp).
-    const std::size_t commit_rows =
-        std::min<std::size_t>(safe_commit, removed_rows);
-    if (commit_rows == 0) return maya::Cmd<Msg>::none();
     return maya::Cmd<Msg>::commit_scrollback(
         static_cast<int>(std::min<std::size_t>(
-            commit_rows,
+            removed_rows,
             static_cast<std::size_t>(std::numeric_limits<int>::max()))));
 }
 
