@@ -365,7 +365,28 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
                 f.color = warn;
             }
         } else {
-            f.glyph = "\xe2\x97\x8f";   // ●
+            // The ONLY animated bytes in a live panel. Seam-safe because the
+            // footer is the panel's LAST row and, while any tool is
+            // non-terminal, the panel is the LAST content in the transcript
+            // (continuation prose only streams after every tool result is
+            // back). Progress output grows the body ABOVE the footer, so
+            // the footer can never be pushed past the viewport top while it
+            // still animates — by the time content streams below the panel,
+            // all tools are terminal and this branch renders the static ✓.
+            //
+            // Glyphs come straight from maya's Spinner<Dots> frame table
+            // (the single source of truth every animated surface maps),
+            // not a hand-copied array. agent_timeline is a STATELESS pure
+            // render — it can't hold a maya::Spinner instance (that owns
+            // per-frame state that must be advanced across frames, and this
+            // Config is rebuilt from scratch every frame, so an embedded
+            // Spinner would reset to frame 0 each render and never move).
+            // The persistent clock is m.s.spinner, ticked once per frame in
+            // meta.cpp; the host threads its frame_index() in as
+            // spinner_frame and we map it onto the shared glyph set here.
+            constexpr auto sp = maya::detail::get_spinner_frames<
+                maya::SpinnerStyle::Dots>();
+            f.glyph = sp.frames[((spinner_frame % sp.count) + sp.count) % sp.count];
             f.text  = "running";
             f.color = muted;
         }
@@ -440,7 +461,13 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
     // colors, both of which are seam-safe (footer = bottom append,
     // category colors are fixed per tool from first render).
     cfg.border_color = muted;
-    if (!all_terminal_title) cfg.frame = 0;
+    // frame = -1 ⇒ maya renders STATIC status glyphs (● running, ○ pending)
+    // on event header rows instead of the braille spinner. Those rows can
+    // sit above the seam (tool progress grows the body below them), so they
+    // must be byte-stable — but a frozen braille frame (`⠋` forever) reads
+    // as "stuck". A solid ● is equally immutable and reads as intentional.
+    // The moving spinner lives in the FOOTER glyph (seam-safe, see above).
+    if (!all_terminal_title) cfg.frame = -1;
 
     // Panel-level cache key for an ALL-TERMINAL batch. Settled tool bytes
     // are immutable and no chrome animates (every elapsed is final, no
