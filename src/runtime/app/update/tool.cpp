@@ -11,6 +11,7 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
+#include <maya/app/app.hpp>   // maya::request_animation_frame
 #include <nlohmann/json.hpp>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -57,6 +58,21 @@ void release_streaming_buffers(ToolUse& tc) {
     tc.args_dump_valid = false;
 }
 
+// Keep the render clock ticking for a bounded window so maya gets the
+// follow-up frames its live-tail shrink/overflow reconciliation needs
+// after a card's rendered height changes mid-turn. This is the same
+// lever the deferred settle-freeze uses (subscribe.cpp gates the tick
+// on settle_cooldown_ticks > 0); arming it here at every card-height
+// mutation reproduces agent_session's always-on clock at the exact
+// seams where the height changes. Grow-only so a longer in-flight
+// window is never truncated by a shorter one.
+void arm_reconcile_cooldown(Model& m) {
+    constexpr int kReconcileTicks = 6;
+    if (m.ui.settle_cooldown_ticks < kReconcileTicks)
+        m.ui.settle_cooldown_ticks = kReconcileTicks;
+    ::maya::request_animation_frame();
+}
+
 } // namespace
 
 void apply_tool_output(Model& m, const ToolCallId& id,
@@ -101,6 +117,21 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         }
         release_streaming_buffers(tc);
     });
+    // A tool reaching a terminal state SWAPS its card body from the
+    // running spinner into the full output/error body — the card's
+    // rendered height changes at this instant (a Failed card in
+    // particular grows by its error rows). If that height change shifts
+    // the overflowed prefix while the clock is about to lapse (last tool
+    // of the turn dropping toward Idle, or a coalesced fps=0 frame),
+    // maya composes the shifted frame ONCE and never gets the follow-up
+    // frames its shrink/overflow reconciliation needs — the old card's
+    // top rows strand in scrollback (the "card cut off one screen up"
+    // corruption). agent_session never sees this because its clock ticks
+    // UNCONDITIONALLY. Mirror that: arm the reconciliation cooldown so
+    // the clock keeps running for a few frames after any card-height
+    // change, guaranteeing maya reconciles the seam exactly like the
+    // reference's always-on tick.
+    arm_reconcile_cooldown(m);
 }
 
 void mark_tool_rejected(Model& m, const ToolCallId& id,
@@ -115,6 +146,10 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
         }
         release_streaming_buffers(tc);
     });
+    // Same rationale as apply_tool_output: a rejected tool's card body
+    // changes height (spinner → rejection reason), so keep the clock
+    // ticking a few frames to let maya reconcile the seam.
+    arm_reconcile_cooldown(m);
 }
 
 // ============================================================================

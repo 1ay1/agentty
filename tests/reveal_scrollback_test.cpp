@@ -43,6 +43,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <expected>
 #include <optional>
 #include <string>
 #include <thread>
@@ -64,6 +65,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/view.hpp"
+#include "agentty/tool/registry.hpp"
 
 using agentty::Model;
 using agentty::Message;
@@ -540,6 +542,42 @@ struct Harness {
                     commits += static_cast<std::size_t>(overflow);
                 }
             }
+            // Mirror maya's GROW-while-overflowed guard (app.cpp): a card
+            // growing mid-turn shifts the committed overflow prefix. Case
+            // (B) soft-repaint would re-serialize the shifted rows as a
+            // second copy, so the only correct recovery is a HardReset
+            // (\x1b[2J\x1b[3J\x1b[H wipe + fresh paint). Demote and render
+            // through the HardReset arm exactly as production does.
+            else if (prev_rows > term_h && R >= prev_rows
+                     && !synced->scrollback_prefix_matches(
+                            c, prev_rows - term_h)) {
+                auto hr = std::move(*synced).demote_to_hard_reset();
+                auto o = std::move(hr).render(
+                    c, content_rows(c), term_rows_for_test(term_h), pool,
+                    writer, false);
+                { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
+                // A HardReset wipes native scrollback (\x1b[3J) and
+                // repaints from the top: the wire shadow the harness
+                // tracks is now stale, so reset it to match the fresh
+                // paint. commits stays 0 until the next overflow.
+                wire.clear();
+                commits = 0;
+                synced = std::visit(
+                    [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                        using T = std::decay_t<decltype(a)>;
+                        if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                            return std::move(a);
+                        else return std::nullopt;
+                    }, std::move(o));
+                CHK(synced.has_value(),
+                    "R3: hard-reset recovery did not return Synced @" + tag);
+                if (!synced) { dead = true; return; }
+                if (std::getenv("REVEAL_DBG"))
+                    std::fprintf(stderr, "[dbg] %-14s HARD-RESET grow\n",
+                                 tag.c_str());
+                check_emu(tag);
+                return;
+            }
             auto wit = synced->verify();
             if (!wit) {
                 // REAL-RUNTIME RECOVERY (app.cpp): a poisoned shadow does
@@ -771,6 +809,26 @@ static ToolUse done_tool(const std::string& tag) {
                              std::move(out)};
     return t;
 }
+
+// A tool still RUNNING: its card renders the spinner/awaiting body (~1
+// row) — SHORT. When it later transitions terminal it SWAPS to the full
+// output/error body, GROWING the card. That mid-turn height grow, over a
+// live tail that has already overflowed the viewport, is the exact seam
+// the screenshot corruption lives at.
+static ToolUse running_tool(const std::string& tag) {
+    ToolUse t;
+    auto now = std::chrono::steady_clock::now();
+    t.id   = agentty::ToolCallId{"bash_" + tag};
+    t.name = agentty::ToolName{"bash"};
+    t.args = nlohmann::json{{"command", "git commit -m " + tag}};
+    t.status = ToolUse::Running{now - std::chrono::milliseconds{5}};
+    return t;
+}
+
+// Turn a running tool into a FAILED one carrying a multi-line error body
+// is driven directly through the real apply_tool_output reducer in the
+// scenario below (so the production height-grow + cooldown-arm path is
+// exercised), not via a hand-built status here.
 
 // A settled WRITE tool card with a LONG body. Once terminal, the view
 // renders it show_all=true (full body) in BOTH the live tail and the
@@ -1131,6 +1189,117 @@ static void run_codeblock_fold_scenario(int width, int term_h) {
     if (pty_master >= 0) close(pty_master);
 }
 
+// TOOL-CARD-GROW-AT-SETTLE scenario — the exact screenshot shape. A
+// live assistant run overflows the viewport while a bash tool
+// (`git commit`) is still RUNNING (short spinner card). Then the tool
+// FAILS, swapping the spinner for a multi-line error body: the card
+// GROWS mid-turn, shifting every row above it — including the already-
+// overflowed prefix now committed to native scrollback. If maya
+// composes that shifted frame once without the follow-up reconciliation
+// frames (the clock lapsing at the tool→continuation seam), the old
+// card's top rows strand in scrollback = the "card cut off one screen
+// up" corruption the user circled. apply_tool_output now arms the
+// reconcile cooldown so the clock keeps ticking exactly like
+// agent_session's always-on clock; the harness renders those cooldown
+// frames and R1/R5/R6 verify no stranded duplicate.
+static void run_toolgrow_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"revealtg"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "tg-welcome");
+
+    // Frozen user turn: committed prefix above the live run.
+    {
+        Message u; u.role = Role::User;
+        u.text = "push all and run the tests";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "tg-submit");
+    }
+
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Assistant streams prose that overflows the viewport, then issues a
+    // bash tool that is still RUNNING (short card).
+    Message a; a.role = Role::Assistant;
+    a.streaming_text = "I'll push both repos and run the suite:";
+    m.d.current.messages.push_back(std::move(a));
+    for (int f = 0; f < 4; ++f) { tick(); h.frame(m, "tg-open" + std::to_string(f)); }
+
+    {
+        auto& back = m.d.current.messages.back();
+        for (int d = 0; d < 30 && !h.dead; ++d) {
+            back.streaming_text +=
+                "\n\nStep " + std::to_string(d)
+                + ": builds tree-" + std::to_string(d)
+                + ", diffs canvas-" + std::to_string(d)
+                + ", serializes runs batch-" + std::to_string(d) + ".";
+            tick(); h.frame(m, "tg-d" + std::to_string(d));
+            tick(); h.frame(m, "tg-anim" + std::to_string(d));
+        }
+    }
+    if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+
+    // Settle the prose into .text (it stays live — tool continuation is
+    // pending) and push a RUNNING bash tool sub-turn (short spinner card).
+    {
+        auto& b = m.d.current.messages.back();
+        b.text += b.streaming_text;
+        b.streaming_text.clear();
+        agentty::app::detail::settle_message_md(m, b);
+    }
+    Message tmsg; tmsg.role = Role::Assistant;
+    tmsg.tool_calls.push_back(running_tool("tg"));
+    m.d.current.messages.push_back(std::move(tmsg));
+    m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+    for (int f = 0; f < 5; ++f) { tick(); h.frame(m, "tg-running" + std::to_string(f)); }
+    if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+
+    // THE SEAM: the tool FAILS. apply_tool_output swaps the spinner for a
+    // multi-line error body — the card GROWS. Production arms the
+    // reconcile cooldown here; model that by rendering the cooldown
+    // frames (the clock keeps ticking) so maya reconciles the shifted
+    // overflow prefix instead of composing once and stranding it.
+    {
+        const auto id = m.d.current.messages.back().tool_calls.front().id;
+        agentty::app::detail::apply_tool_output(
+            m, id,
+            std::unexpected(agentty::tools::ToolError::subprocess(
+                "[subprocess failed] git_commit (add) failed (exit 128): "
+                "fatal: pathspec did not match any files")));
+
+        // apply_tool_output armed settle_cooldown_ticks. Render exactly
+        // those cooldown frames (meta.cpp decrements one per Tick) — the
+        // window where maya reconciles the grown card. Without the fix
+        // the clock lapses after ONE frame and the shifted prefix strands.
+        int guard = 0;
+        while (m.ui.settle_cooldown_ticks > 0 && guard++ < 40 && !h.dead) {
+            --m.ui.settle_cooldown_ticks;   // mirror meta.cpp Tick
+            tick();
+            h.frame(m, "tg-reconcile" + std::to_string(guard));
+        }
+        // The turn then settles to Idle; a few idle frames confirm the
+        // grown card and composer are stable, single-copy.
+        m.s.phase = agentty::phase::Idle{};
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "tg-freeze");
+        for (int f = 0; f < 4 && !h.dead; ++f) {
+            tick(); h.frame(m, "tg-idle" + std::to_string(f));
+        }
+    }
+    if (pty_master >= 0) close(pty_master);
+}
+
 int main() {
     // Each scenario dup2's a PTY over STDOUT to give term_dims() real
     // geometry; save the original so the summary is visible afterward.
@@ -1189,6 +1358,17 @@ int main() {
     for (auto s : shapes) {
         if (g_failures) break;
         run_prior_writecard_scenario(s.w, s.th);
+    }
+    // The screenshot bug: a bash tool FAILS mid-turn while the live tail
+    // has overflowed the viewport — the card grows by its error body,
+    // shifting the committed prefix. Run on both normal and TALL shapes.
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_toolgrow_scenario(s.w, s.th);
+    }
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_toolgrow_scenario(s.w, s.th);
     }
     if (saved_stdout >= 0) { dup2(saved_stdout, STDOUT_FILENO); close(saved_stdout); }
     std::fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
