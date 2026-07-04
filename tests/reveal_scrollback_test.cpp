@@ -399,6 +399,45 @@ struct Harness {
             }
             seen.emplace_back(ln, y);
         }
+
+        // ── R6: THE COMPOSER-DUPLICATION SYMPTOM ────────────────────
+        // After a turn settles, the reported bug is a SECOND copy of the
+        // composer input box stranded one screen up (in native
+        // scrollback), while the live composer rides the viewport bottom.
+        // The composer's idle placeholder row renders "❯ type a
+        // message…"; the non-ASCII prompt chip degrades to spaces in the
+        // coarse TermEmu but the ASCII substring "type a message" is
+        // stable. It must appear AT MOST ONCE across the whole transcript
+        // (scrollback ++ viewport). Two occurrences = the stranded
+        // duplicate the user sees.
+        auto is_composer = [](const std::string& ln) {
+            return ln.find("type a message")      != std::string::npos
+                || ln.find("streaming \xe2\x80\x94 type to queue")
+                       != std::string::npos;
+        };
+        int composer_hits = 0;
+        int first_composer = -1;
+        for (int y = 0; y < static_cast<int>(all.size()); ++y) {
+            if (!is_composer(all[static_cast<std::size_t>(y)])) continue;
+            ++composer_hits;
+            if (first_composer < 0) first_composer = y;
+            else {
+                CHK(false,
+                    "R6: composer duplicated in terminal transcript @" + tag
+                    + " abs-rows " + std::to_string(first_composer) + " and "
+                    + std::to_string(y)
+                    + " (scrollback=" + std::to_string(scr.size()) + ")");
+                std::fprintf(stderr,
+                    "    --- terminal transcript (%zu sb + %zu view) ---\n",
+                    scr.size(), view.size());
+                for (int yy = 0; yy < static_cast<int>(all.size()); ++yy)
+                    std::fprintf(stderr, "    %3d|%s%s\n", yy,
+                        yy < static_cast<int>(scr.size()) ? "" : "V ",
+                        all[static_cast<std::size_t>(yy)].c_str());
+                dead = true;
+                return;
+            }
+        }
     }
 
     // Apply a trim's commit_scrollback(N) Cmd to maya's Synced state
@@ -502,21 +541,53 @@ struct Harness {
                 }
             }
             auto wit = synced->verify();
-            CHK(wit.has_value(), "R3: shadow verify failed @" + tag);
-            if (!wit) { dead = true; return; }
-            auto o = std::move(*synced).render(
-                c, content_rows(c), term_rows_for_test(term_h), pool,
-                writer, std::move(*wit), false);
-            { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
-            synced = std::visit(
-                [](auto&& a) -> std::optional<InlineFrame<Synced>> {
-                    using T = std::decay_t<decltype(a)>;
-                    if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
-                        return std::move(a);
-                    else return std::nullopt;
-                }, std::move(o));
-            CHK(synced.has_value(), "R2: render demoted out of Synced @" + tag);
-            if (!synced) { dead = true; return; }
+            if (!wit) {
+                // REAL-RUNTIME RECOVERY (app.cpp): a poisoned shadow does
+                // NOT kill the session — it demotes to Stale and the next
+                // render goes through compose case (B). When the frame has
+                // overflowed the viewport, app.cpp first commits the
+                // off-viewport rows, then demotes. Model that here so the
+                // harness exercises the SAME path production takes at a
+                // settle whose shadow diverged — the path that stranded the
+                // composer. (Previously the harness just died on R3, hiding
+                // the case-(B) over-serialize entirely.)
+                const int prev_rows = synced->rows();
+                if (prev_rows > term_h) {
+                    const int overflow = prev_rows - term_h;
+                    synced = std::move(*synced).commit(
+                        synced->scrollback_marker(overflow));
+                    commits += static_cast<std::size_t>(overflow);
+                }
+                auto stale = std::move(*synced).demote_to_stale();
+                auto o = std::move(stale).render(
+                    c, content_rows(c), term_rows_for_test(term_h), pool,
+                    writer, false);
+                { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
+                synced = std::visit(
+                    [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                        using T = std::decay_t<decltype(a)>;
+                        if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                            return std::move(a);
+                        else return std::nullopt;
+                    }, std::move(o));
+                CHK(synced.has_value(),
+                    "R3: stale recovery did not return Synced @" + tag);
+                if (!synced) { dead = true; return; }
+            } else {
+                auto o = std::move(*synced).render(
+                    c, content_rows(c), term_rows_for_test(term_h), pool,
+                    writer, std::move(*wit), false);
+                { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
+                synced = std::visit(
+                    [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                        using T = std::decay_t<decltype(a)>;
+                        if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                            return std::move(a);
+                        else return std::nullopt;
+                    }, std::move(o));
+                CHK(synced.has_value(), "R2: render demoted out of Synced @" + tag);
+                if (!synced) { dead = true; return; }
+            }
         }
 
         // R1: wire-model byte check. Canvas row y → absolute wire index
@@ -699,6 +770,129 @@ static ToolUse done_tool(const std::string& tag) {
     t.status = ToolUse::Done{now - std::chrono::milliseconds{5}, now,
                              std::move(out)};
     return t;
+}
+
+// A settled WRITE tool card with a LONG body. Once terminal, the view
+// renders it show_all=true (full body) in BOTH the live tail and the
+// frozen snapshot — a TALL colored card. This is the shape that sat in
+// the user's scrollback (a prior `write random.txt` diff) while a NEW
+// turn settled above it and stranded a duplicate composer. `lines`
+// controls the body height so the card overflows the viewport.
+static ToolUse settled_write_tool(const std::string& tag, int lines) {
+    ToolUse t;
+    auto now = std::chrono::steady_clock::now();
+    t.id   = agentty::ToolCallId{"write_" + tag};
+    t.name = agentty::ToolName{"write"};
+    std::string content;
+    for (int i = 0; i < lines; ++i)
+        content += "line " + std::to_string(i) + ": " + tag
+                 + " written body content that wraps a bit\n";
+    t.args = nlohmann::json{{"path", "random_" + tag + ".txt"},
+                            {"content", content}};
+    std::string out = "wrote " + std::to_string(lines) + " lines to random_"
+                    + tag + ".txt";
+    t.status = ToolUse::Done{now - std::chrono::milliseconds{5}, now,
+                             std::move(out)};
+    return t;
+}
+
+// PRIOR-WRITE-CARD scenario — the exact shape of the reported bug.
+// A completed turn containing a TALL settled write card is frozen into
+// the prefix (it lives in native scrollback, like the user's earlier
+// `write random.txt`). THEN a second turn streams a reply that overflows
+// and settles. On the settle frame the canvas contains the (full-body)
+// write card in the frozen prefix; if maya re-serializes that committed
+// region, the composer band is pushed a second time into scrollback —
+// R6 fires. Runs on TALL terminals (the reported geometry).
+static void run_prior_writecard_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"revealpw"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+
+    // Turn 1: user asks, assistant writes a tall file. Build the model
+    // fully FIRST, then render the initial frame already at the settled
+    // height — this mirrors a resumed session (rehydrate) rather than a
+    // welcome→content jump, so the first frame's grow is not conflated
+    // with the settle grow we're actually testing.
+    {
+        Message u; u.role = Role::User;
+        u.text = "Create random.txt with some nonsense.";
+        m.d.current.messages.push_back(std::move(u));
+
+        Message a; a.role = Role::Assistant;
+        a.text = "Done \xe2\x80\x94 created random.txt with a bit of nonsense.";
+        a.tool_calls.push_back(settled_write_tool("r1", term_h + 20));
+        m.d.current.messages.push_back(std::move(a));
+
+        agentty::app::detail::settle_message_md(
+            m, m.d.current.messages.back());
+        agentty::app::detail::rehydrate_frozen(m);
+        h.frame(m, "pw-turn1-rehydrated");
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "pw-turn1-trim");
+    }
+    if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+
+    // Turn 2: user asks again; assistant streams a reply that overflows,
+    // then settles. This is the settle that stranded the composer.
+    {
+        Message u; u.role = Role::User;
+        u.text = "now edit it";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "pw-turn2-submit");
+    }
+
+    Message a2; a2.role = Role::Assistant;
+    a2.streaming_text = "Sure, here are three trivia facts, unrelated:";
+    m.d.current.messages.push_back(std::move(a2));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    for (int f = 0; f < 4; ++f) { tick(); h.frame(m, "pw-open" + std::to_string(f)); }
+
+    auto& back = m.d.current.messages.back();
+    for (int d = 0; d < 40 && !h.dead; ++d) {
+        back.streaming_text +=
+            "\n\nParagraph " + std::to_string(d)
+            + ": builds tree-" + std::to_string(d)
+            + ", diffs canvas-" + std::to_string(d)
+            + ", serializes runs batch-" + std::to_string(d) + ".";
+        tick(); h.frame(m, "pw-d" + std::to_string(d));
+        tick(); h.frame(m, "pw-anim" + std::to_string(d));
+    }
+    if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+
+    // Settle turn 2 through the production gate.
+    {
+        auto& b = m.d.current.messages.back();
+        b.text += b.streaming_text;
+        b.streaming_text.clear();
+        agentty::app::detail::settle_message_md(m, b);
+        m.s.phase = agentty::phase::Idle{};
+        int guard = 0;
+        do {
+            tick();
+            h.frame(m, "pw-settle" + std::to_string(guard));
+        } while (!agentty::app::detail::live_tail_reveal_settled(m)
+                 && ++guard < 200 && !h.dead);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "pw-freeze");
+        // A couple of idle animation frames after the freeze (the
+        // settle_cooldown window) — the composer keeps repainting; any
+        // stranded copy is now visible to R6.
+        for (int f = 0; f < 4 && !h.dead; ++f) { tick(); h.frame(m, "pw-idle" + std::to_string(f)); }
+    }
+    if (pty_master >= 0) close(pty_master);
 }
 
 static void run_multiturn_scenario(int width, int term_h) {
@@ -945,6 +1139,15 @@ int main() {
     const struct { int w, th; } shapes[] = {
         {80, 24}, {60, 16}, {100, 20}, {72, 12},
     };
+    // TALL terminals (> 24 rows) exercise the min(rows,24) clamp in
+    // view.cpp: the layout is BUILT under a 24-row cap but RENDERED at
+    // the real height, so the composer's absolute row in the built tree
+    // can disagree with where it lands on the wire. The reported bug is
+    // a composer stranded one screen up after a turn settles on exactly
+    // such a terminal — R6 catches it.
+    const struct { int w, th; } tall_shapes[] = {
+        {80, 40}, {100, 50}, {120, 32}, {90, 60},
+    };
     for (auto s : shapes) {
         run_scenario(s.w, s.th);
         if (g_failures) break;
@@ -960,6 +1163,32 @@ int main() {
     for (auto s : shapes) {
         if (g_failures) break;
         run_codeblock_fold_scenario(s.w, s.th);
+    }
+    // Re-run every scenario on TALL terminals — the untested regime
+    // where view.cpp's min(rows,24) build-vs-render height clamp bites.
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_scenario(s.w, s.th);
+    }
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_multiturn_scenario(s.w, s.th);
+    }
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_codeblock_fold_scenario(s.w, s.th);
+    }
+    // The reported bug: a PRIOR turn's tall settled write card in the
+    // frozen prefix, then a second turn settles above it. Composer
+    // duplication (R6) triggers here where the plain-prose scenarios
+    // above stay clean.
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_prior_writecard_scenario(s.w, s.th);
+    }
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_prior_writecard_scenario(s.w, s.th);
     }
     if (saved_stdout >= 0) { dup2(saved_stdout, STDOUT_FILENO); close(saved_stdout); }
     std::fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);
