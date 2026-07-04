@@ -531,52 +531,51 @@ struct Harness {
             CHK(synced.has_value(), "R2: first frame not Synced @" + tag);
             if (!synced) { dead = true; return; }
         } else {
-            // Mirror maya's own shrink-while-overflowed reconciliation so
-            // the harness prev_rows tracks the wire exactly.
+            // Mirror maya's app.cpp SINGLE scrollback-invariant gate:
+            // if the frame is OVERFLOWED and the committed overflow
+            // prefix no longer matches the wire, the per-row diff is
+            // unsafe (it would rewrite immutable native scrollback).
+            // Recover BEFORE the diff — exactly one memcmp, uniform for
+            // shrink / grow / any future cause:
+            //   • growing (R > prev_rows): case (B) would re-overflow, so
+            //     HardReset (\x1b[2J\x1b[3J\x1b[H wipe + fresh paint);
+            //   • not growing: commit off-viewport rows + soft-repaint.
             const int prev_rows = synced->rows();
-            if (prev_rows > term_h && R < prev_rows) {
+            if (prev_rows > term_h
+                && !synced->scrollback_prefix_matches(c, prev_rows - term_h)) {
                 const int overflow = prev_rows - term_h;
-                if (!synced->scrollback_prefix_matches(c, overflow)) {
-                    synced = std::move(*synced).commit(
-                        synced->scrollback_marker(overflow));
-                    commits += static_cast<std::size_t>(overflow);
+                if (R > prev_rows) {
+                    // Growing + prefix shift → HardReset.
+                    auto hr = std::move(*synced).demote_to_hard_reset();
+                    auto o = std::move(hr).render(
+                        c, content_rows(c), term_rows_for_test(term_h), pool,
+                        writer, false);
+                    { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
+                    // HardReset wipes native scrollback (\x1b[3J) and
+                    // repaints from the top: the wire shadow is now
+                    // stale, so reset it to match the fresh paint.
+                    wire.clear();
+                    commits = 0;
+                    synced = std::visit(
+                        [](auto&& a) -> std::optional<InlineFrame<Synced>> {
+                            using T = std::decay_t<decltype(a)>;
+                            if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
+                                return std::move(a);
+                            else return std::nullopt;
+                        }, std::move(o));
+                    CHK(synced.has_value(),
+                        "R3: hard-reset recovery did not return Synced @" + tag);
+                    if (!synced) { dead = true; return; }
+                    if (std::getenv("REVEAL_DBG"))
+                        std::fprintf(stderr, "[dbg] %-14s HARD-RESET grow\n",
+                                     tag.c_str());
+                    check_emu(tag);
+                    return;
                 }
-            }
-            // Mirror maya's GROW-while-overflowed guard (app.cpp): a card
-            // growing mid-turn shifts the committed overflow prefix. Case
-            // (B) soft-repaint would re-serialize the shifted rows as a
-            // second copy, so the only correct recovery is a HardReset
-            // (\x1b[2J\x1b[3J\x1b[H wipe + fresh paint). Demote and render
-            // through the HardReset arm exactly as production does.
-            else if (prev_rows > term_h && R >= prev_rows
-                     && !synced->scrollback_prefix_matches(
-                            c, prev_rows - term_h)) {
-                auto hr = std::move(*synced).demote_to_hard_reset();
-                auto o = std::move(hr).render(
-                    c, content_rows(c), term_rows_for_test(term_h), pool,
-                    writer, false);
-                { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
-                // A HardReset wipes native scrollback (\x1b[3J) and
-                // repaints from the top: the wire shadow the harness
-                // tracks is now stale, so reset it to match the fresh
-                // paint. commits stays 0 until the next overflow.
-                wire.clear();
-                commits = 0;
-                synced = std::visit(
-                    [](auto&& a) -> std::optional<InlineFrame<Synced>> {
-                        using T = std::decay_t<decltype(a)>;
-                        if constexpr (std::is_same_v<T, InlineFrame<Synced>>)
-                            return std::move(a);
-                        else return std::nullopt;
-                    }, std::move(o));
-                CHK(synced.has_value(),
-                    "R3: hard-reset recovery did not return Synced @" + tag);
-                if (!synced) { dead = true; return; }
-                if (std::getenv("REVEAL_DBG"))
-                    std::fprintf(stderr, "[dbg] %-14s HARD-RESET grow\n",
-                                 tag.c_str());
-                check_emu(tag);
-                return;
+                // Not growing + prefix shift → commit + soft-repaint.
+                synced = std::move(*synced).commit(
+                    synced->scrollback_marker(overflow));
+                commits += static_cast<std::size_t>(overflow);
             }
             auto wit = synced->verify();
             if (!wit) {
