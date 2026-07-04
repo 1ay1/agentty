@@ -134,6 +134,16 @@ struct MessageMdCache {
     std::size_t last_text_size           = static_cast<std::size_t>(-1);
     std::size_t last_streaming_size      = static_cast<std::size_t>(-1);
     std::size_t last_pending_size        = static_cast<std::size_t>(-1);
+
+    // Viewport height seen on the previous frame (available_height() from
+    // the RenderContext). A DROP between frames is a terminal shrink: the
+    // terminal autonomously pushes the top viewport rows into immutable
+    // native scrollback. If the live reveal edge (ghost-blanked + scrambled
+    // per-codepoint) is among those rows it freezes stale in scrollback and
+    // the row is lost. cached_markdown_for snaps the reveal to the edge on
+    // such a frame (snap_reveal_to_edge) so no ghosted row exists to strand.
+    // 0 is the "first frame / unknown" sentinel (no shrink inferred).
+    int last_render_height = 0;
 };
 
 struct TurnConfigCache {

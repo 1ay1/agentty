@@ -11,6 +11,7 @@
 
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
+#include <maya/core/render_context.hpp> // available_height (resize-shrink detect)
 #include <maya/render/cache_id.hpp>
 #include <maya/render/renderer.hpp> // build_layout_tree / layout::compute
 #include <maya/layout/yoga.hpp>     // maya::layout::compute / LayoutNode
@@ -428,6 +429,79 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     const bool stream_in_motion =
         wire_streaming_here
         || (!settled && since_grow_ms <= kRevealActiveMs);
+
+    // ── Scrollback safety: never let a mid-reveal row cross the viewport
+    //    top. Rows above the top are committed to IMMUTABLE native
+    //    scrollback; if one gets there while the typewriter is still
+    //    behind the wire (ghost-blanked cells, scramble tip, hot
+    //    gradient), later frames complete the reveal, the canvas row no
+    //    longer matches the committed copy, maya's scrollback-invariant
+    //    gate fires, and the grow-path recovery is a HardReset
+    //    (\x1b[2J\x1b[3J wipe) — seen by the user as duplicated/garbled
+    //    prose stranded above the tool cards.
+    //
+    //    (a) TOOL CARDS on this message: the Anthropic wire closes the
+    //        text block BEFORE tool_use streams, so this message's prose
+    //        is wire-complete the instant a ToolUse exists — there is
+    //        nothing left to type out. Meanwhile the card panel renders
+    //        BELOW this markdown and grows (Pending → Running progress
+    //        → Done), pushing the prose toward/past the viewport top.
+    //        Three-part hardening, all idempotent:
+    //        • snap_reveal_to_edge(): un-ghosts the tail (bumps
+    //          build_dirty_ so the rebuild is immediate);
+    //        • set_reveal_fx(false): stops the per-frame tip mutation
+    //          (scramble glyphs, gradient restyle, pulsing caret) so
+    //          every row that scrolls off is in its FINAL glyphs+style;
+    //        • finish(): force-commits the TRAILING PARAGRAPH into the
+    //          block path NOW. A message's last paragraph never receives
+    //          its terminating \n\n, so without this it rides in
+    //          render_tail's inline path for the whole tool phase and
+    //          only converts to a committed block at turn settle — and
+    //          the two paths wrap at (off-by-one) different widths, so
+    //          the conversion REWRITES the paragraph's rows. If those
+    //          rows crossed the viewport top during the tool phase
+    //          (they routinely do — the growing card pushes them up),
+    //          the settle-time rewrite hits immutable scrollback and
+    //          maya's gate can only HardReset (\x1b[2J\x1b[3J), wiping
+    //          and re-stranding the transcript — the oracle's
+    //          t1-settle corruption and the user's "prose duplicated
+    //          above the cards" screenshots. Committing here makes the
+    //          rewrap happen while the paragraph is still at the
+    //          viewport bottom (diff-repaintable), so its bytes are
+    //          FINAL before any later frame can scroll them off.
+    //        Post-tool prose arrives on a NEW placeholder Message (own
+    //        widget, fx on), so nothing visible is lost — the animation
+    //        simply doesn't outlive the prose it animates.
+    {
+        const bool has_cards = !msg.tool_calls.empty();
+        // Gate on is_live(): finish() assigns live_=false through the
+        // Tracked<> wrapper, which bumps build_dirty_ on EVERY assignment
+        // (even same-value) — running this block per frame would force a
+        // full widget rebuild every frame of the whole tool phase (the
+        // long-turn "md streaming becomes slow" lag). After the first
+        // pass live_ is off, is_live() is false, and the block is skipped;
+        // snap/fx-off are no-ops on a finished widget anyway.
+        if (has_cards && !settled && cache.streaming->is_live()) {
+            cache.streaming->snap_reveal_to_edge();
+            cache.streaming->set_reveal_fx(false);
+            cache.streaming->finish();
+        }
+    }
+
+    //    (b) Viewport HEIGHT SHRINK: the terminal autonomously pushes the
+    //        top viewport rows into native scrollback. If the live reveal
+    //        edge is among them it freezes stale (the height-resize
+    //        corruption). A resize is a discrete user event, so rendering
+    //        the tail fully-revealed for that one frame is imperceptible
+    //        and leaves no ghosted row to strand. snap_reveal_to_edge is
+    //        a no-op when settled / not reveal_fx / already at the edge.
+    {
+        const int cur_h = ::maya::available_height();
+        if (cache.last_render_height > 0 && cur_h < cache.last_render_height
+            && !settled)
+            cache.streaming->snap_reveal_to_edge();
+        cache.last_render_height = cur_h;
+    }
 
     auto built = cache.streaming->build();
 
