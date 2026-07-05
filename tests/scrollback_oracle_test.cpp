@@ -366,12 +366,29 @@ struct Ctx {
         emu->saw_3j = emu->saw_2j = false;
         const std::size_t sb_before = emu->scrollback.size();
         const int rows_before = rt->inline_content_rows();
+        static const bool trace = std::getenv("ORACLE_TRACE") != nullptr;
         // Snapshot the committed scrollback tail BEFORE this render, so if
         // this frame drives maya non-Synced we can print the exact rows
         // that were committed and about to be rewritten.
         std::vector<std::string> sb_snapshot = emu->scrollback;
         (void)rt->render(agentty::ui::view(*m));
         const int rows_after = rt->inline_content_rows();
+        if (trace)
+            std::fprintf(err, "  [trace %s] rows %d -> %d sb %zu\n",
+                         tag.c_str(), rows_before, rows_after,
+                         emu->scrollback.size());
+        if (const char* want = std::getenv("ORACLE_DUMP_AT");
+            want && tag == want) {
+            std::fprintf(err, "  [dump %s] viewport:\n", tag.c_str());
+            for (std::size_t i = 0; i < emu->screen.size(); ++i)
+                std::fprintf(err, "    vp%3zu|%s\n", i,
+                             emu->screen[i].c_str());
+            const std::size_t lo = emu->scrollback.size() > 12
+                                 ? emu->scrollback.size() - 12 : 0;
+            for (std::size_t i = lo; i < emu->scrollback.size(); ++i)
+                std::fprintf(err, "    sb%4zu|%s\n", i,
+                             emu->scrollback[i].c_str());
+        }
         if (rows_before != 0 && rows_after == 0) {
             std::fprintf(err, "  [dbg] frame %s: maya entered non-Synced (rows %d -> 0)\n",
                          tag.c_str(), rows_before);
@@ -734,6 +751,189 @@ static bool tool_turn(Ctx& cx, int t, int H) {
     return settle_freeze_trim(cx, st);
 }
 
+// A WRITE/EDIT turn: the mutating-tool shape. Distinct hazard from the
+// Bash rounds: a streaming write/edit card renders a SMALL tail-windowed
+// preview (show_all=false, ~code_tail rows) while its args grow, then at
+// terminal flips to the FULL body (show_all=true) — a large height GROW
+// in one frame while committed prose rows sit above the panel. The edit
+// additionally switches RENDER PATHS at settle: streaming EditDiff-from-
+// args → fence-parsed GitDiff from the tool output. Both transitions
+// must be pure bottom-appends w.r.t. committed rows.
+static bool write_edit_turn(Ctx& cx, int t, int H) {
+    Model& m = *cx.m;
+    const std::string st = std::to_string(t);
+
+    { // submit — mirror submit_message: freeze prior turn, then trim
+        Message u; u.role = Role::User;
+        u.text = "turn " + st + ": write the file and fix uniq-" + st + "-ask.";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        using Cmd = maya::Cmd<agentty::Msg>;
+        if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner)) {
+            std::fprintf(err, "  [info] turn %s: submit trim commit_scrollback(%d)\n",
+                         st.c_str(), c->rows);
+            cx.rt->commit_inline_prefix(c->rows);
+        }
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        if (cx.frame("t" + st + "-submit")) return true;
+    }
+
+    Message a; a.role = Role::Assistant;
+    a.streaming_text = "Turn " + st + " write opening: uniq-" + st + "-open.";
+    m.d.current.messages.push_back(std::move(a));
+    for (int f = 0; f < 2; ++f) { tick(); if (cx.frame("t" + st + "-o" + std::to_string(f))) return true; }
+
+    // Wrapping prose lead-in so the tail already overflows the viewport
+    // before the card exists — every later card mutation happens while
+    // rows above the card are committed.
+    const int lead = H / 4 + 3;
+    if (stream_paras(cx, m.d.current.messages.back(), st, 0, lead,
+                     ("t" + st + "-pre").c_str(), /*wrapping=*/true, /*burst=*/2))
+        return true;
+
+    // ── WRITE: args stream in (content grows to ~3× viewport), card is
+    //    Pending with a tail-window preview; then Running; then Done →
+    //    the card expands tail-window → FULL body in one frame.
+    {
+        auto& msg = m.d.current.messages.back();
+        ToolUse tc;
+        tc.id   = agentty::ToolCallId{"write-" + st};
+        tc.name = agentty::ToolName{"write"};
+        tc.args = nlohmann::json{{"file_path", "src/gen_" + st + ".cpp"},
+                                 {"content", ""}};
+        tc.args_streaming = "{\"file_path\":\"src/gen_" + st + ".cpp\",\"content\":\"";
+        tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+        msg.tool_calls.push_back(std::move(tc));
+        tick(); if (cx.frame("t" + st + "-w-pending")) return true;
+
+        // Stream the content: the reducer fills args["content"] from the
+        // partial-JSON decoder as input_json deltas land; args_streaming
+        // grows in lockstep (it feeds compute_render_key so caches can't
+        // stale-blit). 3×H lines, bursts of 5 lines, render every 2nd.
+        const int kLines = 3 * H;
+        std::string content;
+        int since = 0;
+        for (int ln = 0; ln < kLines; ++ln) {
+            std::string line = "    auto v" + std::to_string(ln)
+                + " = compute_" + st + "(" + std::to_string(ln) + ");\n";
+            content += line;
+            auto& wt = msg.tool_calls.back();
+            wt.args_streaming += line;
+            if (ln % 5 == 4) {
+                wt.args["content"] = content;   // decoder snapshot cadence
+                if (++since >= 2) {
+                    since = 0;
+                    tick(); if (cx.frame("t" + st + "-w-grow" + std::to_string(ln + 1))) return true;
+                }
+            }
+        }
+        {
+            auto& wt = msg.tool_calls.back();
+            wt.args["content"] = content;
+            tick(); if (cx.frame("t" + st + "-w-args-done")) return true;
+
+            // Execute: Running (brief), then Done. The Done flip switches
+            // the body tail-window → show_all FULL content (~3×H rows) —
+            // the big one-frame GROW this turn exists to check.
+            m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+            wt.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+            tick(); if (cx.frame("t" + st + "-w-run")) return true;
+            auto started = std::get<ToolUse::Running>(wt.status).started_at;
+            wt.status = ToolUse::Done{
+                started, std::chrono::steady_clock::now(),
+                "Wrote " + std::to_string(content.size()) + " bytes to src/gen_"
+                    + st + ".cpp"};
+            wt.expanded = false;
+            tick(); if (cx.frame("t" + st + "-w-done")) return true;
+            tick(); if (cx.frame("t" + st + "-w-fold")) return true;
+        }
+    }
+
+    // Continuation prose on a NEW message (production sub-turn shape).
+    {
+        Message cont; cont.role = Role::Assistant;
+        m.d.current.messages.push_back(std::move(cont));
+    }
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    if (stream_paras(cx, m.d.current.messages.back(), st, lead, 3,
+                     ("t" + st + "-w-post").c_str(), /*wrapping=*/true, /*burst=*/2))
+        return true;
+
+    // ── EDIT: hunks stream into args.edits one by one (elided per-hunk
+    //    preview), then Done with a ```diff fence in the output — the
+    //    settled card re-renders through the fence-parse GitDiff path in
+    //    FULL (show_all), a render-path switch + height grow in one frame.
+    {
+        auto& msg = m.d.current.messages.back();
+        ToolUse tc;
+        tc.id   = agentty::ToolCallId{"edit-" + st};
+        tc.name = agentty::ToolName{"edit"};
+        tc.args = nlohmann::json{{"path", "src/gen_" + st + ".cpp"},
+                                 {"edits", nlohmann::json::array()}};
+        tc.args_streaming = "{\"path\":\"src/gen_" + st + ".cpp\",\"edits\":[";
+        tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+        msg.tool_calls.push_back(std::move(tc));
+        m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+        tick(); if (cx.frame("t" + st + "-e-pending")) return true;
+
+        // 5 hunks, each ~6 lines per side, landing one per rendered frame.
+        const int kHunks = 5;
+        std::string diff_body;
+        for (int hk = 0; hk < kHunks; ++hk) {
+            std::string ot, nt;
+            for (int l = 0; l < 6; ++l) {
+                ot += "old_" + st + "_h" + std::to_string(hk) + "_l"
+                    + std::to_string(l) + "();\n";
+                nt += "new_" + st + "_h" + std::to_string(hk) + "_l"
+                    + std::to_string(l) + "();\n";
+            }
+            auto& et = msg.tool_calls.back();
+            et.args["edits"].push_back({{"old_text", ot}, {"new_text", nt}});
+            et.args_streaming += ot + nt;   // size proxy for render key
+            diff_body += "@@ -" + std::to_string(hk * 10 + 1) + ",6 +"
+                       + std::to_string(hk * 10 + 1) + ",6 @@\n";
+            for (int l = 0; l < 6; ++l)
+                diff_body += "-old_" + st + "_h" + std::to_string(hk) + "_l"
+                           + std::to_string(l) + "();\n";
+            for (int l = 0; l < 6; ++l)
+                diff_body += "+new_" + st + "_h" + std::to_string(hk) + "_l"
+                           + std::to_string(l) + "();\n";
+            tick(); if (cx.frame("t" + st + "-e-hunk" + std::to_string(hk))) return true;
+        }
+
+        // Done: output carries the ```diff fence → settled GitDiff path,
+        // full body. Land the flip and the continuation's first prose
+        // bytes in ONE frame (production burst: ToolExecOutput + first
+        // continuation deltas between two renders) — grow + body-path
+        // switch on the same frame is the HardReset arm if anything above
+        // the seam changed.
+        {
+            auto& et = msg.tool_calls.back();
+            et.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+            tick(); if (cx.frame("t" + st + "-e-run")) return true;
+            auto started = std::get<ToolUse::Running>(et.status).started_at;
+            et.status = ToolUse::Done{
+                started, std::chrono::steady_clock::now(),
+                "Edited src/gen_" + st + ".cpp (" + std::to_string(kHunks)
+                    + " edits):\n```diff\n" + diff_body + "\n```"};
+            et.expanded = false;
+            // NO render here — the Done flip rides the same frame as the
+            // continuation prose below.
+        }
+    }
+    {
+        Message cont; cont.role = Role::Assistant;
+        m.d.current.messages.push_back(std::move(cont));
+    }
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    if (stream_paras(cx, m.d.current.messages.back(), st, lead + 3, 3,
+                     ("t" + st + "-e-post").c_str(), /*wrapping=*/true, /*burst=*/2))
+        return true;
+
+    return settle_freeze_trim(cx, st);
+}
+
 static int run_shape(int W, int H) {
     int master = -1, slave = -1;
     if (openpty(&master, &slave, nullptr, nullptr, nullptr) != 0) {
@@ -770,12 +970,16 @@ static int run_shape(int W, int H) {
 
     if (cx.frame("welcome")) goto done;
 
-    // Alternate prose and tool turns; enough to trigger the trim twice.
+    // Rotate prose / bash-tool / write+edit turns; enough to trigger the
+    // trim twice. The write+edit turn covers the mutating-tool card's
+    // tail-window→show_all settle expansion and the EditDiff→GitDiff
+    // render-path switch, both while committed rows sit above the panel.
     {
         const int kTurns = 6;
         for (int t = 0; t < kTurns; ++t) {
-            bool failed = (t % 2 == 0) ? prose_turn(cx, t, H)
-                                       : tool_turn(cx, t, H);
+            bool failed = (t % 3 == 0) ? prose_turn(cx, t, H)
+                        : (t % 3 == 1) ? tool_turn(cx, t, H)
+                                       : write_edit_turn(cx, t, H);
             if (failed) goto done;
         }
     }
@@ -791,7 +995,13 @@ int main() {
     setlocale(LC_ALL, "C.UTF-8");   // wcwidth needs a UTF-8 locale
     err = fdopen(dup(STDERR_FILENO), "w");
     const int shapes[][2] = {{80, 30}, {60, 18}, {100, 50}, {46, 76}};
+    // ORACLE_SHAPE="60x18" runs a single shape (debug iteration).
+    const char* only = std::getenv("ORACLE_SHAPE");
     for (auto& s : shapes) {
+        if (only) {
+            const std::string want = std::to_string(s[0]) + "x" + std::to_string(s[1]);
+            if (want != only) continue;
+        }
         if (run_shape(s[0], s[1]) == 2) return 2;
     }
     if (g_failures == 0)
