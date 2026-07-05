@@ -1,5 +1,6 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -7,6 +8,8 @@
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+
+#include <maya/platform/io.hpp>
 
 namespace agentty::ui {
 
@@ -78,6 +81,37 @@ void accumulate_grep_hits(const std::string& output, GrepHits& out) {
 // terminal the caller feeds the full content (show_all=true) and the
 // final card renders everything.
 constexpr std::size_t kStreamTailLines = 64;
+
+// ── Streaming-card body budget ────────────────────────────────────────
+//
+// THE INVARIANT (scrollback oracle, write/edit turn): while a write/edit
+// card streams, its event HEADER row must stay inside the viewport. If
+// the body grows tall enough to push the header into native scrollback,
+// the settle's Running→Done restyle of that row (● bright → ✓ + dim on
+// the tree/name cells — a STYLE-ONLY rewrite, invisible in char dumps)
+// is a committed-row rewrite; maya's gate can only recover with a
+// destructive HardReset on the grow frame.
+//
+// The budget therefore scales with the REAL terminal height instead of
+// being pinned to the worst case. Fixed chrome below the header, counted
+// from the oracle's 60x18 viewport dump:
+//   header(1) + blank(1) + footer(1) + card bottom border(1) + gap(1)
+//   + composer(6) + status bar(3) = 14 rows, +1 slack = 15.
+// body_budget = term_rows − 15, floored at 3 (the proven-safe minimum at
+// 18-row terminals — exactly the config the oracle passes with).
+//
+// query_terminal_size (not available_height): tool bodies are built at
+// VIEW-BUILD time, before the render pass installs the sized
+// RenderContext — available_height() would return the 24-row default
+// (see welcome_screen.hpp's max_rows rationale; pickers.cpp uses the
+// same direct query for the same reason).
+[[nodiscard]] int stream_body_budget() {
+    const auto sz = maya::platform::query_terminal_size(
+        maya::platform::stdout_handle());
+    const int rows = sz.height.value > 0 ? sz.height.value : 24;
+    constexpr int kChromeBelowHeader = 15;
+    return std::max(3, rows - kChromeBelowHeader);
+}
 
 [[nodiscard]] std::string tail_window(std::string_view s,
                                       std::size_t keep_lines) {
@@ -256,24 +290,23 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 if (streaming_now && out.hunks.size() > 1)
                     out.hunks.erase(out.hunks.begin(),
                                     out.hunks.end() - 1);
-                // ...and keep that hunk COMPACT: tail-only, 1 line per
-                // side → a 3-row body (stat chip + −tail + +tail), the SAME
-                // height budget as Write's streaming slice. This budget is
+                // ...and keep that hunk inside the STREAMING BODY BUDGET:
+                // tail-only, budget-derived lines per side. The budget is
                 // load-bearing, not cosmetic: the event HEADER row sits
-                // above the body, and everything below the header (body +
-                // blank + footer + border + composer/status chrome ≈ 13
-                // rows) must fit under term_h so the header stays INSIDE
-                // the viewport while the card streams. At 18-row terminals
-                // a 5-row body (2 lines per side) pushed the header into
-                // native scrollback, where the settle's Running→Done
-                // restyle (● bright → ✓ dim on tree/name/status cells) was
-                // a committed-row rewrite — maya's gate could only recover
-                // with a destructive HardReset on the grow frame (oracle
-                // t*-e-post at 60x18). Write passes with its 3-row window;
-                // Edit gets the same contract.
+                // above the body, and everything below it (body + footer +
+                // border + composer/status chrome ≈ 15 rows) must fit
+                // under term_h so the header stays INSIDE the viewport
+                // while the card streams. At 18-row terminals that leaves
+                // 1 line per side (the config the oracle proves safe); at
+                // taller terminals the preview widens up to the settled
+                // profile's 6 lines per side — the user watches the hunk
+                // stream in without risking the header crossing the seam.
+                // Body rows = 1 stat chip + per_side × 2.
                 if (streaming_now) {
+                    const int per_side = std::clamp(
+                        (stream_body_budget() - 1) / 2, 1, 6);
                     out.edit_head_per_side = 0;
-                    out.edit_tail_per_side = 1;
+                    out.edit_tail_per_side = per_side;
                 }
                 // Settled hunks render in FULL (show_all) in BOTH the
                 // live tail and the frozen snapshot — byte-identical, so
@@ -372,13 +405,20 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
             // would balloon height every frame.
             out.show_all = !streaming_now;
             if (streaming_now) {
-                // Small tail slice → O(window) per frame and a fixed
-                // compact card height. show_all=false makes maya render
-                // just its `code_tail` lines from this slice. Footer
-                // totals would be wrong on a partial body, so suppress
-                // mid-stream (status bar carries the live rate); it
-                // returns with the true total the instant we settle.
+                // Small tail slice → O(window) per frame and a bounded
+                // card height. show_all=false makes maya render just its
+                // `code_tail` lines from this slice; size that tail to
+                // the streaming body budget (3 lines at 18-row terminals
+                // — the oracle-proven floor — up to 12 on tall ones) so
+                // the "watch it write" window uses the height available
+                // without pushing the header row past the viewport top
+                // (the committed-row-rewrite seam; see
+                // stream_body_budget). Footer totals would be wrong on a
+                // partial body, so suppress mid-stream (status bar
+                // carries the live rate); it returns with the true total
+                // the instant we settle.
                 out.show_all = false;
+                out.code_tail = std::clamp(stream_body_budget(), 3, 12);
                 out.text = tail_window(content, kStreamTailLines);
                 out.show_footer_stats = false;
             } else {
