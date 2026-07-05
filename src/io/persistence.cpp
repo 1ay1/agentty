@@ -185,6 +185,7 @@ static json message_to_json(const Message& m) {
                 case Attachment::Kind::FileRef: e["kind"] = "fileref"; break;
                 case Attachment::Kind::Symbol:  e["kind"] = "symbol";  break;
                 case Attachment::Kind::Image:   e["kind"] = "image";   break;
+                case Attachment::Kind::Output:  e["kind"] = "output";  break;
             }
             e["body"]        = util::base64_encode(a.body);
             if (!a.path.empty())       e["path"]        = a.path;
@@ -352,6 +353,7 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
             else if (kind == "fileref") a.kind = Attachment::Kind::FileRef;
             else if (kind == "symbol")  a.kind = Attachment::Kind::Symbol;
             else if (kind == "image")   a.kind = Attachment::Kind::Image;
+            else if (kind == "output")  a.kind = Attachment::Kind::Output;
             else                        a.kind = Attachment::Kind::Paste;
             a.body        = util::base64_decode(e.value("body", std::string{}));
             a.path        = e.value("path", std::string{});
