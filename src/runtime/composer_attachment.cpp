@@ -174,6 +174,23 @@ std::string render_attachment_body(const Attachment& a) {
         out.push_back(']');
         return out;
     }
+    if (a.kind == Attachment::Kind::Output) {
+        // Captured local run. Present it to the model exactly the way
+        // the user would have pasted it after running by hand: the
+        // command line, then a fenced block of the (possibly huge)
+        // output. No truncation here — the whole log is what the user
+        // chose to attach; the composer already shows it as a compact
+        // chip, so the size cost is a deliberate, visible act.
+        std::string out;
+        out.reserve(a.body.size() + a.name.size() + 32);
+        out.append("I ran:\n```sh\n");
+        out.append(a.name);
+        out.append("\n```\noutput:\n```\n");
+        out.append(a.body);
+        if (!a.body.empty() && a.body.back() != '\n') out.push_back('\n');
+        out.append("```");
+        return out;
+    }
     return a.body;
 }
 
@@ -262,6 +279,27 @@ std::string chip_label(const Attachment& a) {
         std::snprintf(buf, sizeof(buf), "#%s \xc2\xb7 %s:%d",
                       a.name.c_str(),
                       filename_only(a.path).c_str(), a.line_number);
+        return buf;
+    }
+    if (a.kind == Attachment::Kind::Output) {
+        // ⌘ <command> · N lines · K KB — a compact pill even when the
+        // captured log is enormous. Command is clipped so a long
+        // pipeline doesn't blow the caption width.
+        std::string cmd = a.name;
+        constexpr std::size_t kCmdMax = 32;
+        bool clip = cmd.size() > kCmdMax;
+        if (clip) cmd.resize(kCmdMax);
+        for (char& c : cmd) if (c == '\n' || c == '\t' || c == '\r') c = ' ';
+        const char* ell = clip ? "\xe2\x80\xa6" : "";
+        if (a.byte_count >= 1024) {
+            std::snprintf(buf, sizeof(buf),
+                          "Output: %s%s \xc2\xb7 %zu lines \xc2\xb7 %zu KB",
+                          cmd.c_str(), ell, a.line_count, a.byte_count / 1024);
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "Output: %s%s \xc2\xb7 %zu lines \xc2\xb7 %zu B",
+                          cmd.c_str(), ell, a.line_count, a.byte_count);
+        }
         return buf;
     }
     if (a.kind == Attachment::Kind::Image) {

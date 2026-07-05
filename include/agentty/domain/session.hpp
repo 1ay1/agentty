@@ -498,6 +498,9 @@ struct StreamState {
     // Sparkline ring buffer for the status-bar trend glyphs. NOT
     // reset between sub-turns or across the active→Idle boundary —
     // a user-visible trace of generation rate over the whole session.
+    // 16 samples × 500 ms cadence ≈ 8 s of history: the small fixed-
+    // width status-bar sparkline (a compact trend glimpse, not a wide
+    // graph) shows the newest suffix it can fit.
     static constexpr std::size_t kRateSamples = 16;
     std::array<float, kRateSamples> rate_history{};
     std::size_t rate_history_pos = 0;

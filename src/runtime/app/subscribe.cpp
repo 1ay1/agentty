@@ -149,6 +149,65 @@ std::optional<Msg> on_symbol_palette(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+// Ctrl+G code-block picker. Enter runs the cursor row; a bare digit
+// runs that row directly (1-based, matching the ①②③ row labels — the
+// zero-navigation fast path: Ctrl+G, 2, done). `e` stages into the
+// composer for editing, `y` copies clean.
+std::optional<Msg> on_code_block_picker(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Escape: return CloseCodeBlockPicker{};
+            case SpecialKey::Enter:  return CodeBlockPickerSelect{};
+            case SpecialKey::Up:     return CodeBlockPickerMove{-1};
+            case SpecialKey::Down:   return CodeBlockPickerMove{+1};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        char32_t c = ck->codepoint;
+        if (c >= U'1' && c <= U'9')
+            return CodeBlockPickerSelect{static_cast<int>(c - U'1')};
+        switch (c) {
+            case U'e': case U'E': return CodeBlockPickerEdit{};
+            case U'y': case U'Y': return CodeBlockPickerCopy{};
+            case U'q': case U'Q': return CloseCodeBlockPicker{};
+            default: break;
+        }
+    }
+    return std::nullopt;
+}
+
+// Post-run result card: a = attach to composer, y = copy, Esc/q/Enter
+// dismiss. Enter deliberately DISCARDS rather than attaches — the
+// default action must be the safe one (no surprise composer content);
+// attaching is the explicit `a`.
+std::optional<Msg> on_code_block_result(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Escape:
+            case SpecialKey::Enter:    return CodeBlockResultDiscard{};
+            // Scroll the capture. The result card is read-only (no
+            // selection cursor), so Move deltas translate straight to
+            // viewport scroll rows in the reducer.
+            case SpecialKey::Up:       return CodeBlockPickerMove{-1};
+            case SpecialKey::Down:     return CodeBlockPickerMove{+1};
+            case SpecialKey::PageUp:   return CodeBlockPickerMove{-10};
+            case SpecialKey::PageDown: return CodeBlockPickerMove{+10};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        switch (ck->codepoint) {
+            case U'a': case U'A': return CodeBlockResultAttach{};
+            case U'y': case U'Y': return CodeBlockResultCopy{};
+            case U'q': case U'Q': case U'd': case U'D':
+                return CodeBlockResultDiscard{};
+            default: break;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -327,6 +386,18 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
         && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
         && ev.raw_sequence == "\n")
         return OpenThreadList{};
+    // Alt+←/→ — quick-cycle through threads without the picker. In the
+    // deck order the ^J list shows (newest first): ← = newer, → = older.
+    // Checked in on_global (before on_composer) so it never collides
+    // with plain/Ctrl arrow cursor movement in the composer.
+    if (ev.mods.alt && !ev.mods.ctrl
+        && std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Left:  return ThreadCycle{-1};
+            case SpecialKey::Right: return ThreadCycle{+1};
+            default: break;
+        }
+    }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
         // Legacy terminals (iSH, plain xterm, tmux without KKP /
@@ -354,6 +425,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case U'n': case U'N': return NewThread{};
                 case U't': case U'T': return OpenTodoModal{};
                 case U'e': case U'E': return ComposerToggleExpand{};
+                case U'g': case U'G': return OpenCodeBlockPicker{};
                 default: break;
             }
         }
@@ -517,6 +589,8 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_cmd     = is_open(m.ui.command_palette);
     const bool in_mention = mention_is_open(m.ui.mention_palette);
     const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
+    const bool in_blocks  = code_block_picker_is_open(m.ui.code_blocks);
+    const bool in_blockres = code_block_result_is_open(m.ui.code_blocks);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
     const bool in_threads = pick::is_open(m.ui.thread_list);
@@ -546,6 +620,8 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_cmd)     return on_command_palette(ev);
             if (in_mention) return on_mention_palette(ev);
             if (in_symbol)  return on_symbol_palette(ev);
+            if (in_blocks)  return on_code_block_picker(ev);
+            if (in_blockres) return on_code_block_result(ev);
             if (in_models)  return on_model_picker(ev);
             if (in_providers) return on_provider_picker(ev);
             if (in_threads) return on_thread_list(ev);

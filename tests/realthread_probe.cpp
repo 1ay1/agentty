@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     agentty::app::detail::rehydrate_frozen(m);
     auto t1 = steady_clock::now();
     std::printf("rehydrate_frozen        : %8.1f ms  (frozen=%zu rows=%zu)\n",
-                ms(t1 - t0), m.ui.frozen.size(), m.ui.frozen_row_total);
+                ms(t1 - t0), m.ui.frozen.size(), m.ui.frozen.row_total());
 
     maya::StylePool pool;
     auto build = [&] {
@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
     // Canvas sized to the REAL inline canvas: frozen rows + a couple
     // screens of chrome — NOT 200000 rows (clear() of 40M cells dwarfs
     // the render and hides what we're measuring).
-    const int canvas_h = static_cast<int>(m.ui.frozen_row_total) + 200;
+    const int canvas_h = static_cast<int>(m.ui.frozen.row_total()) + 200;
     maya::Canvas canvas(200, std::max(400, canvas_h), &pool);
     // Cold: nothing in the component cache yet.
     build_and_render("first render (cold)", canvas);

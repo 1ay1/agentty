@@ -82,6 +82,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::OpenProviders: return agentty::app::update(std::move(m), Msg{OpenProviderPicker{}});
                 case Command::OpenThreads:   return agentty::app::update(std::move(m), Msg{OpenThreadList{}});
                 case Command::OpenPlan:      return agentty::app::update(std::move(m), Msg{OpenTodoModal{}});
+                case Command::RunCodeBlock:  return agentty::app::update(std::move(m), Msg{OpenCodeBlockPicker{}});
                 case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
                 case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});
                 case Command::Quit:          return agentty::app::update(std::move(m), Msg{Quit{}});

@@ -160,7 +160,7 @@ const std::vector<Axis>& visual_axes() {
             m.ui.composer.expanded = true;
         }},
         {"frozen prefix grows", [](Model& m) {
-            m.ui.frozen.push_back(maya::Element{});
+            m.ui.frozen.seal(maya::Element{}, 1);
         }},
         {"frozen_turn advances", [](Model& m) {
             m.ui.frozen_turn = 7;

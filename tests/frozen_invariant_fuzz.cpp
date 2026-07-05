@@ -156,30 +156,27 @@ static void check_invariants(const Model& m, bool stream_active,
                              std::size_t expected_dropped_rows) {
     const auto& f = m.ui;
 
-    // I1 lockstep
-    INV(f.frozen.size() == f.frozen_rows.size(), "I1",
-        "frozen / frozen_rows length mismatch");
-    INV(f.frozen.size() == f.frozen_is_separator.size(), "I1",
-        "frozen / frozen_is_separator length mismatch");
+    // I1 lockstep is now STRUCTURAL: the ledger owns one internal meta
+    // vector alongside its elements — there are no host-side parallel
+    // vectors left to drift. Check the accessors stay in-range instead.
+    for (std::size_t k = 0; k < f.frozen.size(); ++k)
+        INV(f.frozen.block_rows(k) >= 1 || !f.frozen.recorded_at(k), "I1",
+            "ledger block has zero recorded rows");
 
-    // I7 + I2 row accounting
+    // I7 + I2 row accounting: row_total equals the sum of block_rows.
     std::size_t sum = 0;
-    bool any_negative = false;
-    for (int r : f.frozen_rows) {
-        if (r < 0) any_negative = true;
-        else sum += static_cast<std::size_t>(r);
-    }
-    INV(!any_negative, "I7", "a frozen_rows entry is negative");
-    INV(sum == f.frozen_row_total, "I2",
-        "frozen_row_total != sum(frozen_rows)");
+    for (std::size_t k = 0; k < f.frozen.size(); ++k)
+        sum += f.frozen.block_rows(k);
+    INV(sum == f.frozen.row_total(), "I2",
+        "row_total() != sum(block_rows)");
 
     // I3 bounds
     INV(f.frozen_through <= m.d.current.messages.size(), "I3",
         "frozen_through outran messages.size()");
 
     // I4 prefix never opens on a separator (gap) row
-    if (!f.frozen_is_separator.empty())
-        INV(!f.frozen_is_separator.front(), "I4",
+    if (!f.frozen.empty())
+        INV(!f.frozen.separator_at(0), "I4",
             "frozen prefix opens on a separator/gap entry");
 
     // I5 never freeze the mutable streaming back
@@ -357,9 +354,18 @@ static void run_walk(std::uint64_t seed, int width) {
             break;
         case 3:
         case 4: {
-            std::size_t before = m.ui.frozen_row_total;
+            // Simulate a rendered frame before the trim: the ledger's
+            // provability gate only drops blocks whose height a paint
+            // has recorded, and this harness never runs maya's real
+            // paint pass. Stamp each block's policy height as its
+            // recorded height — exactly what the ledger-tagged paint
+            // does with the laid-out height in production.
+            for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+                m.ui.frozen.record_paint(
+                    k, static_cast<int>(m.ui.frozen.block_rows(k)));
+            std::size_t before = m.ui.frozen.row_total();
             trim_cmd = agentty::app::detail::trim_frozen_if_oversized(m);
-            dropped_rows = before - m.ui.frozen_row_total;
+            dropped_rows = before - m.ui.frozen.row_total();
             trim_ptr = &trim_cmd;
             g_oplog.push_back("trim_frozen_if_oversized (dropped "
                               + std::to_string(dropped_rows) + " rows)");

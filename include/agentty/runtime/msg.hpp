@@ -301,6 +301,13 @@ struct ThreadListMove { int delta; };
 // Absolute-jump nav for long thread histories. See ModelPickerJump.
 struct ThreadListJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ThreadListSelect {};
+// Quick-cycle: switch to the adjacent thread (by recency order, the
+// same order the ^J picker shows) WITHOUT opening the picker. delta is
+// applied to the thread-list index: +1 = older, -1 = newer; wraps at
+// both ends. Bound to Alt+←/→ globally. The reducer surfaces a
+// "thread k/N · title" toast so the user always knows where they
+// landed.
+struct ThreadCycle { int delta; };
 struct NewThread {};
 // Result of the background thread-history load kicked off from
 // `AgenttyApp::init()`. The on-disk thread JSON walk used to run
@@ -337,13 +344,43 @@ struct MentionPaletteBackspace {};
 struct MentionPaletteMove { int delta; };
 struct MentionPaletteSelect {};
 
-// ── #symbol picker (parallel to @file) ──────────────────────────────────
+// ── #symbol picker (parallel to @file) ────────────────────────────────────
 struct OpenSymbolPalette {};
 struct CloseSymbolPalette {};
 struct SymbolPaletteInput { char32_t ch; };
 struct SymbolPaletteBackspace {};
 struct SymbolPaletteMove { int delta; };
 struct SymbolPaletteSelect {};
+
+// ── Code-block picker (Ctrl+G — run AI-suggested commands) ──────────
+// Open scans the newest assistant reply for fenced ``` blocks; the modal
+// lists them and the user picks an action per block:
+//   Select (Enter / digit) → run the block through /bin/sh, async — the
+//     command + output land in the thread so the model sees the result
+//     next turn. `index` ≥ 0 targets a specific row (digit shortcut);
+//     -1 means "the cursor row".
+//   Edit → stage the cleaned body into the composer (tweak, then Enter
+//     submits as a normal message — or the user deletes it, whatever).
+//   Copy → cleaned body to the system clipboard.
+// RunFinished is the run completion carrying the captured output; it
+// opens the RESULT card (exit code + tail preview) where the user
+// decides: a = attach to composer as an Output chip, y = copy clean,
+// Esc = discard (the live transcript already sits in scrollback).
+struct OpenCodeBlockPicker {};
+struct CloseCodeBlockPicker {};
+struct CodeBlockPickerMove { int delta; };
+struct CodeBlockPickerSelect { int index = -1; };
+struct CodeBlockPickerEdit {};
+struct CodeBlockPickerCopy {};
+struct CodeBlockRunFinished {
+    std::string command;
+    std::string output;
+    int         exit_code = 0;
+    bool        timed_out = false;
+};
+struct CodeBlockResultAttach {};
+struct CodeBlockResultCopy {};
+struct CodeBlockResultDiscard {};
 
 // ── Todo modal ───────────────────────────────────────────────────────────
 struct OpenTodoModal {};
@@ -482,7 +519,7 @@ using ProviderPickerMsg = std::variant<
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
-    ThreadListSelect, NewThread, ThreadsLoaded, ThreadLoaded>;
+    ThreadListSelect, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
 
 using CommandPaletteMsg = std::variant<
     OpenCommandPalette, CloseCommandPalette, CommandPaletteInput,
@@ -495,6 +532,12 @@ using MentionPaletteMsg = std::variant<
 using SymbolPaletteMsg = std::variant<
     OpenSymbolPalette, CloseSymbolPalette, SymbolPaletteInput,
     SymbolPaletteBackspace, SymbolPaletteMove, SymbolPaletteSelect>;
+
+using CodeBlockMsg = std::variant<
+    OpenCodeBlockPicker, CloseCodeBlockPicker, CodeBlockPickerMove,
+    CodeBlockPickerSelect, CodeBlockPickerEdit, CodeBlockPickerCopy,
+    CodeBlockRunFinished,
+    CodeBlockResultAttach, CodeBlockResultCopy, CodeBlockResultDiscard>;
 
 using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
@@ -538,6 +581,7 @@ using Msg = std::variant<
     msg::CommandPaletteMsg,
     msg::MentionPaletteMsg,
     msg::SymbolPaletteMsg,
+    msg::CodeBlockMsg,
     msg::TodoMsg,
     msg::LoginMsg,
     msg::DiffReviewMsg,
@@ -577,6 +621,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::CommandPaletteMsg>}
          + int{in_variant_v<L, msg::MentionPaletteMsg>}
          + int{in_variant_v<L, msg::SymbolPaletteMsg>}
+         + int{in_variant_v<L, msg::CodeBlockMsg>}
          + int{in_variant_v<L, msg::TodoMsg>}
          + int{in_variant_v<L, msg::LoginMsg>}
          + int{in_variant_v<L, msg::DiffReviewMsg>}
@@ -608,6 +653,8 @@ static_assert(leaf_domain_count<MentionPaletteSelect>()      == 1,
               "MentionPaletteSelect must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<SymbolPaletteSelect>()       == 1,
               "SymbolPaletteSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<CodeBlockPickerSelect>()     == 1,
+              "CodeBlockPickerSelect must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<UpdateTodos>()               == 1,
               "UpdateTodos must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<LoginSubmit>()               == 1,
@@ -621,7 +668,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 13,
+static_assert(std::variant_size_v<Msg> == 14,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

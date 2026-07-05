@@ -498,12 +498,12 @@ static bool settle_freeze_trim(Ctx& cx, const std::string& st) {
     agentty::app::detail::freeze_through(m, m.d.current.messages.size());
     std::fprintf(err, "  [dbg] t%s pre-trim: maya_rows=%d frozen_row_total=%zu frozen_entries=%zu\n",
                  st.c_str(), cx.rt->inline_content_rows(),
-                 (std::size_t)m.ui.frozen_row_total, m.ui.frozen.size());
+                 (std::size_t)m.ui.frozen.row_total(), m.ui.frozen.size());
     auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
     using Cmd = maya::Cmd<agentty::Msg>;
     if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner)) {
         std::fprintf(err, "  [info] turn %s: trim commit_scrollback(%d) -> frozen_row_total=%zu\n",
-                     st.c_str(), c->rows, (std::size_t)m.ui.frozen_row_total);
+                     st.c_str(), c->rows, (std::size_t)m.ui.frozen.row_total());
         cx.rt->commit_inline_prefix(c->rows);
         // NOTE: after a prefix commit maya's shadow shifted; the oracle's
         // committed snapshot is still valid (commit emits zero bytes).

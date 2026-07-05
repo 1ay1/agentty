@@ -611,7 +611,7 @@ static void scaling_breakdown() {
         }
         std::printf("%-8d | %12.3f | %12.3f | %12.3f | %5zu live | %6zu rows\n",
                     n, vbuild, paint, vbuild + paint,
-                    live_msgs, m.ui.frozen_row_total);
+                    live_msgs, m.ui.frozen.row_total());
     }
 }
 
@@ -637,7 +637,7 @@ int main() {
         double lt = live_tail_ms(m2);
         double ar = active_run_ms(s.lines);
         std::printf("%-18s | %12zu | %10.2f | %10.2f | %12.2f | %12.2f\n",
-                    s.name, m.ui.frozen_row_total, c.cold, c.warm, lt, ar);
+                    s.name, m.ui.frozen.row_total(), c.cold, c.warm, lt, ar);
     }
 
     scaling_breakdown();
@@ -727,7 +727,7 @@ int main() {
         }
         agentty::app::detail::rehydrate_frozen(m);
         std::printf("%-26s | %12zu | %12zu\n",
-                    rs.name, m.ui.frozen_row_total, m.ui.frozen.size());
+                    rs.name, m.ui.frozen.row_total(), m.ui.frozen.size());
     }
     return 0;
 }
