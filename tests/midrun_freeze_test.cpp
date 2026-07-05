@@ -431,14 +431,23 @@ static void test_trim_commits_exact_dropped_rows() {
     agentty::app::detail::clear_frozen(m);
     agentty::app::detail::freeze_through(m, m.d.current.messages.size());
 
+    // Simulate one rendered frame: the ledger's provability gate only
+    // drops blocks whose height maya's paint has recorded, and this
+    // harness never runs the real paint pass. Stamp each block's policy
+    // height as its recorded height — exactly what the ledger-tagged
+    // paint does with the laid-out height in production.
+    for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+        m.ui.frozen.record_paint(
+            k, static_cast<int>(m.ui.frozen.block_rows(k)));
+
     // Record the row totals before the trim so we can compute exactly
     // how many rows the trim drops.
-    const std::size_t rows_before = m.ui.frozen_row_total;
+    const std::size_t rows_before = m.ui.frozen.row_total();
     const std::size_t entries_before = m.ui.frozen.size();
 
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
 
-    const std::size_t rows_after   = m.ui.frozen_row_total;
+    const std::size_t rows_after   = m.ui.frozen.row_total();
     const std::size_t dropped_rows = rows_before - rows_after;
     CHECK(entries_before > m.ui.frozen.size(),
           "trim did not drop any entries despite an over-budget prefix");
@@ -509,7 +518,7 @@ static void test_output_elided_tool_row_estimate_matches_render() {
     int real_rows = 0;
     for (char c : txt) if (c == '\n') ++real_rows;
 
-    CHECK(m.ui.frozen_row_total < static_cast<std::size_t>(real_rows) + 32,
+    CHECK(m.ui.frozen.row_total() < static_cast<std::size_t>(real_rows) + 32,
           "bash output row estimate vastly over-counts the elided render "
           "(would trip the mid-run keep-loop into a ghost band)");
     // Sanity: the body is still actually rendered (not dropped).

@@ -32,6 +32,7 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
+#include "agentty/runtime/view/thread/seam.hpp"
 #include "agentty/runtime/view/thread/turn/permission.hpp"
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
@@ -39,35 +40,10 @@ namespace agentty::ui {
 
 namespace {
 
-// Inter-turn seam between every pair of adjacent turns — a blank row,
-// the dim ─ rule, then another blank row. MUST stay byte-identical to
-// frozen.cpp's gap_row(): the same seam is pushed before each settled
-// turn, between live-tail turns, and at the frozen↔live boundary. Any
-// height/shape delta at a freeze instant would shift rows already
-// scrolled into native scrollback against the live re-layout,
-// producing a ghost at the scrollback↔viewport seam.
-maya::Element gap_row() {
-    using namespace maya::dsl;
-    return v(blank(),
-             maya::Conversation::divider(),
-             blank()).build();
-}
-
-// Compaction-boundary divider. MUST stay byte-identical to frozen.cpp's
-// compaction_divider_row(): freeze_range pushes this single-row
-// `≡ Conversation compacted` rule before a run that begins on a
-// compaction boundary, so the live tail has to push it too. Without the
-// match the divider materialises only at freeze time — a +1 row
-// shift that strands the pre-shift copy of the just-frozen turn in
-// native scrollback (the post-compaction duplicate-turn / clipped-panel
-// bug). See INLINE_SCROLLBACK.md pin #3 (divider symmetry).
-maya::Element compaction_divider_row() {
-    maya::Turn::Config cfg;
-    cfg.glyph      = "\xe2\x89\xa1";   // ≡
-    cfg.label      = "Conversation compacted";
-    cfg.rail_color = muted;
-    return maya::Turn{std::move(cfg)}.build();
-}
+// gap_row / compaction_divider_row come from the SHARED seam header
+// (seam.hpp) — the same definitions frozen.cpp's freeze_range seals,
+// so the live and frozen row sequences are byte-identical by
+// construction (one definition site, not a mirrored convention).
 
 // Sentinel-check: assistant message whose only content is tool_calls
 // (no prose). Kept for any future per-message classification; the
@@ -97,18 +73,13 @@ void build_live_tail(const Model& m, int& running_turn,
 
     out.reserve(out.size() + (total - start) * 2);
 
-    // Mirror freeze_range's needs_compaction_divider exactly: a run that
-    // begins on a compaction boundary gets the `≡ Conversation
-    // compacted` divider pushed before it. The frozen builder does this;
-    // the live tail must match byte-for-byte or the divider only appears
-    // after the freeze, shifting the just-frozen turn down one row and
-    // duplicating it into native scrollback (INLINE_SCROLLBACK.md pin #3).
-    auto compaction_boundary_at = [&](std::size_t idx) {
-        for (const auto& rec : m.d.current.compactions) {
-            if (rec.up_to_index == idx && rec.up_to_index > 0
-                && rec.up_to_index <= total) return true;
-        }
-        return false;
+    // Mirror freeze_range's divider policy through the SHARED
+    // ui::compaction_boundary_at (seam.hpp): a run that begins on a
+    // compaction boundary gets the `≡ Conversation compacted` divider
+    // pushed before it — same predicate, same Element, one definition
+    // site for both builders.
+    auto compaction_boundary = [&](std::size_t idx) {
+        return compaction_boundary_at(m.d.current.compactions, idx, total);
     };
 
     bool first_in_tail = true;
@@ -128,7 +99,7 @@ void build_live_tail(const Model& m, int& running_turn,
         // Compaction divider FIRST (before the inter-turn gap), exactly
         // as freeze_range orders it, so the live and frozen row
         // sequences stay byte-identical across the freeze seam.
-        if (compaction_boundary_at(i)) {
+        if (compaction_boundary(i)) {
             out.push_back(compaction_divider_row());
         }
 
@@ -398,11 +369,14 @@ std::optional<maya::Element> build_permission_row(const Model& m) {
 maya::Conversation::Config conversation_config(const Model& m) {
     maya::Conversation::Config cfg;
 
-    // ── Borrowed frozen prefix (zero-copy). ─────────────
-    // maya renders this through list_ref, so growing m.ui.frozen does
-    // not increase per-frame cost. Maya's hash_id-keyed cell cache
-    // makes already-painted Elements hit on every subsequent frame.
-    cfg.frozen = &m.ui.frozen;
+    // ── Borrowed sealed prefix (zero-copy, paint-measured). ─────
+    // maya renders this through ledger_ref: zero-copy like the old
+    // list_ref path, PLUS maya's paint pass records every block's
+    // laid-out height back into the ledger each frame — the heights
+    // the trims' commit accounting is minted from (Witness Chain,
+    // Trim Accounting). Maya's hash_id-keyed cell cache makes
+    // already-painted blocks hit on every subsequent frame.
+    cfg.ledger = &m.ui.frozen;
 
     // ── Live tail. ─────────────────────────────────
     // The only thing rebuilt per frame. Bounded by one in-flight

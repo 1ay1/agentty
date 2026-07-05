@@ -13,6 +13,7 @@
 
 #include <maya/core/scroll_state.hpp>
 #include <maya/element/element.hpp>
+#include <maya/render/scrollback_ledger.hpp>
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/conversation.hpp"
@@ -175,70 +176,39 @@ struct Model {
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
         int                 thread_scroll = 0;
 
-        // ── Frozen scrollback prefix (agent_session pattern) ───────
+        // ── Sealed scrollback prefix (maya ScrollbackLedger) ───────
         //
-        // Append-only vector of fully-built Element rows that
+        // Append-only ledger of fully-built Element blocks that
         // represent the settled portion of the transcript. The view
-        // passes a borrowed pointer to maya's Conversation widget
-        // via `Config::frozen`, which renders it through `list_ref`
-        // — zero-copy across frames regardless of how large this
-        // grows. Each entry is one row in the conversation:
-        //   • a gap (one-row blank) before each fresh-speaker turn,
+        // hands maya's Conversation widget a borrowed pointer via
+        // `Config::ledger`, which renders it through `ledger_ref` —
+        // zero-copy across frames AND maya's paint pass records every
+        // block's real laid-out height back into the ledger each
+        // frame.
+        //
+        // THE ACCOUNTING INVERSION (Witness Chain — Trim Accounting):
+        // the ledger replaced four parallel host-maintained vectors
+        // (frozen / frozen_rows / frozen_is_separator + frozen_row_total
+        // + frozen_cols) whose row counts were HOST-measured through a
+        // reconstructed width. Every historical trim-corruption bug was
+        // drift between that parallel measurement and what maya painted
+        // (the phone-over-SSH duplication ghost, the post-resize
+        // over-commit, the one-row estimate drift). Now maya measures:
+        // trim commit counts are minted exclusively by
+        // ledger.harvest() from paint-recorded heights, as a typed
+        // ScrollbackDebt token the host cannot fabricate or adjust —
+        // drift is unrepresentable, not merely tested-against.
+        //
+        // Block granularity (one ledger block per push):
+        //   • a gap (blank+rule+blank) before each fresh-speaker turn,
         //   • a built Turn Element for a settled message (or run),
         //   • a compaction divider for a CompactionRecord boundary.
         //
-        // The producer is `freeze_through_prior_turn()` (in
-        // src/runtime/app/update/internal.hpp), called from
-        // submit_message at the start of every new user turn. It
-        // walks m.d.current.messages[frozen_through .. end), applies
-        // the same tool-batch-merge logic as conversation_config used
-        // to do at view time, and pushes one Turn Element per visual
-        // unit — dividers and all.
-        //
-        // Cleared (and frozen_through reset) on thread switch /
-        // NewThread / OpenThread; rebuilt by `rehydrate_frozen()`
-        // when a saved thread is loaded.
-        std::vector<maya::Element> frozen;
-
-        // Parallel to `frozen`: estimated rendered-row count per entry,
-        // recorded at push time. The inline canvas is sized to the SUM
-        // of these rows, and maya re-derives a full O(rows x width)
-        // canvas witness (plus clear + render_tree) EVERY frame, so
-        // per-frame cost scales with total frozen rows, not entry
-        // count. One full write/edit body can be hundreds of rows in
-        // ONE entry, so an entry-count cap can't bound it.
-        // trim_frozen_if_oversized() trims by ROWS via this. The
-        // estimate MUST count a tool card's rendered body, which comes
-        // from tc.args (write content, edit hunks, read/grep results)
-        // — NOT tc.output(), which is only the one-line footer. Always
-        // the same length as `frozen`.
-        std::vector<int>           frozen_rows;
-
-        // Parallel to `frozen`: true iff the entry is an inter-turn
-        // SEPARATOR (gap row or compaction divider) rather than a real
-        // Turn. A separator only makes visual sense BETWEEN two turns;
-        // if a front-trim or a mid-run rehydrate cut leaves one at
-        // index 0 it renders as a blank gap (or an orphan rule) at the
-        // very top of the canvas — the "saved threads open with a hole"
-        // bug. Both trims and rehydrate strip leading separators so the
-        // frozen prefix always opens on a turn header. Always the same
-        // length as `frozen`.
-        std::vector<bool>          frozen_is_separator;
-
-        // Running sum of frozen_rows, maintained on push/trim so the
-        // oversize check is O(1).
-        std::size_t                frozen_row_total = 0;
-
-        // Full terminal width (cols) every frozen_rows[] count is
-        // currently measured at. push_frozen stamps it; the trims call
-        // ensure_frozen_width() to re-measure the whole prefix to the
-        // live width whenever it differs, BEFORE sizing their
-        // commit_scrollback(). frozen_rows[k] equals maya's emitted
-        // height only at the width it was measured at — a stale stamp
-        // after a resize lets the exact commit over-count the wire and
-        // strand a duplicate just above the viewport. 0 = unstamped
-        // (empty prefix / post-clear).
-        int                        frozen_cols = 0;
+        // The producer is freeze_range/freeze_through (frozen.cpp),
+        // called from the settle path. Cleared (and frozen_through
+        // reset) on thread switch / NewThread / OpenThread; rebuilt by
+        // rehydrate_frozen() when a saved thread is loaded.
+        maya::ScrollbackLedger frozen;
 
         // Exclusive upper bound into m.d.current.messages. Every
         // message with index < frozen_through has already been built

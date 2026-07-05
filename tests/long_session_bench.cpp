@@ -490,26 +490,23 @@ struct RenderStats { Stats cold; Stats warm; };
     for (int i = 0; i < sh.iters; ++i) {
         auto m = build_model(sh);   // Model is move-only — rebuild per iter
         agentty::app::detail::rehydrate_frozen(m);
-        // Force-pad m.ui.frozen past the soft cap so the trim actually fires.
-        // (The cap lives inside frozen.cpp; we just keep duplicating an
-        // existing entry to stress the erase path.) Keep ALL THREE parallel
-        // arrays in lockstep — trim_frozen_if_oversized erases
-        // frozen / frozen_rows / frozen_is_separator together, so a short
-        // frozen_is_separator makes its erase() run past end() (UB / crash).
+        // Force-pad m.ui.frozen past the soft cap so the trim actually
+        // fires. The ledger keeps its element/meta stores in lockstep
+        // internally (the old three-parallel-vector UB class is
+        // structurally gone); we just seal duplicates of an existing
+        // block and stamp their paint-recorded heights so the trim's
+        // provability gate lets them drop.
         if (!m.ui.frozen.empty()) {
-            const auto exemplar = m.ui.frozen.back();
-            const int  exemplar_rows = m.ui.frozen_rows.empty()
-                ? 1 : m.ui.frozen_rows.back();
-            // Seed the separator flag vector to the current frozen length
-            // first (rehydrate may leave it shorter), then grow in step.
-            while (m.ui.frozen_is_separator.size() < m.ui.frozen.size())
-                m.ui.frozen_is_separator.push_back(false);
-            while (m.ui.frozen.size() < 200) {
-                m.ui.frozen.push_back(exemplar);
-                m.ui.frozen_rows.push_back(exemplar_rows);
-                m.ui.frozen_is_separator.push_back(false);
-                m.ui.frozen_row_total += static_cast<std::size_t>(exemplar_rows);
-            }
+            const auto exemplar =
+                m.ui.frozen.elements()[m.ui.frozen.size() - 1];
+            const std::size_t exemplar_rows =
+                std::max<std::size_t>(1,
+                    m.ui.frozen.block_rows(m.ui.frozen.size() - 1));
+            while (m.ui.frozen.size() < 200)
+                m.ui.frozen.seal(exemplar, exemplar_rows);
+            for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+                m.ui.frozen.record_paint(
+                    k, static_cast<int>(m.ui.frozen.block_rows(k)));
         }
         auto t0 = Clock::now();
         (void)agentty::app::detail::trim_frozen_if_oversized(m);
@@ -599,7 +596,7 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
     }
     MidrunStats out;
     out.frame                = summarise(samples);
-    out.frozen_rows_after    = m.ui.frozen_row_total;
+    out.frozen_rows_after    = m.ui.frozen.row_total();
     out.frozen_entries_after = m.ui.frozen.size();
     return out;
 }

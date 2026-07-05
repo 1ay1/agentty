@@ -496,7 +496,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                     "frozen_through=%zu term_h=%d\n",
                     m.d.current.messages.size(),
                     m.ui.frozen.size(),
-                    m.ui.frozen_row_total,
+                    m.ui.frozen.row_total(),
                     m.ui.frozen_through,
                     _ts.height.value);
                 std::fflush(prof_out);
