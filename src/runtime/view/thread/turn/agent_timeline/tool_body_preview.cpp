@@ -240,6 +240,41 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                     auto nt = e.value("new_text", e.value("new_string", std::string{}));
                     out.hunks.push_back({std::move(ot), std::move(nt)});
                 }
+                // WHILE STREAMING: window to the NEWEST hunk only — the
+                // actual Write tail-window discipline this path always
+                // claimed to mirror. Rendering every accumulated hunk let
+                // the live card balloon past the viewport, committing its
+                // top rows to native scrollback; the later Pending→Running
+                // flip then RESTYLED every committed card row (connector
+                // stripe bright_black→blue, status glyph ○→●) — a style-
+                // only committed-row rewrite that trips maya's gate (the
+                // scrollback_oracle write/edit turn caught it at t*-e-run).
+                // One compact hunk keeps the live card inside the viewport
+                // where lifecycle restyles are legal; the full indexed
+                // multi-hunk render appears at settle (show_all below),
+                // painted once, below the seam.
+                if (streaming_now && out.hunks.size() > 1)
+                    out.hunks.erase(out.hunks.begin(),
+                                    out.hunks.end() - 1);
+                // ...and keep that hunk COMPACT: tail-only, 1 line per
+                // side → a 3-row body (stat chip + −tail + +tail), the SAME
+                // height budget as Write's streaming slice. This budget is
+                // load-bearing, not cosmetic: the event HEADER row sits
+                // above the body, and everything below the header (body +
+                // blank + footer + border + composer/status chrome ≈ 13
+                // rows) must fit under term_h so the header stays INSIDE
+                // the viewport while the card streams. At 18-row terminals
+                // a 5-row body (2 lines per side) pushed the header into
+                // native scrollback, where the settle's Running→Done
+                // restyle (● bright → ✓ dim on tree/name/status cells) was
+                // a committed-row rewrite — maya's gate could only recover
+                // with a destructive HardReset on the grow frame (oracle
+                // t*-e-post at 60x18). Write passes with its 3-row window;
+                // Edit gets the same contract.
+                if (streaming_now) {
+                    out.edit_head_per_side = 0;
+                    out.edit_tail_per_side = 1;
+                }
                 // Settled hunks render in FULL (show_all) in BOTH the
                 // live tail and the frozen snapshot — byte-identical, so
                 // the freeze handoff is a pure cache hit. Only STREAMING

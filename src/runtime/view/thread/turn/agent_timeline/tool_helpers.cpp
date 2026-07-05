@@ -126,36 +126,29 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         return detail;
     }
     if (n == "write") {
-        auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
-        if (tc.is_done()) {
-            const auto& out = tc.output();
-            if (auto plus = out.find('+'); plus != std::string::npos) {
-                if (auto end = out.find(')', plus); end != std::string::npos) {
-                    auto from = out.rfind('(', plus);
-                    if (from != std::string::npos)
-                        detail += "  " + out.substr(from, end - from + 1);
-                }
-            }
-        }
-        return detail;
+        // LIFECYCLE-STABLE: path only, forever — same rule as edit below.
+        // The old Done-only "(N lines, X KB)" echo rewrote the committed
+        // header row at settle whenever the streaming write card had
+        // pushed its header above the viewport top (tail-window →
+        // show_all is a net GROW at that frame → gate → HardReset). The
+        // lines/bytes stats render in the settled body footer
+        // (show_footer_stats), which paints below the seam.
+        return path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
     }
     if (n == "edit") {
         if (path_pp.empty()) return "\xe2\x80\xa6";
-        std::string detail = path_pp;
-        if (tc.args.is_object()) {
-            auto it = tc.args.find("edits");
-            if (it != tc.args.end() && it->is_array() && !it->empty())
-                detail += "  \xc2\xb7  " + std::to_string(it->size()) + " edits";
-        }
-        if (tc.is_done()) {
-            const auto& out = tc.output();
-            if (auto from = out.find('('); from != std::string::npos) {
-                if (auto end = out.find(')', from); end != std::string::npos
-                    && (out.find('+', from) < end || out.find('-', from) < end))
-                    detail += "  " + out.substr(from, end - from + 1);
-            }
-        }
-        return detail;
+        // Header detail is LIFECYCLE-STABLE: just the path, forever. No
+        // "· N edits" count and no "(…)" output echo — both appear only
+        // at terminal, but this detail renders on the event HEADER row,
+        // which can commit to native scrollback while the edit streams
+        // (the live tail is tall; prose below pushes the card up). A
+        // Done-only suffix then REWRITES the committed row on the settle
+        // frame — which is a net GROW for edit (windowed hunk → show_all
+        // full diff), so maya's gate can only recover by a destructive
+        // HardReset (the scrollback_oracle write/edit turn caught this at
+        // t*-e-post). The hunk count lives in the settled body's
+        // "edit i/N" band headers; nothing is lost.
+        return path_pp;
     }
     if (n == "bash" || n == "diagnostics") {
         auto cmd = safe("command");
