@@ -1223,6 +1223,21 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
     set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
 
+    # reveal_smoothness_probe — per-BLOCK-TYPE reveal-uniformity gate.
+    # Streams a mixed markdown doc (prose / heading / code fence / table /
+    # list / blockquote) through the production StreamingMarkdown config
+    # (reveal_fx on, 90 cps / 0.3 s pacing) on the virtual anim clock,
+    # renders every frame to a Canvas and counts newly-visible CONTENT
+    # cells per frame per section. FAILS on (1) any height shrink, or
+    # (2) any single frame revealing >60 content cells — the pre-gate
+    # regression (block commits outrunning the reveal cursor) popped
+    # whole blocks at +100..+196 cells/frame while prose glided at ~2.
+    add_executable(reveal_smoothness_probe EXCLUDE_FROM_ALL
+        tests/reveal_smoothness_probe.cpp)
+    target_link_libraries(reveal_smoothness_probe PRIVATE maya::maya)
+    add_test(NAME reveal_smoothness_probe COMMAND reveal_smoothness_probe)
+    set_tests_properties(reveal_smoothness_probe PROPERTIES TIMEOUT 120)
+
     # openai_transport_test — verifies the OpenAI-compatible provider's pure
     # translation layer with NO network: build_tools / build_messages JSON
     # shaping, and a scripted-SSE → agentty-Msg parse (text deltas, streamed
@@ -1381,6 +1396,7 @@ if(AGENTTY_BUILD_TESTS)
         stream_liveness_test
         stream_md_lag_test
         reveal_pacing_test
+        reveal_smoothness_probe
         composer_edit_test
         scheduler_path_test
         table_render_test

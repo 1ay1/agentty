@@ -320,15 +320,30 @@ static bool check_transcript(TermEmu& emu, const std::string& tag,
         std::size_t e = pos;
         while (e < ln.size() && ln[e] != ' ' && ln[e] != '.') ++e;
         std::string tok = ln.substr(pos, e - pos);
-        for (auto& [s, py] : seen) {
-            if (s == tok) {
-                ++g_failures;
-                failed = true;
-                std::fprintf(err,
-                    "  FAIL[%s]: marker %s duplicated at transcript rows %d and %d "
-                    "(scrollback=%zu)\n",
-                    tag.c_str(), tok.c_str(), py, y, emu.scrollback.size());
-                break;
+        // Duplicate = corruption ONLY when the LATER copy sits in the
+        // IMMUTABLE native scrollback (y < scrollback rows). A viewport
+        // row is repainted every frame, and with the reveal typewriter
+        // pacing ALL text (commit gated on the cursor), a mid-type row
+        // legitimately shows a marker PREFIX for a few frames —
+        // "Paragraph uniq-1-1" while typing "uniq-1-10" — which prefix-
+        // collides with a real earlier marker. That is animation, not a
+        // strand. A real strand (the screenshot class) always ends up
+        // with BOTH copies committed: the stale copy is already in sb,
+        // and the settle/freeze/trim of the same turn commits the live
+        // copy right below — so this check still fires on every genuine
+        // corruption by the turn's idle frames at the latest.
+        const bool later_copy_committed = y < (int)emu.scrollback.size();
+        if (later_copy_committed) {
+            for (auto& [s, py] : seen) {
+                if (s == tok) {
+                    ++g_failures;
+                    failed = true;
+                    std::fprintf(err,
+                        "  FAIL[%s]: marker %s duplicated at transcript rows %d and %d "
+                        "(scrollback=%zu)\n",
+                        tag.c_str(), tok.c_str(), py, y, emu.scrollback.size());
+                    break;
+                }
             }
         }
         if (failed) break;
