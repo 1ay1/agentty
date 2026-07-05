@@ -274,41 +274,38 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                     auto nt = e.value("new_text", e.value("new_string", std::string{}));
                     out.hunks.push_back({std::move(ot), std::move(nt)});
                 }
-                // WHILE STREAMING: window to the NEWEST hunk only — the
-                // actual Write tail-window discipline this path always
-                // claimed to mirror. Rendering every accumulated hunk let
-                // the live card balloon past the viewport, committing its
-                // top rows to native scrollback; the later Pending→Running
-                // flip then RESTYLED every committed card row (connector
-                // stripe bright_black→blue, status glyph ○→●) — a style-
-                // only committed-row rewrite that trips maya's gate (the
-                // scrollback_oracle write/edit turn caught it at t*-e-run).
-                // One compact hunk keeps the live card inside the viewport
-                // where lifecycle restyles are legal; the full indexed
-                // multi-hunk render appears at settle (show_all below),
-                // painted once, below the seam.
-                if (streaming_now && out.hunks.size() > 1)
-                    out.hunks.erase(out.hunks.begin(),
-                                    out.hunks.end() - 1);
+                // WHILE STREAMING: maya's edit_diff_streaming renders one
+                // pinned stat chip + a ROW-LEVEL live tail of the last
+                // 2×edit_tail_per_side diff rows across ALL hunks. Feeding
+                // it every hunk (no host-side windowing) is what keeps the
+                // tail window FULL across hunk boundaries: a fresh hunk
+                // pops into the args array mid-token with near-zero
+                // content, and the old newest-hunk-only window collapsed
+                // the body to the bare chip on that frame — the card
+                // visibly shrank upwards, then re-grew as text arrived.
+                // With the cross-hunk row tail the height is monotonically
+                // non-decreasing (content only ever grows), so the card
+                // never shrinks mid-stream and the seam invariant below
+                // still bounds its height.
+                //
                 // Tag the streaming stat chip with the ordinal of the
                 // hunk currently landing ("edit 3 · −6 / +6") so the
-                // windowed preview still conveys how many edits have
-                // already applied — zero extra rows, and the ticking
-                // number stays inside the viewport by the budget below.
+                // tail window still conveys how many edits have already
+                // applied — zero extra rows, and the ticking number stays
+                // inside the viewport by the budget below.
                 if (streaming_now)
                     out.stream_hunk_no = static_cast<int>(it->size());
-                // ...and keep that hunk inside the STREAMING BODY BUDGET:
-                // tail-only, budget-derived lines per side. The budget is
-                // load-bearing, not cosmetic: the event HEADER row sits
-                // above the body, and everything below it (body + footer +
-                // border + composer/status chrome ≈ 15 rows) must fit
-                // under term_h so the header stays INSIDE the viewport
-                // while the card streams. At 18-row terminals that leaves
-                // 1 line per side (the config the oracle proves safe); at
-                // taller terminals the preview widens up to the settled
-                // profile's 6 lines per side — the user watches the hunk
-                // stream in without risking the header crossing the seam.
-                // Body rows = 1 stat chip + per_side × 2.
+                // ...and keep the live card inside the STREAMING BODY
+                // BUDGET. The budget is load-bearing, not cosmetic: the
+                // event HEADER row sits above the body, and everything
+                // below it (body + footer + border + composer/status
+                // chrome ≈ 15 rows) must fit under term_h so the header
+                // stays INSIDE the viewport while the card streams. Body
+                // rows = 1 stat chip + 2×per_side tail rows ≤ budget: at
+                // 18-row terminals that's chip + 2 rows (the config the
+                // oracle proves safe); at taller terminals the tail widens
+                // up to 12 rows — the user watches the newest rows stream
+                // past without the header crossing the seam.
                 if (streaming_now) {
                     const int per_side = std::clamp(
                         (stream_body_budget() - 1) / 2, 1, 6);
@@ -335,6 +332,15 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 // streaming stays elided. Live == frozen body.
                 out.show_all     = !streaming_now;
                 out.is_streaming = streaming_now;
+                // Same seam budget as the edits-array branch: streaming
+                // body = chip + 2×per_side rows must fit under term_h so
+                // the event header never crosses the viewport top.
+                if (streaming_now) {
+                    const int per_side = std::clamp(
+                        (stream_body_budget() - 1) / 2, 1, 6);
+                    out.edit_head_per_side = 0;
+                    out.edit_tail_per_side = per_side;
+                }
                 out.hunks.push_back({std::move(ot), std::move(nt)});
             }
         }
