@@ -74,13 +74,6 @@ bool ends_with(const std::string& s, std::string_view suffix) {
     return s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-void replace_suffix(std::string& s, std::string_view from, std::string_view to) {
-    if (ends_with(s, from)) {
-        s.resize(s.size() - from.size());
-        s.append(to);
-    }
-}
-
 void step1a(std::string& s) {
     if (ends_with(s, "sses")) { s.resize(s.size() - 2); return; }
     if (ends_with(s, "ies"))  { s.resize(s.size() - 2); return; }
