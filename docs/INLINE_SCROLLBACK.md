@@ -537,8 +537,15 @@ little CONTEXT; it structurally cannot corrupt scrollback. (The old
 host-side measurement pipeline — `measure_element_rows` at a
 reconstructed width, `ensure_frozen_width` resize healing, four
 parallel vectors in lockstep — is DELETED; every historical trim
-ghost was drift inside it. Seal-time measurement survives only as
-hash-cache warming for the freeze seam and as trim-policy input.)
+ghost was drift inside it. The SEAL-TIME measure is maya's too:
+`push_frozen` forwards to `ledger.seal_measured()`, which lays the
+block out at the width maya's own paint pass recorded for the
+fragment (`record_paint_width`) — warming the hash-keyed measure
+cache for the freeze seam AND seeding the policy estimate. The
+`measure_cols` term_cols-4 chrome reconstruction, whose -2-vs-4
+comment stack was itself the fossil of a narrow-terminal duplication
+bug, is gone; a chrome-padding change can no longer silently break
+the seal.)
 
 **drop_front is quantized and gated.** It extends across exposed
 separators (a separator must never lead the prefix — the last dropped

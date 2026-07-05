@@ -10,8 +10,8 @@
 //
 // THE ACCOUNTING INVERSION. This file used to maintain a parallel
 // measurement pipeline: per-entry row counts measured through a
-// host-reconstructed width (measure_element_rows at term_cols - 4),
-// healed on resize (ensure_frozen_width), kept in lockstep across four
+// host-reconstructed width (term_cols - 4, healed on resize by
+// ensure_frozen_width), kept in lockstep across four
 // parallel vectors, and summed into the exact commit_scrollback count
 // each trim sent maya. Every historical trim-corruption bug was drift
 // between that pipeline and what maya actually painted. All of it is
@@ -47,12 +47,9 @@
 
 #include <maya/dsl.hpp>
 #include <maya/element/text.hpp>   // maya::string_width (display-column count)
-#include <maya/layout/yoga.hpp>     // maya::layout::compute (seal-time cache warm)
 #include <maya/platform/io.hpp>
 #include <maya/render/cache_id.hpp>
-#include <maya/render/renderer.hpp> // maya::render_detail::build_layout_tree
 #include <maya/render/scrollback_ledger.hpp>
-#include <maya/style/theme.hpp>
 #include <maya/widget/conversation.hpp>
 #include <maya/widget/turn.hpp>
 
@@ -99,34 +96,18 @@ int estimate_wrap_cols(int term_cols) {
 }
 int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
 
-// EXACT content width a frozen Turn Element is laid out at by the real
-// render. A frozen entry is nested under TWO horizontal-padding boxes
-// before maya measures it, and BOTH must be subtracted here:
-//
-//   AppLayout::build:    vstack().padding(1)      -> left 1 + right 1 = 2
-//   Conversation::build: v(rows) | padding(0, 1)  -> left 1 + right 1 = 2
-//
-// (Thread::build is a pass-through and list_ref adds no chrome.) So the
-// frozen Element receives term_cols - 4 columns, NOT term_cols - 2. The
-// earlier -2 counted only AppLayout's pad and MISSED Conversation's
-// padding(0, 1); on a narrow viewport that 2-col over-estimate of the
-// wrap width UNDER-counts every wrapped entry's height (fewer rows than
-// maya actually paints), so the trim's commit_scrollback accounting
-// undershoots and strands a duplicate row one screen up — the
-// phone-over-SSH scrollback-duplication bug.
-//
-// The Turn owns its own rail + inner padding INSIDE the built Element
-// `e`; the layout engine subtracts that itself when measure_element_rows
-// runs compute() on `e`, identically to the real render — so only the
-// EXTERNAL 4 cols belong here. This is the width measure_element_rows
-// MUST use: frozen_rows[] equals the wire height by construction only
-// when measured at the width maya actually wraps at. Verified empirically
-// — for every width W, the real nested render assigns the frozen element
-// exactly the height it has at W-4 (and the coarse estimate_wrap_cols
-// already uses term_cols - 4 for the same reason).
-int measure_cols(int term_cols) {
-    return std::max(16, term_cols - 4);
-}
+// measure_cols is GONE. It reconstructed the EXACT content width a
+// frozen block is laid out at (term_cols - 4: AppLayout's padding(1)
+// eats 2, Conversation's padding(0,1) eats 2) so the seal-time
+// measure matched the real render. That reconstruction was the last
+// host-side measurement fossil — the -2-vs-4 distinction here was
+// itself the fix for a narrow-terminal duplication ghost, and any
+// future chrome-padding change would have silently reintroduced it.
+// ledger.seal_measured() now lays new blocks out at the width maya's
+// OWN paint pass recorded for the fragment (record_paint_width), so
+// there is nothing left to reconstruct. estimate_wrap_cols above
+// survives only for the coarse text-byte POLICY estimates
+// (estimate_msg_rows), where ±2 columns is noise.
 
 // Live-canvas row budget = a small multiple of the terminal viewport,
 // derived from an explicit terminal-row count (see estimate_wrap_cols for
@@ -181,7 +162,7 @@ bool frozen_collapse_enabled() {
 
 // Compact placeholder for an OFF-SCREEN body collapsed out of the in-app
 // re-render window (see collapse_oversized_offscreen_entries). One dim ⋯ row,
-// identical chrome to compaction_divider_row, so measure_element_rows reports
+// identical chrome to compaction_divider_row, so the seal-time measure reports
 // ~1 row. The full body is untouched in the terminal's native scrollback
 // (painted there when it was live) and on disk.
 maya::Element collapsed_body_stub(std::size_t orig_rows) {
@@ -472,49 +453,31 @@ std::size_t estimate_run_rows(const Model& m, std::size_t from, std::size_t to) 
 // commit sums) is GONE: maya's paint pass records each sealed block's
 // laid-out height into the ledger every frame, and the trims mint
 // their commit counts from those recordings via harvest().
-
-// Seal-time measure. TWO deliberate purposes, NEITHER of them
-// accounting:
 //
-//  1. CACHE WARMING (load-bearing for the freeze seam). The freshly
-//     built block carries the SAME hash_id the live tail stamped, and
-//     maya's hash-keyed measure trusts the cached entry's height
-//     blindly (renderer.cpp: hash-keyed measure returns
-//     entries_by_hash[id].height without a width check — that trust
-//     is what makes settled-card measure O(1)). The live-phase entry
-//     can hold a stale height; if the freeze frame lays the sealed
-//     block out at that stale height, the tree transiently shrinks vs
-//     prev_cells and maya's invariant gate fires a (non-destructive,
-//     but avoidable) recovery. Running the block through the real
-//     layout engine here refreshes the entry to its natural height at
-//     the live width, so the freeze frame is byte-stable — the exact
-//     mechanism the oracle proved for the pre-ledger code.
+// The seal-time measure is maya's too, now. push_frozen forwards to
+// ledger.seal_measured(), which lays the block out through maya's own
+// layout engine at the WIDTH THE PAINT PASS RECORDED for this ledger's
+// fragment (record_paint_width) — not a host reconstruction of
+// "terminal columns minus the chrome paddings". That reconstruction
+// (measure_cols' -4, and the -2-vs-4 comment stack justifying it) was
+// the last measurement fossil in this file; a chrome-padding change
+// used to silently break it. seal_measured does double duty:
 //
-//  2. POLICY estimate: the returned height seeds block_rows() until
-//     the first ledger paint records the real value.
+//  1. CACHE WARMING (load-bearing for the freeze seam): the layout
+//     pass refreshes maya's hash-keyed measure entry for the block's
+//     hash_id, so the freeze frame lays out at the true height — the
+//     oracle-proven byte-stability mechanism.
+//  2. POLICY estimate: the measured height seeds block_rows() until
+//     the first ledger paint records the real value. Our coarse
+//     estimate_run_rows is only the pre-first-paint fallback.
 //
-// Accounting never touches this number — the trim's commit is minted
+// Accounting never touches these numbers — the trim's commit is minted
 // exclusively from paint-recorded heights (ledger.harvest()), so a
 // measurement drift here costs at most one avoidable soft repaint,
 // never scrollback corruption.
-std::size_t measure_element_rows(const maya::Element& e, int cols) {
-    if (cols < 1) return 0;
-    thread_local std::vector<maya::layout::LayoutNode> nodes;
-    nodes.clear();
-    const std::size_t root =
-        maya::render_detail::build_layout_tree(e, nodes, maya::theme::dark);
-    if (root >= nodes.size()) return 0;
-    maya::layout::compute(nodes, root, cols);
-    const int h = nodes[root].computed.size.height.raw();
-    return h > 0 ? static_cast<std::size_t>(h) : 0;
-}
-
 void push_frozen(Model& m, maya::Element e, std::size_t rows,
                  bool separator = false) {
-    const std::size_t measured =
-        measure_element_rows(e, measure_cols(term_dims().cols));
-    if (measured > 0) rows = measured;
-    m.ui.frozen.seal(std::move(e), rows, separator);
+    (void)m.ui.frozen.seal_measured(std::move(e), rows, separator);
 }
 
 // Strip leading separator blocks so the sealed prefix always opens on
