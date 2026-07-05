@@ -28,9 +28,11 @@ If inline-mode rendering breaks, check these in order:
 1. **Mode + AppLayout shape.** `Mode::Inline` at the runtime; flat
    `vstack` in `AppLayout` with **no** `overflow()`, **no** `shrink`,
    **no** wrapper boxes around children. (maya commit `54fde37`.)
-2. **Frozen prefix is borrowed, not rebuilt.** `conversation_config`
-   sets `cfg.frozen = &m.ui.frozen`. The host pushes entries; maya
-   renders them through `list_ref` (zero-copy).
+2. **Frozen prefix is a maya-measured ledger.** `conversation_config`
+   sets `cfg.ledger = &m.ui.frozen` (a `maya::ScrollbackLedger`); maya
+   renders it through `ledger_ref` (zero-copy, like `list_ref`) AND
+   records each sealed block's laid-out height back into the ledger
+   every frame.
 3. **Divider symmetry.** `frozen.cpp`, `build_live_tail`, and
    `build_queued_previews` all push **the same** `maya::Conversation::divider()`
    row between turns. Any height delta at a freeze instant ghosts.
@@ -56,14 +58,17 @@ If inline-mode rendering breaks, check these in order:
 7. **Canvas shrink + trim.** `Runtime::render`'s inline path
    reallocates the canvas down to `content + 64` rows when
    `canvas.height() * 2 > shrink_target * 3` (1.5×). `trim_frozen_if_oversized`
-   trims `m.ui.frozen` by ROWS — dropping oldest entries until
-   `frozen_row_total` is under ~600 rows (and entry count under 60),
-   keeping at least the most recent 3 entries — then issues
-   `Cmd::commit_scrollback_overflow()`. The per-entry row count is
-   estimated from each tool card's **args** body (write content, edit
-   hunks, read/grep results), NOT its one-line output footer; counting
-   output alone under-estimates a tall write to ~1 row and the cap
-   never trips.
+   trims `m.ui.frozen` by ROWS — dropping oldest blocks until
+   `frozen.row_total()` is under the row budget (and block count under
+   120), keeping at least the most recent blocks covering the budget —
+   then commits via the TYPED path: `frozen.drop_front(n)` accrues the
+   dropped blocks' paint-recorded heights as debt, `frozen.harvest()`
+   mints a `ScrollbackDebt`, and the trim returns
+   `Cmd::commit_scrollback(debt)`. The row counts feeding the POLICY
+   (when/how much to trim) come from the same paint recordings, with
+   seal-time estimates as the pre-first-paint fallback; the ACCOUNTING
+   (how many rows the shadow advances) is minted exclusively by the
+   ledger and cannot drift from what maya painted.
 
 Each pin has a section below with the file/line, the rationale, and
 the failure mode if you undo it.
@@ -126,37 +131,46 @@ scrollback overflow happen naturally.”
 
 ---
 
-## 2. Borrowed frozen prefix
+## 2. Borrowed frozen prefix (the ScrollbackLedger)
 
 **Pin location.** `src/runtime/view/thread/conversation.cpp` —
 `conversation_config()`.
 
 ```cpp
 maya::Conversation::Config cfg;
-cfg.frozen = &m.ui.frozen;      // borrowed pointer; zero-copy
+cfg.ledger = &m.ui.frozen;      // maya::ScrollbackLedger; zero-copy
 int running_turn = m.ui.frozen_turn + 1;
 build_live_tail(m, running_turn, cfg.live_tail);
 build_queued_previews(m, running_turn, cfg.live_tail);
 cfg.in_flight = std::nullopt;   // see pin 8 — placeholder lives in-Turn
 ```
 
-**Why.** maya's `Conversation` widget, when given a `frozen`
-pointer, does `rows.push_back(list_ref(*cfg_.frozen))` — a single
-`list_ref` Element referencing the host's vector. Per-frame cost is
+**Why.** maya's `Conversation` widget, when given a `ledger`
+pointer, does `rows.push_back(ledger_ref(*cfg_.ledger))` — a single
+Element referencing the ledger's sealed blocks. Per-frame cost is
 O(visible live tail) regardless of how long the session has run.
-The `frozen` vector grows only at freeze instants; it never shrinks
-during normal append (only on trim — pin 7).
+Beyond zero-copy, `ledger_ref` tags the fragment so maya's paint pass
+records every block's laid-out height back into the ledger each frame
+— those recordings are what `harvest()` mints trim-commit debt from
+(pin 7b). The ledger grows only at freeze instants (`seal()`); it
+never shrinks during normal append (only on trim — pin 7).
 
 **The two invariants the host owes maya:**
-- `frozen` outlives every `build()` call. ✓ It's `m.ui.frozen`,
+- The ledger outlives every `build()` call. ✓ It's `m.ui.frozen`,
   same lifetime as the Model.
-- Inter-turn dividers belong to the host. The `Conversation` widget
-  adds **no** dividers when `frozen != nullptr`. See pin 3.
+- Inter-turn dividers belong to the host (sealed with
+  `separator=true` so a trim never leaves one leading the prefix).
+  The `Conversation` widget adds **no** dividers when
+  `ledger != nullptr`. See pin 3.
 
 **Failure signature.** If you switch to `cfg.built_turns` or
 `cfg.turns`, every frame rebuilds every settled turn — frame cost
 goes from O(visible live tail) to O(N turns × tool cards). 200-turn
-session at ~3 ms/turn = 600 ms/frame visible as input lag.
+session at ~3 ms/turn = 600 ms/frame visible as input lag. If you
+switch to `cfg.frozen`/`list_ref` (the pre-ledger wiring), rendering
+still works but NO paint heights are recorded — `drop_front` refuses
+to drop unrecorded blocks (provability gate) and the trim never
+fires; the prefix grows unbounded.
 
 ---
 
@@ -171,9 +185,12 @@ Elements with **the same** `hash_id`:
 | Live tail: between unfrozen turns                   | `src/runtime/view/thread/conversation.cpp` (`build_live_tail`) |
 | Live tail: before each queued-message preview       | `src/runtime/view/thread/conversation.cpp` (`build_queued_previews`) |
 
-All three call `gap_row()`, which forwards to
-`maya::Conversation::divider()` (defined in
-`maya/include/maya/widget/conversation.hpp:177`). That static
+All three call `gap_row()` — defined ONCE in
+`include/agentty/runtime/view/thread/seam.hpp` (shared by the frozen
+builder and the live-tail builder; the pre-seam byte-identical copies
+guarded by "MUST stay identical" comments are gone) — which forwards
+to `maya::Conversation::divider()` (defined in
+`maya/include/maya/widget/conversation.hpp`). That static
 function returns a width-aware indented `─` rule with a fixed
 `hash_id` of `"maya.conversation.divider"`.
 
@@ -480,50 +497,56 @@ proportional to `canvas.height()`.
 `trim_frozen_if_oversized()`.
 
 ```cpp
-constexpr std::size_t kFrozenMaxRows    = 600;   // primary: bound canvas height
-constexpr std::size_t kFrozenMaxEntries = 60;    // secondary: pathological tiny entries
-constexpr std::size_t kKeepMinEntries   = 3;     // never drop the immediate context
+const std::size_t kFrozenMaxRows = frozen_row_budget();  // ~600, env-tunable
+constexpr std::size_t kFrozenMaxEntries = 120;  // secondary: pathological tiny blocks
+constexpr std::size_t kKeepMinEntries   = 8;    // widened only when kept blocks are small
 
-if (frozen_row_total <= kFrozenMaxRows
-    && frozen.size() <= kFrozenMaxEntries) return maya::Cmd<Msg>::none();
-// drop oldest WHOLE entries (front) until both caps satisfied,
-// keeping >= kKeepMinEntries; frozen / frozen_rows / frozen_row_total
-// stay in lockstep...
-return maya::Cmd<Msg>::commit_scrollback_overflow();
+if (m.ui.frozen.row_total() <= kFrozenMaxRows
+    && m.ui.frozen.size() <= kFrozenMaxEntries) return maya::Cmd<Msg>::none();
+// POLICY: walk from the back, keep blocks covering ~kFrozenMaxRows of
+// recent work; drop whole blocks from the front until both caps hold.
+(void)m.ui.frozen.drop_front(drop);   // quantized + provability-gated
+auto debt = m.ui.frozen.harvest();    // ACCOUNTING: paint-recorded rows
+return maya::Cmd<Msg>::commit_scrollback(std::move(debt));
 ```
 
 **Why ROWS, not entries.** `m.ui.frozen` is borrowed by maya every
-frame via `list_ref`, and the inline canvas auto-sizes to
-`frozen_row_total + chrome`. Maya then re-runs THREE O(rows×width)
+frame via `ledger_ref`, and the inline canvas auto-sizes to
+`row_total + chrome`. Maya then re-runs THREE O(rows×width)
 passes per frame: `render_tree` (layout/measure), `canvas.clear()`,
 and the canvas/shadow witness scan. So per-frame cost — and the
 spinner/input lag the user feels on a long thread — scales with
-total frozen ROWS, not entry count. A single full `write`/`edit`
-body is hundreds of rows in ONE entry, so an entry-count cap alone
+total sealed ROWS, not block count. A single full `write`/`edit`
+body is hundreds of rows in ONE block, so a count cap alone
 can't bound the canvas. ~600 rows ≈ a few full viewports; warm
 per-frame render stays ~0.2 ms there (vs ~25–240 ms when a tall
-body is left un-capped). Trimmed entries are NOT lost — they remain
+body is left un-capped). Trimmed blocks are NOT lost — they remain
 on disk in `m.d.current.messages` AND in the terminal's native
 scrollback (painted live once, full body and all). Only the in-app
 re-render window shrinks; `show_all` bodies are never collapsed.
 
-**The row count is estimated from tc.args, NOT tc.output().** A tool
-card renders its body from its ARGS — `write` shows `args["content"]`
-(the whole new file), `edit` shows every hunk under `args["edits"]`,
-`read`/`grep` show their result text. `tc.output()` is only the
-one-line "wrote N lines" footer. The original estimate counted only
-output, so a 3000-line write was scored at ~1 row — `frozen_row_total`
-read tiny, the cap never tripped, and the canvas ballooned to
-thousands of rows while the model believed the thread was small.
-This was THE root cause of the long-thread render lag; see
-`estimate_msg_rows` in `frozen.cpp`.
+**Policy vs accounting — the hard boundary.** Everything the trim
+computes (the row budget, the keep-walk, how many blocks to drop) is
+POLICY, read from `block_rows()` / `row_total()` — paint-recorded
+heights with seal-time estimates as the pre-first-paint fallback. The
+ACCOUNTING — the row count maya's shadow advances by — is minted
+exclusively by `ledger.harvest()` from heights maya's own paint pass
+recorded, returned as a typed `ScrollbackDebt` this codebase cannot
+fabricate or adjust. A sloppy estimate can trim too much or too
+little CONTEXT; it structurally cannot corrupt scrollback. (The old
+host-side measurement pipeline — `measure_element_rows` at a
+reconstructed width, `ensure_frozen_width` resize healing, four
+parallel vectors in lockstep — is DELETED; every historical trim
+ghost was drift inside it. Seal-time measurement survives only as
+hash-cache warming for the freeze seam and as trim-policy input.)
 
-**The `commit_scrollback_overflow` Cmd is the safe variant.** It
-lets maya derive the safe row count itself
-(`max(0, prev_rows - term_h)`); the older row-counted
-`commit_scrollback` was retired because no caller outside the
-renderer can know the right physical-row count (see
-`maya/docs/scrollback-corruption-audit.md` finding #1, if present).
+**drop_front is quantized and gated.** It extends across exposed
+separators (a separator must never lead the prefix — the last dropped
+row being blank keeps the top padding row byte-aligned across the
+commit), clamps to the paint-recorded prefix (a block sealed this
+cycle but not yet painted through the ledger cannot shed rows — the
+provability gate; the next trim catches it), and backs off rather
+than leave a separator at the front.
 
 **Where it's called.** The trim Cmd is issued from the same
 reducer steps that grow `m.ui.frozen` — primarily after
@@ -598,8 +621,9 @@ into native scrollback by shifting `prev_cells` up.
 - The application calls `force_redraw()`.
 
 You should rarely have to think about this layer from agentty —
-the agentty-side `commit_scrollback_overflow()` Cmd is the only
-direct hook into it. Just know that if a state machine
+the agentty-side hooks into it are `commit_scrollback_overflow()`
+(wholesale swaps) and the ledger-minted `commit_scrollback(debt)`
+(pin 7b trims). Just know that if a state machine
 transition looks wrong on the wire, the bug is almost certainly
 in the *content* (one of pins 1–8), not in the state machine.
 
@@ -645,6 +669,8 @@ that pin from this doc.
 | Mode + outer layout                          | `maya/include/maya/widget/app_layout.hpp`                       |
 | Borrowed frozen prefix wiring                | `src/runtime/view/thread/conversation.cpp`                       |
 | Frozen builder + trim                        | `src/runtime/app/update/frozen.cpp`                              |
+| ScrollbackLedger + ScrollbackDebt            | `maya/include/maya/render/scrollback_ledger.hpp`                 |
+| Freeze-seam row builders (ONE definition)    | `include/agentty/runtime/view/thread/seam.hpp`                   |
 | Divider source of truth                      | `maya/include/maya/widget/conversation.hpp` (`divider_rule`)    |
 | `needs_warmup_render` field                  | `include/agentty/runtime/model.hpp`                              |
 | `needs_warmup_render` set                    | `src/runtime/app/update/picker.cpp` (`ThreadLoaded`)             |
