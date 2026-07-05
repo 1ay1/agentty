@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include <maya/app/app.hpp>
+#include <maya/core/anim_clock.hpp>
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -241,8 +242,14 @@ static std::string read_all(int fd) {
     return s;
 }
 
+// Advance the ANIMATION clock (maya::anim_now_ms — the one time source
+// every time-driven widget reads: reveal cursor, scramble window, finalize
+// ramp, anim::Clock/Motion) WITHOUT sleeping. The widgets compute exactly
+// the ages/phases/deadlines they would after a real sleep, so the scenario
+// exercises identical animation dynamics at ~zero wall cost — the suite
+// used to spend >95% of its runtime in sleep_for.
 static void tick(int ms = 20) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    maya::testing::advance_anim_clock_ms(ms);
 }
 
 // ── Oracle state (per shape) ────────────────────────────────────────────

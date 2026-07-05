@@ -55,6 +55,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include <maya/core/anim_clock.hpp>
 #include <maya/render/canvas.hpp>
 #include <maya/render/inline_frame.hpp>
 #include <maya/render/renderer.hpp>
@@ -687,11 +688,15 @@ struct Harness {
     }
 };
 
-// Sleep a beat so the reveal overlay's wall clock advances between
-// frames — that's what makes the animated trailing edge mutate even on a
-// frame where no new bytes arrived (the production RAF cadence).
+// Advance the ANIMATION clock a beat so the reveal overlay's time source
+// moves between frames — that's what makes the animated trailing edge
+// mutate even on a frame where no new bytes arrived (the production RAF
+// cadence). Uses maya::testing::advance_anim_clock_ms instead of a real
+// sleep: every time-driven widget reads maya::anim_now_ms, so the same
+// 20 ms of ANIMATION time passes at zero wall cost — the suite used to
+// spend >95% of its ~280 s runtime asleep.
 static void tick() {
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    maya::testing::advance_anim_clock_ms(20);
 }
 
 // Drive the production streaming cadence with reveal_fx ON (the real

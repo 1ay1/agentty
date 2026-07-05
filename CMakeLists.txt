@@ -1328,13 +1328,11 @@ if(AGENTTY_BUILD_TESTS)
         # openpty() lives in libutil on glibc.
         target_link_libraries(reveal_scrollback_test PRIVATE util)
     endif()
-    # Wall-clock bound BY DESIGN: every frame sleeps 20 ms so the reveal
-    # overlay's wall clock advances (the animation under test). The
-    # trim-storm scenario (14 turns x 8 shapes, added with the exact-
-    # commit trim fix) roughly tripled the frame count: ~280 s locally,
-    # slower on CI runners — the old 180 s cap timed out a PASSING test.
-    # 600 matches the scrollback oracle below.
-    set_tests_properties(reveal_scrollback_test PROPERTIES TIMEOUT 600)
+    # Frames advance maya's ANIMATION clock via
+    # maya::testing::advance_anim_clock_ms (no real sleeps — identical
+    # widget dynamics at zero wall cost): ~24 s locally for 10970 checks.
+    # 180 s cap = generous headroom for slow CI runners.
+    set_tests_properties(reveal_scrollback_test PROPERTIES TIMEOUT 180)
 
     # scrollback_oracle_test — the APPEND-ONLY SCROLLBACK ORACLE. Drives
     # the REAL maya Runtime::render through a PTY with the REAL agentty
