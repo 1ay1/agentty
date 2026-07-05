@@ -390,6 +390,11 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
     // deck order the ^J list shows (newest first): ← = newer, → = older.
     // Checked in on_global (before on_composer) so it never collides
     // with plain/Ctrl arrow cursor movement in the composer.
+    // (Terminals without a real Alt key — iPhone terminals — emulate Alt
+    // as an Esc prefix. That only works because Esc is INERT on the main
+    // screen: a stray Escape keystroke must never quit the app, or the
+    // Esc-then-arrow sequence would kill agentty mid-chord. Quit is
+    // Ctrl+C, deliberately the only app-exit key.)
     if (ev.mods.alt && !ev.mods.ctrl
         && std::holds_alternative<SpecialKey>(ev.key)) {
         switch (std::get<SpecialKey>(ev.key)) {
@@ -519,7 +524,18 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
                 // falls through.
                 if (s.in_history) return ComposerHistoryNext{};
                 return std::nullopt;
-            case SpecialKey::Escape:    return Quit{};
+            case SpecialKey::Escape:
+                // Deliberately INERT on the main screen — quit is Ctrl+C
+                // only. Two reasons: (1) Esc is the most-mashed key in a
+                // terminal (vim muscle memory, "dismiss whatever this
+                // is") and instant app-exit on it loses sessions; (2)
+                // iPhone terminals (iSH, Termius, a-Shell) have no Alt
+                // key and emulate Alt+←/→ as Esc-then-arrow — the Esc
+                // half of that chord must not be a live Quit binding.
+                // Esc still cancels a streaming turn (handled in the
+                // dispatch above) and closes every modal (each modal
+                // handler owns its own Esc).
+                return std::nullopt;
             default: return std::nullopt;
         }
     }

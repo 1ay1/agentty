@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Esc no longer quits the app.** Quit is `Ctrl+C` only. Esc keeps all its useful jobs — cancel a streaming turn, reject a permission, close any modal — but a stray press on the main screen is now inert. This also makes Alt-emulation on iPhone terminals (iSH, Termius, a-Shell) safe: their Alt+←/→ is an Esc-prefix chord, and the Esc half must not be a live exit key.
+
 ## [0.2.4]
 
 ### Added
