@@ -4,6 +4,20 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.3]
+
+### Fixed
+- **The remaining streaming scrollback-corruption classes — closed, oracle-proven.** A new in-repo *scrollback oracle* (a pixel-exact terminal-emulator harness that replays full streamed turns and diffs every committed row against ground truth) flushed out and proved fixes for every class it found: (1) trailing prose duplicated above tool cards — the paragraph rode maya's inline tail path (different wrap than the committed-block path) until settle rewrote its already-committed rows; the widget now finishes the instant a tool call exists; (2) frozen-front trim committed an estimate of dropped rows instead of the exact count; (3) tool-card grow while overflowed strand-painted rows into scrollback (maya grow-guard + reconcile cooldown); (4) chrome strands — a committed drop larger than viewport+margin preserved a pre-commit canvas and smeared composer/status chrome into history; (5) shrink-while-overflowed at stream settle duplicated the composer one screen up (maya's verify-poison recovery committed rows unconditionally). The oracle passes all shapes with maya's scrollback-invariant gate instrumented and **zero gate firings** — the gate exists, but nothing trips it.
+- **Scrollback no longer wiped by gate recovery.** The scrollback-invariant gate's *grow* recovery arm demoted to a hard reset whose escape sequence (`\x1b[3J`) deleted the terminal's entire native scrollback — you'd suddenly see only the last few turns. The wipe dated from an era when recovery re-serialized from row 0 with bottom-edge scrolls; today's repaint is viewport-capped, so the destruction was pure loss. Grow recovery now commits off-viewport rows and soft-repaints, same as shrink — no reachable render path clears scrollback anymore (only width-change resize, hard write failure, and explicit thread swap).
+- **`write`/`edit` streaming cards: seam-stable, no collapse, no committed-row rewrites.** Long streaming edits used to balloon the card (every hunk rendered), tick already-committed "/N" headers, and could collapse the card to zero rows mid-stream. The streaming preview now feeds all hunks to maya's diff widget, which pins a status chip and windows the visible body to a cross-hunk row tail; the header/detail are lifecycle-stable (no Done-only suffix rewriting committed rows); the body budget adapts to content instead of pinning worst-case height; and the chip shows the landing-hunk ordinal while streaming.
+- **Live tool panel animates without touching the freeze seam.** The in-flight agent-timeline panel's spinner moved to a seam-safe footer so animation frames can't perturb rows above the live/frozen boundary.
+
+### Changed
+- Model catalog recognises the Claude Fable/Mythos flagship lane.
+
+### Performance
+- **Test-suite wall clock: 280 s → 24 s.** maya's animation system (reveal effect, activity indicator, `anim::Clock`/`Mount`) now reads a single skewable time source (`anim_now_ms()`: steady clock + test-only additive atomic skew). Tests advance the clock instead of sleeping 20 ms per frame; production cost is one relaxed atomic load.
+
 ## [0.2.2]
 
 ### Fixed
