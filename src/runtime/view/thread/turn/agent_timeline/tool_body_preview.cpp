@@ -290,6 +290,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                 if (streaming_now && out.hunks.size() > 1)
                     out.hunks.erase(out.hunks.begin(),
                                     out.hunks.end() - 1);
+                // Tag the streaming stat chip with the ordinal of the
+                // hunk currently landing ("edit 3 · −6 / +6") so the
+                // windowed preview still conveys how many edits have
+                // already applied — zero extra rows, and the ticking
+                // number stays inside the viewport by the budget below.
+                if (streaming_now)
+                    out.stream_hunk_no = static_cast<int>(it->size());
                 // ...and keep that hunk inside the STREAMING BODY BUDGET:
                 // tail-only, budget-derived lines per side. The budget is
                 // load-bearing, not cosmetic: the event HEADER row sits
