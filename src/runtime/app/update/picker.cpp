@@ -295,7 +295,16 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 m.s.threads_loading = true;
                 cmd = cmd::load_threads_async();
             }
-            m.ui.thread_list = pick::OpenAt{0};
+            // Open AT the current thread, not row 0 — the user's mental
+            // anchor is "where am I", and cycling from there (↑ newer /
+            // ↓ older) mirrors the Alt+←/→ quick-cycle order.
+            int at = 0;
+            for (int i = 0; i < static_cast<int>(m.d.threads.size()); ++i)
+                if (m.d.threads[static_cast<std::size_t>(i)].id == m.d.current.id) {
+                    at = i;
+                    break;
+                }
+            m.ui.thread_list = pick::OpenAt{at};
             return {std::move(m), std::move(cmd)};
         },
         [&](CloseThreadList) -> Step {
@@ -385,6 +394,69 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             m.ui.thread_list = pick::Closed{};
             return {std::move(m), std::move(cmd)};
         },
+        [&](ThreadCycle& e) -> Step {
+            // Alt+←/→ — jump to the adjacent thread without the picker.
+            // Recency order (same as ^J): index 0 = newest; +1 = older,
+            // -1 = newer, wrapping at both ends. Gated on an idle
+            // session — swapping m.d.current under an active stream
+            // would strand the in-flight ctx's writes.
+            if (m.s.active()) {
+                auto cmd = set_status_toast(m,
+                    "wait for the reply to finish before switching threads");
+                return {std::move(m), std::move(cmd)};
+            }
+            if (m.s.thread_loading) return done(std::move(m));
+            const int sz = static_cast<int>(m.d.threads.size());
+            if (sz == 0) {
+                // History not loaded yet (or genuinely empty) — kick a
+                // refresh so the NEXT press works, and say so.
+                Cmd<Msg> cmd = Cmd<Msg>::none();
+                if (!m.s.threads_loading) {
+                    m.s.threads_loading = true;
+                    cmd = cmd::load_threads_async();
+                }
+                auto toast = set_status_toast(m, "no other threads yet");
+                return {std::move(m),
+                        Cmd<Msg>::batch(std::move(cmd), std::move(toast))};
+            }
+            // Locate the current thread in the recency list. A fresh
+            // unsaved thread isn't in it — treat "newest" as the anchor
+            // so the first press lands on the most recent saved thread.
+            int cur = -1;
+            for (int i = 0; i < sz; ++i)
+                if (m.d.threads[static_cast<std::size_t>(i)].id == m.d.current.id) {
+                    cur = i;
+                    break;
+                }
+            int target;
+            if (cur < 0) {
+                target = (e.delta >= 0) ? 0 : sz - 1;
+            } else {
+                if (sz == 1) {
+                    auto toast = set_status_toast(m, "only one thread");
+                    return {std::move(m), std::move(toast)};
+                }
+                target = ((cur + e.delta) % sz + sz) % sz;
+            }
+            const Thread& meta = m.d.threads[static_cast<std::size_t>(target)];
+            if (meta.id == m.d.current.id) return done(std::move(m));
+            // Preserve the thread being left — same courtesy NewThread
+            // extends. finalize_turn saves per turn, but a title edit or
+            // an un-persisted tail shouldn't be lost to a quick cycle.
+            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            m.s.thread_loading = true;
+            // "thread k/N · title" — the positional readout that makes
+            // repeated Alt+←/→ presses feel like flipping through a
+            // deck rather than teleporting blind. Survives the swap
+            // because ThreadLoaded doesn't touch m.s.status.
+            auto toast = set_status_toast(m,
+                "thread " + std::to_string(target + 1) + "/"
+                    + std::to_string(sz) + " \xc2\xb7 "
+                    + (meta.title.empty() ? "(untitled)" : meta.title));
+            return {std::move(m),
+                    Cmd<Msg>::batch(cmd::load_thread_async(meta.id),
+                                    std::move(toast))};
+        },
         [&](NewThread) -> Step {
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
             // Skill activations belong to the old thread's context;
@@ -401,6 +473,9 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             clear_frozen(m);
             m.ui.thread_list = pick::Closed{};
             m.ui.command_palette = palette::Closed{};
+            // Blocks belong to the OLD thread's last reply — running one
+            // against a fresh empty thread would be confusing.
+            m.ui.code_blocks = code_block_picker::Closed{};
             // Wipe the whole composer draft — a pasted-but-unsent image (or
             // any chip / queued message) belongs to the thread we're
             // leaving. Leaking it carried an empty-bytes image attachment

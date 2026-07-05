@@ -4,6 +4,16 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.4]
+
+### Added
+- **Run code blocks from replies (Ctrl+G).** The picker lists every fenced block in the newest assistant reply (first-line preview · language · line count); `Enter` or a bare digit runs one **interactively on the real terminal** — the TUI suspends via a new maya suspend primitive, so sudo password prompts work, output streams live, and Ctrl+C kills the command (never agentty; classic `system()` signal semantics). stdout+stderr are teed: everything hits the screen live AND lands in a capture (capped 2 MB). On exit a Result card shows the command, exit code, and the full scrollable capture — `a` attaches it to the composer as a collapsed Output chip (the same collapse/expand machinery as a big paste; expands on the wire as "I ran: … output: …"), `y` copies it clean, `Esc`/`Enter` discards. The composer never receives output you didn't explicitly ask for. Extraction strips uniform `$ `/`> ` transcript prompts (never `#` comments), tolerates `~~~` fences, CommonMark indent, and unterminated fences; non-shell blocks offer edit/copy instead of run. Also in the command palette as *Run code block*. Windows degrades to the non-interactive captured runner. See `docs/RUN_CODE_BLOCK.md`.
+- **Runnable-block nudge.** When a reply settles and contains shell blocks, a transient toast ("▶ N runnable code blocks — Ctrl+G to run") surfaces the affordance while the commands are still on screen. Counts only runnable (shell-ish) blocks — a python-only reply stays quiet.
+- **Thread quick-cycle (Alt+←/→).** Flip to the adjacent thread without opening the picker — recency order, wraps at both ends, with a "thread k/N · title" toast on every hop so you always know where you landed. Gated on an idle session; the departing thread is saved first. The `^J` thread list now opens **at the current thread** (not row 0), marks it with a bold `●`, and shows the same k/N position readout — both navigation surfaces speak one coordinate system.
+
+### Changed
+- Status bar: the tok/s sparkline now shows from ~90 columns (was 110).
+
 ## [0.2.3]
 
 ### Fixed

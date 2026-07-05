@@ -31,7 +31,12 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     // sparkline + tok/s readout has room to breathe without elbowing
     // the title.
     cfg.breadcrumb_min_width   = is_streaming ? 160 : 130;
-    cfg.token_stream_min_width = 110;
+    // Small fixed-width sparkline + tok/s chip. Shows in the right group
+    // whenever the row has room for it beside the model badge + CTX
+    // gauge — a compact trend glimpse, never a stretched full-row graph.
+    // 90 cols is enough for the ~22-cell chip to sit without elbowing its
+    // neighbours; below that it drops so the badges keep priority.
+    cfg.token_stream_min_width = 90;
     // CTX shows as a COMPACT gauge (bar graph + percent, no raw token counts)
     // from ~40 cols up, so even the phone sees the fill bar and the % it cares
     // about; the verbose "used/max" token counts only join on a wide desktop-

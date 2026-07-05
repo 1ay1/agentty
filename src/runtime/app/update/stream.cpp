@@ -20,6 +20,7 @@
 #include "agentty/provider/error_class.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/code_block_picker.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/tool/spec.hpp"
@@ -1064,6 +1065,9 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
 
     deps().save_thread(m.d.current);
     auto kp = cmd::kick_pending_tools(m);
+    // Set by the idle-settle block below when the reply carries runnable
+    // shell blocks; batched into whichever return path fires.
+    Cmd<Msg> block_toast = Cmd<Msg>::none();
 
     if (m.s.is_idle() && !m.ui.composer.queued.empty()) {
         auto& head = m.ui.composer.queued.front();
@@ -1111,6 +1115,31 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // live_tail_reveal_settled() — already true now that we finished,
         // so the freeze fires immediately on the next frame.
         m.ui.pending_settle_freeze = true;
+
+        // Runnable-code nudge. The reply just settled and the user is
+        // reading it — if it carries shell blocks, surface the Ctrl+G
+        // affordance NOW, while the commands are on screen. Count only
+        // RUNNABLE blocks (is_shell_language): a reply that's all
+        // python/json snippets shouldn't advertise a run key that would
+        // only toast "isn't shell" back. Quiet if the reply has none —
+        // the nudge must stay rare enough to keep meaning something.
+        if (!m.d.current.messages.empty()
+            && m.d.current.messages.back().role == Role::Assistant
+            && !m.d.current.messages.back().text.empty()) {
+            const auto blocks = code_block_picker::extract_code_blocks(
+                m.d.current.messages.back().text);
+            int runnable = 0;
+            for (const auto& b : blocks)
+                if (code_block_picker::is_shell_language(b.language)) ++runnable;
+            if (runnable > 0) {
+                block_toast = set_status_toast(m,
+                    "\xe2\x96\xb6 " + std::to_string(runnable)
+                        + (runnable == 1 ? " runnable code block"
+                                         : " runnable code blocks")
+                        + " \xe2\x80\x94 Ctrl+G to run",
+                    std::chrono::seconds{6});
+            }
+        }
     }
 
     // Post-turn idle auto-compaction.
@@ -1161,11 +1190,12 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
                     dispatch(CompactContext{});
                 });
             return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                std::move(kp), std::move(compact_cmd)});
+                std::move(kp), std::move(block_toast), std::move(compact_cmd)});
         }
     }
 
-    return kp;
+    return Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
+        std::move(kp), std::move(block_toast)});
 }
 
 // ============================================================================

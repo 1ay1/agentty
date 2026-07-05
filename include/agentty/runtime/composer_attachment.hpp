@@ -39,6 +39,12 @@ struct Attachment {
         FileRef,    // Body is loaded from `path` at submit (or chip-build) time.
         Image,      // Body is the raw image bytes; `media_type` is set.
         Symbol,     // Body filled at submit from path:line span; carries `name`.
+        Output,     // Captured output of a locally-run code block. Body is
+                    // the (possibly huge) stdout+stderr; `name` holds the
+                    // command line for the chip caption. Same collapse /
+                    // expand-on-submit contract as Paste — the whole log
+                    // reaches the model on the wire but the composer shows
+                    // a one-line pill.
     };
 
     Kind kind = Kind::Paste;

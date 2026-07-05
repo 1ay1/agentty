@@ -228,6 +228,7 @@ Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
 Step palette_update       (Model m, msg::CommandPaletteMsg pm);
 Step mention_update       (Model m, msg::MentionPaletteMsg mm);
 Step symbol_update        (Model m, msg::SymbolPaletteMsg  sm);
+Step codeblock_update     (Model m, msg::CodeBlockMsg      cm);
 Step todo_update          (Model m, msg::TodoMsg           tm);
 Step login_update         (Model m, msg::LoginMsg          lm);
 Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);

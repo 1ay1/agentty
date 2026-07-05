@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(agentty VERSION 0.2.3 LANGUAGES CXX)
+project(agentty VERSION 0.2.4 LANGUAGES CXX)
 
 # CMake (as of 4.2) has no /std:c++26 mapping for MSVC yet. Ask for C++23
 # there and opt into /std:c++latest so MSVC 14.50+ exposes available C++26
@@ -514,6 +514,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/palette.cpp
     src/runtime/app/update/mention.cpp
     src/runtime/app/update/symbol.cpp
+    src/runtime/app/update/codeblock.cpp
     src/runtime/app/update/diff.cpp
     src/runtime/app/update/meta.cpp
     src/runtime/app/subscribe.cpp

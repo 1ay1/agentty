@@ -77,6 +77,7 @@ agentty --provider openrouter              # Any model via OpenRouter
 | `Esc` | Cancel / reject | `^J` | Thread list |
 | `S-Tab` | Cycle profile | `^P` | Model picker |
 | `Alt+Enter` | Newline | `^N` | New thread |
+| `^G` | Run code block | `Alt+←/→` | Cycle threads |
 
 ## More
 
@@ -131,6 +132,22 @@ agentty speaks the [Agent Client Protocol](https://agentclientprotocol.com) — 
   }
 }
 ```
+
+</details>
+
+<details>
+<summary><b>Run code blocks from replies (Ctrl+G)</b></summary>
+
+The AI hands you a fenced block of commands — don't copy-paste it. `^G` lists
+the blocks from the last reply; `Enter` (or a digit) runs one **interactively
+on your real terminal**: the TUI suspends, sudo password prompts work, output
+streams live, `Ctrl+C` kills the command (not agentty). When it exits, a
+result card lets you attach the captured output to the composer as a
+collapsed chip (`a`), copy it (`y`), or discard (`Esc`) — so "it failed with
+X" reaches the model without you re-typing anything.
+
+Prompt `$ ` markers are stripped, non-shell blocks offer edit/copy instead of
+run, and capture is capped at 2 MB. Details: [`docs/RUN_CODE_BLOCK.md`](docs/RUN_CODE_BLOCK.md)
 
 </details>
 
