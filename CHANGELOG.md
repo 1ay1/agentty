@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Ctrl+←/→ also quick-cycles threads.** Same deck order as `Alt+←/→` (← newer, → older), and now on the welcome-screen shortcut row. Fires only while the composer is **empty** and **no agent turn is running** — with text in the box Ctrl+arrows stay jump-by-word, and mid-turn the keys fall through to the composer so a live stream can never be yanked out from under you.
+
 ### Changed
 - **Esc no longer quits the app.** Quit is `Ctrl+C` only. Esc keeps all its useful jobs — cancel a streaming turn, reject a permission, close any modal — but a stray press on the main screen is now inert. This also makes Alt-emulation on iPhone terminals (iSH, Termius, a-Shell) safe: their Alt+←/→ is an Esc-prefix chord, and the Esc half must not be a live exit key.
 

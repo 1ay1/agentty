@@ -77,7 +77,7 @@ agentty --provider openrouter              # Any model via OpenRouter
 | `Esc` | Cancel / reject | `^J` | Thread list |
 | `S-Tab` | Cycle profile | `^P` | Model picker |
 | `Alt+Enter` | Newline | `^N` | New thread |
-| `^G` | Run code block | `Alt+←/→` | Cycle threads |
+| `^G` | Run code block | `^←/→` or `Alt+←/→` | Cycle threads |
 
 ## More
 

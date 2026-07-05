@@ -346,8 +346,8 @@ Element thread_list(const Model& m) {
             const bool is_current = (t.id == m.d.current.id);
             Picker::Config::Row row;
             // "● " marks the thread you're IN — the anchor for both the
-            // picker and the Alt+←/→ quick-cycle. Non-current rows get a
-            // two-space gutter so titles stay column-aligned.
+            // picker and the ^←→ / Alt+←→ quick-cycle. Non-current rows
+            // get a two-space gutter so titles stay column-aligned.
             row.leading        = (is_current ? "\xe2\x97\x8f " : "  ")
                                + (t.title.empty() ? "(untitled)" : t.title);
             row.leading_style  = is_current ? fg_bold(info) : fg_of(muted);
@@ -360,8 +360,8 @@ Element thread_list(const Model& m) {
     }
 
     cfg.footer.push_back(text(""));
-    // Positional readout — same "k/N" the Alt+←/→ toast shows, so the
-    // two navigation surfaces speak one coordinate system.
+    // Positional readout — same "k/N" the ^←→ / Alt+←→ toast shows, so
+    // the two navigation surfaces speak one coordinate system.
     if (!m.d.threads.empty()) {
         cfg.footer.push_back(text(
             "  " + std::to_string(picker->index + 1) + "/"
@@ -373,7 +373,7 @@ Element thread_list(const Model& m) {
         {"PgUp/PgDn", "page", 2},
         {"Enter", "open", 5},
         {"N", "new", 3},
-        {"Alt+\xe2\x86\x90\xe2\x86\x92", "cycle", 1},   // Alt+←→
+        {"^/Alt+\xe2\x86\x90\xe2\x86\x92", "cycle", 1},   // ^←→ / Alt+←→
         {"Esc", "close", 4},
     }));
 

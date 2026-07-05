@@ -615,6 +615,11 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_login   = ui::login::is_open(m.ui.login);
     const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
+    // Ctrl+←/→ thread-cycle gate: the agent turn must be fully idle.
+    // Distinct from `streaming` (which carves out awaiting-permission
+    // so Esc keeps meaning "cancel") — switching threads mid-turn is
+    // never allowed, permission prompt or not.
+    const bool turn_active = m.s.active();
     bool has_history = false;
     for (const auto& msg : m.d.current.messages)
         if (msg.role == Role::User && !msg.text.empty()) { has_history = true; break; }
@@ -650,6 +655,22 @@ Sub<Msg> subscribe(const Model& m) {
                 && std::holds_alternative<SpecialKey>(ev.key)
                 && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
                 return CancelStream{};
+            // Ctrl+←/→ — quick-cycle threads, same deck order as Alt+←/→
+            // (← = newer, → = older). Only when the composer is EMPTY:
+            // with text in the box Ctrl+arrows stay jump-by-word
+            // (readline muscle memory, handled in on_composer). And only
+            // while no agent turn is running — mid-turn the key falls
+            // through to the composer so it can't yank the thread out
+            // from under a live stream.
+            if (!turn_active && composer_state.text_empty
+                && ev.mods.ctrl && !ev.mods.alt
+                && std::holds_alternative<SpecialKey>(ev.key)) {
+                switch (std::get<SpecialKey>(ev.key)) {
+                    case SpecialKey::Left:  return ThreadCycle{-1};
+                    case SpecialKey::Right: return ThreadCycle{+1};
+                    default: break;
+                }
+            }
             if (auto msg = on_global(ev)) return msg;
             return on_composer(composer_state, ev);
         });

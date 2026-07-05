@@ -304,9 +304,10 @@ struct ThreadListSelect {};
 // Quick-cycle: switch to the adjacent thread (by recency order, the
 // same order the ^J picker shows) WITHOUT opening the picker. delta is
 // applied to the thread-list index: +1 = older, -1 = newer; wraps at
-// both ends. Bound to Alt+←/→ globally. The reducer surfaces a
-// "thread k/N · title" toast so the user always knows where they
-// landed.
+// both ends. Bound to Alt+←/→ globally, and to Ctrl+←/→ when the
+// composer is empty and no agent turn is active (otherwise Ctrl+arrows
+// stay jump-by-word). The reducer surfaces a "thread k/N · title"
+// toast so the user always knows where they landed.
 struct ThreadCycle { int delta; };
 struct NewThread {};
 // Result of the background thread-history load kicked off from
