@@ -66,6 +66,12 @@ maya::TokenStreamSparkline::Config token_stream_sparkline_config(const Model& m)
     cfg.history = std::move(hist);
     cfg.color   = highlight;
     cfg.live    = is_streaming;
+    // Adaptive: the sparkline stretches across the activity row's free
+    // space (the dead cells between the phase chip and the provider /
+    // CTX chips), right-pinned, clamped to the history ring's capacity
+    // — a wide terminal shows ~32 s of rate history instead of blank.
+    cfg.adaptive        = true;
+    cfg.max_spark_cells = static_cast<int>(StreamState::kRateSamples);
     return cfg;
 }
 
