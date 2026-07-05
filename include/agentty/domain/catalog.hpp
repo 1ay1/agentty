@@ -54,7 +54,10 @@ struct ModelInfo {
 // a corresponding update — but at a single, structurally explicit site
 // rather than scattered substring checks.
 struct ModelCapabilities {
-    enum class Family : std::uint8_t { Unknown, Haiku, Sonnet, Opus };
+    // Fable / Mythos are the 2026 flagship lane (Fable 5 = general-access,
+    // Mythos 5 = restricted; same underlying model). They sit ABOVE Opus in
+    // the hierarchy and share Opus-class specs (1M ctx, 128k output, effort).
+    enum class Family : std::uint8_t { Unknown, Haiku, Sonnet, Opus, Fable, Mythos };
 
     Family family = Family::Unknown;
     // Generation extracted as an int. 0 = unknown / pre-4. Use the
@@ -85,6 +88,14 @@ struct ModelCapabilities {
     [[nodiscard]] constexpr bool is_haiku()  const noexcept { return family == Family::Haiku; }
     [[nodiscard]] constexpr bool is_sonnet() const noexcept { return family == Family::Sonnet; }
     [[nodiscard]] constexpr bool is_opus()   const noexcept { return family == Family::Opus; }
+    [[nodiscard]] constexpr bool is_fable()  const noexcept { return family == Family::Fable; }
+    [[nodiscard]] constexpr bool is_mythos() const noexcept { return family == Family::Mythos; }
+    // Fable/Mythos share Opus-class capabilities; group them for the gates
+    // below so a single check covers the whole flagship lane.
+    [[nodiscard]] constexpr bool is_flagship() const noexcept {
+        return family == Family::Opus || family == Family::Fable
+            || family == Family::Mythos;
+    }
     [[nodiscard]] constexpr bool is_known_family() const noexcept {
         return family != Family::Unknown;
     }
@@ -100,6 +111,10 @@ struct ModelCapabilities {
     // `xhigh` shipped with Opus 4.7 (Opus only). Gates read the decoded
     // family + generation + revision so a new id only updates from_id().
     [[nodiscard]] constexpr bool supports_effort() const noexcept {
+        // Flagship lane (Fable/Mythos 5+) ships with effort control GA
+        // (medium is the sweet spot, max the ceiling).
+        if (family == Family::Fable || family == Family::Mythos)
+            return generation >= 5;
         if (family == Family::Opus)
             return generation > 4 || (generation == 4 && revision >= 5);
         if (family == Family::Sonnet)
@@ -108,12 +123,16 @@ struct ModelCapabilities {
     }
     [[nodiscard]] constexpr bool supports_effort_max() const noexcept {
         if (!supports_effort()) return false;
+        if (family == Family::Fable || family == Family::Mythos)
+            return true;  // flagship lane takes every level incl. max
         if (family == Family::Opus)
             return generation > 4 || (generation == 4 && revision >= 6);
         return true;  // any effort-capable Sonnet (4.6+) also takes `max`
     }
     [[nodiscard]] constexpr bool supports_effort_xhigh() const noexcept {
         if (!supports_effort()) return false;
+        if (family == Family::Fable || family == Family::Mythos)
+            return true;  // flagship lane exposes the full ladder
         return family == Family::Opus
             && (generation > 4 || (generation == 4 && revision >= 7));
     }
@@ -150,6 +169,8 @@ struct ModelCapabilities {
                 if (tok == "haiku")       caps.family = Family::Haiku;
                 else if (tok == "sonnet") caps.family = Family::Sonnet;
                 else if (tok == "opus")   caps.family = Family::Opus;
+                else if (tok == "fable")  caps.family = Family::Fable;
+                else if (tok == "mythos") caps.family = Family::Mythos;
                 else if (was_expecting_revision) {
                     // Revision token — same 1-/2-digit plausibility check as
                     // the generation parse so a date can't slip through.
@@ -161,7 +182,8 @@ struct ModelCapabilities {
                     }
                     if (ok) caps.revision = r;
                 }
-                else if (prev == "haiku" || prev == "sonnet" || prev == "opus") {
+                else if (prev == "haiku" || prev == "sonnet" || prev == "opus"
+                         || prev == "fable" || prev == "mythos") {
                     // Generation token — parse as int (no allocations). Only
                     // the NEW id schema puts the generation right after the
                     // family (`claude-sonnet-4-5-...`). The LEGACY schema
@@ -422,11 +444,16 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
     const auto caps = ModelCapabilities::from_id(model_id);
     if (caps.is_known_family()) {
         // Claude family. Generation drives the ceiling:
+        //   Fable/Mythos 5+  -> 64000 (flagship lane, 128k-capable; 64k is the
+        //                       safe raisable default, matching 4.x Opus/Sonnet.
+        //                       AGENTTY_MAX_OUTPUT_TOKENS reaches the full 128k.)
         //   4.x Sonnet/Opus  -> 64000 (officially supported output ceiling)
         //   Haiku (any gen)  -> 8192  (Haiku's real output cap is 8k)
         //   <= 3.x           -> 8192  (older models 400 above this)
         //   unknown gen      -> 16384 (roomy but universally accepted)
         if (caps.is_haiku()) return 8192;
+        // Flagship lane (Fable/Mythos) and any Claude 4-or-later Sonnet/Opus.
+        if (caps.is_fable() || caps.is_mythos()) return 64000;
         if (caps.generation >= 4) return 64000;
         // Legacy schema (`claude-3-5-sonnet-...`, `claude-3-opus-...`) puts
         // the generation BEFORE the family, so caps.generation is 0 here.

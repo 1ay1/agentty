@@ -123,6 +123,33 @@ static void test_max_output_tokens() {
     CHECK(max_output_tokens_for("qwen2.5-coder:7b") == 16384);
     CHECK(max_output_tokens_for("gpt-4o") == 16384);
     CHECK(max_output_tokens_for("") == 16384);
+    // 2026 flagship lane (Fable/Mythos 5): Opus-class 64k ceiling, NOT the
+    // 16k non-Claude default. Regression guard for the mid-turn truncation
+    // caused by "fable" not being a recognised family token.
+    CHECK(max_output_tokens_for("claude-fable-5") == 64000);
+    CHECK(max_output_tokens_for("claude-mythos-5") == 64000);
+    CHECK(max_output_tokens_for("claude-fable-5[1m]") == 64000);
+}
+
+static void test_flagship_lane_caps() {
+    using agentty::ModelCapabilities;
+    // Fable/Mythos 5 must decode as a KNOWN Claude family (else they'd be
+    // treated as unknown/non-Claude: wrong output cap, no effort, no betas).
+    for (const char* id : {"claude-fable-5", "claude-mythos-5"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_known_family());
+        CHECK(c.is_flagship());
+        CHECK(c.generation == 5);
+        CHECK(c.generation_4_or_later);   // gates context-management beta
+        CHECK(!c.is_weak_tool_user());
+        // Effort control is GA on the flagship lane, full ladder.
+        CHECK(c.supports_effort());
+        CHECK(c.supports_effort_max());
+        CHECK(c.supports_effort_xhigh());
+    }
+    // The [1m] extended-context suffix is stripped before decode.
+    CHECK(ModelCapabilities::from_id("claude-fable-5[1m]").is_fable());
+    CHECK(ModelCapabilities::from_id("claude-fable-5[1m]").extended_context_1m);
 }
 
 int main() {
@@ -135,6 +162,7 @@ int main() {
     test_unknown_id_defaults_strong();
     test_bare_size_signal();
     test_max_output_tokens();
+    test_flagship_lane_caps();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");
