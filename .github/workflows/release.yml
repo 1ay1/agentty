@@ -683,22 +683,121 @@ jobs:
 
   # Submit the Windows .msi to the winget community repo. winget is the
   # zero-cost, no-SmartScreen-warning install path: `winget install agentty`.
-  # The action computes the installer SHA from the published .msi and opens a
-  # PR to microsoft/winget-pkgs. Requires a PAT (classic, public_repo scope)
-  # stored as the WINGET_TOKEN secret; skipped automatically if absent.
+  #
+  # Fully hands-off across BOTH cases:
+  #   * package already in winget-pkgs  -> vedantmgoyal9/winget-releaser opens
+  #     the version-bump PR (update path).
+  #   * package NOT yet in winget-pkgs  -> that action refuses ("add at least
+  #     one version first"), so we fall back to a first-submission step that
+  #     renders packaging/winget/*.yaml from the CMake version + the built
+  #     .msi's real SHA256/ProductCode and opens the initial PR via the API.
+  # Either way the submitted version is the central CMake project VERSION.
+  # Requires WINGET_TOKEN (classic PAT, public_repo scope); skipped if absent.
   publish-winget:
     name: publish to winget
     needs: [prepare, build-windows]
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+      PKGID: agentty.agentty
     steps:
-      - name: Submit manifest to winget-pkgs
+      - uses: actions/checkout@v5
+
+      # Does agentty.agentty already have a manifest folder upstream? Drives
+      # which of the two paths below actually runs.
+      - name: Check if package exists in winget-pkgs
+        id: exists
         if: ${{ env.WINGET_TOKEN != '' }}
+        run: |
+          if gh api repos/microsoft/winget-pkgs/contents/manifests/a/agentty/agentty >/dev/null 2>&1; then
+            echo "present=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+
+      # UPDATE path — package already exists upstream.
+      - name: Update manifest (winget-releaser)
+        if: ${{ env.WINGET_TOKEN != '' && steps.exists.outputs.present == 'true' }}
         uses: vedantmgoyal9/winget-releaser@main
         with:
           identifier: agentty.agentty
           version: ${{ needs.prepare.outputs.version }}
           installers-regex: 'agentty-windows-x86_64\.msi$'
           token: ${{ secrets.WINGET_TOKEN }}
+
+      # FIRST-SUBMISSION path — package not yet upstream. Render the templates
+      # from the central version + the exact built .msi and open the initial PR.
+      - name: First submission (render + PR via API)
+        if: ${{ env.WINGET_TOKEN != '' && steps.exists.outputs.present == 'false' }}
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          set -eu
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends msitools >/dev/null
+
+          # 1. Fetch the built .msi; compute SHA256 + ProductCode from it.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-windows-x86_64.msi' --output a.msi
+          MSI_SHA=$(sha256sum a.msi | awk '{print toupper($1)}')
+          # msiinfo dumps the Property table; ProductCode is a GUID in braces.
+          PC=$(msiinfo export a.msi Property 2>/dev/null \
+                 | awk -F'\t' '$1=="ProductCode"{print $2}')
+          [ -n "$PC" ] || { echo "::error::could not read ProductCode from MSI"; exit 1; }
+          echo "msi sha=$MSI_SHA productcode=$PC"
+
+          # 2. Render the three templates. Keep the schema line (needed by
+          #    winget) but drop the template-only notes, which we mark with a
+          #    leading '#!' so they're trivially strippable.
+          mkdir -p out
+          for f in agentty.agentty.installer.yaml agentty.agentty.locale.en-US.yaml agentty.agentty.yaml; do
+            sed -e "s/@VERSION@/$V/g" \
+                -e "s|@MSI_SHA256@|$MSI_SHA|g" \
+                -e "s|@MSI_PRODUCT_CODE@|$PC|g" \
+                "packaging/winget/$f" \
+              | grep -v '^#!' > "out/$f"
+          done
+
+          # 3. Fork winget-pkgs (default branch only; no-op if it exists).
+          gh api repos/microsoft/winget-pkgs/forks -X POST -f default_branch_only=true >/dev/null || true
+          me=$(gh api user -q .login)
+          # Wait for the fork to become queryable.
+          for i in $(seq 1 30); do
+            if gh api "repos/$me/winget-pkgs/git/ref/heads/master" >/dev/null 2>&1; then break; fi
+            sleep 4
+          done
+
+          # 4. Build a commit (blobs -> tree -> commit -> branch) via the API so
+          #    we never clone the multi-GB winget-pkgs repo.
+          branch="agentty-agentty-$V"
+          dir="manifests/a/agentty/agentty/$V"
+          base_sha=$(gh api "repos/$me/winget-pkgs/git/ref/heads/master" -q '.object.sha')
+          base_tree=$(gh api "repos/$me/winget-pkgs/git/commits/$base_sha" -q '.tree.sha')
+          items='[]'
+          for f in agentty.agentty.installer.yaml agentty.agentty.locale.en-US.yaml agentty.agentty.yaml; do
+            b64=$(base64 -w0 "out/$f")
+            blob=$(jq -n --arg c "$b64" '{content:$c,encoding:"base64"}' \
+                     | gh api "repos/$me/winget-pkgs/git/blobs" --input - -q '.sha')
+            items=$(echo "$items" | jq --arg p "$dir/$f" --arg s "$blob" \
+                      '. + [{path:$p,mode:"100644",type:"blob",sha:$s}]')
+          done
+          new_tree=$(jq -n --arg bt "$base_tree" --argjson t "$items" '{base_tree:$bt,tree:$t}' \
+                       | gh api "repos/$me/winget-pkgs/git/trees" --input - -q '.sha')
+          new_commit=$(jq -n --arg m "New version: agentty.agentty version $V" --arg t "$new_tree" --arg p "$base_sha" \
+                         '{message:$m,tree:$t,parents:[$p]}' \
+                       | gh api "repos/$me/winget-pkgs/git/commits" --input - -q '.sha')
+          # Recreate the branch idempotently.
+          gh api -X DELETE "repos/$me/winget-pkgs/git/refs/heads/$branch" >/dev/null 2>&1 || true
+          jq -n --arg r "refs/heads/$branch" --arg s "$new_commit" '{ref:$r,sha:$s}' \
+            | gh api "repos/$me/winget-pkgs/git/refs" --input - >/dev/null
+
+          # 5. Open the PR against microsoft/winget-pkgs.
+          body="First-time submission of agentty.agentty ($V). agentty is a native C++26 terminal coding agent: a single static binary, sandboxed by default, one-command SSH air-gap. https://github.com/1ay1/agentty"
+          jq -n --arg t "New version: agentty.agentty version $V" --arg h "$me:$branch" --arg b "$body" \
+            '{title:$t,head:$h,base:"master",body:$b}' \
+            | gh api repos/microsoft/winget-pkgs/pulls --input - -q '.html_url'
+
