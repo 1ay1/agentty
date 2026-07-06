@@ -314,12 +314,18 @@ Step smart_paste_from_clipboard(Model m) {
     }
 
     // Every local path failed to produce an image or text. Last resort,
-    // ALWAYS: ask the terminal itself via OSC 52. The terminal emulator
-    // runs on the user's LOCAL machine even across SSH, so its reply
-    // carries the laptop's clipboard back over the pty — maya decodes it
-    // into a PasteEvent that re-enters the ComposerPaste arm below (image
+    // ALWAYS: ask the terminal itself. The terminal emulator runs on the
+    // user's LOCAL machine even across SSH, so its reply carries the
+    // laptop's clipboard back over the pty — maya decodes it into a
+    // PasteEvent that re-enters the ComposerPaste arm below (image
     // magic-byte sniff ingests a PNG/JPEG; otherwise the text path takes
-    // it). This is the ONE clipboard read that needs no remote tool and
+    // it). Two dialects, chosen inside maya's query_clipboard:
+    //   • OSC 5522 (kitty) — multi-format: carries IMAGE bytes, so a
+    //     screenshot pastes across SSH with no remote tool at all.
+    //   • OSC 52 read (iTerm2/WezTerm/foot/Ghostty/xterm w/ opts) —
+    //     text-only; for images on these, AGENTTY_CLIPBOARD_CMD or the
+    //     airgap --clipboard-relay remain the answer.
+    // This is the ONE clipboard read that needs no remote tool and
     // no env var, so it's the universal fallback: headless/SSH host with
     // no wl-paste/xclip, a local terminal whose native tools are missing,
     // OR an AGENTTY_CLIPBOARD_CMD ferry that was set but failed (laptop

@@ -5,6 +5,7 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Image paste over SSH with zero remote setup (kitty).** Ctrl+V on a remote agentty session now pulls a screenshot straight off your *local* clipboard through the terminal itself: when every host-side probe comes up empty, maya asks the terminal for its clipboard — under kitty it now speaks **OSC 5522** (kitty's multi-format clipboard protocol), whose reply carries real image bytes (PNG/JPEG/WEBP/GIF chunked base64, reassembled into one paste; image outranks text when both are on the clipboard; EPERM/EBUSY/ENOSYS abandons silently, like a terminal that never replied). Every other terminal keeps the OSC 52 read — text-only by protocol, so on iTerm2/WezTerm/foot/Ghostty images over SSH still go via `AGENTTY_CLIPBOARD_CMD` or `agentty airgap --clipboard-relay`. Works on every platform on both ends — the bytes ride the pty, no wl-paste/xclip/pngpaste/PowerShell on the remote.
 - **Ctrl+←/→ also quick-cycles threads.** Same deck order as `Alt+←/→` (← newer, → older), and now on the welcome-screen shortcut row. Fires only while the composer is **empty** and **no agent turn is running** — with text in the box Ctrl+arrows stay jump-by-word, and mid-turn the keys fall through to the composer so a live stream can never be yanked out from under you.
 
 ### Fixed
