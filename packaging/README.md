@@ -7,6 +7,29 @@ build. **Versioning is centralized**: the single source of truth is
 reads that line and rewrites the version (and pins per-arch checksums) into
 every manifest at release time. Never hardcode a version in a manifest.
 
+## Cutting a release (the ONE manual step)
+
+```sh
+scripts/cut-release.sh X.Y.Z          # POSIX / macOS / Linux / Git-Bash
+scripts\cut-release.cmd X.Y.Z         # Windows cmd.exe
+```
+
+That's the whole ritual. The script bumps `project(agentty VERSION …)` in
+`CMakeLists.txt`, promotes `CHANGELOG.md`'s `[Unreleased]` section to
+`[X.Y.Z]`, commits `release: vX.Y.Z`, creates the annotated tag, and pushes
+branch + tag. **The tag push is what fires everything downstream** —
+`.github/workflows/release.yml` then builds every binary, every OS package,
+and submits to winget/homebrew/scoop/AUR (plus attaches nix/snap/gentoo
+manifests), all in the cloud with no further input.
+
+Guards: refuses a downgrade or duplicate version, requires a clean tree, and
+rejects a tag that already exists. Preview with `--dry-run` (writes nothing);
+commit+tag without pushing with `--no-push`.
+
+> `scripts/release.sh` is a different tool — it *builds* release artifacts
+> locally on the host it runs on (used by CI and for local reproduction). You
+> don't run it by hand to ship; `cut-release` + CI does that for you.
+
 ## Install matrix
 
 Linux
