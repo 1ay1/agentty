@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-07
+
 ### Added
 - **One-command release cut (`scripts/cut-release.sh` / `.cmd`).** `scripts/cut-release.sh X.Y.Z` (or `cut-release.cmd X.Y.Z` on Windows) is now the *entire* manual release ritual: it bumps `project(agentty VERSION …)` in CMakeLists.txt (the single source of truth), promotes CHANGELOG's `[Unreleased]` section to a dated `[X.Y.Z]`, commits `release: vX.Y.Z`, creates the annotated tag, and pushes branch + tag. The tag push triggers `.github/workflows/release.yml`, which builds every binary + OS package and submits to winget/homebrew/scoop/AUR (nix/snap/gentoo manifests attached to the release) with zero further input. Guards refuse a downgrade, a duplicate version, a dirty tree, or an existing tag; `--dry-run` previews the exact diff without writing anything, `--no-push` stops after the local commit+tag. The Windows `.cmd` wrapper runs the POSIX script through Git-Bash (or WSL as fallback).
 
