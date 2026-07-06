@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Ctrl+G now runs PowerShell and cmd blocks natively on Windows.** The code-block runner is platform-aware: a ```` ```powershell ```` / `pwsh` / `ps1` block is executed through `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand` (the body is UTF-16LE-base64-encoded, so arbitrary quoting and multi-line scripts survive the `cmd.exe` wrapper intact), a `cmd`/`bat`/`batch` block and bare fences run through `cmd.exe`, and on POSIX `sh`/`bash`/`zsh`/`shell`/`console`/`terminal` (and bare fences) still go to `/bin/sh`. A block in a language the current platform can't run (e.g. `powershell` on Linux) no longer masquerades as runnable — Run shows a toast and edit/copy stay available. The Run gate, the runnable-block nudge counter, and the runner all consult one `shell_for_language()` classifier so they never disagree. This means the install commands agentty itself suggests on Windows (scoop, winget, PowerShell one-liners) are one keystroke away from running.
+
 ## [0.2.5]
 
 ### Added
