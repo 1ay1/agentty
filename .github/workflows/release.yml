@@ -550,11 +550,13 @@ jobs:
           fi
 
   # Version-pinned downstream manifests (nix/snap/gentoo/alpine) rendered from
-  # the published SHA256SUMS and attached to the release. Same sed pinning as
+  # the release binaries and attached to the release. Same sed pinning as
   # scripts/release.sh — CMake project VERSION stays the single source of truth.
+  # Depends only on the linux binaries it pins (NOT the aggregate checksums job),
+  # so it fires as soon as both linux arches exist.
   publish-manifests:
     name: publish manifests (nix/snap/gentoo)
-    needs: [prepare, checksums]
+    needs: [prepare, build-linux-x86_64, build-linux-aarch64]
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
@@ -565,9 +567,12 @@ jobs:
       - name: Pin + attach manifests
         run: |
           mkdir -p out
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
-          sum_for() { awk -v f="$1" '$2==f{print $1}' SHA256SUMS; }
-          x64=$(sum_for agentty-linux-x86_64); arm=$(sum_for agentty-linux-aarch64)
+          # Compute sums directly from the release binaries (no dependency on
+          # the aggregate SHA256SUMS / checksums job).
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' --skip-existing
+          x64=$(sha256sum agentty-linux-x86_64  | awk '{print $1}')
+          arm=$(sha256sum agentty-linux-aarch64 | awk '{print $1}')
           sed -e "s/@VERSION@/$V/g" \
               -e "s|@LINUX_X86_64_SHA256@|$x64|g" \
               -e "s|@LINUX_AARCH64_SHA256@|$arm|g" \
@@ -578,9 +583,10 @@ jobs:
 
   # Homebrew tap: bump version + pin all four (linux/macos × arch) sha256, then
   # push the formula to 1ay1/homebrew-tap. Needs TAP_TOKEN (PAT, repo scope).
+  # Depends on the linux + macos binaries directly (not the checksums job).
   publish-homebrew:
     name: publish to homebrew tap
-    needs: [prepare, checksums]
+    needs: [prepare, build-linux-x86_64, build-linux-aarch64, build-macos]
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
@@ -592,8 +598,10 @@ jobs:
       - name: Render + push formula
         if: ${{ env.TAP_TOKEN != '' }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
-          sum_for() { awk -v f="$1" '$2==f{print $1}' SHA256SUMS; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' \
+            --pattern 'agentty-macos-x86_64' --pattern 'agentty-macos-arm64' --skip-existing
+          sum_for() { sha256sum "$1" | awk '{print $1}'; }
           sed -e "s/^  version \".*\"/  version \"$V\"/" \
               -e "s|@LINUX_X86_64_SHA256@|$(sum_for agentty-linux-x86_64)|g" \
               -e "s|@LINUX_AARCH64_SHA256@|$(sum_for agentty-linux-aarch64)|g" \
@@ -609,10 +617,11 @@ jobs:
           git push origin HEAD:master
 
   # Scoop bucket: bump version + pin win sha256, push to 1ay1/scoop-bucket.
-  # Needs SCOOP_TOKEN (PAT, repo scope). Skipped when absent.
+  # Needs SCOOP_TOKEN (PAT, repo scope). Skipped when absent. Depends only on
+  # the windows build — fires without waiting on any linux/macos leg.
   publish-scoop:
     name: publish to scoop bucket
-    needs: [prepare, checksums]
+    needs: [prepare, build-windows]
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
@@ -624,8 +633,9 @@ jobs:
       - name: Render + push manifest
         if: ${{ env.SCOOP_TOKEN != '' }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
-          win=$(awk '$2=="agentty-windows-x86_64.exe"{print $1}' SHA256SUMS)
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-windows-x86_64.exe' --skip-existing
+          win=$(sha256sum agentty-windows-x86_64.exe | awk '{print $1}')
           sed -e "s/\"version\": \".*\"/\"version\": \"$V\"/" \
               -e "s|/download/v[0-9.]*/|/download/v$V/|g" \
               -e "s|@WINDOWS_X86_64_SHA256@|$win|g" \
@@ -640,9 +650,10 @@ jobs:
 
   # AUR: push the version-pinned PKGBUILD (agentty-bin). Needs AUR_SSH_KEY, an
   # SSH private key registered with the AUR account. Skipped when absent.
+  # Depends on the two linux binaries directly (not the checksums job).
   publish-aur:
     name: publish to AUR
-    needs: [prepare, checksums]
+    needs: [prepare, build-linux-x86_64, build-linux-aarch64]
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     env:
@@ -654,9 +665,10 @@ jobs:
       - name: Render + push PKGBUILD
         if: ${{ env.AUR_SSH_KEY != '' }}
         run: |
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
-          sum_for() { awk -v f="$1" '$2==f{print $1}' SHA256SUMS; }
-          x64=$(sum_for agentty-linux-x86_64); arm=$(sum_for agentty-linux-aarch64)
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' --skip-existing
+          x64=$(sha256sum agentty-linux-x86_64  | awk '{print $1}')
+          arm=$(sha256sum agentty-linux-aarch64 | awk '{print $1}')
           sed -e "s/^pkgver=.*/pkgver=$V/" \
               -e "s/sha256sums_x86_64=.*/sha256sums_x86_64=('$x64')/" \
               -e "s/sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
