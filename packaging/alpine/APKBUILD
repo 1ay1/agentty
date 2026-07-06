@@ -1,0 +1,46 @@
+# Contributor: Ayush Bhat <tfeayush@gmail.com>
+# Maintainer: Ayush Bhat <tfeayush@gmail.com>
+pkgname=agentty
+# pkgver is rewritten from CMakeLists.txt (project VERSION) by scripts/release.sh
+# — do not hardcode; that line is the single source of truth for every package.
+pkgver=@VERSION@
+pkgrel=0
+pkgdesc="Blazing-fast Claude in your terminal — single static binary, sandboxed by default, one-command SSH airgap"
+url="https://github.com/1ay1/agentty"
+arch="x86_64 aarch64"
+license="MIT"
+# agentty ships as a fully-static musl binary, so no runtime deps.
+depends=""
+# bubblewrap sandboxes bash/diagnostics tool calls; openssh powers `agentty airgap`.
+install=""
+options="!check !strip"  # prebuilt release binary; nothing to test or strip
+
+# Alpine's musl target matches agentty's own fully-static musl build exactly,
+# so we install the published release binary rather than compiling from source
+# (agentty needs C++26 / a very recent GCC not always in the build image).
+_baseurl="https://github.com/1ay1/agentty/releases/download/v$pkgver"
+source="
+	agentty-linux-x86_64::$_baseurl/agentty-linux-x86_64
+	agentty-linux-aarch64::$_baseurl/agentty-linux-aarch64
+"
+
+# abuild fetches every source line for every build; keep only the one matching
+# the target arch to avoid pulling the other binary. abuild honors this hook.
+snapshot() { :; }
+
+_binary_for_arch() {
+	case "$CARCH" in
+		x86_64)  echo agentty-linux-x86_64 ;;
+		aarch64) echo agentty-linux-aarch64 ;;
+		*)       die "unsupported arch: $CARCH" ;;
+	esac
+}
+
+package() {
+	install -Dm755 "$srcdir/$(_binary_for_arch)" "$pkgdir/usr/bin/agentty"
+}
+
+# Checksums are regenerated per release by `abuild checksum` (release.sh wires
+# this the same way it runs `updpkgsums` for the Arch PKGBUILD).
+sha512sums="SKIP  agentty-linux-x86_64
+SKIP  agentty-linux-aarch64"

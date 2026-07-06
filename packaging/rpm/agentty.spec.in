@@ -7,6 +7,9 @@ URL:            https://github.com/1ay1/agentty
 Source0:        agentty-linux-@RPM_ARCH@
 ExclusiveArch:  @RPM_ARCH@
 
+# This single .rpm serves every rpm-based distro: dnf (Fedora), yum (CentOS/RHEL),
+# and zypper (openSUSE) all install it unchanged — `zypper install agentty`.
+
 Recommends:     bubblewrap
 Recommends:     openssh-clients
 

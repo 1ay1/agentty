@@ -1,0 +1,50 @@
+# snap/snapcraft.yaml.in — agentty as a snap.
+#
+# @VERSION@ is rewritten from CMakeLists.txt (project VERSION) by
+# scripts/release.sh — this file is a TEMPLATE; do not hardcode the version.
+#
+# Build:   snapcraft            (produces agentty_<ver>_<arch>.snap)
+# Publish: snapcraft upload --release=stable agentty_<ver>_amd64.snap
+# Install: snap install agentty
+#
+# agentty is a single fully-static binary, so the snap is essentially a thin
+# wrapper: pull the published release binary for the target arch and drop it in.
+name: agentty
+base: core22
+version: '@VERSION@'
+summary: Blazing-fast Claude in your terminal
+description: |
+  agentty is a single-binary terminal client for Anthropic's Claude, written
+  in C++26. Sub-millisecond cold start, sandboxed shell calls by default, and
+  one-command SSH airgap for running the agent on hosts without direct
+  internet access.
+
+  A drop-in alternative to claude-code with no Node, Python, or Electron
+  runtime. Authenticates with Claude Pro/Max OAuth or ANTHROPIC_API_KEY.
+
+grade: stable
+confinement: classic  # agentty edits arbitrary files in the user's workspace
+
+architectures:
+  - build-on: amd64
+    build-for: amd64
+  - build-on: arm64
+    build-for: arm64
+
+apps:
+  agentty:
+    command: bin/agentty
+    environment:
+      TERM: xterm-256color
+
+parts:
+  agentty:
+    plugin: dump
+    # $CRAFT_ARCH_TRIPLET_BUILD_FOR-free: map snap arch → release asset name.
+    source: https://github.com/1ay1/agentty/releases/download/v@VERSION@/agentty-linux-x86_64
+    source-type: file
+    organize:
+      agentty-linux-x86_64: bin/agentty
+    override-build: |
+      craftctl default
+      chmod 0755 $CRAFT_PART_INSTALL/bin/agentty

@@ -15,7 +15,10 @@
 #                  dist/agentty-bin-<ver>-1-x86_64.pkg.tar.zst   arch .pkg
 #                  dist/agentty-bin-<ver>-1-aarch64.pkg.tar.zst  arch .pkg
 #                  dist/agentty-<ver>.tar.gz                  source tarball (homebrew)
-#                  dist/packaging/{agentty.rb,PKGBUILD}       manifests
+#                  dist/packaging/{agentty.rb,PKGBUILD,       manifests (brew, AUR,
+#                                  APKBUILD,default.nix,        alpine, nix, snap,
+#                                  snapcraft.yaml,              gentoo)
+#                                  agentty-<ver>.ebuild}
 #   macOS host   → dist/agentty-macos-x86_64                  native (Intel)
 #                  dist/agentty-macos-arm64                   native (Apple Silicon)
 #                  dist/agentty-<ver>.tar.gz                  source tarball
@@ -494,6 +497,42 @@ if [ "$HOST_OS" = linux ] && [ -n "$linux_x64" ] && [ -n "$linux_arm" ]; then
         -e "s/sha256sums_aarch64=.*/sha256sums_aarch64=('$linux_arm')/" \
         "$root/packaging/arch/PKGBUILD" > "$pkgdir/PKGBUILD"
     ok "packaging/PKGBUILD (AUR)"
+fi
+
+# Alpine APKBUILD — pkgver rewritten from central VERSION; sha512 pinned from
+# the release binaries (abuild wants sha512, so we recompute here).
+if [ "$HOST_OS" = linux ] && [ -x "$dist/agentty-linux-x86_64" ] \
+     && [ -x "$dist/agentty-linux-aarch64" ] && command -v sha512sum >/dev/null 2>&1; then
+    a_x64=$(sha512sum "$dist/agentty-linux-x86_64"  | awk '{print $1}')
+    a_arm=$(sha512sum "$dist/agentty-linux-aarch64" | awk '{print $1}')
+    sed -e "s/^pkgver=@VERSION@/pkgver=$VERSION/" \
+        -e "s|^SKIP  agentty-linux-x86_64|$a_x64  agentty-linux-x86_64|" \
+        -e "s|^SKIP  agentty-linux-aarch64|$a_arm  agentty-linux-aarch64|" \
+        "$root/packaging/alpine/APKBUILD" > "$pkgdir/APKBUILD"
+    ok "packaging/APKBUILD (alpine)"
+fi
+
+# Nix expression — version + per-arch sha256 pinned from SHA256SUMS.
+if [ "$HOST_OS" = linux ] && [ -n "$linux_x64" ] && [ -n "$linux_arm" ]; then
+    sed -e "s/@VERSION@/$VERSION/g" \
+        -e "s|@LINUX_X86_64_SHA256@|$linux_x64|g" \
+        -e "s|@LINUX_AARCH64_SHA256@|$linux_arm|g" \
+        "$root/packaging/nix/default.nix" > "$pkgdir/default.nix"
+    ok "packaging/default.nix (nix)"
+fi
+
+# Snap manifest — version rewritten from central VERSION.
+if [ "$HOST_OS" = linux ]; then
+    sed -e "s/@VERSION@/$VERSION/g" \
+        "$root/packaging/snap/snapcraft.yaml.in" > "$pkgdir/snapcraft.yaml"
+    ok "packaging/snapcraft.yaml (snap)"
+fi
+
+# Gentoo ebuild — copy the 9999 template to a version-pinned filename so the
+# version lives ONLY in the filename (Portage reads PV from there).
+if [ "$HOST_OS" = linux ]; then
+    cp "$root/packaging/gentoo/agentty-9999.ebuild" "$pkgdir/agentty-$VERSION.ebuild"
+    ok "packaging/agentty-$VERSION.ebuild (gentoo)"
 fi
 
 # ---- summary -----------------------------------------------------------------
