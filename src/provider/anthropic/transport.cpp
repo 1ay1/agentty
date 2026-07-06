@@ -25,6 +25,7 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/util/base64.hpp"
@@ -250,45 +251,14 @@ namespace headers {
 namespace {
 
 // --- SSE parser -------------------------------------------------------------
-struct SseState {
-    // Pre-reserve so typical chunk sizes don't force a cascade of reallocations
-    // during a fast stream.
-    SseState() { buf.reserve(64 * 1024); data_accum.reserve(8 * 1024); }
-    std::string buf;
-    // Offset of the next byte in `buf` to parse. Lets feed_sse() drain
-    // already-parsed lines without an O(n) `erase(0, pos)` memmove on every
-    // chunk — we only compact `buf` once the read offset crosses a fairly
-    // large threshold (kCompactThreshold below). On a hot stream this turns
-    // the per-chunk drain cost from O(buffered bytes) to amortized O(1).
-    std::size_t read_pos = 0;
-    std::string event_name;
-    std::string data_accum;
-    // Set when an in-flight event exceeded `kSseDataAccumMax`. Subsequent
-    // `event:` / `data:` lines for the same event are ignored; the blank
-    // terminator clears the flag and the next event parses fresh. Without
-    // this guard the over-cap event's tail data lines would accumulate
-    // into a fresh buffer and dispatch as a corrupted event.
-    bool skip_event = false;
-};
-// Compact the SSE buffer when the read cursor has consumed at least this
-// many bytes. A larger threshold means more memory held at the high-water
-// mark, but fewer memmove passes. 64 KiB sits a couple chunk-sizes ahead
-// of typical Anthropic SSE frames; the buffer never grows unbounded
-// because the total in-flight tail (current event boundary → end of buf)
-// is small even on busy streams.
-constexpr std::size_t kSseCompactThreshold = 64 * 1024;
-
-// Hard ceiling on the multi-line `data:` accumulator within a single SSE
-// event. Real Anthropic frames are 1-10 KB; 4 MiB is generously past the
-// largest content_block_delta we've ever observed. A misbehaving server
-// emitting an unbounded data: stream would otherwise fill `data_accum`
-// until OOM. When the cap is hit we drop the in-flight event silently
-// and the next blank line resets the accumulator.
-constexpr std::size_t kSseDataAccumMax = 4 * 1024 * 1024;
+// The byte-level SSE framing (line splitting, `event:`/`data:` accumulation,
+// the multi-line data join, the overflow cap, buffer compaction) lives in the
+// shared wire::SseFramer — see include/agentty/provider/wire.hpp. This
+// transport supplies only the per-event dispatch (dispatch_event below).
 
 struct StreamCtx {
     EventSink sink;
-    SseState sse;
+    wire::SseFramer sse;
     // Tool-use tracking (current block index in-flight)
     std::string current_tool_id;
     std::string current_tool_name;
@@ -316,7 +286,7 @@ struct StreamCtx {
 // strings we need, and returns without ever materialising a DOM.  Falls
 // back to caller for anything unexpected (unknown delta.type).
 // Returns true if the event was fully handled.
-bool dispatch_content_block_delta_fast(StreamCtx& ctx, const std::string& data) {
+bool dispatch_content_block_delta_fast(StreamCtx& ctx, std::string_view data) {
     const std::size_t need = data.size() + simdjson::SIMDJSON_PADDING;
     if (ctx.simd_scratch.size() < need) {
         ctx.simd_scratch = simdjson::padded_string(need);
@@ -466,7 +436,7 @@ static_assert(kind_of_event("message_stop")     == SseEventKind::MessageStop);
 static_assert(kind_of_event("who_knows")        == SseEventKind::Unknown);
 } // namespace sse_proofs
 
-void dispatch_event(StreamCtx& ctx, std::string_view name, const std::string& data) {
+void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data) {
     if (data.empty() || data == "[DONE]") return;
     // dbg() format string is %s — copy through a small stack buffer only
     // when the debug log is actually enabled (debug_log() returns nullptr
@@ -474,7 +444,8 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, const std::string& da
     // touched). Avoids constructing a std::string per event in the hot path.
     if (debug_log()) {
         std::string name_owned{name};
-        dbg("<< event=%s data=%s\n", name_owned.c_str(), data.c_str());
+        std::string data_owned{data};
+        dbg("<< event=%s data=%s\n", name_owned.c_str(), data_owned.c_str());
     }
 
     // Hot path first — ~95% of events during a streaming turn. The
@@ -619,63 +590,12 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
     // the count of `<< event=` lines that follow before the NEXT `-- chunk`
     // is exactly the number of SSE events that arrived together.
     if (debug_log()) dbg("-- chunk len=%zu\n", len);
-    ctx.sse.buf.append(data, len);
-    auto& read_pos = ctx.sse.read_pos;
-    // Treat the buffer as a string_view so per-line work doesn't allocate.
-    // We only own state in `ctx.sse.event_name` and `data_accum`; lines
-    // are walked as views into `ctx.sse.buf` directly.
-    std::string_view buf{ctx.sse.buf};
-    while (true) {
-        const auto nl = buf.find('\n', read_pos);
-        if (nl == std::string_view::npos) break;
-        std::string_view line = buf.substr(read_pos, nl - read_pos);
-        read_pos = nl + 1;
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-
-        if (line.empty()) {
-            if (!ctx.sse.skip_event
-                && (!ctx.sse.data_accum.empty() || !ctx.sse.event_name.empty()))
-                dispatch_event(ctx, ctx.sse.event_name, ctx.sse.data_accum);
-            ctx.sse.event_name.clear();
-            ctx.sse.data_accum.clear();
-            ctx.sse.skip_event = false;
-        } else if (ctx.sse.skip_event) {
-            // Still inside the over-cap event. Drop until the blank line.
-            continue;
-        } else if (line.starts_with("event:")) {
-            std::size_t s = 6;
-            while (s < line.size() && line[s] == ' ') ++s;
-            // Reuse storage in event_name to avoid the per-event std::string
-            // allocation that the previous substr() path forced.
-            ctx.sse.event_name.assign(line.data() + s, line.size() - s);
-        } else if (line.starts_with("data:")) {
-            std::size_t s = 5;
-            while (s < line.size() && line[s] == ' ') ++s;
-            const std::size_t add = (line.size() - s) +
-                (ctx.sse.data_accum.empty() ? 0 : 1);
-            if (ctx.sse.data_accum.size() + add > kSseDataAccumMax) {
-                // Defensive cap: drop the in-flight event and ignore the
-                // rest of its data lines until the blank-line terminator,
-                // so partial bytes don't accumulate fresh and dispatch as
-                // a corrupted event.
-                ctx.sse.data_accum.clear();
-                ctx.sse.event_name.clear();
-                ctx.sse.skip_event = true;
-                continue;
-            }
-            if (!ctx.sse.data_accum.empty()) ctx.sse.data_accum.push_back('\n');
-            ctx.sse.data_accum.append(line.data() + s, line.size() - s);
-        }
-        // Anything else (`:` comments, unknown fields) is silently dropped
-        // — matches the SSE spec and Claude's transport.
-    }
-    // Amortized drain: only compact the buffer when the read cursor has
-    // consumed enough bytes that the cost of memmove is paid back. Until
-    // then, leave already-parsed bytes in place.
-    if (read_pos >= kSseCompactThreshold) {
-        ctx.sse.buf.erase(0, read_pos);
-        read_pos = 0;
-    }
+    // The shared framer owns the byte buffer, `event:`/`data:` accumulation,
+    // the multi-line data join, the 4 MiB overflow cap, and amortized buffer
+    // compaction. We only dispatch each complete event.
+    ctx.sse.feed(data, len, [&](std::string_view name, std::string_view payload) {
+        dispatch_event(ctx, name, payload);
+    });
 }
 
 json tool_spec_to_json(const ToolSpec& s) {

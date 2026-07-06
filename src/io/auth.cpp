@@ -37,8 +37,11 @@
 #  include <shellapi.h>
 #else
 #  include <fcntl.h>
+#  include <spawn.h>
 #  include <sys/stat.h>
+#  include <sys/wait.h>
 #  include <unistd.h>
+extern char** environ;
 #endif
 
 namespace agentty::auth {
@@ -497,8 +500,8 @@ std::string oauth_authorize_url(const PkceVerifier& verifier,
         << "&client_id="             << OAuthConfig::client_id
         << "&redirect_uri="          << url_escape(OAuthConfig::redirect_uri)
         << "&scope="                 << url_escape(OAuthConfig::scopes)
-        << "&state="                 << state.value
-        << "&code_challenge="        << challenge
+        << "&state="                 << url_escape(state.value)
+        << "&code_challenge="        << url_escape(challenge)
         << "&code_challenge_method=S256"
         << "&code=true";
     return url.str();
@@ -662,15 +665,50 @@ AuthHeader fresh_auth_header(const AuthHeader& fallback) {
 
 void open_browser(const std::string& url) {
 #ifdef _WIN32
+    // ShellExecuteA passes the URL as a single argument to the shell's URL
+    // handler — no command line is composed, so there is no shell-quoting
+    // surface. Safe as-is.
     ::ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-    std::string cmd = "open \"" + url + "\" >/dev/null 2>&1 &";
-    int rc = std::system(cmd.c_str());
-    (void)rc;
 #else
-    std::string cmd = "xdg-open \"" + url + "\" >/dev/null 2>&1 &";
-    int rc = std::system(cmd.c_str());
-    (void)rc;
+    // Launch the platform opener with the URL as a distinct argv element,
+    // NOT interpolated into a `/bin/sh -c` string. This removes the shell
+    // entirely from the code path: the URL can never be word-split, globbed,
+    // command-substituted, or break out of quoting no matter what bytes it
+    // carries. (The OAuth URL is all url-escaped today, so this is
+    // defense-in-depth — but it keeps a future caller who passes an
+    // arbitrary URL here safe by construction rather than by luck.)
+#  if defined(__APPLE__)
+    const char* opener = "open";
+#  else
+    const char* opener = "xdg-open";
+#  endif
+    // posix_spawn needs mutable char* argv; the strings outlive the call.
+    std::string url_copy = url;
+    char* argv[] = {const_cast<char*>(opener),
+                    url_copy.data(),
+                    nullptr};
+
+    // Detach stdio from the browser process so it can't scribble on the
+    // terminal agentty owns: redirect all three fds to /dev/null.
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO,  "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    pid_t pid = 0;
+    int rc = ::posix_spawnp(&pid, opener, &actions, nullptr, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+
+    // Reap the opener so it doesn't linger as a zombie. `open`/`xdg-open`
+    // fork the real browser and exit promptly, so this wait is short; the
+    // browser itself is reparented to init and keeps running. WNOHANG is
+    // avoided intentionally — a blocking wait here is bounded by the
+    // opener's own quick exit, and login is already a synchronous prompt.
+    if (rc == 0) {
+        int status = 0;
+        ::waitpid(pid, &status, 0);
+    }
 #endif
 }
 

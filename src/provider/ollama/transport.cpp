@@ -26,6 +26,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
 
@@ -89,8 +90,11 @@ bool is_assistant_with_results(const Message& m) {
 // ── Stream state ─────────────────────────────────────────────────────────────
 struct StreamCtx {
     EventSink   sink;
-    std::string buf;          // NDJSON line buffer
-    std::size_t read_pos = 0;
+    // NDJSON line framing (buffer + read cursor + compaction) lives in the
+    // shared wire::LineFramer — see include/agentty/provider/wire.hpp. Ollama
+    // uses a larger compaction threshold than the SSE default because its
+    // native frames (whole message objects) run bigger than SSE deltas.
+    wire::LineFramer framer{256 * 1024};
     int         tool_seq = 0; // uniquifies synthesised tool-call ids
     StopReason  stop_reason = StopReason::Unspecified;
     bool        terminated  = false;
@@ -150,10 +154,7 @@ struct StreamCtx {
     std::size_t resp_value_pos = 0;     // next byte to decode inside value
     std::string resp_emitted;           // decoded text already streamed
 
-    StreamCtx() { buf.reserve(64 * 1024); }
 };
-
-constexpr std::size_t kCompactThreshold = 256 * 1024;
 
 // ── Salvage helpers (ported from openai/transport.cpp) ──────────────────
 
@@ -1059,20 +1060,9 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
 }
 
 void feed_ndjson(StreamCtx& ctx, const char* data, std::size_t len) {
-    ctx.buf.append(data, len);
-    std::string_view buf{ctx.buf};
-    while (true) {
-        const auto nl = buf.find('\n', ctx.read_pos);
-        if (nl == std::string_view::npos) break;
-        std::string_view line = buf.substr(ctx.read_pos, nl - ctx.read_pos);
-        ctx.read_pos = nl + 1;
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    ctx.framer.feed(data, len, [&](std::string_view line) {
         dispatch_line(ctx, line);
-    }
-    if (ctx.read_pos >= kCompactThreshold) {
-        ctx.buf.erase(0, ctx.read_pos);
-        ctx.read_pos = 0;
-    }
+    });
 }
 
 // ── CLAUDE.md memory tiers (user-authored, concise) ─────────────────────────

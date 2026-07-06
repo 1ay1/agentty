@@ -506,6 +506,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update.cpp
     src/runtime/app/update/composer.cpp
     src/runtime/app/update/stream.cpp
+    src/runtime/app/update/stream_preview.cpp
     src/runtime/app/update/modal.cpp
     src/runtime/app/update/frozen.cpp
     src/runtime/app/update/tool.cpp

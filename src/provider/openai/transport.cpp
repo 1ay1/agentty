@@ -34,6 +34,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
 
@@ -80,11 +81,13 @@ struct ToolCallSlot {
 struct StreamCtx {
     EventSink sink;
 
-    // SSE line buffer + parse cursor (same amortised-drain scheme as anthropic).
-    std::string buf;
-    std::size_t read_pos = 0;
-    std::string data_accum;
-    bool        skip_event = false;
+    // Byte-level stream framing lives in the shared wire helpers (see
+    // include/agentty/provider/wire.hpp). Exactly one is driven per request:
+    // `sse` for the /v1/chat/completions compat path, `ndjson` for Ollama's
+    // native /api/chat. Both own their own buffer + read cursor + compaction;
+    // the transport only supplies the per-event/per-line dispatch.
+    wire::SseFramer  sse;
+    wire::LineFramer ndjson;
 
     // Tool-call streaming state, indexed by OpenAI's tool_calls[].index.
     std::vector<ToolCallSlot> tool_slots;
@@ -123,8 +126,6 @@ struct StreamCtx {
 
     StopReason stop_reason = StopReason::Unspecified;
     bool terminated = false;
-
-    StreamCtx() { buf.reserve(64 * 1024); data_accum.reserve(8 * 1024); }
 };
 
 // Could `s` be the START of a leaked tool-call? This is only called at the
@@ -198,9 +199,6 @@ struct StreamCtx {
     // Anything else is prose.
     return false;
 }
-
-constexpr std::size_t kSseCompactThreshold = 64 * 1024;
-constexpr std::size_t kSseDataAccumMax     = 4 * 1024 * 1024;
 
 [[nodiscard]] StopReason parse_openai_finish(std::string_view fr) noexcept {
     // OpenAI finish_reason: "stop" | "length" | "tool_calls" |
@@ -800,7 +798,7 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
 }
 
 // Parse + dispatch one SSE `data:` payload.
-void dispatch_data(StreamCtx& ctx, const std::string& data) {
+void dispatch_data(StreamCtx& ctx, std::string_view data) {
     if (data.empty()) return;
     if (data == "[DONE]") {
         close_active_tool(ctx);
@@ -875,44 +873,12 @@ void dispatch_data(StreamCtx& ctx, const std::string& data) {
 
 // SSE line feeder. OpenAI streams `data: {json}\n\n` frames (no `event:`
 // lines), so the parser is simpler than Anthropic's: accumulate `data:`
-// lines, dispatch on the blank-line terminator.
+// lines, dispatch on the blank-line terminator. The framing itself is the
+// shared wire::SseFramer; OpenAI just ignores the (always-empty) event name.
 void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
-    ctx.buf.append(data, len);
-    auto& read_pos = ctx.read_pos;
-    std::string_view buf{ctx.buf};
-    while (true) {
-        const auto nl = buf.find('\n', read_pos);
-        if (nl == std::string_view::npos) break;
-        std::string_view line = buf.substr(read_pos, nl - read_pos);
-        read_pos = nl + 1;
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-
-        if (line.empty()) {
-            if (!ctx.skip_event && !ctx.data_accum.empty())
-                dispatch_data(ctx, ctx.data_accum);
-            ctx.data_accum.clear();
-            ctx.skip_event = false;
-        } else if (ctx.skip_event) {
-            continue;
-        } else if (line.starts_with("data:")) {
-            std::size_t s = 5;
-            while (s < line.size() && line[s] == ' ') ++s;
-            const std::size_t add = (line.size() - s)
-                + (ctx.data_accum.empty() ? 0 : 1);
-            if (ctx.data_accum.size() + add > kSseDataAccumMax) {
-                ctx.data_accum.clear();
-                ctx.skip_event = true;
-                continue;
-            }
-            if (!ctx.data_accum.empty()) ctx.data_accum.push_back('\n');
-            ctx.data_accum.append(line.data() + s, line.size() - s);
-        }
-        // `:` comments and unknown fields silently dropped (SSE spec).
-    }
-    if (read_pos >= kSseCompactThreshold) {
-        ctx.buf.erase(0, read_pos);
-        read_pos = 0;
-    }
+    ctx.sse.feed(data, len, [&](std::string_view /*event*/, std::string_view payload) {
+        dispatch_data(ctx, payload);
+    });
 }
 
 // True iff an assistant message carries any tool_calls (whose results must
@@ -1066,21 +1032,9 @@ void dispatch_native_line(StreamCtx& ctx, std::string_view line) {
 
 // NDJSON line feeder for /api/chat (newline-delimited JSON, not SSE).
 void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
-    ctx.buf.append(data, len);
-    auto& read_pos = ctx.read_pos;
-    std::string_view buf{ctx.buf};
-    while (true) {
-        const auto nl = buf.find('\n', read_pos);
-        if (nl == std::string_view::npos) break;
-        std::string_view line = buf.substr(read_pos, nl - read_pos);
-        read_pos = nl + 1;
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    ctx.ndjson.feed(data, len, [&](std::string_view line) {
         dispatch_native_line(ctx, line);
-    }
-    if (read_pos >= kSseCompactThreshold) {
-        ctx.buf.erase(0, read_pos);
-        read_pos = 0;
-    }
+    });
 }
 
 } // namespace
