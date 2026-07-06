@@ -145,7 +145,13 @@ jobs:
   build-linux-aarch64:
     name: linux aarch64
     needs: prepare
-    runs-on: ubuntu-latest
+    # Native ARM64 runner (GitHub-hosted, free for public repos) — NOT QEMU.
+    # The previous `ubuntu-latest` + docker --platform linux/arm64 path ran
+    # the whole C++26 compile under QEMU emulation (~10-20x slower, 1h+),
+    # which stalled every downstream package that pins the arm64 binary. On
+    # real ARM silicon this finishes in ~the same time as the x86_64 leg, so
+    # aarch64 is a first-class fast arch again and nothing waits on it.
+    runs-on: ubuntu-24.04-arm
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
@@ -161,11 +167,11 @@ jobs:
             sleep $((attempt * 10))
           done
           git submodule update --init --recursive --force
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+        # Host is already arm64, so a plain alpine:3.21 container builds
+        # natively — no --platform, no QEMU.
         run: |
-          docker run --rm --platform linux/arm64 \
+          docker run --rm \
             -e CMARCH='native' \
             -v "$PWD":/src -w /src alpine:3.21 sh -c '
               set -ex
