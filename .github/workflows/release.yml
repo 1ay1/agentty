@@ -13,6 +13,16 @@ name: release
 # agentty-windows-x86_64.exe, agentty-windows-x86_64.msi (signed installer),
 # agentty_<v>_{amd64,arm64}.deb, agentty-<v>-1.{x86_64,aarch64}.rpm,
 # agentty-bin-<v>-1-x86_64.pkg.tar.zst, agentty-<v>.tar.gz, SHA256SUMS.
+#
+# Downstream publishing (all gated on a real tag + a per-target secret; each
+# skips silently when its secret is absent):
+#   winget  → PR to microsoft/winget-pkgs        (WINGET_TOKEN)
+#   homebrew→ PR/commit to the 1ay1/homebrew-tap  (TAP_TOKEN)
+#   scoop   → PR/commit to the 1ay1/scoop-bucket  (SCOOP_TOKEN)
+#   AUR     → push agentty-bin to the AUR         (AUR_SSH_KEY)
+#   alpine  → .apk built + version-pinned APKBUILD attached to the release
+#   nix/snap/gentoo → version-pinned manifests attached to the release for
+#             manual/overlay publishing (nixpkgs/snapcraft/overlay PRs)
 
 on:
   push:
@@ -495,6 +505,181 @@ jobs:
           rm -f SHA256SUMS
           sha256sum -- * > SHA256SUMS
           gh release upload "$TAG" SHA256SUMS --clobber
+
+  # Alpine .apk — built inside an Alpine container with abuild, attached to the
+  # release so users can `apk add ./agentty-*.apk` before the aports APKBUILD is
+  # merged upstream. x86_64 only in CI (aarch64 would need QEMU + abuild).
+  package-alpine:
+    name: package alpine (.apk)
+    needs: [prepare, build-linux-x86_64]
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-linux-x86_64
+          path: bins
+      - name: Build .apk (Alpine 3.21 / abuild)
+        run: |
+          chmod +x bins/agentty-linux-x86_64
+          docker run --rm -v "$PWD":/src -w /src -e V="$V" alpine:3.21 sh -c '
+            set -ex
+            apk add --no-cache alpine-sdk abuild
+            adduser -D builder && addgroup builder abuild
+            su builder -c "abuild-keygen -a -n"
+            work=/home/builder/agentty; mkdir -p "$work"
+            # Central version: @VERSION@ -> $V. Point source at the local binary
+            # and drop the aarch64 line so a single-arch x86_64 build succeeds.
+            sed -e "s/^pkgver=@VERSION@/pkgver=$V/" \
+                -e "s|^\tagentty-linux-x86_64::.*|\tagentty-linux-x86_64::agentty-linux-x86_64|" \
+                -e "/agentty-linux-aarch64::/d" \
+                packaging/alpine/APKBUILD > "$work/APKBUILD"
+            cp bins/agentty-linux-x86_64 "$work/agentty-linux-x86_64"
+            chown -R builder:builder "$work"
+            su builder -c "cd $work && abuild checksum && abuild -r -P /home/builder/pkgs" || true
+            find /home/builder/pkgs -name "agentty-*.apk" -exec cp {} /src/ \; || true
+          '
+          ls -la agentty-*.apk 2>/dev/null || echo "no .apk produced (non-fatal)"
+      - name: Upload .apk to release
+        run: |
+          if ls agentty-*.apk >/dev/null 2>&1; then
+            gh release upload "$TAG" agentty-*.apk --clobber
+          fi
+
+  # Version-pinned downstream manifests (nix/snap/gentoo/alpine) rendered from
+  # the published SHA256SUMS and attached to the release. Same sed pinning as
+  # scripts/release.sh — CMake project VERSION stays the single source of truth.
+  publish-manifests:
+    name: publish manifests (nix/snap/gentoo)
+    needs: [prepare, checksums]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Pin + attach manifests
+        run: |
+          mkdir -p out
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
+          sum_for() { awk -v f="$1" '$2==f{print $1}' SHA256SUMS; }
+          x64=$(sum_for agentty-linux-x86_64); arm=$(sum_for agentty-linux-aarch64)
+          sed -e "s/@VERSION@/$V/g" \
+              -e "s|@LINUX_X86_64_SHA256@|$x64|g" \
+              -e "s|@LINUX_AARCH64_SHA256@|$arm|g" \
+              packaging/nix/default.nix > out/default.nix
+          sed -e "s/@VERSION@/$V/g" packaging/snap/snapcraft.yaml.in > out/snapcraft.yaml
+          cp packaging/gentoo/agentty-9999.ebuild "out/agentty-$V.ebuild"
+          gh release upload "$TAG" out/default.nix out/snapcraft.yaml out/agentty-*.ebuild --clobber
+
+  # Homebrew tap: bump version + pin all four (linux/macos × arch) sha256, then
+  # push the formula to 1ay1/homebrew-tap. Needs TAP_TOKEN (PAT, repo scope).
+  publish-homebrew:
+    name: publish to homebrew tap
+    needs: [prepare, checksums]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Render + push formula
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
+          sum_for() { awk -v f="$1" '$2==f{print $1}' SHA256SUMS; }
+          sed -e "s/^  version \".*\"/  version \"$V\"/" \
+              -e "s|@LINUX_X86_64_SHA256@|$(sum_for agentty-linux-x86_64)|g" \
+              -e "s|@LINUX_AARCH64_SHA256@|$(sum_for agentty-linux-aarch64)|g" \
+              -e "s|@MACOS_X86_64_SHA256@|$(sum_for agentty-macos-x86_64)|g" \
+              -e "s|@MACOS_ARM64_SHA256@|$(sum_for agentty-macos-arm64)|g" \
+              packaging/homebrew/agentty.rb > agentty.rb
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/1ay1/homebrew-tap.git" tap
+          mkdir -p tap/Formula && cp agentty.rb tap/Formula/agentty.rb
+          cd tap
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git add Formula/agentty.rb
+          git commit -m "agentty $V" || { echo "no change"; exit 0; }
+          git push origin HEAD:master
+
+  # Scoop bucket: bump version + pin win sha256, push to 1ay1/scoop-bucket.
+  # Needs SCOOP_TOKEN (PAT, repo scope). Skipped when absent.
+  publish-scoop:
+    name: publish to scoop bucket
+    needs: [prepare, checksums]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      SCOOP_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Render + push manifest
+        if: ${{ env.SCOOP_TOKEN != '' }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
+          win=$(awk '$2=="agentty-windows-x86_64.exe"{print $1}' SHA256SUMS)
+          sed -e "s/\"version\": \".*\"/\"version\": \"$V\"/" \
+              -e "s|/download/v[0-9.]*/|/download/v$V/|g" \
+              -e "s|@WINDOWS_X86_64_SHA256@|$win|g" \
+              packaging/scoop/agentty.json > agentty.json
+          git clone "https://x-access-token:${SCOOP_TOKEN}@github.com/1ay1/scoop-bucket.git" bucket
+          mkdir -p bucket/bucket && cp agentty.json bucket/bucket/agentty.json
+          cd bucket
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git add bucket/agentty.json
+          git commit -m "agentty $V" || { echo "no change"; exit 0; }
+          git push origin HEAD:master
+
+  # AUR: push the version-pinned PKGBUILD (agentty-bin). Needs AUR_SSH_KEY, an
+  # SSH private key registered with the AUR account. Skipped when absent.
+  publish-aur:
+    name: publish to AUR
+    needs: [prepare, checksums]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Render + push PKGBUILD
+        if: ${{ env.AUR_SSH_KEY != '' }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --output SHA256SUMS
+          sum_for() { awk -v f="$1" '$2==f{print $1}' SHA256SUMS; }
+          x64=$(sum_for agentty-linux-x86_64); arm=$(sum_for agentty-linux-aarch64)
+          sed -e "s/^pkgver=.*/pkgver=$V/" \
+              -e "s/sha256sums_x86_64=.*/sha256sums_x86_64=('$x64')/" \
+              -e "s/sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
+              packaging/arch/PKGBUILD > PKGBUILD
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur; chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur"
+          git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur
+          cp PKGBUILD aur/PKGBUILD
+          cd aur
+          # .SRCINFO must mirror the PKGBUILD; generate it via makepkg if the
+          # runner has it, else hand-write the minimal fields the AUR requires.
+          if command -v makepkg >/dev/null 2>&1; then
+            makepkg --printsrcinfo > .SRCINFO
+          else
+            printf 'pkgbase = agentty-bin\n\tpkgdesc = Blazing-fast Claude in your terminal\n\tpkgver = %s\n\tpkgrel = 1\n\turl = https://github.com/1ay1/agentty\n\tarch = x86_64\n\tarch = aarch64\n\tlicense = MIT\n\tprovides = agentty\n\tconflicts = agentty\n\tsource_x86_64 = agentty-%s-x86_64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-x86_64\n\tsha256sums_x86_64 = %s\n\tsource_aarch64 = agentty-%s-aarch64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-aarch64\n\tsha256sums_aarch64 = %s\n\npkgname = agentty-bin\n' \
+              "$V" "$V" "$V" "$x64" "$V" "$V" "$arm" > .SRCINFO
+          fi
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git add PKGBUILD .SRCINFO
+          git commit -m "agentty $V" || { echo "no change"; exit 0; }
+          git push origin HEAD:master
 
   # Submit the Windows .msi to the winget community repo. winget is the
   # zero-cost, no-SmartScreen-warning install path: `winget install agentty`.
