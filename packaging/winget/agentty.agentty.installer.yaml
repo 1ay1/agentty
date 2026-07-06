@@ -1,10 +1,9 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
-#
-# TEMPLATE. PackageVersion / InstallerUrl / InstallerSha256 / ProductCode are
-# rewritten at release time from the CMake project VERSION and the built .msi
-# (see .github/workflows/release.yml — publish-winget for updates, and the
-# first-time submission steps in packaging/winget/README or scripts/release.sh).
-# Do not hardcode a version here.
+#!
+#! TEMPLATE. PackageVersion / InstallerUrl / InstallerSha256 / ProductCode are
+#! rewritten at release time from the CMake project VERSION and the built .msi
+#! (see .github/workflows/release.yml -> publish-winget, which handles both the
+#! first-time submission and later version bumps). Do not hardcode a version.
 PackageIdentifier: agentty.agentty
 PackageVersion: "@VERSION@"
 Platform:
