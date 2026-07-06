@@ -477,12 +477,41 @@ jobs:
           bash packaging/rpm/build.sh "$V" aarch64 bins/agentty-linux-aarch64 "$PWD/dist"
           gh release upload "$TAG" dist/*.deb dist/*.rpm --clobber
 
-  # Runs last; regenerates SHA256SUMS over whatever is on the release. The
-  # binaries are already live regardless of whether this finishes — it only
-  # adds/refreshes the checksum file. `always()` so a single slow/failed build
-  # leg still gets a checksum file for everything that did land.
+  # SHA256SUMS over whatever is on the release. Runs TWICE by design:
+  #   * early  — gated only on the fast x86_64/windows/macos legs, so the
+  #     checksum file exists within ~5 min for everything that's landed.
+  #   * late   — a second job (checksums-final) gated on ALL builds refreshes
+  #     it once the slow QEMU arches (aarch64/i686) finish, so the final file
+  #     covers every asset.
+  # Both use `always()` + hash `*`, so a slow or failed leg never blocks the
+  # file for the assets that DID land. This matters because a consumer (e.g.
+  # an AUR PKGBUILD verifying against SHA256SUMS) 404s if the file is missing
+  # while the slow build drags on.
   checksums:
-    name: checksums
+    name: checksums (early)
+    needs:
+      - prepare
+      - build-linux-x86_64
+      - build-macos
+      - build-windows
+      - package-linux-x86_64
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5   # gh needs a git repo context for release ops
+      - name: Download release assets, hash, re-upload
+        run: |
+          mkdir -p dist && cd dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing || true
+          rm -f SHA256SUMS
+          sha256sum -- * > SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber
+
+  # Late refresh once the slow QEMU arches land, so SHA256SUMS covers them too.
+  checksums-final:
+    name: checksums (final)
     needs:
       - prepare
       - build-linux-x86_64
@@ -497,7 +526,7 @@ jobs:
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5   # gh needs a git repo context for release ops
+      - uses: actions/checkout@v5
       - name: Download release assets, hash, re-upload
         run: |
           mkdir -p dist && cd dist
