@@ -120,9 +120,19 @@ to your screen; only the buffer stops growing, and the capture ends with
 The exit code is the child's `WEXITSTATUS`, or `128 + signal` if it died to a
 signal (the shell convention — Ctrl+C shows as `exit 130`).
 
-> **Windows** degrades honestly: no fork/tty, so the block runs through the
-> same non-interactive captured runner the bash tool uses. sudo isn't a
-> Windows concept anyway.
+> **Windows** runs blocks natively through the right interpreter: a
+> ```` ```powershell ````/`pwsh`/`ps1` block goes to `powershell` (via
+> `-EncodedCommand`, so quoting and multi-line scripts survive intact), a
+> `cmd`/`bat`/`batch` block and bare fences go to `cmd.exe`. There's no
+> fork/tty, so it runs through the same captured (non-interactive) runner
+> the bash tool uses — output is captured and shown in the Result card
+> rather than streamed live. sudo isn't a Windows concept anyway.
+>
+> Which interpreter runs which language is decided by one classifier,
+> `shell_for_language()` — shared by the Run gate, the runnable-block
+> nudge, and the runner, so a block that shows as runnable always is. A
+> language the platform has no interpreter for (e.g. `powershell` on
+> Linux) offers edit/copy instead.
 
 ## The Result card
 

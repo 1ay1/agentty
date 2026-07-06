@@ -21,10 +21,13 @@
 // individual lines would corrupt legitimate scripts. Only the uniform
 // transcript pattern is unambiguous.
 //
-// Running is deliberately restricted to shell-ish blocks (sh/bash/zsh/
-// shell/console/terminal or bare fences). A python/js block routed
-// through `sh -c` fails confusingly; for those the picker still offers
-// edit/copy but Run shows a toast instead of executing garbage.
+// Running is restricted to blocks the current platform has an
+// interpreter for: POSIX runs sh/bash/zsh/shell/console/terminal (and
+// bare fences) through /bin/sh; Windows runs cmd/bat and bare fences
+// through cmd.exe and powershell/pwsh/ps1 through PowerShell. A block in
+// a language this platform can't run (e.g. `powershell` on Linux, or a
+// `python`/`js` snippet anywhere) still offers edit/copy, but Run shows
+// a toast instead of executing garbage. See shell_for_language().
 //
 // This header is UI-state + pure extraction only. Reducer wiring lives in
 // update/codeblock.cpp, key dispatch in subscribe.cpp, the view in
@@ -51,11 +54,58 @@ struct CodeBlock {
 
 namespace code_block_picker {
 
-// Is this a block we're willing to hand to /bin/sh?
+// Which interpreter should run a given fence language — and, implicitly,
+// whether the block is runnable at all on THIS platform. The set is
+// platform-aware: a `powershell` block is runnable on Windows but not on
+// POSIX (nothing sane to hand it to), and a `bash` block is runnable on
+// POSIX but only opportunistically on Windows (needs a bash on PATH,
+// e.g. Git-Bash/WSL — we don't assume it). The picker's Run gate and the
+// runner both consult this one enum so they never disagree.
+enum class BlockShell {
+    None,        // not runnable on this platform
+    Posix,       // /bin/sh -c
+    Cmd,         // Windows cmd.exe (the default shell wrapper)
+    PowerShell,  // powershell -NoProfile -Command
+};
+
+// Classify a fence info string (already lower-cased, first word only)
+// into the interpreter that should run it on the CURRENT platform.
+[[nodiscard]] inline BlockShell shell_for_language(std::string_view lang) noexcept {
+    const bool posixish =
+        lang == "sh" || lang == "bash" || lang == "zsh" || lang == "shell"
+        || lang == "console" || lang == "terminal" || lang == "posix"
+        || lang == "shell-session" || lang == "shellsession";
+    const bool powershellish =
+        lang == "powershell" || lang == "pwsh" || lang == "ps" || lang == "ps1";
+    const bool cmdish =
+        lang == "cmd" || lang == "bat" || lang == "batch" || lang == "dos"
+        || lang == "winbatch" || lang == "cmd.exe";
+
+#if defined(_WIN32)
+    // On Windows the *native* shell for a bare fence is cmd.exe. A
+    // PowerShell block runs through powershell; an explicit posix block
+    // is handed to the default shell wrapper too (cmd.exe) as a best
+    // effort — models emitting `bash` on a Windows session usually mean
+    // "the shell", and if it's truly bash-only it'll just error, same as
+    // any wrong command. That's a run the user explicitly asked for.
+    if (powershellish)          return BlockShell::PowerShell;
+    if (cmdish)                 return BlockShell::Cmd;
+    if (posixish || lang.empty()) return BlockShell::Cmd;
+    return BlockShell::None;
+#else
+    // POSIX: bare fences and posix languages go to /bin/sh. cmd/
+    // powershell blocks are Windows-only — nothing to run them with.
+    if (posixish || lang.empty()) return BlockShell::Posix;
+    (void)powershellish;
+    (void)cmdish;
+    return BlockShell::None;
+#endif
+}
+
+// Is this block runnable on the current platform? (Run gate + nudge
+// counter both use this — a single source of truth with the runner.)
 [[nodiscard]] inline bool is_shell_language(std::string_view lang) noexcept {
-    return lang.empty() || lang == "sh" || lang == "bash" || lang == "zsh"
-        || lang == "shell" || lang == "console" || lang == "terminal"
-        || lang == "posix";
+    return shell_for_language(lang) != BlockShell::None;
 }
 
 // Strip uniform `$ ` / `> ` prompt decoration from a transcript-style

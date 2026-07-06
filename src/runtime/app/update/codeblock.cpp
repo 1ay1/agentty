@@ -178,7 +178,7 @@ namespace {
     return fin;
 }
 
-[[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command) {
+[[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command, cbp::BlockShell /*shell*/) {
     return maya::Cmd<Msg>::suspend(
         [cmd = std::move(command)]() -> Msg {
             return Msg{run_on_real_tty(cmd)};
@@ -187,12 +187,50 @@ namespace {
 
 #else  // _WIN32 — non-interactive fallback via the shared subprocess runner
 
-[[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command) {
+// Wrap the block body for the chosen Windows interpreter. cmd.exe is the
+// default shell of run_command_s (it wraps in `cmd.exe /S /C "..."`), so
+// a Cmd block passes through verbatim. A PowerShell block is handed to
+// powershell -NoProfile -Command; we base64-encode it via -EncodedCommand
+// so arbitrary quoting/newlines survive the cmd.exe wrapper intact
+// (nested quotes through cmd /C are the classic breakage). Multi-line
+// scripts Just Work because the whole body is one encoded argument.
+[[nodiscard]] std::string wrap_for_windows_shell(cbp::BlockShell shell,
+                                                 const std::string& body) {
+    if (shell != cbp::BlockShell::PowerShell) return body;  // Cmd: verbatim
+    // UTF-16LE base64 for -EncodedCommand (PowerShell's contract).
+    std::u16string u16;
+    u16.reserve(body.size());
+    for (unsigned char c : body) u16.push_back(static_cast<char16_t>(c));
+    std::string bytes;
+    bytes.reserve(u16.size() * 2);
+    for (char16_t ch : u16) {
+        bytes.push_back(static_cast<char>(ch & 0xFF));
+        bytes.push_back(static_cast<char>((ch >> 8) & 0xFF));
+    }
+    static constexpr char kB64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string enc;
+    enc.reserve((bytes.size() + 2) / 3 * 4);
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const unsigned b0 = static_cast<unsigned char>(bytes[i]);
+        const unsigned b1 = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0u;
+        const unsigned b2 = i + 2 < bytes.size() ? static_cast<unsigned char>(bytes[i + 2]) : 0u;
+        const unsigned triple = (b0 << 16) | (b1 << 8) | b2;
+        enc.push_back(kB64[(triple >> 18) & 0x3F]);
+        enc.push_back(kB64[(triple >> 12) & 0x3F]);
+        enc.push_back(i + 1 < bytes.size() ? kB64[(triple >> 6) & 0x3F] : '=');
+        enc.push_back(i + 2 < bytes.size() ? kB64[triple & 0x3F] : '=');
+    }
+    return "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + enc;
+}
+
+[[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command, cbp::BlockShell shell) {
     return maya::Cmd<Msg>::task_isolated(
-        [cmd = std::move(command)](std::function<void(Msg)> dispatch) {
-            auto r = tools::util::run_command_s(cmd);
+        [cmd = std::move(command), shell](std::function<void(Msg)> dispatch) {
+            const std::string wrapped = wrap_for_windows_shell(shell, cmd);
+            auto r = tools::util::run_command_s(wrapped);
             CodeBlockRunFinished fin;
-            fin.command   = cmd;
+            fin.command   = cmd;   // show the ORIGINAL body in the card
             fin.timed_out = r.timed_out;
             if (!r.started) {
                 fin.output    = "[failed to start: " + r.start_error + "]";
@@ -256,17 +294,20 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             if (idx < 0 || idx >= static_cast<int>(o->blocks.size()))
                 return done(std::move(m));
             CodeBlock block = o->blocks[static_cast<std::size_t>(idx)];
-            if (!cbp::is_shell_language(block.language)) {
-                // Not something /bin/sh can execute — nudge toward the
-                // actions that DO make sense for this block. Picker
-                // stays open so `e` / `y` are one keystroke away.
+            const cbp::BlockShell shell = cbp::shell_for_language(block.language);
+            if (shell == cbp::BlockShell::None) {
+                // Not runnable on this platform — nudge toward the actions
+                // that DO make sense for this block. Picker stays open so
+                // `e` / `y` are one keystroke away.
+                const std::string tag = block.language.empty()
+                    ? std::string{"this"} : "'" + block.language + "'";
                 auto cmd = set_status_toast(m,
-                    "'" + block.language + "' block isn't shell — "
+                    tag + " block isn't runnable here — "
                     "press e to edit or y to copy");
                 return {std::move(m), std::move(cmd)};
             }
             m.ui.code_blocks = cbp::Closed{};
-            return {std::move(m), run_block_cmd(std::move(block.body))};
+            return {std::move(m), run_block_cmd(std::move(block.body), shell)};
         },
         [&](CodeBlockPickerEdit) -> Step {
             auto* o = code_block_picker_opened(m.ui.code_blocks);
