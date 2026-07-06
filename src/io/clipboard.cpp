@@ -250,10 +250,11 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         if (headless) {
             return fail(
                 "couldn't read the clipboard over this connection. agentty "
-                "asks your terminal for it via OSC 52 \xE2\x80\x94 enable "
-                "clipboard read in your terminal (kitty/iTerm2/WezTerm/foot/"
-                "Ghostty; tmux needs `set -g set-clipboard on`), or attach "
-                "the image by path / set AGENTTY_CLIPBOARD_CMD");
+                "asks your terminal for it \xE2\x80\x94 kitty pastes images "
+                "and text (OSC 5522); iTerm2/WezTerm/foot/Ghostty paste text "
+                "only (OSC 52, enable clipboard read; tmux needs `set -g "
+                "set-clipboard on`). Otherwise attach the image by path or "
+                "set AGENTTY_CLIPBOARD_CMD");
         }
         return fail(wayland
             ? "no clipboard tool — install wl-clipboard "
