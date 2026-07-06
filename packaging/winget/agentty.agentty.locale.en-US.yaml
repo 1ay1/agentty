@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
 PackageIdentifier: agentty.agentty
-PackageVersion: "0.1.0"
+PackageVersion: "@VERSION@"
 PackageLocale: en-US
 Publisher: agentty
 PublisherUrl: https://agentty.org
@@ -24,6 +24,6 @@ Tags:
   - coding-agent
   - terminal
   - developer-tools
-ReleaseNotesUrl: https://github.com/1ay1/agentty/releases/latest
+ReleaseNotesUrl: https://github.com/1ay1/agentty/releases/tag/v@VERSION@
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

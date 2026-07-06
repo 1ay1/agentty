@@ -1,6 +1,12 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# TEMPLATE. PackageVersion / InstallerUrl / InstallerSha256 / ProductCode are
+# rewritten at release time from the CMake project VERSION and the built .msi
+# (see .github/workflows/release.yml — publish-winget for updates, and the
+# first-time submission steps in packaging/winget/README or scripts/release.sh).
+# Do not hardcode a version here.
 PackageIdentifier: agentty.agentty
-PackageVersion: "0.1.0"
+PackageVersion: "@VERSION@"
 Platform:
   - Windows.Desktop
 MinimumOSVersion: 10.0.0.0
@@ -9,12 +15,13 @@ InstallModes:
   - silent
   - silentWithProgress
 UpgradeBehavior: install
-# The InstallerSha256 is filled in per release by CI (compute over the .msi).
 Installers:
   - Architecture: x64
     InstallerType: wix
-    InstallerUrl: https://github.com/1ay1/agentty/releases/download/v0.1.0/agentty-windows-x86_64.msi
-    InstallerSha256: REPLACE_WITH_MSI_SHA256
-    ProductCode: "{6F3A2C18-9E4B-4D27-8A1E-7C5B2D0F9A41}"
+    InstallerUrl: https://github.com/1ay1/agentty/releases/download/v@VERSION@/agentty-windows-x86_64.msi
+    InstallerSha256: @MSI_SHA256@
+    # ProductCode must match the built .msi exactly; extracted from the MSI's
+    # Property table at release time (it changes when the WiX ProductId does).
+    ProductCode: "@MSI_PRODUCT_CODE@"
 ManifestType: installer
 ManifestVersion: 1.6.0
