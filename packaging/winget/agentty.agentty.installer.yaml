@@ -19,8 +19,6 @@ Installers:
     InstallerType: wix
     InstallerUrl: https://github.com/1ay1/agentty/releases/download/v@VERSION@/agentty-windows-x86_64.msi
     InstallerSha256: @MSI_SHA256@
-    # ProductCode must match the built .msi exactly; extracted from the MSI's
-    # Property table at release time (it changes when the WiX ProductId does).
     ProductCode: "@MSI_PRODUCT_CODE@"
 ManifestType: installer
 ManifestVersion: 1.6.0
