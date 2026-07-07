@@ -30,6 +30,7 @@
 #include "agentty/rag/knowledge.hpp"
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
+#include "agentty/util/dbglog.hpp"
 
 #include <mcp/tools/host.hpp>
 
@@ -302,7 +303,8 @@ private:
                 try {
                     int p = std::stoi(hs.substr(colon + 1));
                     if (p > 0 && p <= 65535) cfg.port = static_cast<std::uint16_t>(p);
-                } catch (...) { /* keep default port */ }
+                } catch (const std::exception& e) { util::dbglog("rag.embed_endpoint.port", e.what()); /* keep default port */ }
+                catch (...) { util::dbglog("rag.embed_endpoint.port", "non-std exception"); }
             } else {
                 cfg.host = hs;
             }
@@ -379,7 +381,8 @@ private:
                 if (n < 1) n = 1;
                 if (n > 8) n = 8;
                 cfg.n = static_cast<std::size_t>(n);
-            } catch (...) { /* keep default */ }
+            } catch (const std::exception& e) { util::dbglog("rag.expand_n.env", e.what()); /* keep default */ }
+            catch (...) { util::dbglog("rag.expand_n.env", "non-std exception"); }
         }
         return cfg;
     }
@@ -561,7 +564,12 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
                     if (!asst.tool_calls.empty() && !cur_tool_json.empty()) {
                         try {
                             asst.tool_calls.back().args = json::parse(cur_tool_json);
-                        } catch (...) { /* leave null; marked failed below */ }
+                        } catch (const std::exception& ex) {
+                            util::dbglog("subagent.tool_args.parse", ex.what());
+                            /* leave null; marked failed below */
+                        } catch (...) {
+                            util::dbglog("subagent.tool_args.parse", "non-std exception");
+                        }
                     }
                     cur_tool_json.clear();
                     if (!asst.tool_calls.empty()) {

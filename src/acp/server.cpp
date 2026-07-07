@@ -36,6 +36,7 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -475,7 +476,9 @@ json AgentServer::load_session_index() {
     std::lock_guard<std::mutex> lk(index_mtx_);
     std::ifstream ifs(persistence::threads_dir() / "acp_sessions.json");
     if (!ifs) return json::object();
-    try { json j; ifs >> j; if (j.is_object()) return j; } catch (...) {}
+    try { json j; ifs >> j; if (j.is_object()) return j; }
+    catch (const std::exception& e) { util::dbglog("acp.load_session_index", e.what()); }
+    catch (...) { util::dbglog("acp.load_session_index", "non-std exception"); }
     return json::object();
 }
 
@@ -483,7 +486,7 @@ void AgentServer::index_session(const Session& sess) {
     std::lock_guard<std::mutex> lk(index_mtx_);
     auto path = persistence::threads_dir() / "acp_sessions.json";
     json j = json::object();
-    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (...) { j = json::object(); } } }
+    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.index_session", e.what()); j = json::object(); } catch (...) { j = json::object(); } } }
     if (!j.is_object()) j = json::object();
     j[sess.id] = json{
         {"cwd", sess.cwd},
@@ -498,7 +501,7 @@ void AgentServer::unindex_session(const std::string& id) {
     std::lock_guard<std::mutex> lk(index_mtx_);
     auto path = persistence::threads_dir() / "acp_sessions.json";
     json j = json::object();
-    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (...) { return; } } }
+    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.unindex_session", e.what()); return; } catch (...) { return; } } }
     if (!j.is_object() || !j.contains(id)) return;
     j.erase(id);
     (void)persistence::write_json_atomic(path, j.dump());
@@ -784,7 +787,13 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                             try {
                                 tc.args = cur_tool_json.empty()
                                     ? json::object() : json::parse(cur_tool_json);
-                            } catch (...) { tc.args = json::object(); }
+                            } catch (const std::exception& e) {
+                                util::dbglog("acp.tool_args.parse", e.what());
+                                tc.args = json::object();
+                            } catch (...) {
+                                util::dbglog("acp.tool_args.parse", "non-std exception");
+                                tc.args = json::object();
+                            }
                             a::ToolCallUpdate upd;
                             upd.toolCallId = a::ToolCallId{tc.id.value};
                             upd.title      = a::Just(tool_title(tc));

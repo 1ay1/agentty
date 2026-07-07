@@ -431,6 +431,7 @@ set(AGENTTY_IO_SOURCES
     src/io/persistence.cpp
     src/io/clipboard.cpp
     src/util/base64.cpp
+    src/util/dbglog.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES

@@ -29,6 +29,7 @@
 
 #include "agentty/mcp/client.hpp"
 #include "agentty/mcp/http_server.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #include <mcp/cap/cap.hpp>
 
@@ -78,7 +79,9 @@ PoolHandle current_pool() {
 std::chrono::milliseconds call_timeout() {
     long ms = 60'000;
     if (const char* e = std::getenv("AGENTTY_MCP_TIMEOUT_MS"); e && e[0]) {
-        try { long v = std::stol(e); if (v > 0) ms = v; } catch (...) {}
+        try { long v = std::stol(e); if (v > 0) ms = v; }
+        catch (const std::exception& ex) { util::dbglog("mcp.call_timeout.env", ex.what()); }
+        catch (...) { util::dbglog("mcp.call_timeout.env", "non-std exception"); }
     }
     return std::chrono::milliseconds{ms};
 }
@@ -514,7 +517,9 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // session (its eventual result is dropped when the future detaches).
     long connect_deadline_ms = 15'000;
     if (const char* e = std::getenv("AGENTTY_MCP_CONNECT_TIMEOUT_MS"); e && e[0]) {
-        try { long v = std::stol(e); if (v > 0) connect_deadline_ms = v; } catch (...) {}
+        try { long v = std::stol(e); if (v > 0) connect_deadline_ms = v; }
+        catch (const std::exception& ex) { util::dbglog("mcp.connect_timeout.env", ex.what()); }
+        catch (...) { util::dbglog("mcp.connect_timeout.env", "non-std exception"); }
     }
 
     struct Pending {

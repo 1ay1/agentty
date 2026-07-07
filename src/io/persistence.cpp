@@ -23,6 +23,7 @@
 
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::persistence {
 
@@ -713,7 +714,11 @@ private:
             // Run outside the lock so concurrent enqueue() calls don't
             // block on the (potentially slow) fsync.
             try { save_thread_sync(next); }
-            catch (...) { /* best-effort, same policy as the sync path */ }
+            catch (const std::exception& e) {
+                // best-effort, same policy as the sync path
+                util::dbglog("persistence.async_save", e.what());
+            }
+            catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
         }
     }
 };
@@ -757,7 +762,11 @@ store::Settings load_settings() {
                 if (v.is_string()) s.provider_models[k] = v.get<std::string>();
         }
         s.effort = j.value("effort", "");
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("persistence.load_settings", e.what());
+    } catch (...) {
+        util::dbglog("persistence.load_settings", "non-std exception");
+    }
     return s;
 }
 

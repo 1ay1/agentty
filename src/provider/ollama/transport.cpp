@@ -29,6 +29,7 @@
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::provider::ollama {
 
@@ -386,7 +387,8 @@ void repair_arg_keys(const std::string& tool, json& args) {
         const auto& a = j[key];
         if (a.is_string()) {
             try { args_obj = json::parse(a.get<std::string>()); have_args = true; }
-            catch (...) {}
+            catch (const std::exception& e) { util::dbglog("ollama.salvage_args.parse", e.what()); }
+            catch (...) { util::dbglog("ollama.salvage_args.parse", "non-std exception"); }
         } else if (a.is_object()) {
             args_obj = a; have_args = true;
         } else if (!a.is_null()) {
@@ -1400,7 +1402,9 @@ json build_options(const Request& req) {
         opts["top_p"]       = 0.9;
     }
     if (const char* t = std::getenv("AGENTTY_OLLAMA_TEMPERATURE")) {
-        try { opts["temperature"] = std::stod(t); } catch (...) {}
+        try { opts["temperature"] = std::stod(t); }
+        catch (const std::exception& e) { util::dbglog("ollama.env_temperature.parse", e.what()); }
+        catch (...) { util::dbglog("ollama.env_temperature.parse", "non-std exception"); }
     }
 
     return opts;
@@ -1408,7 +1412,9 @@ json build_options(const Request& req) {
 
 std::string system_prompt() {
     std::string cwd;
-    try { cwd = std::filesystem::current_path().string(); } catch (...) {}
+    try { cwd = std::filesystem::current_path().string(); }
+    catch (const std::exception& e) { util::dbglog("ollama.system_prompt.cwd", e.what()); }
+    catch (...) { util::dbglog("ollama.system_prompt.cwd", "non-std exception"); }
 
 #if defined(_WIN32)
     const char* os_name = "Windows";

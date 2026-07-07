@@ -37,6 +37,7 @@
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/dbglog.hpp"
 
 namespace agentty::provider::openai {
 
@@ -1361,7 +1362,11 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
                 auto v = std::stoul(h.value, &consumed);
                 if (consumed == h.value.size() && v > 0)
                     retry_after_hint = std::chrono::seconds(v);
-            } catch (...) {}
+            } catch (const std::exception& e) {
+                util::dbglog("openai.retry_after.parse", e.what());
+            } catch (...) {
+                util::dbglog("openai.retry_after.parse", "non-std exception");
+            }
             break;
         }
     };
@@ -1487,7 +1492,9 @@ std::string_view local_model_prompt_addendum() {
 
 std::string local_model_system_prompt() {
     std::string cwd;
-    try { cwd = std::filesystem::current_path().string(); } catch (...) {}
+    try { cwd = std::filesystem::current_path().string(); }
+    catch (const std::exception& e) { util::dbglog("openai.local_prompt.cwd", e.what()); }
+    catch (...) { util::dbglog("openai.local_prompt.cwd", "non-std exception"); }
 
 #if defined(_WIN32)
     const char* os_name = "Windows";
@@ -1602,7 +1609,11 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
                 }
             }
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("openai.probe_ollama_model.parse", e.what());
+    } catch (...) {
+        util::dbglog("openai.probe_ollama_model.parse", "non-std exception");
+    }
     return out;
 }
 } // namespace
@@ -1671,7 +1682,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 });
             }
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("openai.list_models.parse", e.what());
+    } catch (...) {
+        util::dbglog("openai.list_models.parse", "non-std exception");
+    }
 
     return result;
 }

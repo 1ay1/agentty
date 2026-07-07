@@ -28,6 +28,7 @@
 #include "agentty/mcp/http_server.hpp"
 
 #include "agentty/io/http.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #include <mcp/cap/client_provider.hpp>
 #include <mcp/client.hpp>
@@ -302,7 +303,9 @@ private:
 
     void feed(const std::string& payload) {
         if (!engine_) return;
-        try { engine_->feed_line(payload); } catch (...) {}
+        try { engine_->feed_line(payload); }
+        catch (const std::exception& e) { util::dbglog("mcp.http_transport.feed", e.what()); }
+        catch (...) { util::dbglog("mcp.http_transport.feed", "non-std exception"); }
     }
 
     ParsedUrl                 url_;

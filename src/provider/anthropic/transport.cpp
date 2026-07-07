@@ -29,6 +29,7 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/dbglog.hpp"
 #include "agentty/util/env.hpp"
 
 namespace agentty::provider::anthropic {
@@ -1364,7 +1365,11 @@ std::string default_system_prompt() {
     try {
         auto u8 = std::filesystem::current_path().u8string();
         cwd.assign(reinterpret_cast<const char*>(u8.data()), u8.size());
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("anthropic.system_prompt.cwd", e.what());
+    } catch (...) {
+        util::dbglog("anthropic.system_prompt.cwd", "non-std exception");
+    }
 
     std::ostringstream oss;
     oss << "You are agentty, a terminal coding assistant. Act, don't ask. "
@@ -1886,7 +1891,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
                 .provider = "anthropic",
             });
         }
-    } catch (...) {}
+    } catch (const std::exception& e) {
+        util::dbglog("anthropic.list_models.parse", e.what());
+    } catch (...) {
+        util::dbglog("anthropic.list_models.parse", "non-std exception");
+    }
 
     // Network said 200 but we parsed nothing usable — fall back to the seed
     // so the picker is never left empty after a provider switch.
