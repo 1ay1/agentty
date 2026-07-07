@@ -40,9 +40,16 @@
     #include <cstdio>
     #include <ctime>
     #include <poll.h>
+    #include <sys/ioctl.h>
     #include <sys/wait.h>
     #include <termios.h>
     #include <unistd.h>
+#else
+    #include <atomic>
+    #include <chrono>
+    #include <cstdio>
+    #include <io.h>
+    #include <thread>
 #endif
 
 #include <maya/core/overload.hpp>
@@ -113,6 +120,53 @@ namespace runner_ui {
         if (tty()) emit("\x1b]2;" + t + "\x07");
     }
     inline void restore_title() { if (tty()) emit("\x1b]2;\x07"); }
+
+    // ── Pinned bottom-line status (DECSTBM) ──────────────────────────────
+    // A universal fallback for terminals/multiplexers that drop the OSC-2
+    // window title: reserve the bottom screen row as a fixed status line so
+    // the elapsed-time readout is ALWAYS visible even while output streams.
+    // Output written by the tee loop scrolls within rows 1..h-1 (the
+    // DECSTBM margin); we repaint row h out-of-band. Every escape here is
+    // TTY-gated and fully torn down by end_status(), so piped output and
+    // the captured buffer never see any of it.
+    inline int term_rows() {
+        struct winsize ws{};
+        if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 2)
+            return ws.ws_row;
+        return 0;   // unknown / too small — caller disables the status line
+    }
+    // Enter status mode: set the scroll region to rows 1..(rows-1), leaving
+    // row `rows` reserved. Cursor is parked at the top of the scroll region.
+    inline void begin_status(int rows) {
+        if (!tty() || rows < 3) return;
+        std::string s;
+        s += "\x1b[1;" + std::to_string(rows - 1) + "r";  // DECSTBM margin
+        s += "\x1b[" + std::to_string(rows - 1) + ";1H";  // park cursor
+        emit(s);
+    }
+    // Repaint the reserved bottom row with `text` (already styled), then
+    // return the cursor into the scroll region so output continues above.
+    inline void paint_status(int rows, const std::string& text) {
+        if (!tty() || rows < 3) return;
+        std::string s;
+        s += "\x1b[s";                                    // save cursor
+        s += "\x1b[" + std::to_string(rows) + ";1H";      // to status row
+        s += "\x1b[2K";                                   // clear it
+        s += text;
+        s += "\x1b[u";                                    // restore cursor
+        emit(s);
+    }
+    // Leave status mode: reset the scroll region to full screen and clear
+    // the reserved row so the transcript ends clean.
+    inline void end_status(int rows) {
+        if (!tty() || rows < 3) return;
+        std::string s;
+        s += "\x1b[r";                                    // reset DECSTBM
+        s += "\x1b[" + std::to_string(rows) + ";1H";
+        s += "\x1b[2K";
+        s += "\x1b[" + std::to_string(rows - 1) + ";1H";
+        emit(s);
+    }
 }
 
 [[nodiscard]] CodeBlockRunFinished run_on_real_tty(const std::string& command) {
@@ -192,37 +246,40 @@ namespace runner_ui {
     bool truncated = false;
     char buf[8192];
     const auto started = ::time(nullptr);
-    bool heartbeat_shown = false;
-    long last_title_secs = -1;
+    long last_status_secs = -1;
     int  spin = 0;
     static constexpr const char* kSpin[] = {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
-    // Short command label for the titlebar timer (first token, clipped).
+    // Short command label for the timers (first token, clipped).
     std::string label = command.substr(0, command.find_first_of(" \t\n"));
     if (label.size() > 24) label.resize(24);
-    auto tick_title = [&] {
+
+    // Two always-on elapsed readouts, belt-and-suspenders so SOMETHING is
+    // visible regardless of terminal quirks:
+    //   1. OSC-2 window title — non-intrusive, but some multiplexers drop it.
+    //   2. A DECSTBM-pinned bottom status row — universal; output scrolls
+    //      above it. Enabled only when we can read the terminal height.
+    const int rows = ui::term_rows();
+    ui::begin_status(rows);
+    auto tick = [&] {
         const long secs = static_cast<long>(::time(nullptr) - started);
-        if (secs == last_title_secs) return;
-        last_title_secs = secs;
+        if (secs == last_status_secs) return;
+        last_status_secs = secs;
         ui::set_title("● " + std::to_string(secs) + "s — " + label + " — agentty");
+        if (rows >= 3) {
+            std::string bar = ui::dim();
+            bar += kSpin[spin++ % 8];
+            bar += " running… " + std::to_string(secs) + "s · " + label
+                 + " · Ctrl-C to stop";
+            bar += ui::reset();
+            ui::paint_status(rows, bar);
+        }
     };
+    tick();
     for (;;) {
-        tick_title();
         struct pollfd pfd{fds[0], POLLIN, 0};
         const int pr = ::poll(&pfd, 1, 1000);
-        if (pr == 0) {
-            // Quiet second — draw/refresh the in-place heartbeat.
-            if (ui::tty()) {
-                const long secs = static_cast<long>(::time(nullptr) - started);
-                std::string hb = "\r\x1b[2K";
-                hb += ui::dim();
-                hb += kSpin[spin++ % 8];
-                hb += " running… " + std::to_string(secs) + "s (Ctrl-C to stop)";
-                hb += ui::reset();
-                ui::emit(hb);
-                heartbeat_shown = true;
-            }
-            continue;
-        }
+        tick();   // refresh timers whether or not output arrived this tick
+        if (pr == 0) continue;
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
@@ -233,8 +290,6 @@ namespace runner_ui {
             break;
         }
         if (n == 0) break;
-        // Wipe any heartbeat line before real output lands on top of it.
-        if (heartbeat_shown) { ui::clear_line(); heartbeat_shown = false; }
         (void)!::write(STDOUT_FILENO, buf, static_cast<std::size_t>(n));
         if (fin.output.size() < kCaptureMax) {
             const auto room = kCaptureMax - fin.output.size();
@@ -244,7 +299,7 @@ namespace runner_ui {
             truncated = true;
         }
     }
-    if (heartbeat_shown) ui::clear_line();
+    ui::end_status(rows);
     ui::restore_title();
     ::close(fds[0]);
 
@@ -366,7 +421,58 @@ namespace runner_ui {
     return maya::Cmd<Msg>::task_isolated(
         [cmd = std::move(command), shell](std::function<void(Msg)> dispatch) {
             const std::string wrapped = wrap_for_windows_shell(shell, cmd);
+
+            // Windows parity for "what's happening while it runs": the
+            // shared subprocess runner (run_command_s) is blocking and
+            // non-streaming — output only appears in the Result card at the
+            // end — so we can't tee live. But we CAN show the run is alive:
+            // print a header, spin a background thread that ticks an
+            // elapsed-time heartbeat (OSC-2 title + an in-place line;
+            // modern Windows Terminal / conhost with VT processing render
+            // both), run the command, then a footer. All decoration is
+            // console-only and never enters the captured buffer.
+            const bool con = (::_isatty(_fileno(stdout)) != 0);
+            auto out = [](const std::string& s) {
+                std::fputs(s.c_str(), stdout); std::fflush(stdout);
+            };
+            if (con) {
+                out("\x1b[2m\n╭─ running ─ (output shown when it finishes) ─────\x1b[0m\n"
+                    "\x1b[36m$ \x1b[0m\x1b[1m" + cmd + "\x1b[0m\n");
+            }
+
+            std::string label = cmd.substr(0, cmd.find_first_of(" \t\n"));
+            if (label.size() > 24) label.resize(24);
+            std::atomic<bool> done_flag{false};
+            std::thread ticker;
+            if (con) {
+                ticker = std::thread([&done_flag, label] {
+                    static constexpr const char* kSpin[] =
+                        {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
+                    int spin = 0;
+                    const auto start = std::chrono::steady_clock::now();
+                    while (!done_flag.load(std::memory_order_relaxed)) {
+                        const long secs = static_cast<long>(
+                            std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::steady_clock::now() - start).count());
+                        std::string s = "\x1b]2;● " + std::to_string(secs)
+                                      + "s — " + label + " — agentty\x07";
+                        s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
+                           + " running… " + std::to_string(secs) + "s\x1b[0m";
+                        std::fputs(s.c_str(), stdout); std::fflush(stdout);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    }
+                });
+            }
+
+            const auto start = std::chrono::steady_clock::now();
             auto r = tools::util::run_command_s(wrapped);
+            const long secs = static_cast<long>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - start).count());
+
+            done_flag.store(true, std::memory_order_relaxed);
+            if (ticker.joinable()) ticker.join();
+
             CodeBlockRunFinished fin;
             fin.command   = cmd;   // show the ORIGINAL body in the card
             fin.timed_out = r.timed_out;
@@ -378,6 +484,18 @@ namespace runner_ui {
                 fin.exit_code = r.exit_code;
                 if (r.truncated) fin.output += "\n[output truncated]";
             }
+
+            if (con) {
+                const bool ok = (fin.exit_code == 0 && !r.timed_out);
+                std::string tail = "\r\x1b[2K\x1b]2;\x07";   // wipe hb + restore title
+                tail += ok ? "\x1b[32m╰─ ✓ done"
+                     : r.timed_out ? "\x1b[33m╰─ ■ timed out"
+                     : "\x1b[31m╰─ ✗ failed";
+                tail += "\x1b[0m\x1b[2m  exit " + std::to_string(fin.exit_code)
+                      + "  ·  " + std::to_string(secs) + "s\x1b[0m\n";
+                out(tail);
+            }
+
             dispatch(Msg{std::move(fin)});
         });
 }
