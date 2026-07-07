@@ -258,10 +258,10 @@ int AgentServer::serve() {
     return 0;
 }
 
-Session* AgentServer::find_session(const std::string& id) {
+std::shared_ptr<Session> AgentServer::find_session(const std::string& id) {
     std::lock_guard<std::mutex> lk(session_mtx_);
     auto it = sessions_.find(id);
-    return it == sessions_.end() ? nullptr : &it->second;
+    return it == sessions_.end() ? nullptr : it->second;
 }
 
 const std::vector<provider::ToolSpec>& AgentServer::wire_tools() {
@@ -294,7 +294,19 @@ void AgentServer::send_update(const std::string& session_id, a::SessionUpdate up
 }
 
 void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
-    for (const auto& m : thread.messages) {
+    // Replay is a synchronous fan-out to the wire on the reader thread (one
+    // blocking write per message + per tool call), so an arbitrarily large
+    // on-disk thread would block every other request for the whole replay.
+    // Bound it: restore only the most recent kReplayMax messages (the rest
+    // stay in thread.messages and are still sent to the model on the next
+    // prompt — this only limits what's re-rendered in the client), and cap
+    // the tool calls emitted per assistant message.
+    constexpr std::size_t kReplayMax          = 200;
+    constexpr std::size_t kReplayToolsPerMsg  = 100;
+    const std::size_t total = thread.messages.size();
+    const std::size_t start = total > kReplayMax ? total - kReplayMax : 0;
+    for (std::size_t mi = start; mi < total; ++mi) {
+        const auto& m = thread.messages[mi];
         if (m.role == Role::User) {
             if (m.text.empty()) continue;
             send_update(session_id, a::SU_UserMessageChunk{
@@ -305,7 +317,9 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
                 send_update(session_id, a::SU_AgentMessageChunk{
                     text_block(body), a::Just(a::MessageId{m.id.value})});
 
+            std::size_t emitted = 0;
             for (const auto& tc : m.tool_calls) {
+                if (emitted++ >= kReplayToolsPerMsg) break;
                 send_update(session_id, a::SU_ToolCall{
                     make_tool_call(tc, a::ToolCallStatus::Pending)});
 
@@ -360,7 +374,9 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
     s.thread.id = tid;
     s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
                                    : std::string{"ACP "} + p.cwd;
-    const Session& stored = sessions_.emplace(sid, std::move(s)).first->second;
+    auto ptr = std::make_shared<Session>(std::move(s));
+    sessions_.emplace(sid, ptr);
+    const Session& stored = *ptr;
     persist(stored);
     index_session(stored);
 
@@ -384,9 +400,9 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     {
         std::lock_guard<std::mutex> lk(session_mtx_);
         if (auto it = sessions_.find(sid); it != sessions_.end()) {
-            if (!cwd.empty()) it->second.cwd = cwd;
-            thread      = it->second.thread;
-            profile     = it->second.profile;
+            if (!cwd.empty()) it->second->cwd = cwd;
+            thread      = it->second->thread;
+            profile     = it->second->profile;
             from_memory = true;
         }
     }
@@ -400,15 +416,23 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
         std::lock_guard<std::mutex> lk(session_mtx_);
         Session s;
         s.id = sid; s.cwd = cwd; s.profile = profile; s.thread = thread;
-        sessions_.insert_or_assign(sid, std::move(s));
+        sessions_.insert_or_assign(sid, std::make_shared<Session>(std::move(s)));
     }
 
     replay_history(sid, thread);
 }
 
 void AgentServer::on_cancel(const a::CancelParams& p) {
-    if (Session* s = find_session(p.sessionId.value); s && s->cancel)
-        s->cancel->cancel();
+    // Snapshot the cancel handle under the same lock find_session uses, then
+    // act on the local copy — run_turn resets s->cancel concurrently, and a
+    // bare read/reset of the same shared_ptr instance across threads is a
+    // data race.
+    std::shared_ptr<http::CancelToken> tok;
+    if (auto s = find_session(p.sessionId.value); s) {
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        tok = s->cancel;
+    }
+    if (tok) tok->cancel();
 }
 
 // ── Session modes ───────────────────────────────────────────────────────────
@@ -443,7 +467,7 @@ a::SessionModeState AgentServer::mode_state(Profile current) {
 }
 
 void AgentServer::on_set_mode(const a::SetModeParams& p) {
-    Session* s = find_session(p.sessionId.value);
+    auto s = find_session(p.sessionId.value);
     if (!s) throw std::runtime_error("session/set_mode: unknown sessionId: " + p.sessionId.value);
     s->profile = profile_from_mode_id(p.modeId.value, s->profile);
     send_update(p.sessionId.value,
@@ -451,7 +475,7 @@ void AgentServer::on_set_mode(const a::SetModeParams& p) {
 }
 
 a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
-    Session* s = find_session(p.sessionId.value);
+    auto s = find_session(p.sessionId.value);
     if (!s) throw std::runtime_error("session/set_config_option: unknown sessionId: " + p.sessionId.value);
     if (p.configId == "model") {
         s->model = p.value;
@@ -520,7 +544,7 @@ a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams&
         std::lock_guard<std::mutex> lk(session_mtx_);
         for (const auto& [id, s] : sessions_)
             if (!index.contains(id))
-                index[id] = json{{"cwd", s.cwd}, {"title", s.thread.title}};
+                index[id] = json{{"cwd", s->cwd}, {"title", s->thread.title}};
     }
 
     a::ListSessionsResult result;
@@ -543,7 +567,7 @@ a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams&
 a::ResumeSessionResult AgentServer::on_resume_session(const a::ResumeSessionParams& p) {
     on_load_session(p);   // restore + replay
     Profile profile = profile_;
-    if (Session* s = find_session(p.sessionId.value)) profile = s->profile;
+    if (auto s = find_session(p.sessionId.value)) profile = s->profile;
 
     a::ResumeSessionResult r;
     r.modes = a::Just(mode_state(profile));
@@ -587,10 +611,10 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         Message um;
         um.role = Role::User;
         um.text = std::move(text);
-        if (it->second.thread.messages.empty() && !um.text.empty())
-            it->second.thread.title = persistence::title_from_first_message(um.text);
-        it->second.thread.messages.push_back(std::move(um));
-        it->second.cancel = std::make_shared<http::CancelToken>();
+        if (it->second->thread.messages.empty() && !um.text.empty())
+            it->second->thread.title = persistence::title_from_first_message(um.text);
+        it->second->thread.messages.push_back(std::move(um));
+        it->second->cancel = std::make_shared<http::CancelToken>();
     }
 
     // Run the whole turn off the reader thread; the engine stays free to
@@ -631,7 +655,9 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
         "remember", "forget", "wipe_memory"};
 
     for (int turn = 0; turn < 64; ++turn) {
-        Session* s = find_session(session_id);
+        // shared_ptr keeps the Session alive for the whole iteration even if
+        // a concurrent session/close|delete erases the map entry mid-turn.
+        auto s = find_session(session_id);
         if (!s) { errored = true; error_msg = "session vanished"; break; }
 
         StopReason stop = stream_completion(*s, cancelled, error_msg,
@@ -650,7 +676,7 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
         // back as a tool result (so the wire tool_use↔result pairing stays
         // valid), and let the model take ONE more sub-turn to answer in plain
         // text — instead of returning a blank bubble.
-        if (Session* cs = find_session(session_id);
+        if (auto cs = find_session(session_id);
             cs && !cs->thread.messages.empty()) {
             Message& back = cs->thread.messages.back();
             if (back.role == Role::Assistant) {
@@ -696,8 +722,13 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
         if (cancelled || !ran) break;
     }
 
-    if (Session* s = find_session(session_id)) {
-        s->cancel.reset();
+    if (auto s = find_session(session_id)) {
+        {
+            // Reset the cancel handle under session_mtx_ so it doesn't race
+            // an on_cancel reading the same shared_ptr instance.
+            std::lock_guard<std::mutex> lk(session_mtx_);
+            s->cancel.reset();
+        }
         persist(*s);
         index_session(*s);
     }
@@ -942,6 +973,15 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         }
 
         bool tool_cancelled = false;
+        bool tool_timed_out = false;
+        // Belt-and-suspenders wall-clock ceiling: a tool that hangs forever
+        // (e.g. a stalled network read with no internal timeout) plus a
+        // client that never sends session/cancel would otherwise pin this
+        // worker — and the session/prompt future — permanently. On the
+        // deadline we fail the tool and move on; the future is detached below
+        // just like the cancel path so the runaway task cleans itself up.
+        constexpr auto kToolDeadline = std::chrono::minutes(10);
+        const auto tool_start = std::chrono::steady_clock::now();
         for (;;) {
             if (fut.wait_for(std::chrono::milliseconds(50))
                     == std::future_status::ready)
@@ -950,19 +990,27 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
                 tool_cancelled = true;
                 break;
             }
+            if (std::chrono::steady_clock::now() - tool_start > kToolDeadline) {
+                tool_timed_out = true;
+                break;
+            }
         }
 
-        if (tool_cancelled) {
+        if (tool_cancelled || tool_timed_out) {
             // Detach: keep the shared_future alive on a throwaway thread so
             // the worker can finish and clean up without us blocking on it.
             std::thread([fut]() mutable { fut.wait(); }).detach();
-            tc.status = ToolUse::Failed{{}, {}, "cancelled"};
+            const char* why = tool_timed_out ? "timed out" : "cancelled";
+            if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
+            tc.status = ToolUse::Failed{{}, {}, why};
             a::ToolCallUpdate c;
             c.toolCallId = a::ToolCallId{tc.id.value};
             c.status     = a::Just(a::ToolCallStatus::Failed);
             send_update(sess.id, a::SU_ToolCallUpdate{std::move(c)});
-            out_cancelled = true;
-            return false;
+            if (tool_cancelled) { out_cancelled = true; return false; }
+            // A timeout fails just this tool; continue the turn so the model
+            // can react to the failure result.
+            continue;
         }
 
         auto result = fut.get();

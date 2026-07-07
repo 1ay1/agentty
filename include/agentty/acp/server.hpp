@@ -112,7 +112,12 @@ private:
     enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
     PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
 
-    Session* find_session(const std::string& id);
+    // Returns a shared_ptr so a worker thread that captured the session can
+    // keep it alive even if the reader thread erases the map entry
+    // (session/close|delete) mid-turn. Returning a raw Session* here was a
+    // use-after-free: the pointer escaped session_mtx_ and a concurrent
+    // erase() destroyed the node under it.
+    std::shared_ptr<Session> find_session(const std::string& id);
 
     // ── Session modes ────────────────────────────────────────────────────
     static ::acp::SessionModeState mode_state(Profile current);
@@ -143,9 +148,9 @@ private:
     unsigned long                   wire_tools_gen_   = 0;
     std::vector<provider::ToolSpec> wire_tools_;
 
-    std::mutex                                   session_mtx_;
-    std::unordered_map<std::string, Session>     sessions_;
-    std::mutex                                   index_mtx_;
+    std::mutex                                              session_mtx_;
+    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
+    std::mutex                                              index_mtx_;
 };
 
 } // namespace agentty::acp
