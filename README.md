@@ -24,7 +24,7 @@ cd your-project
 agentty
 ```
 
-First launch opens auth — OAuth (uses your Claude Pro/Max subscription) or paste an API key. Then type and hit Enter.
+First launch opens auth — OAuth (uses your Claude Pro/Max subscription) or paste an API key. Once you're in, a first-run welcome card suggests a few things to try; just type and hit Enter.
 
 ## Features
 
@@ -84,24 +84,55 @@ agentty --provider openrouter              # Any model via OpenRouter
 <details>
 <summary><b>Installation options</b></summary>
 
+**Linux**
+
 ```bash
 # Debian / Ubuntu
 curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_amd64.deb
 sudo dpkg -i agentty_amd64.deb
 
-# Arch
+# Fedora / RHEL / CentOS
+sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+
+# openSUSE
+sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+
+# Arch (AUR)
 yay -S agentty-bin
 
-# macOS
+# Alpine
+curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.apk
+sudo apk add --allow-untrusted agentty-x86_64.apk
+```
+
+**macOS**
+
+```bash
 brew tap 1ay1/tap && brew install agentty
+```
 
-# Windows
-scoop bucket add 1ay1 https://github.com/1ay1/scoop-bucket && scoop install agentty
+**Windows**
 
-# From source
+```powershell
+scoop bucket add 1ay1 https://github.com/1ay1/scoop-bucket; scoop install agentty
+# or
+winget install agentty.agentty
+```
+
+**Anywhere (no package manager)**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
+```
+
+**From source** (needs a C++26 toolchain — GCC 14+ / recent Clang / MSVC)
+
+```bash
 git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
+
+All binaries are a single fully-static executable (x86_64 + aarch64 on Linux, Intel + Apple Silicon on macOS). Packaging details: [`packaging/README.md`](packaging/README.md).
 
 </details>
 
@@ -146,8 +177,11 @@ result card lets you attach the captured output to the composer as a
 collapsed chip (`a`), copy it (`y`), or discard (`Esc`) — so "it failed with
 X" reaches the model without you re-typing anything.
 
-Prompt `$ ` markers are stripped, non-shell blocks offer edit/copy instead of
-run, and capture is capped at 2 MB. Details: [`docs/RUN_CODE_BLOCK.md`](docs/RUN_CODE_BLOCK.md)
+Runs the right shell per block on every OS: `sh`/`bash` blocks through
+`/bin/sh` on Linux/macOS, `powershell`/`pwsh` and `cmd`/`bat` blocks through
+PowerShell / `cmd.exe` on Windows. Prompt `$ ` markers are stripped, a block
+your platform can't run offers edit/copy instead, and capture is capped at
+2 MB. Details: [`docs/RUN_CODE_BLOCK.md`](docs/RUN_CODE_BLOCK.md)
 
 </details>
 
@@ -166,6 +200,26 @@ On codebases with internal DSLs or tribal conventions, agent accuracy jumps from
 Pure-functional update loop: `(Model, Msg) -> (Model, Cmd)`. View is `Model -> Element`, rendered by [maya](https://github.com/1ay1/maya). Process management via `posix_spawn` + `poll(2)`. File writes are atomic (`write` + `fsync` + `rename`).
 
 Deep dive: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/RENDERING.md`](docs/RENDERING.md)
+
+</details>
+
+<details>
+<summary><b>Releasing (maintainers)</b></summary>
+
+Cutting a release is one command:
+
+```bash
+scripts/cut-release.sh X.Y.Z      # POSIX / macOS / Linux / Git-Bash
+scripts\cut-release.cmd X.Y.Z     # Windows cmd.exe
+```
+
+It bumps `project(agentty VERSION …)` in `CMakeLists.txt` (the single source
+of truth every manifest derives from), promotes `CHANGELOG.md`'s `[Unreleased]`
+section to `[X.Y.Z]`, commits, tags `vX.Y.Z`, and pushes. The tag push fires
+GitHub Actions, which builds every binary + OS package (Linux x86_64/aarch64
+on native runners, macOS Intel/ARM, Windows `.exe`/`.msi`) and auto-submits to
+winget, Homebrew, Scoop, and the AUR — nix/snap/gentoo manifests are attached
+to the release. `--dry-run` previews without writing anything.
 
 </details>
 

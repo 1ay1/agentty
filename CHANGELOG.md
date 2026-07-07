@@ -7,6 +7,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ### Added
 - **First-run onboarding starters.** On a genuine first run — thread history has loaded and there are no saved conversations yet — the welcome screen now shows a compact "New here? Try one of these" card with three concrete example prompts (understand the codebase / find-and-fix a bug / add a feature and run tests). It teaches the three things agentty is for so a brand-new user isn't staring at a blank composer wondering what to type. A returning user with any history never sees it, so the welcome stays clean. Gated on `!threads_loading && threads.empty()`, so it can't flash during the async thread-load at startup.
 
+### Changed
+- **README refreshed.** Full install matrix (apt/dnf/zypper/AUR/apk/brew/scoop/winget + curl one-liner + from-source), a first-run note in Getting Started, the Windows-native Ctrl+G shell dispatch, and a maintainer "Releasing" section documenting the one-command `cut-release` flow.
+
 ## [0.2.6] - 2026-07-07
 
 ### Added
