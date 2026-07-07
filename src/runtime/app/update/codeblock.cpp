@@ -55,6 +55,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/code_block_picker.hpp"
+#include "agentty/runtime/win_shell_encode.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
 namespace agentty::app::detail {
@@ -390,31 +391,10 @@ namespace runner_ui {
 [[nodiscard]] std::string wrap_for_windows_shell(cbp::BlockShell shell,
                                                  const std::string& body) {
     if (shell != cbp::BlockShell::PowerShell) return body;  // Cmd: verbatim
-    // UTF-16LE base64 for -EncodedCommand (PowerShell's contract).
-    std::u16string u16;
-    u16.reserve(body.size());
-    for (unsigned char c : body) u16.push_back(static_cast<char16_t>(c));
-    std::string bytes;
-    bytes.reserve(u16.size() * 2);
-    for (char16_t ch : u16) {
-        bytes.push_back(static_cast<char>(ch & 0xFF));
-        bytes.push_back(static_cast<char>((ch >> 8) & 0xFF));
-    }
-    static constexpr char kB64[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string enc;
-    enc.reserve((bytes.size() + 2) / 3 * 4);
-    for (std::size_t i = 0; i < bytes.size(); i += 3) {
-        const unsigned b0 = static_cast<unsigned char>(bytes[i]);
-        const unsigned b1 = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0u;
-        const unsigned b2 = i + 2 < bytes.size() ? static_cast<unsigned char>(bytes[i + 2]) : 0u;
-        const unsigned triple = (b0 << 16) | (b1 << 8) | b2;
-        enc.push_back(kB64[(triple >> 18) & 0x3F]);
-        enc.push_back(kB64[(triple >> 12) & 0x3F]);
-        enc.push_back(i + 1 < bytes.size() ? kB64[(triple >> 6) & 0x3F] : '=');
-        enc.push_back(i + 2 < bytes.size() ? kB64[triple & 0x3F] : '=');
-    }
-    return "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + enc;
+    // PowerShell -EncodedCommand contract (base64 of UTF-16LE) lives in a
+    // shared, platform-independent header so it can be unit-tested off
+    // Windows — see win_shell_encode.hpp / win_shell_encode_test.
+    return win_shell::powershell_command(body);
 }
 
 [[nodiscard]] maya::Cmd<Msg> run_block_cmd(std::string command, cbp::BlockShell shell) {
