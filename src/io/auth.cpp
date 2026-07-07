@@ -28,6 +28,7 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
+#include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/env.hpp"
 
@@ -219,10 +220,29 @@ static bool write_private(const fs::path& p, const std::string& content) {
 }
 
 std::optional<Credentials> load_credentials() {
-    std::ifstream ifs(credentials_path());
+    std::ifstream ifs(credentials_path(), std::ios::binary);
     if (!ifs) return std::nullopt;
+    std::string raw((std::istreambuf_iterator<char>(ifs)),
+                     std::istreambuf_iterator<char>());
+    if (raw.empty()) return std::nullopt;
+
+    // Encrypted-at-rest (SECURITY_AUDIT #1). New files are sealed
+    // envelopes; a pre-encryption file is plaintext JSON. Detect which,
+    // decrypt the sealed case, and fall through to the SAME parser for
+    // both — a legacy plaintext file is transparently accepted and gets
+    // re-encrypted the next time save_credentials runs (token refresh /
+    // re-login), so no explicit migration step is needed.
+    std::string body;
+    if (crypt::looks_sealed(raw)) {
+        auto pt = crypt::unseal(raw);
+        if (!pt) return std::nullopt;   // tampered / wrong machine / corrupt
+        body = std::move(*pt);
+    } else {
+        body = std::move(raw);          // legacy plaintext
+    }
+
     try {
-        json j; ifs >> j;
+        json j = json::parse(body);
         auto m = j.value("method", "");
         if (m == "oauth") {
             cred::OAuth o;
@@ -264,7 +284,14 @@ bool save_credentials(const Credentials& c) {
         }
     }, c);
     fs::path p = credentials_path();
-    if (!write_private(p, j.dump(2))) return false;
+    // Encrypt at rest (SECURITY_AUDIT #1). If sealing fails (hard OpenSSL
+    // error), refuse to persist rather than silently writing plaintext
+    // tokens — the in-memory credential still works for this session, and
+    // the caller surfaces the save failure.
+    std::string payload = j.dump(2);
+    auto sealed = crypt::seal(payload);
+    if (!sealed) return false;
+    if (!write_private(p, *sealed)) return false;
     restrict_perms(p);
     return true;
 }
