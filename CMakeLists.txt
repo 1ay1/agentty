@@ -427,6 +427,7 @@ set(AGENTTY_IO_SOURCES
     src/io/http.cpp
     src/io/tls.cpp
     src/io/auth.cpp
+    src/io/cred_crypt.cpp
     src/io/persistence.cpp
     src/io/clipboard.cpp
     src/util/base64.cpp
