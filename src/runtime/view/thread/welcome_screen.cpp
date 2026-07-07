@@ -18,15 +18,27 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     cfg.model_badge    = mb.build();
     cfg.profile_label  = std::string{profile_label(m.d.profile)};
     cfg.profile_color  = profile_color(m.d.profile);
-    // Starters panel intentionally empty — maya skips the whole "Try
-    // • …" card (and its bracketing blank rows) when the list has no
-    // entries, so the welcome screen flows straight from the
-    // model/profile chip row into the bottom hint. The placeholder
-    // suggestions ("Implement a small feature", etc.) read as
-    // landing-page filler in a TUI; the wordmark + tagline + bottom
-    // hint already make the affordance ("type to begin") clear.
-    cfg.starters_title = {};
-    cfg.starters       = {};
+    // Starters card — shown ONLY on a genuine first run: thread history has
+    // finished loading (`!threads_loading`) and there are no saved
+    // conversations yet (`threads.empty()`). A returning user with history
+    // never sees it, so the welcome stays clean; the placeholder
+    // suggestions read as landing-page filler once you know the tool. But a
+    // brand-new user staring at an empty composer has no idea what to type
+    // first — these three concrete, real prompts teach the three things
+    // agentty is for (understand a codebase, make a change, run/fix), so the
+    // very first message is a copy of something useful rather than a blank.
+    const bool first_run = !m.s.threads_loading && m.d.threads.empty();
+    if (first_run) {
+        cfg.starters_title = "New here? Try one of these";
+        cfg.starters = {
+            "Explain what this project does and how it's structured",
+            "Find and fix the bug in <file> — it <symptom>",
+            "Add a <feature> and run the tests",
+        };
+    } else {
+        cfg.starters_title = {};
+        cfg.starters       = {};
+    }
     cfg.hint_intro     = "type to begin";
     // Full keybinding map (was previously in the bottom status bar's
     // ShortcutRow, which has been retired — the status row now serves
