@@ -217,9 +217,35 @@ private:
                 session_id_.clear();
             }
         };
+        // Cap total buffered response bytes. The streaming path in
+        // io/http.cpp forwards every DATA frame to on_chunk WITHOUT enforcing
+        // Request::max_body_bytes (that cap only guards the unary path), so a
+        // hostile or buggy MCP server could stream gigabytes — an unbounded
+        // json_buf, or an SSE body that never emits a "\n\n" separator so
+        // drain_sse never erases — until the process OOMs. Returning false
+        // from on_chunk aborts the stream (RST) and surfaces an HttpError.
+        constexpr std::size_t kMaxResponseBytes = 64ull * 1024 * 1024;
+        std::size_t total_bytes = 0;
         handler.on_chunk = [&](std::string_view chunk) -> bool {
-            if (is_sse) { sse_buf.append(chunk); drain_sse(sse_buf); }
-            else        json_buf.append(chunk);
+            total_bytes += chunk.size();
+            if (total_bytes > kMaxResponseBytes) {
+                util::dbglog("mcp.http_transport.on_chunk",
+                             "response exceeded 64 MiB cap — aborting");
+                return false;
+            }
+            if (is_sse) {
+                sse_buf.append(chunk);
+                drain_sse(sse_buf);
+                // A single unterminated SSE event must not grow without
+                // bound even while under the total cap.
+                if (sse_buf.size() > kMaxResponseBytes) {
+                    util::dbglog("mcp.http_transport.on_chunk",
+                                 "unterminated SSE event exceeded cap");
+                    return false;
+                }
+            } else {
+                json_buf.append(chunk);
+            }
             return true;
         };
 

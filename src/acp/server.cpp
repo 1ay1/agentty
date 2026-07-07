@@ -494,7 +494,11 @@ void AgentServer::index_session(const Session& sess) {
         {"updatedAt", std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count()},
     };
-    (void)persistence::write_json_atomic(path, j.dump());
+    // A session title/cwd derived from an untrusted ACP `cwd` can contain
+    // invalid UTF-8; the default dump() throws type_error(316) on that.
+    // Substitute U+FFFD instead so indexing can never crash the worker.
+    (void)persistence::write_json_atomic(
+        path, j.dump(-1, ' ', false, json::error_handler_t::replace));
 }
 
 void AgentServer::unindex_session(const std::string& id) {
@@ -504,7 +508,8 @@ void AgentServer::unindex_session(const std::string& id) {
     { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.unindex_session", e.what()); return; } catch (...) { return; } } }
     if (!j.is_object() || !j.contains(id)) return;
     j.erase(id);
-    (void)persistence::write_json_atomic(path, j.dump());
+    (void)persistence::write_json_atomic(
+        path, j.dump(-1, ' ', false, json::error_handler_t::replace));
 }
 
 a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams& p) {
@@ -597,6 +602,15 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
 }
 
 void AgentServer::run_turn(std::string session_id, Responder resp) {
+  // This runs on a DETACHED worker thread, entirely outside acp-cpp's
+  // handle_request try/catch. An uncaught throw here would call
+  // std::terminate() and kill every session in the process; and a return
+  // without resolving `resp` leaves the client's session/prompt future
+  // hanging forever (the Responder destructor does not auto-reply). So the
+  // whole body is guarded: any escape resolves the deferred prompt with an
+  // InternalError. The ok/error done-latch makes the trailing resp.ok(...)
+  // a no-op if we already errored, so exactly one reply is sent.
+  try {
     bool cancelled = false;
     bool errored = false;
     std::string error_msg;
@@ -692,6 +706,14 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
     result.stopReason = acp_stop_reason(last_stop, cancelled, errored);
     if (errored && !error_msg.empty()) result.meta = json{{"error", error_msg}};
     resp.ok(result);
+  } catch (const std::exception& e) {
+    util::dbglog("acp.run_turn", e.what());
+    resp.error(a::errc::InternalError,
+               std::string{"turn failed: "} + e.what());
+  } catch (...) {
+    util::dbglog("acp.run_turn", "non-std exception");
+    resp.error(a::errc::InternalError, "turn failed (unknown error)");
+  }
 }
 
 StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
@@ -899,10 +921,25 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // "discard the late output" contract the TUI path uses via its
         // idempotent tool-output guard. `shared_future` so the lambda below
         // can keep the running task alive after we stop waiting on it.
-        auto fut = std::async(std::launch::async,
-            [td, name = tc.name.value, args = tc.args]() {
-                return tool::DynamicDispatch::execute_with(td, name, args);
-            }).share();
+        //
+        // std::async(launch::async) throws std::system_error when the OS
+        // can't start a thread (fd/thread exhaustion). Fail only THIS tool
+        // in that case rather than aborting the whole turn.
+        std::shared_future<tool::ExecResult> fut;
+        try {
+            fut = std::async(std::launch::async,
+                [td, name = tc.name.value, args = tc.args]() {
+                    return tool::DynamicDispatch::execute_with(td, name, args);
+                }).share();
+        } catch (const std::exception& e) {
+            util::dbglog("acp.run_tools.async", e.what());
+            tc.status = ToolUse::Failed{{}, {}, std::string{"could not start tool: "} + e.what()};
+            a::ToolCallUpdate f;
+            f.toolCallId = a::ToolCallId{tc.id.value};
+            f.status     = a::Just(a::ToolCallStatus::Failed);
+            send_update(sess.id, a::SU_ToolCallUpdate{std::move(f)});
+            continue;
+        }
 
         bool tool_cancelled = false;
         for (;;) {
