@@ -38,6 +38,8 @@
 #if !defined(_WIN32)
     #include <csignal>
     #include <cstdio>
+    #include <ctime>
+    #include <poll.h>
     #include <sys/wait.h>
     #include <unistd.h>
 #endif
@@ -84,15 +86,49 @@ namespace {
 // /dev/tty directly either way. stdout+stderr are dup2'd onto a pipe the
 // parent tees: each read chunk is written straight to the tty (live
 // output) and appended to the capture buffer. Returns the finished Msg.
+// Small helpers so the transcript looks the same whether or not stdout is
+// a real terminal. Colour/heartbeat are TTY-only (piped output stays clean
+// for `agentty ... | tee`), but the command echo + status always print.
+namespace runner_ui {
+    inline bool tty() { return ::isatty(STDOUT_FILENO) == 1; }
+    inline const char* dim()   { return tty() ? "\x1b[2m"  : ""; }
+    inline const char* bold()  { return tty() ? "\x1b[1m"  : ""; }
+    inline const char* green() { return tty() ? "\x1b[32m" : ""; }
+    inline const char* red()   { return tty() ? "\x1b[31m" : ""; }
+    inline const char* cyan()  { return tty() ? "\x1b[36m" : ""; }
+    inline const char* reset() { return tty() ? "\x1b[0m"  : ""; }
+    inline void emit(const std::string& s) {
+        (void)!::write(STDOUT_FILENO, s.data(), s.size());
+    }
+    // Clear the current line (used to wipe an in-place heartbeat before
+    // real output or the final status lands on top of it).
+    inline void clear_line() { if (tty()) emit("\r\x1b[2K"); }
+}
+
 [[nodiscard]] CodeBlockRunFinished run_on_real_tty(const std::string& command) {
+    namespace ui = runner_ui;
     CodeBlockRunFinished fin;
     fin.command = command;
 
-    // Echo the command first so the terminal transcript reads like a
-    // shell session ("$ sudo mkfs…") — the user sees exactly what fired.
+    // Framed run header: a clearly-delimited banner so the user can see at
+    // a glance WHERE the run started (the TUI just tore down, so a bare
+    // "$ cmd" line was easy to lose) and, crucially, that Ctrl-C stops it.
+    // The command still reads like a shell prompt so the transcript is
+    // copy-paste-faithful.
     {
-        std::string banner = "$ " + command + "\n";
-        (void)!::write(STDOUT_FILENO, banner.data(), banner.size());
+        std::string header;
+        header += ui::dim();
+        header += "\n╭─ running ─ Ctrl-C to stop ─────────────────────────────────";
+        header += ui::reset();
+        header += "\n";
+        header += ui::cyan();
+        header += "$ ";
+        header += ui::reset();
+        header += ui::bold();
+        header += command;
+        header += ui::reset();
+        header += "\n";
+        ui::emit(header);
     }
 
     int fds[2];
@@ -135,16 +171,49 @@ namespace {
     // Tee loop: live to the tty, captured to the buffer. Bounded capture
     // (2 MB) so a runaway command can't OOM the composer — the SCREEN
     // still shows everything; only the buffer stops growing.
+    //
+    // We poll(2) with a 1s timeout instead of a bare blocking read so a
+    // SILENT command (npm install fetching, a network wait, a `sleep`)
+    // still shows a heartbeat — "⠿ running… 12s (Ctrl-C to stop)" redrawn
+    // in place — instead of a frozen-looking screen. The heartbeat is
+    // TTY-only and is wiped the instant real output or the exit status
+    // arrives, so it never pollutes the captured buffer or piped output.
     constexpr std::size_t kCaptureMax = 2u * 1024 * 1024;
     bool truncated = false;
     char buf[8192];
+    const auto started = ::time(nullptr);
+    bool heartbeat_shown = false;
+    int  spin = 0;
+    static constexpr const char* kSpin[] = {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
     for (;;) {
+        struct pollfd pfd{fds[0], POLLIN, 0};
+        const int pr = ::poll(&pfd, 1, 1000);
+        if (pr == 0) {
+            // Quiet second — draw/refresh the in-place heartbeat.
+            if (ui::tty()) {
+                const long secs = static_cast<long>(::time(nullptr) - started);
+                std::string hb = "\r\x1b[2K";
+                hb += ui::dim();
+                hb += kSpin[spin++ % 8];
+                hb += " running… " + std::to_string(secs) + "s (Ctrl-C to stop)";
+                hb += ui::reset();
+                ui::emit(hb);
+                heartbeat_shown = true;
+            }
+            continue;
+        }
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         const ssize_t n = ::read(fds[0], buf, sizeof buf);
         if (n < 0) {
             if (errno == EINTR) continue;
             break;
         }
         if (n == 0) break;
+        // Wipe any heartbeat line before real output lands on top of it.
+        if (heartbeat_shown) { ui::clear_line(); heartbeat_shown = false; }
         (void)!::write(STDOUT_FILENO, buf, static_cast<std::size_t>(n));
         if (fin.output.size() < kCaptureMax) {
             const auto room = kCaptureMax - fin.output.size();
@@ -154,6 +223,7 @@ namespace {
             truncated = true;
         }
     }
+    if (heartbeat_shown) ui::clear_line();
     ::close(fds[0]);
 
     int status = 0;
@@ -166,14 +236,23 @@ namespace {
     else                          fin.exit_code = -1;
     if (truncated) fin.output += "\n[capture truncated at 2 MB — full output was shown on screen]";
 
-    // Brief pause so the user can read the tail + exit status before the
-    // TUI repaints over the viewport. A keypress-to-continue would be
-    // sturdier but adds a mandatory keystroke to every run; the output
-    // remains in native scrollback above the restored TUI either way.
+    // Completion footer: a colour-coded status line so success/failure is
+    // unmistakable at a glance, with elapsed time. The output stays in
+    // native scrollback above the restored TUI either way.
     {
-        std::string tail = "\n[exit " + std::to_string(fin.exit_code)
-                         + " — returning to agentty]\n";
-        (void)!::write(STDOUT_FILENO, tail.data(), tail.size());
+        const long secs = static_cast<long>(::time(nullptr) - started);
+        const bool ok = (fin.exit_code == 0);
+        std::string tail = "\n";
+        tail += ok ? ui::green() : ui::red();
+        tail += ok ? "╰─ ✓ done" : "╰─ ✗ failed";
+        tail += ui::reset();
+        tail += ui::dim();
+        tail += "  exit " + std::to_string(fin.exit_code)
+              + "  ·  " + std::to_string(secs) + "s"
+              + "  ·  returning to agentty";
+        tail += ui::reset();
+        tail += "\n";
+        ui::emit(tail);
     }
     return fin;
 }
