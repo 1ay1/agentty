@@ -41,6 +41,7 @@
     #include <ctime>
     #include <poll.h>
     #include <sys/wait.h>
+    #include <termios.h>
     #include <unistd.h>
 #endif
 
@@ -95,6 +96,7 @@ namespace runner_ui {
     inline const char* bold()  { return tty() ? "\x1b[1m"  : ""; }
     inline const char* green() { return tty() ? "\x1b[32m" : ""; }
     inline const char* red()   { return tty() ? "\x1b[31m" : ""; }
+    inline const char* yellow(){ return tty() ? "\x1b[33m" : ""; }
     inline const char* cyan()  { return tty() ? "\x1b[36m" : ""; }
     inline const char* reset() { return tty() ? "\x1b[0m"  : ""; }
     inline void emit(const std::string& s) {
@@ -103,6 +105,14 @@ namespace runner_ui {
     // Clear the current line (used to wipe an in-place heartbeat before
     // real output or the final status lands on top of it).
     inline void clear_line() { if (tty()) emit("\r\x1b[2K"); }
+    // Set / restore the terminal window title (OSC 2). This is an
+    // ALWAYS-ON elapsed-time readout that lives in the titlebar, so it
+    // updates every second even while output is streaming without ever
+    // touching the scrollback area. No-op off a TTY.
+    inline void set_title(const std::string& t) {
+        if (tty()) emit("\x1b]2;" + t + "\x07");
+    }
+    inline void restore_title() { if (tty()) emit("\x1b]2;\x07"); }
 }
 
 [[nodiscard]] CodeBlockRunFinished run_on_real_tty(const std::string& command) {
@@ -183,9 +193,20 @@ namespace runner_ui {
     char buf[8192];
     const auto started = ::time(nullptr);
     bool heartbeat_shown = false;
+    long last_title_secs = -1;
     int  spin = 0;
     static constexpr const char* kSpin[] = {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
+    // Short command label for the titlebar timer (first token, clipped).
+    std::string label = command.substr(0, command.find_first_of(" \t\n"));
+    if (label.size() > 24) label.resize(24);
+    auto tick_title = [&] {
+        const long secs = static_cast<long>(::time(nullptr) - started);
+        if (secs == last_title_secs) return;
+        last_title_secs = secs;
+        ui::set_title("● " + std::to_string(secs) + "s — " + label + " — agentty");
+    };
     for (;;) {
+        tick_title();
         struct pollfd pfd{fds[0], POLLIN, 0};
         const int pr = ::poll(&pfd, 1, 1000);
         if (pr == 0) {
@@ -224,6 +245,7 @@ namespace runner_ui {
         }
     }
     if (heartbeat_shown) ui::clear_line();
+    ui::restore_title();
     ::close(fds[0]);
 
     int status = 0;
@@ -231,28 +253,65 @@ namespace runner_ui {
     ::sigaction(SIGINT,  &old_int,  nullptr);
     ::sigaction(SIGQUIT, &old_quit, nullptr);
 
-    if (WIFEXITED(status))        fin.exit_code = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status)) fin.exit_code = 128 + WTERMSIG(status);
-    else                          fin.exit_code = -1;
+    // Distinguish a user interrupt (Ctrl-C / Ctrl-\) from a genuine
+    // command failure — "failed exit 130" reads like the command broke
+    // when the user actually stopped it on purpose.
+    bool interrupted = false;
+    if (WIFEXITED(status)) {
+        fin.exit_code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        const int sig = WTERMSIG(status);
+        interrupted = (sig == SIGINT || sig == SIGQUIT);
+        fin.exit_code = 128 + sig;
+    } else {
+        fin.exit_code = -1;
+    }
     if (truncated) fin.output += "\n[capture truncated at 2 MB — full output was shown on screen]";
 
-    // Completion footer: a colour-coded status line so success/failure is
-    // unmistakable at a glance, with elapsed time. The output stays in
-    // native scrollback above the restored TUI either way.
+    // Completion footer: a colour-coded status line so success/failure/
+    // interrupt is unmistakable at a glance, with elapsed time.
     {
         const long secs = static_cast<long>(::time(nullptr) - started);
         const bool ok = (fin.exit_code == 0);
         std::string tail = "\n";
-        tail += ok ? ui::green() : ui::red();
-        tail += ok ? "╰─ ✓ done" : "╰─ ✗ failed";
+        if (interrupted)   { tail += ui::yellow(); tail += "╰─ ■ stopped"; }
+        else if (ok)       { tail += ui::green();  tail += "╰─ ✓ done"; }
+        else               { tail += ui::red();    tail += "╰─ ✗ failed"; }
         tail += ui::reset();
         tail += ui::dim();
         tail += "  exit " + std::to_string(fin.exit_code)
-              + "  ·  " + std::to_string(secs) + "s"
-              + "  ·  returning to agentty";
+              + "  ·  " + std::to_string(secs) + "s";
         tail += ui::reset();
         tail += "\n";
         ui::emit(tail);
+    }
+
+    // Keypress-to-continue: hold the transcript on screen until the user
+    // acknowledges, so a fast command's output isn't repainted away before
+    // it can be read. Only when stdout AND stdin are a real terminal (so
+    // we can actually read a key); piped/redirected runs skip it. The
+    // prompt is on its own line and cleared afterward so the restored TUI
+    // starts on a clean row. Any key continues.
+    if (ui::tty() && ::isatty(STDIN_FILENO) == 1) {
+        std::string prompt = ui::dim();
+        prompt += "   press any key to return to agentty…";
+        prompt += ui::reset();
+        ui::emit(prompt);
+        // Best-effort raw single-key read: disable canonical mode + echo
+        // so a lone keypress (no Enter) continues, then restore.
+        struct termios oldt{}, raw{};
+        const bool have_termios = (::tcgetattr(STDIN_FILENO, &oldt) == 0);
+        if (have_termios) {
+            raw = oldt;
+            raw.c_lflag &= ~(ICANON | ECHO);
+            raw.c_cc[VMIN]  = 1;
+            raw.c_cc[VTIME] = 0;
+            ::tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        }
+        char c;
+        while (::read(STDIN_FILENO, &c, 1) < 0 && errno == EINTR) {}
+        if (have_termios) ::tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+        ui::clear_line();
     }
     return fin;
 }
