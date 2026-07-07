@@ -919,6 +919,51 @@ if(AGENTTY_SANITIZE AND NOT MSVC)
     target_link_options(agentty PRIVATE -fsanitize=${AGENTTY_SANITIZE})
 endif()
 
+# ── Security hardening + release strip ──────────────────────────────
+# Free defense-in-depth for the SHIPPING binary (SECURITY_AUDIT.md #5: no
+# explicit ASLR/DEP/RELRO). All zero-behaviour-change:
+#   -fstack-protector-strong   canary on any frame with a local array/aggregate
+#   -D_FORTIFY_SOURCE=2         compile-time + runtime bounds checks on libc
+#                              str/mem/printf calls (needs an optimizing build)
+#   -fPIE / -pie               position-independent exe → full ASLR of .text
+#   -Wl,-z,relro,-z,now        GOT mapped read-only after startup (full RELRO)
+#   -Wl,-z,noexecstack         non-executable stack marker
+# Skipped under sanitizers (they own the runtime + want frame pointers) and on
+# MSVC (has its own /GS /DYNAMICBASE /NXCOMPAT defaults). RELRO/noexecstack are
+# ELF-only; the linker no-ops them elsewhere, but gate to be explicit.
+if(NOT MSVC AND NOT AGENTTY_SANITIZE)
+    target_compile_options(agentty PRIVATE
+        -fstack-protector-strong
+        -fPIE)
+    # _FORTIFY_SOURCE requires -O1+; only define it for optimizing configs so
+    # a Debug build doesn't emit the "requires optimization" warning per TU.
+    target_compile_definitions(agentty PRIVATE
+        $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
+    if(UNIX AND NOT APPLE)
+        # RELRO + BIND_NOW + non-exec stack are GNU-ld / lld (ELF) features.
+        # Apple ld64 rejects -z; MSVC handled above.
+        target_link_options(agentty PRIVATE
+            -pie
+            -Wl,-z,relro,-z,now
+            -Wl,-z,noexecstack)
+    else()
+        target_link_options(agentty PRIVATE -pie)
+    endif()
+endif()
+
+# Strip the release binary. LTO + -O3 already shipped ~14 MB with a full
+# symbol table the running app never needs; --strip-all drops the .symtab /
+# .debug sections (typically >50%). Never strip Debug/RelWithDebInfo (you want
+# the symbols) or sanitizer builds (strip breaks ASan symbolization), and skip
+# on Apple (macOS+GCC keeps a live LTO LOAD segment strip can't touch — see the
+# IPO note above; the release path there strips via a separate step) and MSVC
+# (PDBs are external, nothing to strip off the .exe).
+if(NOT MSVC AND NOT APPLE AND NOT AGENTTY_SANITIZE
+        AND (CMAKE_BUILD_TYPE STREQUAL "Release"
+          OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
+    target_link_options(agentty PRIVATE -Wl,--strip-all)
+endif()
+
 # ── Profile-guided optimization (opt-in, two phases) ────────────────────
 # Phase 1: `cmake -B build-pgogen -DAGENTTY_PGO=generate` → build + run the
 #          app through a realistic workload (a couple of chat turns + tool
