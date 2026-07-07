@@ -22,6 +22,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <optional>
 #include <string>
 #include <vector>
@@ -50,6 +52,15 @@ using agentty::ToolName;
 using agentty::ToolUse;
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
+
+// A FIXED wall-clock timestamp for every fuzz message. The turn header
+// renders msg.timestamp as HH:MM (timestamp_hh_mm); a default-constructed
+// time_point is the epoch, whose HH:MM depends on the local timezone. Pin it
+// to a constant instant (12:00 UTC — with TZ=UTC set in run_walk) so the
+// rendered header bytes are identical on every machine and a committed row's
+// content stays a pure function of model state.
+static const std::chrono::system_clock::time_point kFixedTs =
+    std::chrono::system_clock::time_point{std::chrono::hours{12}};
 
 using namespace maya;
 using namespace maya::inline_frame;
@@ -336,6 +347,18 @@ struct WireHarness {
         // index commits + y. Rows past the viewport top of THIS frame
         // (R - term_h of them) are committed from now on; compare any
         // already-captured indices, then extend the capture.
+        //
+        // EXCEPTION: the welcome screen (empty thread) is transient
+        // first-run UI — in production it is NEVER committed to real
+        // scrollback; the first submit replaces it in the viewport and
+        // the conversation renders in its place. If it overflows a short
+        // terminal, its top rows are NOT committed wire. Skip capture
+        // while the thread has no messages so the legitimate
+        // welcome→conversation swap isn't mistaken for a committed-row
+        // rewrite. Once real turns exist and overflow, capture resumes
+        // exactly as before (the welcome frame committed nothing, so
+        // there is no stale prefix to conflict with).
+        if (m.d.current.messages.empty()) return;
         const int over = R > term_h ? R - term_h : 0;
         for (int y = 0; y < over; ++y) {
             const std::size_t wi = commits + static_cast<std::size_t>(y);
@@ -396,6 +419,16 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
     setenv("LINES", std::to_string(term_h).c_str(), 1);
     setenv("COLUMNS", std::to_string(width).c_str(), 1);
 
+    // Pin the timezone so the turn-header timestamp (timestamp_hh_mm ->
+    // localtime_r) renders IDENTICALLY on every machine. Without this the
+    // rendered header bytes depend on the runner's TZ, so a committed row's
+    // content becomes machine-dependent and W4's byte-exact check can flake
+    // across CI hosts (the walk itself even diverges when the header wraps
+    // differently). Combined with the fixed per-message timestamp below,
+    // every frame's bytes are a pure function of model state.
+    setenv("TZ", "UTC", 1);
+    tzset();
+
     Rng rng(seed);
     Model m;
     m.d.current.id = agentty::ThreadId{"wirefuzz"};
@@ -423,6 +456,7 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
             case 0: {   // submit: user push + freeze prior turn
                 Message u; u.role = Role::User;
                 u.text = "request " + st + ": do a thing with detail";
+                u.timestamp = kFixedTs;
                 m.d.current.messages.push_back(std::move(u));
                 agentty::app::detail::freeze_through(
                     m, m.d.current.messages.size());
@@ -432,6 +466,7 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
             }
             case 1: {   // start a stream
                 Message a; a.role = Role::Assistant;
+                a.timestamp = kFixedTs;
                 a.streaming_text = "working on it";
                 seed_md_no_reveal(m, a);
                 m.d.current.messages.push_back(std::move(a));
@@ -460,8 +495,10 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
             default: {  // settled tool turn in one go (history replay)
                 Message u; u.role = Role::User;
                 u.text = "tool req " + st;
+                u.timestamp = kFixedTs;
                 m.d.current.messages.push_back(std::move(u));
                 Message a; a.role = Role::Assistant;
+                a.timestamp = kFixedTs;
                 a.tool_calls.push_back(settled_tool(rng, "h" + st));
                 m.d.current.messages.push_back(std::move(a));
                 agentty::app::detail::freeze_through(
@@ -508,6 +545,7 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
             }
             case 1: {   // settled tool card lands on the live run
                 Message a; a.role = Role::Assistant;
+                a.timestamp = kFixedTs;
                 a.tool_calls.push_back(settled_tool(rng, "t" + st));
                 // production: the tool sub-turn is pushed; the streaming
                 // tail message settled its text into `text` first
@@ -520,6 +558,7 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 m.d.current.messages.push_back(std::move(a));
                 // continuation placeholder — the next sub-turn
                 Message ph; ph.role = Role::Assistant;
+                ph.timestamp = kFixedTs;
                 ph.streaming_text = "continuing";
                 seed_md_no_reveal(m, ph);
                 m.d.current.messages.push_back(std::move(ph));
