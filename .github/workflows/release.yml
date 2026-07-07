@@ -587,12 +587,11 @@ jobs:
   # Version-pinned downstream manifests (nix/snap/gentoo/alpine) rendered from
   # the release binaries and attached to the release. Same sed pinning as
   # scripts/release.sh — CMake project VERSION stays the single source of truth.
-  # Depends only on the linux binaries it pins (NOT the aggregate checksums job),
-  # so it fires as soon as both linux arches exist.
+  # Pins from SHA256SUMS + verifies the bytes match before attaching.
   publish-manifests:
     name: publish manifests (nix/snap/gentoo)
-    needs: [prepare, build-linux-x86_64, build-linux-aarch64]
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, checksums-final, build-linux-x86_64, build-linux-aarch64]
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
@@ -601,13 +600,22 @@ jobs:
       - uses: actions/checkout@v5
       - name: Pin + attach manifests
         run: |
+          set -eu
           mkdir -p out
-          # Compute sums directly from the release binaries (no dependency on
-          # the aggregate SHA256SUMS / checksums job).
+          # Authoritative hashes from SHA256SUMS; verify bytes still match so a
+          # re-run never renders a manifest that drifted from the release.
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' --skip-existing
-          x64=$(sha256sum agentty-linux-x86_64  | awk '{print $1}')
-          arm=$(sha256sum agentty-linux-aarch64 | awk '{print $1}')
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' \
+            --pattern 'SHA256SUMS' --skip-existing
+          sum_for() {
+            want=$(awk -v f="$1" '$2==f {print $1}' SHA256SUMS)
+            [ -n "$want" ] || { echo "::error::$1 missing from SHA256SUMS"; exit 1; }
+            got=$(sha256sum "$1" | awk '{print $1}')
+            [ "$want" = "$got" ] || { echo "::error::$1 hash drift: SHA256SUMS=$want bytes=$got"; exit 1; }
+            printf '%s' "$want"
+          }
+          x64=$(sum_for agentty-linux-x86_64)
+          arm=$(sum_for agentty-linux-aarch64)
           sed -e "s/@VERSION@/$V/g" \
               -e "s|@LINUX_X86_64_SHA256@|$x64|g" \
               -e "s|@LINUX_AARCH64_SHA256@|$arm|g" \
@@ -618,11 +626,12 @@ jobs:
 
   # Homebrew tap: bump version + pin all four (linux/macos × arch) sha256, then
   # push the formula to 1ay1/homebrew-tap. Needs TAP_TOKEN (PAT, repo scope).
-  # Depends on the linux + macos binaries directly (not the checksums job).
+  # Pins from the release's SHA256SUMS (single source of truth) + verifies the
+  # downloaded bytes match, so a re-run can never publish a stale hash.
   publish-homebrew:
     name: publish to homebrew tap
-    needs: [prepare, build-linux-x86_64, build-linux-aarch64, build-macos]
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, checksums-final, build-linux-x86_64, build-linux-aarch64, build-macos]
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
@@ -633,10 +642,21 @@ jobs:
       - name: Render + push formula
         if: ${{ env.TAP_TOKEN != '' }}
         run: |
+          set -eu
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' \
-            --pattern 'agentty-macos-x86_64' --pattern 'agentty-macos-arm64' --skip-existing
-          sum_for() { sha256sum "$1" | awk '{print $1}'; }
+            --pattern 'agentty-macos-x86_64' --pattern 'agentty-macos-arm64' \
+            --pattern 'SHA256SUMS' --skip-existing
+          # SHA256SUMS on the release is the single source of truth. Read the
+          # hash from it, and verify the downloaded bytes still match — so a
+          # re-run can never pin a hash that has drifted from the release.
+          sum_for() {
+            want=$(awk -v f="$1" '$2==f {print $1}' SHA256SUMS)
+            [ -n "$want" ] || { echo "::error::$1 missing from SHA256SUMS"; exit 1; }
+            got=$(sha256sum "$1" | awk '{print $1}')
+            [ "$want" = "$got" ] || { echo "::error::$1 hash drift: SHA256SUMS=$want bytes=$got — release was re-clobbered; refusing to pin a stale hash"; exit 1; }
+            printf '%s' "$want"
+          }
           sed -e "s/^  version \".*\"/  version \"$V\"/" \
               -e "s|@LINUX_X86_64_SHA256@|$(sum_for agentty-linux-x86_64)|g" \
               -e "s|@LINUX_AARCH64_SHA256@|$(sum_for agentty-linux-aarch64)|g" \
@@ -656,8 +676,8 @@ jobs:
   # the windows build — fires without waiting on any linux/macos leg.
   publish-scoop:
     name: publish to scoop bucket
-    needs: [prepare, build-windows]
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, checksums-final, build-windows]
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
@@ -668,9 +688,15 @@ jobs:
       - name: Render + push manifest
         if: ${{ env.SCOOP_TOKEN != '' }}
         run: |
+          set -eu
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'agentty-windows-x86_64.exe' --skip-existing
-          win=$(sha256sum agentty-windows-x86_64.exe | awk '{print $1}')
+            --pattern 'agentty-windows-x86_64.exe' --pattern 'SHA256SUMS' --skip-existing
+          # Authoritative hash from SHA256SUMS; verify bytes still match so a
+          # re-run never pins a hash that drifted from the release.
+          win=$(awk '$2=="agentty-windows-x86_64.exe" {print $1}' SHA256SUMS)
+          [ -n "$win" ] || { echo "::error::windows .exe missing from SHA256SUMS"; exit 1; }
+          got=$(sha256sum agentty-windows-x86_64.exe | awk '{print $1}')
+          [ "$win" = "$got" ] || { echo "::error::windows .exe hash drift: SHA256SUMS=$win bytes=$got"; exit 1; }
           sed -e "s/\"version\": \".*\"/\"version\": \"$V\"/" \
               -e "s|/download/v[0-9.]*/|/download/v$V/|g" \
               -e "s|@WINDOWS_X86_64_SHA256@|$win|g" \
@@ -685,11 +711,11 @@ jobs:
 
   # AUR: push the version-pinned PKGBUILD (agentty-bin). Needs AUR_SSH_KEY, an
   # SSH private key registered with the AUR account. Skipped when absent.
-  # Depends on the two linux binaries directly (not the checksums job).
+  # Pins from SHA256SUMS + verifies the bytes match before pushing.
   publish-aur:
     name: publish to AUR
-    needs: [prepare, build-linux-x86_64, build-linux-aarch64]
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    needs: [prepare, checksums-final, build-linux-x86_64, build-linux-aarch64]
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
@@ -700,10 +726,20 @@ jobs:
       - name: Render + push PKGBUILD
         if: ${{ env.AUR_SSH_KEY != '' }}
         run: |
+          set -eu
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' --skip-existing
-          x64=$(sha256sum agentty-linux-x86_64  | awk '{print $1}')
-          arm=$(sha256sum agentty-linux-aarch64 | awk '{print $1}')
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' \
+            --pattern 'SHA256SUMS' --skip-existing
+          # Authoritative hashes from SHA256SUMS; verify bytes still match.
+          sum_for() {
+            want=$(awk -v f="$1" '$2==f {print $1}' SHA256SUMS)
+            [ -n "$want" ] || { echo "::error::$1 missing from SHA256SUMS"; exit 1; }
+            got=$(sha256sum "$1" | awk '{print $1}')
+            [ "$want" = "$got" ] || { echo "::error::$1 hash drift: SHA256SUMS=$want bytes=$got"; exit 1; }
+            printf '%s' "$want"
+          }
+          x64=$(sum_for agentty-linux-x86_64)
+          arm=$(sum_for agentty-linux-aarch64)
           sed -e "s/^pkgver=.*/pkgver=$V/" \
               -e "s/sha256sums_x86_64=.*/sha256sums_x86_64=('$x64')/" \
               -e "s/sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
@@ -743,7 +779,7 @@ jobs:
   publish-winget:
     name: publish to winget
     needs: [prepare, build-windows]
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
@@ -866,7 +902,7 @@ jobs:
   publish-copr:
     name: publish to Fedora COPR
     needs: [prepare, build-linux-x86_64]
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     container: fedora:41
     env:
@@ -925,7 +961,7 @@ jobs:
   publish-apt-repo:
     name: publish APT repo
     needs: [prepare, package-linux-x86_64, package-linux-aarch64]
-    if: always() && startsWith(github.ref, 'refs/tags/v')
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     env:
       TAG: ${{ needs.prepare.outputs.tag }}

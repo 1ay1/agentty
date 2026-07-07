@@ -1,0 +1,167 @@
+# Reconcile downstream manifests against an existing release — WITHOUT rebuilding
+# or cutting a new release.
+#
+# Why this exists: every publish-* job in release.yml pins a sha256 read from the
+# release's SHA256SUMS (the single source of truth) and verifies the bytes match.
+# But if a publish job was skipped/failed on the original run, or a binary was
+# re-uploaded (`--clobber`) afterwards, a downstream manifest (Homebrew formula,
+# Scoop manifest, AUR PKGBUILD) can drift out of sync with the release.
+#
+# This workflow re-renders + re-pushes those manifests from the CURRENT
+# SHA256SUMS of a chosen release. It never builds anything, so it's fast and
+# cannot itself introduce new drift. Safe to run any time; idempotent (each job
+# no-ops if its manifest already matches).
+#
+#   Actions ▸ reconcile manifests ▸ Run workflow ▸ tag (blank → v<CMake version>)
+name: reconcile manifests
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to reconcile against (blank → v<CMake project version>)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  meta:
+    name: resolve tag + version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.m.outputs.version }}
+      tag: ${{ steps.m.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: m
+        run: |
+          V=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          TAG="${{ inputs.tag }}"; [ -n "$TAG" ] || TAG="v$V"
+          # Derive the version FROM the tag being reconciled (a manifest for an
+          # old tag must pin that tag's version, not HEAD's CMake version).
+          TV="${TAG#v}"
+          echo "version=$TV" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "reconciling $TAG (version $TV)"
+
+  # Shared helper is inlined per job (composite actions would need a checkout of
+  # this repo in each; the duplication is tiny and keeps each job self-contained).
+  homebrew:
+    name: reconcile homebrew tap
+    needs: meta
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.meta.outputs.version }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Re-pin formula from SHA256SUMS
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          set -eu
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' \
+            --pattern 'agentty-macos-x86_64' --pattern 'agentty-macos-arm64' \
+            --pattern 'SHA256SUMS' --skip-existing
+          sum_for() {
+            want=$(awk -v f="$1" '$2==f {print $1}' SHA256SUMS)
+            [ -n "$want" ] || { echo "::error::$1 missing from SHA256SUMS"; exit 1; }
+            got=$(sha256sum "$1" | awk '{print $1}')
+            [ "$want" = "$got" ] || { echo "::error::$1 drift: SHA256SUMS=$want bytes=$got"; exit 1; }
+            printf '%s' "$want"
+          }
+          sed -e "s/^  version \".*\"/  version \"$V\"/" \
+              -e "s|@LINUX_X86_64_SHA256@|$(sum_for agentty-linux-x86_64)|g" \
+              -e "s|@LINUX_AARCH64_SHA256@|$(sum_for agentty-linux-aarch64)|g" \
+              -e "s|@MACOS_X86_64_SHA256@|$(sum_for agentty-macos-x86_64)|g" \
+              -e "s|@MACOS_ARM64_SHA256@|$(sum_for agentty-macos-arm64)|g" \
+              packaging/homebrew/agentty.rb > agentty.rb
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/1ay1/homebrew-tap.git" tap
+          mkdir -p tap/Formula && cp agentty.rb tap/Formula/agentty.rb
+          cd tap
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git add Formula/agentty.rb
+          git commit -m "reconcile agentty $V" || { echo "already in sync"; exit 0; }
+          git push origin HEAD:master
+
+  scoop:
+    name: reconcile scoop bucket
+    needs: meta
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.meta.outputs.version }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      SCOOP_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Re-pin manifest from SHA256SUMS
+        if: ${{ env.SCOOP_TOKEN != '' }}
+        run: |
+          set -eu
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-windows-x86_64.exe' --pattern 'SHA256SUMS' --skip-existing
+          win=$(awk '$2=="agentty-windows-x86_64.exe" {print $1}' SHA256SUMS)
+          [ -n "$win" ] || { echo "::error::windows .exe missing from SHA256SUMS"; exit 1; }
+          got=$(sha256sum agentty-windows-x86_64.exe | awk '{print $1}')
+          [ "$win" = "$got" ] || { echo "::error::windows .exe drift: SHA256SUMS=$win bytes=$got"; exit 1; }
+          sed -e "s/\"version\": \".*\"/\"version\": \"$V\"/" \
+              -e "s|/download/v[0-9.]*/|/download/v$V/|g" \
+              -e "s|@WINDOWS_X86_64_SHA256@|$win|g" \
+              packaging/scoop/agentty.json > agentty.json
+          git clone "https://x-access-token:${SCOOP_TOKEN}@github.com/1ay1/scoop-bucket.git" bucket
+          mkdir -p bucket/bucket && cp agentty.json bucket/bucket/agentty.json
+          cd bucket
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git add bucket/agentty.json
+          git commit -m "reconcile agentty $V" || { echo "already in sync"; exit 0; }
+          git push origin HEAD:master
+
+  aur:
+    name: reconcile AUR
+    needs: meta
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.meta.outputs.version }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Re-pin PKGBUILD from SHA256SUMS
+        if: ${{ env.AUR_SSH_KEY != '' }}
+        run: |
+          set -eu
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-linux-x86_64' --pattern 'agentty-linux-aarch64' \
+            --pattern 'SHA256SUMS' --skip-existing
+          sum_for() {
+            want=$(awk -v f="$1" '$2==f {print $1}' SHA256SUMS)
+            [ -n "$want" ] || { echo "::error::$1 missing from SHA256SUMS"; exit 1; }
+            got=$(sha256sum "$1" | awk '{print $1}')
+            [ "$want" = "$got" ] || { echo "::error::$1 drift: SHA256SUMS=$want bytes=$got"; exit 1; }
+            printf '%s' "$want"
+          }
+          x64=$(sum_for agentty-linux-x86_64)
+          arm=$(sum_for agentty-linux-aarch64)
+          sed -e "s/^pkgver=.*/pkgver=$V/" \
+              -e "s/sha256sums_x86_64=.*/sha256sums_x86_64=('$x64')/" \
+              -e "s/sha256sums_aarch64=.*/sha256sums_aarch64=('$arm')/" \
+              packaging/arch/PKGBUILD > PKGBUILD
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur; chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur"
+          git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur
+          cp PKGBUILD aur/PKGBUILD
+          cd aur
+          printf 'pkgbase = agentty-bin\n\tpkgdesc = Blazing-fast Claude in your terminal\n\tpkgver = %s\n\tpkgrel = 1\n\turl = https://github.com/1ay1/agentty\n\tarch = x86_64\n\tarch = aarch64\n\tlicense = MIT\n\tprovides = agentty\n\tconflicts = agentty\n\tsource_x86_64 = agentty-%s-x86_64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-x86_64\n\tsha256sums_x86_64 = %s\n\tsource_aarch64 = agentty-%s-aarch64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-aarch64\n\tsha256sums_aarch64 = %s\n\npkgname = agentty-bin\n' \
+            "$V" "$V" "$V" "$x64" "$V" "$V" "$arm" > .SRCINFO
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git add PKGBUILD .SRCINFO
+          git commit -m "reconcile agentty $V" || { echo "already in sync"; exit 0; }
+          git push origin HEAD:master
