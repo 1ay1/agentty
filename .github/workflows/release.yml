@@ -848,3 +848,135 @@ jobs:
             '{title:$t,head:$h,base:"master",body:$b}' \
             | gh api repos/microsoft/winget-pkgs/pulls --input - -q '.html_url'
 
+  # Fedora COPR: submit a source build so `dnf/yum/zypper install agentty` works
+  # from the project's own COPR repo. This is the cheapest RPM channel — no
+  # distro-review wait, builds for every enabled Fedora/EL/openSUSE chroot.
+  #
+  # One-time setup (you):
+  #   1. Create the project at https://copr.fedorainfracloud.org (name it
+  #      `agentty`; enable the fedora-*/epel-*/opensuse-* chroots you want).
+  #   2. Copr → API → copy the whole `[copr-cli]` token block.
+  #   3. gh secret set COPR_CONFIG --repo 1ay1/agentty < the-token-file
+  #   4. gh secret set COPR_PROJECT --repo 1ay1/agentty --body '<user>/agentty'
+  # Users then:  dnf copr enable <user>/agentty && dnf install agentty
+  #
+  # We hand COPR the version-pinned .spec + the prebuilt binary as an SRPM so
+  # COPR's builders don't recompile C++26 (matching every other channel). The
+  # version is the central CMake project VERSION (via prepare.outputs.version).
+  publish-copr:
+    name: publish to Fedora COPR
+    needs: [prepare, build-linux-x86_64]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    container: fedora:41
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+      COPR_PROJECT: ${{ secrets.COPR_PROJECT }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build SRPM + submit to COPR
+        if: ${{ env.COPR_CONFIG != '' && env.COPR_PROJECT != '' }}
+        run: |
+          set -eu
+          dnf install -y --setopt=install_weak_deps=False \
+            rpm-build rpmdevtools copr-cli gh tar >/dev/null
+
+          # Central version -> .spec. The spec packages the prebuilt static
+          # binary fetched from the release (Source0), so no compile on COPR.
+          rpmdev-setuptree
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'agentty-linux-x86_64' --output ~/rpmbuild/SOURCES/agentty-linux-x86_64
+          sed -e "s/@VERSION@/$V/g" \
+              -e "s/@RPM_ARCH@/x86_64/g" \
+              -e "s/@DATE@/$(LC_ALL=C date '+%a %b %d %Y')/g" \
+              packaging/rpm/agentty.spec.in > ~/rpmbuild/SPECS/agentty.spec
+
+          # Build a SOURCE rpm only (-bs) — COPR rebuilds it in each chroot.
+          rpmbuild -bs ~/rpmbuild/SPECS/agentty.spec
+          srpm=$(ls ~/rpmbuild/SRPMS/agentty-*.src.rpm | head -1)
+
+          # copr-cli reads ~/.config/copr for auth.
+          mkdir -p ~/.config
+          printf '%s\n' "$COPR_CONFIG" > ~/.config/copr
+          chmod 600 ~/.config/copr
+          copr-cli build "$COPR_PROJECT" "$srpm"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Self-hosted APT repo on the `apt-repo` branch (served via GitHub Pages) so
+  # `apt-get install agentty` works without Debian's multi-month review. Rebuilds
+  # the Packages/Release index over ALL .deb versions each run, GPG-signs the
+  # Release, and force-pushes the branch.
+  #
+  # One-time setup (you):
+  #   1. Generate a GPG key:  gpg --full-generate-key  (RSA, no passphrase)
+  #   2. Export it:  gpg --armor --export-secret-keys <KEYID> > apt-signing.asc
+  #   3. gh secret set APT_GPG_KEY --repo 1ay1/agentty < apt-signing.asc
+  #   4. Settings → Pages → deploy from branch `apt-repo` (root).
+  # Users then:
+  #   curl -fsSL https://1ay1.github.io/agentty/apt/public.key \
+  #     | sudo gpg --dearmor -o /usr/share/keyrings/agentty.gpg
+  #   echo "deb [signed-by=/usr/share/keyrings/agentty.gpg] \
+  #     https://1ay1.github.io/agentty/apt stable main" \
+  #     | sudo tee /etc/apt/sources.list.d/agentty.list
+  #   sudo apt-get update && sudo apt-get install agentty
+  publish-apt-repo:
+    name: publish APT repo
+    needs: [prepare, package-linux-x86_64, package-linux-aarch64]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      APT_GPG_KEY: ${{ secrets.APT_GPG_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Build + sign + push APT repo
+        if: ${{ env.APT_GPG_KEY != '' }}
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg
+
+          # Pull EVERY published .deb (all versions, both arches) so the index
+          # covers the full history, not just this release.
+          mkdir -p work/pool
+          for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+                         --json tagName -q '.[].tagName'); do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'agentty_*_*.deb' --dir work/pool --skip-existing || true
+          done
+          ls work/pool/*.deb
+
+          # Import the signing key; grab its id + export the public half.
+          printf '%s\n' "$APT_GPG_KEY" | gpg --batch --import
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
+
+          # Build a flat-ish repo: dists/stable/main/binary-{amd64,arm64}.
+          cd work
+          for arch in amd64 arm64; do
+            d="dists/stable/main/binary-$arch"; mkdir -p "$d"
+            dpkg-scanpackages --arch "$arch" pool /dev/null > "$d/Packages"
+            gzip -9c "$d/Packages" > "$d/Packages.gz"
+          done
+          apt-ftparchive release dists/stable > dists/stable/Release
+          gpg --default-key "$KEYID" -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --default-key "$KEYID" --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg --armor --export "$KEYID" > public.key
+
+          # Force-push the assembled repo to the apt-repo branch under apt/.
+          cd ..
+          git config user.name agentty-ci; git config user.email noreply@github.com
+          git checkout --orphan apt-repo
+          git rm -rf . >/dev/null 2>&1 || true
+          mkdir -p apt
+          cp -r work/dists work/pool work/public.key apt/
+          git add apt
+          git commit -m "apt repo @ $TAG"
+          git push -f origin apt-repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
