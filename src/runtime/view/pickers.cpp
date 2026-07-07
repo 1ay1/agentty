@@ -1,6 +1,7 @@
 #include "agentty/runtime/view/pickers.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
 
 #include <maya/widget/picker.hpp>
@@ -87,7 +88,25 @@ constexpr int kPickerChromeRows = 7;
 [[nodiscard]] int picker_viewport_h() {
     const auto sz = maya::platform::query_terminal_size(
         maya::platform::stdout_handle());
-    const int term_rows = sz.height.value > 0 ? sz.height.value : 40;
+    // Prefer the real ioctl height. When it's unavailable (no tty: a pipe,
+    // a test harness, `agentty | cat`) ws_col is 0 and the query returns
+    // maya's hardcoded {80,24} fallback — which is NOT the real viewport. In
+    // that no-tty case only, fall back to the LINES env var (the same way
+    // maya's view build-phase resolves dims), so the picker clamp uses the
+    // true height and never overflows a short viewport. A valid ioctl always
+    // wins over LINES (which may be stale). (This is also what routes the
+    // scrollback fuzz's simulated term_h into the clamp — without it the
+    // picker is sized against a phantom 24-row terminal and strands rows on
+    // small shapes.)
+    int term_rows = sz.height.value;
+    const bool have_tty = maya::platform::is_tty(
+        maya::platform::stdout_handle());
+    if (!have_tty) {
+        if (const char* lines_env = std::getenv("LINES")) {
+            if (const int n = std::atoi(lines_env); n > 0) term_rows = n;
+        }
+    }
+    if (term_rows <= 0) term_rows = 40;
     // Leave the chrome plus a small breathing margin so the picker's top
     // border sits strictly below the viewport top with the base behind it.
     const int avail = term_rows - kPickerChromeRows - 1;
