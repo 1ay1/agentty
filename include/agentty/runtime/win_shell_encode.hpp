@@ -20,7 +20,12 @@
 namespace agentty::win_shell {
 
 // Base64-encode `bytes` (standard alphabet, '=' padded). Pure; no deps.
-[[nodiscard]] inline std::string base64(const std::string& bytes) {
+// `constexpr` so the whole transform is compile-time evaluable, which lets
+// the known-answer self-check at the bottom of this header run at build time
+// on EVERY platform (see the static_assert block) — the Windows runner path
+// can't be compiled on the Linux/macOS CI hosts, so a compile-time proof is
+// the only cross-platform guard against silently corrupting encoded scripts.
+[[nodiscard]] constexpr std::string base64(const std::string& bytes) {
     static constexpr char kB64[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string enc;
@@ -41,7 +46,7 @@ namespace agentty::win_shell {
 // Widen `body` (treated as a stream of raw bytes, one char = one UTF-16 code
 // unit \u2014 which is exactly right for ASCII scripts, and byte-faithful for the
 // rest) to UTF-16LE bytes: low byte then high byte per code unit.
-[[nodiscard]] inline std::string to_utf16le_bytes(const std::string& body) {
+[[nodiscard]] constexpr std::string to_utf16le_bytes(const std::string& body) {
     std::string bytes;
     bytes.reserve(body.size() * 2);
     for (unsigned char c : body) {
@@ -53,14 +58,37 @@ namespace agentty::win_shell {
 
 // The full `-EncodedCommand` payload (base64 of UTF-16LE), no `powershell`
 // prefix \u2014 so tests can assert the payload directly.
-[[nodiscard]] inline std::string encoded_command(const std::string& body) {
+[[nodiscard]] constexpr std::string encoded_command(const std::string& body) {
     return base64(to_utf16le_bytes(body));
 }
 
 // The complete command line the Windows runner spawns for a PowerShell block.
-[[nodiscard]] inline std::string powershell_command(const std::string& body) {
+[[nodiscard]] constexpr std::string powershell_command(const std::string& body) {
     return "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "
          + encoded_command(body);
 }
+
+// ---------------------------------------------------------------------------
+// Compile-time known-answer test. These vectors were generated with the
+// documented ground truth
+//     python3 -c 'import base64;print(base64.b64encode(S.encode("utf-16-le")))'
+// which is byte-identical to PowerShell's
+//     [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(S))
+// Because encoded_command is constexpr, these static_asserts FAIL THE BUILD
+// — on Linux, macOS, and Windows alike — if the endianness or base64 padding
+// ever regresses. No ctest run required; a plain `cmake --build` proves it,
+// since this header is included by the always-compiled codeblock.cpp TU.
+namespace detail {
+consteval bool kat(const char* body, const char* want) {
+    return encoded_command(std::string(body)) == std::string(want);
+}
+static_assert(kat("", ""),                                    "empty");
+static_assert(kat("A", "QQA="),                               "single char / 2-pad");
+static_assert(kat("AB", "QQBCAA=="),                          "1-pad boundary");
+static_assert(kat("echo hi", "ZQBjAGgAbwAgAGgAaQA="),         "ascii + space");
+static_assert(kat("Write-Host \"x\"",
+                  "VwByAGkAdABlAC0ASABvAHMAdAAgACIAeAAiAA=="), "quotes / cmdlet");
+static_assert(kat("a\nb", "YQAKAGIA"),                        "embedded newline");
+} // namespace detail
 
 } // namespace agentty::win_shell

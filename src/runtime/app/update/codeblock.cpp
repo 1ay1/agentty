@@ -392,8 +392,9 @@ namespace runner_ui {
                                                  const std::string& body) {
     if (shell != cbp::BlockShell::PowerShell) return body;  // Cmd: verbatim
     // PowerShell -EncodedCommand contract (base64 of UTF-16LE) lives in a
-    // shared, platform-independent header so it can be unit-tested off
-    // Windows — see win_shell_encode.hpp / win_shell_encode_test.
+    // shared, platform-independent header so it can be verified off Windows
+    // — the header carries a compile-time known-answer static_assert block
+    // that fails THIS build if the transform ever regresses.
     return win_shell::powershell_command(body);
 }
 
