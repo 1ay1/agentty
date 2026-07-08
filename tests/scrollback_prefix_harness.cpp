@@ -472,6 +472,61 @@ static void scn_marker_generation(int W, int TERM_H) {
     close(rfd);
 }
 
+// ────────────────────────────────────────────────────────────────────────────────────
+// SCENARIO 5 — ScrollbackProof: the render gate lifted into the type system.
+//   check_scrollback is the SOLE producer of the proof that
+//   InlineFrame<Synced>::render now REQUIRES. Three outcomes:
+//     - overflow + matching prefix → WITNESSED proof (bound to state)
+//     - overflow + shifted prefix  → std::nullopt (caller MUST recover)
+//     - fits the viewport          → VACUOUS proof (nullptr, overflow 0)
+//   "Render an overflowed frame without the gate" is now uncompilable;
+//   this scenario proves the runtime discharge of that obligation.
+// ────────────────────────────────────────────────────────────────────────────────────
+static void scn_scrollback_proof(int W, int TERM_H) {
+    const int TALL = TERM_H + 16;
+    StylePool pool;
+    auto [writer, rfd] = make_pipe_writer();
+    TermEmu emu(W, TERM_H);
+    Canvas c = marked_canvas(W, TALL, pool, "PRF");
+    auto s = seed_render(emu, rfd, c, TERM_H, pool, writer);
+    check(s.has_value(), "proof: oversized render reaches Synced");
+    if (!s) { close(rfd); return; }
+
+    // (a) Overflow + matching prefix → WITNESSED proof.
+    auto ok = s->check_scrollback(c, TERM_H);
+    check(ok.has_value(),
+          "proof: overflow + matching prefix issues a proof");
+    if (ok) {
+        const int overflow = s->rows() - TERM_H;
+        check(ok->valid(), "proof: issued proof is valid (not moved-from)");
+        check(ok->overflow_rows() == overflow,
+              "proof: witnessed proof records the overflow count ("
+              + std::to_string(ok->overflow_rows()) + " == "
+              + std::to_string(overflow) + ")");
+        check(ok->bound_to() != nullptr,
+              "proof: witnessed proof is bound to a state");
+    }
+
+    // (b) Overflow + SHIFTED prefix → std::nullopt (must recover).
+    Canvas shifted = marked_canvas(W, TALL, pool, "ZZZ");  // different labels
+    auto bad = s->check_scrollback(shifted, TERM_H);
+    check(!bad.has_value(),
+          "proof: shifted prefix yields NO proof (render is blocked)");
+
+    // (c) Frame FITS the viewport (term_h >= rows) → VACUOUS proof.
+    auto vac = s->check_scrollback(c, s->rows() + 5);
+    check(vac.has_value(), "proof: non-overflow frame issues a vacuous proof");
+    if (vac) {
+        check(vac->overflow_rows() == 0,
+              "proof: vacuous proof has zero overflow");
+        check(vac->bound_to() == nullptr,
+              "proof: vacuous proof is unbound (no committed prefix)");
+    }
+
+    char drain[4096]; while (read(rfd, drain, sizeof(drain)) > 0) {}
+    close(rfd);
+}
+
 int main() {
     std::fprintf(stderr, "scrollback_prefix_harness — append-only-prefix oracle\n");
 
@@ -497,6 +552,7 @@ int main() {
         scn_committed_prefix_immutable(s.w, s.h);
         scn_reemit_hazard_and_safe(s.w, s.h);
         scn_marker_generation(s.w, s.h);
+        scn_scrollback_proof(s.w, s.h);
     }
 
     std::fprintf(stderr, "\n%d checks, %d failures\n", g_checks, g_failures);
