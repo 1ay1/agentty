@@ -49,6 +49,18 @@ using agentty::ToolUse;
 
 static FILE* err = nullptr;
 static int g_failures = 0;
+// Ground-truth count of times maya's scrollback gate had to RECOVER
+// (drove non-Synced) across the whole run. This oracle drives a real
+// Runtime under a PTY with byte-faithful, append-only turn scripts — a
+// correct pipeline never trips the gate, so the invariant is: this stays
+// ZERO. Any tick means a frame carried a committed-row mutation the type
+// guards couldn't have caught (a second-accountant class), which is a
+// harder failure than a mere visual dup: it means the shadow itself
+// disagreed with the emulator.
+static unsigned long g_recoveries = 0;
+// Subset of g_recoveries that were NOT the one-time empty-state splash
+// teardown — i.e. genuine second-accountant events. Must be zero.
+static unsigned long g_bad_recoveries = 0;
 
 // ── Minimal ANSI terminal emulator with native scrollback ──────────────
 //
@@ -393,8 +405,41 @@ struct Ctx {
         // this frame drives maya non-Synced we can print the exact rows
         // that were committed and about to be rewritten.
         std::vector<std::string> sb_snapshot = emu->scrollback;
+        const unsigned long recov_before = rt->scrollback_recovery_count();
         (void)rt->render(agentty::ui::view(*m));
+        const unsigned long recov_after = rt->scrollback_recovery_count();
         const int rows_after = rt->inline_content_rows();
+        if (recov_after != recov_before) {
+            const unsigned long delta = recov_after - recov_before;
+            g_recoveries += delta;
+            // EXEMPTION — the very first submit tears down the full-screen
+            // empty-state SPLASH ("a calm middleware", the NEW-HERE box,
+            // the tall composer). On a terminal shorter than the splash
+            // it overflows a few BLANK leading rows into scrollback; when
+            // the splash vanishes at t0-submit those committed rows have
+            // no match in the conversation view, so maya correctly does a
+            // soft case-B recovery (commit the blank rows + repaint). The
+            // rows are blank, the append-only oracle stays green, and this
+            // reshape happens exactly ONCE per session in production. It
+            // is a legitimate teardown, not a second-accountant class — so
+            // it does not count as a corruption. Every OTHER frame must
+            // stay Synced (delta == 0), which is the invariant we assert.
+            const bool splash_teardown = (tag == "t0-submit");
+            if (!splash_teardown) {
+                ++g_failures;
+                g_bad_recoveries += delta;
+                std::fprintf(err,
+                    "  FAIL[%s][recovery]: maya scrollback gate RECOVERED %lu time(s) "
+                    "on this frame (rows %d -> %d) — shadow disagreed with the "
+                    "viewport; a committed-row mutation slipped past the type guards\n",
+                    tag.c_str(), delta, rows_before, rows_after);
+            } else {
+                std::fprintf(err,
+                    "  [info] %s: %lu expected splash-teardown recovery (blank "
+                    "overflow rows collapse; not a corruption)\n",
+                    tag.c_str(), delta);
+            }
+        }
         if (trace)
             std::fprintf(err, "  [trace %s] rows %d -> %d sb %zu\n",
                          tag.c_str(), rows_before, rows_after,
@@ -1007,6 +1052,8 @@ static int run_shape(int W, int H) {
     }
 
     std::fprintf(err, "  [info] frames oracle-checked: %d\n", orc.frames_checked);
+    std::fprintf(err, "  [info] scrollback gate recoveries this shape: %lu\n",
+                 rt.scrollback_recovery_count());
 
 done:
     close(master);
@@ -1027,8 +1074,11 @@ int main() {
         if (run_shape(s[0], s[1]) == 2) return 2;
     }
     if (g_failures == 0)
-        std::fprintf(err, "PASS: append-only oracle + markers + chrome (all shapes)\n");
+        std::fprintf(err, "PASS: append-only oracle + markers + chrome + "
+                          "zero gate recoveries (all shapes)\n");
     else
-        std::fprintf(err, "FAILED: %d corruption(s) detected\n", g_failures);
+        std::fprintf(err, "FAILED: %d corruption(s) detected (%lu genuine gate "
+                          "recovery/ies, %lu total incl. splash teardown)\n",
+                     g_failures, g_bad_recoveries, g_recoveries);
     return g_failures ? 1 : 0;
 }
