@@ -408,8 +408,79 @@ static void scn_reemit_hazard_and_safe(int W, int TERM_H) {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────────────
+// SCENARIO 4 — ScrollbackMarker GENERATION binding (type-theoretic SoT).
+//   The marker is a capability bound to the IDENTITY of the state that
+//   issued it. A marker consumed against the SAME generation commits; a
+//   STALE marker (issued before an intervening commit advanced the state)
+//   is REJECTED as a no-op — it can never MISAPPLY a superseded row count.
+//   This is the deposit-watermark second-accountant class closed by type.
+// ────────────────────────────────────────────────────────────────────────────────────
+static void scn_marker_generation(int W, int TERM_H) {
+    const int TALL = TERM_H + 16;
+    StylePool pool;
+    auto [writer, rfd] = make_pipe_writer();
+    TermEmu emu(W, TERM_H);
+    Canvas c = marked_canvas(W, TALL, pool, "GEN");
+    auto s = seed_render(emu, rfd, c, TERM_H, pool, writer);
+    check(s.has_value(), "gen: oversized render reaches Synced");
+    if (!s) { close(rfd); return; }
+
+    const int overflow = s->rows() - TERM_H;
+    check(overflow > 0, "gen: frame overflows the viewport");
+
+    // A live state that has rendered carries a non-zero generation.
+    const std::uint64_t gen_before = s->state_generation();
+    check(gen_before != 0, "gen: rendered state has non-zero generation ('"
+          + std::to_string(gen_before) + "')");
+
+    // Mint a marker NOW, at gen_before. This is the stale one we'll try to
+    // reuse after an intervening commit.
+    auto stale = s->scrollback_marker(overflow);
+    check(stale.generation() == gen_before,
+          "gen: marker captures the issuing state's generation");
+
+    // (a) LEGITIMATE same-tick commit: a FRESH marker minted from `s` is
+    //     consumed immediately — same generation, must succeed & advance.
+    const int before = s->rows();
+    auto fresh = s->scrollback_marker(overflow);
+    auto committed = std::move(*s).commit(fresh);
+    check(committed.rows() == before - overflow,
+          "gen: same-generation commit succeeds (drops exactly overflow: "
+          + std::to_string(committed.rows()) + " == "
+          + std::to_string(before - overflow) + ")");
+
+    // The commit advanced the generation — the state's identity changed.
+    const std::uint64_t gen_after = committed.state_generation();
+    check(gen_after != gen_before,
+          "gen: commit advances the generation ("
+          + std::to_string(gen_before) + " -> "
+          + std::to_string(gen_after) + ")");
+
+    // (b) STALE marker rejection: the `stale` marker (still at gen_before)
+    //     applied to the POST-commit state must be a NO-OP — rows unchanged.
+    //     Without the generation guard this would drop `overflow` more rows
+    //     from a shadow that never pushed them (the deposit-watermark bug).
+    const int rows_pre_stale = committed.rows();
+    auto after_stale = std::move(committed).commit(stale);
+    check(after_stale.rows() == rows_pre_stale,
+          "gen: STALE marker is REJECTED as a no-op (rows unchanged: "
+          + std::to_string(after_stale.rows()) + " == "
+          + std::to_string(rows_pre_stale) + ")");
+
+    char drain[4096]; while (read(rfd, drain, sizeof(drain)) > 0) {}
+    close(rfd);
+}
+
 int main() {
     std::fprintf(stderr, "scrollback_prefix_harness — append-only-prefix oracle\n");
+
+    // The generation scenario deliberately feeds committed() a STALE
+    // marker to prove it is rejected. In a debug-built libmaya that path
+    // aborts (the loud tripwire); tell it to no-op instead so the harness
+    // can assert the rejection rather than crash. Release libmaya ignores
+    // this (already a silent no-op).
+    setenv("MAYA_NO_GATE_ABORT", "1", 1);
 
     // A spread of terminal shapes (narrow/wide, short/tall), so the
     // overflow / commit / prefix-compare arithmetic is exercised across
@@ -425,6 +496,7 @@ int main() {
         scn_oversized_startup(s.w, s.h);
         scn_committed_prefix_immutable(s.w, s.h);
         scn_reemit_hazard_and_safe(s.w, s.h);
+        scn_marker_generation(s.w, s.h);
     }
 
     std::fprintf(stderr, "\n%d checks, %d failures\n", g_checks, g_failures);
