@@ -612,9 +612,32 @@ struct Harness {
                     "R3: stale recovery did not return Synced @" + tag);
                 if (!synced) { dead = true; return; }
             } else {
-                auto o = std::move(*synced).render(
-                    c, content_rows(c), term_rows_for_test(term_h), pool,
-                    writer, std::move(*wit), false);
+                // Scrollback gate, type-enforced: Synced::render REQUIRES
+                // the proof that the committed off-viewport prefix is
+                // byte-stable. We ran maya's recovery above (commit
+                // overflow on a prefix-changed shrink), so the frame
+                // either fits or its committed prefix is stable and
+                // check_scrollback mints a proof. If it still comes back
+                // nullopt (a shift the pre-commit didn't cover), mirror
+                // maya exactly: commit the off-viewport rows and
+                // soft-repaint via Stale.
+                auto proof = synced->check_scrollback(c, term_h);
+                maya::inline_frame::RenderOutcome o = [&] {
+                    if (proof) {
+                        return std::move(*synced).render(
+                            c, content_rows(c), term_rows_for_test(term_h),
+                            pool, writer, std::move(*wit), std::move(*proof),
+                            false);
+                    }
+                    const int prev_rows = synced->rows();
+                    const int overflow = prev_rows > term_h
+                        ? prev_rows - term_h : 0;
+                    auto committed = std::move(*synced).commit(
+                        synced->scrollback_marker(overflow));
+                    commits += static_cast<std::size_t>(overflow);
+                    return maya::inline_frame::RenderOutcome{
+                        std::move(committed).demote_to_stale()};
+                }();
                 { std::string b = read_fd(rfd); last_wrote = b.size(); emu.feed(b); }
                 synced = std::visit(
                     [](auto&& a) -> std::optional<InlineFrame<Synced>> {
