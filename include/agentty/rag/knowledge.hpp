@@ -365,16 +365,13 @@ private:
 // NormalizeQueryStage — preprocesses the query before retrieval. Applies:
 //   1. Lowercasing
 //   2. Whitespace normalization
-//   3. Optional: stopword removal, spell correction, abbreviation expansion
 // Runs BEFORE retrieval to ensure consistent query representation.
 class NormalizeQueryStage final : public RetrievalStage {
 public:
     struct Config {
         bool lowercase            = true;
         bool normalize_whitespace = true;
-        bool remove_stopwords     = false;  // TODO: implement
-        bool expand_abbreviations = false;  // TODO: implement
-        
+
         Config() = default;
     };
     NormalizeQueryStage() : cfg_{} {}

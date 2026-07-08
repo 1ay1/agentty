@@ -59,6 +59,18 @@ struct Session {
     std::string model;   // empty = use server default
     std::shared_ptr<http::CancelToken> cancel;
     std::set<std::string> grants;   // session-scoped "always allow", by tool
+    // Guards ALL access to `thread.messages` (and the tool_calls / status
+    // fields nested in its elements). The turn loop runs on a DETACHED worker
+    // thread that appends assistant messages and mutates tool-call statuses,
+    // while the reader thread can concurrently snapshot the thread for
+    // session/load|resume (replay) or persist. session_mtx_ only protects the
+    // session MAP + the cancel handle, not the thread contents, so without
+    // this a load-during-turn is a data race on the messages vector (a read
+    // racing a push_back). Held briefly around each mutation / snapshot —
+    // NEVER across network streaming or tool execution. shared_ptr so it stays
+    // valid for a worker that captured the Session by shared_ptr even after a
+    // concurrent session/close erases the map entry.
+    std::shared_ptr<std::mutex> thread_mtx = std::make_shared<std::mutex>();
 };
 
 class AgentServer {

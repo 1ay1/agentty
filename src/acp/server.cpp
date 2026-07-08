@@ -283,7 +283,15 @@ const std::vector<provider::ToolSpec>& AgentServer::wire_tools() {
 }
 
 void AgentServer::persist(const Session& sess) {
-    persistence::save_thread(sess.thread);
+    // Snapshot the thread under the per-session mutex so a worker turn
+    // mutating messages concurrently can't race save_thread's read. Copy
+    // then write outside the lock to keep the hold short.
+    Thread snapshot;
+    {
+        std::lock_guard<std::mutex> lk(*sess.thread_mtx);
+        snapshot = sess.thread;
+    }
+    persistence::save_thread(snapshot);
 }
 
 void AgentServer::send_update(const std::string& session_id, a::SessionUpdate update) {
@@ -401,6 +409,11 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
         std::lock_guard<std::mutex> lk(session_mtx_);
         if (auto it = sessions_.find(sid); it != sessions_.end()) {
             if (!cwd.empty()) it->second->cwd = cwd;
+            // Snapshot the thread under the per-session thread mutex so a
+            // worker turn appending an assistant message concurrently can't
+            // race this copy (a read racing a push_back on the same vector).
+            // Lock order: session_mtx_ then thread_mtx, as in on_prompt.
+            std::lock_guard<std::mutex> tlk(*it->second->thread_mtx);
             thread      = it->second->thread;
             profile     = it->second->profile;
             from_memory = true;
@@ -613,7 +626,14 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         um.text = std::move(text);
         if (it->second->thread.messages.empty() && !um.text.empty())
             it->second->thread.title = persistence::title_from_first_message(um.text);
-        it->second->thread.messages.push_back(std::move(um));
+        {
+            // Structural mutation — also take the per-session thread mutex so
+            // the worker's snapshot/read sites (which do NOT hold
+            // session_mtx_) are excluded. Lock order: session_mtx_ then
+            // thread_mtx, consistently everywhere.
+            std::lock_guard<std::mutex> tlk(*it->second->thread_mtx);
+            it->second->thread.messages.push_back(std::move(um));
+        }
         it->second->cancel = std::make_shared<http::CancelToken>();
     }
 
@@ -678,6 +698,14 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
         // text — instead of returning a blank bubble.
         if (auto cs = find_session(session_id);
             cs && !cs->thread.messages.empty()) {
+            // The worker mutates tc.status below; take the per-session thread
+            // mutex for the whole inspect+fail block so a concurrent reader
+            // snapshot (session/load, persist) sees a consistent tool-call
+            // state. send_update does I/O but not on thread.messages, so
+            // holding the lock across it is safe (no lock-order cycle: the
+            // reader takes session_mtx_ then thread_mtx; we hold only
+            // thread_mtx here).
+            std::lock_guard<std::mutex> tlk(*cs->thread_mtx);
             Message& back = cs->thread.messages.back();
             if (back.role == Role::Assistant) {
                 bool any_salvaged = false, mem_leak = false;
@@ -886,7 +914,15 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
         send_update(sid, std::move(u));
     }
 
-    sess.thread.messages.push_back(std::move(assistant));
+    // Structural mutation of the shared messages vector — lock the
+    // per-session thread mutex so a concurrent reader-thread snapshot
+    // (session/load|resume replay, persist) can't observe a half-grown
+    // vector or race the reallocation. Held only for the push, not the
+    // stream above.
+    {
+        std::lock_guard<std::mutex> lk(*sess.thread_mtx);
+        sess.thread.messages.push_back(std::move(assistant));
+    }
     return stop;
 }
 
@@ -908,6 +944,19 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     // loop is already off the reader thread, tool results must be appended to
     // `last.tool_calls` in a stable order for the wire tool_use↔result
     // pairing, and Zed renders the cards sequentially anyway.
+    // The worker mutates each tc.status in place as tools resolve. Those
+    // writes must be exclusive with a concurrent reader snapshot
+    // (session/load, persist), which copies the whole messages vector under
+    // thread_mtx. We CAN'T hold thread_mtx across a tool's execution (minutes
+    // for a slow bash/web_fetch would stall load/persist), so each status
+    // assignment is guarded individually via this helper. The reference
+    // `last` stays valid across the loop because the worker never push_backs
+    // during run_tools (no reallocation), and the reader only reads.
+    auto set_status = [&](ToolUse& tc, ToolUse::Status st) {
+        std::lock_guard<std::mutex> tlk(*sess.thread_mtx);
+        tc.status = std::move(st);
+    };
+
     for (auto& tc : last.tool_calls) {
         if (sess.cancel && sess.cancel->is_cancelled()) { out_cancelled = true; return false; }
 
@@ -930,7 +979,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             if (sess.cancel && sess.cancel->is_cancelled()) { out_cancelled = true; return false; }
             if (outcome == PermissionOutcome::AllowAlways) sess.grants.insert(tc.name.value);
             if (outcome == PermissionOutcome::Deny) {
-                tc.status = ToolUse::Rejected{};
+                set_status(tc, ToolUse::Rejected{});
                 a::ToolCallUpdate r;
                 r.toolCallId = a::ToolCallId{tc.id.value};
                 r.status     = a::Just(a::ToolCallStatus::Failed);
@@ -964,7 +1013,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
                 }).share();
         } catch (const std::exception& e) {
             util::dbglog("acp.run_tools.async", e.what());
-            tc.status = ToolUse::Failed{{}, {}, std::string{"could not start tool: "} + e.what()};
+            set_status(tc, ToolUse::Failed{{}, {}, std::string{"could not start tool: "} + e.what()});
             a::ToolCallUpdate f;
             f.toolCallId = a::ToolCallId{tc.id.value};
             f.status     = a::Just(a::ToolCallStatus::Failed);
@@ -1002,7 +1051,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             std::thread([fut]() mutable { fut.wait(); }).detach();
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
-            tc.status = ToolUse::Failed{{}, {}, why};
+            set_status(tc, ToolUse::Failed{{}, {}, why});
             a::ToolCallUpdate c;
             c.toolCallId = a::ToolCallId{tc.id.value};
             c.status     = a::Just(a::ToolCallStatus::Failed);
@@ -1036,7 +1085,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             upd.status    = a::Just(a::ToolCallStatus::Completed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", result->text}});
-            tc.status = ToolUse::Done{{}, {}, result->text};
+            set_status(tc, ToolUse::Done{{}, {}, result->text});
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;
@@ -1044,7 +1093,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
                 a::TCC_Content{text_block(detail), json::object()}});
             upd.status  = a::Just(a::ToolCallStatus::Failed);
             upd.content = a::Just(std::move(content));
-            tc.status = ToolUse::Failed{{}, {}, detail};
+            set_status(tc, ToolUse::Failed{{}, {}, detail});
         }
 
         send_update(sess.id, a::SU_ToolCallUpdate{std::move(upd)});
