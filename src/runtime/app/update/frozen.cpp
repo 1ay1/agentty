@@ -705,13 +705,32 @@ void freeze_through(Model& m, std::size_t live_start) {
 static int g_incremental_freeze_override = -1;
 
 bool incremental_freeze_enabled() {
+    // Test-only override wins (the seam tests force it on to keep the
+    // carve/settle invariant under test). In PRODUCTION this is always
+    // false: the env var was retired because mid-stream carving cannot be
+    // made sound against maya's STATEFUL cross-frame row diff.
+    //
+    // Why (and why the seam tests still pass): midrun_seam_test renders
+    // each frame from a FRESH Canvas, so prefix++suffix provably
+    // reproduces the un-split render — that invariant holds and is
+    // pinned. But the LIVE renderer keeps a prev_cells mirror and
+    // reconciles frame-to-frame. A carve mutates m.ui.frozen (append)
+    // WHILE the live suffix shrinks in the same update — two shape changes
+    // maya's inline scrollback-prefix-match diff sees as one ambiguous
+    // delta. The appended frozen Turn carries a hash maya's component
+    // cache did not paint on the previous live frame (carve stamps
+    // cfg.hash_id={}, rebuild-allowed), so the cache misses and re-emits
+    // those rows — sometimes over rows already committed to native
+    // scrollback: the duplicated-rows / flush-left-header / box-border
+    // corruption. Same structural failure as the deleted
+    // freeze_settled_subturns / freeze_streaming_text_prefix machinery.
+    // The single agent_session-style settle-time freeze is the ONLY
+    // construction that guarantees the frozen snapshot equals the
+    // on-screen live frame byte-for-byte. Machinery + tests are kept so
+    // the seam invariant stays proven, but production never carves.
     if (g_incremental_freeze_override >= 0)
         return g_incremental_freeze_override != 0;
-    static const bool on = [] {
-        const char* e = std::getenv("AGENTTY_INCREMENTAL_FREEZE");
-        return e && *e && *e != '0';
-    }();
-    return on;
+    return false;   // env var retired — never enable in production
 }
 
 void set_incremental_freeze_override(int v) {

@@ -1353,10 +1353,127 @@ static void test_incremental_body_freeze_seam() {
     det::set_incremental_freeze_override(-1);   // restore env-driven
 }
 
+// The REAL-WORLD incremental-freeze corruption: bytes arrive in small
+// chunks (not all at once), so the widget re-segments its tail every
+// frame AND the reveal cursor is genuinely mid-glide when carves fire.
+// The all-at-once test above masks both because the whole buffer is
+// present from frame 1 (block boundaries never move) and the reveal has
+// no backlog. This variant feeds ~24-byte chunks, renders + reveals
+// between each, and carves opportunistically — the exact pattern that
+// produced the on-screen duplicated-rows / flush-left-header corruption.
+// Contract is identical: no committed (scrolled-off) row may ever be
+// rewritten across any carve or the final settle-freeze.
+static void test_incremental_body_freeze_seam_chunked() {
+    namespace det = agentty::app::detail;
+    constexpr int kTermH = 40;
+    det::set_incremental_freeze_override(1);   // force enabled
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"ibfc"};
+    Message u; u.role = Role::User; u.text = "write a long answer";
+    m.d.current.messages.push_back(std::move(u));
+    det::clear_frozen(m);
+    det::freeze_through(m, 1);
+
+    // Mixed prose + tight headers (no blank line before some headers) +
+    // lists — the loose-GFM shape that re-segments as bytes trickle in.
+    std::string body;
+    for (int b = 0; b < 30; ++b) {
+        body += "Paragraph " + std::to_string(b)
+             +  " of a fairly long streaming answer that wraps a bit.\n\n";
+        if (b % 5 == 4) {
+            body += "- bullet one for section " + std::to_string(b) + "\n";
+            body += "- bullet two for section " + std::to_string(b) + "\n";
+            body += "## Section header " + std::to_string(b) + "\n\n";
+        }
+    }
+
+    Message a; a.role = Role::Assistant;
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    std::vector<std::string> prev;
+    int worst = -1, worst_step = -1;
+
+    // Feed in small chunks. Between chunks: render (feeds widget +
+    // advances reveal), check committed stability, attempt a carve,
+    // render again to catch a post-carve rewrite.
+    constexpr std::size_t kChunk = 24;
+    std::size_t fed = 0;
+    int e = 0;
+    while (fed < body.size() || [&]{
+        const auto& c = m.ui.view_cache.message_md(
+            m.d.current.id, m.d.current.messages.back().id);
+        return c.streaming && c.streaming->reveal_in_progress();
+    }()) {
+        if (fed < body.size()) {
+            std::size_t n = std::min(kChunk, body.size() - fed);
+            m.d.current.messages.back().streaming_text.append(
+                body.substr(fed, n));
+            fed += n;
+        }
+        auto r1 = render_rows(m);
+        if (!prev.empty()) {
+            int d = first_committed_divergence(prev, r1, kTermH);
+            if (d >= 0 && (worst < 0 || d < worst)) { worst = d; worst_step = e; }
+        }
+        prev = std::move(r1);
+
+        det::maybe_incremental_freeze(m);
+
+        auto r2 = render_rows(m);
+        int d2 = first_committed_divergence(prev, r2, kTermH);
+        if (d2 >= 0 && (worst < 0 || d2 < worst)) { worst = d2; worst_step = 1000 + e; }
+        prev = std::move(r2);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (++e > 2000) break;   // safety cap
+    }
+
+    // Settle + final freeze.
+    {
+        auto& back = m.d.current.messages.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+        det::settle_message_md(m, back);
+    }
+    auto pre_freeze = render_rows(m);
+    if (!prev.empty()) {
+        int d = first_committed_divergence(prev, pre_freeze, kTermH);
+        if (d >= 0 && (worst < 0 || d < worst)) { worst = d; worst_step = 9998; }
+    }
+    prev = pre_freeze;
+
+    m.s.phase = agentty::phase::Idle{};
+    det::freeze_through(m, m.d.current.messages.size());
+    auto frozen = render_rows(m);
+    {
+        int d = first_committed_divergence(prev, frozen, kTermH);
+        if (d >= 0 && (worst < 0 || d < worst)) { worst = d; worst_step = 9999; }
+    }
+
+    CHECK(!m.ui.live_body_freeze.has_value(),
+          "live_body_freeze not cleared at settle (chunked)");
+    CHECK(m.ui.frozen_through == m.d.current.messages.size(),
+          "settle did not freeze through the whole transcript (chunked)");
+
+    if (worst >= 0) {
+        std::fprintf(stderr,
+            "  chunked incremental body-freeze committed-row divergence at "
+            "row %d (step %d)\n", worst, worst_step);
+    }
+    CHECK(worst < 0,
+          "chunked incremental body freeze rewrote a committed scrollback "
+          "row (carve/settle seam corruption)");
+
+    det::set_incremental_freeze_override(-1);
+}
+
 int main() {
     std::printf("midrun_seam_test\n");
     test_incremental_freeze_prefix_stable();
     test_incremental_body_freeze_seam();
+    test_incremental_body_freeze_seam_chunked();
     test_single_edit_stream_to_freeze();
     test_single_write_stream_to_freeze();
     test_read_then_edit_batch_freeze();
