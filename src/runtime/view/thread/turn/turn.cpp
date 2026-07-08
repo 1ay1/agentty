@@ -75,17 +75,22 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         //     a brisk readable minimum.
         //   • drain_secs = the target LAG: how far behind the live edge the
         //     cursor rides, in seconds. rate = backlog / drain_secs holds the
-        //     reveal ~drain_secs behind the wire at the wire's own speed.
-        //     0.3s is tight enough to feel live, loose enough to smooth SSE
-        //     chunk jitter.
-        // A fat batched delta no longer teleports: the rate low-pass
-        // (rate_tau in RateCursor) accelerates the cursor into the chunk over
-        // a few frames so it reveals as an animated slide, not an instant
-        // paste — the fix for "streaming stops / text just appears on a long
-        // turn". The settle deadline ramp still bypasses the smoothing so the
-        // tail always lands on time.
+        //     reveal ~drain_secs behind the wire at the wire's own speed, so
+        //     the STEADY-STATE backlog ≈ wire_cps × drain_secs. That backlog
+        //     is exactly what gets dumped when the ToolUse guard hard-snaps
+        //     the reveal to the edge (snap_reveal_to_edge is mandatory for
+        //     scrollback safety — a growing tool card strands any lagged
+        //     inline line; proven by scrollback_oracle_test, which fails on
+        //     ANY glide at ANY ramp). So the ONLY safe lever on the
+        //     "first char sticks then bursts with the next tool" symptom is
+        //     to keep this lag small: at 0.15s a 1200 cps reply carries only
+        //     ~180 chars of backlog at the boundary (half the old 0.3s
+        //     burst), while 0.15s is still ~9 frames of jitter smoothing —
+        //     a chunky SSE delta still slides in over several frames rather
+        //     than teleporting. Tighter than this starts to feel per-token
+        //     rather than smoothed.
         cache.streaming->set_reveal_pacing(/*floor_cps=*/90.0,
-                                           /*lead_secs=*/0.3);
+                                           /*lead_secs=*/0.15);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
@@ -474,6 +479,44 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     //        simply doesn't outlive the prose it animates.
     {
         const bool has_cards = !msg.tool_calls.empty();
+
+        // ── Pre-emptive end-of-text drain (kills the burst at its ROOT) ──
+        //
+        // The reveal cursor rides ~drain_secs behind the wire to smooth
+        // jitter, so when the model closes its text block there is a
+        // backlog (~wire_cps × drain_secs) still to type out. The instant
+        // a tool_use arrives the guard below MUST hard-snap that backlog
+        // to the edge (a growing card would otherwise strand any lagged
+        // inline line — scrollback corruption, oracle-proven on ANY
+        // glide). That snap is the visible BURST ("first char sticks, then
+        // it all appears with the next tool").
+        //
+        // But on the wire the text block goes QUIET a beat before the
+        // tool_use streams. During that gap there is NO card yet, so the
+        // reveal can safely GLIDE to the edge — nothing below it can
+        // scroll a lagged row off. Detect the gap (live, no cards, bytes
+        // have stopped growing for a short window) and request_finalize:
+        // the cursor sprints to the edge over a bounded ramp WHILE fx
+        // stays on, so it reads as the typewriter catching up, not a
+        // paste. By the time the tool_use lands the cursor is already at
+        // the edge and the mandatory snap below is a NO-OP → zero burst.
+        //
+        // Safe against a mid-text pause (model stalls mid-sentence, not
+        // actually done): if more bytes arrive after a premature drain,
+        // the widget simply resumes revealing from the new edge — the
+        // early catch-up looks like "caught up, waiting," never a burst,
+        // and never touches scrollback (still no card). Gated on the same
+        // since_grow window the RAF logic uses so it never fights active
+        // streaming.
+        constexpr std::int64_t kTextQuietMs = 120;
+        const bool text_gone_quiet =
+            !settled && !has_cards && cache.streaming->is_live()
+            && cache.streaming->reveal_in_progress()
+            && cache.last_grow_tick.time_since_epoch().count() != 0
+            && since_grow_ms >= kTextQuietMs;
+        if (text_gone_quiet)
+            cache.streaming->request_finalize(/*ramp_ms=*/160);
+
         // Gate on is_live(): finish() assigns live_=false through the
         // Tracked<> wrapper, which bumps build_dirty_ on EVERY assignment
         // (even same-value) — running this block per frame would force a
@@ -481,6 +524,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // long-turn "md streaming becomes slow" lag). After the first
         // pass live_ is off, is_live() is false, and the block is skipped;
         // snap/fx-off are no-ops on a finished widget anyway.
+        //
+        // Why HARD SNAP and not a smooth glide HERE: the tool card renders
+        // BELOW this prose and starts GROWING the same frame the tool
+        // appears (Pending → Running → Done). A glide at THIS point leaves
+        // the reveal cursor ~drain_secs behind the live edge, so the lines
+        // between cursor and edge are still inline (uncommitted) — and the
+        // growing card pushes exactly those lines into native scrollback
+        // before the cursor reaches them (oracle-proven: 124 gate
+        // recoveries when this glided). The snap eliminates the lag
+        // instantly so there is no un-swept inline window for the card to
+        // strand. The pre-emptive drain above is what makes this snap
+        // usually a no-op (cursor already at edge) — the burst is gone
+        // WITHOUT weakening this safety net for the case where the tool
+        // arrives with no quiet gap at all.
         if (has_cards && !settled && cache.streaming->is_live()) {
             cache.streaming->snap_reveal_to_edge();
             cache.streaming->set_reveal_fx(false);

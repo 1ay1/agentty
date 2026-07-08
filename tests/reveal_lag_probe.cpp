@@ -37,7 +37,7 @@ int main() {
     StreamingMarkdown md;
     md.set_reveal_fx(true);
     md.set_live(true);
-    md.set_reveal_pacing(90.0, 0.3);   // agentty prod
+    md.set_reveal_pacing(90.0, 0.15);   // agentty prod
 
     std::string src;
     double owed = 0.0;
@@ -63,6 +63,17 @@ int main() {
         }
         md.set_content(src);
         maya::testing::advance_anim_clock_ms(frame_ms);
+
+        // Simulate agentty's pre-emptive end-of-text drain: once the wire
+        // has gone quiet (all bytes fed) for >= 120 ms and the reveal is
+        // still catching up, the host calls request_finalize before any
+        // tool card exists. `quiet_ms` tracks time since the last byte.
+        static int quiet_ms = 0;
+        const bool wire_done = (src.size() >= total);
+        quiet_ms = wire_done ? (quiet_ms + frame_ms) : 0;
+        if (wire_done && quiet_ms >= 120 && md.reveal_in_progress())
+            md.request_finalize(160);
+
         (void)md.build();
 
         if (f % 6 == 0) {   // every 100ms
@@ -72,8 +83,6 @@ int main() {
                         md.is_live() ? 1 : 0,
                         md.is_finalizing() ? 1 : 0);
         }
-        // Simulate the tool-use arrival at t=4s: the host would call the
-        // has_cards guard here. Show the state right before/after.
     }
     std::printf("-------------------------------------------------\n");
     std::printf("final: src=%zu in_prog=%d live=%d\n",
