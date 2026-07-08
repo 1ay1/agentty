@@ -806,10 +806,22 @@ jobs:
       # UPDATE path — package already exists upstream.
       - name: Update manifest (winget-releaser)
         if: ${{ env.WINGET_TOKEN != '' && steps.exists.outputs.present == 'true' }}
+        # Non-fatal: winget is publish-once-per-version. A manual re-dispatch
+        # for an already-submitted version makes komac error on the
+        # duplicate; that's a no-op, not a release-breaking failure. The
+        # tagged-release path submits each version exactly once.
+        continue-on-error: true
         uses: vedantmgoyal9/winget-releaser@main
         with:
           identifier: agentty.agentty
           version: ${{ needs.prepare.outputs.version }}
+          # Explicit tag: the action's default is
+          # `github.event.release.tag_name || github.ref_name`, which on a
+          # workflow_dispatch from master resolves to "master" — komac then
+          # queries releases/tags/master (404), gets no asset URLs, and
+          # fails. prepare.outputs.tag is the real vX.Y.Z on both the
+          # tagged-release and manual-dispatch paths.
+          release-tag: ${{ needs.prepare.outputs.tag }}
           installers-regex: 'agentty-windows-x86_64\.msi$'
           token: ${{ secrets.WINGET_TOKEN }}
 
