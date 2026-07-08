@@ -52,6 +52,33 @@ static void drain(int fd) {
 
 static void tick(int t = 16) { maya::testing::advance_anim_clock_ms(t); }
 
+static agentty::ToolUse settled_edit(int idx, int n_hunks, int lines) {
+    agentty::ToolUse t;
+    t.id   = agentty::ToolCallId{"edit_" + std::to_string(idx)};
+    t.name = agentty::ToolName{"edit"};
+    nlohmann::json edits = nlohmann::json::array();
+    std::string diff = "```diff\n";
+    for (int h = 0; h < n_hunks; ++h) {
+        std::string ot, nt;
+        for (int l = 0; l < lines; ++l) {
+            ot += "    const auto old_" + std::to_string(l) + " = compute(l);\n";
+            nt += "    const auto new_" + std::to_string(l) + " = compute(l)+1;\n";
+        }
+        edits.push_back({{"old_text", ot}, {"new_text", nt}});
+        diff += "@@ hunk " + std::to_string(h) + " @@\n";
+        for (int l = 0; l < lines; ++l) {
+            diff += "-    const auto old_" + std::to_string(l) + " = compute(l);\n";
+            diff += "+    const auto new_" + std::to_string(l) + " = compute(l)+1;\n";
+        }
+    }
+    diff += "```";
+    t.args = nlohmann::json{{"file_path", "src/module_" + std::to_string(idx) + ".cpp"},
+                           {"edits", edits}};
+    auto now = Clock::now();
+    t.status = agentty::ToolUse::Done{now - std::chrono::milliseconds{10}, now, diff};
+    return t;
+}
+
 // A stable prose paragraph so growth is realistic (wraps a few rows).
 static std::string para(int i) {
     return "\n\nParagraph " + std::to_string(i)
@@ -164,9 +191,29 @@ int main() {
         render();
     }
 
+    // PROBE_EDITS>0: the live turn accumulates N settled edit tools with a
+    // running bash tool at the tail (panel NOT cached; per-event edit bodies
+    // SHOULD cache-blit). Drives the REAL grow-and-retry Runtime so we see
+    // whether tall edit bodies overflow the canvas and miss the cache.
+    const int n_edits =
+        std::getenv("PROBE_EDITS") ? std::atoi(std::getenv("PROBE_EDITS")) : 0;
+    const int edit_lines =
+        std::getenv("PROBE_EDIT_LINES") ? std::atoi(std::getenv("PROBE_EDIT_LINES"))
+                                        : 120;
+
     Message live;
     live.role = Role::Assistant;
-    live.streaming_text = "Opening the explanation.";
+    if (n_edits > 0) {
+        live.text = "Applying the refactor across the modules.";
+        agentty::ToolUse bash;
+        bash.id   = agentty::ToolCallId{"bash_live"};
+        bash.name = agentty::ToolName{"bash"};
+        bash.args = nlohmann::json{{"command", "cmake --build build -j10"}};
+        bash.status = agentty::ToolUse::Running{Clock::now()};
+        live.tool_calls.push_back(std::move(bash));
+    } else {
+        live.streaming_text = "Opening the explanation.";
+    }
     m.d.current.messages.push_back(std::move(live));
 
     std::vector<double> samp;
@@ -183,7 +230,18 @@ int main() {
     std::uint64_t miss_sum = 0;
     // Buckets: report cost as the reply grows so we can see any scaling.
     for (int f = 0; f < frames; ++f) {
-        m.d.current.messages.back().streaming_text += para(f);
+        if (n_edits > 0) {
+            // Grow the edit turn: insert a fresh settled edit before the
+            // running bash tool, up to n_edits, then just re-render (the
+            // running spinner keeps the panel live/uncached every frame).
+            auto& tcs = m.d.current.messages.back().tool_calls;
+            if ((int)tcs.size() - 1 < n_edits) {
+                tcs.insert(tcs.end() - 1,
+                           settled_edit((int)tcs.size() - 1, 2, edit_lines));
+            }
+        } else {
+            m.d.current.messages.back().streaming_text += para(f);
+        }
         tick();
         double r = render();
         samp.push_back(r);

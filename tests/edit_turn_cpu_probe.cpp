@@ -203,5 +203,20 @@ int main() {
     }
     std::printf("\nat 30fps a 33ms budget is 100%% of one core; "
                 "compare (B) to (A).\n");
+
+    // ── Production-height sweep ────────────────────────────────────────
+    // The live inline app grows the canvas to needed+headroom, so in
+    // steady state canvas_h >= content and everything fits. But measure
+    // the SHORT-canvas regime explicitly (canvas < content) to see if a
+    // tall edit body that OVERFLOWS the canvas turns into a per-frame
+    // cache MISS (capture-skip on overflow) — the suspected spike.
+    std::printf("\nproduction-height sweep (one running, live panel):\n");
+    std::printf("%-14s | %-12s\n", "canvas_h", "mean ms/frame");
+    std::printf("---------------+-------------\n");
+    for (int h : {40, 60, 100, 200, 400, 1000, 6000}) {
+        auto m = build_model(edits, e_lines, /*with_running=*/true);
+        double r = render_rebuild_ms(m, h, iters);
+        std::printf("%-14d | %10.3f\n", h, r);
+    }
     return 0;
 }
