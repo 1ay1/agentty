@@ -253,9 +253,14 @@ static void test_growing_live_run_no_committed_rewrite() {
                   "grow: shadow verify failed before append render "
                   "(prev_cells already desynced from the wire)");
             if (!wit) { ok_all = false; break; }
+            auto proof = synced->check_scrollback(c, kTermH);
+            CHECK(proof.has_value(),
+                  "grow: scrollback gate rejected the append frame "
+                  "(committed prefix shifted)");
+            if (!proof) { ok_all = false; break; }
             auto outcome = std::move(*synced).render(
                 c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
-                std::move(*wit), false);
+                std::move(*wit), std::move(*proof), false);
             (void)drain(rfd);
             synced = std::visit(
                 [](auto&& arm) -> std::optional<InlineFrame<Synced>> {
@@ -410,9 +415,12 @@ static void test_grep_read_highlight_no_stale_blit() {
     CHECK(wit.has_value(),
           "hl: shadow verify failed after frame A (already desynced)");
     if (wit) {
+        auto proof = sa.check_scrollback(cb, kTermH);
+        CHECK(proof.has_value(),
+              "hl: scrollback gate rejected the grep-append frame");
         auto ob = std::move(sa).render(
             cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), false);
+            std::move(*wit), std::move(*proof), false);
         (void)drain(rfd);
         bool synced_b = std::visit([](auto&& arm) {
             using T = std::decay_t<decltype(arm)>;
@@ -551,9 +559,12 @@ static void test_write_freeze_no_rewrite() {
 
     std::string bytes_b;
     if (wit) {
+        auto proof = sa.check_scrollback(cb, kTermH);
+        CHECK(proof.has_value(),
+              "freeze: scrollback gate rejected the frozen frame");
         auto outcome_b = std::move(sa).render(
             cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), /*sync=*/false);
+            std::move(*wit), std::move(*proof), /*sync=*/false);
         bytes_b = drain(rfd);
         // It must stay Synced — a demote here means maya itself detected
         // an overflow-while-poisoned and is recovering (visible flicker).
@@ -668,9 +679,12 @@ static void test_write_midrun_active_freeze_no_rewrite() {
     auto wit = sa.verify();
     CHECK(wit.has_value(), "midrun shadow verify failed after frame A");
     if (wit) {
+        auto proof = sa.check_scrollback(cb, kTermH);
+        CHECK(proof.has_value(),
+              "midrun: scrollback gate rejected the frozen frame");
         auto outcome_b = std::move(sa).render(
             cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), false);
+            std::move(*wit), std::move(*proof), false);
         (void)drain(rfd);
         bool synced_b = std::visit([](auto&& arm) {
             using T = std::decay_t<decltype(arm)>;
@@ -821,9 +835,12 @@ static void test_write_streaming_settle_freeze() {
         auto wit = s.verify();
         CHECK(wit.has_value(), "life shadow verify failed after A");
         if (wit) {
+            auto proof = s.check_scrollback(cb, kTermH);
+            CHECK(proof.has_value(),
+                  "life: scrollback gate rejected the settle frame");
             auto ob = std::move(s).render(
                 cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-                std::move(*wit), false);
+                std::move(*wit), std::move(*proof), false);
             (void)drain(rfd);
             s = std::visit([](auto&& arm) -> InlineFrame<Synced> {
                 using T = std::decay_t<decltype(arm)>;
@@ -850,9 +867,12 @@ static void test_write_streaming_settle_freeze() {
         auto wit = s.verify();
         CHECK(wit.has_value(), "life shadow verify failed after B");
         if (wit) {
+            auto proof = s.check_scrollback(cc, kTermH);
+            CHECK(proof.has_value(),
+                  "life: scrollback gate rejected the freeze frame");
             auto oc = std::move(s).render(
                 cc, content_rows(cc), term_rows_for_test(kTermH), pool, writer,
-                std::move(*wit), false);
+                std::move(*wit), std::move(*proof), false);
             (void)drain(rfd);
             bool synced = std::visit([](auto&& arm) {
                 using T = std::decay_t<decltype(arm)>;
@@ -946,9 +966,12 @@ static void test_write_idle_finalize_freeze() {
     auto wit = s.verify();
     CHECK(wit.has_value(), "idle shadow verify failed after A");
     if (wit) {
+        auto proof = s.check_scrollback(cb, kTermH);
+        CHECK(proof.has_value(),
+              "idle: scrollback gate rejected the freeze frame");
         auto ob = std::move(s).render(
             cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), false);
+            std::move(*wit), std::move(*proof), false);
         (void)drain(rfd);
         bool synced = std::visit([](auto&& arm) {
             using T = std::decay_t<decltype(arm)>;
@@ -1092,9 +1115,12 @@ static void test_text_turn_finish_shrink() {
     auto wit = s.verify();
     CHECK(wit.has_value(), "text shadow verify failed after A");
     if (wit) {
+        auto proof = s.check_scrollback(cb, kTermH);
+        CHECK(proof.has_value(),
+              "text: scrollback gate rejected the freeze frame");
         auto ob = std::move(s).render(
             cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), false);
+            std::move(*wit), std::move(*proof), false);
         (void)drain(rfd);
         bool synced = std::visit([](auto&& arm) {
             using T = std::decay_t<decltype(arm)>;
@@ -1266,9 +1292,13 @@ static void test_overflowed_shrink_stays_synced() {
         auto wit = s.verify();
         CHECK(wit.has_value(), "shrink shadow verify failed after A");
         if (wit) {
+            auto proof = s.check_scrollback(cb, kTermH);
+            CHECK(proof.has_value(),
+                  "shrink: scrollback gate rejected the pure-bottom-shrink "
+                  "frame (prefix should be unchanged)");
             auto ob = std::move(s).render(
                 cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-                std::move(*wit), false);
+                std::move(*wit), std::move(*proof), false);
             bytes_guard = drain(rfd);
             bool synced = std::visit([](auto&& arm) {
                 using T = std::decay_t<decltype(arm)>;
@@ -1427,9 +1457,24 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
     CHECK(wit.has_value(), "trim: shadow verify failed before render");
     std::string bytes_b;
     if (wit) {
-        auto ob = std::move(sa).render(
-            cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), false);
+        // The top-drop shifts content up, so the committed prefix may no
+        // longer match — check_scrollback then returns nullopt and the
+        // production path commits the overflow + soft-repaints (case B).
+        // Both a valid proof (stay Synced) and the recovery are correct
+        // and non-destructive; the anti-corruption proof is the
+        // kept_real_rows >= term_h check above.
+        auto proof = sa.check_scrollback(cb, kTermH);
+        maya::inline_frame::RenderOutcome ob = [&] {
+            if (proof) {
+                return std::move(sa).render(
+                    cb, content_rows(cb), term_rows_for_test(kTermH), pool,
+                    writer, std::move(*wit), std::move(*proof), false);
+            }
+            const int overflow = std::max(0, sa.rows() - kTermH);
+            auto committed = std::move(sa).commit(sa.scrollback_marker(overflow));
+            return maya::inline_frame::RenderOutcome{
+                std::move(committed).demote_to_stale()};
+        }();
         bytes_b = drain(rfd);
         bool synced_b = std::visit([](auto&& arm) {
             using T = std::decay_t<decltype(arm)>;
@@ -1538,9 +1583,22 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
     CHECK(wit.has_value(), "full-body trim: shadow verify failed");
     std::string bytes_b;
     if (wit) {
-        auto ob = std::move(sa).render(
-            cb, content_rows(cb), term_rows_for_test(kTermH), pool, writer,
-            std::move(*wit), false);
+        // As in the output-heavy variant: the top-drop may shift the
+        // committed prefix so check_scrollback returns nullopt; the
+        // production path then commits overflow + soft-repaints. Both
+        // outcomes are correct and non-destructive.
+        auto proof = sa.check_scrollback(cb, kTermH);
+        maya::inline_frame::RenderOutcome ob = [&] {
+            if (proof) {
+                return std::move(sa).render(
+                    cb, content_rows(cb), term_rows_for_test(kTermH), pool,
+                    writer, std::move(*wit), std::move(*proof), false);
+            }
+            const int overflow = std::max(0, sa.rows() - kTermH);
+            auto committed = std::move(sa).commit(sa.scrollback_marker(overflow));
+            return maya::inline_frame::RenderOutcome{
+                std::move(committed).demote_to_stale()};
+        }();
         bytes_b = drain(rfd);
         bool synced_b = std::visit([](auto&& arm) {
             using T = std::decay_t<decltype(arm)>;
@@ -1647,9 +1705,14 @@ static void test_model_picker_open_close_no_scrollback_growth() {
             CHECK(wit.has_value(),
                   "picker-cycle: shadow verify before render (desync)");
             if (!wit) { synced.reset(); return; }
+            auto proof = synced->check_scrollback(c, kTermH);
+            CHECK(proof.has_value(),
+                  "picker-cycle: scrollback gate rejected the frame "
+                  "(a demote would scroll the base into scrollback)");
+            if (!proof) { synced.reset(); return; }
             auto o = std::move(*synced).render(
                 c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
-                std::move(*wit), false);
+                std::move(*wit), std::move(*proof), false);
             (void)drain(rfd);
             synced = std::visit(
                 [](auto&& a) -> std::optional<InlineFrame<Synced>> {
