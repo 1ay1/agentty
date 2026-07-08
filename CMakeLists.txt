@@ -1139,6 +1139,12 @@ if(AGENTTY_BUILD_TESTS)
         target_link_libraries(stream_cpu_probe PRIVATE util)
     endif()
 
+    # edit_turn_cpu_probe — host-side view() build cost for a turn with
+    # several SETTLED edit tools while ONE tool still runs (panel has no
+    # hash_id → rebuilt every frame). Isolates the per-settled-edit body
+    # Config copy that maya's component cache can't amortise while live.
+    agentty_add_full_test(edit_turn_cpu_probe NO_TEST)
+
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime), so it compiles against just the fuzzy_match TU.
