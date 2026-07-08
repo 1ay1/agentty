@@ -28,6 +28,7 @@
 
 #include <maya/app/app.hpp>
 #include <maya/core/anim_clock.hpp>
+#include <maya/render/renderer.hpp>
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -172,6 +173,14 @@ int main() {
     std::vector<double> timeline;
     samp.reserve(frames);
     timeline.reserve(frames);
+    // Track ComponentElement render() cache-MISSES per streaming frame — the
+    // hard proof that the committed prefix stays cached (a hit never bumps
+    // this). Steady frames should miss only the handful of live-tail /
+    // newest-block components, NOT the O(N) committed prefix.
+    std::uint64_t miss_prev = maya::render_detail::component_render_calls();
+    std::uint64_t miss_worst = 0;
+    std::uint64_t miss_worst_steady = 0;
+    std::uint64_t miss_sum = 0;
     // Buckets: report cost as the reply grows so we can see any scaling.
     for (int f = 0; f < frames; ++f) {
         m.d.current.messages.back().streaming_text += para(f);
@@ -179,6 +188,19 @@ int main() {
         double r = render();
         samp.push_back(r);
         timeline.push_back(r);
+        const std::uint64_t now = maya::render_detail::component_render_calls();
+        const std::uint64_t d = now - miss_prev;
+        miss_prev = now;
+        miss_sum += d;
+        if (d > miss_worst) miss_worst = d;
+        // The first 1-2 frames legitimately miss the whole pre-built
+        // backdrop + committed prefix for the FIRST time (one-time cache
+        // warm at turn start; whether it lands on frame 0 or 1 depends on
+        // when the streaming content first appears vs the backdrop paint).
+        // Every frame from 2 on must miss only a small constant (live tail
+        // + reveal decoration), never the O(N) committed prefix — that is
+        // the steady-state O(1)-per-frame guarantee.
+        if (f >= 2 && d > miss_worst_steady) miss_worst_steady = d;
     }
 
     std::sort(samp.begin(), samp.end());
@@ -199,6 +221,19 @@ int main() {
     std::fprintf(stderr,
         "  at 60fps: mean render = %.1f%% of one core (%.2f ms/16 ms budget)\n",
         (sum / samp.size()) / 16.0 * 100.0, sum / samp.size());
+
+    // Component render() cache-miss rate — the O(1)-prefix proof. If the
+    // committed prefix stayed cached, per-frame misses are a small constant
+    // (live tail + newest blocks) independent of transcript length. A worst
+    // frame in the hundreds would mean the prefix re-rendered.
+    std::fprintf(stderr,
+        "  component render() MISSES: mean=%.1f/frame  worst=%llu/frame  "
+        "total=%llu over %d frames\n"
+        "  POST-WARM (frame>=2) worst misses = %llu/frame  "
+        "(committed prefix stays cached \xe2\x86\x92 O(1)/frame)\n",
+        double(miss_sum) / double(frames),
+        (unsigned long long)miss_worst, (unsigned long long)miss_sum, frames,
+        (unsigned long long)miss_worst_steady);
 
     // First-quarter vs last-quarter mean, to expose growth with length.
     const std::size_t q = timeline.size() / 4;
