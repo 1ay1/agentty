@@ -1254,6 +1254,13 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME stream_md_lag_test COMMAND stream_md_lag_test)
     set_tests_properties(stream_md_lag_test PROPERTIES TIMEOUT 60)
 
+    # reveal_lag_probe — dev probe (NOT a ctest entry). Traces the reveal
+    # cursor on a long turn ending in a big eager (code) block at agentty's
+    # production pacing to reproduce the "first char sticks, then bursts on
+    # the next tool use" stall. maya-only.
+    add_executable(reveal_lag_probe EXCLUDE_FROM_ALL tests/reveal_lag_probe.cpp)
+    target_link_libraries(reveal_lag_probe PRIVATE maya::maya)
+
     # composer_edit_test — reducer-level coverage for the composer's
     # word-wise delete keys (Ctrl+W unix-word-rubout / Alt+D kill-word),
     # including the chip-aware boundary that drops a whole attachment
