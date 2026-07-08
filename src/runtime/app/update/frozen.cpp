@@ -751,6 +751,24 @@ void maybe_incremental_freeze(Model& m) {
         return;
     }
 
+    // Defensive: if a live_body_freeze survives from a DIFFERENT message
+    // than the current streaming target, it is stale. The only way this
+    // arises is a mid-freeze error/cancel/retry that popped the sealed
+    // message and pushed a fresh placeholder (StreamError retry/auth,
+    // CancelStream discard) — those paths provably only pop an EMPTY-text
+    // message (has_committed gates retry; cancel pops only when text is
+    // empty), and a seal needs >=1 committed block, so a stale mismatch
+    // should be unreachable. Reset it anyway rather than seal a second
+    // header for `target` while the old sealed header sits orphaned in the
+    // ledger: making the header-vs-body invariant LOCAL (checked here) is
+    // cheaper to reason about than one that holds only by a distant
+    // gating argument. The old sealed rows are already committed to
+    // native scrollback (append-only), so dropping the bookkeeping is
+    // harmless — the reconcile for a genuinely live prefix still runs in
+    // freeze_range, keyed on the matching id.
+    if (m.ui.live_body_freeze && m.ui.live_body_freeze->msg != target->id)
+        m.ui.live_body_freeze.reset();
+
     auto& cache = m.ui.view_cache.message_md(m.d.current.id, target->id);
     maya::StreamingMarkdown& w = *cache.streaming;
 
