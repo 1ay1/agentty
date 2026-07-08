@@ -109,6 +109,34 @@ std::string    model_for_provider(std::string_view spec);
 // is about to be pushed).
 void freeze_through(Model& m, std::size_t live_start);
 
+// ── Incremental (mid-stream) body freeze (opt-in) ────────────────────────
+//
+// incremental_freeze_enabled: reads AGENTTY_INCREMENTAL_FREEZE once.
+// Default OFF. When on, maybe_incremental_freeze runs each streaming
+// Tick.
+bool incremental_freeze_enabled();
+
+// Test-only: force incremental_freeze_enabled() to a fixed value.
+// v<0 restores env-driven behaviour; v==0 disables; v>0 enables.
+void set_incremental_freeze_override(int v);
+
+// maybe_incremental_freeze: if the live tail is exactly ONE streaming
+// assistant message (no tools, sole live turn), seal its newly reveal-
+// swept leading markdown blocks into m.ui.frozen block-by-block (via
+// maya's settled_prefix_element), advancing m.ui.live_body_freeze. The
+// live tail then renders only the un-frozen remainder (live_suffix_
+// element) — see build_live_tail. Append-only: never drops a sealed
+// block mid-stream, so no host scrollback commit is minted here. No-op
+// unless incremental_freeze_enabled() and the shape matches. Defined in
+// frozen.cpp.
+void maybe_incremental_freeze(Model& m);
+
+// incremental_freeze_target: returns a pointer to the live-tail Message
+// eligible for incremental freeze (sole streaming assistant turn with a
+// live md widget), or nullptr. Shared by the producer (maybe_incremental_
+// freeze) and the consumer (build_live_tail) so both agree on the shape.
+const Message* incremental_freeze_target(const Model& m);
+
 // NOTE: the mid-stream carve API that used to be declared here
 // (freeze_settled_subturns, freeze_streaming_text_prefix,
 // trim_frozen_above_viewport) is DELETED. agent_session — the

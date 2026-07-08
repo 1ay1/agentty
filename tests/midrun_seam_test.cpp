@@ -21,7 +21,10 @@
 // duplication bug.
 
 #include <cstdio>
+#include <algorithm>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -1250,9 +1253,110 @@ static void test_multi_turn_write_pairs_seam() {
           "write (the reported duplicate)");
 }
 
+// Incremental (mid-stream) body freeze seam. With the opt-in enabled, a
+// long single-message prose reply seals its reveal-swept leading blocks
+// into m.ui.frozen mid-stream (maybe_incremental_freeze), and the live
+// tail renders only the un-frozen remainder. The seam contract: across
+// the carve AND the final settle-freeze, no committed (scrolled-off) row
+// may be rewritten — prefix++suffix must reproduce the un-split render.
+static void test_incremental_body_freeze_seam() {
+    namespace det = agentty::app::detail;
+    constexpr int kTermH = 40;
+    det::set_incremental_freeze_override(1);   // force enabled
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"ibf"};
+    Message u; u.role = Role::User; u.text = "write a long answer";
+    m.d.current.messages.push_back(std::move(u));
+    det::clear_frozen(m);
+    det::freeze_through(m, 1);                  // User frozen
+
+    // A single streaming assistant message with MANY prose blocks so its
+    // early blocks overflow the viewport and genuinely commit.
+    std::string body;
+    for (int b = 0; b < 40; ++b)
+        body += "Paragraph " + std::to_string(b)
+             +  " of a fairly long streaming answer that wraps a bit.\n\n";
+    Message a; a.role = Role::Assistant;
+    a.streaming_text = body;                    // all bytes arrived at once
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    std::vector<std::string> prev;
+    int worst = -1, worst_step = -1;
+    auto step = [&](int e) {
+        // Render (feeds the widget + advances reveal), then attempt an
+        // incremental carve, then render again.
+        auto r1 = render_rows(m);
+        if (!prev.empty()) {
+            int d = first_committed_divergence(prev, r1, kTermH);
+            if (d >= 0 && (worst < 0 || d < worst)) { worst = d; worst_step = e; }
+        }
+        prev = std::move(r1);
+        det::maybe_incremental_freeze(m);
+    };
+
+    // Drive the reveal to the edge, carving as blocks become safe.
+    for (int e = 0; e < 400; ++e) {
+        step(e);
+        const auto& cache = m.ui.view_cache.message_md(
+            m.d.current.id, m.d.current.messages.back().id);
+        if (cache.streaming && !cache.streaming->reveal_in_progress()
+            && e > 20)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    }
+
+    // At least one block should have been carved mid-stream.
+    CHECK(m.ui.live_body_freeze.has_value(),
+          "incremental freeze never carved any block mid-stream");
+    CHECK(m.ui.frozen.size() > 1,
+          "nothing sealed into the ledger during streaming");
+
+    // Settle: move bytes to text, finish widget, freeze the remainder.
+    {
+        auto& back = m.d.current.messages.back();
+        back.text = std::move(back.streaming_text);
+        back.streaming_text.clear();
+        det::settle_message_md(m, back);
+    }
+    auto pre_freeze = render_rows(m);
+    if (!prev.empty()) {
+        int d = first_committed_divergence(prev, pre_freeze, kTermH);
+        if (d >= 0 && (worst < 0 || d < worst)) { worst = d; worst_step = 998; }
+    }
+    prev = pre_freeze;
+
+    m.s.phase = agentty::phase::Idle{};
+    det::freeze_through(m, m.d.current.messages.size());
+    auto frozen = render_rows(m);
+    {
+        int d = first_committed_divergence(prev, frozen, kTermH);
+        if (d >= 0 && (worst < 0 || d < worst)) { worst = d; worst_step = 999; }
+    }
+
+    // After settle the carve watermark is cleared and everything frozen.
+    CHECK(!m.ui.live_body_freeze.has_value(),
+          "live_body_freeze not cleared at settle");
+    CHECK(m.ui.frozen_through == m.d.current.messages.size(),
+          "settle did not freeze through the whole transcript");
+
+    if (worst >= 0) {
+        std::fprintf(stderr,
+            "  incremental body-freeze committed-row divergence at row %d "
+            "(step %d)\n", worst, worst_step);
+    }
+    CHECK(worst < 0,
+          "incremental body freeze rewrote a committed scrollback row "
+          "(carve/settle seam corruption)");
+
+    det::set_incremental_freeze_override(-1);   // restore env-driven
+}
+
 int main() {
     std::printf("midrun_seam_test\n");
     test_incremental_freeze_prefix_stable();
+    test_incremental_body_freeze_seam();
     test_single_edit_stream_to_freeze();
     test_single_write_stream_to_freeze();
     test_read_then_edit_batch_freeze();

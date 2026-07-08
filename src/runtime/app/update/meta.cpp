@@ -238,6 +238,22 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     // tick. Never freeze a still-animating turn.
                     ::maya::request_animation_frame();
                 }
+            } else if (m.ui.pending_settle_freeze) {
+                // Armed to freeze, but the FSM is not yet Idle (a trailing
+                // sub-turn teardown, a retry ctx still parked in the phase,
+                // or the off-thread markdown parse finishing a hair before
+                // the phase reaches Idle). The freeze body above is gated on
+                // is_idle(), so it did NOT run this tick — and it did NOT
+                // re-arm a frame either. On an fps=0 event-driven screen the
+                // periodic Tick can be coalesced away, so if nothing else
+                // schedules a frame the reveal settles silently off-thread
+                // and pending_settle_freeze strands set: the just-finished
+                // markdown sits in the live tail until the next keystroke,
+                // which then diffs against stale prev_cells (cache miss →
+                // duplicated / late-committed turn). Self-perpetuate a frame
+                // as long as the flag is pending so the gate is always
+                // re-tested on a real frame once is_idle() flips true.
+                ::maya::request_animation_frame();
             }
 
             // ── pending_stream → streaming_text ──────────────────────
@@ -257,6 +273,23 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     msg.streaming_text.append(msg.pending_stream);
                     msg.pending_stream.clear();
                 }
+            }
+
+            // ── Incremental (mid-stream) body freeze (opt-in) ─────────
+            // Seal the streaming assistant message's newly reveal-swept,
+            // parse-final leading markdown blocks into m.ui.frozen so a
+            // long prose reply commits block-by-block instead of all at
+            // settle. No-op unless AGENTTY_INCREMENTAL_FREEZE=1 and the
+            // live tail is a single tool-less streaming assistant turn.
+            // Append-only (never drops a sealed block mid-stream), so no
+            // host scrollback commit is minted — maya's scrollback_prefix
+            // _matches branch absorbs the growth. An animation frame is
+            // armed so the next view() paints the shrunken live suffix.
+            if (detail::incremental_freeze_enabled()) {
+                const std::size_t before = m.ui.frozen.size();
+                detail::maybe_incremental_freeze(m);
+                if (m.ui.frozen.size() != before)
+                    ::maya::request_animation_frame();
             }
 
             // No mid-stream freeze or trim on Tick. The single freeze
