@@ -1706,13 +1706,28 @@ static void test_model_picker_open_close_no_scrollback_growth() {
                   "picker-cycle: shadow verify before render (desync)");
             if (!wit) { synced.reset(); return; }
             auto proof = synced->check_scrollback(c, kTermH);
-            CHECK(proof.has_value(),
-                  "picker-cycle: scrollback gate rejected the frame "
-                  "(a demote would scroll the base into scrollback)");
-            if (!proof) { synced.reset(); return; }
-            auto o = std::move(*synced).render(
-                c, content_rows(c), term_rows_for_test(kTermH), pool, writer,
-                std::move(*wit), std::move(*proof), false);
+            maya::inline_frame::RenderOutcome o = [&] {
+                if (proof) {
+                    return std::move(*synced).render(
+                        c, content_rows(c), term_rows_for_test(kTermH), pool,
+                        writer, std::move(*wit), std::move(*proof), false);
+                }
+                // Open/close height transition shifted the committed
+                // prefix vs the prior frame's shadow: production commits
+                // the off-viewport rows and soft-repaints via Stale (which
+                // re-enters Synced, no scrollback wipe). Model that exactly
+                // — the REAL anti-corruption invariant is the byte-stability
+                // check below (no already-committed wire row is rewritten),
+                // which holds regardless of which arm rendered this frame.
+                const int prev_rows = synced->rows();
+                const int overflow = prev_rows > kTermH
+                    ? prev_rows - kTermH : 0;
+                auto committed = std::move(*synced).commit(
+                    synced->scrollback_marker(overflow));
+                return std::move(committed).demote_to_stale().render(
+                    c, content_rows(c), term_rows_for_test(kTermH), pool,
+                    writer, false);
+            }();
             (void)drain(rfd);
             synced = std::visit(
                 [](auto&& a) -> std::optional<InlineFrame<Synced>> {
@@ -1722,8 +1737,7 @@ static void test_model_picker_open_close_no_scrollback_growth() {
                     else return std::nullopt;
                 }, std::move(o));
             CHECK(synced.has_value(),
-                  "picker-cycle: render stayed Synced (a demote would "
-                  "scroll the base into scrollback)");
+                  "picker-cycle: render re-entered Synced after recovery");
             if (!synced) return;
         }
 

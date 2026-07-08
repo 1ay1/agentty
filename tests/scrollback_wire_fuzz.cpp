@@ -341,14 +341,22 @@ struct WireHarness {
                         pool, writer, std::move(*wit), std::move(*proof),
                         false);
                 }
+                // Prefix shifted under an already-overflowed frame:
+                // maya commits the off-viewport rows and soft-repaints
+                // via Stale — and the Stale render RE-ENTERS Synced
+                // (compose case B repaints in place, no scrollback wipe).
+                // Render it here so the outcome is Synced again, exactly
+                // as app.cpp's recovery does; leaving it Stale would strand
+                // the frame out of the coherent state W3 asserts.
                 const int prev_rows = synced->rows();
                 const int overflow = prev_rows > term_h
                     ? prev_rows - term_h : 0;
                 auto committed = std::move(*synced).commit(
                     synced->scrollback_marker(overflow));
                 commits += static_cast<std::size_t>(overflow);
-                return maya::inline_frame::RenderOutcome{
-                    std::move(committed).demote_to_stale()};
+                return std::move(committed).demote_to_stale().render(
+                    c, content_rows(c), term_rows_for_test(term_h),
+                    pool, writer, false);
             }();
             (void)drain_fd(rfd);
             synced = std::visit(
