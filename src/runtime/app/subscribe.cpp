@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
 
 namespace agentty::app {
 
@@ -723,8 +724,24 @@ Sub<Msg> subscribe(const Model& m) {
     // freeze has actually fired (flag cleared) so the live-tail→frozen
     // handoff always lands on a fresh frame, exactly like agent_session's
     // always-on 30fps clock reconciles the collapse the same frame.
+    //
+    // Reveal-still-gliding term (was MISSING — the low-CPU post-stream
+    // stall). maya's reveal_fx is a WALL-CLOCK typewriter: after the wire
+    // drains its last bytes (m.s.active() false, tail_has_live_bytes
+    // false) the cursor is often still gliding across the final
+    // paragraph at ~90 cps, with SECONDS of animation left on a longer
+    // turn. If the gate rests only on the four terms above, the Tick
+    // stops the instant the bytes land and the reveal FREEZES mid-glide
+    // — the widget sits at 1% CPU waiting for a clock that won't tick
+    // until the next keystroke, which then snaps the remaining text into
+    // view all at once. `!live_tail_reveal_settled(m)` is true exactly
+    // while the reveal (is_live / reveal_in_progress / is_finalizing /
+    // is_parsing) has NOT drained, so we keep waking the widget until the
+    // typewriter reaches the live edge — the same reason build_live_tail
+    // and the deferred settle-freeze consult this predicate.
     if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
-        || m.ui.settle_cooldown_ticks > 0) {
+        || m.ui.settle_cooldown_ticks > 0
+        || !detail::live_tail_reveal_settled(m)) {
         auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
     }
