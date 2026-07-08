@@ -601,6 +601,128 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
     return out;
 }
 
+// TRUE streaming per-frame cost — the thing the user feels as "30% CPU on
+// long turns". Unlike midrun_frame (which builds the Element tree ONCE and
+// re-renders a static root), this reproduces production faithfully: the
+// LAST assistant run is IN-FLIGHT (a Running write tool whose args_streaming
+// body keeps growing), so it is deliberately NOT hash_id'd — its whole
+// subtree is rebuilt (view_build) AND repainted every RAF frame. The
+// frozen prefix above the viewport is preserved (clear_below), but the live
+// tail is not. If this scales with the in-flight body's row count, the live
+// tail is the culprit; if it's flat, the tail is already bounded.
+struct StreamingStats { Stats frame; Stats build; Stats render;
+                        std::size_t live_rows = 0; };
+
+[[nodiscard]] StreamingStats streaming_frame(const Shape& sh, int live_lines) {
+    // Settle every PRIOR turn; the final assistant turn is left live.
+    auto m = build_model(sh);
+    // Make the last assistant message an in-flight streaming write: a
+    // Running tool with a big args_streaming body + growing prose.
+    auto& msgs = m.d.current.messages;
+    if (!msgs.empty()) {
+        // Append a fresh live assistant turn (user + assistant) so the
+        // prior thread freezes and only this one stays in the live tail.
+        Message u; u.role = Role::User; u.text = user_prompt(sh.user_text_chars);
+        msgs.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        // Two live shapes controlled by live_lines' sign:
+        //   live_lines > 0 : in-flight WRITE tool with live_lines of body.
+        //   live_lines < 0 : in-flight PROSE stream of |live_lines| lines
+        //                     (no tool) — tests the markdown-body path.
+        if (live_lines < 0) {
+            // Build a big streaming markdown body: |live_lines| lines of
+            // mixed prose/code so the outer Element tree has many blocks.
+            const int n = -live_lines;
+            std::string body;
+            body.reserve(static_cast<std::size_t>(n) * 48);
+            for (int i = 0; i < n; ++i) {
+                body += (i % 5 == 0)
+                    ? "Here's the next step in the refactor, paragraph line."
+                    : "    auto x = compute(step, ctx); // inline detail";
+                body += '\n';
+            }
+            a.streaming_text = std::move(body);
+            a.role = Role::Assistant;
+        } else {
+            a.text = gen::assistant_prose(sh.assistant_prose_p);
+            ToolUse live;
+            live.id     = ToolCallId{"call_live"};
+            live.name   = ToolName{"write"};
+            live.status = ToolUse::Running{};
+            // args_streaming carries the partial JSON the write card renders
+            // its body from — grow it to `live_lines` of code.
+            live.args_streaming =
+                "{\"file_path\":\"src/auth/login.cpp\",\"content\":\""
+                + gen::code_block(live_lines);
+            a.tool_calls.push_back(std::move(live));
+        }
+        msgs.push_back(std::move(a));
+    }
+    agentty::app::detail::rehydrate_frozen(m);
+
+    constexpr int kCanvasW = 120;
+    constexpr int kCanvasH = 4000;
+    maya::StylePool pool;
+    maya::Canvas canvas(kCanvasW, kCanvasH, &pool);
+    canvas.clear();
+    constexpr int kTermH = 80;
+    constexpr int kPreserveMargin = 8;
+
+    std::vector<double> frame_s, build_s, render_s;
+    const int iters = std::max(sh.iters, 8);
+    frame_s.reserve(iters); build_s.reserve(iters); render_s.reserve(iters);
+
+    // Prime once.
+    {
+        auto root = maya::AppLayout{{
+            .thread        = agentty::ui::thread_config(m),
+            .changes_strip = agentty::ui::changes_strip_config(m),
+            .composer      = agentty::ui::composer_config(m),
+            .status_bar    = agentty::ui::status_bar_config(m),
+            .overlay       = std::nullopt,
+        }}.build();
+        maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    }
+
+    for (int i = 0; i < iters; ++i) {
+        auto tb0 = Clock::now();
+        // Production rebuilds the whole Element tree every frame; the
+        // in-flight run is NOT cached so this is the real view cost.
+        auto root = maya::AppLayout{{
+            .thread        = agentty::ui::thread_config(m),
+            .changes_strip = agentty::ui::changes_strip_config(m),
+            .composer      = agentty::ui::composer_config(m),
+            .status_bar    = agentty::ui::status_bar_config(m),
+            .overlay       = std::nullopt,
+        }}.build();
+        auto tb1 = Clock::now();
+
+        const int prev_ch = maya::content_height(canvas);
+        int keep_top = 0;
+        if (prev_ch > kTermH) {
+            keep_top = prev_ch - kTermH - kPreserveMargin;
+            if (keep_top < 0) keep_top = 0;
+        }
+        if (keep_top > 0) canvas.clear_below(keep_top);
+        else              canvas.clear();
+
+        auto tr0 = Clock::now();
+        maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+        auto tr1 = Clock::now();
+
+        build_s.push_back(ms(tb1 - tb0));
+        render_s.push_back(ms(tr1 - tr0));
+        frame_s.push_back(ms(tb1 - tb0) + ms(tr1 - tr0));
+    }
+
+    StreamingStats out;
+    out.frame     = summarise(frame_s);
+    out.build     = summarise(build_s);
+    out.render    = summarise(render_s);
+    out.live_rows = static_cast<std::size_t>(maya::content_height(canvas));
+    return out;
+}
+
 } // namespace phase
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -828,6 +950,35 @@ int main(int argc, char** argv) {
     const bool emit_json_lines = std::getenv("BENCH_JSON") != nullptr;
 
     const auto shapes = all_scenarios(iters_override);
+
+    // BENCH_STREAM=1 → run ONLY the true streaming-frame probe: sweep the
+    // in-flight write body size and print build/render/frame ms so we can
+    // see whether the live tail cost scales with the streaming body length.
+    if (std::getenv("BENCH_STREAM")) {
+        std::printf("streaming_frame probe — in-flight (un-cached) live tail\n");
+        std::printf("%-8s | %-10s | %-10s | %-10s | %-8s\n",
+                    "live", "build ms", "render ms", "frame ms", "rows");
+        std::printf("---------+------------+------------+------------+---------\n");
+        // A modest settled backdrop (6 turns × 300-line writes) so the
+        // frozen prefix is realistic; the live body is what we sweep.
+        Shape base{.name = "stream", .n_turns = 6, .write_lines = 300,
+                   .assistant_prose_p = 2, .iters = 20};
+        std::printf("-- WRITE tool body sweep --\n");
+        for (int live_lines : {8, 100, 400, 800, 1500, 3000}) {
+            auto s = phase::streaming_frame(base, live_lines);
+            std::printf("%-8d | %8.3f   | %8.3f   | %8.3f   | %-8zu\n",
+                        live_lines, s.build.median, s.render.median,
+                        s.frame.median, s.live_rows);
+        }
+        std::printf("-- PROSE stream (markdown body) sweep --\n");
+        for (int prose_lines : {8, 100, 400, 800, 1500, 3000}) {
+            auto s = phase::streaming_frame(base, -prose_lines);
+            std::printf("%-8d | %8.3f   | %8.3f   | %8.3f   | %-8zu\n",
+                        prose_lines, s.build.median, s.render.median,
+                        s.frame.median, s.live_rows);
+        }
+        return 0;
+    }
 
     if (!emit_json_lines) {
         std::printf("long_session_bench — agentty resume/render hot paths\n");

@@ -1127,6 +1127,18 @@ if(AGENTTY_BUILD_TESTS)
     # regime (canvas-height vs card-height). Build-only.
     agentty_add_full_test(tallcard_probe NO_TEST)
 
+    # stream_cpu_probe — TRUE end-to-end per-frame streaming cost. Drives
+    # the REAL maya Runtime::render (inline compose path) under a PTY with
+    # the REAL agentty view + freeze/trim, builds a deep frozen backdrop,
+    # then streams a long assistant turn frame-by-frame at 60 fps and
+    # prints render() ms as the reply grows. Answers "30% CPU on long
+    # turns": if per-frame render() stays flat as the reply grows, the
+    # streaming pipeline is O(viewport). Build-only (not a ctest entry).
+    agentty_add_full_test(stream_cpu_probe NO_TEST)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(stream_cpu_probe PRIVATE util)
+    endif()
+
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime), so it compiles against just the fuzzy_match TU.
