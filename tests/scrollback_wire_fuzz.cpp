@@ -325,9 +325,31 @@ struct WireHarness {
             auto wit = synced->verify();
             INV(wit.has_value(), "W2", "shadow verify failed @" + tag);
             if (!wit) { dead = true; return; }
-            auto o = std::move(*synced).render(
-                c, content_rows(c), term_rows_for_test(term_h), pool,
-                writer, std::move(*wit), false);
+            // Scrollback gate, type-enforced: render REQUIRES the proof.
+            // We already ran maya's recovery above (commit overflow on a
+            // prefix-changed shrink), so the frame either fits or its
+            // committed prefix is stable and check_scrollback mints a
+            // proof. If it still comes back nullopt (a shift the
+            // pre-commit didn't cover), mirror maya exactly: commit the
+            // off-viewport rows and soft-repaint via Stale.
+            auto proof =
+                synced->check_scrollback(c, term_h);
+            maya::inline_frame::RenderOutcome o = [&] {
+                if (proof) {
+                    return std::move(*synced).render(
+                        c, content_rows(c), term_rows_for_test(term_h),
+                        pool, writer, std::move(*wit), std::move(*proof),
+                        false);
+                }
+                const int prev_rows = synced->rows();
+                const int overflow = prev_rows > term_h
+                    ? prev_rows - term_h : 0;
+                auto committed = std::move(*synced).commit(
+                    synced->scrollback_marker(overflow));
+                commits += static_cast<std::size_t>(overflow);
+                return maya::inline_frame::RenderOutcome{
+                    std::move(committed).demote_to_stale()};
+            }();
             (void)drain_fd(rfd);
             synced = std::visit(
                 [](auto&& a) -> std::optional<InlineFrame<Synced>> {
