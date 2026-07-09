@@ -241,36 +241,6 @@ struct Model {
         // re-emit), and clears the flag.
         bool                pending_settle_freeze = false;
 
-        // ── Incremental (mid-stream) body freeze ────────────────────────
-        // Opt-in (AGENTTY_INCREMENTAL_FREEZE=1). While a SINGLE assistant
-        // message streams as the sole live-tail turn, its already-
-        // revealed, parse-committed leading markdown blocks are sealed
-        // into `frozen` block-by-block as the reveal cursor sweeps them
-        // — instead of waiting for the whole turn to settle. This bounds
-        // the live-tail rebuild to the still-revealing tail even on a
-        // multi-thousand-line reply.
-        //
-        // Correctness rests on three maya primitives, each pinned by
-        // test_markdown's st_incremental_settle:
-        //   • settle_safe_block_count()  — only reveal-swept, parse-final
-        //     blocks are eligible (no scramble frozen).
-        //   • settled_prefix_element(k)   — the sealed prefix's cells are
-        //     byte-identical to the live top region (cache HIT, no
-        //     re-emit over committed rows).
-        //   • live_suffix_element(k)      — the live tail renders the
-        //     complementary remainder; prefix ++ host-gap ++ suffix
-        //     reproduces the un-split render exactly (seam identity).
-        //
-        // Append-only: blocks are only ever SEALED (never dropped mid-
-        // stream), so maya's scrollback_prefix_matches branch absorbs the
-        // growth with no host commit. The front-trim stays at settle time.
-        struct BodyFreeze {
-            MessageId   msg;              // the streaming message being carved
-            std::size_t blocks     = 0;   // # leading blocks already sealed
-            bool        header_sealed = false;  // header row sealed with block 0
-        };
-        std::optional<BodyFreeze> live_body_freeze;
-
         // Post-freeze settling window. When the deferred settle-freeze
         // fires, the live tail collapses into the frozen prefix in ONE
         // reducer step. If that tail had overflowed the viewport (the

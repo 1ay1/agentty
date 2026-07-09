@@ -63,14 +63,5 @@ namespace agentty::ui {
 [[nodiscard]] maya::CacheId assistant_run_hash_id(
     const Model& m, std::size_t run_start, std::size_t run_end);
 
-// live_suffix_turn: render the un-frozen remainder of an incrementally-
-// frozen assistant message (AGENTTY_INCREMENTAL_FREEZE) as a header-
-// suppressed continuation Turn. `sealed` leading markdown blocks already
-// live in m.ui.frozen; this returns the live suffix (blocks [sealed, N) +
-// the still-revealing tail). Defined in turn.cpp so it can reach the
-// file-local cached_markdown_for / speaker_style_for.
-[[nodiscard]] maya::Element live_suffix_turn(
-    const Message& msg, const Model& m, std::size_t sealed);
-
 
 } // namespace agentty::ui

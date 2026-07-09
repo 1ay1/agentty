@@ -112,31 +112,6 @@ void build_live_tail(const Model& m, int& running_turn,
         const Message& head = m.d.current.messages[i];
         int turn_num = running_turn;
 
-        // ── Incremental-freeze consumer ────────────────────────────
-        // When this message's leading blocks were sealed mid-stream
-        // (m.ui.live_body_freeze), its header + those blocks already
-        // live in m.ui.frozen. Render ONLY the un-frozen remainder here
-        // as a header-suppressed continuation Turn whose body is the
-        // live suffix. The gap before this row was ALSO sealed with the
-        // header, so we must NOT emit another one — undo the gap the
-        // loop just pushed. Detected purely from Model state (no reducer
-        // predicate needed): a header-sealed live_body_freeze for the
-        // sole live-tail message.
-        if (m.ui.live_body_freeze
-            && m.ui.live_body_freeze->msg == head.id
-            && m.ui.live_body_freeze->header_sealed
-            && head.role == Role::Assistant
-            && run_end == i + 1) {
-            // Undo the inter-turn gap this iteration pushed: the header
-            // (with its leading gap) is already in the ledger, so the
-            // live continuation must sit flush against it.
-            if (!out.empty() && !first_overall) out.pop_back();
-            out.push_back(live_suffix_turn(head, m,
-                                           m.ui.live_body_freeze->blocks));
-            i = run_end;
-            continue;
-        }
-
         if (head.role == Role::Assistant) {
             // ── In-turn activity indicator (agent_session pattern).
             //    Show the breathing "thinking…" row whenever the agent

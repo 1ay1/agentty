@@ -109,43 +109,20 @@ std::string    model_for_provider(std::string_view spec);
 // is about to be pushed).
 void freeze_through(Model& m, std::size_t live_start);
 
-// ── Incremental (mid-stream) body freeze (opt-in) ────────────────────────
-//
-// incremental_freeze_enabled: reads AGENTTY_INCREMENTAL_FREEZE once.
-// Default OFF. When on, maybe_incremental_freeze runs each streaming
-// Tick.
-bool incremental_freeze_enabled();
-
-// Test-only: force incremental_freeze_enabled() to a fixed value.
-// v<0 restores env-driven behaviour; v==0 disables; v>0 enables.
-void set_incremental_freeze_override(int v);
-
-// maybe_incremental_freeze: if the live tail is exactly ONE streaming
-// assistant message (no tools, sole live turn), seal its newly reveal-
-// swept leading markdown blocks into m.ui.frozen block-by-block (via
-// maya's settled_prefix_element), advancing m.ui.live_body_freeze. The
-// live tail then renders only the un-frozen remainder (live_suffix_
-// element) — see build_live_tail. Append-only: never drops a sealed
-// block mid-stream, so no host scrollback commit is minted here. No-op
-// unless incremental_freeze_enabled() and the shape matches. Defined in
-// frozen.cpp.
-void maybe_incremental_freeze(Model& m);
-
-// incremental_freeze_target: returns a pointer to the live-tail Message
-// eligible for incremental freeze (sole streaming assistant turn with a
-// live md widget), or nullptr. Shared by the producer (maybe_incremental_
-// freeze) and the consumer (build_live_tail) so both agree on the shape.
-const Message* incremental_freeze_target(const Model& m);
-
-// NOTE: the mid-stream carve API that used to be declared here
-// (freeze_settled_subturns, freeze_streaming_text_prefix,
-// trim_frozen_above_viewport) is DELETED. agent_session — the
-// reference implementation with zero scrollback corruption — freezes
-// exactly once per turn (MessageStop); the only production analog is
-// finalize_turn → pending_settle_freeze → freeze_through. Mid-stream
-// carves stamped frozen Turns whose hashes maya's cache had never
-// seen, forcing cache-miss re-emits over committed scrollback. Do
-// not reintroduce them.
+// NOTE: the incremental (mid-stream) body-freeze API that used to be
+// declared here (incremental_freeze_enabled, set_incremental_freeze_
+// override, maybe_incremental_freeze, incremental_freeze_target) has
+// been DELETED, along with freeze_settled_subturns / freeze_streaming_
+// text_prefix / trim_frozen_above_viewport before it. agent_session —
+// the reference implementation with zero scrollback corruption —
+// freezes exactly once per turn (MessageStop); the only production
+// analog is finalize_turn → pending_settle_freeze → freeze_through.
+// Mid-stream carves appended to m.ui.frozen WHILE the live suffix
+// shrank in the same update — two shape changes maya's stateful inline
+// diff cannot disambiguate — and stamped frozen Turns whose hashes
+// maya's cache had never seen, forcing cache-miss re-emits over
+// committed scrollback (the duplicated-line / flush-left-header /
+// box-border / composer-bleed corruption). Do not reintroduce them.
 
 // rehydrate_frozen: rebuild m.ui.frozen from scratch from the current
 // thread's messages + compaction records. Used on thread switch /

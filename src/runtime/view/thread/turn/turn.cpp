@@ -989,30 +989,6 @@ maya::Turn::Config turn_config_for_assistant_run(
     return cfg;
 }
 
-// live_suffix_turn: render the un-frozen remainder of an incrementally-
-// frozen assistant message as a header-suppressed continuation Turn.
-// `sealed` leading markdown blocks already live in m.ui.frozen (header +
-// blocks [0, sealed)); this returns Turn{ continuation, body =
-// live_suffix_element(sealed) }. Feeds the widget the current bytes
-// first (via cached_markdown_for) so the slice reflects this frame.
-// Lives here because cached_markdown_for / speaker_style_for are
-// file-local statics.
-maya::Element live_suffix_turn(const Message& msg, const Model& m,
-                               std::size_t sealed) {
-    // Ensure the widget reflects this frame's bytes before slicing.
-    (void)cached_markdown_for(msg, m);
-    auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
-    auto style = speaker_style_for(msg.role, m);
-    maya::Turn::Config cfg;
-    cfg.glyph        = style.glyph;
-    cfg.label        = style.label;
-    cfg.rail_color   = style.color;
-    cfg.continuation = true;   // header already sealed with the prefix
-    if (cache.streaming)
-        cfg.body.emplace_back(cache.streaming->live_suffix_element(sealed));
-    return maya::Turn{std::move(cfg)}.build();
-}
-
 std::size_t turn_run_end(const std::vector<Message>& messages,
                          std::size_t from)
 {

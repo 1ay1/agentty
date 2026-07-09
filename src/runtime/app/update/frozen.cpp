@@ -603,50 +603,6 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
 
         const Message& head = m.d.current.messages[i];
 
-        // ── Incremental-freeze reconcile (BEFORE the leading gap) ─────
-        // This message's header + leading blocks [0, sealed) were already
-        // sealed mid-stream (m.ui.live_body_freeze). Its gap + header are
-        // in the ledger; seal ONLY the remaining blocks [sealed, N) as a
-        // header-suppressed continuation, matching the live suffix the
-        // build_live_tail consumer was rendering. We must NOT push the
-        // usual leading inter-turn gap here — the header's own gap is
-        // already in the ledger, so the continuation sits flush. Then
-        // clear the watermark and bump frozen_turn ONCE (the mid-stream
-        // carve deliberately didn't). Single-message run only, so
-        // run_end == i+1.
-        if (m.ui.live_body_freeze
-            && m.ui.live_body_freeze->msg == head.id
-            && m.ui.live_body_freeze->header_sealed
-            && head.role == Role::Assistant
-            && run_end == i + 1) {
-            const std::size_t sealed = m.ui.live_body_freeze->blocks;
-            auto& cache = m.ui.view_cache.message_md(m.d.current.id, head.id);
-            if (cache.streaming) {
-                const std::size_t nblk = cache.streaming->block_count();
-                if (sealed < nblk) {
-                    // Boundary gap between the sealed prefix and this
-                    // continuation remainder (the single vstack().gap(1)
-                    // the split severed).
-                    push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
-                    auto inc = cache.streaming->settled_range_element(
-                        sealed, nblk);
-                    if (inc) {
-                        auto cfg = ui::turn_config(head, i, m.ui.frozen_turn,
-                                                   m, /*continuation=*/true);
-                        cfg.body.clear();
-                        cfg.body.emplace_back(*inc);
-                        cfg.hash_id = {};
-                        push_frozen(m, maya::Turn{std::move(cfg)}.build(),
-                                    /*est_rows=*/(nblk - sealed) + 1);
-                    }
-                }
-            }
-            ++m.ui.frozen_turn;             // the one bump for this turn
-            m.ui.live_body_freeze.reset();
-            i = run_end;
-            continue;
-        }
-
         // Leading gap: one blank row before every turn except the
         // very first frozen row (avoid a top-of-thread gap).
         const bool first_overall = m.ui.frozen.empty();
@@ -698,175 +654,32 @@ void freeze_through(Model& m, std::size_t live_start) {
     freeze_range(m, m.ui.frozen_through, live_start);
 }
 
-// ── Incremental (mid-stream) body freeze ──────────────────────────────
-// Test-only override: when set (>=0), forces the enabled state,
-// bypassing the env read. -1 means "use the env var". Set via
-// set_incremental_freeze_override (declared in internal.hpp).
-static int g_incremental_freeze_override = -1;
-
-bool incremental_freeze_enabled() {
-    // Test-only override wins (the seam tests force it on to keep the
-    // carve/settle invariant under test). In PRODUCTION this is always
-    // false: the env var was retired because mid-stream carving cannot be
-    // made sound against maya's STATEFUL cross-frame row diff.
-    //
-    // Why (and why the seam tests still pass): midrun_seam_test renders
-    // each frame from a FRESH Canvas, so prefix++suffix provably
-    // reproduces the un-split render — that invariant holds and is
-    // pinned. But the LIVE renderer keeps a prev_cells mirror and
-    // reconciles frame-to-frame. A carve mutates m.ui.frozen (append)
-    // WHILE the live suffix shrinks in the same update — two shape changes
-    // maya's inline scrollback-prefix-match diff sees as one ambiguous
-    // delta. The appended frozen Turn carries a hash maya's component
-    // cache did not paint on the previous live frame (carve stamps
-    // cfg.hash_id={}, rebuild-allowed), so the cache misses and re-emits
-    // those rows — sometimes over rows already committed to native
-    // scrollback: the duplicated-rows / flush-left-header / box-border
-    // corruption. Same structural failure as the deleted
-    // freeze_settled_subturns / freeze_streaming_text_prefix machinery.
-    // The single agent_session-style settle-time freeze is the ONLY
-    // construction that guarantees the frozen snapshot equals the
-    // on-screen live frame byte-for-byte. Machinery + tests are kept so
-    // the seam invariant stays proven, but production never carves.
-    if (g_incremental_freeze_override >= 0)
-        return g_incremental_freeze_override != 0;
-    return false;   // env var retired — never enable in production
-}
-
-void set_incremental_freeze_override(int v) {
-    g_incremental_freeze_override = v;
-}
-
-const Message* incremental_freeze_target(const Model& m) {
-    if (!incremental_freeze_enabled()) return nullptr;
-    // Scope: the live tail is EXACTLY one streaming assistant message,
-    // with no tools (a tool panel between blocks would break the simple
-    // header+body split), and a live md widget. This is the long-prose-
-    // reply case incremental freeze exists for; the multi-message run /
-    // interleaved-tool case stays on the once-per-turn settle path.
-    const auto& msgs = m.d.current.messages;
-    if (m.ui.frozen_through != msgs.size() - 1 && msgs.size() != 1)
-        return nullptr;                         // more than one live turn
-    if (m.ui.frozen_through >= msgs.size()) return nullptr;
-    // The single live message must be the LAST one and be a streaming
-    // assistant with no tools.
-    if (m.ui.frozen_through != msgs.size() - 1) return nullptr;
-    const Message& msg = msgs.back();
-    if (msg.role != Role::Assistant) return nullptr;
-    if (!msg.tool_calls.empty()) return nullptr;
-    // Must be actively streaming (settle path owns the finished case).
-    if (!m.s.is_streaming()) return nullptr;
-    const auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
-    if (!cache.streaming || !cache.streaming->is_live()) return nullptr;
-    return &msg;
-}
-
-void maybe_incremental_freeze(Model& m) {
-    const Message* target = incremental_freeze_target(m);
-    if (!target) {
-        // Shape no longer matches (tool arrived, run continued, settled).
-        // Leave any existing live_body_freeze in place: the settle path's
-        // freeze_range consults it to avoid re-sealing the carved prefix.
-        return;
-    }
-
-    // Defensive: if a live_body_freeze survives from a DIFFERENT message
-    // than the current streaming target, it is stale. The only way this
-    // arises is a mid-freeze error/cancel/retry that popped the sealed
-    // message and pushed a fresh placeholder (StreamError retry/auth,
-    // CancelStream discard) — those paths provably only pop an EMPTY-text
-    // message (has_committed gates retry; cancel pops only when text is
-    // empty), and a seal needs >=1 committed block, so a stale mismatch
-    // should be unreachable. Reset it anyway rather than seal a second
-    // header for `target` while the old sealed header sits orphaned in the
-    // ledger: making the header-vs-body invariant LOCAL (checked here) is
-    // cheaper to reason about than one that holds only by a distant
-    // gating argument. The old sealed rows are already committed to
-    // native scrollback (append-only), so dropping the bookkeeping is
-    // harmless — the reconcile for a genuinely live prefix still runs in
-    // freeze_range, keyed on the matching id.
-    if (m.ui.live_body_freeze && m.ui.live_body_freeze->msg != target->id)
-        m.ui.live_body_freeze.reset();
-
-    auto& cache = m.ui.view_cache.message_md(m.d.current.id, target->id);
-    maya::StreamingMarkdown& w = *cache.streaming;
-
-    // Reveal-swept, parse-final leading blocks eligible to freeze NOW.
-    const std::size_t safe = w.settle_safe_block_count();
-
-    std::size_t already = 0;
-    bool header_sealed = false;
-    if (m.ui.live_body_freeze && m.ui.live_body_freeze->msg == target->id) {
-        already       = m.ui.live_body_freeze->blocks;
-        header_sealed = m.ui.live_body_freeze->header_sealed;
-    }
-    if (safe <= already) return;                 // nothing new to seal
-
-    // Materialise ONLY the new blocks [already, safe). settled_range_
-    // element keeps each block's build()-identical hash_id (renderer
-    // cache HIT) and emits NO leading/trailing gap — the boundary gaps
-    // are the host's job below.
-    auto inc = w.settled_range_element(already, safe);
-    if (!inc) return;
-
-    if (!header_sealed) {
-        // FIRST carve for this message: seal a leading gap (unless this
-        // is the very first frozen row) then a HEADER-bearing Turn whose
-        // body is the increment [already, safe) (== [0, safe) here).
-        // Reuse turn_config for correct glyph/label/meta, then replace
-        // its body with the sealed prefix element.
-        if (!m.ui.frozen.empty())
-            push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
-
-        int turn_num = m.ui.frozen_turn + 1;
-        auto cfg = ui::turn_config(*target, m.ui.frozen_through, turn_num, m,
-                                   /*continuation=*/false);
-        cfg.body.clear();
-        cfg.body.emplace_back(*inc);            // pre-built Element slot
-        cfg.hash_id = {};                       // live carve: rebuild allowed
-        push_frozen(m, maya::Turn{std::move(cfg)}.build(),
-                    /*est_rows=*/safe + 2);
-        // NOTE: frozen_turn is NOT bumped here. The turn is not complete
-        // — its still-streaming remainder renders in the live tail as a
-        // header-suppressed CONTINUATION of this sealed header (see
-        // build_live_tail's live_body_freeze branch). Bumping now would
-        // (a) double-count the turn number and (b) make the live tail
-        // start numbering the NEXT turn while this one is unfinished. The
-        // single bump happens once, at settle, in freeze_range's
-        // reconcile of the already-carved message.
-        m.ui.live_body_freeze = Model::UI::BodyFreeze{
-            target->id, safe, /*header_sealed=*/true};
-    } else {
-        // SUBSEQUENT carve: seal the increment [already, safe) as a
-        // header-suppressed continuation Turn, preceded by the ONE
-        // boundary gap the split severs between block already-1 and
-        // already (matching build()'s single vstack().gap(1) join).
-        push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
-        auto cfg = ui::turn_config(*target, m.ui.frozen_through,
-                                   m.ui.frozen_turn, m,
-                                   /*continuation=*/true);
-        cfg.body.clear();
-        cfg.body.emplace_back(*inc);
-        cfg.hash_id = {};
-        push_frozen(m, maya::Turn{std::move(cfg)}.build(),
-                    /*est_rows=*/(safe - already) + 1);
-        m.ui.live_body_freeze->blocks = safe;
-    }
-}
-
-// NOTE: the mid-stream carve machinery that used to live here
-// (freeze_settled_subturns, last_safe_block_split,
-// freeze_streaming_text_prefix) has been DELETED, not just unwired.
-// agent_session — the reference implementation with provably zero
-// scrollback corruption — has exactly ONE freeze instant per turn
-// (MessageStop). Every mid-stream carve stamped a frozen Turn whose
-// hash maya's component cache had not seen on the previous live
-// frame, forcing a cache-miss re-emit over committed scrollback —
-// the corruption these functions repeatedly reintroduced each time
-// someone re-wired them "for performance". Per-frame cost is bounded
-// by maya's hash-keyed component cache on a STABLE live-tail hash
-// (verified flat in o1_probe / long_session_bench), so there is
-// nothing left for a carve to buy. Do not bring them back.
+// ── Incremental (mid-stream) body freeze — REMOVED ────────────────────
+// The mid-stream carve (maybe_incremental_freeze / live_body_freeze /
+// incremental_freeze_target and the AGENTTY_INCREMENTAL_FREEZE gate)
+// is DELETED, not merely disabled. It sealed chunks of a
+// still-streaming reply into m.ui.frozen mid-turn: an append to the
+// frozen prefix WHILE the live suffix shrank in the same update —
+// two shape changes maya's STATEFUL inline scrollback-prefix-match
+// diff cannot disambiguate. The carved Turn stamped cfg.hash_id={}
+// (rebuild-allowed, a key maya's component cache never painted on the
+// previous live frame), so the cache missed and re-emitted those rows,
+// sometimes over rows already committed to native scrollback: the
+// duplicated-lines / flush-left-header / box-border / composer-bleed
+// corruption. This is the SAME structural failure as the earlier
+// freeze_settled_subturns / freeze_streaming_text_prefix machinery,
+// reintroduced twice "for performance" and reverted twice.
+//
+// The one sound freeze instant is turn-settle (finalize_turn →
+// pending_settle_freeze → freeze_through, meta.cpp), gated on
+// is_idle() && live_tail_reveal_settled() and keyed on a hash
+// byte-identical to the live tail (assistant_run_hash_id) — a maya
+// component-cache HIT, zero re-emit. Streaming stays fully incremental
+// on screen via maya's StreamingMarkdown reveal_fx; only the
+// freeze/commit boundary is deferred to settle. Per-frame cost of the
+// live tail is bounded by maya's cache on a STABLE live-tail hash
+// (flat in o1_probe / long_session_bench), so a mid-stream carve buys
+// nothing and costs correctness. Do not bring it back.
 
 // ensure_frozen_width is GONE. It existed to heal the host's parallel
 // row-count stamps after a resize; the ledger's paint recording
@@ -881,7 +694,6 @@ void clear_frozen(Model& m) {
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
     m.ui.pending_settle_freeze   = false;
-    m.ui.live_body_freeze.reset();
 }
 
 void rehydrate_frozen(Model& m) {
