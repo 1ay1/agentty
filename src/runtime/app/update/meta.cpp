@@ -275,23 +275,6 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 }
             }
 
-            // ── Incremental (mid-stream) body freeze (opt-in) ─────────
-            // Seal the streaming assistant message's newly reveal-swept,
-            // parse-final leading markdown blocks into m.ui.frozen so a
-            // long prose reply commits block-by-block instead of all at
-            // settle. No-op unless AGENTTY_INCREMENTAL_FREEZE=1 and the
-            // live tail is a single tool-less streaming assistant turn.
-            // Append-only (never drops a sealed block mid-stream), so no
-            // host scrollback commit is minted — maya's scrollback_prefix
-            // _matches branch absorbs the growth. An animation frame is
-            // armed so the next view() paints the shrunken live suffix.
-            if (detail::incremental_freeze_enabled()) {
-                const std::size_t before = m.ui.frozen.size();
-                detail::maybe_incremental_freeze(m);
-                if (m.ui.frozen.size() != before)
-                    ::maya::request_animation_frame();
-            }
-
             // No mid-stream freeze or trim on Tick. The single freeze
             // site is finalize_turn (via pending_settle_freeze, the
             // agent_session MessageStop analog). Carving during streaming
