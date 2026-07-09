@@ -361,6 +361,14 @@ Step smart_paste_from_clipboard(Model m) {
 using maya::overload;
 
 Step composer_update(Model m, msg::ComposerMsg cm) {
+    // Stamp the last-interaction clock on ANY composer message (keystroke,
+    // edit, cursor move, paste, history walk). The idle blink-stop in the
+    // maya composer widget keys off this: 15 s after the last interaction
+    // the painted cursor goes solid and stops requesting frames, so an
+    // idle agentty stops driving the terminal compositor. Stamping here
+    // (the single entry point for all composer msgs) covers every path
+    // without touching each arm.
+    m.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
     return std::visit(overload{
         [&](ComposerCharInput e) -> Step {
             // '/' on a fully-empty composer opens the command palette

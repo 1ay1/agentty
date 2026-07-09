@@ -117,6 +117,14 @@ struct ComposerState {
     /// peeked item — only the queue slot is treated as the new
     /// pending content on submit.
     int                        queue_peek_idx = -1;
+
+    /// Wall-clock ms (maya anim clock) of the user's last composer
+    /// interaction (any keystroke / edit / cursor move). Drives the
+    /// idle blink-stop: the painted block cursor stops blinking 15 s
+    /// after this, so the composer cell goes static and a GPU terminal
+    /// with an aggressive repaint_delay stops compositing at idle. 0
+    /// until the first interaction (blink runs normally until then).
+    std::int64_t last_edit_ms = 0;
 };
 
 // Todo picker carries its own item list — separate concern from the

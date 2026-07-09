@@ -854,6 +854,28 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
             return done(std::move(m));
         },
+        [&](StreamTextBlockClosed) -> Step {
+            // The wire closed the assistant's TEXT content block. This is
+            // the earliest authoritative "model finished typing prose"
+            // signal and ALWAYS precedes a tool_use content_block_start, so
+            // it lands before any tool card is pushed to tool_calls. Flag
+            // the in-flight message; the view (cached_markdown_for) reads
+            // text_block_closed to request_finalize the reveal cursor now,
+            // gliding it to the live edge during this genuine quiet gap so
+            // the mandatory hard-snap at the tool card is a no-op — the
+            // reveal burst ("first char sticks, rest pops in with the tool")
+            // never happens.
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
+            // No placeholder to flag during compaction (summary is
+            // off-transcript); harmless no-op there.
+            if (!m.s.compacting
+                && !m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                m.d.current.messages.back().text_block_closed = true;
+            }
+            return done(std::move(m));
+        },
         [&](StreamToolUseStart& e) -> Step {
             auto now = std::chrono::steady_clock::now();
             if (auto* a = active_ctx(m.s.phase)) a->last_event_at = now;

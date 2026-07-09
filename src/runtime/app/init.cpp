@@ -21,6 +21,12 @@ std::vector<ModelInfo> seed_models() {
 
 std::pair<Model, maya::Cmd<Msg>> init() {
     Model m;
+    // Seed the composer idle-blink clock at launch so the 15 s
+    // blink-stop countdown starts now, not on the first keystroke. A
+    // freshly-opened, never-touched agentty is exactly the idle-CPU case
+    // (a forever-blinking painted cursor keeps a GPU terminal compositing),
+    // so it must time out even if the user never types.
+    m.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
     // Thread history is the single largest startup cost: a real-world
     // history of hundreds of multi-MB thread JSONs serializes into
     // seconds of synchronous parse work before the first frame can

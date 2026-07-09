@@ -539,7 +539,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
             && cache.streaming->reveal_in_progress()
             && cache.last_grow_tick.time_since_epoch().count() != 0
             && since_grow_ms >= kTextQuietMs;
-        if (text_gone_quiet)
+        if (text_gone_quiet || msg.text_block_closed)
             cache.streaming->request_finalize(/*ramp_ms=*/160);
 
         // Gate on is_live(): finish() assigns live_=false through the

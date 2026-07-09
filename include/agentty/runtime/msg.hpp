@@ -131,6 +131,14 @@ struct ComposerImagePasteFromClipboard {};
 // ── Streaming from provider ──────────────────────────────────────────────
 struct StreamStarted {};
 struct StreamTextDelta { std::string text; };
+// Emitted when the wire closes a TEXT content block (Anthropic
+// content_block_stop for a non-tool block). Always precedes the
+// tool_use content_block_start, so it is the earliest authoritative
+// "model finished typing prose" signal — the reducer flips the
+// in-flight message's text_block_closed so the view drains the reveal
+// cursor to the edge before any tool card is pushed (kills the reveal
+// burst at the text→tool seam). No-op if no text block was open.
+struct StreamTextBlockClosed {};
 struct StreamToolUseStart { ToolCallId id; ToolName name; };
 struct StreamToolUseDelta { std::string partial_json; };
 struct StreamToolUseEnd {};
@@ -499,7 +507,7 @@ using ComposerMsg = std::variant<
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 
 using StreamMsg = std::variant<
-    StreamStarted, StreamTextDelta,
+    StreamStarted, StreamTextDelta, StreamTextBlockClosed,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
     StreamThinkingDelta,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
