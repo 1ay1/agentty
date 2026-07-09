@@ -261,15 +261,40 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
             && cache.streaming->source().size() == feed_source.size()
             && !cache.streaming->is_parsing();
         if (!skip_set_content) {
-            // Use the async variant: tiny appends stay on the sync
-            // incremental path inside StreamingMarkdown (cheap), but a
-            // diverging-prefix swap of >=16 KB (loading an old thread,
-            // recovering scrollback, pasting a long markdown body)
-            // gets offloaded to a worker so the render thread doesn't
-            // stall on the parse. While the worker is in flight the
-            // widget keeps returning its previous element tree, so
-            // there's no visible blank during the handoff.
-            cache.streaming->set_content_async(feed_source);
+            // Path split by liveness:
+            //
+            //   LIVE WIRE (!settled): always feed the sync
+            //   set_content. The live combined feed is append-in-
+            //   spirit — text + streaming_text + pending_stream grows
+            //   monotonically within a sub-turn. But at each sub-turn
+            //   boundary the prior sub-turn's streaming_text folds into
+            //   msg.text and streaming_text resets, so the NEXT feed is
+            //   a divergent-prefix change; once the accumulated body
+            //   crosses set_content_async's 16 KB threshold that swap
+            //   would spawn a detached parse worker. While the worker
+            //   runs is_parsing() is true and the widget returns its
+            //   PREVIOUS element tree — the live reveal FREEZES — and
+            //   the result is only adopted (maybe_apply_async_) the next
+            //   time build() is polled. If the wire goes quiet for a
+            //   beat while the frozen-scrollback visual-hash gate
+            //   suppresses redraws, build() stops being polled and the
+            //   finished parse sits unapplied: the tail stalls until the
+            //   next delta / 100 ms Tick. That's the "md streaming stops
+            //   after a while in a long turn, fine again next turn"
+            //   report (next turn = fresh <16 KB placeholder → sync
+            //   path). The sync path has no is_parsing() window, so the
+            //   live reveal can never freeze on a parse.
+            //
+            //   SETTLED / RELOAD (settled): keep the async variant. A
+            //   thread reload or scrollback recovery swaps in a whole
+            //   >=16 KB body at once as a divergent prefix; offloading
+            //   that one-shot parse to a worker keeps the render thread
+            //   responsive, and finish() below force-adopts it in the
+            //   same pass, so there's no unbounded freeze window.
+            if (!settled)
+                cache.streaming->set_content(feed_source);
+            else
+                cache.streaming->set_content_async(feed_source);
         }
 
         // Settled message → commit any trailing tail to the prefix's
