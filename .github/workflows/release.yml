@@ -511,15 +511,28 @@ jobs:
         run: |
           mkdir -p dist && cd dist
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing || true
+          # Never hash the checksum file itself into itself.
           rm -f SHA256SUMS
           sha256sum -- * > SHA256SUMS
-          gh release upload "$TAG" SHA256SUMS --clobber
+          # --clobber alone races with checksums-final on the same asset name
+          # (both delete+create SHA256SUMS): the loser hits
+          # "HTTP 422 ReleaseAsset.name already exists". Delete first, then retry.
+          for attempt in 1 2 3; do
+            gh release delete-asset "$TAG" SHA256SUMS --yes 2>/dev/null || true
+            if gh release upload "$TAG" SHA256SUMS --clobber; then
+              exit 0
+            fi
+            echo "upload attempt $attempt failed (asset race); retrying in 5s" >&2
+            sleep 5
+          done
+          echo "::error::failed to upload SHA256SUMS after 3 attempts"; exit 1
 
   # Late refresh once the slow QEMU arches land, so SHA256SUMS covers them too.
   checksums-final:
     name: checksums (final)
     needs:
       - prepare
+      - checksums
       - build-linux-x86_64
       - build-linux-aarch64
       - build-linux-i686
@@ -537,9 +550,20 @@ jobs:
         run: |
           mkdir -p dist && cd dist
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing || true
+          # Never hash the checksum file itself into itself.
           rm -f SHA256SUMS
           sha256sum -- * > SHA256SUMS
-          gh release upload "$TAG" SHA256SUMS --clobber
+          # Delete-then-upload with retry, so a transient asset-name collision
+          # ("HTTP 422 ReleaseAsset.name already exists") self-heals.
+          for attempt in 1 2 3; do
+            gh release delete-asset "$TAG" SHA256SUMS --yes 2>/dev/null || true
+            if gh release upload "$TAG" SHA256SUMS --clobber; then
+              exit 0
+            fi
+            echo "upload attempt $attempt failed (asset race); retrying in 5s" >&2
+            sleep 5
+          done
+          echo "::error::failed to upload SHA256SUMS after 3 attempts"; exit 1
 
   # Alpine .apk — built inside an Alpine container with abuild, attached to the
   # release so users can `apk add ./agentty-*.apk` before the aports APKBUILD is
