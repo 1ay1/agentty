@@ -1296,6 +1296,19 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
     set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
 
+    # stream_async_freeze_test — reproduces the long-turn "md streaming
+    # stops partway, fine again next turn" freeze and pins the fix. Drives
+    # StreamingMarkdown directly at the cached_markdown_for seam: a >=16 KB
+    # divergent-prefix set_content_async DOES enter is_parsing() and returns
+    # stale content (the bug), while the same change via set_content (the
+    # live !settled path now) never parses async and is live in the same
+    # call (the fix). Header-driven against maya only.
+    add_executable(stream_async_freeze_test EXCLUDE_FROM_ALL
+        tests/stream_async_freeze_test.cpp)
+    target_link_libraries(stream_async_freeze_test PRIVATE maya::maya)
+    add_test(NAME stream_async_freeze_test COMMAND stream_async_freeze_test)
+    set_tests_properties(stream_async_freeze_test PROPERTIES TIMEOUT 60)
+
     # reveal_smoothness_probe — per-BLOCK-TYPE reveal-uniformity gate.
     # Streams a mixed markdown doc (prose / heading / code fence / table /
     # list / blockquote) through the production StreamingMarkdown config
@@ -1469,6 +1482,7 @@ if(AGENTTY_BUILD_TESTS)
         stream_liveness_test
         stream_md_lag_test
         reveal_pacing_test
+        stream_async_freeze_test
         reveal_smoothness_probe
         composer_edit_test
         scheduler_path_test
