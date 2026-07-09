@@ -1,7 +1,9 @@
 #include "agentty/runtime/view/composer.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <string_view>
 
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -165,6 +167,31 @@ maya::Composer::Config composer_config(const Model& m) {
     // streaming. 2 rows costs one blank row of vertical space when idle
     // and eliminates the bob.
     cfg.min_body_rows   = 2;
+
+    // ── Cross-frame cache key (streaming anti-flicker) ───────────────
+    //
+    // During streaming the host re-runs view() on every delta; without
+    // a stable identity the composer's whole box (border + divider +
+    // width-adaptive hint component) re-lays-out each frame and the
+    // hint row's 1-cell drift reads as flicker. Fold in EXACTLY the
+    // inputs that change the rendered cells so the key holds constant
+    // across the many streaming frames where the composer is visually
+    // identical, and moves the instant any of them does (the user
+    // types, the phase flips, the queue depth ticks, the profile
+    // swaps). maya::Composer::build() only consults this while active
+    // (steady cursor, no blink), so excluding the blink phase is safe.
+    cfg.cache_id = maya::CacheIdBuilder{}
+        .add(std::string_view{"agentty-composer"})
+        .add(std::string_view{cfg.text})
+        .add(static_cast<std::uint64_t>(cfg.cursor))
+        .add(static_cast<std::uint64_t>(cfg.state))
+        .add(cfg.active_color)
+        .add(static_cast<std::uint64_t>(cfg.queued))
+        .add(std::string_view{cfg.profile.label})
+        .add(cfg.profile.color)
+        .add(static_cast<std::uint64_t>(cfg.expanded ? 1 : 0))
+        .add(static_cast<std::uint64_t>(cfg.min_body_rows))
+        .build();
     return cfg;
 }
 
