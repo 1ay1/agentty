@@ -168,6 +168,13 @@ maya::Composer::Config composer_config(const Model& m) {
     // and eliminates the bob.
     cfg.min_body_rows   = 2;
 
+    // Idle blink-stop: hand the widget the last-interaction timestamp so
+    // it stops blinking the painted cursor 15 s after the user goes idle
+    // (mirrors kitty's cursor_stop_blinking_after). Keeps an idle agentty
+    // from driving the terminal compositor forever on GPU terminals with
+    // an aggressive repaint_delay.
+    cfg.last_edit_ms    = m.ui.composer.last_edit_ms;
+
     // ── Cross-frame cache key (streaming anti-flicker) ───────────────
     //
     // During streaming the host re-runs view() on every delta; without

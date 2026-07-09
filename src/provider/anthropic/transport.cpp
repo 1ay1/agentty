@@ -264,6 +264,13 @@ struct StreamCtx {
     std::string current_tool_id;
     std::string current_tool_name;
     bool in_tool_use = false;
+    // True while a TEXT content block is open on the wire (between its
+    // content_block_start and content_block_stop). Lets ContentBlockStop
+    // emit StreamTextBlockClosed exactly once per text block, and only for
+    // text (not tool_use / thinking) blocks — the view uses that as the
+    // earliest "prose finished" signal to drain the reveal before a tool
+    // card appears.
+    bool text_block_open = false;
     // Terminal-event tracking — exactly one of finished/errored must fire.
     bool terminated = false;
     // Stashed from message_delta so we can hand it to StreamFinished. Lets
@@ -504,6 +511,10 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
                 ctx.current_tool_name = block.value("name", "");
                 ctx.in_tool_use = true;
                 ctx.sink(StreamToolUseStart{ToolCallId{ctx.current_tool_id}, ToolName{ctx.current_tool_name}});
+            } else if (type == "text") {
+                // Mark the text block open so its matching
+                // content_block_stop emits StreamTextBlockClosed.
+                ctx.text_block_open = true;
             }
             break;
         }
@@ -534,6 +545,14 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
                 ctx.in_tool_use = false;
                 ctx.current_tool_id.clear();
                 ctx.current_tool_name.clear();
+            } else if (ctx.text_block_open) {
+                // The prose block just closed — this ALWAYS precedes a
+                // tool_use content_block_start, so it is the earliest
+                // authoritative "model finished typing" signal. The view
+                // drains the reveal cursor to the edge on it so the
+                // mandatory hard-snap at the tool card is a no-op (no burst).
+                ctx.text_block_open = false;
+                ctx.sink(StreamTextBlockClosed{});
             }
             break;
         }

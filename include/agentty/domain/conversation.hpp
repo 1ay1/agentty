@@ -307,6 +307,18 @@ struct Message {
     // `streaming_text` exactly as before — the smoothing is invisible
     // to the renderer.
     std::string pending_stream;
+    // Set the instant the wire closes this message's TEXT content block
+    // (Anthropic content_block_stop for a text block) — which always
+    // precedes the tool_use content_block_start. It is the authoritative
+    // "the model is done typing prose" signal, and it arrives BEFORE any
+    // tool card is pushed to tool_calls. The view reads it to pre-emptively
+    // glide the reveal cursor to the live edge during that genuine quiet
+    // gap, so the mandatory hard-snap when the card appears is already a
+    // no-op → no visible reveal burst ("first char sticks then the rest
+    // pops in with the next tool"). More robust than the byte-quiet timing
+    // heuristic, which a fast wire out-runs. Sticky within a sub-turn;
+    // reset when a fresh placeholder message is minted for post-tool prose.
+    bool text_block_closed = false;
     std::vector<ToolUse> tool_calls;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
     std::optional<CheckpointId> checkpoint_id;
