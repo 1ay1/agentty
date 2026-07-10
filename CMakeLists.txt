@@ -1324,6 +1324,17 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME reveal_smoothness_probe COMMAND reveal_smoothness_probe)
     set_tests_properties(reveal_smoothness_probe PROPERTIES TIMEOUT 120)
 
+    # tool_boundary_burst_probe — dev probe (NOT a ctest entry). RECREATES
+    # the "long turn: md reveal sticks, then BURSTS when a tool use lands"
+    # bug headlessly: streams a long body through the production pacing
+    # (90 cps / 0.15 s), fires the pre-emptive end-of-text drain
+    # (request_finalize(160)) exactly as turn.cpp does, then executes the
+    # mandatory snap trio at the tool card and measures the cells pasted
+    # in that single frame across wire-speed x close->tool-gap scenarios.
+    add_executable(tool_boundary_burst_probe EXCLUDE_FROM_ALL
+        tests/tool_boundary_burst_probe.cpp)
+    target_link_libraries(tool_boundary_burst_probe PRIVATE maya::maya)
+
     # openai_transport_test — verifies the OpenAI-compatible provider's pure
     # translation layer with NO network: build_tools / build_messages JSON
     # shaping, and a scripted-SSE → agentty-Msg parse (text deltas, streamed

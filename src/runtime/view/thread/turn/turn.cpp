@@ -550,23 +550,172 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // pass live_ is off, is_live() is false, and the block is skipped;
         // snap/fx-off are no-ops on a finished widget anyway.
         //
-        // Why HARD SNAP and not a smooth glide HERE: the tool card renders
-        // BELOW this prose and starts GROWING the same frame the tool
-        // appears (Pending → Running → Done). A glide at THIS point leaves
-        // the reveal cursor ~drain_secs behind the live edge, so the lines
-        // between cursor and edge are still inline (uncommitted) — and the
-        // growing card pushes exactly those lines into native scrollback
-        // before the cursor reaches them (oracle-proven: 124 gate
-        // recoveries when this glided). The snap eliminates the lag
-        // instantly so there is no un-swept inline window for the card to
-        // strand. The pre-emptive drain above is what makes this snap
-        // usually a no-op (cursor already at edge) — the burst is gone
-        // WITHOUT weakening this safety net for the case where the tool
-        // arrives with no quiet gap at all.
+        // Why HARD SNAP before the card can paint: the tool card renders
+        // BELOW this prose and starts GROWING the same frame it appears
+        // (Pending → Running → Done). A glide with the card visible
+        // leaves the reveal cursor ~drain_secs behind the live edge, so
+        // the lines between cursor and edge are still inline
+        // (uncommitted) — and the growing card pushes exactly those lines
+        // into native scrollback before the cursor reaches them
+        // (oracle-proven: 124 gate recoveries when this glided). The snap
+        // eliminates the lag instantly so there is no un-swept inline
+        // window for the card to strand.
+        //
+        // ── Tool-panel DEFERRAL (kills the boundary burst) ──
+        //
+        // The pre-emptive drain above rarely gets to run: on the wire,
+        // content_block_stop(text) and content_block_start(tool_use) are
+        // CONSECUTIVE SSE events — usually the same TCP segment — so
+        // text_block_closed and has_cards become true in the SAME reduce
+        // batch and the drain gets ZERO frames before a card exists. The
+        // mandatory snap then pastes the whole wire_cps×drain_secs
+        // backlog in one frame: the user-reported "md sticks then bursts
+        // when a tool use happens" (tool_boundary_burst_probe reproduces
+        // it at 4-10× the steady reveal rate for close→tool gaps
+        // ≤ 80 ms, and unconditionally on transports that never emit
+        // StreamTextBlockClosed).
+        //
+        // Resolution: while the cursor is still mid-glide, HOLD THE TOOL
+        // PANEL OFF-SCREEN (cache.defer_tool_panel — consumed by
+        // append_assistant_body_slots / turn_config_for_assistant_run
+        // this same frame) and arm the finalize ramp. With nothing
+        // rendering below the prose there is no growing element to push
+        // a mid-reveal row past the viewport top — the only rows that
+        // can cross it are the OLDEST, fully-revealed committed ones,
+        // exactly the normal mid-stream case the oracle already proves
+        // safe. The typewriter finishes its glide (typically 300-700 ms
+        // of visible catch-up, the RateCursor's natural backlog decay),
+        // reveal_in_progress() flips false, and THEN the trio runs —
+        // snap is a no-op, fx drops, finish() commits the trailing
+        // paragraph — and the panel appears below FINAL prose. Zero
+        // paste, and the scrollback invariant (card never paints under
+        // un-swept inline rows) holds by construction.
+        //
+        // Bounds and bail-outs — the deferral must never hide a card
+        // indefinitely or delay an interaction:
+        //   • LAST-MESSAGE gate: the glide is only scrollback-safe while
+        //     NOTHING renders below this prose. The instant a following
+        //     message exists (the post-tool sub-turn placeholder — its
+        //     markdown/panel renders underneath and grows), a lagged
+        //     inline row above it can be pushed past the viewport top
+        //     mid-reveal — the exact corruption the hard snap prevents
+        //     (oracle-proven: deferring under a growing successor added
+        //     9 gate recoveries). So the defer holds only while this
+        //     message is the live tail's bottom-most element.
+        //   • ALL-PENDING + height-budget gate: the unhide frame grows
+        //     the tail by the hidden panel's full height in ONE frame.
+        //     Rows that cross the viewport top on a grow are committed
+        //     AS PAINTED — if the grow ≥ viewport height, the old
+        //     bottom-rule row (mutated into panel content by the unhide)
+        //     crosses un-repainted → shadow mismatch → HardReset
+        //     (oracle-proven at 60x18: a Running card accumulating 2×H
+        //     of hidden progress recovered on unhide). A Pending card's
+        //     preview is tail-windowed (height-bounded ~a dozen rows);
+        //     Running progress / Done output are unbounded. So the defer
+        //     holds only while EVERY card is still Pending AND the
+        //     estimated hidden height fits comfortably inside the
+        //     viewport. Production timing makes this the common case:
+        //     tools flip Running only after finalize_turn, so the whole
+        //     args-streaming window (the burst window) stays deferrable.
+        //   • kMaxCardDeferMs hard cap: a pathological backlog (the
+        //     adaptive ramp in request_finalize stretches to 2.5 s on
+        //     tens-of-KB dumps) falls back to the hard snap after 1.5 s
+        //     — a small residual paste is the lesser evil vs. a card
+        //     that looks stuck. Timed from cache.card_defer_since.
+        //   • pending_permission: a tool awaiting approval floats its
+        //     permission card as its own live-tail row the same frame —
+        //     the user must see WHAT they're approving, so the panel
+        //     cannot lag the prompt. Snap immediately.
+        // Tool EXECUTION is untouched — kick_pending_tools runs in the
+        // reducer regardless of panel visibility; a fast tool may
+        // already be Running/Done when its card first paints, which
+        // reads as "typewriter finished, then the result landed".
         if (has_cards && !settled && cache.streaming->is_live()) {
-            cache.streaming->snap_reveal_to_edge();
-            cache.streaming->set_reveal_fx(false);
-            cache.streaming->finish();
+            constexpr std::int64_t kMaxCardDeferMs = 1500;
+            const auto defer_now = std::chrono::steady_clock::now();
+            const std::int64_t deferred_ms =
+                cache.card_defer_since.time_since_epoch().count() == 0
+                    ? 0
+                    : std::chrono::duration_cast<std::chrono::milliseconds>(
+                          defer_now - cache.card_defer_since).count();
+            const bool is_tail_bottom =
+                !m.d.current.messages.empty()
+                && &msg == &m.d.current.messages.back();
+            // Hidden-height budget: every card must be Pending (bounded
+            // tail-window preview) and the worst-case hidden rows
+            // (~12/card incl. chrome) must fit well inside the viewport
+            // so the unhide grow can never push the mutated seam row
+            // past the commit boundary in one frame.
+            bool all_pending = true;
+            for (const auto& tc : msg.tool_calls)
+                if (!tc.is_pending()) { all_pending = false; break; }
+            const int est_hidden_rows =
+                static_cast<int>(msg.tool_calls.size()) * 12;
+            const bool hidden_fits =
+                est_hidden_rows < ::maya::available_height() - 4;
+            const bool can_defer =
+                cache.streaming->reveal_in_progress()
+                && is_tail_bottom
+                && all_pending
+                && hidden_fits
+                && !m.d.pending_permission
+                && deferred_ms < kMaxCardDeferMs;
+            if (can_defer) {
+                if (cache.card_defer_since.time_since_epoch().count() == 0)
+                    cache.card_defer_since = defer_now;
+                cache.defer_tool_panel = true;
+                // Glide to the edge now — covers transports that never
+                // emit StreamTextBlockClosed (the drain above may not
+                // have fired) and re-arms idempotently when it did.
+                cache.streaming->request_finalize(/*ramp_ms=*/160);
+            } else {
+                // Exit (glide done / cap hit / bail-out): run the trio
+                // NOW. If we had been deferring, this is phase 1 of the
+                // two-phase exit — the finish() mutations paint on a
+                // frame where the panel is STILL hidden (mutation-only,
+                // diff-repaintable); the panel unhides next frame as a
+                // pure grow. If we never deferred (e.g. permission card
+                // pending on arrival), show immediately — the original
+                // single-frame behavior.
+                const bool was_deferring = cache.defer_tool_panel;
+                cache.streaming->snap_reveal_to_edge();
+                cache.streaming->set_reveal_fx(false);
+                cache.streaming->finish();
+                cache.card_defer_since = {};
+                if (was_deferring) {
+                    cache.defer_exit_finished = true;   // unhide next frame
+                    ::maya::request_animation_frame();
+                } else {
+                    cache.defer_tool_panel = false;
+                }
+            }
+        } else if (has_cards && !settled && cache.defer_tool_panel) {
+            if (!cache.defer_exit_finished) {
+                // The deferral's finalize ramp completed and the widget
+                // flipped live_ off ON ITS OWN (advance_reveal_cursor_'s
+                // scramble-settle gate) before the exit above got a frame.
+                // finish() must STILL run exactly once: it force-commits
+                // the trailing paragraph out of render_tail's inline path,
+                // whose off-by-one wrap vs the committed-block path is the
+                // settle-time row rewrite ("t1-settle corruption"). Panel
+                // stays hidden this frame (phase 1); unhides next (phase 2).
+                cache.streaming->set_reveal_fx(false);
+                cache.streaming->finish();
+                cache.defer_exit_finished = true;
+                ::maya::request_animation_frame();
+            } else {
+                // Phase 2: the finish-mutation frame has painted; the
+                // panel now appears as a pure bottom-append grow.
+                cache.defer_tool_panel   = false;
+                cache.defer_exit_finished = false;
+                cache.card_defer_since   = {};
+            }
+        } else {
+            // No cards / settled / widget already finished — make sure a
+            // stale defer can never hide a panel on a later frame.
+            cache.defer_tool_panel    = false;
+            cache.defer_exit_finished = false;
+            cache.card_defer_since    = {};
         }
     }
 
@@ -836,6 +985,14 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
     const bool has_body = !msg.text.empty() || !msg.streaming_text.empty();
     if (has_body) {
         cfg.body.emplace_back(cached_markdown_for(msg, m));
+        // Tool-panel deferral: cached_markdown_for just decided (this
+        // same frame) whether the reveal cursor is still mid-glide with
+        // a fresh tool card. While it is, the panel stays off-screen so
+        // nothing grows below the animating prose — the anti-burst /
+        // scrollback-safety mechanism documented at the decision site.
+        if (m.ui.view_cache.message_md(m.d.current.id, msg.id)
+                .defer_tool_panel)
+            return;
     }
     append_assistant_tool_panel(cfg, tool_calls, m, style);
 }
@@ -997,10 +1154,18 @@ maya::Turn::Config turn_config_for_assistant_run(
         if (m_i.role != Role::Assistant) break;   // run boundary
 
         const bool has_text = !m_i.text.empty() || !m_i.streaming_text.empty();
+        bool defer_panel = false;
         if (has_text) {
             cfg.body.emplace_back(cached_markdown_for(m_i, m));
+            // Same-frame deferral handshake as append_assistant_body_slots:
+            // cached_markdown_for holds this message's panel off-screen
+            // while its reveal cursor is still gliding to the live edge
+            // after a tool_use landed (anti-burst; see the decision site).
+            defer_panel = m.ui.view_cache
+                              .message_md(m.d.current.id, m_i.id)
+                              .defer_tool_panel;
         }
-        if (!m_i.tool_calls.empty()) {
+        if (!m_i.tool_calls.empty() && !defer_panel) {
             append_assistant_tool_panel(
                 cfg,
                 std::span<const ToolUse>{m_i.tool_calls},

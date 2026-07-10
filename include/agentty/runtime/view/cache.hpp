@@ -144,6 +144,40 @@ struct MessageMdCache {
     // such a frame (snap_reveal_to_edge) so no ghosted row exists to strand.
     // 0 is the "first frame / unknown" sentinel (no shrink inferred).
     int last_render_height = 0;
+
+    // ── Tool-panel deferral ──
+    //
+    // True while cached_markdown_for is holding this message's tool panel
+    // OFF-SCREEN because the reveal cursor is still gliding to the live
+    // edge. On the wire, content_block_stop(text) and content_block_start
+    // (tool_use) are consecutive SSE events — often the same TCP segment —
+    // so the pre-emptive end-of-text drain gets ZERO frames to run before
+    // a card exists, and the mandatory scrollback-safety hard-snap pastes
+    // the whole wire_cps×drain_secs backlog in one frame (the "md sticks
+    // then bursts at the tool" symptom; tool_boundary_burst_probe). While
+    // this flag is set the view skips append_assistant_tool_panel, so
+    // nothing renders below the prose that could push a mid-reveal row
+    // into immutable scrollback — the glide is safe and the snap at the
+    // card's first paint is a no-op. Recomputed EVERY frame by
+    // cached_markdown_for; consumed the same frame (same cfg build) by
+    // append_assistant_body_slots / turn_config_for_assistant_run.
+    // Messages that never build markdown (tool-only sub-turns) never set
+    // it — they have no prose to reveal.
+    bool defer_tool_panel = false;
+    // First frame the defer engaged — drives the kMaxCardDeferMs hard cap
+    // in cached_markdown_for so the card can never hide indefinitely.
+    // Zero-initialised = "not deferring".
+    std::chrono::steady_clock::time_point card_defer_since{};
+    // Two-phase defer exit. When the glide completes, the exit frame runs
+    // finish() + fx-off — which MUTATES rows at the viewport bottom (the
+    // scramble tail un-ghosts, the trailing paragraph rewraps into the
+    // committed block path) — while the panel STAYS hidden, so the frame
+    // is mutation-only (diff-repaintable in place). The panel unhides on
+    // the NEXT frame, a pure bottom-append grow whose rows crossing the
+    // viewport top are all final. Collapsing both into one frame is
+    // grow+mutation — maya's HardReset arm (oracle-proven: the one-frame
+    // exit added 4 gate recoveries at 60x18).
+    bool defer_exit_finished = false;
 };
 
 struct TurnConfigCache {

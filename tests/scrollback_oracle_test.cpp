@@ -30,7 +30,11 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <pty.h>
+#if defined(__APPLE__)
+#include <util.h>       // openpty on macOS
+#else
+#include <pty.h>        // openpty on glibc (link -lutil)
+#endif
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
