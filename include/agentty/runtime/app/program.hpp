@@ -12,6 +12,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"  // detail::live_tail_reveal_settled
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/view/view.hpp"
@@ -296,8 +297,30 @@ struct AgenttyApp {
         // the collapse never finishes reconciling — leaving a stranded
         // duplicate turn in scrollback. Advancing the hash while the
         // cooldown counts down makes each armed Tick actually render.
+        //
+        // THIRD term — an in-flight reveal that has ALREADY drained its
+        // wire bytes (`!detail::live_tail_reveal_settled(m)`). This closes
+        // the "freeze then everything-at-once" (symptom 2) hole. When the
+        // wire completes a text block, its bytes land in streaming_text and
+        // — at StreamTextBlockClosed / a tool round-trip — get committed
+        // into `text` while the widget's reveal cursor is STILL gliding to
+        // the edge (is_finalizing / reveal_in_progress). In that window
+        // BOTH m.s.active() and `revealing_text` (which keys off
+        // streaming_text/pending_stream being non-empty) can be false, and
+        // pending_settle_freeze may not be set yet. The subscription keeps
+        // the Tick armed off the SAME predicate (`!live_tail_reveal_settled`
+        // in subscribe.cpp) and cached_markdown_for keeps re-arming RAF —
+        // but if the hash falls through to the 265 ms caret-blink parity
+        // bucket, the run loop's visual_hash gate SKIPS every one of those
+        // armed frames, view() never runs, the typewriter freezes, and the
+        // remaining tail snaps in on the next caret flip / keypress. Keying
+        // the fast bucket on the exact predicate that keeps the frame
+        // sources armed guarantees each of those frames actually renders,
+        // so the reveal glides continuously to the edge over SSH / any
+        // link where the wire goes quiet mid-reveal.
         const bool draining_reveal =
-            m.ui.pending_settle_freeze || m.ui.settle_cooldown_ticks > 0;
+            m.ui.pending_settle_freeze || m.ui.settle_cooldown_ticks > 0
+            || !detail::live_tail_reveal_settled(m);
 
         if (revealing_text || draining_reveal) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));

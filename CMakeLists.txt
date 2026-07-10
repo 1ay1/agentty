@@ -1350,6 +1350,14 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(rag_advanced_test)
     agentty_add_full_test(knowledge_test)
 
+    # reveal_freeze_gate_probe — PROVES symptom-2 ("reveal freezes, then
+    # everything appears at once") was a visual_hash gate hole, and that
+    # the fix (keying the 16 ms reveal bucket on !live_tail_reveal_settled)
+    # closes it without an idle-CPU regression. Drives the REAL
+    # AgenttyApp::visual_hash + a REAL StreamingMarkdown parked mid-glide.
+    agentty_add_full_test(reveal_freeze_gate_probe)
+    set_tests_properties(reveal_freeze_gate_probe PROPERTIES TIMEOUT 30)
+
     # visual_hash_coverage_test — proves the render gate
     # (Program::visual_hash) can't silently drop a visible change. Two
     # declarative tables: every view-affecting model axis must advance
