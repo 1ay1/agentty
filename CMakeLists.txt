@@ -1503,6 +1503,7 @@ if(AGENTTY_BUILD_TESTS)
         rag_expand_test
         rag_advanced_test
         knowledge_test
+        reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test
         salvage_dedup_test
