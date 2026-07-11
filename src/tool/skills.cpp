@@ -215,7 +215,14 @@ void scan_root(const fs::path& root, const std::string& source,
     std::error_code ec;
     if (!fs::is_directory(root, ec) || ec) return;
     auto mt = fs::last_write_time(root, ec);
-    if (!ec) sig += source + ":" + std::to_string(mt.time_since_epoch().count()) + ";";
+    // file_time_type's rep is __int128 on Android/bionic — no std::to_string
+    // overload matches. long long keeps ~292 years of ns range; a cache-sig
+    // wrap is harmless (it only needs to CHANGE when the mtime changes).
+    if (!ec)
+        sig += source + ":" +
+               std::to_string(static_cast<long long>(
+                   mt.time_since_epoch().count())) +
+               ";";
 
     std::vector<fs::path> dirs;
     for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
@@ -227,7 +234,10 @@ void scan_root(const fs::path& root, const std::string& source,
         fs::path md = d / "SKILL.md";
         std::error_code mec;
         auto fmt = fs::last_write_time(md, mec);
-        if (!mec) sig += std::to_string(fmt.time_since_epoch().count()) + ";";
+        if (!mec)
+            sig += std::to_string(static_cast<long long>(
+                       fmt.time_since_epoch().count())) +
+                   ";";
         std::string raw = read_capped(md, kMaxBodyBytes);
         if (raw.empty()) continue;
         Skill s = parse_skill(raw, d.filename().string(), source);
