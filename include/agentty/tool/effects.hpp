@@ -107,17 +107,17 @@ inline constexpr EffectSet pure_effects{};
 // Compile-time spot-checks of the rule — clearer than a prose comment
 // and fail the build if someone rewrites the implementation wrong.
 namespace proofs {
-static_assert( is_parallel_safe(EffectSet{}, EffectSet{{Effect::ReadFs}}));
-static_assert( is_parallel_safe(EffectSet{{Effect::ReadFs}}, EffectSet{{Effect::ReadFs}}));
-static_assert( is_parallel_safe(EffectSet{{Effect::ReadFs}}, EffectSet{{Effect::Net}}));
-static_assert( is_parallel_safe(EffectSet{{Effect::Net}},    EffectSet{{Effect::Net}}));
-static_assert( is_parallel_safe(EffectSet{},                 EffectSet{{Effect::WriteFs}}));
-static_assert( is_parallel_safe(EffectSet{},                 EffectSet{{Effect::Exec}}));
-static_assert(!is_parallel_safe(EffectSet{{Effect::WriteFs}}, EffectSet{{Effect::ReadFs}}));
-static_assert(!is_parallel_safe(EffectSet{{Effect::ReadFs}},  EffectSet{{Effect::WriteFs}}));
-static_assert(!is_parallel_safe(EffectSet{{Effect::Exec}},    EffectSet{{Effect::ReadFs}}));
-static_assert(!is_parallel_safe(EffectSet{{Effect::WriteFs}}, EffectSet{{Effect::WriteFs}}));
-static_assert(!is_parallel_safe(EffectSet{{Effect::Exec}},    EffectSet{{Effect::Exec}}));
+static_assert( is_parallel_safe(EffectSet{}, EffectSet{Effect::ReadFs}));
+static_assert( is_parallel_safe(EffectSet{Effect::ReadFs}, EffectSet{Effect::ReadFs}));
+static_assert( is_parallel_safe(EffectSet{Effect::ReadFs}, EffectSet{Effect::Net}));
+static_assert( is_parallel_safe(EffectSet{Effect::Net},    EffectSet{Effect::Net}));
+static_assert( is_parallel_safe(EffectSet{},               EffectSet{Effect::WriteFs}));
+static_assert( is_parallel_safe(EffectSet{},               EffectSet{Effect::Exec}));
+static_assert(!is_parallel_safe(EffectSet{Effect::WriteFs}, EffectSet{Effect::ReadFs}));
+static_assert(!is_parallel_safe(EffectSet{Effect::ReadFs},  EffectSet{Effect::WriteFs}));
+static_assert(!is_parallel_safe(EffectSet{Effect::Exec},    EffectSet{Effect::ReadFs}));
+static_assert(!is_parallel_safe(EffectSet{Effect::WriteFs}, EffectSet{Effect::WriteFs}));
+static_assert(!is_parallel_safe(EffectSet{Effect::Exec},    EffectSet{Effect::Exec}));
 } // namespace proofs
 
 // "ReadFs, Net" — sorted-by-bit, comma-separated. For permission UI
