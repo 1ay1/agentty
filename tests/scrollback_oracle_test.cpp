@@ -410,7 +410,25 @@ struct Ctx {
         // that were committed and about to be rewritten.
         std::vector<std::string> sb_snapshot = emu->scrollback;
         const unsigned long recov_before = rt->scrollback_recovery_count();
-        (void)rt->render(agentty::ui::view(*m));
+        maya::Element root = agentty::ui::view(*m);
+        (void)rt->render(root);
+        // Residue drain — REQUIRED on macOS, where the PTY buffer is ~1 KB
+        // and any frame bigger than that leaves bytes in the writer's
+        // residue. Production's run loop drains residue within ~8 ms
+        // (has_pending_writes → short poll → render() re-entry, which is a
+        // pure drain, no recompose). If the oracle does NOT mirror that,
+        // maya DEFERS the next model-bearing frames entirely (render()
+        // early-outs while residue is pending): the welcome→conversation
+        // teardown slides off the exempted "t0-submit" tag onto a later
+        // frame (false recovery FAIL), and the emulator diffs a torn
+        // half-frame (false "composer chrome twice" FAIL). Linux's 64 KB
+        // PTY buffer never split a frame, which is why this only shows on
+        // macOS. maya's internal coherence is wire-write-side and is not
+        // affected by how the harness reads.
+        for (int k = 0; k < 256 && rt->has_pending_writes(); ++k) {
+            emu->feed(read_all(master));
+            (void)rt->render(root);
+        }
         const unsigned long recov_after = rt->scrollback_recovery_count();
         const int rows_after = rt->inline_content_rows();
         if (recov_after != recov_before) {

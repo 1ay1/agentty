@@ -1139,6 +1139,15 @@ if(AGENTTY_BUILD_TESTS)
         target_link_libraries(stream_cpu_probe PRIVATE util)
     endif()
 
+    # composer_flicker_probe — reproduces "list rows hidden then appear +
+    # composer flickers" through the REAL view + Runtime::render under a
+    # PTY with a viewport ANSI emulator. Reports composer border moves /
+    # in-place rewrites and hidden→reappear content rows. Build-only.
+    agentty_add_full_test(composer_flicker_probe NO_TEST)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(composer_flicker_probe PRIVATE util)
+    endif()
+
     # edit_turn_cpu_probe — host-side view() build cost for a turn with
     # several SETTLED edit tools while ONE tool still runs (panel has no
     # hash_id → rebuilt every frame). Isolates the per-settled-edit body
