@@ -11,8 +11,6 @@
 namespace agentty::ui {
 
 maya::StatusBar::Config status_bar_config(const Model& m) {
-    const bool is_streaming = m.s.is_streaming() && m.s.active();
-
     maya::StatusBar::Config cfg;
     cfg.phase_color   = phase_color(m.s.phase);
     cfg.breadcrumb    = title_chip_config(m);
@@ -27,27 +25,10 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
     // doubles as the toast slot for transient notifications (retry,
     // cancel, compact, error) which is more useful real estate.
 
-    // Streaming pushes the breadcrumb threshold up so the live
-    // sparkline + tok/s readout has room to breathe without elbowing
-    // the title.
-    cfg.breadcrumb_min_width   = is_streaming ? 160 : 130;
-    // Small fixed-width sparkline + tok/s chip. Shows in the right group
-    // whenever the row has room for it beside the model badge + CTX
-    // gauge — a compact trend glimpse, never a stretched full-row graph.
-    // 90 cols is enough for the ~22-cell chip to sit without elbowing its
-    // neighbours; below that it drops so the badges keep priority.
-    cfg.token_stream_min_width = 90;
-    // CTX shows as a COMPACT gauge (bar graph + percent, no raw token counts)
-    // from ~40 cols up, so even the phone sees the fill bar and the % it cares
-    // about; the verbose "used/max" token counts only join on a wide desktop-
-    // class terminal. Below 40 cols CTX hides entirely.
-    cfg.ctx_gauge_min_width    = 40;   // show the gauge (compact) from here up
-    cfg.ctx_bar_min_width      = 40;   // bar graph rides along with the gauge
-    cfg.ctx_tokens_min_width   = 120;  // raw token counts only when really wide
-    // Provider badge joins from ~50 cols up so even the phone shows which
-    // backend is active alongside the compact CTX; it only drops on the very
-    // narrowest widths (< 50) where it wouldn't fit beside the gauge.
-    cfg.model_badge_min_width  = 50;
+    // Width thresholds retired (maya 6263c4f): StatusBar's activity row
+    // is now a measured degradation ladder — every fragment is built at
+    // its real styled width and the row sheds detail until it fits. No
+    // per-host knobs to tune.
     return cfg;
 }
 
