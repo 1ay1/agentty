@@ -41,6 +41,24 @@ int main(int argc, char** argv) {
         body = "<div>\nraw html body\n</div>\n\nafter\n";
     else if (!std::strcmp(which, "quote_code"))
         body = "> quoted\n> ```\n> code in quote\n> ```\n\nafter\n";
+    else if (!std::strcmp(which, "push_summary"))
+        body =
+            "Master pushed cleanly (`0b34b32..2528c70`).\n"
+            "\n"
+            "Summary:\n"
+            "- **Pulled**: rebased local master onto `origin/master`, picking "
+            "up the remote's `0b34b32` (static-PIE build) commit.\n"
+            "- **Pushed**: your 2 commits (checkpoints + always-allow grants, "
+            "now `2539fb0`/`2528c70`) \xe2\x86\x92 `origin/master`. Fast-forward, no "
+            "force needed.\n"
+            "- **Review work** stays local-only on the `review` branch + "
+            "`review-feature` tag \xe2\x80\x94 **not** on master, not pushed.\n"
+            "\n"
+            "You asked to push \"Master\" specifically.\n";
+    else if (!std::strcmp(which, "bold_bullet"))
+        body = "- **alpha**: one\n- **beta**: two\n\nafter\n";
+    else if (!std::strcmp(which, "para_then_list"))
+        body = "Summary:\n- item one\n- item two\n\nafter\n";
 
     StreamingMarkdown md;
     md.set_reveal_fx(true);
