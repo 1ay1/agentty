@@ -54,6 +54,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <chrono>
 #include <list>
 #include <memory>
@@ -272,6 +273,15 @@ private:
 
     std::unordered_map<std::string, Entry> entries_;
     std::list<std::string>                 lru_;
+    // 32 entries. This cache holds the HEAVY per-message markdown
+    // trees (a 100 KB `read`/`bash` body can be several MiB of Element
+    // nodes), so the cap is a RAM ceiling, not a speed knob: 256
+    // entries once retained >1 GiB after the underlying output strings
+    // were compacted out. The per-settled-panel render memo does NOT
+    // live here — it lives in the dedicated, generously-sized
+    // g_panel_render_memo next to g_panel_cache (agent_timeline.cpp),
+    // which holds only lightweight Element HANDLES. That split is what
+    // lets a 300-sub-turn run stay flat without inflating this cap.
     std::size_t                            cap_ = 32;
 
     Entry& touch_(const std::string& key);

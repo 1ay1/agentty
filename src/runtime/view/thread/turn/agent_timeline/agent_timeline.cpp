@@ -154,6 +154,99 @@ private:
 
 thread_local PanelElementCache g_panel_cache;
 
+// ── Per-message panel render memo (fast primary key) ──
+//
+// g_panel_cache above is content-addressed: hitting it still costs an
+// O(tools) key-string build (std::to_string per tool) before the map
+// lookup. In a long in-flight autopilot run every SETTLED sub-turn is
+// re-emitted every frame (the whole run stays in the live tail until
+// settle), so that key-build runs O(run-length) times per frame — the
+// residual per-frame cost that still crept up with turn depth.
+//
+// This memo removes it. It is keyed on the sub-turn's stable MessageId
+// and stores (render_key, handle): a single-uint64 compare decides the
+// hit, no string built. render_key is Message::compute_render_key(),
+// which changes iff the panel's rendered output would (it folds every
+// tool's status/output/render key). A still-running tool advances the
+// key every frame → natural miss → rebuild (spinner animates); once
+// the sub-turn settles, the key freezes and every later frame is a
+// pure uint64-compare hit returning the shared handle.
+//
+// Why this lives HERE and not in ViewCache: entries are lightweight
+// Element HANDLES (the cells live once in maya's component cache,
+// keyed by the panel's per-event hash_ids), NOT the heavy markdown
+// trees ViewCache holds. So this map can be sized generously to cover
+// a very deep run without the >1 GiB retention risk that pins the
+// ViewCache cap at 32 — decoupling "how deep a run stays flat" from
+// "how much markdown RAM we retain".
+class PanelRenderMemo {
+public:
+    // Sized to cover a very deep single autopilot turn (each entry is
+    // ~a control block + small ComponentElement). Comfortably above
+    // any realistic sub-turn count; a longer run degrades gracefully
+    // to the g_panel_cache path (which is itself still an O(1) hit,
+    // just with the key-build tax back).
+    static constexpr std::size_t kCap = 4096;
+
+    // Returns the stored handle iff a memo entry exists for `mid` AND
+    // its render_key matches — else nullptr (caller rebuilds).
+    // Heterogeneous lookup (string_view key against a std::string map)
+    // so the hot HIT path allocates nothing — no temporary std::string
+    // per sub-turn per frame.
+    const std::shared_ptr<const maya::Element>*
+    get(std::string_view mid, std::uint64_t render_key) {
+        auto it = map_.find(mid);
+        if (it == map_.end() || it->second.render_key != render_key)
+            return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        return &it->second.el;
+    }
+
+    void put(std::string_view mid, std::uint64_t render_key,
+             std::shared_ptr<const maya::Element> el) {
+        if (auto it = map_.find(mid); it != map_.end()) {
+            it->second.render_key = render_key;
+            it->second.el         = std::move(el);
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+            return;
+        }
+        // Miss is rare (once per sub-turn settle), so the one string
+        // materialization here is off the hot path.
+        lru_.emplace_front(mid);
+        map_.emplace(std::string{mid},
+                     Entry{render_key, std::move(el), lru_.begin()});
+        while (map_.size() > kCap) {
+            map_.erase(lru_.back());
+            lru_.pop_back();
+        }
+    }
+
+private:
+    struct Entry {
+        std::uint64_t                        render_key;
+        std::shared_ptr<const maya::Element> el;
+        std::list<std::string>::iterator     lru_it;
+    };
+    // Transparent hash/eq so find(string_view) doesn't build a
+    // temporary std::string key.
+    struct SvHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+    struct SvEq {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const noexcept {
+            return a == b;
+        }
+    };
+    std::unordered_map<std::string, Entry, SvHash, SvEq> map_;
+    std::list<std::string>                               lru_;
+};
+
+thread_local PanelRenderMemo g_panel_render_memo;
+
 } // namespace
 
 maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_calls,
@@ -581,6 +674,48 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
         maya::AgentTimeline{
             agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build());
     g_panel_cache.put(key, el);
+    return maya::Element{el};
+}
+
+maya::Element agent_timeline_element_memoized(std::string_view msg_id,
+                                              std::uint64_t render_key,
+                                              std::span<const ToolUse> tool_calls,
+                                              int spinner_frame,
+                                              maya::Color rail_color) {
+    // Only SETTLED (all-terminal) batches are memoizable: a running /
+    // pending tool animates a spinner + live elapsed, so its render_key
+    // (and hence its output) changes every frame — the memo would just
+    // miss-and-store churn. Detect that up front and fall straight to
+    // the per-frame build, exactly as the base function does.
+    bool all_terminal = !tool_calls.empty();
+    for (const auto& tc : tool_calls) {
+        if (!tc.is_terminal()) { all_terminal = false; break; }
+    }
+    if (!all_terminal) {
+        return maya::AgentTimeline{
+            agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build();
+    }
+
+    // Fast primary key: MessageId + render_key. A settled sub-turn's
+    // render_key is frozen, so this is a permanent hit after the first
+    // frame — one uint64 compare, NO content-key string built and (via
+    // heterogeneous lookup) NO temporary string allocated. That is the
+    // whole point: it removes the O(tools) std::to_string key-build
+    // that even a g_panel_cache hit pays, which is what still scaled
+    // with run depth (O(run-length) key-builds per frame).
+    if (const std::shared_ptr<const maya::Element>* hit =
+            g_panel_render_memo.get(msg_id, render_key))
+        return maya::Element{*hit};   // shared handle: refcount bump
+
+    // Miss: build via the content-addressed path (which itself hits
+    // g_panel_cache across sub-turns with identical batch bytes, e.g.
+    // repeated identical edits), then record the resulting handle under
+    // the fast key so every later frame skips the key-build. Storing
+    // the SAME shared handle g_panel_cache returned keeps one stable
+    // control block — maya blits its cells cross-frame.
+    auto el = std::make_shared<const maya::Element>(
+        agent_timeline_element(tool_calls, spinner_frame, rail_color));
+    g_panel_render_memo.put(msg_id, render_key, el);
     return maya::Element{el};
 }
 

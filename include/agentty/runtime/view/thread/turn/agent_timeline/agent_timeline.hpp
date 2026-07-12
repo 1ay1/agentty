@@ -1,5 +1,7 @@
 #pragma once
+#include <cstdint>
 #include <span>
+#include <string_view>
 #include <maya/widget/agent_timeline.hpp>
 #include "agentty/runtime/model.hpp"
 
@@ -37,6 +39,22 @@ namespace agentty::ui {
 // (freeze_range stamps the same assistant_run_hash_id) stays a pure maya
 // cache hit — no scrollback-corruption surface.
 [[nodiscard]] maya::Element agent_timeline_element(
+    std::span<const ToolUse> tool_calls,
+    int spinner_frame,
+    maya::Color rail_color);
+
+// Memoized variant. Same result as agent_timeline_element, but keyed
+// FIRST on the sub-turn's stable MessageId + render_key (a single
+// uint64 compare) via a dedicated per-message panel memo. On a settled
+// sub-turn this skips the O(tools) content-key string build that even a
+// g_panel_cache hit would otherwise pay, so a long in-flight run whose
+// settled panels are re-emitted every frame stays flat with turn depth.
+// `msg_id` is Message::id.value; `render_key` is
+// Message::compute_render_key(). Falls through to the content-addressed
+// path (g_panel_cache) on a memo miss.
+[[nodiscard]] maya::Element agent_timeline_element_memoized(
+    std::string_view msg_id,
+    std::uint64_t render_key,
     std::span<const ToolUse> tool_calls,
     int spinner_frame,
     maya::Color rail_color);

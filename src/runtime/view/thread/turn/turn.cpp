@@ -976,13 +976,29 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
 // its own live_tail entry below the active assistant Turn (mirrors
 // agent_session's `Permission` sibling under the root vstack).
 void append_assistant_tool_panel(maya::Turn::Config& cfg,
+                                 const Message& msg,
                                  std::span<const ToolUse> tool_calls,
                                  const Model& m,
                                  const SpeakerStyle& style)
 {
     if (tool_calls.empty()) return;
+
+    // Route settled sub-turn panels through the dedicated per-message
+    // panel memo (g_panel_render_memo, agent_timeline.cpp). It is keyed
+    // on this message's stable id + compute_render_key() so a settled
+    // sub-turn is a single-uint64-compare hit — skipping even the
+    // O(tools) content-key string build a bare g_panel_cache hit would
+    // pay. That is what keeps per-frame view cost flat as an in-flight
+    // run accumulates hundreds of settled sub-turns (they stay in the
+    // live tail until settle and are re-emitted every frame). The memo
+    // lives next to g_panel_cache, NOT in the RAM-bounded ViewCache, so
+    // its depth is decoupled from markdown-tree retention. A running
+    // tool advances the render_key each frame → natural miss → rebuild
+    // (spinner animates), handled inside the memoized helper.
     const int frame = m.s.spinner.frame_index();
-    cfg.body.emplace_back(agent_timeline_element(tool_calls, frame, style.color));
+    cfg.body.emplace_back(agent_timeline_element_memoized(
+        msg.id.value, msg.compute_render_key(),
+        tool_calls, frame, style.color));
 }
 
 // Single-message body slot append: text (if any) then this message's
@@ -1007,7 +1023,7 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
                 .defer_tool_panel)
             return;
     }
-    append_assistant_tool_panel(cfg, tool_calls, m, style);
+    append_assistant_tool_panel(cfg, msg, tool_calls, m, style);
 }
 
 } // namespace
@@ -1181,6 +1197,7 @@ maya::Turn::Config turn_config_for_assistant_run(
         if (!m_i.tool_calls.empty() && !defer_panel) {
             append_assistant_tool_panel(
                 cfg,
+                m_i,
                 std::span<const ToolUse>{m_i.tool_calls},
                 m, style);
         }
