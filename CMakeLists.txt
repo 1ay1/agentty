@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(agentty VERSION 0.2.6 LANGUAGES CXX)
+project(agentty VERSION 0.2.7 LANGUAGES CXX)
 
 # CMake (as of 4.2) has no /std:c++26 mapping for MSVC yet. Ask for C++23
 # there and opt into /std:c++latest so MSVC 14.50+ exposes available C++26

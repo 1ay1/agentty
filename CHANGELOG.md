@@ -4,11 +4,17 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-12
+
 ### Added
 - **First-run onboarding starters.** On a genuine first run — thread history has loaded and there are no saved conversations yet — the welcome screen now shows a compact "New here? Try one of these" card with three concrete example prompts (understand the codebase / find-and-fix a bug / add a feature and run tests). It teaches the three things agentty is for so a brand-new user isn't staring at a blank composer wondering what to type. A returning user with any history never sees it, so the welcome stays clean. Gated on `!threads_loading && threads.empty()`, so it can't flash during the async thread-load at startup.
 
 ### Changed
 - **README refreshed.** Full install matrix (apt/dnf/zypper/AUR/apk/brew/scoop/winget + curl one-liner + from-source), a first-run note in Getting Started, the Windows-native Ctrl+G shell dispatch, and a maintainer "Releasing" section documenting the one-command `cut-release` flow.
+
+### Fixed
+- **The `agentty-linux-aarch64` binary now runs on Termux/Android and 64-bit Raspberry Pi.** The standalone aarch64 binary is built `-static-pie` (passed to *both* compile and link steps, working around the Alpine/musl GCC spec bug where link-only `-static-pie` picks `Scrt1.o` over `rcrt1.o` and drops the program header). The result is a fully static `ET_DYN` with no `PT_INTERP` and a valid `PT_PHDR` — so it loads on Android's PIE-only linker (no more `unexpected e_type: 2`), needs no external loader on Termux (no more `Could not find a PHDR`), and stays portable across every arm64 core down to a Cortex-A72 (`armv8-a` baseline via `MAYA_NATIVE_TUNING=OFF`). One file runs on glibc, musl, Termux, and 64-bit Pi OS alike.
+- **Release assets no longer silently vanish behind a draft.** `gh release view` succeeds on a *draft* release, so a draft `vX.Y.Z` left by a prior cancelled run (or auto-created on tag push) would absorb every `gh release upload` while staying invisible — public download URLs 404 and the unauthenticated API omits it, making a green CI run look like it produced nothing. The release job now always `gh release edit --draft=false --prerelease=false` right after ensuring the release exists, so a leftover draft can never swallow uploads again.
 
 ## [0.2.6] - 2026-07-07
 
