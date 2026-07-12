@@ -253,6 +253,12 @@ struct RetryStream {};
 struct ToolExecOutput {
     ToolCallId id;
     std::expected<std::string, tools::ToolError> result;
+    // Structured file edit computed by the tool (edit / write): path,
+    // before/after contents, hunks. Feeds m.d.pending_changes so the
+    // diff-review pane + changes strip reflect what the agent actually
+    // touched this session. nullopt for tools that don't mutate files
+    // and for failed runs.
+    std::optional<FileChange> change;
 };
 // Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can

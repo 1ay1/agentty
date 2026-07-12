@@ -17,6 +17,7 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/diff/diff.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
 
@@ -74,6 +75,40 @@ void arm_reconcile_cooldown(Model& m) {
     if (m.ui.settle_cooldown_ticks < kReconcileTicks)
         m.ui.settle_cooldown_ticks = kReconcileTicks;
     ::maya::request_animation_frame();
+}
+
+// Fold a completed tool's FileChange into m.d.pending_changes so the
+// changes strip + diff-review pane track the agent's cumulative session
+// edits. Coalesced PER PATH: a second edit to the same file replaces the
+// entry but keeps the ORIGINAL original_contents (the review baseline is
+// "since the user last looked", not "since the last tool call") and
+// recomputes hunks across the whole before→after span. Hunk-status
+// choices the user already made on the stale entry are dropped by design
+// — they were made against hunks that no longer exist.
+void fold_pending_change(Model& m, FileChange&& ch) {
+    if (ch.path.empty()) return;
+    auto it = std::find_if(m.d.pending_changes.begin(),
+                           m.d.pending_changes.end(),
+                           [&](const FileChange& fc) {
+                               return fc.path == ch.path;
+                           });
+    if (it == m.d.pending_changes.end()) {
+        m.d.pending_changes.push_back(std::move(ch));
+        return;
+    }
+    // Chain: keep the existing baseline, adopt the new after-state, and
+    // recompute the structured hunks over the full span. If the file has
+    // returned to its baseline content exactly (agent undid itself), the
+    // change is no longer pending — drop the entry.
+    if (it->original_contents == ch.new_contents) {
+        m.d.pending_changes.erase(it);
+        return;
+    }
+    FileChange merged = diff::compute(ch.path, it->original_contents,
+                                      ch.new_contents);
+    merged.original_contents = std::move(it->original_contents);
+    merged.new_contents      = std::move(ch.new_contents);
+    *it = std::move(merged);
 }
 
 } // namespace
@@ -245,6 +280,12 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     for (const auto& tc : msg_.tool_calls)
                         if (tc.id == e.id && tc.name == "todo")
                             sync_todo_state_from_args(m, tc.args);
+            }
+            // Structured file edit → session change set (feeds the
+            // changes strip + diff-review). Only successful runs carry
+            // a change; per-path coalescing keeps one entry per file.
+            if (e.result && e.change) {
+                fold_pending_change(m, std::move(*e.change));
             }
             apply_tool_output(m, e.id, std::move(e.result));
             // No mid-run freeze or trim here. The single freeze site is
