@@ -562,11 +562,16 @@ static void scaling_breakdown() {
             t.id   = ToolCallId{"e_" + std::to_string(++c)};
             t.name = ToolName{"edit"};
             nlohmann::json edits = nlohmann::json::array();
-            edits.push_back({{"old_text", code_block(6)},
-                             {"new_text", code_block(6)}});
+            const int bl = std::getenv("PROBE_BODY_LINES")
+                             ? std::atoi(std::getenv("PROBE_BODY_LINES")) : 6;
+            edits.push_back({{"old_text", code_block(bl)},
+                             {"new_text", code_block(bl)}});
             t.args = {{"path", "src/foo.cpp"}, {"edits", edits}};
             auto now = steady_clock::now();
-            t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
+            std::string diff = "```diff\n";
+            for (int l = 0; l < bl; ++l) diff += "-old line " + std::to_string(l) + "\n+new line " + std::to_string(l) + "\n";
+            diff += "```";
+            t.status = ToolUse::Done{now - milliseconds{5}, now, diff};
             a.tool_calls.push_back(std::move(t));
             m.d.current.messages.push_back(std::move(a));
         }
@@ -588,10 +593,12 @@ static void scaling_breakdown() {
         // events out of paint range, so their painted-cell cache never
         // populates and every frame re-renders them — a harness
         // artifact, not an app cost.
-        const int canvas_h = 40000;
+        const int canvas_h = std::getenv("PROBE_CANVAS_H")
+                                ? std::atoi(std::getenv("PROBE_CANVAS_H")) : 40000;
         maya::StylePool pool;
         maya::Canvas canvas(120, canvas_h, &pool);
         double vbuild = 1e9, paint = 1e9;
+        std::uint64_t miss_steady = 0;
         // Prime twice so maya's hash-keyed component cache captures the
         // frozen entries' cells (the warm/blit path the real loop hits).
         for (int w = 0; w < 2; ++w) {
@@ -600,6 +607,8 @@ static void scaling_breakdown() {
             maya::render_tree(r, canvas, pool, maya::theme::dark, true);
         }
         for (int it = 0; it < 9; ++it) {
+            const std::uint64_t m0 =
+                maya::render_detail::component_render_calls();
             auto t1 = steady_clock::now();
             auto r = agentty::app::AgenttyApp::view(m);
             auto t2 = steady_clock::now();
@@ -608,10 +617,13 @@ static void scaling_breakdown() {
             auto t3 = steady_clock::now();
             vbuild = std::min(vbuild, ms(t2 - t1));
             paint  = std::min(paint,  ms(t3 - t2));
+            miss_steady = std::max(miss_steady,
+                maya::render_detail::component_render_calls() - m0);
         }
-        std::printf("%-8d | %12.3f | %12.3f | %12.3f | %5zu live | %6zu rows\n",
+        std::printf("%-8d | %12.3f | %12.3f | %12.3f | %5zu live | %6zu rows | miss=%llu\n",
                     n, vbuild, paint, vbuild + paint,
-                    live_msgs, m.ui.frozen.row_total());
+                    live_msgs, m.ui.frozen.row_total(),
+                    (unsigned long long)miss_steady);
     }
 }
 

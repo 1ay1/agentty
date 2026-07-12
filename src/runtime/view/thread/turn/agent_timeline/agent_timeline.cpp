@@ -276,6 +276,14 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         // into a cheap copy per settled card. Emitted bytes are identical
         // to a fresh build, so the freeze handoff stays a pure maya hit.
         maya::ToolBodyPreview::Config body;
+        // For a terminal tool we keep the body behind a shared_ptr (the
+        // same immutable object the body-config cache stores) and hand it
+        // to maya via body_shared — no per-frame deep copy of the body
+        // text here OR inside append_event's terminal closure. For a
+        // non-terminal tool the body is still built fresh and moved into
+        // `.body` by value (it mutates every frame, so there's nothing to
+        // share).
+        std::shared_ptr<const maya::ToolBodyPreview::Config> body_sp;
         std::string body_key;
         const bool cacheable = tc.is_terminal();
         if (cacheable) {
@@ -289,16 +297,19 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             body_key.push_back('|');
             body_key += grep_sig;
             if (auto hit = g_body_cache.get(body_key)) {
-                body = *hit;  // copy the cached (immutable) build
+                body_sp = hit;  // SHARE the cached (immutable) build
             } else {
-                body = tool_body_preview_config(tc, &grep_hits);
-                g_body_cache.put(
-                    body_key,
-                    std::make_shared<const maya::ToolBodyPreview::Config>(body));
+                body_sp = std::make_shared<const maya::ToolBodyPreview::Config>(
+                    tool_body_preview_config(tc, &grep_hits));
+                g_body_cache.put(body_key, body_sp);
             }
         } else {
             body = tool_body_preview_config(tc, &grep_hits);
         }
+
+        // Event-hash / height inputs read from whichever body we have.
+        const maya::ToolBodyPreview::Config& body_ref =
+            body_sp ? *body_sp : body;
 
         // Key: tool-call id + status + output size + body-height inputs
         // that aren't implied by output().size() (highlight_lines).
@@ -312,8 +323,8 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
               .add(std::string_view{tc.id.value})
               .add(static_cast<std::uint64_t>(tc.status.index()))
               .add(static_cast<std::uint64_t>(tc.output().size()))
-              .add(static_cast<std::uint64_t>(body.highlight_lines.size()));
-            for (int hl : body.highlight_lines)
+              .add(static_cast<std::uint64_t>(body_ref.highlight_lines.size()));
+            for (int hl : body_ref.highlight_lines)
                 kb.add(static_cast<std::uint64_t>(hl));
             event_hash_id = kb.build();
         }
@@ -330,7 +341,11 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             .elapsed_seconds = tool_elapsed(tc),
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
+            // Terminal tools: body lives in body_shared (maya's terminal
+            // closure captures it by ref-bump, no copy). Non-terminal:
+            // move the fresh build into `.body` (it re-renders anyway).
             .body            = std::move(body),
+            .body_shared     = std::move(body_sp),
             .hash_id         = event_hash_id,
         });
     }
