@@ -57,6 +57,7 @@
 #include <chrono>
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -178,6 +179,24 @@ struct MessageMdCache {
     // grow+mutation — maya's HardReset arm (oracle-proven: the one-frame
     // exit added 4 gate recoveries at 60x18).
     bool defer_exit_finished = false;
+
+    // ── Memoized assistant-turn elapsed (header meta) ──
+    //
+    // assistant_elapsed() reverse-scans m.d.current.messages to the
+    // previous User message to compute the turn's wall-clock duration.
+    // That scan is O(sub-turns since the last user turn) = O(turn
+    // length), run EVERY frame for the run head while the turn is in
+    // flight — a genuine per-frame cost that grows with turn depth
+    // (the whole in-flight turn stays in the live tail until settle;
+    // it is never frozen mid-turn — see frozen.cpp). The value only
+    // depends on two immutable timestamps (this head's + the prior
+    // user message's), so once computed it never changes. Cache it
+    // here keyed on the head message's id and skip the scan on every
+    // subsequent frame. `elapsed_valid` distinguishes "cached
+    // nullopt" (no prior user turn / out-of-range dt) from "not yet
+    // computed".
+    bool                 elapsed_valid = false;
+    std::optional<float> elapsed_cached{};
 };
 
 struct TurnConfigCache {
