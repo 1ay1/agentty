@@ -7,6 +7,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
 
@@ -15,6 +16,8 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
 
 namespace agentty::app::detail {
@@ -304,7 +307,18 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // re-prompt. Mirrors Zed's per-session allow-list with live
             // sibling propagation.
             m.d.session_grants.insert(name.value);
-            m.s.status = name.value + ": always allowed this session";
+            // Persist the grant (Zed's always_allow rules): reload-proof.
+            // Load-modify-save so we never clobber provider keys etc.
+            {
+                auto s = deps().load_settings();
+                if (std::find(s.always_allow_tools.begin(),
+                              s.always_allow_tools.end(), name.value)
+                        == s.always_allow_tools.end()) {
+                    s.always_allow_tools.push_back(name.value);
+                    deps().save_settings(s);
+                }
+            }
+            m.s.status = name.value + ": always allowed";
             m.s.status_until = std::chrono::steady_clock::now()
                              + std::chrono::seconds{3};
             with_live_tool(m, id, [&](ToolUse& tc) {

@@ -44,6 +44,12 @@ struct Settings {
     // Reasoning effort tier (output_config.effort wire value, e.g. "high";
     // empty = off, the default). Reloaded into Model::effort at startup.
     std::string          effort;
+    // Tool names the user granted "always allow" (PermissionApproveAlways).
+    // Persisted so the grant survives restarts — Zed's always_allow rules.
+    // Loaded into Model::session_grants at init; note CycleProfile still
+    // clears the in-memory set for the session (tightening the profile
+    // re-arms prompts), but the grants reload on next launch.
+    std::vector<std::string> always_allow_tools;
 };
 
 template <class S>
