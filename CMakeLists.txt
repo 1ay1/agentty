@@ -845,14 +845,35 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
         target_link_options(agentty PRIVATE
             -static-libstdc++ -static-libgcc)
         if(AGENTTY_FULLY_STATIC)
-            # -static-pie (not plain -static): produces an ET_DYN, no-interp,
-            # fully self-contained binary. Plain -static emits ET_EXEC, which
-            # Android/Bionic (Termux) refuses to exec ("unexpected e_type: 2").
-            # static-PIE loads on any aarch64 Linux kernel AND on Android, so
-            # one artifact covers glibc/musl distros + Termux. Requires a musl
-            # toolchain built with static-pie support (Alpine's, or
-            # aarch64-linux-musl-cross).
+            # -static-pie: produces an ET_DYN, no-INTERP, fully self-contained
+            # binary that carries its own PT_PHDR for self-relocation. Plain
+            # -static emits ET_EXEC, which Android/Bionic (Termux) refuses to
+            # exec ("unexpected e_type: 2"); a bare -pie against shared libc
+            # emits a DYN that keeps a NEEDED + drops the PHDR when the static
+            # startup is half-selected, aborting with "Could not find a PHDR".
+            # static-PIE done right loads on any aarch64 Linux kernel AND on
+            # Android — one artifact covers glibc/musl distros + Termux.
+            #
+            # Force it through the driver AND the linker so GCC can't silently
+            # downgrade to a dynamic-PIE link when it picks the wrong CRT
+            # startup object: -static-pie selects rcrt1.o + emits the self-
+            # relocating PT_PHDR; -no-pie is NOT added anywhere for this path.
+            # Requires a toolchain with the static-pie CRT (Alpine musl,
+            # aarch64-linux-musl-cross) — all third-party deps must be .a
+            # (openssl-libs-static, nghttp2-static, zlib-static).
             target_link_options(agentty PRIVATE -static-pie)
+            # Alpine's default-PIE GCC has a known spec bug (Debian #996326,
+            # musl ML 2021): with -static-pie it STILL passes -dynamic-linker
+            # and selects Scrt1.o (dynamic-PIE startup) instead of rcrt1.o.
+            # The result is an ET_DYN that keeps NEEDED libc + a bogus INTERP
+            # request but no self-relocating PT_PHDR — it aborts at exec with
+            # "Could not find a PHDR: broken executable?" (this is precisely
+            # what shipped in the first v0.2.6 aarch64 asset). Forcing
+            # --no-dynamic-linker makes the linker drop the interpreter and
+            # emit the self-contained static-PIE layout rcrt1.o expects, so
+            # the binary carries its own PT_PHDR and loads on bare kernels +
+            # Android/Bionic (Termux) alike.
+            target_link_options(agentty PRIVATE -Wl,--no-dynamic-linker)
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
