@@ -1540,6 +1540,8 @@ if(AGENTTY_BUILD_TESTS)
         reveal_pacing_test
         stream_async_freeze_test
         reveal_smoothness_probe
+        md_shape_sweep
+        md_cache_probe
         composer_edit_test
         scheduler_path_test
         table_render_test
