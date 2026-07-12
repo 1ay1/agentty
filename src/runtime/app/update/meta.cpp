@@ -17,6 +17,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mem.hpp"
+#include "agentty/runtime/picker.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/workspace/checkpoint.hpp"
 
@@ -169,7 +170,21 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.d.current.updated_at = std::chrono::system_clock::now();
             deps().save_thread(m.d.current);
 
+            // The worktree was just rewritten wholesale — every pending
+            // FileChange describes before/after states that no longer
+            // exist on disk. Reviewing (or worse, "rejecting" → writing
+            // stale bytes back) against them would corrupt the restored
+            // files. Drop the set; the changes strip resets with it.
+            m.d.pending_changes.clear();
+            m.ui.diff_review = ui::pick::Closed{};
+
+            // Queued messages (typed while a turn streamed, preserved by
+            // CancelStream) are the user's words — they survive the
+            // rewind. reset_composer_draft would wipe them; stash first.
+            auto queued_keep = std::move(m.ui.composer.queued);
+
             reset_composer_draft(m.ui.composer);
+            m.ui.composer.queued = std::move(queued_keep);
             m.ui.composer.text   = std::move(refill);
             m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
             if (m.ui.composer.text.find('\n') != std::string::npos)

@@ -654,7 +654,12 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
             try {
                 auto result = tool::DynamicDispatch::execute(name.value, args);
                 if (result) {
-                    dispatch(ToolExecOutput{id, std::move(result->text)});
+                    ToolExecOutput out{id, std::move(result->text)};
+                    // Structured edit (edit/write carry before/after +
+                    // hunks) rides the same Msg so the reducer can fold
+                    // it into m.d.pending_changes for diff review.
+                    out.change = std::move(result->change);
+                    dispatch(std::move(out));
                 } else {
                     dispatch(ToolExecOutput{id,
                         std::unexpected(std::move(result).error())});
