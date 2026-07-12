@@ -17,6 +17,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/workspace/checkpoint.hpp"
 
 namespace agentty::app::detail {
 
@@ -220,6 +221,22 @@ Step submit_message(Model m) {
         m.d.current.title = deps().title_from(title_src);
     }
 
+    // ── Git checkpoint (Zed-agent behavior) ─────────────────────────
+    // Stamp a checkpoint id on the user message and snapshot the whole
+    // worktree (tracked + untracked, .gitignore respected) as a pinned
+    // parentless commit BEFORE the agent starts mutating files. The
+    // snapshot itself runs on an isolated worker (git add -A can take a
+    // moment on a big repo); only the cheap repo-ness probe + id stamp
+    // happen here. The view renders a checkpoint divider above the turn
+    // (cfg.checkpoint_above), and "Rewind to checkpoint" in the palette
+    // restores the files + truncates the transcript back to this point.
+    // Outside a git repo this is a no-op — no id, no divider, no worker.
+    std::optional<std::string> checkpoint_to_create;
+    if (workspace::in_git_repo()) {
+        user.checkpoint_id  = CheckpointId{user.id.value};
+        checkpoint_to_create = user.id.value;
+    }
+
     // Freeze the prior turn AND the freshly-pushed User in one pass —
     // the agent_session SessionStart analog (it pushes gap() + the user
     // Turn into m.frozen the moment the user submits). The prior turn
@@ -296,6 +313,18 @@ Step submit_message(Model m) {
     // them, surfacing as duplicate cards in scrollback.
     std::vector<Cmd<Msg>> parts;
     if (!trim.is_none()) parts.push_back(std::move(trim));
+    // Worktree snapshot rides the same batch as the stream launch: it
+    // runs concurrently with the request's TTFB window, so by the time
+    // the model asks for its first file edit the checkpoint is pinned.
+    // Failure is silent by design — the rewind path re-verifies the ref
+    // exists and surfaces a toast there instead.
+    if (checkpoint_to_create) {
+        parts.push_back(Cmd<Msg>::task_isolated(
+            [id = std::move(*checkpoint_to_create)]
+            (std::function<void(Msg)>) {
+                (void)workspace::create_checkpoint(id);
+            }));
+    }
     parts.push_back(std::move(launch));
     auto cmd = parts.size() == 1
         ? std::move(parts.front())

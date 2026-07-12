@@ -468,6 +468,12 @@ struct CompactContext {};
 
 struct CycleProfile {};
 struct RestoreCheckpoint { CheckpointId id; };
+// Completion of the async git-restore kicked off by RestoreCheckpoint.
+// `ok=false` carries a human-readable reason in `error`. The transcript
+// truncation + composer refill happen HERE (not at dispatch) so the
+// worktree is already byte-identical to the snapshot when the user sees
+// their old prompt reappear in the composer.
+struct CheckpointRestored { CheckpointId id; bool ok = false; std::string error; };
 struct ScrollThread { int delta; };
 struct ToggleToolExpanded { ToolCallId id; };
 
@@ -563,7 +569,7 @@ using DiffReviewMsg = std::variant<
     AcceptHunk, RejectHunk, AcceptAllChanges, RejectAllChanges>;
 
 using MetaMsg = std::variant<
-    CompactContext, CycleProfile, RestoreCheckpoint,
+    CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
     ScrollThread, ToggleToolExpanded,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen>;
 

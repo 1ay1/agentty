@@ -437,6 +437,7 @@ set(AGENTTY_IO_SOURCES
 set(AGENTTY_WORKSPACE_SOURCES
     src/workspace/files.cpp
     src/workspace/symbols.cpp
+    src/workspace/checkpoint.cpp
 )
 
 set(AGENTTY_AIRGAP_SOURCES
