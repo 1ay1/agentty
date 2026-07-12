@@ -1340,6 +1340,15 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME reveal_smoothness_probe COMMAND reveal_smoothness_probe)
     set_tests_properties(reveal_smoothness_probe PROPERTIES TIMEOUT 120)
 
+    # md_shape_sweep — streams a corpus of tricky markdown shapes at several
+    # chunk sizes and fails on ANY frame where rendered height SHRINKS while
+    # live (the "composer bounces during md streaming" flicker class).
+    add_executable(md_shape_sweep EXCLUDE_FROM_ALL
+        tests/md_shape_sweep.cpp)
+    target_link_libraries(md_shape_sweep PRIVATE maya::maya)
+    add_test(NAME md_shape_sweep COMMAND md_shape_sweep)
+    set_tests_properties(md_shape_sweep PROPERTIES TIMEOUT 120)
+
     # tool_boundary_burst_probe — dev probe (NOT a ctest entry). RECREATES
     # the "long turn: md reveal sticks, then BURSTS when a tool use lands"
     # bug headlessly: streams a long body through the production pacing
