@@ -275,20 +275,43 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
         switch (sk) {
-            case SpecialKey::Escape: return CloseDiffReview{};
-            case SpecialKey::Up:     return DiffReviewMove{-1};
-            case SpecialKey::Down:   return DiffReviewMove{+1};
-            case SpecialKey::Left:   return DiffReviewPrevFile{};
-            case SpecialKey::Right:  return DiffReviewNextFile{};
+            case SpecialKey::Escape:   return CloseDiffReview{};
+            case SpecialKey::Enter:    return DiffReviewFinish{};
+            case SpecialKey::Up:       return DiffReviewMove{-1};
+            case SpecialKey::Down:     return DiffReviewMove{+1};
+            case SpecialKey::Left:     return DiffReviewPrevFile{};
+            case SpecialKey::Right:    return DiffReviewNextFile{};
+            // Tab mirrors → (cycle files) — muscle memory from tabbed UIs.
+            case SpecialKey::Tab:      return DiffReviewNextFile{};
+            case SpecialKey::BackTab:  return DiffReviewPrevFile{};
+            case SpecialKey::Home:     return DiffReviewJump{false};
+            case SpecialKey::End:      return DiffReviewJump{true};
+            // Page WITHIN the focused hunk's diff body (tall hunks).
+            case SpecialKey::PageUp:   return DiffReviewBodyScroll{-8};
+            case SpecialKey::PageDown: return DiffReviewBodyScroll{+8};
             default: break;
         }
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         switch (ck->codepoint) {
+            // Decide the focused hunk (auto-advances to next pending).
             case 'y': case 'Y': return AcceptHunk{};
             case 'n': case 'N': return RejectHunk{};
+            // Undo a decision — back to pending, cursor stays.
+            case 'u': case 'U': return DiffReviewUndoHunk{};
+            // Whole-file decisions (advance to next file with pending).
+            case 'f': case 'F': return DiffReviewAcceptFile{};
+            case 'd': case 'D': return DiffReviewRejectFile{};
+            // Whole-set decisions.
             case 'a': case 'A': return AcceptAllChanges{};
             case 'x': case 'X': return RejectAllChanges{};
+            // Vim navigation.
+            case 'j':           return DiffReviewMove{+1};
+            case 'k':           return DiffReviewMove{-1};
+            case 'h':           return DiffReviewPrevFile{};
+            case 'l':           return DiffReviewNextFile{};
+            case 'g':           return DiffReviewJump{false};
+            case 'G':           return DiffReviewJump{true};
         }
     }
     return std::nullopt;

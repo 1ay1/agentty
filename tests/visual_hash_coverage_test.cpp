@@ -189,6 +189,28 @@ const std::vector<Axis>& visual_axes() {
         {"diff_review hunk move", [](Model& m) {
             m.ui.diff_review = agentty::ui::pick::OpenAtCell{1, 2};
         }},
+        {"diff_review body scroll", [](Model& m) {
+            m.ui.diff_review = agentty::ui::pick::OpenAtCell{0, 0, 5};
+        }},
+        {"pending change appears", [](Model& m) {
+            agentty::FileChange fc;
+            fc.path = "src/foo.cpp";
+            fc.added = 1;
+            fc.hunks.push_back(agentty::Hunk{});
+            m.d.pending_changes.push_back(std::move(fc));
+        }},
+        {"hunk decision flips", [](Model& m) {
+            agentty::FileChange fc;
+            fc.path = "src/foo.cpp";
+            fc.added = 1;
+            agentty::Hunk hk;
+            hk.status = agentty::Hunk::Status::Accepted;
+            fc.hunks.push_back(std::move(hk));
+            m.d.pending_changes.push_back(std::move(fc));
+        }},
+        {"review_enabled toggles", [](Model& m) {
+            m.d.review_enabled = false;
+        }},
         {"command_palette opens", [](Model& m) {
             m.ui.command_palette = agentty::palette::Open{};
         }},

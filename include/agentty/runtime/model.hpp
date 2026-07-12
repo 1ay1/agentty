@@ -161,6 +161,12 @@ struct Model {
         Effort                 effort = Effort::None;
 
         std::vector<FileChange>          pending_changes;
+        // Diff-review workflow toggle (mirrors Settings::review_enabled;
+        // persisted through deps().save_settings on flip). When false the
+        // fold into pending_changes is skipped entirely — edits are
+        // auto-accepted, the changes strip stays empty, and OpenDiffReview
+        // toasts a pointer at the palette toggle instead of opening.
+        bool                             review_enabled = true;
         std::optional<PendingPermission> pending_permission;
 
         // Session-scoped "always allow" grants, keyed by tool name

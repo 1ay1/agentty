@@ -1,0 +1,9 @@
+maya/include/maya/render/serialize.hpp
+maya/src/render/serialize.cpp
+maya/src/render/frame_bytes.cpp
+maya/src/render/scrollback_ledger.cpp
+maya/include/maya/app/app.hpp
+agentty/src/runtime/app/update/picker.cpp
+agentty/src/runtime/app/update/frozen.cpp
+agentty/src/runtime/app/update/modal.cpp
+agentty/src/runtime/app/update/meta.cpp

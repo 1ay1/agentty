@@ -284,7 +284,10 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // Structured file edit → session change set (feeds the
             // changes strip + diff-review). Only successful runs carry
             // a change; per-path coalescing keeps one entry per file.
-            if (e.result && e.change) {
+            // With review disabled the edit is auto-accepted: the tool
+            // already wrote the new bytes, so simply not tracking it IS
+            // acceptance — no strip, no review pane, no revert baseline.
+            if (e.result && e.change && m.d.review_enabled) {
                 fold_pending_change(m, std::move(*e.change));
             }
             apply_tool_output(m, e.id, std::move(e.result));

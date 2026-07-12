@@ -77,6 +77,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::ReviewChanges: return agentty::app::update(std::move(m), Msg{OpenDiffReview{}});
                 case Command::AcceptAll:     return agentty::app::update(std::move(m), Msg{AcceptAllChanges{}});
                 case Command::RejectAll:     return agentty::app::update(std::move(m), Msg{RejectAllChanges{}});
+                case Command::ToggleReview:  return agentty::app::update(std::move(m), Msg{ToggleDiffReview{}});
                 case Command::CycleProfile:  return agentty::app::update(std::move(m), Msg{CycleProfile{}});
                 case Command::OpenModels:    return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
                 case Command::OpenProviders: return agentty::app::update(std::move(m), Msg{OpenProviderPicker{}});

@@ -88,6 +88,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
     m.d.effort  = effort_from_wire(settings.effort);
+    m.d.review_enabled = settings.review_enabled;
     // Rehydrate persisted "always allow" tool grants (Zed's always_allow
     // rules). PermissionApproveAlways appends to this list; loading it here
     // means a grant given last week still suppresses the prompt today.
