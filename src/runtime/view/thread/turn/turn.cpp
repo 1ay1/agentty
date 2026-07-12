@@ -925,16 +925,29 @@ std::string format_turn_meta(const Message& msg, int turn_num,
 //    user message timestamp to this one.
 std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
     if (msg.role != Role::Assistant) return std::nullopt;
+    // Memoized: the result depends only on msg.timestamp and the prior
+    // User message's timestamp — both immutable once this message
+    // exists — so a settled value never changes. Without the memo the
+    // reverse scan below is O(sub-turns since the last user turn) run
+    // every frame for the run head, which grows with turn depth (the
+    // whole in-flight turn sits in the live tail until settle). Cache
+    // on the head message's per-message slot; return the cached value
+    // on every subsequent frame.
+    auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
+    if (cache.elapsed_valid) return cache.elapsed_cached;
+    std::optional<float> result;
     for (std::size_t i = m.d.current.messages.size(); i-- > 0;) {
         if (&m.d.current.messages[i] == &msg) continue;
         if (m.d.current.messages[i].role == Role::User) {
             auto dt = std::chrono::duration<float>(
                 msg.timestamp - m.d.current.messages[i].timestamp).count();
-            if (dt > 0.0f && dt < 3600.0f) return dt;
-            return std::nullopt;
+            if (dt > 0.0f && dt < 3600.0f) result = dt;
+            break;
         }
     }
-    return std::nullopt;
+    cache.elapsed_cached = result;
+    cache.elapsed_valid  = true;
+    return result;
 }
 
 // Append one Assistant Message's body slots (markdown + tools panel +

@@ -111,14 +111,24 @@ public:
     // 160→320 knee in the o1_probe scaling table.
     static constexpr std::size_t kCap = 512;
 
-    const maya::Element* get(const std::string& key) {
+    // Returns the cached shared Element handle, or nullptr on miss.
+    // Stored as shared_ptr<const Element> so a cache hit is a refcount
+    // bump handed to maya's shared_ptr Element ctor (a ComponentElement
+    // with a control-block-keyed hash_id) instead of a DEEP COPY of the
+    // whole panel subtree. The panel is a BoxElement whose children are
+    // vector<Element> (per-event rows, each with its own body rows), so
+    // copying it by value clones the entire tree every frame for every
+    // settled sub-turn in a long in-flight run — O(Σ panel nodes)/frame.
+    // Sharing collapses that to O(1) per settled panel: maya blits the
+    // wrapped subtree's cells from its cross-frame component cache.
+    const std::shared_ptr<const maya::Element>* get(const std::string& key) {
         auto it = map_.find(key);
         if (it == map_.end()) return nullptr;
         lru_.splice(lru_.begin(), lru_, it->second.lru_it);
         return &it->second.el;
     }
 
-    void put(const std::string& key, maya::Element el) {
+    void put(const std::string& key, std::shared_ptr<const maya::Element> el) {
         auto it = map_.find(key);
         if (it != map_.end()) {
             it->second.el = std::move(el);
@@ -135,8 +145,8 @@ public:
 
 private:
     struct Entry {
-        maya::Element                    el;
-        std::list<std::string>::iterator lru_it;
+        std::shared_ptr<const maya::Element> el;
+        std::list<std::string>::iterator     lru_it;
     };
     std::unordered_map<std::string, Entry> map_;
     std::list<std::string>                 lru_;
@@ -564,13 +574,14 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
         key += std::to_string(tc.compute_render_key());
     }
 
-    if (const maya::Element* hit = g_panel_cache.get(key))
-        return *hit;   // copy the prebuilt, byte-stable panel Element
+    if (const std::shared_ptr<const maya::Element>* hit = g_panel_cache.get(key))
+        return maya::Element{*hit};   // shared handle: refcount bump, no tree copy
 
-    maya::Element el = maya::AgentTimeline{
-        agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build();
+    auto el = std::make_shared<const maya::Element>(
+        maya::AgentTimeline{
+            agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build());
     g_panel_cache.put(key, el);
-    return el;
+    return maya::Element{el};
 }
 
 } // namespace agentty::ui
