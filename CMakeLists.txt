@@ -615,6 +615,13 @@ else()
         # initializers (a -Wextra default) doesn't model that.
         -Wno-missing-field-initializers
     )
+    # Clang 18+ split partial *designated* initializers into their own
+    # warning that -Wno-missing-field-initializers no longer covers. Same
+    # intentional pattern, same benign default-init — suppress it too.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${tgt} PRIVATE
+            -Wno-missing-designated-field-initializers)
+    endif()
     # GCC -Wmaybe-uninitialized produces false positives on std::variant moves
     # of designated-initialized aggregates (maya's Element{TextElement{...}} pattern).
     # The warnings escape -isystem because they fire during late optimization.
