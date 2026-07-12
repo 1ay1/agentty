@@ -50,6 +50,12 @@ struct Settings {
     // clears the in-memory set for the session (tightening the profile
     // re-arms prompts), but the grants reload on next launch.
     std::vector<std::string> always_allow_tools;
+    // Diff-review workflow toggle. When false, completed edits are
+    // treated as auto-accepted: nothing accumulates in the pending
+    // change set, the changes strip stays hidden, and Ctrl+R points the
+    // user at the palette toggle. Flipped by ToggleDiffReview (command
+    // palette → "Toggle diff review"); default on.
+    bool review_enabled = true;
 };
 
 template <class S>

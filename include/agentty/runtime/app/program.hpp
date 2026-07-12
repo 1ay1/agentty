@@ -99,6 +99,22 @@ struct AgenttyApp {
         mix(static_cast<std::uint64_t>(m.d.profile));
         mix_str(m.d.model_id.value);
         mix(m.d.pending_permission ? 1ULL : 0ULL);
+        // Pending change set — feeds the changes strip AND the diff-review
+        // pane. Per-hunk decision flips (AcceptHunk/RejectHunk) mutate ONLY
+        // a Hunk::Status deep inside this vector; without mixing it the
+        // render gate eats the repaint and "y" appears dead until the next
+        // caret blink. Bounded: one entry per touched file, a handful of
+        // hunks each.
+        mix(m.d.pending_changes.size());
+        for (const auto& fc : m.d.pending_changes) {
+            mix_str(fc.path);
+            mix(static_cast<std::uint64_t>(fc.added));
+            mix(static_cast<std::uint64_t>(fc.removed));
+            mix(fc.hunks.size());
+            for (const auto& hk : fc.hunks)
+                mix(static_cast<std::uint64_t>(hk.status));
+        }
+        mix(m.d.review_enabled ? 1ULL : 0ULL);
 
         // ── Session / phase.
         mix(static_cast<std::uint64_t>(m.s.phase.index()));
@@ -150,6 +166,7 @@ struct AgenttyApp {
         if (auto* c = ui::pick::opened(m.ui.diff_review)) {
             mix(static_cast<std::uint64_t>(c->file_index));
             mix(static_cast<std::uint64_t>(c->hunk_index));
+            mix(static_cast<std::uint64_t>(c->body_scroll));
         }
         mix(static_cast<std::uint64_t>(m.ui.command_palette.index()));
         if (auto* o = opened(m.ui.command_palette)) {

@@ -31,8 +31,10 @@ struct Closed {};
 struct OpenAt { int index = 0; };
 using OneAxis = std::variant<Closed, OpenAt>;
 
-// Two-axis picker (diff review: file × hunk).
-struct OpenAtCell { int file_index = 0; int hunk_index = 0; };
+// Two-axis picker (diff review: file × hunk). `body_scroll` is the
+// scroll offset (in diff-body lines) WITHIN the focused hunk, for hunks
+// taller than the review pane's body window; reset on any cursor move.
+struct OpenAtCell { int file_index = 0; int hunk_index = 0; int body_scroll = 0; };
 using TwoAxis = std::variant<Closed, OpenAtCell>;
 
 // Modal-style picker that toggles open/close without a cursor (e.g.

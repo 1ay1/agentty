@@ -1,0 +1,880 @@
+% !TEX program = xelatex
+% The Frozen Row — a plain-English picture book about how a terminal
+% AI assistant never scrambles your screen history.
+% Build:  xelatex -interaction=nonstopmode frozen-row.tex  (run twice for TOC)
+\documentclass[11pt,twoside]{book}
+
+% ---------- Fonts (XeLaTeX + fontspec) ----------
+\usepackage{fontspec}
+\newcommand{\tgpath}{/usr/share/texmf-dist/fonts/opentype/public/tex-gyre/}
+\setmainfont{texgyrepagella-regular.otf}[
+  Path=\tgpath,
+  BoldFont=texgyrepagella-bold.otf,
+  ItalicFont=texgyrepagella-italic.otf,
+  BoldItalicFont=texgyrepagella-bolditalic.otf,
+  Numbers=OldStyle,
+  Ligatures=TeX ]
+\setsansfont{texgyreheros-regular.otf}[
+  Path=\tgpath,
+  BoldFont=texgyreheros-bold.otf,
+  ItalicFont=texgyreheros-italic.otf,
+  BoldItalicFont=texgyreheros-bolditalic.otf,
+  Scale=0.92 ]
+\newfontfamily\codefont{JetBrainsMono Nerd Font}[
+  Scale=0.82,
+  Ligatures=NoCommon ]
+
+% ---------- Page geometry ----------
+\usepackage[
+  paperwidth=6.5in, paperheight=9.25in,
+  inner=0.85in, outer=0.7in, top=0.85in, bottom=0.85in,
+  headsep=14pt, footskip=26pt ]{geometry}
+
+% ---------- Colors ----------
+\usepackage[table]{xcolor}
+\definecolor{ink}{HTML}{1A1A22}
+\definecolor{accent}{HTML}{2C4A78}      % deep slate blue
+\definecolor{accent2}{HTML}{9B4A2F}     % rust
+\definecolor{codebg}{HTML}{F5F5F1}
+\definecolor{coderule}{HTML}{D9D9CE}
+\definecolor{noteblue}{HTML}{EAF0F7}
+\definecolor{notebluerule}{HTML}{2C4A78}
+\definecolor{warmbg}{HTML}{FBF1E9}
+\definecolor{warmrule}{HTML}{9B4A2F}
+\definecolor{greenbg}{HTML}{ECF2E8}
+\definecolor{greenrule}{HTML}{4A6B34}
+\definecolor{rulegray}{HTML}{B8B8B0}
+\color{ink}
+
+% ---------- Microtype, spacing ----------
+\usepackage[protrusion=true]{microtype}
+\usepackage{setspace}
+\setstretch{1.08}
+\usepackage{ragged2e}
+\usepackage[hidelinks]{hyperref}
+\hypersetup{
+  pdftitle={The Frozen Row: how a terminal keeps your screen from scrambling},
+  pdfauthor={A plain-English guide},
+  colorlinks=true, linkcolor=accent, urlcolor=accent2 }
+
+% ---------- Headings (titlesec) ----------
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\sffamily\bfseries\color{accent}}
+  {\fontsize{13}{13}\selectfont\MakeUppercase{Chapter \thechapter}}
+  {10pt}
+  {\fontsize{23}{27}\selectfont\color{ink}}
+  [\vspace{4pt}{\color{rulegray}\titlerule[1pt]}]
+\titlespacing*{\chapter}{0pt}{6pt}{26pt}
+
+\titleformat{\section}
+  {\sffamily\bfseries\large\color{accent}}{}{0pt}{}
+\titlespacing*{\section}{0pt}{14pt}{5pt}
+
+% ---------- Running heads / feet ----------
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancyhead[LE]{\sffamily\footnotesize\color{rulegray}\thepage\quad\textbar\quad The Frozen Row}
+\fancyhead[RO]{\sffamily\footnotesize\color{rulegray}\leftmark\quad\textbar\quad\thepage}
+\renewcommand{\chaptermark}[1]{\markboth{#1}{}}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\sffamily\footnotesize\color{rulegray}\thepage}}
+
+% ---------- Lists ----------
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=1.4em,itemsep=3pt,topsep=4pt}
+\setlist[description]{leftmargin=0pt,style=nextline,font=\sffamily\bfseries\color{accent}}
+
+\usepackage[most]{tcolorbox}
+
+% callout: the big idea (blue)
+\newtcolorbox{insight}[1][]{
+  colback=noteblue, colframe=notebluerule,
+  boxrule=0pt, leftrule=2.5pt, arc=1pt,
+  left=10pt, right=10pt, top=7pt, bottom=7pt,
+  before skip=10pt, after skip=10pt,
+  fonttitle=\sffamily\bfseries\color{notebluerule},
+  title={#1},
+}
+% callout: watch out (warm)
+\newtcolorbox{trap}[1][]{
+  colback=warmbg, colframe=warmrule,
+  boxrule=0pt, leftrule=2.5pt, arc=1pt,
+  left=10pt, right=10pt, top=7pt, bottom=7pt,
+  before skip=10pt, after skip=10pt,
+  fonttitle=\sffamily\bfseries\color{warmrule},
+  title={#1},
+}
+% callout: try it yourself / picture this (green)
+\newtcolorbox{pic}[1][]{
+  colback=greenbg, colframe=greenrule,
+  boxrule=0pt, leftrule=2.5pt, arc=1pt,
+  left=10pt, right=10pt, top=7pt, bottom=7pt,
+  before skip=10pt, after skip=10pt,
+  fonttitle=\sffamily\bfseries\color{greenrule},
+  title={#1},
+}
+
+% drop cap
+\usepackage{lettrine}
+\renewcommand{\LettrineFontHook}{\color{accent}\sffamily\bfseries}
+\setcounter{DefaultLines}{3}
+
+% ---------- TOC styling ----------
+\usepackage{titletoc}
+\usepackage{tocloft}
+\renewcommand{\cfttoctitlefont}{\sffamily\bfseries\Large\color{accent}}
+\renewcommand{\cftchapfont}{\sffamily\bfseries\color{ink}}
+\renewcommand{\cftchappagefont}{\sffamily\color{ink}}
+\renewcommand{\cftchapleader}{\color{rulegray}\cftdotfill{\cftdotsep}}
+\setlength{\cftbeforechapskip}{4pt}
+
+\usepackage{graphicx}
+
+% ================================================================
+\begin{document}
+\frenchspacing
+\emergencystretch=3em
+\hbadness=4000
+\tolerance=2000
+
+% ---------------- TITLE PAGE ----------------
+\thispagestyle{empty}
+\begin{titlepage}
+\raggedright
+\vspace*{1.1in}
+{\color{rulegray}\rule{\linewidth}{1pt}}\\[10pt]
+{\sffamily\bfseries\fontsize{40}{44}\selectfont\color{ink} The Frozen Row}\\[14pt]
+{\sffamily\fontsize{15}{20}\selectfont\color{accent}
+  How a chat program keeps your screen\\ from turning into a scrambled mess}\\[10pt]
+{\color{rulegray}\rule{\linewidth}{1pt}}\\[24pt]
+{\itshape\fontsize{12}{16}\selectfont
+A picture-book explanation, in plain English,\\
+of one clever little idea \\
+and the careful rules that make it work.}\\[10pt]
+\vfill
+{\sffamily\small\color{accent}
+No computer knowledge needed.\\
+If you have ever used a receipt printer or a whiteboard,\\
+you already know enough to understand this whole book.}\\[20pt]
+{\color{rulegray}\rule{\linewidth}{0.5pt}}\\[6pt]
+{\small A friendly guide to the trickiest part of a terminal AI assistant.}
+\end{titlepage}
+
+% ---------------- FRONT MATTER ----------------
+\frontmatter
+\pagestyle{plain}
+
+\chapter*{Before we start}
+\addcontentsline{toc}{chapter}{Before we start}
+\markboth{Before we start}{}
+
+\lettrine{T}{his} is a book about a problem that sounds tiny and turns out
+to be surprisingly deep. A computer program is drawing words on a screen,
+very fast, and it must never make a mistake. That's it. That's the whole
+problem.
+
+But there is a catch that makes it hard, and the catch is the heart of the
+whole story. So before anything else, here is a promise: \textbf{you will
+not need to know anything about computers to understand this book.} Every
+idea in here is explained with things you already know---a receipt
+printer, a whiteboard, a notebook, a careful painter, a librarian. Whenever
+something has a fancy computer name, we will give it a nickname and use the
+nickname instead.
+
+The program we are talking about is a kind of chatbot that lives in a
+plain text window on a computer---the sort programmers use. You type a
+question, and an AI types back an answer, live, one word at a time, like a
+person texting you. The answer can get long. Long enough to scroll off the
+top of the screen. And later you can scroll back up to re-read it.
+
+Simple, right? You'd think so. But making that work \emph{without ever
+scrambling the screen} took years of careful thought and a small pile of
+clever rules. This book explains those rules, one at a time, from the very
+beginning.
+
+Read it front to back like a story. Each chapter builds on the one before.
+By the end you'll understand something most professional programmers never
+stop to think about---and you'll see why it's genuinely beautiful.
+
+\begin{pic}[How to read the coloured boxes]
+Throughout the book you'll see three kinds of coloured boxes.
+\textcolor{notebluerule}{\textbf{Blue boxes}} hold the big idea of a
+chapter---the one sentence to remember.
+\textcolor{warmrule}{\textbf{Orange boxes}} are warnings: a tempting
+mistake and why it goes wrong.
+\textcolor{greenrule}{\textbf{Green boxes}} ask you to picture something,
+so the idea sticks.
+\end{pic}
+
+\tableofcontents
+
+% ---------------- MAIN MATTER ----------------
+\mainmatter
+\pagestyle{fancy}
+
+% ======================================================
+\chapter{The receipt printer}
+% ======================================================
+\lettrine{I}{magine} a receipt printer---the kind at a shop checkout. Paper
+feeds up from a slot, and as it prints, the paper rolls upward and out the
+top. New lines appear at the bottom; old lines climb toward the top and
+eventually disappear over the edge.
+
+Now here is the important part. Once a line of paper has rolled up and out
+of the machine, \textbf{you cannot un-print it.} It's done. If there was a
+typo on that line, too bad---it has left the building. You could tear off
+the whole roll, but you cannot reach back in and fix that one line. It is,
+in a word, \emph{frozen}.
+
+A computer screen in a text window works almost exactly like this receipt
+printer. As new text appears at the bottom, old text scrolls up and off the
+top. And---this is the whole book in one sentence---\textbf{once a line has
+scrolled off the top of the screen, the program can never change it again.}
+
+You, the human, can still \emph{see} those old lines: you scroll up with
+your mouse wheel and there they are, saved in a big roll of history. But the
+program that put them there has lost all power over them. They are frozen,
+exactly like a printed receipt.
+
+\begin{pic}[Picture this]
+Hold a paper receipt in your hand. Try to change the third line from the
+top without tearing anything or scribbling on it. You can't. That
+helplessness---that's what the program feels about every line that has
+scrolled off the screen.
+\end{pic}
+
+So why does this matter so much? Because our chat program is writing to the
+screen \emph{constantly}. Every time a new word of the AI's answer arrives,
+the program redraws things, and a little more text scrolls up and freezes.
+
+That means the program gets exactly \textbf{one chance} to get each line
+right: the split-second before that line scrolls off the top. If it puts the
+wrong thing there in that instant, the mistake is frozen into your history
+forever, and you'll see it every time you scroll up.
+
+\begin{insight}[The one big idea]
+Every line eventually scrolls off the top and freezes. The program has one
+chance to get each line right---the moment before it freezes. Everything
+else in this book exists to make sure that, at that exact moment, the line
+is correct.
+\end{insight}
+
+That is why the book is called \emph{The Frozen Row}. A ``row'' is just one
+line of text on the screen. The entire design is about one thing: making
+sure that when a row freezes, it's right.
+
+% ======================================================
+\chapter{Why not just take over the whole screen?}
+% ======================================================
+\lettrine{H}{ere's} a fair question. Some programs \emph{don't} have this
+problem at all. Think of a full-screen program---a text editor, or one of
+those live system monitors with the moving bars. They take over the
+\emph{entire} screen. Nothing scrolls off; there's no receipt roll; when you
+quit, the whole thing vanishes and your old screen pops back exactly as it
+was.
+
+If that's so much easier, why doesn't our chat program do the same thing?
+
+Because it would ruin the thing people love most about it. Our chat program
+deliberately shares the screen with everything else you were doing. Your
+earlier commands, the AI's answers, more commands, more answers---all of it
+piles up together in one long roll of history that you can scroll through
+later, like a diary of your whole session. It feels natural. It feels like
+part of your terminal, not a separate app that hijacks the screen.
+
+The polite word for this is \textbf{inline}: the program draws its stuff
+\emph{in line} with everything else, right where your cursor already is,
+instead of taking over.
+
+\begin{pic}[Two kinds of program]
+A full-screen program is like a \textbf{whiteboard}: it owns the whole
+surface, wipes it clean when it starts, and you can erase and redraw any
+part any time. Our inline program is like \textbf{writing at the bottom of a
+shared notebook} that already has other people's notes above yours---and the
+pages, once turned, are glued shut.
+\end{pic}
+
+So the chat program chose the harder life on purpose. It gets the lovely
+shared-history feeling, but it pays for it: it has to live with the receipt
+printer, and the frozen rows, and the one-chance-to-get-it-right rule. The
+rest of this book is how it pays that price without ever slipping up.
+
+When it \emph{does} slip up---and early versions did---you get ugly things:
+the little text box you type into suddenly appears twice, one copy stranded
+higher up. Or a whole answer gets accidentally printed twice into your
+history. Or your older commands slowly creep upward for no reason. Every one
+of those bugs is the same underlying mistake: the program got confused about
+what was really on the screen, and a wrong row froze.
+
+% ======================================================
+\chapter{The magic notebook}
+% ======================================================
+\lettrine{N}{ow} we reach the single cleverest idea in the whole design, and
+happily it's an easy one to picture.
+
+Remember that the program can never look at the screen. This sounds
+unbelievable, but it's true: the program can \emph{send} text to the screen,
+but it can never \emph{read back} what's currently showing. It's like
+mailing letters into a house with no windows---you can send things in, but
+you can never peek to see what's inside.
+
+So how can the program possibly know what to change, if it can't see what's
+there? Here's the trick. The program keeps a \textbf{second copy}---a
+private notebook---in which it writes down \emph{exactly what it believes is
+on the screen right now}. Every time it sends something to the real screen,
+it also updates its notebook to match. The notebook is the program's memory
+of the screen.
+
+We'll call this notebook the \textbf{shadow}, because it's meant to be a
+perfect shadow of the real screen---moving in step with it, always
+identical.
+
+\begin{insight}[The shadow]
+The program can't see the screen, so it keeps a private notebook---the
+shadow---that says what it thinks is on the screen. The single most
+important rule in the entire design is: \textbf{the shadow must always
+match the real screen, exactly.}
+\end{insight}
+
+Why does this matter? Because of how the program decides what to redraw. When
+a new word of the answer arrives, the program figures out the new picture it
+wants, then \textbf{compares} it against the shadow---its notebook of what's
+already there. Wherever they differ, it sends just those changes to the
+screen. Wherever they're the same, it sends nothing (why repaint a line
+that's already correct?).
+
+This comparing step is the beating heart of the program, and we'll call it
+the \textbf{compare}. It's efficient and lovely: even if the answer is ten
+thousand lines long, only the few lines that actually changed get touched.
+
+But notice: the compare trusts the notebook completely. If the notebook is
+\emph{wrong}---if it says a line holds one thing but the real screen shows
+another---then the compare makes bad decisions, sends text to the wrong
+places, and sooner or later a wrong line freezes. Everything downstream
+depends on the shadow being a perfect match.
+
+\begin{pic}[The two ways it can go wrong]
+Suppose the notebook is wrong about a line. Two bad things can happen. Either
+the program thinks ``this line is already fine'' when it isn't---so it leaves
+a stale, wrong line on screen (things look \emph{stuck}). Or it thinks ``this
+line changed'' when it didn't---so it needlessly repaints, and every needless
+repaint is a chance to nudge something out of place. Both roads end at a
+frozen wrong row.
+\end{pic}
+
+Almost every bug this program ever had, in its whole history, was one thing:
+the shadow briefly stopped matching the real screen. Keep that in mind. It's
+the villain of the entire story, and every rule from here on is armour
+against it.
+
+% ======================================================
+\chapter{Keeping the notebook honest}
+% ======================================================
+\lettrine{S}{o} the shadow---the notebook---must always match the real
+screen. How does the program keep that promise? With a simple, disciplined
+habit, repeated on every single update.
+
+The habit is this: \textbf{whenever the program paints something onto the
+real screen, in the very same breath it writes that same thing into the
+notebook.} Never one without the other. Paint a line; copy that line into
+the notebook. Paint another; copy that too. The two actions are welded
+together, like a cashier who can't hand you an item without also scanning it.
+
+If it follows this habit perfectly, then by simple logic the notebook can
+never fall out of step. Think about it: the lines it didn't touch this time
+were already correct (they matched last time, and nothing changed them). The
+lines it \emph{did} touch, it just copied into the notebook as it painted
+them. So after every update, top to bottom, notebook equals screen. Always.
+
+\begin{pic}[Painter and photograph]
+Imagine a careful painter touching up a mural. Every time she paints a
+stroke on the wall, she immediately makes the identical stroke on a small
+photograph of the wall she keeps in her pocket. She never looks at the wall
+directly---she's not allowed---but because she updates the photo with every
+stroke, her photo is always a perfect copy of the wall. The notebook is that
+pocket photograph.
+\end{pic}
+
+There's one more thing the program has to be careful about: knowing where
+its ``pen'' is. On the real screen, the program moves an invisible pen
+(programmers call it the cursor) and text comes out wherever the pen is. But
+remember---it can't look at the screen, so it can't see where the pen
+actually is. It has to \emph{remember} where it left the pen last time, and
+trust that memory.
+
+This is where a lot of the danger lives. If the program's memory of ``where
+the pen is'' drifts even one line away from reality, then the next thing it
+draws lands one line off, and that off-by-one mistake can freeze. So the
+program is extremely disciplined about the pen: every move is measured
+carefully from where it believes the pen already is, and every action that
+could move the pen is accounted for.
+
+\begin{insight}[The habit that keeps the promise]
+Paint and record in the same motion. Track the pen with obsessive care. Do
+those two things faithfully and the notebook stays a perfect shadow of the
+screen---which is the one promise everything else depends on.
+\end{insight}
+
+% ======================================================
+\chapter{One line at a time}
+% ======================================================
+\lettrine{L}{et's} slow down and actually watch the program do one update, in
+plain steps. A new word has arrived; the program wants to update the screen.
+Here's what it does, told as a little recipe.
+
+\textbf{Step one: figure out what should be on screen now.} It lays out the
+new picture---all the text, wrapped and arranged---in a fresh workspace. Call
+this the \emph{new picture}.
+
+\textbf{Step two: find the first line that's different.} It goes down the
+new picture and the notebook side by side, top to bottom, looking for the
+first line where they disagree. Everything above that first difference is
+already correct and can be left completely alone. On a normal update, the
+only thing that changed is a bit more text at the very bottom---so this first
+difference is way down near the end, and almost the whole screen gets
+skipped. That's why it's fast.
+
+\textbf{Step three: move the pen there.} It moves its invisible pen up or
+down from where it remembers leaving it, to reach that first changed line.
+This is the careful pen-tracking from the last chapter.
+
+\textbf{Step four: repaint from there to the bottom.} Going line by line, it
+paints each changed line, and---following the sacred habit---copies each one
+into the notebook as it goes. Lines that happen to be unchanged in the
+middle, it just steps past without repainting.
+
+\textbf{Step five: if the new picture is shorter, tidy up.} Sometimes the new
+picture is \emph{shorter} than before (say the little type-box shrank). Then
+there are leftover lines below the new content still showing old text, so the
+program erases them.
+
+And that's a full update. New word in, a few lines repainted, notebook kept
+in sync, done---often in well under a thousandth of a second, dozens of times
+a second, for as long as the answer keeps streaming in.
+
+\begin{pic}[The whole loop in one image]
+A word arrives. The painter glances at her pocket photo, spots the one place
+the wall should change, walks her brush there, paints the change, dabs the
+same change onto the photo, and steps back. Over and over, faster than you
+can watch. The wall and the photo move as one.
+\end{pic}
+
+There's a subtle bit in step four worth flagging, because it's where the
+frozen-row danger becomes real. To grow the picture and make room for new
+text at the bottom, the program pushes everything up---and pushing up is
+exactly what makes the top line scroll off and \emph{freeze}. So the moment
+of growth is the moment of freezing. That's the dangerous instant, and the
+next chapter is entirely about defending it.
+
+% ======================================================
+\chapter{The last-second double-check}
+% ======================================================
+\lettrine{H}{ere} is the scariest instant in the whole program: the moment a
+line is about to scroll off the top and freeze forever. If the notebook was
+even slightly wrong about that line---maybe a rare hiccup left it stale---then
+the wrong text is about to become permanent. And unlike every other mistake,
+this one can never be fixed afterward.
+
+The program's response is beautifully paranoid. For any line that is
+\emph{about to freeze this instant}, it doesn't trust the compare at all. It
+just \textbf{repaints that whole line from scratch}, start to finish, even if
+the notebook swears the line is already fine.
+
+Think of it as a bouncer at the exit. Most lines leave the screen quietly.
+But for the handful of lines stepping out the top door \emph{right now}---the
+ones about to freeze---the bouncer stops each one and says, ``Let me redraw
+you completely, just to be certain, because after this door there's no coming
+back.'' It costs a few extra keystrokes of work. It's worth it, because the
+alternative is a permanent scar in your history.
+
+\begin{insight}[Belt and braces]
+The notebook \emph{should} always be correct---but freezing is forever, so
+the program refuses to gamble on the lines about to freeze. It repaints them
+in full at the last second, guaranteeing they're right no matter what. A
+little wasted effort buys a promise that can never be broken.
+\end{insight}
+
+Why not do this for \emph{every} line, then, and skip the whole compare? Two
+reasons. First, it would be wasteful---repainting the entire screen on every
+tiny change, thousands of times, would be slow and make the text flicker.
+Second, and more importantly, most lines aren't in danger; they're safely in
+the middle of the screen with no risk of freezing this instant. The genius is
+in aiming the expensive, careful repaint at \emph{exactly} the lines at
+risk---the ones at the top edge about to scroll away---and trusting the fast
+compare everywhere else.
+
+\begin{pic}[Where the danger lives]
+Picture the screen as a room with a trapdoor at the top. Lines near the
+bottom are safe. Lines drifting toward the trapdoor are in danger. Lines
+actually stepping onto the trapdoor this second are the ones the program
+double-checks by hand. Everyone else, it waves through.
+\end{pic}
+
+% ======================================================
+\chapter{A quick way to check the notebook}
+% ======================================================
+\lettrine{T}{here's} a nagging worry hiding under everything so far. We keep
+saying ``as long as the notebook is correct.'' But what if, somehow, it
+\emph{isn't}? What if some rare glitch scribbled in the notebook when nobody
+was looking? Before the program trusts the notebook for another update, it
+would be nice to quickly confirm the notebook hasn't been corrupted.
+
+The obvious way is to re-read the whole notebook, line by line, and check
+it's all still sensible. But the notebook can be thousands of lines long, and
+doing that on \emph{every} update, dozens of times a second, would be
+painfully slow.
+
+So the program uses a shortcut you might recognise from everyday life: a
+\textbf{tally}. Alongside the notebook, it keeps a single little number---call
+it the \emph{fingerprint}---computed from all the lines. If even one letter in
+the notebook changes, the fingerprint changes too. So instead of re-reading
+thousands of lines, the program just glances at the fingerprint. Matches what
+it should be? The notebook is intact. Doesn't match? Something's wrong---stop,
+don't trust it.
+
+\begin{pic}[The jar of marbles]
+Imagine a jar of marbles and a sticky note on the lid saying how many are
+inside. To check nobody's stolen one, you don't have to count the marbles---you
+just read the note and shake the jar. The fingerprint is that sticky note: a
+tiny summary that instantly reveals if anything's off.
+\end{pic}
+
+And there's an extra bit of cleverness. When the program repaints a few lines,
+it doesn't recompute the fingerprint from scratch (that would mean re-reading
+everything again). Instead it \emph{adjusts} the tally: it subtracts out the
+old lines' contribution and adds in the new lines'. Like updating a running
+total on a receipt---you don't re-add every item, you just add the newest one.
+So keeping the fingerprint current costs almost nothing, no matter how long
+the answer gets.
+
+\begin{insight}[Cheap, constant vigilance]
+A single fingerprint number lets the program verify its notebook is intact in
+an instant, on every update, without ever re-reading the whole thing. Cheap
+enough to do always---so it always does.
+\end{insight}
+
+If that fingerprint ever fails to match, the program knows its notebook can no
+longer be trusted, and it switches into a special repair mode. We'll meet those
+repair modes later. For now, the point is simply: the program is constantly,
+cheaply checking its own memory---and it never draws based on a notebook it
+hasn't just confirmed.
+
+% ======================================================
+\chapter{Rules the program cannot break}
+% ======================================================
+\lettrine{U}{p} to now, every safeguard has been a \emph{habit}---a discipline
+the program follows. Paint and record together. Double-check the freezing
+lines. Verify the fingerprint. Good habits. But here's an uncomfortable truth
+the people who built this program learned the hard way:
+
+\begin{quote}
+\itshape Almost every bug in the program's whole history was a moment when
+someone, somewhere, \emph{forgot} to follow one of the habits.
+\end{quote}
+
+Habits can be forgotten. A new piece of code takes a shortcut, skips the
+fingerprint check ``just this once,'' and months later a user sees a scrambled
+screen. So the builders did something clever: they stopped relying on
+discipline, and made the computer itself \emph{refuse} to let the habits be
+skipped.
+
+Here's the idea, and it's genuinely elegant. Think of a nightclub that will
+not let you onto the dance floor without a wristband, and the \emph{only} way
+to get a wristband is to pass through the security check at the door. There's
+no back entrance. You literally cannot be on the dance floor without having
+been checked---not because everyone's being careful, but because the building
+is shaped so that skipping the check is impossible.
+
+The program does exactly this. The step that draws to the screen demands a
+kind of ``wristband''---a token that proves the fingerprint was just checked
+and the notebook is confirmed good. And the only way to get that token is to
+actually run the check. So ``draw without checking the notebook first'' isn't
+just discouraged---it's \emph{impossible}. The program won't even assemble if
+you try; it's rejected before it ever runs.
+
+\begin{insight}[From good habits to unbreakable rules]
+Discipline can be forgotten. So the design makes the safety checks impossible
+to skip: you cannot reach the draw step without first passing the check that
+hands you the permission token. The bug of ``forgetting to check'' simply
+cannot exist anymore.
+\end{insight}
+
+These tokens come as a matched set of wristbands, and the next two short
+chapters describe them. But the pattern is always the same: to do the
+dangerous thing, you must first hold the proof that it's safe---and the proof
+can only be earned honestly.
+
+% ======================================================
+\chapter{The two wristbands}
+% ======================================================
+\lettrine{T}{here} are two things that must be true before the program is
+allowed to draw, and so there are two wristbands---two proofs it must hold.
+
+\textbf{Wristband one: ``the notebook matches the visible screen.''} This is
+the fingerprint check from Chapter 7, turned into a token. You run the check;
+if it passes, you receive the wristband. The draw step demands this wristband
+and won't proceed without it. So there's no way to draw against a notebook you
+haven't just confirmed.
+
+There's a nice extra safety catch built in. The wristband is \emph{single
+use}---the moment the program draws, the wristband is torn off. You can't
+save an old wristband from a previous update and reuse it. Each update must
+earn a fresh proof. This stops a sneaky class of mistake where stale
+permission gets reused after things have changed.
+
+\textbf{Wristband two: ``the frozen lines still hold what we think they
+hold.''} Remember the lines that have already scrolled off and frozen? The
+program keeps notebook entries for some of them too. Normally it never touches
+those---they're frozen, off-limits. But there's a subtle trap: what if the
+program is about to \emph{switch} to a completely different conversation? Then
+the new picture's frozen region should hold different text than what actually
+froze earlier. If the program isn't careful, it can end up with the old frozen
+lines stranded on screen while its notebook believes they've been replaced.
+
+So there's a second check---and a second wristband---just for this: before
+drawing a screen that has frozen lines above it, the program proves that those
+frozen lines genuinely still match what it thinks. If they don't, it refuses to
+draw normally and switches to repair instead.
+
+\begin{pic}[Two doors, two guards]
+Getting onto the screen is like passing through two doors. The first guard
+checks that the \emph{part you can still see} matches your notebook. The
+second guard checks that the \emph{part that already froze} matches too.
+Between them, every line---visible or frozen---is vouched for before a single
+mark is made.
+\end{pic}
+
+Two wristbands, two halves of the same guarantee: the part of the screen you
+can still change, and the part you never can. Cover both, and there's no line
+anywhere that could be wrong when it matters.
+
+% ======================================================
+\chapter{Delivering the message safely}
+% ======================================================
+\lettrine{O}{ne} more danger, and then our set of safeguards is complete. It's
+about the actual moment of sending text to the screen, and it's sneakier than
+it sounds.
+
+Picture this. The program has figured out its changes and updated its
+notebook to match the new screen. Then it starts sending the text to the
+screen---and halfway through, the sending \emph{fails}. Maybe the connection
+hiccupped (this program can even run over a remote link, like controlling a
+computer across the internet). Now the screen only received \emph{half} the
+changes, but the notebook already says the \emph{full} change happened. The
+notebook and the screen have fallen out of step---the exact disaster
+everything is built to prevent.
+
+The fix is a rule about \emph{order} and \emph{atomicity}: the program treats
+``send the text'' and ``update the notebook'' as a single, all-or-nothing
+package. It hands over the new notebook \emph{only if} the send fully
+succeeded. If the send fails partway, the half-baked new notebook is thrown
+away entirely, and the program flips into a repair mode that assumes the
+screen is now in an unknown state and rebuilds it cleanly.
+
+\begin{pic}[Sign only on delivery]
+Think of a courier delivering a parcel. You don't mark the parcel
+``delivered'' the moment it leaves the van---you mark it delivered only when it's
+actually in the customer's hands. If the van breaks down halfway, the parcel is
+\emph{not} delivered, and you don't pretend it was. The program signs for the
+new screen only once it's truly on the screen.
+\end{pic}
+
+\begin{insight}[The complete armour]
+Put the pieces together. The program keeps a notebook shadowing the screen;
+updates it in the same breath as every paint; double-checks the lines about to
+freeze; verifies the notebook with a cheap fingerprint on every update; makes
+those checks impossible to skip by requiring earned wristbands; and treats
+``send'' and ``record'' as one all-or-nothing act. At no step can the notebook
+quietly drift from the screen. The classic bugs aren't guarded against---they're
+made impossible.
+\end{insight}
+
+% ======================================================
+\chapter{When something still goes wrong}
+% ======================================================
+\lettrine{N}{o} matter how careful you are, some things are simply outside your
+control. Another program might barge in and scribble on the screen. A remote
+connection might drop and drown some text. The terminal window might get
+resized mid-sentence. So the program can't only \emph{prevent} trouble---it
+also needs a way to \emph{recover} when the world misbehaves.
+
+It has three repair tools, and the whole trick is using the \emph{right} one.
+They range from gentle to drastic:
+
+\begin{description}
+\item[The gentle one: quietly adjust the notebook.] Sometimes nothing is
+  actually wrong on screen---the notebook just needs a small bookkeeping
+  tweak to account for lines that have already frozen. This tool writes
+  nothing to the screen at all. It just tidies the notebook. Cheapest, safest,
+  used most often.
+\item[The medium one: repaint what you can see.] This one redraws every line
+  currently visible on screen, freshening it up. Good for clearing up leftover
+  smudges inside the visible area. But it can only touch what's on screen---it
+  can't reach the frozen lines above.
+\item[The drastic one: wipe and start over.] This is the sledgehammer. It
+  clears the whole screen \emph{and} the frozen history above, then repaints
+  from a clean slate. It's the only tool that can reach the frozen lines---but
+  it does so by destroying \emph{all} of them, including bits of your session
+  from before the program even started. So it's reserved for moments when the
+  user has clearly asked for a fresh start.
+\end{description}
+
+\begin{trap}[The tempting mistake]
+Here's a trap the builders actually fell into. Suppose you switch to a
+different conversation, and the old one had scrolled a lot of lines into the
+frozen history. It's tempting to reach for the gentle or medium repair
+tool---they feel safer. But neither can reach those old frozen lines, so a
+ghostly copy of the previous conversation gets stranded above the new one. The
+\emph{only} tool that actually cleans it up is the drastic wipe-and-restart.
+Choosing the ``safe-feeling'' tool here is exactly the wrong call.
+\end{trap}
+
+The lesson is that matching the repair to the situation is its own skill. Use
+the drastic wipe for a routine little update and you'll destroy the user's
+history for no reason. Use a gentle tweak where a full wipe was needed and
+you'll leave ghosts behind. The program has a small, careful chart matching
+each kind of trouble to exactly the right tool---and a firm rule never to wire
+the sledgehammer to anything that happens routinely.
+
+% ======================================================
+\chapter{Doing the sums exactly}
+% ======================================================
+\lettrine{O}{ne} last idea, and it's a lovely one because it's really a lesson
+about honesty in engineering.
+
+When the conversation gets very long, the program lets the oldest parts scroll
+away into the frozen history and stops tracking them in detail---otherwise the
+notebook would grow forever. But to let go of an old part cleanly, the program
+has to know \emph{exactly} how many lines that old part took up on screen, so
+its bookkeeping stays perfectly aligned. Off by even one, and a ghost line
+appears.
+
+Now, here's the mistake an earlier version made. The program tried to
+\emph{guess} how tall each old part had been, by re-doing the arithmetic of how
+the text would have wrapped. But that arithmetic was fiddly---it depended on
+little margins and paddings---and every so often the guess was off by a line or
+two. On narrow screens especially (imagine using this on a phone over a remote
+connection), the guess drifted, and a duplicate ghost of the text appeared.
+
+The fix is a principle worth carrying into life well beyond programming:
+
+\begin{insight}[Don't guess what you can know]
+Don't make one part of a system \emph{estimate} a number that another part
+already \emph{knows} for certain. Have the part that actually did the work
+write down the true number, and let everyone else simply read it.
+\end{insight}
+
+So instead of the bookkeeper guessing how tall each old block was, the part of
+the program that \emph{actually drew} each block now records its true height on
+the spot. Later, when it's time to let that block go, the bookkeeper just reads
+the recorded number. No guessing, no drift, no ghost. The truth is measured
+once, by the one who knows, and never reconstructed.
+
+\begin{pic}[Measure once, at the source]
+It's the difference between a builder guessing ``that wall was about nine feet''
+from memory, versus reading the exact height he wrote on the blueprint the day
+he built it. One drifts; the other is simply correct.
+\end{pic}
+
+% ======================================================
+\chapter{The whole story, in one breath}
+% ======================================================
+\lettrine{L}{et's} stand back and see the whole thing at once, because now that
+you have all the pieces, they form a single, satisfying shape.
+
+The problem was: a program must keep a screen perfect, forever, even though it
+can't look at the screen, can't fix lines once they scroll away, and lives in a
+world where other things can barge in. That's a genuinely hard problem. The
+solution came in four layers, each a different \emph{kind} of promise.
+
+\begin{description}
+\item[One notebook.] The program keeps exactly one private notebook shadowing
+  the screen---never two, so nothing can disagree with itself.
+\item[A faithful habit.] It updates that notebook in the same breath as every
+  paint, and double-checks the lines about to freeze---so the notebook stays a
+  true shadow, and the one irreversible moment is always guarded.
+\item[A cheap constant check.] A little fingerprint lets it confirm the
+  notebook is intact on every single update, without slowing down---so it can
+  afford to always check.
+\item[Unbreakable rules.] And it makes those checks impossible to skip, by
+  requiring earned proof before any drawing or delivering happens---so the bug
+  of ``forgetting to check'' cannot exist.
+\end{description}
+
+That progression is the real lesson, and it's more general than screens. It
+goes from \emph{a tidy habit}, to \emph{a cheap way to catch yourself slipping},
+to \emph{a design where slipping is impossible.} The people who built this kept
+noticing the same thing: every past disaster was someone forgetting a check. So
+they built a world where the check cannot be forgotten. That's the deepest idea
+in the book.
+
+And wrapped around all of it is a dose of humility: since the world can still
+misbehave in ways you can't prevent, keep a small set of sharp repair tools,
+and be disciplined about choosing the gentlest one that actually fixes the
+problem.
+
+\begin{insight}[What all this care buys]
+You can chat with an AI in your terminal, watch a thousand-line answer stream
+in, scroll up through your whole session, resize your window, switch
+conversations---and never once see a duplicated box, a drifting line, or a
+half-scrambled mess. Every frozen line is correct, because in the instant
+before it froze, the program had \emph{proven}---not merely hoped---that it was
+right.
+\end{insight}
+
+That's the entire story. A receipt printer you can't un-print. A magic notebook
+you can never look away from to check. A last-second double-check at the
+trapdoor. A fingerprint on the jar. Wristbands at the door. And a courier who
+signs only on delivery. Put together, they let a little chat program do
+something quietly remarkable: draw on a shared, unforgiving screen, thousands of
+times a second, and never, ever leave a scar.
+
+\vspace{1cm}
+\begin{center}
+{\sffamily\color{rulegray}\rule{0.3\linewidth}{0.5pt}}\\[6pt]
+{\itshape\color{accent} --- the end ---}
+\end{center}
+
+% ---------------- BACK MATTER ----------------
+\backmatter
+\chapter*{A little glossary}
+\addcontentsline{toc}{chapter}{A little glossary}
+\markboth{A little glossary}{}
+
+In case you want the everyday nicknames matched to the real names
+programmers use:
+
+\begin{description}
+\item[The receipt roll / frozen history] The terminal's \emph{scrollback}---the
+  saved lines you reach by scrolling up. Once a line enters it, the program
+  can't change it.
+\item[Drawing in line, not taking over] \emph{Inline} rendering, as opposed to
+  a \emph{full-screen} program that owns the whole display.
+\item[The notebook / shadow] The renderer's private copy of what it believes is
+  on screen. It's compared against the freshly-laid-out new picture to decide
+  what to redraw.
+\item[The compare] The \emph{diff}---finding where the notebook and the new
+  picture differ, so only the changes get drawn.
+\item[The pen] The \emph{cursor}: the invisible position where text appears.
+  The program tracks it by memory, never by looking.
+\item[The last-second double-check] Forcing a full repaint of any line about to
+  scroll off, so a stale line can never freeze.
+\item[The fingerprint] A \emph{hash}: one small number summarising the notebook,
+  so corruption is caught instantly and cheaply.
+\item[The wristbands] Proof tokens the code must hold before it's allowed to
+  draw or deliver---making the safety checks impossible to skip.
+\item[Sign only on delivery] Updating the notebook only after the screen write
+  fully succeeds, so a failed send can't desync the two.
+\item[The three repair tools] From gentle to drastic: adjust-the-notebook,
+  repaint-the-visible, and wipe-and-restart.
+\end{description}
+
+\vspace{6pt}
+\noindent This book explains, in plain language, the real design used by a
+terminal AI assistant to keep its screen perfectly in sync---the same ideas the
+programmers rely on, just told with receipts and notebooks instead of code.
+
+\end{document}

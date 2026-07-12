@@ -450,6 +450,28 @@ struct DiffReviewNextFile {};
 struct DiffReviewPrevFile {};
 struct AcceptHunk {};
 struct RejectHunk {};
+// Reset the focused hunk back to Pending — the "oops" key for a
+// mis-pressed accept/reject. No auto-advance (the user is revisiting).
+struct DiffReviewUndoHunk {};
+// Decide every hunk of the FOCUSED file at once, then advance to the
+// next file that still has pending hunks.
+struct DiffReviewAcceptFile {};
+struct DiffReviewRejectFile {};
+// Jump to the first (to_end=false) or last (to_end=true) hunk of the
+// focused file — vim g/G plus Home/End.
+struct DiffReviewJump { bool to_end = false; };
+// Scroll WITHIN the focused hunk's diff body (PgUp/PgDn) for hunks
+// taller than the viewport window. delta is in body lines.
+struct DiffReviewBodyScroll { int delta; };
+// Finish the review (Enter): remaining Pending hunks count as Accepted
+// ("keep everything I didn't explicitly reject" — the disk already
+// holds the new contents), every file materialises, the set clears.
+struct DiffReviewFinish {};
+// Enable/disable the whole review workflow (persisted setting). When
+// disabled, completed edits are treated as auto-accepted: nothing folds
+// into pending_changes, the changes strip stays hidden, and Ctrl+R
+// explains how to re-enable.
+struct ToggleDiffReview {};
 struct AcceptAllChanges {};
 struct RejectAllChanges {};
 
@@ -572,7 +594,11 @@ using LoginMsg = std::variant<
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove,
     DiffReviewNextFile, DiffReviewPrevFile,
-    AcceptHunk, RejectHunk, AcceptAllChanges, RejectAllChanges>;
+    AcceptHunk, RejectHunk, DiffReviewUndoHunk,
+    DiffReviewAcceptFile, DiffReviewRejectFile,
+    DiffReviewJump, DiffReviewBodyScroll, DiffReviewFinish,
+    ToggleDiffReview,
+    AcceptAllChanges, RejectAllChanges>;
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,

@@ -764,6 +764,7 @@ store::Settings load_settings() {
         s.effort = j.value("effort", "");
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
+        s.review_enabled = j.value("review_enabled", true);
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
     } catch (...) {
@@ -793,6 +794,8 @@ void save_settings(const store::Settings& s) {
     if (!s.effort.empty()) j["effort"] = s.effort;
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
+    // Only persist the non-default so old settings files stay minimal.
+    if (!s.review_enabled) j["review_enabled"] = false;
     (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }
 
