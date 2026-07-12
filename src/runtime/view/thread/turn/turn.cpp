@@ -1178,14 +1178,16 @@ maya::Turn::Config turn_config_for_assistant_run(
     // its own actions_panel(...).
     std::string error_accum;
 
-    for (std::size_t i = run_first; i < end; ++i) {
-        const Message& m_i = msgs[i];
-        if (m_i.role != Role::Assistant) break;   // run boundary
-
+    // ── Emit one sub-turn's body slots into `into`. Factored out of
+    //    the run loop so the settled-prefix hoist below can reuse the
+    //    EXACT same slot construction (byte-identical rows) inside a
+    //    nested Turn.
+    auto emit_subturn = [&](std::size_t idx, maya::Turn::Config& into) {
+        const Message& m_i = msgs[idx];
         const bool has_text = !m_i.text.empty() || !m_i.streaming_text.empty();
         bool defer_panel = false;
         if (has_text) {
-            cfg.body.emplace_back(cached_markdown_for(m_i, m));
+            into.body.emplace_back(cached_markdown_for(m_i, m));
             // Same-frame deferral handshake as append_assistant_body_slots:
             // cached_markdown_for holds this message's panel off-screen
             // while its reveal cursor is still gliding to the live edge
@@ -1196,12 +1198,96 @@ maya::Turn::Config turn_config_for_assistant_run(
         }
         if (!m_i.tool_calls.empty() && !defer_panel) {
             append_assistant_tool_panel(
-                cfg,
+                into,
                 m_i,
                 std::span<const ToolUse>{m_i.tool_calls},
                 m, style);
         }
         if (m_i.error && error_accum.empty()) error_accum = *m_i.error;
+    };
+
+    // ── Settled-prefix hoist (flat per-frame cost vs. turn depth). ──
+    //    An in-flight run only MUTATES in its last sub-turn (the
+    //    streaming edge). Sub-turns [run_first, edge) are settled and
+    //    byte-stable, so we hoist them into ONE headerless continuation
+    //    Turn keyed on assistant_run_hash_id(prefix) and emit it as a
+    //    single body slot. maya blits that component O(1) on every
+    //    subsequent frame — the N-slot build/walk runs ONCE per prefix
+    //    change (a sub-turn settling advances the key by one), not every
+    //    frame. Without this, build_inner walks all N body slots each
+    //    frame → per-frame CPU grows O(turn depth).
+    //
+    //    Byte-identity with the flat build (freeze_range, and the
+    //    whole-run-hash path in build_live_tail) is guaranteed by
+    //    reusing maya::Turn's own body assembly for the prefix: the
+    //    inner continuation Turn runs the identical is_blank-gated gap
+    //    loop (turn.hpp build_inner), and the prefix component sits as a
+    //    top-level body slot so build_inner inserts exactly one gap
+    //    between it and the live edge — same rows as emitting the slots
+    //    inline. The prefix and the whole-run-hash path are mutually
+    //    exclusive (the whole run only earns its key once IDLE+settled,
+    //    at which point this active-run function's split is gone), so
+    //    the freeze seam never sees a split→flat transition.
+    //
+    //    Gated exactly like the whole-run key, scoped to the prefix:
+    //    every prefix tool terminal AND every prefix reveal drained.
+    //    Keying while a reveal animates would cache scramble glyphs
+    //    forever (the hash is invariant across scramble→clean); the
+    //    live edge is excluded from the prefix so its live reveal can
+    //    never poison the prefix cache.
+    std::size_t body_lo = run_first;
+    const std::size_t edge = end - 1;   // last sub-turn = streaming edge
+    if (edge > run_first && msgs[edge].role == Role::Assistant) {
+        // Single pass over the prefix: it's hoistable iff every tool is
+        // terminal AND every reveal has drained. Both were separate
+        // O(N) scans; fused here so the per-frame cost of DECIDING to
+        // hoist is one loop, not three (the key build below is the
+        // fourth unavoidable pass — maya needs the content hash to look
+        // up the cache; it short-circuits on the first non-hoistable
+        // sub-turn so a still-streaming prefix pays nothing extra).
+        bool prefix_hoistable = true;
+        for (std::size_t j = run_first; j < edge && prefix_hoistable; ++j) {
+            const auto& mj = msgs[j];
+            for (const auto& tc : mj.tool_calls)
+                if (!tc.is_terminal()) { prefix_hoistable = false; break; }
+            if (!prefix_hoistable) break;
+            if (mj.role == Role::Assistant && !mj.text.empty()) {
+                const auto& mc = m.ui.view_cache.message_md(
+                    m.d.current.id, mj.id);
+                if (mc.streaming
+                 && (mc.streaming->is_live()
+                  || mc.streaming->is_finalizing()
+                  || mc.streaming->reveal_in_progress()
+                  || mc.streaming->is_parsing()))
+                    prefix_hoistable = false;
+            }
+        }
+        if (prefix_hoistable) {
+            maya::Turn::Config pref;
+            pref.bare       = true;   // body-only, no header/rail/divider
+            pref.rail_color = style.color;
+            for (std::size_t j = run_first; j < edge; ++j) {
+                if (msgs[j].role != Role::Assistant) break;
+                emit_subturn(j, pref);
+            }
+            // Only hoist when the prefix produced at least one body
+            // slot. An empty bare Turn renders an empty (non-blank)
+            // vstack Box, which the outer body loop would treat as a
+            // visible slot and emit a spurious leading gap before the
+            // live edge — a 1-row divergence from the flat build. With
+            // ≥1 slot the bare vstack is genuinely non-blank and the
+            // single gap between it and the edge matches the flat build.
+            if (!pref.body.empty()) {
+                pref.hash_id = assistant_run_hash_id(m, run_first, edge);
+                cfg.body.emplace_back(maya::Turn{std::move(pref)}.build());
+                body_lo = edge;   // live edge onward built eagerly below
+            }
+        }
+    }
+
+    for (std::size_t i = body_lo; i < end; ++i) {
+        if (msgs[i].role != Role::Assistant) break;   // run boundary
+        emit_subturn(i, cfg);
     }
 
     if (!error_accum.empty()) cfg.error = std::move(error_accum);
