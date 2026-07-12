@@ -84,9 +84,17 @@ jobs:
           V: ${{ steps.meta.outputs.version }}
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
+          # Create the release if it doesn't exist. IMPORTANT: `gh release
+          # view` succeeds on a DRAFT too — a draft left by a prior cancelled
+          # run (or auto-created on tag push) would otherwise absorb every
+          # upload while staying invisible (public download URLs 404, unauth
+          # API omits it). So after ensuring it exists, ALWAYS force it
+          # published + non-prerelease. This is the fix for "run succeeded but
+          # assets 404 / release doesn't show up".
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" \
                  --notes "See [CHANGELOG.md](https://github.com/1ay1/agentty/blob/master/CHANGELOG.md)."
+          gh release edit "$TAG" --draft=false --prerelease=false
           pipx run git-archive-all "agentty-${V}.tar.gz"
           gh release upload "$TAG" "agentty-${V}.tar.gz" --clobber
 
