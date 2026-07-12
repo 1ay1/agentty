@@ -15,6 +15,10 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/mem.hpp"
+#include "agentty/store/store.hpp"
+#include "agentty/workspace/checkpoint.hpp"
 
 namespace agentty::app::detail {
 
@@ -71,9 +75,119 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             persist_settings(m);
             return done(std::move(m));
         },
-        [&](RestoreCheckpoint&) -> Step {
-            m.s.status = "checkpoint restore not implemented yet";
-            return done(std::move(m));
+        [&](RestoreCheckpoint& e) -> Step {
+            // Rewind = destructive double restore: worktree files AND the
+            // transcript both return to the instant before the checkpointed
+            // user turn was submitted (Zed's "restore checkpoint"). Only
+            // from Idle — a running turn holds tool workers that write
+            // files; racing them against checkout-index would interleave
+            // snapshot bytes with fresh tool output.
+            if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
+                return {std::move(m),
+                        set_status_toast(m, "cannot rewind while the agent is working")};
+            // The checkpointed message must still exist (compaction never
+            // deletes messages, so this only fails on a stale id).
+            const auto& msgs = m.d.current.messages;
+            const bool found = std::any_of(msgs.begin(), msgs.end(),
+                [&](const Message& msg) {
+                    return msg.checkpoint_id && *msg.checkpoint_id == e.id;
+                });
+            if (!found)
+                return {std::move(m),
+                        set_status_toast(m, "checkpoint not found in this thread")};
+            // thread_loading doubles as the "transcript is about to be
+            // rewritten" guard: submit_message queues instead of firing,
+            // so no message can land between the index computed at
+            // CheckpointRestored time and the truncation.
+            m.s.thread_loading = true;
+            m.s.status         = "rewinding to checkpoint\xe2\x80\xa6";
+            m.s.status_until   = {};
+            // Isolated worker: git checkout-index on a large snapshot can
+            // block for seconds; never on the shared BG pool.
+            auto cmd = Cmd<Msg>::task_isolated(
+                [id = e.id](std::function<void(Msg)> dispatch) {
+                    CheckpointRestored done;
+                    done.id = id;
+                    std::string err;
+                    done.ok = workspace::restore_checkpoint(id.value, &err);
+                    if (!done.ok) done.error = err.empty() ? "restore failed" : err;
+                    dispatch(Msg{std::move(done)});
+                });
+            return {std::move(m), std::move(cmd)};
+        },
+        [&](CheckpointRestored& e) -> Step {
+            m.s.thread_loading = false;
+            if (!e.ok) {
+                return {std::move(m),
+                        set_status_toast(m, "rewind failed: " + e.error,
+                                         std::chrono::seconds{6})};
+            }
+            // Files are already byte-identical to the snapshot; now cut the
+            // transcript back to just before the checkpointed user turn and
+            // hand its text back to the composer for editing + resubmit.
+            auto& msgs = m.d.current.messages;
+            auto it = std::find_if(msgs.begin(), msgs.end(),
+                [&](const Message& msg) {
+                    return msg.checkpoint_id && *msg.checkpoint_id == e.id;
+                });
+            if (it == msgs.end()) {
+                // Restored the files but the message vanished (shouldn't
+                // happen — dispatch is gated on Idle + thread_loading).
+                return {std::move(m),
+                        set_status_toast(m, "files rewound (turn already gone)")};
+            }
+            // Composer refill: plain-text render of the old prompt — chip
+            // placeholders become their visible labels. Raw placeholders
+            // can't be resurrected safely (image bodies were drained onto
+            // Message.images at submit; a dangling chip 400s the request).
+            std::string refill;
+            refill.reserve(it->text.size());
+            for (std::size_t i = 0; i < it->text.size(); ) {
+                if (static_cast<unsigned char>(it->text[i]) == attachment::kSentinel) {
+                    auto len = attachment::placeholder_len_at(it->text, i);
+                    if (len > 0) {
+                        auto idx = attachment::placeholder_index(it->text, i);
+                        if (idx < it->attachments.size()) {
+                            refill.push_back('[');
+                            refill.append(attachment::chip_label(it->attachments[idx]));
+                            refill.push_back(']');
+                        }
+                        i += len;
+                        continue;
+                    }
+                }
+                refill.push_back(it->text[i++]);
+            }
+            const auto cut = static_cast<std::size_t>(it - msgs.begin());
+            msgs.erase(msgs.begin() + static_cast<std::ptrdiff_t>(cut), msgs.end());
+            // Compaction records covering now-deleted messages are
+            // meaningless (up_to_index points past the end) — drop them.
+            std::erase_if(m.d.current.compactions,
+                          [&](const Thread::CompactionRecord& r) {
+                              return r.up_to_index > cut;
+                          });
+            m.d.current.updated_at = std::chrono::system_clock::now();
+            deps().save_thread(m.d.current);
+
+            reset_composer_draft(m.ui.composer);
+            m.ui.composer.text   = std::move(refill);
+            m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+            if (m.ui.composer.text.find('\n') != std::string::npos)
+                m.ui.composer.expanded = true;
+
+            // Wholesale content swap into a SHORTER transcript — same
+            // recovery as ThreadLoaded/NewThread: rebuild the frozen
+            // prefix and reset the inline region (the truncated turns'
+            // rows live in native scrollback and only reset_inline can
+            // clear them; the user explicitly asked for the rewind).
+            rehydrate_frozen(m);
+            m.ui.needs_warmup_render = !m.ui.frozen.empty();
+            release_to_kernel();
+            auto toast = set_status_toast(
+                m, "rewound \xc2\xb7 files restored, prompt back in composer",
+                std::chrono::seconds{5});
+            return {std::move(m),
+                    Cmd<Msg>::batch(Cmd<Msg>::reset_inline(), std::move(toast))};
         },
         [&](ScrollThread& e) -> Step {
             m.ui.thread_scroll = std::max(0, m.ui.thread_scroll + e.delta);
