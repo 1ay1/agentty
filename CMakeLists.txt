@@ -844,7 +844,14 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
         target_link_options(agentty PRIVATE
             -static-libstdc++ -static-libgcc)
         if(AGENTTY_FULLY_STATIC)
-            target_link_options(agentty PRIVATE -static)
+            # -static-pie (not plain -static): produces an ET_DYN, no-interp,
+            # fully self-contained binary. Plain -static emits ET_EXEC, which
+            # Android/Bionic (Termux) refuses to exec ("unexpected e_type: 2").
+            # static-PIE loads on any aarch64 Linux kernel AND on Android, so
+            # one artifact covers glibc/musl distros + Termux. Requires a musl
+            # toolchain built with static-pie support (Alpine's, or
+            # aarch64-linux-musl-cross).
+            target_link_options(agentty PRIVATE -static-pie)
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
@@ -948,14 +955,19 @@ if(NOT MSVC AND NOT AGENTTY_SANITIZE)
     # a Debug build doesn't emit the "requires optimization" warning per TU.
     target_compile_definitions(agentty PRIVATE
         $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
+    # A fully-static build already passed -static-pie (which implies PIE);
+    # adding a second bare -pie alongside -static confuses some linkers into
+    # emitting a dynamic ET_EXEC. Only add -pie here for the non-static path.
     if(UNIX AND NOT APPLE)
         # RELRO + BIND_NOW + non-exec stack are GNU-ld / lld (ELF) features.
         # Apple ld64 rejects -z; MSVC handled above.
+        if(NOT AGENTTY_FULLY_STATIC)
+            target_link_options(agentty PRIVATE -pie)
+        endif()
         target_link_options(agentty PRIVATE
-            -pie
             -Wl,-z,relro,-z,now
             -Wl,-z,noexecstack)
-    else()
+    elseif(NOT AGENTTY_FULLY_STATIC)
         target_link_options(agentty PRIVATE -pie)
     endif()
 endif()
