@@ -861,19 +861,17 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
             # Requires a toolchain with the static-pie CRT (Alpine musl,
             # aarch64-linux-musl-cross) — all third-party deps must be .a
             # (openssl-libs-static, nghttp2-static, zlib-static).
+            # -static-pie must reach BOTH the compile and link driver
+            # invocations. Alpine's default-PIE GCC only selects rcrt1.o (the
+            # self-relocating static-PIE startup) when the DRIVER is in static
+            # mode at link time — and it decides that partly from the compile
+            # flags. Passing it on link options alone let the driver fall back
+            # to Scrt1.o + a -dynamic-linker line, yielding an ET_DYN that kept
+            # NEEDED libc and no usable PT_PHDR (aborts on Bionic with "Could
+            # not find a PHDR"). Setting it as a compile option too makes the
+            # driver commit to static-PIE consistently.
+            target_compile_options(agentty PRIVATE -static-pie)
             target_link_options(agentty PRIVATE -static-pie)
-            # Alpine's default-PIE GCC has a known spec bug (Debian #996326,
-            # musl ML 2021): with -static-pie it STILL passes -dynamic-linker
-            # and selects Scrt1.o (dynamic-PIE startup) instead of rcrt1.o.
-            # The result is an ET_DYN that keeps NEEDED libc + a bogus INTERP
-            # request but no self-relocating PT_PHDR — it aborts at exec with
-            # "Could not find a PHDR: broken executable?" (this is precisely
-            # what shipped in the first v0.2.6 aarch64 asset). Forcing
-            # --no-dynamic-linker makes the linker drop the interpreter and
-            # emit the self-contained static-PIE layout rcrt1.o expects, so
-            # the binary carries its own PT_PHDR and loads on bare kernels +
-            # Android/Bionic (Termux) alike.
-            target_link_options(agentty PRIVATE -Wl,--no-dynamic-linker)
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
