@@ -26,6 +26,7 @@ enum class Command : std::uint8_t {
     OpenPlan,
     RunCodeBlock,
     CompactContext,
+    RewindCheckpoint,
     OpenLogin,
     Quit,
 };
@@ -48,6 +49,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenPlan,      "Open plan",          "View task progress"},
     CommandDef{Command::RunCodeBlock,  "Run code block",     "Run a fenced block from the last reply (Ctrl+G)"},
     CommandDef{Command::CompactContext,"Compact context",    "Replace history with a structured summary"},
+    CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to before your last message"},
     CommandDef{Command::OpenLogin,     "Login",              "Sign in via OAuth or API key"},
     CommandDef{Command::Quit,          "Quit",               "Exit agentty"},
 };
