@@ -1349,6 +1349,18 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME md_shape_sweep COMMAND md_shape_sweep)
     set_tests_properties(md_shape_sweep PROPERTIES TIMEOUT 120)
 
+    # md_cache_probe — long-stream cache-efficiency regression. Streams long
+    # shapes (400-item loose/tight lists, 300-row table, 300-line quoted
+    # fence, 200 paragraphs, 200 link-refs) and fails when the per-frame
+    # build+render cost GROWS with stream progress (last-quartile mean > 1ms
+    # AND >3x the first quartile) — i.e. some O(N) path escaped the memo
+    # layers and the turn gets slower the longer it runs.
+    add_executable(md_cache_probe EXCLUDE_FROM_ALL
+        tests/md_cache_probe.cpp)
+    target_link_libraries(md_cache_probe PRIVATE maya::maya)
+    add_test(NAME md_cache_probe COMMAND md_cache_probe)
+    set_tests_properties(md_cache_probe PROPERTIES TIMEOUT 120)
+
     # tool_boundary_burst_probe — dev probe (NOT a ctest entry). RECREATES
     # the "long turn: md reveal sticks, then BURSTS when a tool use lands"
     # bug headlessly: streams a long body through the production pacing
