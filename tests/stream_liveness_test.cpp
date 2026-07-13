@@ -443,6 +443,78 @@ static void test_freeze_gate_blocks_while_widget_live() {
           "stamped the cacheable key — freeze is a byte-identical cache HIT)");
 }
 
+// ── (6) DEEP RUN, live edge below many settled sub-turns. The reported
+//        low-CPU stall: in a long autopilot run the streaming edge is a
+//        fresh placeholder message BELOW dozens of settled tool sub-turns.
+//        turn_config_for_assistant_run wraps each SETTLED sub-turn in its
+//        own stably-keyed bare Turn (maya blits it, flat cost) but MUST
+//        keep the still-streaming edge built inline so its
+//        cached_markdown_for re-arms the animation frame every build. If
+//        the edge were stably keyed (e.g. because its text prefix looked
+//        settled), maya would blit the cached component, cached_markdown_
+//        for would never re-run, the RAF would never re-arm, and the
+//        typewriter would freeze mid-turn at ~0% CPU until an unrelated
+//        hash axis flips. This asserts the edge stays armed. ────────────
+static void test_deep_run_live_edge_stays_armed() {
+    std::printf("test_deep_run_live_edge_stays_armed\n");
+
+    Model m;
+    m.d.current.id = agentty::ThreadId{"liveness6"};
+    Message u; u.role = Role::User; u.text = "do a long series of edits";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    // Many SETTLED tool-only sub-turns (each its own Assistant message) —
+    // the deep run's quiescent prefix. Tool terminal, no prose.
+    for (int e = 0; e < 40; ++e) {
+        Message a; a.role = Role::Assistant;
+        agentty::ToolUse tc;
+        tc.id   = agentty::ToolCallId{"e" + std::to_string(e)};
+        tc.name = agentty::ToolName{"edit"};
+        tc.args = {{"path", "src/f" + std::to_string(e) + ".cpp"}};
+        auto now = std::chrono::steady_clock::now();
+        tc.status = agentty::ToolUse::Done{
+            now - std::chrono::milliseconds{5}, now, "edited"};
+        a.tool_calls.push_back(std::move(tc));
+        m.d.current.messages.push_back(std::move(a));
+    }
+
+    // The LIVE EDGE: a fresh streaming placeholder with live prose bytes,
+    // mid-tool-execution phase (the wire left Streaming for a tool
+    // round-trip). This is the message that must stay inline + armed.
+    Message edge; edge.role = Role::Assistant;
+    edge.streaming_text = "Now I will summarize the edits I performed";
+    m.d.current.messages.push_back(std::move(edge));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    CHECK(frame_requests_animation(m, 100, 4000),
+          "armed on the first streaming frame of the deep-run edge");
+
+    // The edge keeps receiving bytes (a real stream), so it stays live.
+    // Across several frames — including after the recency clock is
+    // backdated past kRevealActiveMs and the phase leaves Streaming for a
+    // tool round-trip — the edge's build must re-arm the animation frame
+    // EVERY time. If the deep-run keying swallowed the edge into a cached
+    // bare Turn, cached_markdown_for would stop running and the arm would
+    // drop (the low-CPU freeze).
+    m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+    for (int f = 0; f < 6; ++f) {
+        // Feed a byte so the edge is unambiguously still streaming, and
+        // backdate the per-message recency clock so the since_grow window
+        // can't be what arms it — only the inline reveal path can.
+        m.d.current.messages.back().streaming_text += ".";
+        auto& edge_cache = m.ui.view_cache.message_md(
+            m.d.current.id, m.d.current.messages.back().id);
+        edge_cache.last_grow_tick =
+            std::chrono::steady_clock::now() - std::chrono::seconds{10};
+        CHECK(frame_requests_animation(m, 100, 4000),
+              "deep-run live edge STILL armed (40 settled sub-turns above, "
+              "phase=ExecutingTool, recency expired) — the streaming edge "
+              "must be built inline, never stably keyed");
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+    }
+}
+
 int main() {
     std::printf("stream_liveness_test — the caret must never look "
                 "frozen while a response is in flight\n\n");
@@ -452,6 +524,7 @@ int main() {
     test_caret_armed_when_live_but_phase_not_streaming();
     test_freeze_gated_on_reveal_drain();
     test_freeze_gate_blocks_while_widget_live();
+    test_deep_run_live_edge_stays_armed();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

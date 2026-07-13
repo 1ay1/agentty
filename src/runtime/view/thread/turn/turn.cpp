@@ -1281,13 +1281,32 @@ maya::Turn::Config turn_config_for_assistant_run(
     auto subturn_stably_keyable = [&](std::size_t j) -> bool {
         const auto& mj = msgs[j];
         if (mj.role != Role::Assistant) return false;
+        // Live wire bytes still arriving → this is the streaming edge (or
+        // a sub-turn mid-stream). Its reveal_fx animates the scramble /
+        // gradient / caret BETWEEN byte arrivals with NO size change, so
+        // a content-keyed hash would freeze between deltas: maya blits the
+        // cached bare Turn, cached_markdown_for never re-runs, its
+        // request_animation_frame() is never re-armed, and the typewriter
+        // FREEZES until an unrelated hash axis flips (the low-CPU "md gets
+        // stuck mid-turn" report). Must be built inline so its per-frame
+        // builder keeps running. Checked FIRST — independent of whether
+        // msg.text has any settled prefix yet.
+        if (!mj.streaming_text.empty() || !mj.pending_stream.empty())
+            return false;
         for (const auto& tc : mj.tool_calls)
             if (!tc.is_terminal()) return false;
         const auto& mc = m.ui.view_cache.message_md(m.d.current.id, mj.id);
         if (mc.defer_tool_panel || mc.defer_exit_finished
             || mc.card_defer_since.time_since_epoch().count() != 0)
             return false;
-        if (!mj.text.empty() && mc.streaming
+        // Reveal widget still animating (live / finalize ramp / cursor
+        // gliding backlog / async parse) → same freeze hazard as live
+        // bytes: the hash is invariant across the scramble→clean
+        // transition, so keying it would strand the animation. Applies
+        // whether or not text has committed — a message can have a
+        // settled text prefix with the widget still live_ during the
+        // finalize ramp, so DON'T gate this on text being non-empty.
+        if (mc.streaming
             && (mc.streaming->is_live()
              || mc.streaming->is_finalizing()
              || mc.streaming->reveal_in_progress()

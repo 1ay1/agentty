@@ -1061,12 +1061,26 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
     }
 
     // Opening prose sub-turn (the model's "I'll do these edits" line).
+    // In production a sub-turn's streaming_text is committed into `text`
+    // and its reveal drains BEFORE the next sub-turn appends below it
+    // (finalize between sub-turns). Mirror that: stream it, then settle
+    // it to `text` so it becomes a stable committed prefix — only the
+    // TRUE live edge (the last message) should ever stay inline/animating.
     {
         Message a; a.role = Role::Assistant;
         a.streaming_text = "Turn " + st + " deep opening: uniq-" + st + "-open.";
         m.d.current.messages.push_back(std::move(a));
         for (int f = 0; f < 2; ++f) {
             tick(); if (cx.frame("t" + st + "-o" + std::to_string(f))) return true;
+        }
+        // Settle it: streaming_text → text, drain the reveal (a few
+        // frames), exactly as finalize does before the next sub-turn.
+        auto& op = m.d.current.messages.back();
+        op.text = std::move(op.streaming_text);
+        op.streaming_text.clear();
+        for (int f = 0; f < 40
+                 && !agentty::app::detail::live_tail_reveal_settled(m); ++f) {
+            tick(); if (cx.frame("t" + st + "-o-settle" + std::to_string(f))) return true;
         }
     }
 
