@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <string>
-#include <unordered_set>
 
 namespace agentty::ui {
 
@@ -74,10 +73,6 @@ MessageMdCache& ViewCache::message_md(const ThreadId& tid, const MessageId& mid)
     return touch_settled_(make_key_(tid, mid)).md;
 }
 
-TurnConfigCache& ViewCache::turn_config(const ThreadId& tid, const MessageId& mid) {
-    return touch_settled_(make_key_(tid, mid)).cfg;
-}
-
 MessageMdCache& ViewCache::message_md_live(const ThreadId& tid, const MessageId& mid) {
     return touch_pinned_(make_key_(tid, mid)).md;
 }
@@ -107,37 +102,6 @@ const MessageMdCache* ViewCache::peek(const ThreadId& tid,
     if (auto it = entries_.find(key); it != entries_.end())
         return &it->second.md;
     return nullptr;
-}
-
-void ViewCache::retain_messages(const ThreadId& tid,
-                                const std::unordered_set<std::string>& live)
-{
-    // Build the per-thread prefix once ("<tid>:") so we can identify
-    // entries belonging to `tid` by string-prefix without re-parsing
-    // the composite key on every iteration.
-    std::string prefix;
-    prefix.reserve(tid.value.size() + 1);
-    prefix.append(tid.value);
-    prefix.push_back(':');
-
-    auto reap = [&](std::unordered_map<std::string, Entry>& map) {
-        for (auto it = map.begin(); it != map.end(); ) {
-            const std::string& key = it->first;
-            const bool in_thread =
-                key.size() > prefix.size()
-                && key.compare(0, prefix.size(), prefix) == 0;
-            if (!in_thread) { ++it; continue; }
-            const auto msg_id = key.substr(prefix.size());
-            if (live.count(msg_id) > 0) { ++it; continue; }
-            it = map.erase(it);
-        }
-    };
-
-    // Reap orphans from BOTH homes. Normally near-empty (freeze already
-    // dropped the preserved tail's entries); this catches a compaction
-    // that races an in-flight turn whose message id is about to vanish.
-    reap(entries_);
-    reap(pinned_);
 }
 
 } // namespace agentty::ui

@@ -60,7 +60,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <maya/widget/turn.hpp>
 
@@ -199,14 +198,6 @@ struct MessageMdCache {
     std::optional<float> elapsed_cached{};
 };
 
-struct TurnConfigCache {
-    // Reserved for future per-(thread, msg) view-state. Empty for now —
-    // the legacy `agent_timeline` slot was removed: settled assistant
-    // panels are built into m.ui.frozen by freeze_range and never
-    // re-rendered from this cache, so the slot was populated and
-    // immediately bypassed forever.
-};
-
 // Per-(thread, msg) render cache, partitioned by LIFECYCLE.
 //
 // The cache wears two hats that have genuinely different invariants, and
@@ -283,14 +274,12 @@ public:
     ViewCache(ViewCache&&) noexcept            = default;
     ViewCache& operator=(ViewCache&&) noexcept = default;
 
-    // ── Settled accessors (staged, dropped at freeze) ──
-    // For entries whose animation state is fully drained: a pure render
+    // ── Settled accessor (staged, dropped at freeze) ──
+    // For an entry whose animation state is fully drained: a pure render
     // memo for a sub-turn still in the live tail. freeze_range() drops it
     // the frame its message freezes (its last read), so the settled map
     // stays bounded by the active turn — no cap, no LRU.
     [[nodiscard]] MessageMdCache&  message_md (const ThreadId& tid,
-                                               const MessageId& mid);
-    [[nodiscard]] TurnConfigCache& turn_config(const ThreadId& tid,
                                                const MessageId& mid);
 
     // ── Live accessors (pinned — never evicted) ──
@@ -336,35 +325,33 @@ public:
     [[nodiscard]] const MessageMdCache* peek(const ThreadId& tid,
                                              const MessageId& mid) const noexcept;
 
-    // Drop every entry under `tid` whose MessageId isn't in `live`.
-    // A defensive backstop for compaction: freeze already drops each
-    // message's entry as it seals, so by the time a compaction runs on a
-    // settled transcript both maps are essentially empty of the
-    // preserved tail. But a compaction that races an in-flight turn (an
-    // entry pinned or staged, its message about to be replaced by a
-    // new-id compaction summary) would orphan that entry — no freeze will
-    // ever visit the old id. This reaps any such orphan from BOTH maps.
-    //
-    // Entries belonging to OTHER threads (different `tid`) are left
-    // alone — those are still reachable when the user switches back.
-    void retain_messages(const ThreadId& tid,
-                         const std::unordered_set<std::string>& live);
+    // Drop EVERYTHING — both maps, all threads. Called on a wholesale
+    // conversation swap (NewThread / ThreadLoaded / CheckpointRestored),
+    // where m.d.current is replaced and every cached (tid,msg) entry
+    // belongs to a conversation that is no longer on screen. Without this
+    // the previous thread's settled entries would linger forever: freeze
+    // only drops entries for the CURRENT thread's messages as they
+    // freeze, and a swapped-away thread's messages never freeze again.
+    // Since the keys embed thread_id there is no correctness bug (no
+    // collision) — only an unbounded-over-session-of-many-threads leak,
+    // which this closes. The new thread repopulates from scratch on its
+    // first render.
+    void clear() noexcept { entries_.clear(); pinned_.clear(); }
 
 private:
     // One payload type, two homes. A key lives in AT MOST ONE of these at
     // a time; migrate_() moves the Entry between them, preserving the
-    // MessageMdCache / TurnConfigCache payload (the reveal widget, block
-    // cache, defer state) so a settle never drops animation state. Both
-    // are bounded by the ACTIVE turn: pinned by the live sub-turns,
-    // settled by drained-but-not-yet-frozen sub-turns — freeze drops from
-    // settled, so neither grows over a session. No LRU, no cap: the death
-    // instant (freeze) is explicit, not amortised.
+    // MessageMdCache payload (the reveal widget, block cache, defer
+    // state) so a settle never drops animation state. Both are bounded by
+    // the ACTIVE turn: pinned by the live sub-turns, settled by
+    // drained-but-not-yet-frozen sub-turns — freeze drops from settled,
+    // so neither grows over a session. No LRU, no cap: the death instant
+    // (freeze) is explicit, not amortised.
     //   • entries_ — settled memo, dropped at freeze.
     //   • pinned_  — live state, never evicted, drained → migrates down.
     struct Entry {
-        MessageMdCache  md;
-        TurnConfigCache cfg;
-        bool pinned = false;
+        MessageMdCache md;
+        bool           pinned = false;
     };
     std::unordered_map<std::string, Entry> entries_;   // settled
     std::unordered_map<std::string, Entry> pinned_;    // live (never evict)

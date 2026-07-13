@@ -569,11 +569,14 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // Skill activations belong to the old thread's context;
             // the new thread must be able to re-load any skill.
             tools::skills::reset_activations();
-            // No cache eviction needed — the freshly-minted Thread
-            // has a different ThreadId, and a freshly-appended Message
-            // has a fresh MessageId, so the old (tid, mid) keys never
-            // collide with new lookups. LRU drains the previous
-            // thread's entries as the new thread fills the cap.
+            // Drop the whole render cache: every (tid,msg) entry belongs
+            // to the thread we're leaving, whose messages will never
+            // freeze again (freeze is the only per-entry drop, and it
+            // only runs on the CURRENT thread). Keys embed thread_id so
+            // there's no collision — this is purely reclaiming the old
+            // thread's staged/pinned entries so they don't linger for the
+            // session. The empty new thread repopulates from scratch.
+            m.ui.view_cache.clear();
             m.d.current = Thread{};
             m.d.current.id = deps().new_thread_id();
             m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
@@ -652,6 +655,11 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
             };
             m.d.current = std::move(e.thread);
+            // Drop the whole render cache — same rationale as NewThread:
+            // the entries belong to the thread being left, which won't
+            // freeze again. The loaded thread rebuilds its frozen prefix
+            // via rehydrate_frozen below and repopulates the cache lazily.
+            m.ui.view_cache.clear();
             // Wipe the composer draft — same rationale as NewThread: a
             // pasted-but-unsent image / chip / queued message belongs to
             // the thread being left, and the leftover image Attachment has

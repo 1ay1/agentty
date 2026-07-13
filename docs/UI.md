@@ -806,22 +806,35 @@ struct MessageMdCache {
     // … plus reveal-grace + multi-sub-turn concat bookkeeping
 };
 
-class ViewCache {                               // LRU-bounded, 32 entries default
+class ViewCache {                               // lifecycle-partitioned, no cap
 public:
-    MessageMdCache&  message_md (const ThreadId&, const MessageId&);
-    TurnConfigCache& turn_config(const ThreadId&, const MessageId&);
-    void retain_messages(const ThreadId&, const std::unordered_set<std::string>& live);
-    void set_capacity(std::size_t max_entries) noexcept;
+    MessageMdCache& message_md      (const ThreadId&, const MessageId&); // settled
+    MessageMdCache& message_md_live (const ThreadId&, const MessageId&); // pinned
+    const MessageMdCache* peek(const ThreadId&, const MessageId&) const; // no migrate
+    void drop (const ThreadId&, const MessageId&);   // free from both homes (at freeze)
+    void clear() noexcept;                           // drop all (thread swap)
 };
 ```
 
-The cache is an **LRU-bounded `ViewCache`** owned by the Model
+The cache is a **lifecycle-partitioned `ViewCache`** owned by the Model
 (`m.ui.view_cache`), not a process-global thread_local map. Entries are
 keyed on `(ThreadId, MessageId)` — a stable `MessageId`, **not** a
 message index (an index would alias across compaction / insert). Each
-entry pairs a `MessageMdCache` (the markdown render state) with a
-`TurnConfigCache` (reserved; empty today — settled assistant panels live
-in `m.ui.frozen`, not here).
+entry holds a `MessageMdCache` (the markdown render state).
+
+Two maps, split by lifecycle:
+
+- **pinned** — an entry holding load-bearing animation state (a live
+  `StreamingMarkdown` reveal widget or an active tool-panel defer
+  machine). NEVER evicted; evicting it mid-glide would stall the
+  typewriter. Reached via `message_md_live()`.
+- **settled** — a drained render memo, staged until its message freezes.
+  Reached via `message_md()`.
+
+An access declares which hat it wants; the entry migrates between maps as
+its message's lifecycle moves (live → settled). Read-only state probes
+use `peek()`, which reads from either home WITHOUT migrating (routing a
+probe through a mutating accessor would silently un-pin the live edge).
 
 Streaming messages hold a live `StreamingMarkdown` instance whose
 internal block-cache makes each delta `O(new_chars)`; once a message
@@ -829,12 +842,16 @@ settles, `last_settled_size`/`revealed_size` gate the per-frame
 `set_content()`/`finish()` round-trip so a fully-revealed turn returns
 its cached `build()` for free.
 
-Capacity defaults to **32 entries** (a single 100 KB `read` result can
-cost several MiB of Element nodes). There is no manual `evict_*` on
-thread switch — LRU pressure pushes stale entries out as the new thread's
-MessageIds access fresh keys — except `retain_messages()`, called once
-per compaction to drop entries for messages that didn't survive (so the
-pre-compact Element trees don't linger in the LRU on a quiet session).
+**No cap, no LRU.** A settled entry has a proven death instant — the
+frame its message freezes. Every settled-accessor call site reads a
+message in the live tail `[frozen_through, size())`; once `freeze_through`
+seals that message into `m.ui.frozen`, no code path reads its cache entry
+again (scroll-back is the terminal's native scrollback, never a rebuild).
+So `freeze_range()` calls `drop()` on every message it seals, and the
+settled map is self-emptying — bounded by the active turn, same as the
+pinned map. A wholesale conversation swap (NewThread / ThreadLoaded /
+CheckpointRestored) calls `clear()` to reclaim the leaving thread's
+entries, which would otherwise never freeze again.
 
 **Streaming-rate sparkline** (separate from this cache) lives in the
 phase `Active` context's `rate_history` ring buffer — a 16-slot buffer

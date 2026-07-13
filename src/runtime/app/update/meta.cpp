@@ -180,6 +180,13 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // prefix and reset the inline region (the truncated turns'
             // rows live in native scrollback and only reset_inline can
             // clear them; the user explicitly asked for the rewind).
+            //
+            // Drop the whole render cache too: the truncated tail's
+            // messages are gone (their entries would never freeze again
+            // — the only per-entry drop), and the surviving prefix is
+            // about to be rebuilt into the frozen ledger. Both repopulate
+            // lazily on the next render.
+            m.ui.view_cache.clear();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
             release_to_kernel();
