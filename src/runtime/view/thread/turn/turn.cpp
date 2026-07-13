@@ -1355,10 +1355,10 @@ maya::Turn::Config turn_config_for_assistant_run(
         for (const auto& tc : mj.tool_calls)
             if (!tc.is_terminal()) return false;
         // Non-migrating peek(): this is a READ-ONLY state probe. Routing
-        // it through message_md() would touch the LRU / migrate a pinned
-        // live entry down into the evictable set — exactly the un-pin we
-        // must avoid. A slot that doesn't exist yet is trivially not
-        // animating (no widget), so nullptr → keyable-so-far.
+        // it through message_md() would migrate a pinned live entry down
+        // into the settled map — exactly the un-pin we must avoid. A slot
+        // that doesn't exist yet is trivially not animating (no widget),
+        // so nullptr → keyable-so-far.
         const auto* mc = m.ui.view_cache.peek(m.d.current.id, mj.id);
         if (mc && (mc->defer_tool_panel || mc->defer_exit_finished
                 || mc->card_defer_since.time_since_epoch().count() != 0))
