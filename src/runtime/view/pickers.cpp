@@ -189,17 +189,38 @@ Element model_picker(const Model& m) {
     cfg.scroll     = &m.ui.model_picker_scroll;
     cfg.selected   = picker->index;
 
+    // Live search header — mirrors the command palette. Type to filter,
+    // Backspace to trim; the row list below is the filtered subset.
+    cfg.header.push_back(h(text("\xf0\x9f\x94\x8d ", fg_of(muted)),
+        text(picker->query.empty() ? "type to filter models\xe2\x80\xa6" : picker->query,
+             picker->query.empty() ? fg_italic(muted) : fg_of(fg))
+    ).build());
+    cfg.header.push_back(sep);
+
+    // Build the filtered index list (case-insensitive substring over the
+    // display name). Empty query → every row, in order.
+    std::vector<int> vis;
+    vis.reserve(m.d.available_models.size());
+    for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
+        if (pick::fuzzy_contains(
+                m.d.available_models[static_cast<std::size_t>(i)].display_name,
+                picker->query))
+            vis.push_back(i);
+
     if (m.d.available_models.empty()) {
         cfg.items.push_back(text(
             m.s.models_loading
-                ? "  Loading models…"
-                : "  No models available — check the provider/key, then Esc.",
+                ? "  Loading models\xe2\x80\xa6"
+                : "  No models available \xe2\x80\x94 check the provider/key, then Esc.",
             fg_italic(muted)));
+    } else if (vis.empty()) {
+        cfg.items.push_back(text("  no models match", fg_italic(muted)));
     } else {
-        cfg.rows.reserve(m.d.available_models.size());
-        int i = 0;
-        for (const auto& mi : m.d.available_models) {
-            const bool sel    = i == picker->index;
+        cfg.rows.reserve(vis.size());
+        for (int vi = 0; vi < static_cast<int>(vis.size()); ++vi) {
+            const auto& mi = m.d.available_models[
+                static_cast<std::size_t>(vis[static_cast<std::size_t>(vi)])];
+            const bool sel    = vi == picker->index;
             const bool active = mi.id == m.d.model_id;
             const auto caps   = ModelCapabilities::from_id(mi.id.value);
             Picker::Config::Row row;
@@ -207,38 +228,38 @@ Element model_picker(const Model& m) {
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
             // Trailing: favourite star, plus the reasoning-effort tier on the
             // highlighted row when the model supports it (←/→ cycles it).
-            std::string trailing = mi.favorite ? "★" : "";
+            std::string trailing = mi.favorite ? "\xe2\x98\x85" : "";
             if (sel && caps.supports_effort() && m.d.effort != Effort::None) {
                 if (!trailing.empty()) trailing += "  ";
-                trailing += "◇ " + std::string{effort_label(m.d.effort)};
+                trailing += "\xe2\x97\x87 " + std::string{effort_label(m.d.effort)};
             }
             row.trailing       = std::move(trailing);
             row.trailing_style = fg_of(warn);
             row.selected = sel;
             row.active   = active;
             cfg.rows.push_back(std::move(row));
-            ++i;
         }
     }
 
     cfg.footer.push_back(text(""));
     // Reasoning-effort line: shown only when the highlighted model supports
     // effort. Names the current tier and the ←/→ binding that cycles it.
-    if (!m.d.available_models.empty()) {
+    if (!vis.empty()) {
         const int hi = std::clamp(picker->index, 0,
-            static_cast<int>(m.d.available_models.size()) - 1);
+            static_cast<int>(vis.size()) - 1);
         const auto caps = ModelCapabilities::from_id(
-            m.d.available_models[static_cast<std::size_t>(hi)].id.value);
+            m.d.available_models[
+                static_cast<std::size_t>(vis[static_cast<std::size_t>(hi)])].id.value);
         if (caps.supports_effort())
             cfg.footer.push_back(h(
-                text("←→", fg_of(fg)),
+                text("\xe2\x86\x90\xe2\x86\x92", fg_of(fg)),
                 text(" reasoning effort: ", fg_dim(muted)),
                 text(std::string{effort_label(m.d.effort)}, fg_bold(accent))
             ).build());
     }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"PgUp/PgDn", "page", 2},
+        {"type", "filter", 2},
         {"Enter", "select", 5},
         {"F", "favorite", 1},
         {"Esc", "close", 4},

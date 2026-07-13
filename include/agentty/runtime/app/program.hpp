@@ -142,6 +142,8 @@ struct AgenttyApp {
         // cursor movement within an open picker.
         mix(static_cast<std::uint64_t>(m.ui.model_picker.index()));
         mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.model_picker)));
+        if (auto* mp = ui::pick::opened(m.ui.model_picker))
+            mix_str(mp->query);   // live search buffer
         mix(static_cast<std::uint64_t>(m.ui.provider_picker.index()));
         mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.provider_picker)));
         mix(static_cast<std::uint64_t>(m.ui.thread_list.index()));

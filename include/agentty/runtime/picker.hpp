@@ -21,14 +21,18 @@
 //   TwoAxis  — diff review (file × hunk cursor)
 //   Modal    — todo overlay (no cursor; just gates rendering)
 
+#include <string>
+#include <string_view>
 #include <variant>
 
 namespace agentty::ui::pick {
 
 struct Closed {};
 
-// One-axis picker (model list, thread list).
-struct OpenAt { int index = 0; };
+// One-axis picker (model list, thread list). `query` is an optional
+// incremental-search buffer — only the model picker uses it today; pickers
+// that don't touch it leave it empty and behave exactly as before.
+struct OpenAt { int index = 0; std::string query; };
 using OneAxis = std::variant<Closed, OpenAt>;
 
 // Two-axis picker (diff review: file × hunk).
@@ -63,6 +67,27 @@ template <class P>
 [[nodiscard]] inline int index_or(const OneAxis& p, int fallback = -1) noexcept {
     if (auto* o = std::get_if<OpenAt>(&p)) return o->index;
     return fallback;
+}
+
+// Case-insensitive substring test used by incremental-search pickers.
+// Empty needle matches everything (an empty query shows the full list).
+// ASCII-fold only — model ids are ASCII in practice, and a full Unicode
+// case-fold would be overkill for a live filter.
+[[nodiscard]] inline bool fuzzy_contains(std::string_view hay,
+                                         std::string_view needle) noexcept {
+    if (needle.empty()) return true;
+    if (needle.size() > hay.size()) return false;
+    auto lower = [](char c) noexcept -> char {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    };
+    const std::size_t last = hay.size() - needle.size();
+    for (std::size_t i = 0; i <= last; ++i) {
+        std::size_t j = 0;
+        for (; j < needle.size(); ++j)
+            if (lower(hay[i + j]) != lower(needle[j])) break;
+        if (j == needle.size()) return true;
+    }
+    return false;
 }
 
 } // namespace agentty::ui::pick

@@ -286,6 +286,12 @@ struct ModelPickerMove { int delta; };
 struct ModelPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ModelPickerSelect {};
 struct ModelPickerToggleFavorite {};
+// Incremental search over the model list. FilterInput appends a printable
+// codepoint to the picker's query; FilterBackspace drops the last one. The
+// query is a case-insensitive substring match over the model display name;
+// the reducer keeps the cursor on a still-visible row after every edit.
+struct ModelPickerFilterInput { char32_t ch; };
+struct ModelPickerFilterBackspace {};
 // Cycle the reasoning effort tier (←/→ in the model picker). delta steps
 // within the active model's supported efforts (wrapping); the new tier is
 // persisted immediately. No-op when the model doesn't support effort.
@@ -526,6 +532,7 @@ using ToolMsg = std::variant<
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
     ModelPickerSelect, ModelPickerToggleFavorite, ModelPickerCycleEffort,
+    ModelPickerFilterInput, ModelPickerFilterBackspace,
     ModelsLoaded>;
 
 using ProviderPickerMsg = std::variant<

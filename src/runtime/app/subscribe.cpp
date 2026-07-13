@@ -217,6 +217,8 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
             case SpecialKey::Enter:    return ModelPickerSelect{};
             case SpecialKey::Up:       return ModelPickerMove{-1};
             case SpecialKey::Down:     return ModelPickerMove{+1};
+            // Backspace edits the live search query rather than paging.
+            case SpecialKey::Backspace: return ModelPickerFilterBackspace{};
             case SpecialKey::Home:     return ModelPickerJump{ModelPickerJump::Where::Home};
             case SpecialKey::End:      return ModelPickerJump{ModelPickerJump::Where::End};
             case SpecialKey::PageUp:   return ModelPickerJump{ModelPickerJump::Where::PageUp};
@@ -227,9 +229,18 @@ std::optional<Msg> on_model_picker(const KeyEvent& ev) {
             default: break;
         }
     }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        if (ck->codepoint == 'f' || ck->codepoint == 'F')
-            return ModelPickerToggleFavorite{};
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        char32_t c = ck->codepoint;
+        // Ctrl+F toggles the highlighted model as a favourite — moved off
+        // the bare `f` key now that plain letters feed the search box.
+        if (ev.mods.ctrl) {
+            if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+            if (c == U'f') return ModelPickerToggleFavorite{};
+            return std::nullopt;
+        }
+        // Any other printable codepoint types into the filter query.
+        if (c >= 0x20) return ModelPickerFilterInput{c};
+    }
     return std::nullopt;
 }
 

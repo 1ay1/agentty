@@ -33,6 +33,24 @@ namespace agentty::app::detail {
 
 namespace pick = agentty::ui::pick;
 using maya::overload;
+
+namespace {
+// Indices into m.d.available_models that match the picker's live query
+// (case-insensitive substring over the display name). An empty query
+// yields every index in order, so the un-filtered picker is unchanged.
+// The picker cursor (OpenAt::index) indexes INTO this filtered list, so
+// every nav/select site resolves through here to reach the real model.
+std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
+                                std::string_view query) {
+    std::vector<int> out;
+    out.reserve(models.size());
+    for (int i = 0; i < static_cast<int>(models.size()); ++i)
+        if (pick::fuzzy_contains(models[static_cast<std::size_t>(i)].display_name,
+                                 query))
+            out.push_back(i);
+    return out;
+}
+} // namespace
 using maya::Cmd;
 
 Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
@@ -73,9 +91,14 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 persist_settings(m);
             }
             if (auto* p = pick::opened(m.ui.model_picker)) {
+                // Cursor indexes the FILTERED list; a fetch can land while a
+                // query is active. Find the active model's position within
+                // the current filter (fall back to row 0).
+                const auto vis = model_filtered(m.d.available_models, p->query);
                 p->index = 0;
-                for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
-                    if (m.d.available_models[i].id == m.d.model_id) p->index = i;
+                for (int i = 0; i < static_cast<int>(vis.size()); ++i)
+                    if (m.d.available_models[static_cast<std::size_t>(vis[static_cast<std::size_t>(i)])].id
+                        == m.d.model_id) { p->index = i; break; }
             }
             return done(std::move(m));
         },
@@ -84,18 +107,20 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             return done(std::move(m));
         },
         [&](ModelPickerMove& e) -> Step {
-            if (m.d.available_models.empty()) return done(std::move(m));
             auto* p = pick::opened(m.ui.model_picker);
             if (!p) return done(std::move(m));
-            int sz = static_cast<int>(m.d.available_models.size());
+            const auto vis = model_filtered(m.d.available_models, p->query);
+            if (vis.empty()) return done(std::move(m));
+            int sz = static_cast<int>(vis.size());
             p->index = (p->index + e.delta + sz) % sz;
             return done(std::move(m));
         },
         [&](ModelPickerJump& e) -> Step {
-            if (m.d.available_models.empty()) return done(std::move(m));
             auto* p = pick::opened(m.ui.model_picker);
             if (!p) return done(std::move(m));
-            int sz = static_cast<int>(m.d.available_models.size());
+            const auto vis = model_filtered(m.d.available_models, p->query);
+            if (vis.empty()) return done(std::move(m));
+            int sz = static_cast<int>(vis.size());
             using W = ModelPickerJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
             switch (e.where) {
@@ -106,29 +131,81 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             }
             return done(std::move(m));
         },
+        [&](ModelPickerFilterInput& e) -> Step {
+            auto* p = pick::opened(m.ui.model_picker);
+            if (!p) return done(std::move(m));
+            // Append the codepoint (UTF-8). Narrowing the list can leave
+            // the cursor past the new end — clamp so it always points at a
+            // visible row (the Picker widget auto-scrolls to it).
+            char buf[4];
+            const char32_t c = e.ch;
+            if (c < 0x80) p->query.push_back(static_cast<char>(c));
+            else {
+                int n = 0;
+                if (c < 0x800) { buf[n++] = static_cast<char>(0xC0 | (c >> 6)); }
+                else if (c < 0x10000) {
+                    buf[n++] = static_cast<char>(0xE0 | (c >> 12));
+                    buf[n++] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+                } else {
+                    buf[n++] = static_cast<char>(0xF0 | (c >> 18));
+                    buf[n++] = static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+                    buf[n++] = static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+                }
+                if (c >= 0x80) buf[n++] = static_cast<char>(0x80 | (c & 0x3F));
+                p->query.append(buf, static_cast<std::size_t>(n));
+            }
+            const int sz = static_cast<int>(
+                model_filtered(m.d.available_models, p->query).size());
+            p->index = sz == 0 ? 0 : std::clamp(p->index, 0, sz - 1);
+            return done(std::move(m));
+        },
+        [&](ModelPickerFilterBackspace) -> Step {
+            auto* p = pick::opened(m.ui.model_picker);
+            if (!p || p->query.empty()) return done(std::move(m));
+            // Drop the last UTF-8 codepoint (walk back over continuation
+            // bytes 0x80..0xBF).
+            std::size_t n = p->query.size();
+            do { --n; } while (n > 0
+                && (static_cast<unsigned char>(p->query[n]) & 0xC0) == 0x80);
+            p->query.resize(n);
+            const int sz = static_cast<int>(
+                model_filtered(m.d.available_models, p->query).size());
+            p->index = sz == 0 ? 0 : std::clamp(p->index, 0, sz - 1);
+            return done(std::move(m));
+        },
         [&](ModelPickerSelect) -> Step {
             auto* p = pick::opened(m.ui.model_picker);
-            if (p && !m.d.available_models.empty()) {
-                m.d.model_id = m.d.available_models[p->index].id;
-                // Update the per-model context cap so the status-bar ctx
-                // % bar reflects the right denominator for the new model
-                // (1 M for `[1m]` variants, 200 K otherwise).
-                m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
-                // Keep subagents on the live model: the startup config
-                // captured whatever was saved at launch, which can be a
-                // stale/invalid id (every subagent request 400s and the
-                // tool returns no report). Track the picker selection.
-                tools::subagent::set_model(m.d.model_id.value);
-                persist_settings(m);
+            if (p) {
+                const auto vis = model_filtered(m.d.available_models, p->query);
+                if (!vis.empty() && p->index >= 0
+                    && p->index < static_cast<int>(vis.size())) {
+                    const int real = vis[static_cast<std::size_t>(p->index)];
+                    m.d.model_id = m.d.available_models[static_cast<std::size_t>(real)].id;
+                    // Update the per-model context cap so the status-bar ctx
+                    // % bar reflects the right denominator for the new model
+                    // (1 M for `[1m]` variants, 200 K otherwise).
+                    m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+                    // Keep subagents on the live model: the startup config
+                    // captured whatever was saved at launch, which can be a
+                    // stale/invalid id (every subagent request 400s and the
+                    // tool returns no report). Track the picker selection.
+                    tools::subagent::set_model(m.d.model_id.value);
+                    persist_settings(m);
+                }
             }
             m.ui.model_picker = pick::Closed{};
             return done(std::move(m));
         },
         [&](ModelPickerToggleFavorite) -> Step {
             auto* p = pick::opened(m.ui.model_picker);
-            if (p && !m.d.available_models.empty()) {
-                auto& mi = m.d.available_models[p->index];
-                mi.favorite = !mi.favorite;
+            if (p) {
+                const auto vis = model_filtered(m.d.available_models, p->query);
+                if (!vis.empty() && p->index >= 0
+                    && p->index < static_cast<int>(vis.size())) {
+                    auto& mi = m.d.available_models[
+                        static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])];
+                    mi.favorite = !mi.favorite;
+                }
             }
             return done(std::move(m));
         },
@@ -138,11 +215,17 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             // model that can't reason). Persist immediately so the pick
             // survives a restart; the request path re-clamps at send time.
             auto* p = pick::opened(m.ui.model_picker);
-            if (p && !m.d.available_models.empty()) {
-                const auto caps = ModelCapabilities::from_id(
-                    m.d.available_models[p->index].id.value);
-                m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
-                persist_settings(m);
+            if (p) {
+                const auto vis = model_filtered(m.d.available_models, p->query);
+                if (!vis.empty() && p->index >= 0
+                    && p->index < static_cast<int>(vis.size())) {
+                    const auto caps = ModelCapabilities::from_id(
+                        m.d.available_models[
+                            static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
+                            .id.value);
+                    m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
+                    persist_settings(m);
+                }
             }
             return done(std::move(m));
         },
@@ -231,8 +314,20 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             auth::AuthHeader anthropic_creds = deps().auth;
             if (auto saved = auth::load_credentials())
                 anthropic_creds = auth::make_auth_header(*saved);
+            // Consult the in-app key store (Settings.provider_keys) so a key
+            // the user pasted on a PRIOR switch to this provider is reused —
+            // otherwise resolve_auth_for only sees env vars and re-prompts on
+            // every switch even though the key is persisted on disk.
+            std::string saved_provider_key;
+            {
+                auto settings = deps().load_settings();
+                if (auto it = settings.provider_keys.find(spec);
+                    it != settings.provider_keys.end())
+                    saved_provider_key = it->second;
+            }
             auth::AuthHeader new_auth =
-                provider::resolve_auth_for(spec, anthropic_creds);
+                provider::resolve_auth_for(spec, anthropic_creds,
+                                           /*cli_key=*/{}, saved_provider_key);
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
             // key can't stream. Instead of a dead-end error, open the in-app
