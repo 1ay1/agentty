@@ -21,6 +21,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/runtime/login.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/view/cache.hpp"
@@ -155,7 +156,10 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
 // model fetch so the model list reflects the new backend. No restart.
 Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
     const auto presets = provider::providers();
-    const int n = static_cast<int>(presets.size());
+    // One extra virtual row after the presets: "Custom host…", which opens
+    // a free-text endpoint entry (llama.cpp / vLLM / remote host:port).
+    const int n = static_cast<int>(presets.size()) + 1;
+    const int custom_row = n - 1;   // index of the sentinel row
     return std::visit(overload{
         [&](OpenProviderPicker) -> Step {
             // Open at the row matching the currently-active provider.
@@ -196,6 +200,14 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             auto* p = pick::opened(m.ui.provider_picker);
             m.ui.provider_picker = pick::Closed{};
             if (!p || p->index < 0 || p->index >= n) return done(std::move(m));
+
+            // "Custom host…" row: hand off to the free-text endpoint modal
+            // instead of selecting a preset.
+            if (p->index == custom_row) {
+                m.ui.login = ui::login::CustomHostInput{};
+                return done(std::move(m));
+            }
+
             const auto& preset = presets[static_cast<std::size_t>(p->index)];
             const std::string spec{preset.id};
 

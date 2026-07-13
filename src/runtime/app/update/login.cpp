@@ -93,6 +93,10 @@ Step login_char_input(Model m, char32_t ch) {
             s.key_input.insert(s.cursor, utf8);
             s.cursor += static_cast<int>(utf8.size());
         },
+        [&](login::CustomHostInput& s) {
+            s.host_input.insert(s.cursor, utf8);
+            s.cursor += static_cast<int>(utf8.size());
+        },
         [](auto&) {},
     }, m.ui.login);
     return done(std::move(m));
@@ -114,6 +118,13 @@ Step login_backspace(Model m) {
                 s.cursor = p;
             }
         },
+        [](login::CustomHostInput& s) {
+            if (s.cursor > 0 && !s.host_input.empty()) {
+                int p = ui::utf8_prev(s.host_input, s.cursor);
+                s.host_input.erase(p, s.cursor - p);
+                s.cursor = p;
+            }
+        },
         [](auto&) {},
     }, m.ui.login);
     return done(std::move(m));
@@ -129,6 +140,10 @@ Step login_paste(Model m, std::string text) {
             s.key_input.insert(s.cursor, text);
             s.cursor += static_cast<int>(text.size());
         },
+        [&](login::CustomHostInput& s) {
+            s.host_input.insert(s.cursor, text);
+            s.cursor += static_cast<int>(text.size());
+        },
         [](auto&) {},
     }, m.ui.login);
     return done(std::move(m));
@@ -141,6 +156,9 @@ Step login_cursor_left(Model m) {
         },
         [](login::ApiKeyInput& s) {
             s.cursor = ui::utf8_prev(s.key_input, s.cursor);
+        },
+        [](login::CustomHostInput& s) {
+            s.cursor = ui::utf8_prev(s.host_input, s.cursor);
         },
         [](auto&) {},
     }, m.ui.login);
@@ -155,12 +173,60 @@ Step login_cursor_right(Model m) {
         [](login::ApiKeyInput& s) {
             s.cursor = ui::utf8_next(s.key_input, s.cursor);
         },
+        [](login::CustomHostInput& s) {
+            s.cursor = ui::utf8_next(s.host_input, s.cursor);
+        },
         [](auto&) {},
     }, m.ui.login);
     return done(std::move(m));
 }
 
 Step login_submit(Model m) {
+    if (auto* ch = std::get_if<login::CustomHostInput>(&m.ui.login)) {
+        std::string spec = std::move(ch->host_input);
+        while (!spec.empty() && (spec.back() == '\r' || spec.back() == '\n'
+                               || spec.back() == ' ' || spec.back() == '\t'))
+            spec.pop_back();
+        // Strip a leading scheme if the user pasted a URL — from_spec wants
+        // a bare host[:port].
+        for (std::string_view pfx : {"http://", "https://"})
+            if (spec.rfind(pfx, 0) == 0) { spec.erase(0, pfx.size()); break; }
+        // Trim a trailing slash / path — only host[:port] is meaningful.
+        if (auto slash = spec.find('/'); slash != std::string::npos)
+            spec.erase(slash);
+        if (spec.empty()) {
+            m.ui.login = login::Failed{"no host entered"};
+            return done(std::move(m));
+        }
+
+        const std::string active_before = active_provider_id();
+        provider::select(provider::parse_selection(spec));
+        {
+            auto settings = deps().load_settings();
+            if (!m.d.model_id.empty())
+                settings.provider_models[active_before] = m.d.model_id.value;
+            settings.provider = spec;
+            deps().save_settings(settings);
+        }
+        // Custom hosts are treated as keyless local/compatible endpoints;
+        // resolve_auth_for still consults the OPENAI_API_KEY chain in case
+        // the user is fronting a keyed proxy.
+        auth::AuthHeader new_auth = provider::resolve_auth_for(
+            spec, deps().auth);
+        app::switch_provider(new_auth);
+        if (auto next = model_for_provider(spec); !next.empty()) {
+            m.d.model_id = ModelId{next};
+            m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+            tools::subagent::set_model(m.d.model_id.value);
+        }
+        m.d.available_models.clear();
+        m.s.models_loading = true;
+        m.ui.login = login::Closed{};
+        auto toast = set_status_toast(
+            m, "provider \xe2\x86\x92 " + spec, std::chrono::seconds{3});
+        return {std::move(m),
+                Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
+    }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
         std::string key = std::move(api->key_input);
         const std::string provider = api->provider;

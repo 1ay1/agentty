@@ -1071,10 +1071,20 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         ep.native_api = true;
         return ep;
     }
+    if (eq(spec, "llama.cpp")) {
+        // llama.cpp's built-in server speaks the OpenAI REST dialect on
+        // /v1 (NOT Ollama's native /api/chat), defaults to port 8080, and
+        // needs no auth. Plain HTTP — it's a localhost daemon.
+        return Endpoint{"localhost", 8080, "/v1/chat/completions",
+                        "/v1/models", false, "llama.cpp"};
+    }
     // Treat anything else as a raw "host[:port]" — defaults to https on 443,
     // plain http if a non-443 port is given (a local server convention).
+    // The label carries the raw spec so the model badge / provider readout
+    // shows the actual endpoint ("my-box.lan:8080") rather than a generic
+    // placeholder.
     Endpoint ep;
-    ep.label = "openai-compatible";
+    ep.label = std::string{spec};
     std::string s{spec};
     if (auto colon = s.rfind(':'); colon != std::string::npos) {
         ep.host = s.substr(0, colon);
