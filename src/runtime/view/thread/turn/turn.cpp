@@ -1206,99 +1206,119 @@ maya::Turn::Config turn_config_for_assistant_run(
         if (m_i.error && error_accum.empty()) error_accum = *m_i.error;
     };
 
-    // ── Settled-prefix hoist (flat per-frame cost vs. turn depth). ──
-    //    An in-flight run's per-frame mutation is confined to a small
-    //    trailing window (the streaming edge, plus any sub-turn still
-    //    running a defer/reveal state machine). Everything BEFORE that
-    //    window is byte-stable, so we hoist the leading QUIESCENT run
-    //    [run_first, hoist_end) into ONE cacheable bare Turn keyed on
-    //    assistant_run_hash_id(prefix) and emit it as a single body
-    //    slot. maya blits that component O(1) every subsequent frame —
-    //    the N-slot build/walk runs ONCE per prefix change (a sub-turn
-    //    settling advances the key by one), not every frame. Without
-    //    this, build_inner walks all N body slots each frame →
-    //    per-frame CPU grows O(turn depth).
+    // ── Per-sub-turn stable-identity slots (flat per-frame cost + a
+    //    corruption-proof live tail vs. turn depth). ──
     //
-    //    ROBUSTNESS — what may NOT be hoisted (else a card silently
-    //    vanishes or an animation stalls):
-    //      • A sub-turn with a non-terminal tool (still running).
-    //      • A sub-turn whose reveal widget is still live/finalizing/
-    //        revealing/parsing — the hash is invariant across the
-    //        scramble→clean transition, so caching mid-reveal would
-    //        freeze scramble glyphs forever.
-    //      • A sub-turn running the tool-panel DEFER state machine
-    //        (defer_tool_panel / defer_exit_finished / card_defer_since).
-    //        The defer flag is per-frame mutable state NOT folded into
-    //        the render key, and its two-phase exit only advances while
-    //        cached_markdown_for is called every frame. Hoisting such a
-    //        message would (a) bake a panel-hidden body under a key the
-    //        defer-clear never bumps → card invisible forever, and (b)
-    //        stall the exit machine (the cached component skips the
-    //        per-frame builder). So the hoist boundary STOPS at the
-    //        first non-quiescent sub-turn; everything from there on is
-    //        built eagerly so its side-effecting builders keep running.
+    //    An in-flight assistant run can accumulate hundreds of settled
+    //    sub-turns that all sit in the live tail until the whole run
+    //    settles and freezes (freeze happens only at turn-settle; there
+    //    is no sound mid-run freeze — see frozen.cpp). So the live tail
+    //    grows unbounded during a deep autopilot run, and its leading
+    //    sub-turns overflow into the terminal's IMMUTABLE native
+    //    scrollback while the run is still live. Two requirements fall
+    //    out of that, and a single mechanism satisfies both:
     //
-    //    Byte-identity with the flat build (freeze_range, and the
-    //    whole-run-hash path in build_live_tail) holds by construction:
-    //    the bare Turn reuses maya::Turn's own is_blank-gated body
-    //    assembly, and it sits as a top-level body slot so build_inner
-    //    inserts exactly one gap between it and the first eager slot —
-    //    same rows as emitting the slots inline.
-    std::size_t body_lo = run_first;
-    const std::size_t edge = end - 1;   // last sub-turn = streaming edge
-    if (edge > run_first && msgs[edge].role == Role::Assistant) {
-        // Predicate: is sub-turn j byte-stable AND free of any per-frame
-        // state machine that needs cached_markdown_for to keep running?
-        auto quiescent = [&](std::size_t j) -> bool {
-            const auto& mj = msgs[j];
-            if (mj.role != Role::Assistant) return false;
-            for (const auto& tc : mj.tool_calls)
-                if (!tc.is_terminal()) return false;
-            const auto& mc = m.ui.view_cache.message_md(
-                m.d.current.id, mj.id);
-            // Any active tool-panel defer machine → not hoistable.
-            if (mc.defer_tool_panel || mc.defer_exit_finished
-                || mc.card_defer_since.time_since_epoch().count() != 0)
-                return false;
-            // Reveal must be fully drained (only relevant when the
-            // sub-turn has prose that built a streaming widget).
-            if (!mj.text.empty() && mc.streaming
-                && (mc.streaming->is_live()
-                 || mc.streaming->is_finalizing()
-                 || mc.streaming->reveal_in_progress()
-                 || mc.streaming->is_parsing()))
-                return false;
-            return true;
-        };
-        // Longest leading run of quiescent sub-turns, capped BELOW the
-        // live edge (the edge is always built eagerly).
-        std::size_t hoist_end = run_first;
-        while (hoist_end < edge && quiescent(hoist_end)) ++hoist_end;
+    //      (1) FLAT per-frame cost: a settled sub-turn must not be
+    //          rebuilt/re-walked from scratch every frame, or per-frame
+    //          CPU grows O(turn depth).
+    //      (2) APPEND-ONLY scrollback: once a sub-turn's rows have
+    //          committed to native scrollback they can NEVER be re-
+    //          emitted at a shifted position or under a changed element
+    //          identity — maya's inline diff treats any committed-row
+    //          mutation as uncorrectable and HardResets (\x1b[2J\x1b[3J),
+    //          wiping+restranding the transcript. THIS is the user's
+    //          report: "a running tool card doesn't show, then the reply
+    //          and the prior cards render broken."
+    //
+    //    The mechanism: wrap EACH settled sub-turn in its OWN bare Turn
+    //    keyed on a STABLE per-sub-turn hash (its message id + its own
+    //    compute_render_key). Consequences:
+    //
+    //      • Stable identity for life. A sub-turn's slot occupies a
+    //        fixed body index (its ordinal in the run) and, once the
+    //        sub-turn settles, a fixed hash_id — for every frame until
+    //        it freezes. maya blits it from its component cache (flat
+    //        cost) and never re-emits it (append-only safe). A settling
+    //        sub-turn just goes from "hash changes each frame" (live) to
+    //        "hash frozen" — the exact lifecycle maya already handles
+    //        for the whole live tail.
+    //      • NO regrouping, ever. The earlier growing-prefix and
+    //        fixed/row chunk designs both MOVED a sub-turn from an eager
+    //        top-level slot INTO a differently-keyed group Turn as the
+    //        boundary advanced. On a viewport short enough that the sub-
+    //        turn had already overflowed, that move rewrote a committed
+    //        row → HardReset. Per-sub-turn slots never move between
+    //        containers, so that transition cannot occur at ANY depth or
+    //        terminal size (scrollback_oracle deep_run_turn: green on
+    //        every shape).
+    //
+    //    Robustness carve-outs (a slot must stay per-frame REBUILT, not
+    //    stably keyed, while any of these hold — else a card vanishes or
+    //    an animation stalls):
+    //      • A non-terminal tool (still running): its render_key already
+    //        advances every frame (progress/elapsed), so keying it is a
+    //        natural miss+rebuild anyway; we still stamp the key so the
+    //        blit engages the instant it settles.
+    //      • A live/finalizing/revealing/parsing reveal widget: the hash
+    //        is invariant across the scramble→clean transition, so a
+    //        stable key mid-reveal would freeze scramble glyphs. Keep
+    //        such a sub-turn UNKEYED (rebuild every frame) until drained.
+    //      • An active tool-panel DEFER machine (defer_tool_panel /
+    //        defer_exit_finished / card_defer_since): the defer flag is
+    //        per-frame mutable state NOT folded into the render key, and
+    //        its two-phase exit only advances while cached_markdown_for
+    //        runs every frame. A stable key would (a) bake a panel-hidden
+    //        body under a key the defer-clear never bumps → card
+    //        invisible forever, and (b) stall the exit machine. Keep it
+    //        UNKEYED until the defer machine is idle.
+    //
+    //    Byte-identity with the flat build (freeze_range) and the whole-
+    //    run-hash live-tail path holds by construction: each bare Turn
+    //    reuses maya::Turn's own is_blank-gated body assembly and sits as
+    //    a top-level body slot, so build_inner inserts exactly one gap
+    //    between adjacent non-blank slots — the same rows as emitting the
+    //    sub-turn's markdown/panel inline.
+    auto subturn_stably_keyable = [&](std::size_t j) -> bool {
+        const auto& mj = msgs[j];
+        if (mj.role != Role::Assistant) return false;
+        for (const auto& tc : mj.tool_calls)
+            if (!tc.is_terminal()) return false;
+        const auto& mc = m.ui.view_cache.message_md(m.d.current.id, mj.id);
+        if (mc.defer_tool_panel || mc.defer_exit_finished
+            || mc.card_defer_since.time_since_epoch().count() != 0)
+            return false;
+        if (!mj.text.empty() && mc.streaming
+            && (mc.streaming->is_live()
+             || mc.streaming->is_finalizing()
+             || mc.streaming->reveal_in_progress()
+             || mc.streaming->is_parsing()))
+            return false;
+        return true;
+    };
 
-        if (hoist_end > run_first) {
-            maya::Turn::Config pref;
-            pref.bare       = true;   // body-only, no header/rail/divider
-            pref.rail_color = style.color;
-            for (std::size_t j = run_first; j < hoist_end; ++j)
-                emit_subturn(j, pref);
-            // Only hoist when the prefix produced at least one body
-            // slot. An empty bare Turn renders an empty (non-blank)
-            // vstack Box, which the outer body loop would treat as a
-            // visible slot and emit a spurious leading gap before the
-            // next slot — a 1-row divergence from the flat build. With
-            // ≥1 slot the bare vstack is genuinely non-blank and the
-            // single gap matches the flat build.
-            if (!pref.body.empty()) {
-                pref.hash_id = assistant_run_hash_id(m, run_first, hoist_end);
-                cfg.body.emplace_back(maya::Turn{std::move(pref)}.build());
-                body_lo = hoist_end;   // remainder built eagerly below
-            }
-        }
-    }
-
-    for (std::size_t i = body_lo; i < end; ++i) {
+    for (std::size_t i = run_first; i < end; ++i) {
         if (msgs[i].role != Role::Assistant) break;   // run boundary
-        emit_subturn(i, cfg);
+        if (subturn_stably_keyable(i)) {
+            // Settled sub-turn: emit as its own bare Turn with a stable
+            // per-sub-turn hash_id. maya caches + blits it every frame
+            // and never re-emits it once its rows commit to scrollback.
+            maya::Turn::Config sub;
+            sub.bare       = true;
+            sub.rail_color = style.color;
+            emit_subturn(i, sub);
+            if (sub.body.empty()) continue;   // nothing to show
+            sub.hash_id = maya::CacheIdBuilder{}
+                .add(std::string_view{"agentty.turn.subturn"})
+                .add(std::string_view{msgs[i].id.value})
+                .add(msgs[i].compute_render_key())
+                .build();
+            cfg.body.emplace_back(maya::Turn{std::move(sub)}.build());
+        } else {
+            // Live / animating / deferring sub-turn: build inline into
+            // the outer Turn so its side-effecting per-frame builders
+            // (reveal cursor, defer exit machine, spinner) keep running.
+            emit_subturn(i, cfg);
+        }
     }
 
     if (!error_accum.empty()) cfg.error = std::move(error_accum);

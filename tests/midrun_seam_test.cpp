@@ -1342,10 +1342,142 @@ static void test_prefix_hoist_all_cards_present() {
     }
 }
 
+// ── The user-reported failure the hoist introduced: a RUNNING tool at
+//    the live edge during a deep run, then the user texts AGAIN. Two
+//    distinct bugs are asserted here, neither of which the all-settled
+//    hoist test above can hit (it only ever has terminal cards):
+//
+//    (A) A still-Running tool card must render while it is running. In a
+//        deep run the quiescent-prefix hoist must NOT swallow the edge
+//        sub-turn whose tool is non-terminal — its spinner/progress has
+//        to keep updating, so it must stay in the eagerly-built tail.
+//
+//    (B) When a NEW user turn (and its assistant reply) is appended after
+//        that run, the just-settled tool cards above must still render
+//        exactly once AND the committed prefix must not be rewritten.
+//        The reported symptom ("reply comes but the earlier tool card's
+//        output shows up broken") is a committed-row rewrite here — a
+//        stale hoisted-prefix cache blitting an old shape over rows that
+//        already overflowed into native scrollback.
+static ToolUse running_edit(const std::string& tag) {
+    ToolUse t;
+    t.id   = ToolCallId{"edit_" + tag};
+    t.name = ToolName{"edit"};
+    nlohmann::json edits = nlohmann::json::array();
+    edits.push_back({{"old_text", code_block(4)},
+                     {"new_text", code_block(4)}});
+    t.args = {{"path", "src/" + tag + ".cpp"}, {"edits", edits}};
+    t.status = ToolUse::Running{steady_clock::now(), ""};
+    return t;
+}
+
+static void test_running_tool_then_followup_user_turn() {
+    constexpr int kTermH = 40;
+    Model m;
+    m.d.current.id = agentty::ThreadId{"run+followup"};
+    Message u; u.role = Role::User; u.text = "do a deep run";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    constexpr int N = 24;   // deep enough that the hoist engages
+    // Build a deep run of SETTLED edit sub-turns.
+    for (int e = 0; e < N; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("r" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // The live edge: a sub-turn whose tool is STILL RUNNING.
+    {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(running_edit("live"));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    auto with_running = render_rows(m);
+
+    // (A) The running card MUST be present (its path marker shows).
+    {
+        const std::string marker = "src/live.cpp";
+        int copies = 0;
+        for (const auto& row : with_running)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies >= 1,
+              "running tool card missing while its tool is running "
+              "(hoist swallowed the live edge)");
+    }
+    // Every settled card present exactly once, too.
+    for (int k = 0; k < N; ++k) {
+        const std::string marker = "src/r" + std::to_string(k) + ".cpp";
+        int copies = 0;
+        for (const auto& row : with_running)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("settled card " + marker + " not exactly once with a "
+               "running edge").c_str());
+    }
+
+    // The tool finishes; the run settles and freezes (turn-end).
+    agentty::app::detail::with_live_tool(
+        m, ToolCallId{"edit_live"}, [&](ToolUse& t) {
+            auto now = steady_clock::now();
+            t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                     "edited-live"};
+        });
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    auto after_settle = render_rows(m);
+
+    // Committed prefix stable across settle.
+    {
+        int d = first_committed_divergence(with_running, after_settle, kTermH);
+        CHECK(d < 0,
+              "committed prefix rewritten when the running tool settled");
+    }
+
+    // (B) The user TEXTS AGAIN: new User turn + a fresh assistant reply.
+    Message u2; u2.role = Role::User; u2.text = "now explain what you did";
+    m.d.current.messages.push_back(std::move(u2));
+    Message a2; a2.role = Role::Assistant; a2.streaming_text = "Sure — I ";
+    m.d.current.messages.push_back(std::move(a2));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    auto with_reply = render_rows(m);
+
+    // Every tool card from the prior run must STILL render exactly once.
+    for (int k = 0; k < N; ++k) {
+        const std::string marker = "src/r" + std::to_string(k) + ".cpp";
+        int copies = 0;
+        for (const auto& row : with_reply)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("prior-run card " + marker + " broke after a follow-up "
+               "user turn (got " + std::to_string(copies) + ")").c_str());
+    }
+    {
+        const std::string marker = "src/live.cpp";
+        int copies = 0;
+        for (const auto& row : with_reply)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("the once-running card broke after a follow-up user turn "
+               "(got " + std::to_string(copies) + ")").c_str());
+    }
+    // And the committed prefix (the whole frozen run) must be byte-stable
+    // across the new user turn's arrival.
+    {
+        int d = first_committed_divergence(after_settle, with_reply, kTermH);
+        CHECK(d < 0,
+              "committed prefix rewritten when a follow-up user turn "
+              "arrived after a deep tool run");
+    }
+}
+
 int main() {
     std::printf("midrun_seam_test\n");
     test_incremental_freeze_prefix_stable();
     test_prefix_hoist_all_cards_present();
+    test_running_tool_then_followup_user_turn();
     test_single_edit_stream_to_freeze();
 
     test_single_write_stream_to_freeze();
