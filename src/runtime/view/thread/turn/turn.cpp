@@ -62,16 +62,16 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // still animating (live / finalize ramp / cursor gliding / async
     // parse). Evicting the slot in that window destroys the reveal
     // mid-glide and stalls the typewriter, so it must be PINNED (kept out
-    // of the evictable LRU entirely). Once fully drained the slot is a
-    // pure render memo, safe under the LRU cap.
+    // of any evictable set entirely). Once fully drained the slot is a
+    // pure render memo that stages settled until freeze drops it.
     //
     // We can't read the widget's post-update animation state before we
     // access the slot, so pin on either signal available up front: live
     // wire bytes on the message, or an existing widget that reports
     // itself still animating from last frame. A message that has neither
-    // is settled and routed to the LRU. The predicate is deliberately
-    // the same shape as turn.cpp's `subturn_stably_keyable` negation —
-    // liveness has ONE definition in this view.
+    // is settled and staged (dropped at freeze). The predicate is
+    // deliberately the same shape as turn.cpp's `subturn_stably_keyable`
+    // negation — liveness has ONE definition in this view.
     const bool has_live_bytes = !msg.streaming_text.empty()
                              || !msg.pending_stream.empty();
     const auto& probe = m.ui.view_cache; // const peek, no touch/reorder
@@ -1379,7 +1379,7 @@ maya::Turn::Config turn_config_for_assistant_run(
         return true;
     };
 
-    // ── Live-edge protection is now STRUCTURAL, not a manual touch. ──
+    // ── Live-edge protection is STRUCTURAL, not a manual touch. ──
     //
     //    The loop below calls cached_markdown_for() once per sub-turn
     //    that has text — O(depth) distinct (thread,msg) accesses per
@@ -1391,16 +1391,18 @@ maya::Turn::Config turn_config_for_assistant_run(
     //    bookkeeping, restarting the reveal from scratch and stalling the
     //    typewriter (the "md animation not smooth in a long turn"
     //    report). The old fix was a belt-and-braces manual touch of the
-    //    edge BEFORE the walk (move it to the LRU front) plus a bumped
-    //    cap so realistic depth wouldn't thrash — both mitigations of a
-    //    shared-LRU hazard.
+    //    edge BEFORE the walk plus a bumped cap so realistic depth
+    //    wouldn't thrash — both mitigations of a shared-LRU hazard.
     //
-    //    That hazard no longer exists. cached_markdown_for routes a live
-    //    message (live wire bytes OR an animating widget) through the
-    //    cache's PINNED set, which is not part of the evictable LRU at
-    //    all (see cache.hpp). No walk depth can evict a live edge because
-    //    live edges aren't in the evictable set — the stall class is
-    //    unrepresentable, not merely unlikely. Nothing to pre-touch here.
+    //    That hazard no longer exists, and there is no LRU at all now.
+    //    cached_markdown_for routes a live message (live wire bytes OR an
+    //    animating widget) through the cache's PINNED map, which is never
+    //    evicted; settled sub-turns go in a separate staging map that is
+    //    never evicted either — it is DROPPED per-message at freeze (see
+    //    cache.hpp / freeze_range). No walk depth can touch a live edge,
+    //    and no walk depth grows memory: both maps are bounded by the
+    //    active turn. The stall class is unrepresentable, not merely
+    //    unlikely. Nothing to pre-touch here.
 
     for (std::size_t i = run_first; i < end; ++i) {
         if (msgs[i].role != Role::Assistant) break;   // run boundary
