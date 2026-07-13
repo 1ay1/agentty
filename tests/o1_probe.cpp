@@ -606,6 +606,30 @@ static void scaling_breakdown() {
             canvas.clear();
             maya::render_tree(r, canvas, pool, maya::theme::dark, true);
         }
+        // Per-frame WIRE BYTES: append one byte to the streaming tail,
+        // render into a ping-pong canvas, diff against the previous
+        // frame. This is the ANSI the real loop pushes to the tty each
+        // frame. If settled sub-turns are cache-blitted this stays FLAT
+        // as the run deepens; if maya re-emits them the byte count climbs
+        // with N — the tty backpressure that spikes CPU and STICKS the
+        // display mid-turn (the user's 5-8% → 15-20% report).
+        std::size_t max_wire = 0;
+        {
+            maya::Canvas wa(120, canvas_h, &pool);
+            maya::Canvas wb(120, canvas_h, &pool);
+            maya::Canvas* pv = &wa; maya::Canvas* cu = &wb;
+            auto r0 = agentty::app::AgenttyApp::view(m);
+            pv->clear(); maya::render_tree(r0, *pv, pool, maya::theme::dark, true);
+            std::string wout;
+            for (int f = 0; f < 12; ++f) {
+                m.d.current.messages.back().streaming_text += "x";
+                auto rr = agentty::app::AgenttyApp::view(m);
+                cu->clear(); maya::render_tree(rr, *cu, pool, maya::theme::dark, true);
+                wout.clear(); maya::diff(*pv, *cu, pool, wout);
+                max_wire = std::max(max_wire, wout.size());
+                std::swap(pv, cu);
+            }
+        }
         for (int it = 0; it < 9; ++it) {
             const std::uint64_t m0 =
                 maya::render_detail::component_render_calls();
@@ -620,10 +644,10 @@ static void scaling_breakdown() {
             miss_steady = std::max(miss_steady,
                 maya::render_detail::component_render_calls() - m0);
         }
-        std::printf("%-8d | %12.3f | %12.3f | %12.3f | %5zu live | %6zu rows | miss=%llu\n",
+        std::printf("%-8d | %12.3f | %12.3f | %12.3f | %5zu live | %6zu rows | miss=%llu | wire=%zu\n",
                     n, vbuild, paint, vbuild + paint,
                     live_msgs, m.ui.frozen.row_total(),
-                    (unsigned long long)miss_steady);
+                    (unsigned long long)miss_steady, max_wire);
     }
 }
 
