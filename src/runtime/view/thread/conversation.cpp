@@ -255,13 +255,16 @@ void build_live_tail(const Model& m, int& running_turn,
                 for (std::size_t j = i; j < run_end && j < m.d.current.messages.size(); ++j) {
                     const auto& mj = m.d.current.messages[j];
                     if (mj.role != Role::Assistant || mj.text.empty()) continue;
-                    const auto& mc = m.ui.view_cache.message_md(
+                    // Non-migrating read-only probe: mj may be the PINNED
+                    // live edge, and message_md() would migrate it out of
+                    // the pinned set. peek() reads from either home.
+                    const auto* mc = m.ui.view_cache.peek(
                         m.d.current.id, mj.id);
-                    if (!mc.streaming) continue;
-                    if (mc.streaming->is_live()
-                     || mc.streaming->is_finalizing()
-                     || mc.streaming->reveal_in_progress()
-                     || mc.streaming->is_parsing())
+                    if (!mc || !mc->streaming) continue;
+                    if (mc->streaming->is_live()
+                     || mc->streaming->is_finalizing()
+                     || mc->streaming->reveal_in_progress()
+                     || mc->streaming->is_parsing())
                         return false;
                 }
                 return true;

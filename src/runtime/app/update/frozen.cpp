@@ -641,6 +641,18 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
                         estimate_run_rows(m, i, run_end));
         }
 
+        // A frozen message is, by construction, no longer live: its
+        // Turn Element is sealed into m.ui.frozen and will never re-enter
+        // the live tail. Settle-migrate any pinned view-cache key for the
+        // messages in this run down into the LRU (payload preserved) so a
+        // pin that never got relaxed at the render seam — error/cancel
+        // mid-reveal, or a run scrolling into the prefix before its drain
+        // frame — can't strand a pinned orphan. Idempotent: no-op for the
+        // common case where the message was already settled.
+        for (std::size_t k = i; k < run_end; ++k)
+            m.ui.view_cache.settle(m.d.current.id,
+                                   m.d.current.messages[k].id);
+
         i = run_end;
     }
 

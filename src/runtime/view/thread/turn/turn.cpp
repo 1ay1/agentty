@@ -55,7 +55,38 @@ namespace {
 //    path. The tail re-parses on each frame for finalized messages too,
 //    but that's a single inline parse on the last few bytes — cheap.
 maya::Element cached_markdown_for(const Message& msg, const Model& m) {
-    auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
+    // Lifecycle-aware cache access (see cache.hpp's partition rationale).
+    // A message's md slot holds LOAD-BEARING animation state — the
+    // StreamingMarkdown reveal widget + defer bookkeeping — exactly while
+    // it is still moving: live wire bytes arriving, OR the widget itself
+    // still animating (live / finalize ramp / cursor gliding / async
+    // parse). Evicting the slot in that window destroys the reveal
+    // mid-glide and stalls the typewriter, so it must be PINNED (kept out
+    // of the evictable LRU entirely). Once fully drained the slot is a
+    // pure render memo, safe under the LRU cap.
+    //
+    // We can't read the widget's post-update animation state before we
+    // access the slot, so pin on either signal available up front: live
+    // wire bytes on the message, or an existing widget that reports
+    // itself still animating from last frame. A message that has neither
+    // is settled and routed to the LRU. The predicate is deliberately
+    // the same shape as turn.cpp's `subturn_stably_keyable` negation —
+    // liveness has ONE definition in this view.
+    const bool has_live_bytes = !msg.streaming_text.empty()
+                             || !msg.pending_stream.empty();
+    const auto& probe = m.ui.view_cache; // const peek, no touch/reorder
+    const bool widget_animating = [&] {
+        // is_pinned is a cheap const lookup; if the slot is already
+        // pinned from last frame we keep pinning until it drains (checked
+        // post-update below via the same accessor). If it's settled or
+        // absent we only pin when the message carries live bytes.
+        return probe.is_pinned(m.d.current.id, msg.id);
+    }();
+    const bool want_pin = has_live_bytes || widget_animating;
+
+    auto& cache = want_pin
+        ? m.ui.view_cache.message_md_live(m.d.current.id, msg.id)
+        : m.ui.view_cache.message_md    (m.d.current.id, msg.id);
 
     if (!cache.streaming) {
         cache.streaming = std::make_shared<maya::StreamingMarkdown>();
@@ -184,7 +215,17 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     if (settled
         && cache.last_settled_size == source.size()
         && cache.revealed_size    == source.size()) {
-        return cache.streaming->build();
+        auto built = cache.streaming->build();
+        // Lifecycle down-migration: this message is fully drained (no
+        // live bytes, reveal complete). If its slot is still PINNED from
+        // its streaming days, hand it back to the LRU now — it is a pure
+        // render memo from here on, and leaving it pinned would leak a
+        // permanent (uncapped) entry per settled turn. `build` is a value
+        // (not a reference into the slot), so the migrate that follows
+        // can safely move the Entry. Idempotent: no-op once settled.
+        if (want_pin)
+            (void)m.ui.view_cache.message_md(m.d.current.id, msg.id);
+        return built;
     }
 
     // ── Reveal: feed ALL arrived bytes, every frame ──
@@ -933,8 +974,19 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
     // whole in-flight turn sits in the live tail until settle). Cache
     // on the head message's per-message slot; return the cached value
     // on every subsequent frame.
-    auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
-    if (cache.elapsed_valid) return cache.elapsed_cached;
+    //
+    // Access is PARTITION-SAFE. The head of a live run is frequently the
+    // PINNED streaming edge; routing this memo through the settled
+    // message_md() would migrate it out of the pinned set every frame,
+    // defeating the eviction-immunity. Read via a non-migrating peek()
+    // first; only when the slot exists and already holds the memo do we
+    // return it. On the (rare) miss we must write, so we touch the slot
+    // in whichever home it already lives — message_md_live() if pinned
+    // (preserves the pin), message_md() otherwise — so the write never
+    // moves the entry across the partition.
+    if (const auto* mc = m.ui.view_cache.peek(m.d.current.id, msg.id);
+        mc && mc->elapsed_valid)
+        return mc->elapsed_cached;
     std::optional<float> result;
     for (std::size_t i = m.d.current.messages.size(); i-- > 0;) {
         if (&m.d.current.messages[i] == &msg) continue;
@@ -945,6 +997,9 @@ std::optional<float> assistant_elapsed(const Message& msg, const Model& m) {
             break;
         }
     }
+    auto& cache = m.ui.view_cache.is_pinned(m.d.current.id, msg.id)
+        ? m.ui.view_cache.message_md_live(m.d.current.id, msg.id)
+        : m.ui.view_cache.message_md     (m.d.current.id, msg.id);
     cache.elapsed_cached = result;
     cache.elapsed_valid  = true;
     return result;
@@ -1016,11 +1071,11 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
         cfg.body.emplace_back(cached_markdown_for(msg, m));
         // Tool-panel deferral: cached_markdown_for just decided (this
         // same frame) whether the reveal cursor is still mid-glide with
-        // a fresh tool card. While it is, the panel stays off-screen so
-        // nothing grows below the animating prose — the anti-burst /
-        // scrollback-safety mechanism documented at the decision site.
-        if (m.ui.view_cache.message_md(m.d.current.id, msg.id)
-                .defer_tool_panel)
+        // a fresh tool card. Read via non-migrating peek() — the slot may
+        // be PINNED (live), and message_md() here would migrate it out
+        // of the pinned set. See the decision site for the mechanism.
+        if (const auto* mc = m.ui.view_cache.peek(m.d.current.id, msg.id);
+            mc && mc->defer_tool_panel)
             return;
     }
     append_assistant_tool_panel(cfg, msg, tool_calls, m, style);
@@ -1189,12 +1244,16 @@ maya::Turn::Config turn_config_for_assistant_run(
         if (has_text) {
             into.body.emplace_back(cached_markdown_for(m_i, m));
             // Same-frame deferral handshake as append_assistant_body_slots:
-            // cached_markdown_for holds this message's panel off-screen
-            // while its reveal cursor is still gliding to the live edge
-            // after a tool_use landed (anti-burst; see the decision site).
-            defer_panel = m.ui.view_cache
-                              .message_md(m.d.current.id, m_i.id)
-                              .defer_tool_panel;
+            // cached_markdown_for just decided (this frame) whether the
+            // reveal cursor is still mid-glide with a fresh tool card.
+            // Read the flag via a non-migrating peek() — cached_markdown_for
+            // may have PINNED this slot (it's live), and re-accessing it
+            // through the settled message_md() here would migrate it back
+            // out of the pinned set, un-pinning the very edge we just
+            // protected. peek() reads from whichever home it lives in
+            // without perturbing the partition.
+            if (const auto* mc = m.ui.view_cache.peek(m.d.current.id, m_i.id))
+                defer_panel = mc->defer_tool_panel;
         }
         if (!m_i.tool_calls.empty() && !defer_panel) {
             append_assistant_tool_panel(
@@ -1295,9 +1354,14 @@ maya::Turn::Config turn_config_for_assistant_run(
             return false;
         for (const auto& tc : mj.tool_calls)
             if (!tc.is_terminal()) return false;
-        const auto& mc = m.ui.view_cache.message_md(m.d.current.id, mj.id);
-        if (mc.defer_tool_panel || mc.defer_exit_finished
-            || mc.card_defer_since.time_since_epoch().count() != 0)
+        // Non-migrating peek(): this is a READ-ONLY state probe. Routing
+        // it through message_md() would touch the LRU / migrate a pinned
+        // live entry down into the evictable set — exactly the un-pin we
+        // must avoid. A slot that doesn't exist yet is trivially not
+        // animating (no widget), so nullptr → keyable-so-far.
+        const auto* mc = m.ui.view_cache.peek(m.d.current.id, mj.id);
+        if (mc && (mc->defer_tool_panel || mc->defer_exit_finished
+                || mc->card_defer_since.time_since_epoch().count() != 0))
             return false;
         // Reveal widget still animating (live / finalize ramp / cursor
         // gliding backlog / async parse) → same freeze hazard as live
@@ -1306,38 +1370,37 @@ maya::Turn::Config turn_config_for_assistant_run(
         // whether or not text has committed — a message can have a
         // settled text prefix with the widget still live_ during the
         // finalize ramp, so DON'T gate this on text being non-empty.
-        if (mc.streaming
-            && (mc.streaming->is_live()
-             || mc.streaming->is_finalizing()
-             || mc.streaming->reveal_in_progress()
-             || mc.streaming->is_parsing()))
+        if (mc && mc->streaming
+            && (mc->streaming->is_live()
+             || mc->streaming->is_finalizing()
+             || mc->streaming->reveal_in_progress()
+             || mc->streaming->is_parsing()))
             return false;
         return true;
     };
 
-    // ── Pin the live edge in the LRU BEFORE the settled walk. ──
+    // ── Live-edge protection is now STRUCTURAL, not a manual touch. ──
     //
-    //    The loop below calls message_md() once per settled sub-turn
-    //    (both inside subturn_stably_keyable's state check and inside
-    //    emit_subturn's cached_markdown_for). On a deep run that is
-    //    O(depth) distinct (thread,msg) touches per frame. The ViewCache
-    //    LRU is capacity-bounded, so once depth exceeds the cap the walk
-    //    EVICTS the oldest entries as it inserts new ones — and the live
-    //    streaming edge (the LAST message, touched LAST) is exactly the
-    //    entry sitting at the LRU back from the previous frame when the
-    //    walk begins. Evicting it destroys its StreamingMarkdown widget
-    //    + reveal bookkeeping (last_grow_tick, revealed_size, the async
-    //    parse state); the edge's cached_markdown_for then re-creates a
-    //    fresh widget, the reveal restarts from scratch, and the live
-    //    typewriter visibly STALLS / stutters every frame the depth stays
-    //    over the cap (the "md animation not smooth in a long turn"
-    //    report). Touching the edge FIRST moves it to the LRU front so
-    //    the settled walk can never evict it mid-frame. (The cap is also
-    //    raised — see cache.hpp — so a realistic run doesn't thrash at
-    //    all; this pin is the belt-and-braces guarantee for runs that
-    //    still exceed it.)
-    if (end > run_first && msgs[end - 1].role == Role::Assistant)
-        (void)m.ui.view_cache.message_md(m.d.current.id, msgs[end - 1].id);
+    //    The loop below calls cached_markdown_for() once per sub-turn
+    //    that has text — O(depth) distinct (thread,msg) accesses per
+    //    frame. Previously that walk shared ONE LRU with the live edge,
+    //    so once depth exceeded the cap the walk evicted the oldest
+    //    entries as it inserted new ones — and the streaming edge (last
+    //    message, touched last) sat at the LRU back when the walk began.
+    //    Evicting it destroyed its StreamingMarkdown widget + reveal
+    //    bookkeeping, restarting the reveal from scratch and stalling the
+    //    typewriter (the "md animation not smooth in a long turn"
+    //    report). The old fix was a belt-and-braces manual touch of the
+    //    edge BEFORE the walk (move it to the LRU front) plus a bumped
+    //    cap so realistic depth wouldn't thrash — both mitigations of a
+    //    shared-LRU hazard.
+    //
+    //    That hazard no longer exists. cached_markdown_for routes a live
+    //    message (live wire bytes OR an animating widget) through the
+    //    cache's PINNED set, which is not part of the evictable LRU at
+    //    all (see cache.hpp). No walk depth can evict a live edge because
+    //    live edges aren't in the evictable set — the stall class is
+    //    unrepresentable, not merely unlikely. Nothing to pre-touch here.
 
     for (std::size_t i = run_first; i < end; ++i) {
         if (msgs[i].role != Role::Assistant) break;   // run boundary

@@ -208,19 +208,58 @@ struct TurnConfigCache {
     // immediately bypassed forever.
 };
 
-// LRU-bounded render cache. Both the markdown render and the turn-config
-// caches share one entry per (thread, msg) pair — half-evictions force a
-// rebuild anyway, so coupling them simplifies invalidation.
+// Per-(thread, msg) render cache, partitioned by LIFECYCLE.
 //
-// Capacity defaults to 32 entries. With a 100 KB `read` result and a few
-// code blocks per turn, a single entry can cost several MiB of heap;
-// 256 entries on a long session was observed to retain >1 GiB of
-// Element nodes after the underlying tool_calls[].output strings had
-// already been compacted out of the conversation. 32 is the sweet spot:
-// a turn that scrolls off the visible window will *usually* still be
-// cached when the user scrolls back, and a thread switch / compaction
-// (which call evict_thread / evict_message directly) reclaims entries
-// immediately rather than waiting for LRU pressure that may never come.
+// The cache wears two hats that have genuinely different invariants, and
+// conflating them under a single LRU is what produced the whole class of
+// "typewriter stalls on a deep run" bugs. So they are split:
+//
+//   ┌─────────────┬──────────────────────────┬───────────────────────────┐
+//   │             │  LIVE (pinned)           │  SETTLED (LRU-bounded)    │
+//   ├─────────────┼──────────────────────────┼───────────────────────────┤
+//   │ holds       │  animation state — the   │  a pure render memo — the │
+//   │             │  StreamingMarkdown +     │  built Element / md state  │
+//   │             │  reveal cursor + defer   │  of a fully-drained sub-   │
+//   │             │  machine bookkeeping     │  turn                     │
+//   │ evicting is │  a CORRECTNESS BUG       │  a cheap rebuild on       │
+//   │             │  (destroys the reveal    │  scroll-back — safe       │
+//   │             │  widget mid-glide →      │                           │
+//   │             │  the typewriter stalls)  │                           │
+//   │ count       │  bounded by the ACTIVE   │  unbounded over a session │
+//   │             │  turn (≈1 streaming edge │  (this is where >1 GiB of │
+//   │             │  + its live sub-turns)   │  Element nodes lived)     │
+//   │ policy      │  NEVER evicted           │  LRU, capped              │
+//   └─────────────┴──────────────────────────┴───────────────────────────┘
+//
+// The caller declares which hat an access wants: `message_md_live()`
+// pins the entry (it lives OUTSIDE the LRU and can never be evicted);
+// `message_md()` / `turn_config()` put it under the LRU cap. A message
+// is "live" exactly while its reveal widget is
+// live/finalizing/revealing/parsing OR its tool-panel defer machine is
+// running — i.e. while evicting it would corrupt on-screen output. The
+// view already computes that predicate (see turn.cpp
+// `subturn_stably_keyable`, whose negation IS liveness).
+//
+// The partition dissolves the old dilemma. The cap used to trade
+// correctness against RAM: too small and the live edge got evicted
+// (stall); too large and settled prose trees hoarded gigabytes. Those
+// were never the same axis. With live entries un-capped-but-tiny and
+// settled entries capped-and-safe, BOTH concerns are satisfied and the
+// stall class is UNREPRESENTABLE — no run depth can evict a live edge,
+// because live edges are not in the evictable set at all.
+//
+// A settle is a single migration: the one frame the widget finishes
+// draining, the caller stops passing the live flag and the entry moves
+// from the pinned map into the LRU (message_md() after a run of
+// message_md_live() calls performs that migration, payload preserved).
+//
+// Settled-side eviction detail: capacity defaults to 128 entries. A
+// single settled entry can cost several MiB (a 100 KB `read` result +
+// code blocks), but the genuinely heavy render trees now live in maya's
+// component cache via the stably-keyed blit — this slot retains only the
+// StreamingMarkdown source + block metadata, not a duplicate tree. A
+// turn that scrolls off is usually still cached on scroll-back;
+// compaction's retain_messages() reclaims dropped entries immediately.
 class ViewCache {
 public:
     ViewCache() = default;
@@ -233,10 +272,62 @@ public:
     ViewCache(ViewCache&&) noexcept            = default;
     ViewCache& operator=(ViewCache&&) noexcept = default;
 
+    // ── Settled accessors (LRU-bounded) ──
+    // For entries whose animation state is fully drained: a pure render
+    // memo, safe to evict under cap pressure (rebuilds on scroll-back).
     [[nodiscard]] MessageMdCache&  message_md (const ThreadId& tid,
                                                const MessageId& mid);
     [[nodiscard]] TurnConfigCache& turn_config(const ThreadId& tid,
                                                const MessageId& mid);
+
+    // ── Live accessors (pinned — never evicted) ──
+    // For entries holding load-bearing animation state (a live reveal
+    // widget or an active defer machine). Pinning lives OUTSIDE the LRU,
+    // so no run depth can evict the streaming edge mid-glide. Calling a
+    // live accessor on a key currently in the LRU MIGRATES it to the
+    // pinned map (and a settled accessor migrates it back), so a
+    // message's slot follows its lifecycle with its payload intact.
+    [[nodiscard]] MessageMdCache&  message_md_live (const ThreadId& tid,
+                                                    const MessageId& mid);
+
+    // Introspection for probes / assertions: is this key currently
+    // pinned (i.e. structurally exempt from eviction)?
+    [[nodiscard]] bool is_pinned(const ThreadId& tid,
+                                 const MessageId& mid) const noexcept;
+    [[nodiscard]] std::size_t pinned_count()  const noexcept { return pinned_.size(); }
+    [[nodiscard]] std::size_t settled_count() const noexcept { return entries_.size(); }
+
+    // Explicit settle: migrate `key` from the pinned set down into the
+    // LRU (payload preserved), or no-op if the key isn't pinned. This is
+    // the ONE non-accessor way to leave the pinned set; every other
+    // migration is a side-effect of a settled accessor being called on a
+    // key that used to be live.
+    //
+    // Why it exists: the pin predicate at the render seam
+    // (cached_markdown_for) latches `want_pin` on the previous frame's
+    // is_pinned() and only relaxes when a down-migration fires. If a
+    // widget stops animating but never re-enters that seam AND never hits
+    // the reducer's settle_message_md() — e.g. an error/cancel mid-reveal,
+    // or the run scrolls into the frozen prefix before its drain frame —
+    // the entry would stay pinned forever (a small bounded leak that only
+    // self-heals at the next compaction's retain reap). freeze_range()
+    // calls this on every message it seals so a frozen message is, by
+    // construction, never pinned: the leak becomes unrepresentable, not
+    // merely eventually-collected.
+    void settle(const ThreadId& tid, const MessageId& mid);
+
+    // Non-migrating, non-touching const peek. Returns the message's md
+    // slot from whichever home it lives in (pinned or settled), or
+    // nullptr if absent. Unlike message_md() / message_md_live(), it
+    // does NOT create, migrate, or reorder anything — it is a pure
+    // read. Use it for read-only STATE PROBES ("is this widget still
+    // animating?") that must not perturb the partition or the LRU
+    // order: routing such a probe through a mutating accessor would
+    // migrate a live entry down into the LRU (un-pinning the edge) or
+    // bump LRU recency spuriously. The pointer is valid until the next
+    // mutating cache call.
+    [[nodiscard]] const MessageMdCache* peek(const ThreadId& tid,
+                                             const MessageId& mid) const noexcept;
 
     // Drop every entry under `tid` whose MessageId isn't in `live`.
     // Use after compaction (which clears most of `messages` while
@@ -253,53 +344,62 @@ public:
     void retain_messages(const ThreadId& tid,
                          const std::unordered_set<std::string>& live);
 
-    // Override the LRU cap. Capacity 0 is treated as 1 (must hold the
-    // current touch). Aside from the targeted retain_messages() above
-    // (called once per compaction to drop entries for messages that
-    // didn't survive), there's no manual evict_* path — stale entries
-    // get pushed out by LRU as the new thread / new post-compaction
-    // messages access fresh keys. With the cap at 32 and a few MiB
-    // worst-case per entry, the transient memory footprint during a
-    // thread switch is bounded at ~tens of MiB until the new thread's
-    // accesses reclaim those slots.
+    // Override the LRU cap (SETTLED side only — the pinned live set is
+    // never capped, it's self-bounding by the active turn). Capacity 0
+    // is treated as 1. Aside from the targeted retain_messages() above
+    // (called once per compaction), there's no manual evict_* path —
+    // stale settled entries get pushed out by LRU as fresh keys access;
+    // stale pinned entries are impossible because a message stops being
+    // pinned the moment its widget drains, migrating it into the LRU.
     void set_capacity(std::size_t max_entries) noexcept;
 
 private:
     struct Entry {
         MessageMdCache  md;
         TurnConfigCache cfg;
+        // Valid iff this entry lives in the LRU (settled). Meaningless
+        // for pinned entries, which are not linked into lru_ at all.
         std::list<std::string>::iterator lru_it;
+        bool pinned = false;
     };
 
-    std::unordered_map<std::string, Entry> entries_;
+    // Two homes, one payload type. A key lives in EXACTLY ONE of these
+    // at a time; migrate_() moves the Entry between them, preserving the
+    // MessageMdCache / TurnConfigCache payload (the reveal widget, block
+    // cache, defer state) so a settle never drops animation state.
+    //   • entries_ — settled memo, linked into lru_, bounded by cap_.
+    //   • pinned_  — live state, never evicted, bounded by the turn.
+    std::unordered_map<std::string, Entry> entries_;   // settled (LRU)
+    std::unordered_map<std::string, Entry> pinned_;    // live (never evict)
     std::list<std::string>                 lru_;
-    // 256 entries. This cache holds per-message markdown state
-    // (StreamingMarkdown widgets + reveal bookkeeping), so the cap is a
-    // RAM ceiling. It was 32 for a long time — sized against the WORST
-    // case where every entry is a multi-MiB prose tree — but 32 is far
-    // too small for the dominant real workload: a deep autopilot run
-    // accumulates HUNDREDS of settled sub-turns that all stay in the
-    // live tail (freeze only happens at turn-settle), and
-    // turn_config_for_assistant_run touches message_md() once PER
-    // sub-turn EVERY frame. Past 32 sub-turns the LRU thrashed — each
-    // frame evicted and re-inserted entries, and worst of all the live
-    // streaming edge (touched last) got evicted mid-walk, destroying its
-    // reveal widget and stalling the typewriter (the "md animation not
-    // smooth in a long turn" report). 256 comfortably covers realistic
-    // run depth so the walk is all cache HITS.
-    //
-    // Why 256 is safe on RAM despite the old ">1 GiB at 256" note: the
-    // heavy case only arises for PROSE sub-turns (tool-only sub-turns
-    // build no markdown tree here), and a stably-keyed settled sub-turn
-    // hands its built Element to maya's own component cache via the blit
-    // — this slot retains only the StreamingMarkdown source + block
-    // metadata, not a duplicate render tree. Compaction's
-    // retain_messages() still reclaims dropped entries immediately, so
-    // the ceiling is only approached by a single very deep un-compacted
-    // run, whose prose bodies are bounded by the context window anyway.
-    std::size_t                            cap_ = 256;
+    // 128 entries — the SETTLED ceiling only. The live edge is no longer
+    // among these (it's pinned), so this cap is now purely a RAM/hit-
+    // rate knob for scrolled-off settled turns, decoupled from reveal
+    // smoothness. A settled sub-turn hands its built Element to maya's
+    // component cache via the stably-keyed blit, so this slot retains
+    // only the StreamingMarkdown source + block metadata, not a
+    // duplicate render tree; 128 scrolled-off turns of that is bounded,
+    // and compaction's retain_messages() reclaims dropped entries at
+    // once. (Sizing note: the old 256 existed to keep a deep live run's
+    // walk all-hits; that job now belongs to the pinned set, which is
+    // uncapped, so the settled cap can drop back down without any reveal
+    // risk.)
+    std::size_t                            cap_ = 128;
 
-    Entry& touch_(const std::string& key);
+    // Access `key` on the SETTLED side: find-or-insert in entries_,
+    // move-to-front in the LRU, evicting the oldest settled entries past
+    // cap_. If the key was pinned, migrate it back down into the LRU
+    // first (payload preserved).
+    Entry& touch_settled_(const std::string& key);
+    // Access `key` on the LIVE side: find-or-insert in pinned_. If the
+    // key was in the LRU, migrate it up into pinned_ (payload preserved,
+    // LRU link dropped). Never evicts.
+    Entry& touch_pinned_(const std::string& key);
+    // Move an existing key from one home to the other, carrying its
+    // payload. Returns a reference to the entry in its new home.
+    Entry& migrate_to_pinned_(const std::string& key);
+    Entry& migrate_to_settled_(const std::string& key);
+
     static std::string make_key_(const ThreadId& tid, const MessageId& mid);
 };
 
