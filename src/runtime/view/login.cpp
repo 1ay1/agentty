@@ -268,6 +268,28 @@ Element panel_api_key(const login::ApiKeyInput& s) {
     return v(std::move(rows)).build();
 }
 
+Element panel_custom_host(const login::CustomHostInput& s) {
+    std::vector<Element> rows;
+    rows.push_back(text("Custom OpenAI-compatible host", fg_bold(fg)));
+    rows.push_back(body_text(
+        "Enter a host or host:port for any server that speaks the OpenAI "
+        "chat API \xe2\x80\x94 llama.cpp, vLLM, LM Studio, a proxy, or a "
+        "remote box. A non-443 port uses plain HTTP (the local-server "
+        "convention); a bare host uses HTTPS on 443.",
+        fg_dim(muted)));
+    rows.push_back(text(""));
+    rows.push_back(input_row(s.host_input, s.cursor, /*secret=*/false,
+                             /*placeholder=*/"localhost:8080"));
+    rows.push_back(text(""));
+    rows.push_back(body_text(
+        "Examples:  localhost:8080  \xc2\xb7  127.0.0.1:1234  \xc2\xb7  "
+        "inference.example.com",
+        fg_dim(muted)));
+    rows.push_back(text(""));
+    rows.push_back(key_hints({{"Enter", "connect"}, {"Esc", "cancel"}}));
+    return v(std::move(rows)).build();
+}
+
 } // namespace
 
 Element login_modal(const Model& m) {
@@ -285,6 +307,8 @@ Element login_modal(const Model& m) {
             return panel_oauth_exchanging();
         } else if constexpr (std::same_as<T, login::ApiKeyInput>) {
             return panel_api_key(s);
+        } else if constexpr (std::same_as<T, login::CustomHostInput>) {
+            return panel_custom_host(s);
         } else if constexpr (std::same_as<T, login::Failed>) {
             return panel_picking(true, s.message);
         }

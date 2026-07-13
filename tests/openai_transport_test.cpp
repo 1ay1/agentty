@@ -430,10 +430,18 @@ static void test_endpoint_presets() {
     CHECK(ollama.native_api);
     CHECK(ollama.path == "/api/chat");
 
+    auto llama = oai::Endpoint::from_spec("llama.cpp");
+    CHECK(llama.host == "localhost");
+    CHECK(llama.port == 8080);
+    CHECK(!llama.use_tls);
+    CHECK(llama.path == "/v1/chat/completions");
+    CHECK(!llama.native_api);   // OpenAI dialect, not Ollama native
+
     auto custom = oai::Endpoint::from_spec("my.host:8080");
     CHECK(custom.host == "my.host");
     CHECK(custom.port == 8080);
     CHECK(!custom.use_tls);
+    CHECK(custom.label == "my.host:8080");   // label carries the raw spec
 
     auto def = oai::Endpoint::from_spec("");
     CHECK(def.host == "api.openai.com");

@@ -64,7 +64,7 @@ struct ProviderPreset {
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderPreset, 7> kProviders{{
+inline constexpr std::array<ProviderPreset, 8> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}},
     {"openai",     "OpenAI",     "GPT — api.openai.com",
@@ -78,6 +78,8 @@ inline constexpr std::array<ProviderPreset, 7> kProviders{{
     {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
      Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}},
     {"ollama",     "Ollama",     "Local models at localhost:11434",
+     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
+    {"llama.cpp",  "llama.cpp",  "Local llama.cpp server at localhost:8080",
      Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
 }};
 

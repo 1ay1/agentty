@@ -14,6 +14,10 @@
 //                    exchange the code on submit.
 //   OAuthExchanging — code submitted; HTTP POST to /oauth/token in flight.
 //   ApiKeyInput    — user is typing an `sk-ant-...` key.
+//   CustomHostInput — user is typing a raw `host[:port]` for an
+//                    OpenAI-compatible backend (llama.cpp, vLLM, a
+//                    remote box). No auth; submit switches the provider
+//                    to that endpoint directly.
 //   Failed         — error toast; press any key to return to Picking.
 
 #include <string>
@@ -49,12 +53,22 @@ struct ApiKeyInput {
     std::string provider_label;  // display name for the panel title
 };
 
+// Free-text entry of a raw OpenAI-compatible endpoint ("host" or
+// "host:port"). Opened from the provider picker's "Custom host…" row.
+// Submit routes through provider::parse_selection(raw) — the same path
+// --provider host:port takes — so any llama.cpp / vLLM / remote server
+// is reachable from the UI without touching the CLI.
+struct CustomHostInput {
+    std::string host_input;
+    int         cursor = 0;
+};
+
 struct Failed {
     std::string message;
 };
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
-                           ApiKeyInput, Failed>;
+                           ApiKeyInput, CustomHostInput, Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {
     return !std::holds_alternative<Closed>(s);
@@ -63,7 +77,8 @@ using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
 [[nodiscard]] inline bool is_input_state(const State& s) noexcept {
     // States that consume free-text key input (vs the Picking choice keys).
     return std::holds_alternative<OAuthCode>(s)
-        || std::holds_alternative<ApiKeyInput>(s);
+        || std::holds_alternative<ApiKeyInput>(s)
+        || std::holds_alternative<CustomHostInput>(s);
 }
 
 } // namespace agentty::ui::login

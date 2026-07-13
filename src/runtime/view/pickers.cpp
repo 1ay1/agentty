@@ -327,6 +327,21 @@ Element provider_picker(const Model& m) {
         ++i;
     }
 
+    // Virtual trailing row: "Custom host…" — opens a free-text endpoint
+    // entry for any OpenAI-compatible server (llama.cpp, vLLM, a remote
+    // host:port). Kept out of the registry so preset_for / from_spec stay
+    // clean; the reducer maps this row index to the CustomHostInput modal.
+    {
+        Picker::Config::Row row;
+        row.leading        = std::string{"Custom host\xe2\x80\xa6  "}
+                           + "any OpenAI-compatible server (host:port)";
+        row.leading_style  = fg_of(muted);
+        row.trailing       = "\xe2\x9c\x8e edit";   // ✎ edit
+        row.trailing_style = fg_of(info);
+        row.selected       = (i == picker->index);
+        cfg.rows.push_back(std::move(row));
+    }
+
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(h(
         text("✓", fg_of(success)), text(" ready  ", fg_dim(muted)),

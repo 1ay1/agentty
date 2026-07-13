@@ -110,11 +110,13 @@ void print_usage() {
         "                             write   (never prompt reads).\n"
         "      --provider P    LLM backend. anthropic (default, OAuth/Pro/Max)\n"
         "                      or an OpenAI-compatible one: openai | groq |\n"
-        "                      openrouter | together | cerebras | ollama, or a\n"
-        "                      raw host[:port]. Reads OPENAI_API_KEY (or the\n"
-        "                      provider-specific *_API_KEY) / -k for the key;\n"
-        "                      ollama needs no key. Persisted like -m.\n"
-        "                      (Switch live in-app with Ctrl-P or palette.)\n"
+        "                      openrouter | together | cerebras | ollama |\n"
+        "                      llama.cpp, or a raw host[:port] for any other\n"
+        "                      OpenAI-compatible server. Reads OPENAI_API_KEY\n"
+        "                      (or the provider-specific *_API_KEY) / -k for\n"
+        "                      the key; local backends need no key. Persisted\n"
+        "                      like -m. (Switch live in-app with Ctrl-P \xe2\x80\x94 the\n"
+        "                      picker has a \"Custom host\xe2\x80\xa6\" entry too.)\n"
         "  -V, --version       Print the agentty version and exit.\n"
         "  -h, --help          Show this message.\n"
         "\n",
@@ -128,7 +130,7 @@ struct Args {
     std::string cli_workspace;
     std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
-    std::string cli_provider;  // "anthropic" | "openai" | "groq" | "ollama" | host[:port]
+    std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
