@@ -1023,6 +1023,135 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
     return settle_freeze_trim(cx, st);
 }
 
+// A DEEP autopilot run: one user submit, then MANY sub-turns land
+// one-at-a-time and stay LIVE (no mid-run freeze) until the whole run
+// settles. This is the scenario the settled-prefix HOIST optimizes —
+// and the one the user hit as "a running tool card that doesn't show,
+// then the reply and the prior card render broken." Two hazards this
+// turn exercises that no other turn does:
+//
+//   • The hoist engages ONLY at depth: as settled sub-turns accumulate,
+//     turn_config_for_assistant_run collapses the leading quiescent run
+//     into ONE cached bare Turn keyed on a SUBRANGE hash that ADVANCES
+//     as more sub-turns settle. Every advance reshuffles which sub-turns
+//     are inside the cached prefix vs. the eager tail — a within-live-
+//     tail structural change maya's inline diff must absorb as a pure
+//     append, or a committed card row is rewritten (the "prior card
+//     broke" corruption).
+//
+//   • The live edge holds a RUNNING tool whose progress overflows the
+//     viewport, so the settled sub-turns above it are genuinely
+//     committed to native scrollback while the hoist boundary keeps
+//     moving underneath them.
+static bool deep_run_turn(Ctx& cx, int t, int H) {
+    Model& m = *cx.m;
+    const std::string st = std::to_string(t);
+
+    { // submit
+        Message u; u.role = Role::User;
+        u.text = "turn " + st + ": do a long series of edits (uniq-" + st + "-ask).";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        using Cmd = maya::Cmd<agentty::Msg>;
+        if (const auto* c = std::get_if<Cmd::CommitScrollback>(&trim.inner))
+            cx.rt->commit_inline_prefix(c->rows);
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+        if (cx.frame("t" + st + "-submit")) return true;
+    }
+
+    // Opening prose sub-turn (the model's "I'll do these edits" line).
+    {
+        Message a; a.role = Role::Assistant;
+        a.streaming_text = "Turn " + st + " deep opening: uniq-" + st + "-open.";
+        m.d.current.messages.push_back(std::move(a));
+        for (int f = 0; f < 2; ++f) {
+            tick(); if (cx.frame("t" + st + "-o" + std::to_string(f))) return true;
+        }
+    }
+
+    // MANY settled edit sub-turns, each on its OWN Assistant message
+    // (production sub-turn shape). Deep enough to engage the hoist and
+    // to overflow the viewport many times over. The FIRST half renders
+    // every sub-turn (max overflow-commit boundaries); the SECOND half
+    // lands sub-turns in BURSTS of 3 per rendered frame — the under-load
+    // shape where several panels commit to scrollback in one diff.
+    const int kEdits = 3 * H + 10;   // well past the hoist knee + viewport
+    for (int e = 0; e < kEdits; ++e) {
+        const std::string et = st + "e" + std::to_string(e);
+        Message a; a.role = Role::Assistant;
+        ToolUse tc;
+        tc.id   = agentty::ToolCallId{"dedit-" + et};
+        tc.name = agentty::ToolName{"edit"};
+        tc.args = nlohmann::json{
+            {"path", "src/deep_" + et + ".cpp"},
+            {"edits", nlohmann::json::array({{{"old_text", "a();\n"},
+                                              {"new_text", "b();\n"}}})}};
+        auto now = std::chrono::steady_clock::now();
+        tc.status = ToolUse::Done{now - std::chrono::milliseconds{5}, now,
+                                  "edited uniq-" + et + "-done"};
+        tc.expanded = false;
+        a.tool_calls.push_back(std::move(tc));
+        m.d.current.messages.push_back(std::move(a));
+        // First half: render every sub-turn. Second half: burst 3.
+        const int burst = (e < kEdits / 2) ? 1 : 3;
+        if (e % burst == burst - 1) {
+            tick(); if (cx.frame("t" + st + "-e" + std::to_string(e))) return true;
+        }
+    }
+    tick(); if (cx.frame("t" + st + "-e-flush")) return true;
+
+    // The LIVE edge: one more sub-turn whose tool is STILL RUNNING with
+    // a growing progress body that overflows the viewport. The settled
+    // sub-turns above are committed to scrollback; the running card must
+    // render AND every frame's committed prefix must stay byte-stable.
+    {
+        Message a; a.role = Role::Assistant;
+        ToolUse tc;
+        tc.id   = agentty::ToolCallId{"drun-" + st};
+        tc.name = agentty::ToolName{"Bash"};
+        tc.args = nlohmann::json{
+            {"command", "make deep-" + st},
+            {"display_description", "uniq-" + st + "-run. go"}};
+        tc.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+        a.tool_calls.push_back(std::move(tc));
+        m.d.current.messages.push_back(std::move(a));
+        m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+        tick(); if (cx.frame("t" + st + "-run0")) return true;
+
+        const int kProgress = H + 12;
+        auto& tcr = m.d.current.messages.back().tool_calls.back();
+        for (int p = 0; p < kProgress; ++p) {
+            auto& run = std::get<ToolUse::Running>(tcr.status);
+            run.progress_text +=
+                "[" + std::to_string(p) + "/" + std::to_string(kProgress)
+                + "] deep step " + std::to_string(p) + " of turn " + st + "...\n";
+            if (p % 3 == 2) {
+                tick(); if (cx.frame("t" + st + "-run" + std::to_string(p + 1))) return true;
+            }
+        }
+
+        // Tool finishes.
+        auto started = std::get<ToolUse::Running>(tcr.status).started_at;
+        tcr.status = ToolUse::Done{
+            started, std::chrono::steady_clock::now(),
+            "ok: deep run uniq-" + st + "-run-done"};
+        tcr.expanded = false;
+    }
+
+    // Continuation prose on a NEW message (the reply after the run).
+    {
+        Message cont; cont.role = Role::Assistant;
+        m.d.current.messages.push_back(std::move(cont));
+    }
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    if (stream_paras(cx, m.d.current.messages.back(), st, 0, 3,
+                     ("t" + st + "-post").c_str(), /*wrapping=*/true, /*burst=*/2))
+        return true;
+
+    return settle_freeze_trim(cx, st);
+}
+
 static int run_shape(int W, int H) {
     int master = -1, slave = -1;
     if (openpty(&master, &slave, nullptr, nullptr, nullptr) != 0) {
@@ -1072,6 +1201,16 @@ static int run_shape(int W, int H) {
             if (failed) goto done;
         }
     }
+
+    // A DEEP autopilot run on a NON-EMPTY frozen prefix: the settled-
+    // prefix hoist engages here (many sub-turns kept live) with a
+    // running edge, then settles and freezes. This is the scenario the
+    // user reported broken; it runs AFTER the rotation so a real frozen
+    // prefix + trimmed scrollback already exist beneath it.
+    if (deep_run_turn(cx, 6, H)) goto done;
+    // And a follow-up turn right after it — the "text again after the
+    // run" step where the prior run's cards showed broken.
+    if (prose_turn(cx, 7, H)) goto done;
 
     std::fprintf(err, "  [info] frames oracle-checked: %d\n", orc.frames_checked);
     std::fprintf(err, "  [info] scrollback gate recoveries this shape: %lu\n",
