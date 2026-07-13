@@ -18,6 +18,9 @@
 #include <vector>
 
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/registry.hpp"
+#include "agentty/provider/selection.hpp"
+#include <cstdlib>
 
 using namespace agentty;
 namespace oai = agentty::provider::openai;
@@ -423,6 +426,23 @@ static void test_endpoint_presets() {
     CHECK(groq.use_tls);
     CHECK(groq.path == "/openai/v1/chat/completions");
 
+    auto openrouter = oai::Endpoint::from_spec("openrouter");
+    CHECK(openrouter.host == "openrouter.ai");
+    CHECK(openrouter.use_tls);
+    CHECK(openrouter.path == "/api/v1/chat/completions");
+    CHECK(openrouter.models_path == "/api/v1/models");
+    CHECK(!openrouter.native_api);
+
+    auto together = oai::Endpoint::from_spec("together");
+    CHECK(together.host == "api.together.xyz");
+    CHECK(together.use_tls);
+    CHECK(together.path == "/v1/chat/completions");
+
+    auto cerebras = oai::Endpoint::from_spec("cerebras");
+    CHECK(cerebras.host == "api.cerebras.ai");
+    CHECK(cerebras.use_tls);
+    CHECK(cerebras.path == "/v1/chat/completions");
+
     auto ollama = oai::Endpoint::from_spec("ollama");
     CHECK(ollama.host == "localhost");
     CHECK(ollama.port == 11434);
@@ -446,6 +466,90 @@ static void test_endpoint_presets() {
     auto def = oai::Endpoint::from_spec("");
     CHECK(def.host == "api.openai.com");
     CHECK(def.use_tls);
+
+    // Registry ↔ from_spec consistency: EVERY OpenAI-family preset id must
+    // resolve to a usable endpoint (non-empty host + chat/models paths).
+    // Anthropic is skipped — it doesn't go through the OpenAI from_spec.
+    // This catches the "added a registry row, forgot the endpoint arm"
+    // class of bug: the fallback would treat the id as a raw hostname and
+    // silently dial the wrong place.
+    for (const auto& p : agentty::provider::providers()) {
+        if (p.kind != agentty::provider::Kind::OpenAI) continue;
+        auto ep = oai::Endpoint::from_spec(p.id);
+        CHECK(!ep.host.empty());
+        CHECK(!ep.path.empty());
+        CHECK(!ep.models_path.empty());
+        // Hosted (non-local) presets must use TLS on 443; locals must not.
+        if (p.is_local) {
+            CHECK(!ep.use_tls);
+        } else {
+            CHECK(ep.use_tls);
+            CHECK(ep.port == 443);
+        }
+        // The label must round-trip to the SAME preset so the model badge
+        // and provider readout name it correctly (not fall through to the
+        // raw-host label branch).
+        CHECK(ep.label == p.id);
+    }
+}
+
+// ── Per-preset auth resolution ──────────────────────────────────────────────
+// resolve_auth_for is the single mapping every provider switch goes through
+// (startup AND the picker). Verify each preset kind lands on the right auth:
+//   • Anthropic → the login creds, verbatim.
+//   • local (ollama/llama.cpp) → an EMPTY key (no auth), never the env chain.
+//   • hosted OpenAI-family → a bearer key, with precedence
+//     cli_key > saved_key > env chain.
+static void test_resolve_auth_per_preset() {
+    using namespace agentty::provider;
+    // A distinctive Anthropic cred so we can prove it round-trips untouched.
+    auth::AuthHeader anthropic{auth::BearerHeader{"anthropic-oauth-token"}};
+
+    // Clear any ambient keys so the env-chain branch is deterministic.
+    ::unsetenv("OPENAI_API_KEY");
+    ::unsetenv("GROQ_API_KEY");
+    ::unsetenv("OPENROUTER_API_KEY");
+    ::unsetenv("TOGETHER_API_KEY");
+    ::unsetenv("CEREBRAS_API_KEY");
+
+    for (const auto& p : providers()) {
+        auto a = resolve_auth_for(p.id, anthropic, /*cli_key=*/{}, /*saved_key=*/{});
+        if (p.kind == Kind::Anthropic) {
+            // Echoes the login creds unchanged.
+            CHECK(!auth::is_empty(a));
+            auto* b = std::get_if<auth::BearerHeader>(&a);
+            CHECK(b && b->token == "anthropic-oauth-token");
+        } else if (p.auth == AuthStyle::None) {
+            // Local backend: empty key, and it must NOT have grabbed the
+            // Anthropic token by accident.
+            CHECK(auth::is_empty(a));
+        } else {
+            // Hosted OpenAI-family with no env/saved/cli key → empty bearer.
+            CHECK(auth::is_empty(a));
+        }
+    }
+
+    // Saved key (the in-app paste path) is honoured for a hosted provider.
+    {
+        auto a = resolve_auth_for("openrouter", anthropic,
+                                  /*cli_key=*/{}, /*saved_key=*/"sk-saved");
+        CHECK(!auth::is_empty(a));
+        auto* k = std::get_if<auth::ApiKeyHeader>(&a);
+        CHECK(k && k->value == "sk-saved");
+    }
+    // cli_key wins over saved_key.
+    {
+        auto a = resolve_auth_for("groq", anthropic,
+                                  /*cli_key=*/"sk-cli", /*saved_key=*/"sk-saved");
+        auto* k = std::get_if<auth::ApiKeyHeader>(&a);
+        CHECK(k && k->value == "sk-cli");
+    }
+    // A local backend ignores a saved key (stays keyless).
+    {
+        auto a = resolve_auth_for("ollama", anthropic,
+                                  /*cli_key=*/{}, /*saved_key=*/"sk-ignored");
+        CHECK(auth::is_empty(a));
+    }
 }
 
 // ── Incremental salvage tests ──────────────────────────────────────────────────
@@ -800,6 +904,7 @@ int main() {
     test_sse_plain_json_prose_not_salvaged();
     test_sse_structured_tool_still_works_with_salvage_on();
     test_endpoint_presets();
+    test_resolve_auth_per_preset();
     // Incremental salvage tests.
     test_sse_salvage_streamed_tokens();
     test_sse_prose_then_tool_call();
