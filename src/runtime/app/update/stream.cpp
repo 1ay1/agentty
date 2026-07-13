@@ -1364,11 +1364,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     ctx.retry             = retry::Scheduled{};
                     m.s.phase = phase::Streaming{std::move(ctx)};
                     if (last) {
-                        // Settle before pop — an uncommitted (textless)
-                        // placeholder may hold a pinned reveal widget; drop
-                        // it into the LRU so the pop doesn't orphan a pinned
-                        // key (see the CancelStream pop for rationale).
-                        m.ui.view_cache.settle(m.d.current.id, last->id);
+                        // Drop before pop — an uncommitted (textless)
+                        // placeholder may hold a cache entry (pinned or
+                        // staged); free it so the pop doesn't orphan it
+                        // (see the CancelStream pop for rationale).
+                        m.ui.view_cache.drop(m.d.current.id, last->id);
                         m.d.current.messages.pop_back();
                     }
                     Message placeholder;
@@ -1459,8 +1459,8 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 ctx.retry             = retry::Scheduled{};
                 m.s.phase = phase::Streaming{std::move(ctx)};
                 if (last) {
-                    // Settle before pop — see the auth-retry pop above.
-                    m.ui.view_cache.settle(m.d.current.id, last->id);
+                    // Drop before pop — see the auth-retry pop above.
+                    m.ui.view_cache.drop(m.d.current.id, last->id);
                     m.d.current.messages.pop_back();
                 }
                 Message placeholder;
@@ -1607,14 +1607,11 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     std::string{}.swap(tc.args_streaming);
                 }
                 if (last.text.empty() && last.tool_calls.empty()) {
-                    // The message carried nothing but a (possibly pinned)
-                    // reveal widget from its brief streaming life. Settle
-                    // its cache key BEFORE the pop so it lands in the LRU
-                    // and ages out normally — a pinned key whose message no
-                    // longer exists can't be reached by freeze_range and
-                    // would sit in the uncapped pinned set until the next
-                    // compaction reap.
-                    m.ui.view_cache.settle(m.d.current.id, last.id);
+                    // The message carried nothing but a (possibly cached)
+                    // reveal widget from its brief streaming life. Drop its
+                    // cache entry BEFORE the pop so a removed message can't
+                    // orphan an entry in either home.
+                    m.ui.view_cache.drop(m.d.current.id, last.id);
                     m.d.current.messages.pop_back();
                 }
             }
