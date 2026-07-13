@@ -273,16 +273,31 @@ private:
 
     std::unordered_map<std::string, Entry> entries_;
     std::list<std::string>                 lru_;
-    // 32 entries. This cache holds the HEAVY per-message markdown
-    // trees (a 100 KB `read`/`bash` body can be several MiB of Element
-    // nodes), so the cap is a RAM ceiling, not a speed knob: 256
-    // entries once retained >1 GiB after the underlying output strings
-    // were compacted out. The per-settled-panel render memo does NOT
-    // live here — it lives in the dedicated, generously-sized
-    // g_panel_render_memo next to g_panel_cache (agent_timeline.cpp),
-    // which holds only lightweight Element HANDLES. That split is what
-    // lets a 300-sub-turn run stay flat without inflating this cap.
-    std::size_t                            cap_ = 32;
+    // 256 entries. This cache holds per-message markdown state
+    // (StreamingMarkdown widgets + reveal bookkeeping), so the cap is a
+    // RAM ceiling. It was 32 for a long time — sized against the WORST
+    // case where every entry is a multi-MiB prose tree — but 32 is far
+    // too small for the dominant real workload: a deep autopilot run
+    // accumulates HUNDREDS of settled sub-turns that all stay in the
+    // live tail (freeze only happens at turn-settle), and
+    // turn_config_for_assistant_run touches message_md() once PER
+    // sub-turn EVERY frame. Past 32 sub-turns the LRU thrashed — each
+    // frame evicted and re-inserted entries, and worst of all the live
+    // streaming edge (touched last) got evicted mid-walk, destroying its
+    // reveal widget and stalling the typewriter (the "md animation not
+    // smooth in a long turn" report). 256 comfortably covers realistic
+    // run depth so the walk is all cache HITS.
+    //
+    // Why 256 is safe on RAM despite the old ">1 GiB at 256" note: the
+    // heavy case only arises for PROSE sub-turns (tool-only sub-turns
+    // build no markdown tree here), and a stably-keyed settled sub-turn
+    // hands its built Element to maya's own component cache via the blit
+    // — this slot retains only the StreamingMarkdown source + block
+    // metadata, not a duplicate render tree. Compaction's
+    // retain_messages() still reclaims dropped entries immediately, so
+    // the ceiling is only approached by a single very deep un-compacted
+    // run, whose prose bodies are bounded by the context window anyway.
+    std::size_t                            cap_ = 256;
 
     Entry& touch_(const std::string& key);
     static std::string make_key_(const ThreadId& tid, const MessageId& mid);

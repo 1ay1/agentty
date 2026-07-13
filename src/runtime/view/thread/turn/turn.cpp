@@ -1315,6 +1315,30 @@ maya::Turn::Config turn_config_for_assistant_run(
         return true;
     };
 
+    // ── Pin the live edge in the LRU BEFORE the settled walk. ──
+    //
+    //    The loop below calls message_md() once per settled sub-turn
+    //    (both inside subturn_stably_keyable's state check and inside
+    //    emit_subturn's cached_markdown_for). On a deep run that is
+    //    O(depth) distinct (thread,msg) touches per frame. The ViewCache
+    //    LRU is capacity-bounded, so once depth exceeds the cap the walk
+    //    EVICTS the oldest entries as it inserts new ones — and the live
+    //    streaming edge (the LAST message, touched LAST) is exactly the
+    //    entry sitting at the LRU back from the previous frame when the
+    //    walk begins. Evicting it destroys its StreamingMarkdown widget
+    //    + reveal bookkeeping (last_grow_tick, revealed_size, the async
+    //    parse state); the edge's cached_markdown_for then re-creates a
+    //    fresh widget, the reveal restarts from scratch, and the live
+    //    typewriter visibly STALLS / stutters every frame the depth stays
+    //    over the cap (the "md animation not smooth in a long turn"
+    //    report). Touching the edge FIRST moves it to the LRU front so
+    //    the settled walk can never evict it mid-frame. (The cap is also
+    //    raised — see cache.hpp — so a realistic run doesn't thrash at
+    //    all; this pin is the belt-and-braces guarantee for runs that
+    //    still exceed it.)
+    if (end > run_first && msgs[end - 1].role == Role::Assistant)
+        (void)m.ui.view_cache.message_md(m.d.current.id, msgs[end - 1].id);
+
     for (std::size_t i = run_first; i < end; ++i) {
         if (msgs[i].role != Role::Assistant) break;   // run boundary
         if (subturn_stably_keyable(i)) {
