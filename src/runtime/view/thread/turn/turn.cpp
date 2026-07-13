@@ -1207,80 +1207,91 @@ maya::Turn::Config turn_config_for_assistant_run(
     };
 
     // ── Settled-prefix hoist (flat per-frame cost vs. turn depth). ──
-    //    An in-flight run only MUTATES in its last sub-turn (the
-    //    streaming edge). Sub-turns [run_first, edge) are settled and
-    //    byte-stable, so we hoist them into ONE headerless continuation
-    //    Turn keyed on assistant_run_hash_id(prefix) and emit it as a
-    //    single body slot. maya blits that component O(1) on every
-    //    subsequent frame — the N-slot build/walk runs ONCE per prefix
-    //    change (a sub-turn settling advances the key by one), not every
-    //    frame. Without this, build_inner walks all N body slots each
-    //    frame → per-frame CPU grows O(turn depth).
+    //    An in-flight run's per-frame mutation is confined to a small
+    //    trailing window (the streaming edge, plus any sub-turn still
+    //    running a defer/reveal state machine). Everything BEFORE that
+    //    window is byte-stable, so we hoist the leading QUIESCENT run
+    //    [run_first, hoist_end) into ONE cacheable bare Turn keyed on
+    //    assistant_run_hash_id(prefix) and emit it as a single body
+    //    slot. maya blits that component O(1) every subsequent frame —
+    //    the N-slot build/walk runs ONCE per prefix change (a sub-turn
+    //    settling advances the key by one), not every frame. Without
+    //    this, build_inner walks all N body slots each frame →
+    //    per-frame CPU grows O(turn depth).
+    //
+    //    ROBUSTNESS — what may NOT be hoisted (else a card silently
+    //    vanishes or an animation stalls):
+    //      • A sub-turn with a non-terminal tool (still running).
+    //      • A sub-turn whose reveal widget is still live/finalizing/
+    //        revealing/parsing — the hash is invariant across the
+    //        scramble→clean transition, so caching mid-reveal would
+    //        freeze scramble glyphs forever.
+    //      • A sub-turn running the tool-panel DEFER state machine
+    //        (defer_tool_panel / defer_exit_finished / card_defer_since).
+    //        The defer flag is per-frame mutable state NOT folded into
+    //        the render key, and its two-phase exit only advances while
+    //        cached_markdown_for is called every frame. Hoisting such a
+    //        message would (a) bake a panel-hidden body under a key the
+    //        defer-clear never bumps → card invisible forever, and (b)
+    //        stall the exit machine (the cached component skips the
+    //        per-frame builder). So the hoist boundary STOPS at the
+    //        first non-quiescent sub-turn; everything from there on is
+    //        built eagerly so its side-effecting builders keep running.
     //
     //    Byte-identity with the flat build (freeze_range, and the
-    //    whole-run-hash path in build_live_tail) is guaranteed by
-    //    reusing maya::Turn's own body assembly for the prefix: the
-    //    inner continuation Turn runs the identical is_blank-gated gap
-    //    loop (turn.hpp build_inner), and the prefix component sits as a
-    //    top-level body slot so build_inner inserts exactly one gap
-    //    between it and the live edge — same rows as emitting the slots
-    //    inline. The prefix and the whole-run-hash path are mutually
-    //    exclusive (the whole run only earns its key once IDLE+settled,
-    //    at which point this active-run function's split is gone), so
-    //    the freeze seam never sees a split→flat transition.
-    //
-    //    Gated exactly like the whole-run key, scoped to the prefix:
-    //    every prefix tool terminal AND every prefix reveal drained.
-    //    Keying while a reveal animates would cache scramble glyphs
-    //    forever (the hash is invariant across scramble→clean); the
-    //    live edge is excluded from the prefix so its live reveal can
-    //    never poison the prefix cache.
+    //    whole-run-hash path in build_live_tail) holds by construction:
+    //    the bare Turn reuses maya::Turn's own is_blank-gated body
+    //    assembly, and it sits as a top-level body slot so build_inner
+    //    inserts exactly one gap between it and the first eager slot —
+    //    same rows as emitting the slots inline.
     std::size_t body_lo = run_first;
     const std::size_t edge = end - 1;   // last sub-turn = streaming edge
     if (edge > run_first && msgs[edge].role == Role::Assistant) {
-        // Single pass over the prefix: it's hoistable iff every tool is
-        // terminal AND every reveal has drained. Both were separate
-        // O(N) scans; fused here so the per-frame cost of DECIDING to
-        // hoist is one loop, not three (the key build below is the
-        // fourth unavoidable pass — maya needs the content hash to look
-        // up the cache; it short-circuits on the first non-hoistable
-        // sub-turn so a still-streaming prefix pays nothing extra).
-        bool prefix_hoistable = true;
-        for (std::size_t j = run_first; j < edge && prefix_hoistable; ++j) {
+        // Predicate: is sub-turn j byte-stable AND free of any per-frame
+        // state machine that needs cached_markdown_for to keep running?
+        auto quiescent = [&](std::size_t j) -> bool {
             const auto& mj = msgs[j];
+            if (mj.role != Role::Assistant) return false;
             for (const auto& tc : mj.tool_calls)
-                if (!tc.is_terminal()) { prefix_hoistable = false; break; }
-            if (!prefix_hoistable) break;
-            if (mj.role == Role::Assistant && !mj.text.empty()) {
-                const auto& mc = m.ui.view_cache.message_md(
-                    m.d.current.id, mj.id);
-                if (mc.streaming
-                 && (mc.streaming->is_live()
-                  || mc.streaming->is_finalizing()
-                  || mc.streaming->reveal_in_progress()
-                  || mc.streaming->is_parsing()))
-                    prefix_hoistable = false;
-            }
-        }
-        if (prefix_hoistable) {
+                if (!tc.is_terminal()) return false;
+            const auto& mc = m.ui.view_cache.message_md(
+                m.d.current.id, mj.id);
+            // Any active tool-panel defer machine → not hoistable.
+            if (mc.defer_tool_panel || mc.defer_exit_finished
+                || mc.card_defer_since.time_since_epoch().count() != 0)
+                return false;
+            // Reveal must be fully drained (only relevant when the
+            // sub-turn has prose that built a streaming widget).
+            if (!mj.text.empty() && mc.streaming
+                && (mc.streaming->is_live()
+                 || mc.streaming->is_finalizing()
+                 || mc.streaming->reveal_in_progress()
+                 || mc.streaming->is_parsing()))
+                return false;
+            return true;
+        };
+        // Longest leading run of quiescent sub-turns, capped BELOW the
+        // live edge (the edge is always built eagerly).
+        std::size_t hoist_end = run_first;
+        while (hoist_end < edge && quiescent(hoist_end)) ++hoist_end;
+
+        if (hoist_end > run_first) {
             maya::Turn::Config pref;
             pref.bare       = true;   // body-only, no header/rail/divider
             pref.rail_color = style.color;
-            for (std::size_t j = run_first; j < edge; ++j) {
-                if (msgs[j].role != Role::Assistant) break;
+            for (std::size_t j = run_first; j < hoist_end; ++j)
                 emit_subturn(j, pref);
-            }
             // Only hoist when the prefix produced at least one body
             // slot. An empty bare Turn renders an empty (non-blank)
             // vstack Box, which the outer body loop would treat as a
             // visible slot and emit a spurious leading gap before the
-            // live edge — a 1-row divergence from the flat build. With
+            // next slot — a 1-row divergence from the flat build. With
             // ≥1 slot the bare vstack is genuinely non-blank and the
-            // single gap between it and the edge matches the flat build.
+            // single gap matches the flat build.
             if (!pref.body.empty()) {
-                pref.hash_id = assistant_run_hash_id(m, run_first, edge);
+                pref.hash_id = assistant_run_hash_id(m, run_first, hoist_end);
                 cfg.body.emplace_back(maya::Turn{std::move(pref)}.build());
-                body_lo = edge;   // live edge onward built eagerly below
+                body_lo = hoist_end;   // remainder built eagerly below
             }
         }
     }

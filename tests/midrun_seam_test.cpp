@@ -1260,9 +1260,92 @@ static void test_multi_turn_write_pairs_seam() {
 // once at settle — is covered by test_incremental_freeze_prefix_stable
 // (above) and the single/write/read seam tests below.
 
+// ── Settled-prefix HOIST correctness (the perf split must be invisible).
+//    turn_config_for_assistant_run hoists the leading quiescent sub-turns
+//    of an in-flight run into ONE cacheable bare Turn to keep per-frame
+//    build O(1) in turn depth. The split must NEVER change what the user
+//    sees: every settled tool card must still render EXACTLY once, and
+//    the row output must be identical frame-to-frame as the prefix grows
+//    (a hoisted card silently vanishing, or a stale cache blitting an
+//    old prefix, is the "sometimes not working" bug this guards).
+static void test_prefix_hoist_all_cards_present() {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"hoist"};
+    Message u; u.role = Role::User; u.text = "do many edits";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);   // User frozen
+
+    constexpr int N = 24;   // deep enough that the hoist engages
+    std::vector<std::string> prev;
+
+    for (int e = 0; e < N; ++e) {
+        // A settled edit sub-turn lands (all prior ones become the
+        // hoistable quiescent prefix).
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("h" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+
+        // Streaming successor placeholder = the live edge (never hoisted).
+        Message ph; ph.role = Role::Assistant; ph.streaming_text = "working";
+        m.d.current.messages.push_back(std::move(ph));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+        auto cur = render_rows(m);
+
+        // (1) EVERY settled edit card so far must be present EXACTLY
+        //     once. settled_edit stamps tc.output()="edited-<tag>"; the
+        //     card renders the tool name + path src/<tag>.cpp, so the
+        //     unique path is our per-card marker. A hoisted card that
+        //     vanished (defer poisoning / stale prefix cache) drops its
+        //     marker; a double-emit (spurious gap / duplicated slot)
+        //     bumps the count above one.
+        for (int k = 0; k <= e; ++k) {
+            const std::string marker = "src/h" + std::to_string(k) + ".cpp";
+            int copies = 0;
+            for (const auto& row : cur)
+                if (row.find(marker) != std::string::npos) ++copies;
+            CHECK(copies == 1,
+                  ("settled card " + marker
+                   + " not rendered exactly once in a "
+                   + std::to_string(e + 1) + "-deep in-flight run "
+                   + "(got " + std::to_string(copies)
+                   + ") — prefix hoist dropped or duplicated a card").c_str());
+        }
+
+        // (2) The committed prefix must be byte-stable across the grow
+        //     (a stale prefix cache blitting an old shape would rewrite
+        //     an already-overflowed row).
+        if (!prev.empty()) {
+            int d = first_committed_divergence(prev, cur, /*term_h=*/40);
+            CHECK(d < 0,
+                  "prefix hoist rewrote a committed row as the run grew");
+        }
+        prev = std::move(cur);
+
+        m.d.current.messages.pop_back();   // drop placeholder
+    }
+
+    // (3) Settle-freeze the whole run: the frozen output must contain
+    //     each card exactly once too (the split→flat handoff is clean).
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    auto frozen = render_rows(m);
+    for (int k = 0; k < N; ++k) {
+        const std::string marker = "src/h" + std::to_string(k) + ".cpp";
+        int copies = 0;
+        for (const auto& row : frozen)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("card " + marker + " not exactly once after settle-freeze")
+                  .c_str());
+    }
+}
+
 int main() {
     std::printf("midrun_seam_test\n");
     test_incremental_freeze_prefix_stable();
+    test_prefix_hoist_all_cards_present();
     test_single_edit_stream_to_freeze();
 
     test_single_write_stream_to_freeze();
