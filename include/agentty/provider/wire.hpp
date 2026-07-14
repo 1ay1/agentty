@@ -32,10 +32,21 @@
 // std::function on the hot path.
 
 #include <cstddef>
+#include <cstring>
 #include <string>
 #include <string_view>
 
 namespace agentty::provider::wire {
+
+// Trailing readable bytes SseFramer keeps live past the end of every
+// dispatched `data:` payload. Set equal to simdjson::SIMDJSON_PADDING (64) so
+// a transport can hand the accumulator straight to simdjson's ondemand parser
+// WITHOUT the per-frame memcpy-into-a-padded-scratch dance — simdjson only
+// requires the padding bytes be *readable* (SIMD over-reads tolerate junk),
+// which the reserved accumulator satisfies. Kept as a local constant so
+// wire.hpp stays free of a simdjson include; a static_assert in the transport
+// pins it to the real SIMDJSON_PADDING.
+inline constexpr std::size_t kSseSimdPadding = 64;
 
 // Compact `buf` (erasing the already-consumed prefix) only once `read_pos`
 // crosses this — turns the per-chunk drain from O(buffered bytes) to
@@ -122,19 +133,39 @@ public:
     explicit SseFramer(std::size_t compact_threshold = kDefaultCompactThreshold,
                        std::size_t data_accum_max     = kDefaultSseDataAccumMax)
         : lines_(compact_threshold), data_accum_max_(data_accum_max) {
-        data_accum_.reserve(8 * 1024);
+        // Reserve payload headroom PLUS the simd padding tail so the common
+        // single-line `data:` frame never reallocates and the accumulator's
+        // storage always has kSseSimdPadding readable bytes past the payload.
+        data_accum_.reserve(8 * 1024 + kSseSimdPadding);
     }
 
     // Feed raw bytes; dispatch every complete event. `on_event` is invoked as
-    // `on_event(std::string_view event_name, std::string_view data)`. Both
-    // views are valid only for the duration of the call.
+    // `on_event(std::string_view event_name, std::string_view data,
+    //           char* padded_data)`. All three refer to the same payload:
+    // `data` is the read-only view; `padded_data` points at the SAME bytes in
+    // the accumulator's storage but guarantees kSseSimdPadding readable
+    // trailing bytes (for an in-place simdjson ondemand parse with no
+    // memcpy). `padded_data` is nullptr only for the degenerate empty payload.
+    // All are valid only for the duration of the call.
     template <class OnEvent>
     void feed(const char* data, std::size_t len, OnEvent&& on_event) {
         lines_.feed(data, len, [&](std::string_view line) {
             if (line.empty()) {
-                if (!skip_event_ && (!data_accum_.empty() || !event_name_.empty()))
+                if (!skip_event_ && (!data_accum_.empty() || !event_name_.empty())) {
+                    // Ensure kSseSimdPadding readable bytes past the payload.
+                    // reserve() guarantees capacity; the bytes in [size,
+                    // capacity) are readable (they belong to the allocation),
+                    // which is all simdjson's SIMD over-read requires. The
+                    // reserve is a no-op on the hot path once the accumulator
+                    // has grown to its steady-state size.
+                    if (data_accum_.capacity() < data_accum_.size() + kSseSimdPadding)
+                        data_accum_.reserve(data_accum_.size() + kSseSimdPadding);
+                    char* padded = data_accum_.empty()
+                        ? nullptr : data_accum_.data();
                     on_event(std::string_view{event_name_},
-                             std::string_view{data_accum_});
+                             std::string_view{data_accum_},
+                             padded);
+                }
                 event_name_.clear();
                 data_accum_.clear();
                 skip_event_ = false;

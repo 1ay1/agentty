@@ -112,6 +112,18 @@ struct ToolUse {
     // we've consumed; the next decode pass resumes there.
     mutable std::string stream_decoded_value;
     std::size_t         stream_decode_through = 0;
+    // Amortization cursor for the edit/todo structured preview. Those two
+    // branches can't use write's incremental cached-offset decode (they
+    // mirror a growing ARRAY of objects, not one long string), so they lean
+    // on try_parse_partial(args_streaming), which is O(|args_streaming|) per
+    // call. Running it every ~120 ms tick is quadratic over a large multi-
+    // edit call. Instead we re-parse only once the buffer has grown by
+    // kStreamParseGrowth bytes since the last parse — the preview lags by at
+    // most that many bytes (imperceptible) but the parse COUNT drops from
+    // one-per-tick to one-per-growth-window, cutting the cumulative cost by
+    // that factor. Holds the args_streaming size at the last structured
+    // parse; 0 = never parsed.
+    std::size_t         stream_parse_through = 0;
     // Set when StreamToolUseEnd / finalize_turn detected that the
     // wire ended inside a string value. finalize_turn's retry loop
     // treats this exactly like a missing-required-field truncation:

@@ -1178,6 +1178,15 @@ if(AGENTTY_BUILD_TESTS)
         target_link_libraries(stream_cpu_probe PRIVATE util)
     endif()
 
+    # loop_body_split_probe — splits the REAL run<P> frame-gate body into
+    # its four phases (visual_hash / subscribe / view / render) and times
+    # each separately over a long streaming turn, to locate WHERE the
+    # "~50% CPU on very long turns" actually is. Build-only.
+    agentty_add_full_test(loop_body_split_probe NO_TEST)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(loop_body_split_probe PRIVATE util)
+    endif()
+
     # composer_flicker_probe — reproduces "list rows hidden then appear +
     # composer flickers" through the REAL view + Runtime::render under a
     # PTY with a viewport ANSI emulator. Reports composer border moves /

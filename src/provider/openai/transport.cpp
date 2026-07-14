@@ -33,6 +33,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <simdjson.h>
 
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -89,6 +90,11 @@ struct StreamCtx {
     // the transport only supplies the per-event/per-line dispatch.
     wire::SseFramer  sse;
     wire::LineFramer ndjson;
+
+    // Reused simdjson ondemand parser for the content-delta fast path
+    // (see dispatch_data_fast). Stateful — caches its scratch across
+    // iterate() calls so the hot path avoids a malloc per SSE frame.
+    simdjson::ondemand::parser simd_parser;
 
     // Tool-call streaming state, indexed by OpenAI's tool_calls[].index.
     std::vector<ToolCallSlot> tool_slots;
@@ -798,6 +804,71 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
     }
 }
 
+// Fast path for the dominant OpenAI SSE frame: a single choice carrying only
+// a `delta.content` string, once salvage is no longer in play. That's the
+// bulk of a streaming turn's volume. simdjson ondemand walks the bytes in
+// place (over the SseFramer's padded buffer) and emits one StreamTextDelta
+// without materialising an nlohmann DOM.
+//
+// Tri-state, for the SAME reason as Anthropic's fast path: simdjson unescapes
+// strings in place, mutating the buffer, so once we've read the content string
+// the caller must NOT re-parse.
+//
+//   Unparseable — didn't match the exact simple shape BEFORE any string was
+//                 extracted; buffer pristine, caller falls back to nlohmann.
+//   Handled     — emitted the content delta; done.
+//
+// Bails (→ Unparseable) on ANYTHING that needs the full path: salvage still
+// eligible / currently holding, an `error`/`usage`/`finish_reason` field, a
+// `tool_calls` delta, a missing/empty/non-string content, more than one
+// choice-relevant field. Correctness first — a false Handled would drop a
+// tool call or a usage frame. The guards are cheap key probes (no unescape).
+static_assert(wire::kSseSimdPadding == simdjson::SIMDJSON_PADDING,
+              "wire::kSseSimdPadding must equal simdjson::SIMDJSON_PADDING");
+enum class FastData { Unparseable, Handled };
+FastData dispatch_data_fast(StreamCtx& ctx, std::string_view data, char* padded) {
+    if (!padded) return FastData::Unparseable;
+    // Only safe once prose is flowing and no leaked-tool-call hold is open.
+    // In any other salvage state handle_delta's hold machinery must run.
+    if (ctx.holding || ctx.salvage_eligible) return FastData::Unparseable;
+    // A usage frame (stream_options.include_usage) or a mid-body error frame
+    // both need the full path; a cheap substring probe rejects them before we
+    // even parse (these are rare, so the probe cost is paid seldom).
+    if (data.find("\"usage\"") != std::string_view::npos
+        || data.find("\"error\"") != std::string_view::npos
+        || data.find("\"finish_reason\"") != std::string_view::npos
+        || data.find("\"tool_calls\"") != std::string_view::npos)
+        return FastData::Unparseable;
+
+    const std::size_t cap = data.size() + simdjson::SIMDJSON_PADDING;
+    simdjson::ondemand::document doc;
+    if (ctx.simd_parser.iterate(padded, data.size(), cap).get(doc))
+        return FastData::Unparseable;
+
+    simdjson::ondemand::array choices;
+    if (doc.find_field_unordered("choices").get_array().get(choices))
+        return FastData::Unparseable;
+    auto it = choices.begin();
+    if (it == choices.end()) return FastData::Unparseable;
+    simdjson::ondemand::object choice;
+    if ((*it).get_object().get(choice)) return FastData::Unparseable;
+
+    simdjson::ondemand::object delta;
+    if (choice.find_field_unordered("delta").get_object().get(delta))
+        return FastData::Unparseable;
+
+    // Extracting the content string may unescape into the buffer — this is the
+    // commit point; never return Unparseable past here.
+    std::string_view content;
+    if (delta.find_field_unordered("content").get_string().get(content))
+        return FastData::Unparseable;
+    if (!content.empty()) {
+        ctx.sink(StreamTextDelta{std::string{content}});
+        ctx.any_text_flushed = true;
+    }
+    return FastData::Handled;
+}
+
 // Parse + dispatch one SSE `data:` payload.
 void dispatch_data(StreamCtx& ctx, std::string_view data) {
     if (data.empty()) return;
@@ -877,7 +948,15 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
 // lines, dispatch on the blank-line terminator. The framing itself is the
 // shared wire::SseFramer; OpenAI just ignores the (always-empty) event name.
 void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
-    ctx.sse.feed(data, len, [&](std::string_view /*event*/, std::string_view payload) {
+    ctx.sse.feed(data, len, [&](std::string_view /*event*/, std::string_view payload,
+                                char* padded) {
+        // [DONE] and empty frames go straight to the full path (terminal
+        // handling lives there). Otherwise try the content-delta fast path;
+        // it returns Unparseable — leaving `payload` pristine — for anything
+        // that needs salvage/usage/tool handling.
+        if (!payload.empty() && payload != "[DONE]"
+            && dispatch_data_fast(ctx, payload, padded) == FastData::Handled)
+            return;
         dispatch_data(ctx, payload);
     });
 }

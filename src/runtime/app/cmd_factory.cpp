@@ -74,9 +74,11 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
     // the set of side effects that have ALREADY happened (or failed) this
     // turn. args.dump() is canonical (key order is nlohmann's stable insert
     // order from the same parse path), so byte-equality == semantic equality
-    // for the leaked-then-reparsed JSON.
+    // for the leaked-then-reparsed JSON. Uses the cached args_dump() so a
+    // long agentic run doesn't re-serialize every prior call's args each
+    // sub-turn (the doom-loop breaker walks the whole run per tool kick).
     auto sig = [](const ToolUse& tc) {
-        return tc.name.value + '\0' + tc.args.dump();
+        return tc.name.value + '\0' + tc.args_dump();
     };
     std::unordered_set<std::string> terminal_sigs;
     std::size_t terminal_salvaged = 0;   // how many salvaged calls already ran
@@ -315,6 +317,31 @@ std::vector<Message> wire_messages_for_impl(const Thread& t) {
     out.push_back(std::move(summary_msg));
     for (std::size_t i = rec.up_to_index; i < t.messages.size(); ++i) {
         out.push_back(t.messages[i]);
+    }
+    return out;
+}
+
+// Rvalue overload: when the caller OWNS the Thread (the stream worker owns
+// its per-turn snapshot), the common no-compaction path can MOVE the
+// messages out instead of deep-copying them a second time. The worker used
+// to pay two full-transcript copies per turn — one into the task closure on
+// the UI thread, then this builder's `return t.messages` copy — on a long
+// thread that's two multi-MB clones. Moving here retires the second.
+std::vector<Message> wire_messages_for_impl(Thread&& t) {
+    if (t.compactions.empty()) return std::move(t.messages);
+    const auto& rec = t.compactions.back();
+    if (rec.up_to_index == 0 || rec.up_to_index > t.messages.size()) {
+        return std::move(t.messages);   // defensive: malformed record
+    }
+    std::vector<Message> out;
+    out.reserve(1 + (t.messages.size() - rec.up_to_index));
+    Message summary_msg;
+    summary_msg.role = Role::User;
+    summary_msg.is_compact_summary = true;
+    summary_msg.text = wrap_summary_as_user_text(rec.summary);
+    out.push_back(std::move(summary_msg));
+    for (std::size_t i = rec.up_to_index; i < t.messages.size(); ++i) {
+        out.push_back(std::move(t.messages[i]));
     }
     return out;
 }
@@ -566,7 +593,10 @@ Cmd<Msg> launch_stream(Model& m) {
             req.messages = wire_messages_for_compaction(thread, context_max);
             // req.tools left empty — summarisation is text-only.
         } else {
-            req.messages = wire_messages_for_impl(thread);
+            // Worker owns `thread` — move it into the builder so the common
+            // no-compaction path relocates the messages vector instead of
+            // deep-copying it a second time (see wire_messages_for_impl&&).
+            req.messages = wire_messages_for_impl(std::move(thread));
             // Adaptive soft-trim: if the wire view is still over the
             // window (no compactions yet, or the latest one is stale
             // and the user has run many turns since), drop oldest raw
@@ -800,8 +830,11 @@ std::optional<LoopBreak> agent_loop_should_break(
             // Only settled calls inform the breaker; in-flight ones are the
             // batch we're about to (re)kick.
             if (!tc.is_terminal()) continue;
+            // Cached args_dump() avoids re-serializing every prior settled
+            // call's args on each kick_pending_tools (this walks the whole run
+            // per tool sub-turn — raw args.dump() made it O(N²) over the run).
             std::string key = tc.name.value + '\0'
-                + (tc.args.is_null() ? std::string{} : tc.args.dump());
+                + (tc.args.is_null() ? std::string{} : tc.args_dump());
             auto& [count, all_failed] = seen[key];
             if (count == 0) all_failed = true;
             ++count;

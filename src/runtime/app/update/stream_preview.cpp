@@ -73,15 +73,33 @@ void update_stream_preview(ToolUse& tc) {
     };
     // Lazy: try_parse_partial is O(|args_streaming|) per call — on a
     // multi-KB write body, running it every 120 ms is quadratic over
-    // the turn. Only the `edit` branch actually needs the structured
-    // view (to walk `edits[]`). Every other branch works with sniffer
-    // scalars + the cached-offset content decode, and skips this cost
-    // entirely. The optional is populated on first access.
+    // the turn. Only the `edit`/`todo` branches actually need the
+    // structured view (to walk `edits[]` / `todos[]`). Every other
+    // branch works with sniffer scalars + the cached-offset content
+    // decode, and skips this cost entirely. The optional is populated
+    // on first access.
+    //
+    // Growth-window amortization: even for edit/todo we don't re-parse
+    // on every tick. The buffer must have grown by kStreamParseGrowth
+    // bytes since the last structured parse (tracked in
+    // tc.stream_parse_through) before we pay the O(N) parse again. The
+    // preview then lags the wire by at most that window — imperceptible,
+    // and StreamToolUseEnd re-parses the complete buffer authoritatively,
+    // so the final rendered args are always exact. This turns the parse
+    // COUNT from one-per-tick into one-per-window.
+    constexpr std::size_t kStreamParseGrowth = 512;
     std::optional<json> parsed_cache;
     bool                parsed_attempted = false;
     auto get_parsed = [&]() -> const std::optional<json>& {
         if (!parsed_attempted) {
-            parsed_cache = try_parse_partial(tc.args_streaming);
+            const bool grew_enough =
+                tc.stream_parse_through == 0
+                || tc.args_streaming.size()
+                       >= tc.stream_parse_through + kStreamParseGrowth;
+            if (grew_enough) {
+                parsed_cache = try_parse_partial(tc.args_streaming);
+                tc.stream_parse_through = tc.args_streaming.size();
+            }
             parsed_attempted = true;
         }
         return parsed_cache;
@@ -330,6 +348,22 @@ void sync_todo_state_from_args(Model& m, const nlohmann::json& args) {
         items.push_back(std::move(item));
     }
     if (items.empty()) return;
+    // Cheap unchanged-guard: the preview fires this every tick a `todo`
+    // call is streaming, but the plan only actually changes when an item's
+    // content or status flips. Rebuilding + move-assigning the vector each
+    // tick churns allocations for no visible change. Compare shape first
+    // (count + per-item content/status) and bail if identical.
+    if (items.size() == m.ui.todo.items.size()) {
+        bool same = true;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            if (items[i].status != m.ui.todo.items[i].status
+                || items[i].content != m.ui.todo.items[i].content) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return;
+    }
     m.ui.todo.items = std::move(items);
 }
 
