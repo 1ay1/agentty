@@ -268,7 +268,38 @@ struct AgenttyApp {
             && m.d.current.messages.back().role == Role::Assistant
             && (!m.d.current.messages.back().streaming_text.empty()
                 || !m.d.current.messages.back().pending_stream.empty());
-        const std::int64_t kRevealBucketMs = 16;   // == kAnimationFrameInterval
+        // Reveal render cadence.
+        //
+        // On a SYNC-output terminal (DEC mode 2026: kitty / ghostty /
+        // wezterm / foot / VTE 0.62+ / Windows Terminal / Konsole 22.04+)
+        // each multi-row frame swaps atomically, so 16 ms / 60 fps gives a
+        // smooth tear-free typewriter — keep it.
+        //
+        // On a NON-SYNC terminal (Apple Terminal, plain xterm, tmux w/o
+        // sync passthrough, and — the reported repro — the default Termux /
+        // Android terminal) every multi-row repaint paints progressively,
+        // so the live edge ALREADY tears on each render regardless of rate:
+        // 60 fps buys ZERO extra smoothness there, it only floods a slow
+        // emulator with ~6x the ANSI diff bytes it can composite. On a
+        // constrained device (slow ARM + a heavyweight terminal app) that
+        // flood is exactly the "streaming gets stuck" symptom — the display
+        // falls seconds behind the model because the paint/wire pipe can't
+        // drain 60 fps of frames. The Tick subscription already wakes at
+        // only 100 ms (streaming_tick_period()) on these terminals, and the
+        // RAF override forces a render on the intervening 16 ms wakes for no
+        // visible gain. Match the reveal bucket to the tick period so the
+        // hash advances ONCE per tick: exactly one render per wake, the
+        // freshly arrived bytes still show on that very next tick (no "burst"
+        // — the tick period is the byte-delivery cadence anyway), and the
+        // redundant torn repaints stop. The reveal SPEED is unchanged (the
+        // pacer is bytes/second, not bytes/frame), so prose fills at the same
+        // wall-clock rate, just in fewer frames. Sharing streaming_tick_
+        // period() keeps this phase-locked to the Tick by construction — the
+        // same guarantee kFineAnimMs relies on.
+        const std::int64_t kRevealBucketMs =
+            maya::ansi::env_supports_synchronized_output()
+                ? 16                              // sync: 60 fps, atomic swap
+                : streaming_tick_period().count(); // non-sync: 1 render / tick
 
         // POST-STREAM SETTLE bucket. After StreamFinished the phase goes
         // Idle and streaming_text drains into `text`, so BOTH m.s.active()
