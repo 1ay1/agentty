@@ -28,9 +28,17 @@
 #  include <fcntl.h>
 #  include <poll.h>
 #  include <signal.h>
-#  include <spawn.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
+// <spawn.h> is gated behind __ANDROID_API__ >= 28 on Bionic and absent from
+// the sysroot below that (Termux on some devices). Prefer posix_spawn where
+// available; otherwise run_posix falls back to fork/exec (no header needed).
+#  if __has_include(<spawn.h>)
+#    include <spawn.h>
+#    define AGENTTY_HAVE_POSIX_SPAWN 1
+#  else
+#    define AGENTTY_HAVE_POSIX_SPAWN 0
+#  endif
 extern char** environ;
 #endif
 
@@ -437,6 +445,9 @@ struct FdGuard {
 };
 
 // Owns a posix_spawn_file_actions_t; destroys on scope exit. Move-only.
+// Only compiled when posix_spawn is available; the fork/exec fallback wires
+// the child fds by hand instead.
+#if AGENTTY_HAVE_POSIX_SPAWN
 struct SpawnFileActions {
     posix_spawn_file_actions_t a{};
     bool inited = false;
@@ -450,6 +461,14 @@ struct SpawnFileActions {
         return inited;
     }
 };
+#else
+// Fork/exec fallback: no file_actions object exists, so provide an empty
+// stand-in that always "inits" successfully. The child does the fd wiring.
+struct SpawnFileActions {
+    bool inited = false;
+    [[nodiscard]] bool init() noexcept { inited = true; return true; }
+};
+#endif
 
 // Typestate: a wired-up pipe + file_actions, ready to spawn. OWNS both pipe
 // ends and the file_actions until spawn consumes it.
@@ -511,12 +530,14 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
         r.started = false; r.start_error = "posix_spawn_file_actions_init failed";
         return r;   // ~Piped closes both pipe fds
     }
+#if AGENTTY_HAVE_POSIX_SPAWN
     ::posix_spawn_file_actions_addopen(&piped.actions.a, STDIN_FILENO,
         "/dev/null", O_RDONLY, 0);
     ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDOUT_FILENO);
     ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDERR_FILENO);
     ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.write_end.fd);
     ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.read_end.fd);
+#endif
 
     // Build child argv. Shell form goes through `/bin/sh -c <cmd>` so
     // pipes / redirects / globs work; argv form bypasses the shell for
@@ -540,8 +561,29 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     // ── Piped ─spawn─▶ Spawned ──────────────────────────────────────────
     io::fsm::assert_legal_edge<Piped, Spawned>();
     pid_t pid = -1;
-    int rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, nullptr,
-                            arg_ptrs.data(), environ);
+    int rc = 0;
+#if AGENTTY_HAVE_POSIX_SPAWN
+    rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, nullptr,
+                        arg_ptrs.data(), environ);
+#else
+    // Fork/exec fallback (Bionic without <spawn.h> below API 28). Perform
+    // the same fd wiring the file_actions would have — stdin<-/dev/null,
+    // stdout+stderr->pipe write end, close the read end — in the forked
+    // child before exec. execvp honours PATH like posix_spawnp.
+    pid = ::fork();
+    if (pid == 0) {
+        int devnull = ::open("/dev/null", O_RDONLY);
+        if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
+        ::dup2(piped.write_end.fd, STDOUT_FILENO);
+        ::dup2(piped.write_end.fd, STDERR_FILENO);
+        ::close(piped.write_end.fd);
+        ::close(piped.read_end.fd);
+        ::execvp(arg_ptrs[0], arg_ptrs.data());
+        ::_exit(127);   // exec only returns on failure
+    } else if (pid < 0) {
+        rc = errno;
+    }
+#endif
     // file_actions no longer needed; the write end is parent-side dead
     // weight (the child has its dup'd copy). Releasing them here mirrors
     // the original eager teardown — ~Piped would do it too, but we want
@@ -549,9 +591,10 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     piped.write_end.reset();
     // (piped.actions is destroyed when `piped` leaves scope below.)
 
-    if (rc != 0) {
+    if (rc != 0 || pid < 0) {
         r.started = false;
-        r.start_error = "spawn failed: " + std::string{std::strerror(rc)};
+        r.start_error = "spawn failed: " +
+            std::string{std::strerror(rc != 0 ? rc : errno)};
         return r;   // ~Piped closes the read end
     }
 

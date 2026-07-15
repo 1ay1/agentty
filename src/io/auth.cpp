@@ -38,10 +38,18 @@
 #  include <shellapi.h>
 #else
 #  include <fcntl.h>
-#  include <spawn.h>
 #  include <sys/stat.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
+// <spawn.h> is gated behind __ANDROID_API__ >= 28 on Bionic and absent from
+// the sysroot below that (Termux on some devices). Prefer posix_spawn where
+// available; otherwise the fork/exec fallback in open_browser needs no header.
+#  if __has_include(<spawn.h>)
+#    include <spawn.h>
+#    define AGENTTY_HAVE_POSIX_SPAWN 1
+#  else
+#    define AGENTTY_HAVE_POSIX_SPAWN 0
+#  endif
 extern char** environ;
 #endif
 
@@ -715,6 +723,10 @@ void open_browser(const std::string& url) {
                     url_copy.data(),
                     nullptr};
 
+    pid_t pid = 0;
+    int   rc  = 0;
+
+#if AGENTTY_HAVE_POSIX_SPAWN
     // Detach stdio from the browser process so it can't scribble on the
     // terminal agentty owns: redirect all three fds to /dev/null.
     posix_spawn_file_actions_t actions;
@@ -723,16 +735,30 @@ void open_browser(const std::string& url) {
     posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
-    pid_t pid = 0;
-    int rc = ::posix_spawnp(&pid, opener, &actions, nullptr, argv, environ);
+    rc = ::posix_spawnp(&pid, opener, &actions, nullptr, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
+#else
+    // Fallback (Bionic without <spawn.h> below API 28): fork + exec with the
+    // same stdio detachment done in the child before exec.
+    pid = ::fork();
+    if (pid == 0) {
+        int rd = ::open("/dev/null", O_RDONLY);
+        int wr = ::open("/dev/null", O_WRONLY);
+        if (rd >= 0) { ::dup2(rd, STDIN_FILENO);  ::close(rd); }
+        if (wr >= 0) { ::dup2(wr, STDOUT_FILENO); ::dup2(wr, STDERR_FILENO); ::close(wr); }
+        ::execvp(opener, argv);
+        ::_exit(127);   // exec only returns on failure
+    } else if (pid < 0) {
+        rc = errno;
+    }
+#endif
 
     // Reap the opener so it doesn't linger as a zombie. `open`/`xdg-open`
     // fork the real browser and exit promptly, so this wait is short; the
     // browser itself is reparented to init and keeps running. WNOHANG is
     // avoided intentionally — a blocking wait here is bounded by the
     // opener's own quick exit, and login is already a synchronous prompt.
-    if (rc == 0) {
+    if (rc == 0 && pid > 0) {
         int status = 0;
         ::waitpid(pid, &status, 0);
     }
