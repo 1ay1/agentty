@@ -157,6 +157,36 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_definitions(_Static_assert=static_assert)
 endif()
 
+# ── Android / Termux: expose <spawn.h> + posix_spawn ───────────────────────
+# On Bionic, <spawn.h> and the posix_spawn* family are gated behind
+#     __ANDROID_API__ >= 28
+# (see bionic/libc/include/spawn.h — the whole header is wrapped in
+# `#if __ANDROID_API__ >= 28`). Termux's native clang derives __ANDROID_API__
+# from the device's ro.build.version.sdk, and on many devices / mis-synced
+# clang configs that lands below 28 — at which point the header body vanishes
+# and any TU that does `#include <spawn.h>` fails with
+#     fatal error: 'spawn.h' file not found
+# (subprocess.cpp in agentty AND mcp-cpp, airgap.cpp, auth.cpp all do).
+#
+# posix_spawn has been present in the Bionic *runtime* since API 24; only the
+# *header visibility* is pinned at 28. Modern Termux always runs on API ≥ 28
+# devices, so forcing the macro up to 28 for the header's benefit is safe: the
+# symbol resolves at link time against the live libc. Define it directory-wide
+# HERE — before every add_subdirectory below (maya, acp-cpp, mcp-cpp) and the
+# agentty / test targets — so all of them inherit the fix from one place.
+#
+# Guarded on __ANDROID__ so it's a no-op on every other platform. We only
+# RAISE the floor: if the toolchain already targets ≥ 28 this is redundant but
+# harmless (identical value → no redefinition), and we never lower a
+# higher-API build.
+if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"
+           OR DEFINED ENV{TERMUX_VERSION}
+           OR EXISTS "/data/data/com.termux/files/usr")
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-U__ANDROID_API__>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-D__ANDROID_API__=28>")
+endif()
+
 # ── Submodule auto-pull ────────────────────────────────────────────────────
 # When AGENTTY_AUTO_PULL_SUBMODULES is ON (default), every in-tree submodule
 # is synced to the tip of its tracking branch on each build before its library
