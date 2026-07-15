@@ -209,6 +209,33 @@ if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"
     add_compile_options(
         "$<$<COMPILE_LANGUAGE:C,CXX>:-U__ANDROID_API__>"
         "$<$<COMPILE_LANGUAGE:C,CXX>:-D__ANDROID_API__=28>")
+
+    # BELT-AND-SUSPENDERS: also bake the target + API macro straight into
+    # CMAKE_<LANG>_FLAGS. add_compile_options() only reaches targets defined
+    # in THIS directory and subdirectories added AFTER the call; anything
+    # that slips in via a different mechanism (a FetchContent project that
+    # resets flags, a submodule that calls project() and re-detects the
+    # compiler, an out-of-order add_subdirectory) can miss it. CMAKE_*_FLAGS
+    # is string-prepended to EVERY compile in EVERY (sub)directory
+    # unconditionally, so mcp-cpp / maya / acp-cpp all get the deployment
+    # target no matter how their own CMake is structured. Idempotent: guard
+    # against double-append on reconfigure.
+    set(_agentty_android_flags
+        "--target=${_agentty_android_target} -U__ANDROID_API__ -D__ANDROID_API__=28")
+    if(NOT CMAKE_CXX_FLAGS MATCHES "--target=${_agentty_android_target}")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${_agentty_android_flags}")
+    endif()
+    if(NOT CMAKE_C_FLAGS MATCHES "--target=${_agentty_android_target}")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${_agentty_android_flags}")
+    endif()
+    if(NOT CMAKE_EXE_LINKER_FLAGS MATCHES "--target=${_agentty_android_target}")
+        set(CMAKE_EXE_LINKER_FLAGS
+            "${CMAKE_EXE_LINKER_FLAGS} --target=${_agentty_android_target}")
+    endif()
+    if(NOT CMAKE_SHARED_LINKER_FLAGS MATCHES "--target=${_agentty_android_target}")
+        set(CMAKE_SHARED_LINKER_FLAGS
+            "${CMAKE_SHARED_LINKER_FLAGS} --target=${_agentty_android_target}")
+    endif()
 endif()
 
 # ── Submodule auto-pull ────────────────────────────────────────────────────
