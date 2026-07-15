@@ -157,31 +157,55 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_definitions(_Static_assert=static_assert)
 endif()
 
-# ── Android / Termux: expose <spawn.h> + posix_spawn ───────────────────────
-# On Bionic, <spawn.h> and the posix_spawn* family are gated behind
-#     __ANDROID_API__ >= 28
-# (see bionic/libc/include/spawn.h — the whole header is wrapped in
-# `#if __ANDROID_API__ >= 28`). Termux's native clang derives __ANDROID_API__
-# from the device's ro.build.version.sdk, and on many devices / mis-synced
-# clang configs that lands below 28 — at which point the header body vanishes
-# and any TU that does `#include <spawn.h>` fails with
+# ── Android / Termux: raise the deployment API to 28 ───────────────────────
+# Two Bionic symbols agentty's dependency graph needs are API-gated:
+#   • <spawn.h> / posix_spawn*   → __INTRODUCED_IN(28)
+#   • strtod_l / strtof_l        → __INTRODUCED_IN(26)   (libc++ <locale>
+#     calls these UNCONDITIONALLY, pulled in transitively via <iostream> /
+#     <format>, so the whole C++ standard library fails to compile below 26)
+#
+# It is NOT enough to -D__ANDROID_API__=28: that only moves the preprocessor
+# macro, while clang's __attribute__((availability)) diagnostics compare
+# against the DEPLOYMENT TARGET baked into the target triple's API suffix
+# (e.g. aarch64-linux-android24). If that stays below the symbol's
+# introduction level you get:
+#     error: 'strtod_l' is unavailable: introduced in Android 26
 #     fatal error: 'spawn.h' file not found
-# (subprocess.cpp in agentty AND mcp-cpp, airgap.cpp, auth.cpp all do).
+# even with the macro raised. The sanctioned Termux fix (termux-packages
+# #23401) is to pass --target=<arch>-linux-android28 so the deployment
+# target itself moves up. Modern Termux always runs on API ≥ 28 devices, so
+# deploying at 28 is safe.
 #
-# posix_spawn has been present in the Bionic *runtime* since API 24; only the
-# *header visibility* is pinned at 28. Modern Termux always runs on API ≥ 28
-# devices, so forcing the macro up to 28 for the header's benefit is safe: the
-# symbol resolves at link time against the live libc. Define it directory-wide
-# HERE — before every add_subdirectory below (maya, acp-cpp, mcp-cpp) and the
-# agentty / test targets — so all of them inherit the fix from one place.
-#
-# Guarded on __ANDROID__ so it's a no-op on every other platform. We only
-# RAISE the floor: if the toolchain already targets ≥ 28 this is redundant but
-# harmless (identical value → no redefinition), and we never lower a
-# higher-API build.
+# Derive <arch> from the compiler's own default triple so this works on
+# aarch64 / arm / x86_64 without hardcoding. Applied to BOTH compile and link
+# (the CRT objects carry the API level too). Directory-wide + before every
+# add_subdirectory so maya / acp-cpp / mcp-cpp and the agentty/test targets
+# all inherit it. No-op on every non-Android platform.
 if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"
            OR DEFINED ENV{TERMUX_VERSION}
            OR EXISTS "/data/data/com.termux/files/usr")
+    # Ask the compiler for its default target triple (e.g.
+    # "aarch64-linux-android24") and rewrite the trailing API number to 28.
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} -dumpmachine
+        OUTPUT_VARIABLE _agentty_android_triple
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(_agentty_android_triple MATCHES "^(.+-linux-android)[0-9]*$")
+        set(_agentty_android_target "${CMAKE_MATCH_1}28")
+    elseif(_agentty_android_triple MATCHES "android")
+        set(_agentty_android_target "${_agentty_android_triple}")
+    else()
+        # Fallback: derive from the processor if -dumpmachine gave us nothing
+        # android-shaped (unusual). aarch64 is the overwhelming Termux case.
+        set(_agentty_android_target "aarch64-linux-android28")
+    endif()
+    message(STATUS "agentty: Android/Termux detected — deploying at "
+                   "${_agentty_android_target} (exposes spawn.h + strtod_l)")
+    add_compile_options("--target=${_agentty_android_target}")
+    add_link_options("--target=${_agentty_android_target}")
+    # Keep the preprocessor macro in lock-step for any code that reads it
+    # directly (undef first so the toolchain's own -D doesn't conflict).
     add_compile_options(
         "$<$<COMPILE_LANGUAGE:C,CXX>:-U__ANDROID_API__>"
         "$<$<COMPILE_LANGUAGE:C,CXX>:-D__ANDROID_API__=28>")
