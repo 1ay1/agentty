@@ -153,18 +153,22 @@ static void test_freeze_window_exists_and_is_now_driven() {
     //     Across a 16 ms step that parity does NOT flip → hash static →
     //     frame gated away → FREEZE. Demonstrate the parity is unchanged.
     {
-        const auto now_ms = []() {
-            return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        };
+        // Demonstrate the pre-fix gate algebra WITHOUT reading the real wall
+        // clock: on a live runner the 16 ms sleep can straddle a 265 ms
+        // boundary and flip the parity, making this check flaky (that was a
+        // TEST bug, not a product regression). Instead pick a reference time
+        // that is phase-aligned to the START of a blink half-period, so a
+        // 16 ms step provably stays inside the same bucket. The point stands:
+        // the OLD ~265 ms caret bucket does not advance across a 16 ms reveal
+        // step, so the frame was gated away.
         const std::int64_t kBlinkHalfMs = 265;
-        const auto p0 = (now_ms() / kBlinkHalfMs) & 1;
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        const auto p1 = (now_ms() / kBlinkHalfMs) & 1;
+        const std::int64_t t0 = 1000 * kBlinkHalfMs;  // aligned to bucket edge
+        const std::int64_t t1 = t0 + 16;              // 16 ms later
+        const auto p0 = (t0 / kBlinkHalfMs) & 1;
+        const auto p1 = (t1 / kBlinkHalfMs) & 1;
         CHECK(p0 == p1,
-              "pre-fix regime: caret parity flipped within 16 ms — pick a "
-              "different step; the point is the OLD bucket was ~265 ms so a "
-              "16 ms reveal step was gated away");
+              "pre-fix regime: caret parity flipped within 16 ms — the OLD "
+              "bucket was ~265 ms so a 16 ms reveal step was gated away");
     }
 
     // (B) POST-FIX: the real visual_hash must ADVANCE across a 16 ms step
