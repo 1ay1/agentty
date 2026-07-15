@@ -49,7 +49,15 @@
 #  endif
 #  include <windows.h>
 #else
-#  include <spawn.h>
+// <spawn.h> is gated behind __ANDROID_API__ >= 28 on Bionic and absent from
+// the sysroot below that (Termux on some devices). Prefer posix_spawn where
+// available; otherwise run_sync falls back to fork/exec (no header needed).
+#  if __has_include(<spawn.h>)
+#    include <spawn.h>
+#    define AGENTTY_HAVE_POSIX_SPAWN 1
+#  else
+#    define AGENTTY_HAVE_POSIX_SPAWN 0
+#  endif
 #  include <sys/wait.h>
 #  include <unistd.h>
 extern char** environ;
@@ -195,12 +203,27 @@ int run_sync(const std::vector<std::string>& argv) {
     raw.push_back(nullptr);
 
     pid_t pid = -1;
-    int rc = ::posix_spawnp(&pid, raw[0], /*file_actions=*/nullptr,
-                            /*attr=*/nullptr, raw.data(), environ);
-    if (rc != 0) {
+    int   rc  = 0;
+
+#if AGENTTY_HAVE_POSIX_SPAWN
+    rc = ::posix_spawnp(&pid, raw[0], /*file_actions=*/nullptr,
+                        /*attr=*/nullptr, raw.data(), environ);
+#else
+    // Fallback (Bionic without <spawn.h> below API 28): fork + exec,
+    // inheriting stdin/stdout/stderr just like posix_spawnp with no
+    // file_actions does.
+    pid = ::fork();
+    if (pid == 0) {
+        ::execvp(raw[0], raw.data());
+        ::_exit(127);   // exec only returns on failure
+    } else if (pid < 0) {
+        rc = errno;
+    }
+#endif
+    if (rc != 0 || pid < 0) {
         std::fprintf(stderr,
             "agentty airgap: failed to spawn `%s`: %s\n",
-            raw[0], std::strerror(rc));
+            raw[0], std::strerror(rc != 0 ? rc : errno));
         return -1;
     }
 
