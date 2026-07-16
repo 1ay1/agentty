@@ -480,6 +480,27 @@ struct RestoreCheckpoint { CheckpointId id; };
 // worktree is already byte-identical to the snapshot when the user sees
 // their old prompt reappear in the composer.
 struct CheckpointRestored { CheckpointId id; bool ok = false; std::string error; };
+
+// ── Checkpoint picker ────────────────────────────────────────────────────
+// Rewind picker over ALL checkpointed turns in the thread (not just the
+// newest). Open builds the entry list from messages carrying a
+// checkpoint_id and kicks an async diff-summary per entry; Select maps the
+// highlighted entry onto the existing RestoreCheckpoint flow.
+struct OpenCheckpointPicker {};
+struct CloseCheckpointPicker {};
+struct CheckpointPickerMove { int delta; };
+struct CheckpointPickerSelect {};
+// One entry's async "what changed since here" summary landed. `index` is
+// the entry's position in Open::entries at dispatch time; the reducer
+// re-validates it against the current list (an open/close race can't
+// corrupt a stale index).
+struct CheckpointDiffLoaded {
+    int  index          = 0;
+    bool ok             = false;
+    int  files_changed  = 0;
+    int  insertions     = 0;
+    int  deletions      = 0;
+};
 struct ScrollThread { int delta; };
 struct ToggleToolExpanded { ToolCallId id; };
 
@@ -561,6 +582,10 @@ using CodeBlockMsg = std::variant<
     CodeBlockRunFinished,
     CodeBlockResultAttach, CodeBlockResultCopy, CodeBlockResultDiscard>;
 
+using CheckpointMsg = std::variant<
+    OpenCheckpointPicker, CloseCheckpointPicker, CheckpointPickerMove,
+    CheckpointPickerSelect, CheckpointDiffLoaded>;
+
 using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
 
@@ -604,6 +629,7 @@ using Msg = std::variant<
     msg::MentionPaletteMsg,
     msg::SymbolPaletteMsg,
     msg::CodeBlockMsg,
+    msg::CheckpointMsg,
     msg::TodoMsg,
     msg::LoginMsg,
     msg::DiffReviewMsg,
@@ -644,6 +670,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::MentionPaletteMsg>}
          + int{in_variant_v<L, msg::SymbolPaletteMsg>}
          + int{in_variant_v<L, msg::CodeBlockMsg>}
+         + int{in_variant_v<L, msg::CheckpointMsg>}
          + int{in_variant_v<L, msg::TodoMsg>}
          + int{in_variant_v<L, msg::LoginMsg>}
          + int{in_variant_v<L, msg::DiffReviewMsg>}
@@ -677,6 +704,8 @@ static_assert(leaf_domain_count<SymbolPaletteSelect>()       == 1,
               "SymbolPaletteSelect must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<CodeBlockPickerSelect>()     == 1,
               "CodeBlockPickerSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<CheckpointPickerSelect>()    == 1,
+              "CheckpointPickerSelect must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<UpdateTodos>()               == 1,
               "UpdateTodos must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<LoginSubmit>()               == 1,
@@ -690,7 +719,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 14,
+static_assert(std::variant_size_v<Msg> == 15,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

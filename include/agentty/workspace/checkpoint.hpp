@@ -23,6 +23,20 @@ namespace agentty::workspace {
 // the first call (repo-ness doesn't change mid-session).
 [[nodiscard]] bool in_git_repo();
 
+// A one-glance summary of what the worktree has changed SINCE a
+// checkpoint was taken — the diff between the pinned snapshot tree and
+// the current working tree (tracked + newly-added; ignored files never
+// counted). Powers the rewind picker's preview so a rewind is never
+// blind. All zero / valid==false when not in a repo, the ref is gone,
+// or nothing changed.
+struct CheckpointDiff {
+    bool valid          = false;   // the summary was computed successfully
+    int  files_changed  = 0;
+    int  insertions     = 0;
+    int  deletions      = 0;
+};
+[[nodiscard]] CheckpointDiff checkpoint_summary(const std::string& id);
+
 // Snapshot the current worktree and pin it at
 // refs/agentty/checkpoints/<id>. Returns false when not in a repo or
 // any git step fails. Also prunes the oldest checkpoint refs beyond a

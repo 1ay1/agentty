@@ -171,6 +171,19 @@ struct AgenttyApp {
         mix(static_cast<std::uint64_t>(m.ui.todo.open.index()));
         mix(static_cast<std::uint64_t>(m.ui.login.index()));
 
+        // Checkpoint picker: open/closed + cursor + each entry's async
+        // diff-load state (Loading→Ready flips the visible "N files · +A −D"
+        // stat, so it MUST advance the hash or the row's diffstat wouldn't
+        // repaint when its background load lands). Same selection-driven
+        // repaint contract as the other pickers above.
+        mix(static_cast<std::uint64_t>(m.ui.checkpoints.index()));
+        if (auto* o = checkpoint_picker_opened(m.ui.checkpoints)) {
+            mix(static_cast<std::uint64_t>(o->index));
+            for (const auto& e : o->entries)
+                mix(static_cast<std::uint64_t>(e.diff_state) * 131
+                    + static_cast<std::uint64_t>(e.files_changed));
+        }
+
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
         // how often we'll re-render purely for animation; the actual

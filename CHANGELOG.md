@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Rewind to any checkpoint, with a diff preview.** Every user turn inside a git repo already pins a worktree snapshot and draws a checkpoint divider above it; now *all* of those points are reachable, not just the newest. "Rewind to checkpoint" in the command palette opens a picker listing every checkpointed turn (turn number + prompt preview + relative time), and each row shows a `N files · +A −D` summary of what the worktree has changed **since** that point — computed asynchronously (tree-vs-tree `git diff --numstat` against a scratch index) so opening is instant even on a big repo and a rewind is never blind. `↑↓`/`j`/`k` move, `Enter` rewinds (the existing destructive files-and-transcript revert, with the old prompt refilled in the composer), `Esc` cancels. Gated on an idle session and a real git repo, with a friendly toast otherwise.
+
 ## [0.2.7] - 2026-07-12
 
 ### Added

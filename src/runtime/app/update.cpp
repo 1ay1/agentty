@@ -65,6 +65,7 @@ std::pair<Model, Cmd<Msg>> update(Model m, Msg msg) {
         [&](msg::MentionPaletteMsg mm) { return detail::mention_update      (std::move(m), std::move(mm)); },
         [&](msg::SymbolPaletteMsg sm)  { return detail::symbol_update       (std::move(m), std::move(sm)); },
         [&](msg::CodeBlockMsg cm)      { return detail::codeblock_update    (std::move(m), std::move(cm)); },
+        [&](msg::CheckpointMsg cm)     { return detail::checkpoint_update   (std::move(m), std::move(cm)); },
         [&](msg::TodoMsg tm)           { return detail::todo_update         (std::move(m), std::move(tm)); },
         [&](msg::LoginMsg lm)          { return detail::login_update        (std::move(m), std::move(lm)); },
         [&](msg::DiffReviewMsg dm)     { return detail::diff_review_update  (std::move(m), std::move(dm)); },

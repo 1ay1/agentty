@@ -600,6 +600,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/mention.cpp
     src/runtime/app/update/symbol.cpp
     src/runtime/app/update/codeblock.cpp
+    src/runtime/app/update/checkpoint.cpp
     src/runtime/app/update/diff.cpp
     src/runtime/app/update/meta.cpp
     src/runtime/app/subscribe.cpp
