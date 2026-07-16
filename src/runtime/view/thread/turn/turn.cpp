@@ -27,6 +27,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/permission.hpp"
+#include "agentty/runtime/view/thread/seam.hpp"
 
 namespace agentty::ui {
 
@@ -1130,12 +1131,14 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     // same — its `compact_boundary` transcript line type renders as
     // chrome, not content (binary near offset 114920224).
     if (msg.is_compact_summary) {
-        cfg.glyph      = "\xe2\x89\xa1";              // ≡
-        cfg.label      = "Conversation compacted";
-        cfg.rail_color = muted;
-        // Empty body → the Turn frame collapses to just the header
-        // row + bottom rule, ~2 rows total. The user sees a clear
-        // divider where the boundary is and nothing more.
+        // Render the SAME centered labeled rule as the wire-only
+        // compaction boundary (seam.hpp) so the two ways a compaction can
+        // surface look identical — a clean section break, not an empty
+        // speaker Turn with a hanging left rail. A bare Turn holding the
+        // single divider Element keeps it row-transparent (no rail, no
+        // header) and exactly one row.
+        cfg.bare = true;
+        cfg.body.emplace_back(compaction_divider_row());
         return cfg;
     }
 
