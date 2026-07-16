@@ -555,6 +555,15 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](Quit) -> Step {
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            // Always file the model the user is CURRENTLY on under the active
+            // provider before exit, so a relaunch (or a later switch back to
+            // this backend) restores exactly this model instead of the
+            // built-in default. Without this, a session where the user never
+            // opened the model picker nor switched provider recorded no
+            // per-provider recall at all — the "it forgets the model I was
+            // using" complaint. persist_settings is load-modify-save, so it
+            // preserves every other backend's recall + keys.
+            persist_settings(m);
             return {std::move(m), Cmd<Msg>::quit()};
         },
         [&](NoOp) -> Step { return done(std::move(m)); },

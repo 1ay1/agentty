@@ -199,33 +199,18 @@ Step login_submit(Model m) {
             return done(std::move(m));
         }
 
-        const std::string active_before = active_provider_id();
-        provider::select(provider::parse_selection(spec));
-        {
-            auto settings = deps().load_settings();
-            if (!m.d.model_id.empty())
-                settings.provider_models[active_before] = m.d.model_id.value;
-            settings.provider = spec;
-            deps().save_settings(settings);
-        }
         // Custom hosts are treated as keyless local/compatible endpoints;
         // resolve_auth_for still consults the OPENAI_API_KEY chain in case
-        // the user is fronting a keyed proxy.
-        auth::AuthHeader new_auth = provider::resolve_auth_for(
-            spec, deps().auth);
-        app::switch_provider(new_auth);
-        if (auto next = model_for_provider(spec); !next.empty()) {
-            m.d.model_id = ModelId{next};
-            m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
-            tools::subagent::set_model(m.d.model_id.value);
-        }
-        m.d.available_models.clear();
-        m.s.models_loading = true;
+        // the user is fronting a keyed proxy. Load Anthropic creds fresh from
+        // disk (NOT deps().auth) so resolve_auth_for never echoes the current
+        // provider's empty key — same footgun the picker guards against.
+        auth::AuthHeader anthropic_creds = deps().auth;
+        if (auto saved = auth::load_credentials())
+            anthropic_creds = auth::make_auth_header(*saved);
+        auth::AuthHeader new_auth =
+            provider::resolve_auth_for(spec, anthropic_creds);
         m.ui.login = login::Closed{};
-        auto toast = set_status_toast(
-            m, "provider \xe2\x86\x92 " + spec, std::chrono::seconds{3});
-        return {std::move(m),
-                Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
+        return commit_provider_switch(std::move(m), spec, std::move(new_auth), spec);
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
         std::string key = std::move(api->key_input);
@@ -251,30 +236,17 @@ Step login_submit(Model m) {
                 settings.provider = provider;
                 deps().save_settings(settings);
             }
-            provider::select(provider::parse_selection(provider));
             // Build the new backend's auth from the just-pasted key (it isn't
             // in deps().load_settings()'s in-memory copy used elsewhere; pass
             // it as the saved_key so the resolver picks it without a reload).
             auth::AuthHeader new_auth = provider::resolve_auth_for(
                 provider, deps().auth, /*cli_key=*/{}, /*saved_key=*/key);
-            app::switch_provider(new_auth);
-            // Make a valid model active for the new provider (recall, else a
-            // built-in default); ModelsLoaded auto-selects from the refetch
-            // if this is empty or absent from the list.
-            if (auto next = model_for_provider(provider); !next.empty()) {
-                m.d.model_id = ModelId{next};
-                m.s.context_max =
-                    ui::context_max_for_model(m.d.model_id.value);
-                tools::subagent::set_model(m.d.model_id.value);
-            }
-            m.d.available_models.clear();
-            m.s.models_loading = true;
             m.ui.login = login::Closed{};
-            auto toast = set_status_toast(
-                m, "provider → " + provider_label,
-                std::chrono::seconds{3});
-            return {std::move(m),
-                    Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
+            // The saved key persists across the helper's load-modify-save
+            // (persist_settings preserves provider_keys), so the switch is
+            // committed through the ONE shared path like every other entry.
+            return commit_provider_switch(std::move(m), provider,
+                                          std::move(new_auth), provider_label);
         }
 
         install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}});
