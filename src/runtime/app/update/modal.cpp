@@ -13,10 +13,12 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/tool/subagent.hpp"
 #include "agentty/workspace/checkpoint.hpp"
 
 namespace agentty::app::detail {
@@ -384,6 +386,61 @@ void persist_settings(const Model& m) {
         s.provider_models[active_provider_id()] = m.d.model_id.value;
     s.effort = std::string{effort_wire(m.d.effort)};
     deps().save_settings(s);
+}
+
+std::pair<Model, maya::Cmd<Msg>>
+commit_provider_switch(Model m, std::string_view spec,
+                       auth::AuthHeader new_auth, std::string_view label) {
+    using maya::Cmd;
+    const std::string spec_s{spec};
+
+    // (1) File the OUTGOING model under its canonical provider id BEFORE
+    //     provider::select swaps active() out from under us, so a later
+    //     switch back restores exactly this model.
+    const std::string outgoing_id = active_provider_id();
+
+    // (2) Install the new selection (process-global; the stream seam reads
+    //     active() at call time).
+    provider::select(provider::parse_selection(spec_s));
+
+    {
+        auto settings = deps().load_settings();
+        if (!m.d.model_id.empty())
+            settings.provider_models[outgoing_id] = m.d.model_id.value;
+        settings.provider = spec_s;
+        deps().save_settings(settings);
+    }
+
+    // (3) Make a valid model active for the NEW backend: recall → built-in
+    //     default → empty (ModelsLoaded auto-selects the first available).
+    if (auto next = model_for_provider(spec_s); !next.empty()) {
+        m.d.model_id    = ModelId{next};
+        m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+        tools::subagent::set_model(m.d.model_id.value);
+    }
+
+    // (4) Re-clamp the reasoning-effort tier to what the (possibly new)
+    //     active model supports — a stale Xhigh/High carried onto a model
+    //     without that tier (or a non-reasoning model) would otherwise show a
+    //     bogus chip and get silently dropped only at request time. When the
+    //     new model isn't known yet (local, empty id) this is a no-op until
+    //     ModelsLoaded, which is fine — the wire path re-clamps regardless.
+    m.d.effort = clamp_effort(
+        m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+
+    // (5) Persist the FULL settings shape (provider + per-provider model +
+    //     effort + favorites) through the one owner so effort is never
+    //     dropped on a hop, then swap the Deps auth and refetch models.
+    persist_settings(m);
+
+    app::switch_provider(std::move(new_auth));
+    m.d.available_models.clear();
+    m.s.models_loading = true;
+
+    auto toast = set_status_toast(
+        m, "provider \xe2\x86\x92 " + std::string{label}, std::chrono::seconds{3});
+    return {std::move(m),
+            Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
 }
 
 maya::Cmd<Msg> set_status_toast(Model& m, std::string text,

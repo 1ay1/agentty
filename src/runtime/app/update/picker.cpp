@@ -87,6 +87,12 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 m.d.model_id = m.d.available_models.front().id;
                 m.s.context_max =
                     ui::context_max_for_model(m.d.model_id.value);
+                // The auto-selected model may not support the effort tier that
+                // rode over from the previous provider — clamp it so the picker
+                // chip and the wire agree (commit_provider_switch couldn't do
+                // this yet: the model id was empty until this refetch landed).
+                m.d.effort = clamp_effort(
+                    m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
                 tools::subagent::set_model(m.d.model_id.value);
                 persist_settings(m);
             }
@@ -185,6 +191,12 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // % bar reflects the right denominator for the new model
                     // (1 M for `[1m]` variants, 200 K otherwise).
                     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+                    // Degrade the effort tier to what the newly-picked model
+                    // supports — picking a non-reasoning (or lower-ceiling)
+                    // model while effort=Xhigh must not leave a stale chip that
+                    // the wire silently drops.
+                    m.d.effort = clamp_effort(
+                        m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
                     // Keep subagents on the live model: the startup config
                     // captured whatever was saved at launch, which can be a
                     // stale/invalid id (every subagent request 400s and the
@@ -294,10 +306,6 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             const auto& preset = presets[static_cast<std::size_t>(p->index)];
             const std::string spec{preset.id};
 
-            // Capture the OUTGOING provider id before provider::select swaps
-            // active() — needed to file the current model under it.
-            const std::string active_provider_id_before = active_provider_id();
-
             // Resolve the new backend's credentials BEFORE committing the
             // switch so we can refuse a switch that would land the user in a
             // silently-broken state (every request 401s with no key). For
@@ -348,43 +356,11 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                 return done(std::move(m));
             }
 
-            // Install + persist the new selection.
-            provider::select(provider::parse_selection(spec));
-            {
-                auto settings = deps().load_settings();
-                // Remember the model we were using on the OUTGOING provider
-                // so a later switch back restores it.
-                if (!m.d.model_id.empty())
-                    settings.provider_models[active_provider_id_before] =
-                        m.d.model_id.value;
-                settings.provider = spec;
-                deps().save_settings(settings);
-            }
-
-            // Make a valid model active for the NEW provider: the model last
-            // used there, else a built-in default. For local backends with
-            // no recall this is empty and ModelsLoaded auto-selects the first
-            // available model once the refetch lands.
-            if (auto next = model_for_provider(spec); !next.empty()) {
-                m.d.model_id = ModelId{next};
-                m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
-                tools::subagent::set_model(m.d.model_id.value);
-            }
-
-            // Swap the Deps auth to the new backend's credentials. The stream
-            // seam reads provider::active() at call time so the next request
-            // targets the new backend.
-            app::switch_provider(new_auth);
-
-            // Models differ per backend — drop the stale list and refetch.
-            m.d.available_models.clear();
-            m.s.models_loading = true;
-
-            // Confirmation toast + refetch the new backend's model list.
-            auto toast = set_status_toast(
-                m, "provider → " + std::string{preset.label});
-            return {std::move(m),
-                    Cmd<Msg>::batch(std::move(toast), cmd::fetch_models())};
+            // Every entry point funnels the actual switch through the ONE
+            // helper so provider + per-provider model recall + effort clamp +
+            // auth swap + refetch can never drift between call sites.
+            return commit_provider_switch(std::move(m), spec, std::move(new_auth),
+                                          std::string{preset.label});
         },
     }, pm);
 }

@@ -381,6 +381,19 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
     return effort_wire(e);
 }
 
+// Typed sibling of effort_wire_for: degrade a stored Effort to what `caps`
+// actually supports and return the Effort itself (not the wire string). Used
+// when SWITCHING MODEL/PROVIDER to fix up Model::effort so the picker chip and
+// the request path agree — a stale Xhigh carried onto a model without xhigh
+// becomes High here, and effort on a non-reasoning model collapses to None.
+[[nodiscard]] inline Effort clamp_effort(
+        Effort e, const ModelCapabilities& caps) noexcept {
+    if (e == Effort::None || !caps.supports_effort()) return Effort::None;
+    if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
+    if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
+    return e;
+}
+
 // Ordered efforts the user may cycle for a given model: always
 // {None, Low, Medium, High}, plus Xhigh / Max where supported. The picker
 // cycles within this so the user never lands on a level the model 400s on.

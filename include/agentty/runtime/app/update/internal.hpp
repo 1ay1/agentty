@@ -96,6 +96,24 @@ std::string    active_provider_id();
 // will then auto-select the first available model).
 std::string    model_for_provider(std::string_view spec);
 
+// Commit a live provider switch — the ONE place the full sequence lives, so
+// the three entry points (provider picker, custom-host modal, api-key modal)
+// can never drift. Given the already-resolved destination `spec` and the
+// already-resolved `new_auth` for it, this:
+//   1. files the OUTGOING model under its canonical provider id (recall),
+//   2. installs + persists the new Selection (provider + effort + keys via
+//      persist_settings, so effort is never dropped on a hop),
+//   3. makes a valid model active for the new backend (recall → built-in
+//      default → empty for auto-select), updating context_max + subagent,
+//   4. RE-CLAMPS Model::effort to the new model's capabilities so a stale
+//      Xhigh/high tier can't ride onto a model that doesn't support it,
+//   5. swaps the Deps auth, clears the stale model list, and returns the
+//      Cmd batch (status toast + model refetch) for the caller to return.
+// `label` is the human name for the confirmation toast.
+[[nodiscard]] std::pair<Model, maya::Cmd<Msg>>
+commit_provider_switch(Model m, std::string_view spec,
+                       auth::AuthHeader new_auth, std::string_view label);
+
 // ── Frozen-scrollback prefix helpers (frozen.cpp) ────────────────────────
 //
 // freeze_through_prior_turn: walk m.d.current.messages[frozen_through..end)
