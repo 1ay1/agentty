@@ -69,12 +69,11 @@ struct Request {
     http::CancelTokenPtr cancel;
 
     // 0-based count of prior failed attempts for THIS turn (the source
-    // ctx's transient_retries). Surfaced on the wire as
-    // x-stainless-retry-count, exactly like the Anthropic SDK / Zed
-    // increment it on each retry. Anthropic's edge reads it for routing
-    // and to avoid penalising retried traffic; a hard-coded "0" makes
-    // every retry look like a fresh first attempt and can land us on the
-    // same overloaded pop. Cheap to set correctly.
+    // ctx's transient_retries). Historically surfaced on the wire as
+    // x-stainless-retry-count — that header (part of the Anthropic JS SDK
+    // fingerprint) is NO LONGER sent, since agentty identifies as itself
+    // rather than impersonating the SDK/CLI. Retained for internal retry
+    // bookkeeping and available to any provider that wants it.
     int retry_count = 0;
 
     // Weak-model JSON-protocol mode (agent-zero style). Set by launch_stream

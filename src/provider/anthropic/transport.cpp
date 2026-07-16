@@ -212,28 +212,26 @@ void dbg(const char* fmt, ...) {
 
 using json = nlohmann::json;
 
-// Wire-format identity. We send byte-for-byte the same headers the official
-// Claude Code CLI sends so OAuth tokens minted for "Claude Code" are accepted
-// — Anthropic's edge gates oauth-2025-04-20 traffic on the matching x-app /
-// user-agent / anthropic-beta combination. Pinned to the CLI version we
-// reverse-engineered against (cli.js BUILD_TIME 2026-04-17, VERSION 2.1.113);
-// refresh when a newer release adds beta flags we want to ride.
+// Wire-format identity. agentty identifies itself HONESTLY — it does NOT
+// impersonate the official Claude Code CLI. The user-agent and x-app announce
+// "agentty"; we send only the headers Anthropic's API actually requires to
+// function (anthropic-version + the anthropic-beta flags that gate features we
+// use, including oauth-2025-04-20 for subscription tokens). We deliberately do
+// NOT spoof Claude Code's user-agent, the Anthropic JS SDK's x-stainless-*
+// fingerprint, its BetaToolRunner helper tag, or a Claude-Code-shaped
+// metadata.user_id. If Anthropic's edge ever hard-requires a first-party
+// client signature, that's a ToS boundary we surface to the user ("use an API
+// key or another provider"), not one we quietly circumvent by masquerading.
 namespace headers {
     inline constexpr const char* anthropic_version = "2023-06-01";
-    inline constexpr const char* claude_cli_version = "2.1.113";
-    inline constexpr const char* anth_sdk_version  = "0.81.0";
-    inline constexpr const char* node_runtime_ver  = "v22.11.0";
-    // Matches CC's `bA()`: literal `claude-code/<VERSION>` — no "(external,
-    // cli)" suffix, no `claude-cli` prefix. Older suffix variant correlated
-    // with mid-stream buffering on long tool_use bodies.
-    inline constexpr const char* user_agent        = "claude-code/2.1.113";
-    inline constexpr const char* x_app             = "cli";
+    // Honest identity — agentty says it is agentty.
+    inline constexpr const char* user_agent        = "agentty/" AGENTTY_VERSION;
+    inline constexpr const char* x_app             = "agentty";
 
-    // Beta IDs (literal strings extracted from the v2.1.113 binary's
-    // `fR8(model)` builder). Listed individually so select_betas() can compose
-    // the call-site set in the same order Claude Code's cocktail-builder
-    // pushes them. Thinking betas (interleaved-thinking, redact-thinking) are
-    // intentionally absent — see select_betas() for why.
+    // Beta IDs are FEATURE flags, not identity spoofing — each unlocks a
+    // capability agentty genuinely uses (OAuth-token acceptance, 1M context,
+    // context management, prompt-cache scope, fine-grained tool streaming).
+    // Composed by select_betas() per model/auth.
     inline constexpr const char* beta_claude_code            = "claude-code-20250219";
     inline constexpr const char* beta_oauth                  = "oauth-2025-04-20";
     inline constexpr const char* beta_context_1m             = "context-1m-2025-08-07";
@@ -242,10 +240,7 @@ namespace headers {
     // Per-tool `eager_input_streaming: true` is honored without a beta header
     // on Claude 4.6 (GA there). For older models (haiku-4-5, claude-3.x) the
     // edge requires this header — sending it on 4.6+ is a no-op so we always
-    // include it when any tool in the request opts in. Discovered from CC's
-    // breaking-changes doc strings ("fine-grained-tool-streaming-2025-05-14 →
-    // GA on 4.6, remove") and verified against zed-industries/zed's
-    // crates/anthropic completion path.
+    // include it when any tool in the request opts in.
     inline constexpr const char* beta_fine_grained_streaming = "fine-grained-tool-streaming-2025-05-14";
 } // namespace headers
 
@@ -662,38 +657,6 @@ json tool_spec_to_json(const ToolSpec& s) {
     return j;
 }
 
-// x-stainless-os literal. Mirrors the SDK's normalize-platform table in
-// anth-sdk/internal/detect-platform.mjs lines 50-58.
-constexpr const char* stainless_os() {
-#if defined(__APPLE__)
-    return "MacOS";
-#elif defined(_WIN32)
-    return "Windows";
-#elif defined(__linux__)
-    return "Linux";
-#elif defined(__FreeBSD__)
-    return "FreeBSD";
-#elif defined(__OpenBSD__)
-    return "OpenBSD";
-#else
-    return "Other";
-#endif
-}
-
-constexpr const char* stainless_arch() {
-#if defined(__x86_64__) || defined(_M_X64)
-    return "x64";
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    return "arm64";
-#elif defined(__arm__) || defined(_M_ARM)
-    return "arm";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "x32";
-#else
-    return "unknown";
-#endif
-}
-
 // Pick the anthropic-beta value list for /v1/messages exactly the way the
 // Mirrors Claude Code v2.1.113's `fR8(model)` cocktail builder for the
 // firstParty path, MINUS the two thinking betas. Why we deviate from CC:
@@ -733,13 +696,12 @@ std::string select_betas(std::string_view model, bool is_oauth,
     return out;
 }
 
-// Build the lowercase HTTP/2 header set in the same order Claude Code lays
-// them out. Order isn't semantically required (HTTP doesn't care) but
-// matching it makes wireshark dumps line up cleanly during debugging.
-//
-// `streaming=true` adds the same x-stainless-helper-method+x-stainless-helper
-// pair that cli.js's MessageStream._createMessage() injects when entering the
-// BetaToolRunner agent loop — Anthropic's edge keys some quotas off these.
+// Build the lowercase HTTP/2 header set. agentty sends ONLY the headers the
+// Anthropic API requires: the auth header, the API version, the beta feature
+// flags, and its own honest user-agent / x-app. It deliberately does NOT send
+// the Anthropic JS SDK's x-stainless-* platform fingerprint or the CLI's
+// x-stainless-helper=BetaToolRunner tag — those exist only to make traffic
+// look first-party, which agentty is not.
 //
 // AuthHeader is the closed sum (ApiKeyHeader | BearerHeader); std::visit
 // dispatches to the right header NAME at the type level. There's no way
@@ -750,6 +712,9 @@ http::Headers build_request_headers(const AuthHeader& auth,
                                     int timeout_seconds,
                                     bool streaming = false,
                                     int retry_count = 0) {
+    (void)timeout_seconds;
+    (void)streaming;
+    (void)retry_count;
     http::Headers h;
     h.push_back({"accept",         "application/json"});
     h.push_back({"content-type",   "application/json"});
@@ -759,21 +724,6 @@ http::Headers build_request_headers(const AuthHeader& auth,
     h.push_back({"anthropic-dangerous-direct-browser-access", "true"});
     if (!beta_value.empty())
         h.push_back({"anthropic-beta", std::string{beta_value}});
-    h.push_back({"x-stainless-lang",            "js"});
-    h.push_back({"x-stainless-package-version", headers::anth_sdk_version});
-    h.push_back({"x-stainless-os",              stainless_os()});
-    h.push_back({"x-stainless-arch",            stainless_arch()});
-    h.push_back({"x-stainless-runtime",         "node"});
-    h.push_back({"x-stainless-runtime-version", headers::node_runtime_ver});
-    h.push_back({"x-stainless-retry-count",     std::to_string(retry_count < 0 ? 0 : retry_count)});
-    h.push_back({"x-stainless-timeout",         std::to_string(timeout_seconds)});
-    if (streaming) {
-        // .stream() helpers in cli.js always set helper-method=stream; the
-        // sibling x-stainless-helper carries the agent-loop tag so Anthropic
-        // can distinguish raw API consumers from the official tool runner.
-        h.push_back({"x-stainless-helper-method", "stream"});
-        h.push_back({"x-stainless-helper",        "BetaToolRunner"});
-    }
     // The variant arm dictates the header. "Bearer " prefix is owned by
     // this site — callers hand us a raw token, not a prefixed string —
     // so an API key can't accidentally land with a Bearer prefix either.
@@ -788,12 +738,12 @@ http::Headers build_request_headers(const AuthHeader& auth,
     return h;
 }
 
-// Synthesize a Claude-Code-shaped metadata.user_id. The CLI uses
-// `user_<emailHash>_account_<accountUuid>_session_<sessionUuid>`. We don't
-// own an Anthropic account UUID, so we derive a stable per-machine hex
-// triplet. Anthropic uses this for abuse signals — keeping it stable per
-// machine makes our traffic look like a single legit user instead of a
-// thundering herd of fresh sessions every turn.
+// Stable per-machine hex id. Anthropic's `metadata.user_id` is a legitimate,
+// documented field used for abuse signals — keeping it STABLE per machine makes
+// agentty's traffic look like one consistent user rather than a herd of fresh
+// sessions every turn, which is honest (it IS one user on one machine). We do
+// NOT shape it to look like Claude Code's `user_<hash>_account_<uuid>_...`
+// identifier; it's just a derived-from-machine-id opaque hex string.
 std::string machine_id_hex(int nibbles) {
     static std::string cached;
     static std::once_flag once;
@@ -824,19 +774,11 @@ std::string machine_id_hex(int nibbles) {
 }
 
 std::string make_user_id() {
-    // CC v2.1.113's `T7H()` returns `metadata.user_id` as a JSON-stringified
-    // object: `{"device_id":..,"account_uuid":..,"session_id":..}`. Earlier
-    // CLI builds used the flat `user_<hex>_account_<hex>_session_<hex>` shape
-    // — agentty shipped that and it correlated with a 20-30 s mid-stream pause
-    // on long tool_use bodies. Anthropic's edge appears to inspect this field
-    // for routing/quota; matching the new shape byte-for-byte is part of the
-    // fix. We don't own a real account UUID under OAuth here, so we leave it
-    // empty exactly as CC does when one isn't available.
-    //
-    // Cached for the agentty process lifetime so `session_id` stays stable
-    // across turns — CC mints session_id once per CLI invocation. A fresh
-    // session_id per request defeats the abuse-signal stability that the
-    // stable device_id is meant to provide.
+    // metadata.user_id is a JSON object `{device_id, session_id}`: a stable
+    // per-machine device_id plus a per-process session_id (minted once, so it
+    // stays constant across turns of one agentty run). This is agentty's own
+    // honest client identity for Anthropic's abuse-signal bucketing — NOT a
+    // copy of Claude Code's `T7H()` shape and with no fake account_uuid.
     static std::string cached;
     static std::once_flag once;
     std::call_once(once, []{
@@ -850,9 +792,8 @@ std::string make_user_id() {
                       (unsigned long long)s1, (unsigned long long)s2);
         auto session_id = std::string(buf, 32);
         cached = nlohmann::json{
-            {"device_id",    device_id},
-            {"account_uuid", ""},
-            {"session_id",   session_id},
+            {"device_id",  device_id},
+            {"session_id", session_id},
         }.dump();
     });
     return cached;
