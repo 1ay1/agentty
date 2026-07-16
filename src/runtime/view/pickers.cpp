@@ -797,17 +797,45 @@ Element tool_output_viewer(const Model& m) {
         ).build());
     cfg.header.push_back(sep);
 
-    // Body. edit/write/read/git_diff/todo have a STRUCTURED body Kind in
-    // maya::ToolBodyPreview — render those through the exact same widget
-    // the timeline uses (forced show_all + head-anchored so nothing is
-    // elided): coloured +/- diffs for edit/write, a line-number gutter
-    // and syntax bands for read, +/- bands for git_diff, checkboxes for
-    // todo. Everything else (bash/grep/glob/git_status/…) is plain text,
-    // and the user wants it LINE-NUMBERED — so those get a right-aligned
-    // gutter + category-hued pipe we build here (maya's CodeBlock kind
-    // has no gutter). Failure bodies also go line-numbered (red) rather
-    // than through the structured path so long errors stay scannable.
-    {
+    // Body rows — built ONCE per viewed entry, then windowed per frame.
+    //
+    // Why: a 256 KiB output renders to thousands of row Elements. The
+    // previous shape rebuilt the full ToolBodyPreview tree (deep-copying
+    // the output through its Config) on EVERY key repeat, and handed the
+    // whole thing to a scroll container that laid out ALL rows to paint
+    // ~20 — the "viewer lags/hangs" report. Now:
+    //   * the rows are materialised once into a function-local cache
+    //     keyed by (entries identity, index, output bytes identity);
+    //   * each frame we copy only the visible [y, y+vh) slice into the
+    //     picker — no scroll container, no full-content layout — so a
+    //     frame costs O(viewport) regardless of output size;
+    //   * scroll bounds are written to the host ScrollState here (the
+    //     reducer's clamp reads max_y), replacing the widget writeback
+    //     the scroll container used to do.
+    //
+    // The cache is safe across frames: entries are snapshotted at open
+    // (immutable while Open), the vector buffer is stable under Model
+    // moves, and the output-bytes key guards against allocator reuse
+    // after a close/reopen.
+    struct BodyCache {
+        const void* entries_key = nullptr;
+        int         index       = -1;
+        const void* bytes_key   = nullptr;
+        std::size_t bytes_len   = 0;
+        std::vector<Element> rows;
+    };
+    static BodyCache cache;   // UI thread only — same discipline as pickers’ statics
+
+    const void* entries_key = static_cast<const void*>(o->entries.data());
+    const void* bytes_key   = static_cast<const void*>(e.output.data());
+    if (cache.entries_key != entries_key || cache.index != cur
+        || cache.bytes_key != bytes_key || cache.bytes_len != e.output.size()) {
+        cache.entries_key = entries_key;
+        cache.index       = cur;
+        cache.bytes_key   = bytes_key;
+        cache.bytes_len   = e.output.size();
+        cache.rows.clear();
+
         using Kind = maya::ToolBodyPreview::Kind;
         auto bp = tool_body_preview_config(e.call);
         const bool structured =
@@ -819,9 +847,19 @@ Element tool_output_viewer(const Model& m) {
             bp.show_all   = true;    // no "⋯ N more" elision — full output
             bp.tail_only  = false;   // head-anchored, show from the top
             bp.show_streaming_placeholder = false;
-            cfg.items.push_back(maya::ToolBodyPreview{std::move(bp)}.build());
+            Element body = maya::ToolBodyPreview{std::move(bp)}.build();
+            // The preview renders as one vstack of row Elements. Explode
+            // it so the window slice below can address individual rows;
+            // the wrapper vstack carries no styling of its own.
+            if (auto* box = maya::as_box(body);
+                box && box->layout.direction == maya::FlexDirection::Column
+                && !box->children.empty()) {
+                cache.rows = std::move(box->children);
+            } else {
+                cache.rows.push_back(std::move(body));
+            }
         } else if (e.output.empty()) {
-            cfg.items.push_back(text("  (no output captured)", fg_italic(muted)));
+            cache.rows.push_back(text("  (no output captured)", fg_italic(muted)));
         } else {
             // Line-numbered fallback: right-aligned gutter + dim pipe in
             // the tool's category hue (red pipe on failure), then the
@@ -841,11 +879,12 @@ Element tool_output_viewer(const Model& m) {
             }
             const int gutter_w = static_cast<int>(
                 std::to_string(std::max<std::size_t>(1, lines.size())).size());
+            cache.rows.reserve(lines.size());
             for (std::size_t i = 0; i < lines.size(); ++i) {
                 std::string num = std::to_string(i + 1);
                 if (static_cast<int>(num.size()) < gutter_w)
                     num.insert(0, gutter_w - num.size(), ' ');
-                cfg.items.push_back(
+                cache.rows.push_back(
                     h(text("  " + num + " ", fg_dim(warn)),
                       text("\xe2\x94\x82 ", fg_dim(pipe_hue)),   // │
                       text(std::string{lines[i]},
@@ -855,7 +894,30 @@ Element tool_output_viewer(const Model& m) {
         }
     }
 
+    // Window the cached rows to the viewport. No scroll container — the
+    // picker paints the slice inline; scroll bounds are maintained here
+    // so the reducer's clamp (ToolViewerMove) stays correct.
+    const int total_rows = static_cast<int>(cache.rows.size());
+    const int vh = std::max(1, cfg.viewport_h);
+    auto& sc = m.ui.tool_viewer_scroll;
+    sc.max_y = std::max(0, total_rows - vh);
+    sc.y     = std::clamp(sc.y, 0, sc.max_y);
+    cfg.scroll = nullptr;
+    const int first = sc.y;
+    const int last  = std::min(total_rows, first + vh);
+    for (int i = first; i < last; ++i)
+        cfg.items.push_back(cache.rows[static_cast<std::size_t>(i)]);
+
     cfg.footer.push_back(text(""));
+    // Position line: which rows of the output are on screen — the manual
+    // window has no scrollbar, so this is the scroll affordance.
+    if (total_rows > vh) {
+        cfg.footer.push_back(text(
+            "  " + std::to_string(first + 1) + "\xe2\x80\x93"      // –
+                 + std::to_string(last) + " / "
+                 + std::to_string(total_rows) + " rows",
+            fg_dim(muted)));
+    }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},               // ↑↓
         {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},            // ←→
