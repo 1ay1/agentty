@@ -19,6 +19,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
+#include "agentty/tool/util/utf8.hpp"
 
 namespace agentty::app::detail {
 
@@ -39,13 +40,24 @@ constexpr std::size_t kStoredOutputCap = 256u * 1024u; // 256 KiB
 std::string clamp_output(std::string s) {
     if (s.size() <= kStoredOutputCap) return s;
     constexpr std::size_t half = kStoredOutputCap / 2;
+    // Both cut points MUST land on UTF-8 code-point boundaries: the
+    // clamped string is what goes onto the wire as the tool_result, and
+    // nlohmann::json::dump() throws type_error.316 on a split multi-byte
+    // sequence — which would kill serialization of the whole request.
+    // Head: largest boundary ≤ half. Tail: walk the start FORWARD past
+    // any continuation bytes so the kept suffix begins on a lead byte.
+    const std::size_t head_end = tools::util::safe_utf8_cut(s, half);
+    std::size_t tail_start = s.size() - half;
+    while (tail_start < s.size()
+           && (static_cast<unsigned char>(s[tail_start]) & 0xC0) == 0x80)
+        ++tail_start;
     std::string out;
     out.reserve(kStoredOutputCap + 64);
-    out.append(s, 0, half);
+    out.append(s, 0, head_end);
     out.append("\n\n… (");
-    out.append(std::to_string((s.size() - kStoredOutputCap) / 1024));
+    out.append(std::to_string((s.size() - head_end - (s.size() - tail_start)) / 1024));
     out.append(" KiB elided to keep memory bounded) …\n\n");
-    out.append(s, s.size() - half, half);
+    out.append(s, tail_start, s.size() - tail_start);
     return out;
 }
 
@@ -191,9 +203,17 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     constexpr std::size_t kProgressKeep = 16 * 1024;
                     if (e.snapshot.size() > kProgressKeep) {
                         // Keep the tail — newest bytes are the most
-                        // useful confirmation of progress.
-                        e.snapshot.erase(
-                            0, e.snapshot.size() - kProgressKeep);
+                        // useful confirmation of progress. Advance the
+                        // cut past any UTF-8 continuation bytes so the
+                        // kept suffix starts on a code-point boundary
+                        // (a split sequence renders as mojibake in the
+                        // card body).
+                        std::size_t cut = e.snapshot.size() - kProgressKeep;
+                        while (cut < e.snapshot.size()
+                               && (static_cast<unsigned char>(
+                                       e.snapshot[cut]) & 0xC0) == 0x80)
+                            ++cut;
+                        e.snapshot.erase(0, cut);
                     }
                     r->progress_text = std::move(e.snapshot);
                 }

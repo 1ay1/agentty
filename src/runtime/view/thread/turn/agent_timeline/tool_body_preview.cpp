@@ -216,6 +216,18 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //      lands.
     if (n == "edit") {
         const bool streaming_now = !tc.is_terminal();
+        // FAILED edit: surface the error text as the body. Falling through
+        // to the args-echo EditDiff (as before) rendered the *attempted*
+        // hunks and swallowed the actual failure reason ("old_text not
+        // found", "file changed since read") — the user saw a red ✗ with
+        // no explanation and the model's self-correction hint was only on
+        // the wire, never on screen.
+        if (tc.is_failed() && !tc.output().empty()) {
+            out.kind = Kind::Failure;
+            out.text = std::string{tc.output()};
+            out.chrome_color = status_error;
+            return out;
+        }
         if (tc.is_terminal() && !tc.is_failed()) {
             // Pull the diff payload out of the ```diff … ``` fence in the
             // tool's output. Falls back to EditDiff-from-args if the fence
@@ -386,6 +398,13 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    "⋯ N more" elision); the user wants to see exactly what was
     //    written.
     if (n == "write") {
+        // FAILED write: error body, same rationale as edit above.
+        if (tc.is_failed() && !tc.output().empty()) {
+            out.kind = Kind::Failure;
+            out.text = std::string{tc.output()};
+            out.chrome_color = status_error;
+            return out;
+        }
         auto content = safe_arg(tc.args, "content");
         const bool streaming_now = !tc.is_terminal();
         if (!content.empty()) {

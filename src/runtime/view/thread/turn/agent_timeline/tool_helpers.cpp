@@ -102,6 +102,25 @@ std::string pretty_path(std::string p) {
     return p;
 }
 
+// Parse the leading count out of a tool output that begins "Found N …"
+// (grep: "Found N matches across M files", glob: "Found N file(s):").
+// Returns -1 when the output doesn't match, so callers can fall back.
+// Counting rendered LINES (the old behaviour) inflated the number —
+// grep output includes ### context headers, 2 context lines per hit and
+// blank separators, so "· 45 matches" showed for 3 real hits.
+[[nodiscard]] int parse_found_count(const std::string& out) {
+    constexpr std::string_view kTag = "Found ";
+    if (out.rfind(kTag, 0) != 0) return -1;
+    int n = 0;
+    bool got = false;
+    for (std::size_t i = kTag.size(); i < out.size(); ++i) {
+        const char c = out[i];
+        if (c >= '0' && c <= '9') { n = n * 10 + (c - '0'); got = true; }
+        else break;
+    }
+    return got ? n : -1;
+}
+
 } // namespace
 
 // One-line "what this tool is doing" for the timeline. Tool-specific
@@ -166,8 +185,10 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = path_pp.empty() ? pat : pat + "  in  " + path_pp;
         if (tc.is_done()) {
-            int matches = count_lines(tc.output());
-            if (matches > 0) detail += "  \xc2\xb7  " + std::to_string(matches) + " matches";
+            int matches = parse_found_count(tc.output());
+            if (matches == 0)     detail += "  \xc2\xb7  no matches";
+            else if (matches > 0) detail += "  \xc2\xb7  " + std::to_string(matches)
+                                          + (matches == 1 ? " match" : " matches");
         }
         return detail;
     }
@@ -176,8 +197,10 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = pat;
         if (tc.is_done()) {
-            int hits = count_lines(tc.output());
-            if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits) + " hits";
+            int hits = parse_found_count(tc.output());
+            if (hits == 0)     detail += "  \xc2\xb7  no hits";
+            else if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
+                                       + (hits == 1 ? " hit" : " hits");
         }
         return detail;
     }
