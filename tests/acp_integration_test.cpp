@@ -105,6 +105,15 @@ int main() {
     // Point the root at a tmp dir we own so the scripted `write` succeeds.
     const fs::path tmp = fs::temp_directory_path() / "agentty_acp_it";
     fs::create_directories(tmp);
+    // Sandbox persistence too: AgentServer::persist() writes every turn
+    // to persistence::threads_dir() = $HOME/.agentty/threads. Without
+    // redirecting HOME, every ctest run deposited the scripted "please
+    // write the file" thread (plus acp_sessions.json entries) into the
+    // DEVELOPER'S real thread history — they showed up when cycling
+    // threads in the real app. data_dir() re-reads the env on each call,
+    // so setting it here (before any persistence touch) is sufficient.
+    setenv("HOME", tmp.string().c_str(), 1);
+    setenv("USERPROFILE", tmp.string().c_str(), 1);   // win32 branch of data_dir
     ag::tools::util::set_workspace_root(tmp);
     const fs::path target = tmp / "out.txt";
     fs::remove(target);
