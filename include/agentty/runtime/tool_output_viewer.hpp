@@ -28,6 +28,8 @@
 #include <variant>
 #include <vector>
 
+#include "agentty/domain/conversation.hpp"
+
 namespace agentty {
 
 namespace tool_viewer {
@@ -43,6 +45,14 @@ struct Entry {
     std::string trailing;  // "ok · 4.2s · 48 KB"  or  "failed · 0.3s"
     std::string output;    // full stored output (≤ 256 KiB by upstream cap)
     bool        failed = false;
+    // A snapshot of the settled tool call. The body stage renders it
+    // through the SAME maya::ToolBodyPreview path the timeline uses
+    // (show_all) — so edit/write show a coloured diff, read/write show
+    // a line-number gutter, git_diff shows +/- bands, etc. — instead of
+    // a flat monochrome text dump. Snapshotting the whole ToolUse (name
+    // + args + terminal output) keeps the overlay immune to transcript
+    // mutation and the copy is bounded by the 256 KiB output clamp.
+    ToolUse     call;
 };
 
 struct Closed {};

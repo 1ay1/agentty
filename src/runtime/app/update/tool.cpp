@@ -121,6 +121,7 @@ void arm_reconcile_cooldown(Model& m) {
             e.name   = tc.name.value;
             e.title  = ui::tool_display_name(tc.name.value);
             e.detail = ui::tool_timeline_detail(tc);
+            e.call   = tc;   // snapshot for the rich body render (diff/gutter)
             // Trailing: ok/failed · duration · size.
             e.trailing = e.failed ? "failed" : "ok";
             if (float secs = ui::tool_elapsed(tc); secs >= 0.05f) {

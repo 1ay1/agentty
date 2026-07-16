@@ -6,11 +6,13 @@
 
 #include <maya/widget/picker.hpp>
 #include <maya/widget/plan_view.hpp>
+#include <maya/widget/tool_body_preview.hpp>
 #include <maya/platform/io.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/workspace/files.hpp"
@@ -795,19 +797,61 @@ Element tool_output_viewer(const Model& m) {
         ).build());
     cfg.header.push_back(sep);
 
-    // Full output in the scrollable region. Line Elements are cheap; the
-    // picker's viewport paints only the visible slice, and the stored
-    // output is ≤ 256 KiB by the conversation-side clamp.
+    // Body. edit/write/read/git_diff/todo have a STRUCTURED body Kind in
+    // maya::ToolBodyPreview — render those through the exact same widget
+    // the timeline uses (forced show_all + head-anchored so nothing is
+    // elided): coloured +/- diffs for edit/write, a line-number gutter
+    // and syntax bands for read, +/- bands for git_diff, checkboxes for
+    // todo. Everything else (bash/grep/glob/git_status/…) is plain text,
+    // and the user wants it LINE-NUMBERED — so those get a right-aligned
+    // gutter + category-hued pipe we build here (maya's CodeBlock kind
+    // has no gutter). Failure bodies also go line-numbered (red) rather
+    // than through the structured path so long errors stay scannable.
     {
-        std::string_view body{e.output};
-        std::size_t pos_b = 0;
-        while (pos_b <= body.size()) {
-            std::size_t eol = body.find('\n', pos_b);
-            std::size_t len = (eol == std::string_view::npos ? body.size() : eol) - pos_b;
-            cfg.items.push_back(text("  " + std::string{body.substr(pos_b, len)},
-                                     fg_of(muted)));
-            if (eol == std::string_view::npos) break;
-            pos_b = eol + 1;
+        using Kind = maya::ToolBodyPreview::Kind;
+        auto bp = tool_body_preview_config(e.call);
+        const bool structured =
+            !e.failed && (bp.kind == Kind::EditDiff || bp.kind == Kind::GitDiff
+                       || bp.kind == Kind::FileRead || bp.kind == Kind::FileWrite
+                       || bp.kind == Kind::TodoList);
+
+        if (structured) {
+            bp.show_all   = true;    // no "⋯ N more" elision — full output
+            bp.tail_only  = false;   // head-anchored, show from the top
+            bp.show_streaming_placeholder = false;
+            cfg.items.push_back(maya::ToolBodyPreview{std::move(bp)}.build());
+        } else if (e.output.empty()) {
+            cfg.items.push_back(text("  (no output captured)", fg_italic(muted)));
+        } else {
+            // Line-numbered fallback: right-aligned gutter + dim pipe in
+            // the tool's category hue (red pipe on failure), then the
+            // raw line. Every line of every plain-text output numbered.
+            const Color pipe_hue = e.failed ? danger : tool_hue;
+            std::vector<std::string_view> lines;
+            {
+                std::string_view b{e.output};
+                std::size_t p = 0;
+                while (p <= b.size()) {
+                    std::size_t nl = b.find('\n', p);
+                    std::size_t len = (nl == std::string_view::npos ? b.size() : nl) - p;
+                    lines.push_back(b.substr(p, len));
+                    if (nl == std::string_view::npos) break;
+                    p = nl + 1;
+                }
+            }
+            const int gutter_w = static_cast<int>(
+                std::to_string(std::max<std::size_t>(1, lines.size())).size());
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+                std::string num = std::to_string(i + 1);
+                if (static_cast<int>(num.size()) < gutter_w)
+                    num.insert(0, gutter_w - num.size(), ' ');
+                cfg.items.push_back(
+                    h(text("  " + num + " ", fg_dim(warn)),
+                      text("\xe2\x94\x82 ", fg_dim(pipe_hue)),   // │
+                      text(std::string{lines[i]},
+                           e.failed ? fg_of(danger) : fg_of(muted)))
+                    .build());
+            }
         }
     }
 
