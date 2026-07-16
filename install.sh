@@ -205,9 +205,9 @@ if [ -n "$api_json" ]; then
     urls=$(printf '%s\n' "$api_json" \
         | grep -o '"browser_download_url": *"[^"]*"' \
         | sed 's/.*": *"//; s/"$//')
-    sums_url=$(printf '%s\n' "$urls" | grep -E '/SHA256SUMS\$' | head -n1)
+    sums_url=$(printf '%s\n' "$urls" | grep -E '/SHA256SUMS$' | head -n1)
     for sfx in $suffixes; do
-        asset_url=$(printf '%s\n' "$urls" | grep -E "/agentty(-[0-9][^/]*)?-${sfx}\$" | head -n1)
+        asset_url=$(printf '%s\n' "$urls" | grep -E "/agentty(-[0-9][^/]*)?-${sfx}$" | head -n1)
         [ -n "$asset_url" ] && break
     done
 fi
