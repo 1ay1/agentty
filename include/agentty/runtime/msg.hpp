@@ -397,6 +397,20 @@ struct CodeBlockResultAttach {};
 struct CodeBlockResultCopy {};
 struct CodeBlockResultDiscard {};
 
+// ── Tool-output viewer ───────────────────────────────────────────────────────
+// Ctrl+O scrollable overlay for reading the FULL stored output of any
+// settled tool call — the timeline cards elide long bodies (head/tail
+// windows) and expanding them in place would rewrite committed scrollback
+// rows, so inspection happens in an overlay that paints strictly over the
+// live viewport. Open snapshots the entries; Move drives the list cursor
+// (or the body scroll in the viewing stage); Select enters the body
+// stage; Close = Esc (body → back to list, list → closed); Copy = y.
+struct OpenToolOutputViewer {};
+struct CloseToolOutputViewer {};
+struct ToolViewerMove { int delta; };
+struct ToolViewerSelect {};
+struct ToolViewerCopy {};
+
 // ── Todo modal ───────────────────────────────────────────────────────────
 struct OpenTodoModal {};
 struct CloseTodoModal {};
@@ -548,7 +562,9 @@ using StreamMsg = std::variant<
 
 using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
-    PermissionApprove, PermissionReject, PermissionApproveAlways>;
+    PermissionApprove, PermissionReject, PermissionApproveAlways,
+    OpenToolOutputViewer, CloseToolOutputViewer,
+    ToolViewerMove, ToolViewerSelect, ToolViewerCopy>;
 
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,

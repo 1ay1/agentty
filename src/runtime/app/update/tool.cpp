@@ -17,6 +17,8 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/util/utf8.hpp"
@@ -86,6 +88,53 @@ void arm_reconcile_cooldown(Model& m) {
     if (m.ui.settle_cooldown_ticks < kReconcileTicks)
         m.ui.settle_cooldown_ticks = kReconcileTicks;
     ::maya::request_animation_frame();
+}
+
+// Build the tool-output-viewer entry list: every settled tool call in the
+// current thread with a non-empty stored output, NEWEST FIRST (the one the
+// user just watched scroll past is entry 0). Bounded by kMaxEntries /
+// kSnapshotBudget so a marathon session can't balloon the overlay open.
+// Snapshotting (copying the output bytes) makes the overlay immune to the
+// transcript mutating underneath it — each stored output is already
+// clamped to 256 KiB upstream, so the copies are cheap and bounded.
+[[nodiscard]] std::vector<tool_viewer::Entry> collect_viewer_entries(const Model& m) {
+    std::vector<tool_viewer::Entry> out;
+    std::size_t budget = tool_viewer::kSnapshotBudget;
+    for (auto mit = m.d.current.messages.rbegin();
+         mit != m.d.current.messages.rend(); ++mit) {
+        for (auto tit = mit->tool_calls.rbegin();
+             tit != mit->tool_calls.rend(); ++tit) {
+            const auto& tc = *tit;
+            if (!tc.is_terminal()) continue;
+            const auto& body = tc.output();
+            if (body.empty()) continue;
+            if (out.size() >= tool_viewer::kMaxEntries) return out;
+            if (body.size() > budget) continue;   // skip, keep older smaller ones
+            budget -= body.size();
+
+            tool_viewer::Entry e;
+            e.failed = tc.is_failed();
+            e.output = body;
+            // "Read  src/foo.cpp @120  · 450 lines" — reuse the timeline's
+            // display name + detail line so the list reads exactly like
+            // the transcript cards the user is trying to re-inspect.
+            e.label = ui::tool_display_name(tc.name.value);
+            if (auto detail = ui::tool_timeline_detail(tc); !detail.empty())
+                e.label += "  " + detail;
+            // Trailing: ok/failed · duration · size.
+            e.trailing = e.failed ? "failed" : "ok";
+            if (float secs = ui::tool_elapsed(tc); secs >= 0.05f) {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, " \xc2\xb7 %.1fs", secs);
+                e.trailing += buf;
+            }
+            e.trailing += (body.size() >= 1024)
+                ? " \xc2\xb7 " + std::to_string(body.size() / 1024) + " KB"
+                : " \xc2\xb7 " + std::to_string(body.size()) + " B";
+            out.push_back(std::move(e));
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -346,6 +395,66 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             });
             m.d.pending_permission.reset();
             return {std::move(m), cmd::kick_pending_tools(m)};
+        },
+
+        // ── Tool-output viewer ────────────────────────────────────
+        [&](OpenToolOutputViewer) -> Step {
+            auto entries = collect_viewer_entries(m);
+            if (entries.empty()) {
+                auto cmd = set_status_toast(m, "no tool outputs to inspect yet");
+                return {std::move(m), std::move(cmd)};
+            }
+            m.ui.tool_viewer = tool_viewer::Open{std::move(entries), 0, false};
+            m.ui.tool_viewer_scroll.y = 0;
+            return done(std::move(m));
+        },
+        [&](CloseToolOutputViewer) -> Step {
+            // Esc semantics: body stage → back to the list; list → closed.
+            if (auto* o = tool_viewer_opened(m.ui.tool_viewer); o && o->viewing) {
+                o->viewing = false;
+                m.ui.tool_viewer_scroll.y = 0;
+                return done(std::move(m));
+            }
+            m.ui.tool_viewer = tool_viewer::Closed{};
+            return done(std::move(m));
+        },
+        [&](ToolViewerMove& e) -> Step {
+            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            if (!o) return done(std::move(m));
+            if (o->viewing) {
+                // Body stage: deltas scroll the output viewport directly.
+                // max_y is paint-written-back by the Picker widget.
+                auto& sc = m.ui.tool_viewer_scroll;
+                sc.y = std::clamp(sc.y + e.delta, 0, std::max(0, sc.max_y));
+            } else {
+                int sz = static_cast<int>(o->entries.size());
+                if (sz > 0)
+                    o->index = std::clamp(o->index + e.delta, 0, sz - 1);
+            }
+            return done(std::move(m));
+        },
+        [&](ToolViewerSelect) -> Step {
+            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            if (!o || o->viewing) return done(std::move(m));
+            if (o->index < 0
+                || o->index >= static_cast<int>(o->entries.size()))
+                return done(std::move(m));
+            o->viewing = true;
+            m.ui.tool_viewer_scroll.y = 0;
+            return done(std::move(m));
+        },
+        [&](ToolViewerCopy) -> Step {
+            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            if (!o) return done(std::move(m));
+            if (o->index < 0
+                || o->index >= static_cast<int>(o->entries.size()))
+                return done(std::move(m));
+            std::string body =
+                o->entries[static_cast<std::size_t>(o->index)].output;
+            auto toast = set_status_toast(m, "tool output copied to clipboard");
+            return {std::move(m), maya::Cmd<Msg>::batch(
+                maya::Cmd<Msg>::write_clipboard(std::move(body)),
+                std::move(toast))};
         },
     }, tm);
 }

@@ -25,6 +25,7 @@
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/code_block_picker.hpp"
 #include "agentty/runtime/checkpoint_picker.hpp"
+#include "agentty/runtime/tool_output_viewer.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
 #include "agentty/runtime/symbol_palette.hpp"
@@ -183,6 +184,7 @@ struct Model {
         SymbolPaletteState  symbol_palette;   // Closed | Open{query, index, entries}
         CodeBlockPickerState code_blocks;      // Closed | Open{blocks, index}
         CheckpointPickerState checkpoints;     // Closed | Open{entries, index}
+        ToolViewerState     tool_viewer;       // Closed | Open{entries, index, viewing}
         ui::pick::TwoAxis   diff_review;      // Closed | OpenAtCell{file_index,hunk_index}
         TodoState           todo;
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
@@ -339,6 +341,7 @@ struct Model {
         mutable maya::ScrollState code_blocks_scroll{.auto_dispatch = false};
         mutable maya::ScrollState checkpoints_scroll{.auto_dispatch = false};
         mutable maya::ScrollState todo_scroll{.auto_dispatch = false};
+        mutable maya::ScrollState tool_viewer_scroll{.auto_dispatch = false};
     };
 
     Domain      d;

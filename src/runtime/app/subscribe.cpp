@@ -338,6 +338,37 @@ std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+// Ctrl+O tool-output viewer. Two stages share one handler: the LIST
+// (↑↓/j/k move the cursor, Enter opens the body, y copies, Esc/q close)
+// and the BODY (↑↓/j/k/PgUp/PgDn/Home/End scroll, y copies, Esc back to
+// the list). The reducer branches on Open::viewing, so the same Move/
+// Copy msgs serve both stages.
+std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Escape:   return CloseToolOutputViewer{};
+            case SpecialKey::Enter:    return ToolViewerSelect{};
+            case SpecialKey::Up:       return ToolViewerMove{-1};
+            case SpecialKey::Down:     return ToolViewerMove{+1};
+            case SpecialKey::PageUp:   return ToolViewerMove{-10};
+            case SpecialKey::PageDown: return ToolViewerMove{+10};
+            case SpecialKey::Home:     return ToolViewerMove{-1000000};
+            case SpecialKey::End:      return ToolViewerMove{+1000000};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        switch (ck->codepoint) {
+            case U'k': case U'K': return ToolViewerMove{-1};
+            case U'j': case U'J': return ToolViewerMove{+1};
+            case U'y': case U'Y': return ToolViewerCopy{};
+            case U'q': case U'Q': return CloseToolOutputViewer{};
+            default: break;
+        }
+    }
+    return std::nullopt;
+}
+
 // Login modal — dispatches based on which sub-state we're in.
 // Picking accepts only '1'/'2' (and Esc to close);
 // OAuthCode + ApiKeyInput consume free-text input + cursor keys + Enter;
@@ -469,6 +500,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case U't': case U'T': return OpenTodoModal{};
                 case U'e': case U'E': return ComposerToggleExpand{};
                 case U'g': case U'G': return OpenCodeBlockPicker{};
+                case U'o': case U'O': return OpenToolOutputViewer{};
                 default: break;
             }
         }
@@ -645,6 +677,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
     const bool in_blocks  = code_block_picker_is_open(m.ui.code_blocks);
     const bool in_blockres = code_block_result_is_open(m.ui.code_blocks);
+    const bool in_toolview = tool_viewer_is_open(m.ui.tool_viewer);
     const bool in_checkpoints = checkpoint_picker_is_open(m.ui.checkpoints);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
@@ -682,6 +715,7 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_symbol)  return on_symbol_palette(ev);
             if (in_blocks)  return on_code_block_picker(ev);
             if (in_blockres) return on_code_block_result(ev);
+            if (in_toolview) return on_tool_viewer(ev);
             if (in_checkpoints) return on_checkpoint_picker(ev);
             if (in_models)  return on_model_picker(ev);
             if (in_providers) return on_provider_picker(ev);

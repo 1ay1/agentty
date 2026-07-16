@@ -699,6 +699,92 @@ Element code_block_result_card(const Model& m) {
     return Picker{std::move(cfg)}.build();
 }
 
+// Ctrl+O tool-output viewer. Two stages inside one Picker chrome:
+//
+//   LIST  — one row per settled tool call (newest first): "Read src/…"
+//           leading + "ok · 1.2s · 48 KB" trailing. Enter opens the body.
+//   BODY  — the FULL stored output of the selected call in the scrollable
+//           region (the timeline card elides long bodies; this is where
+//           the elided middle lives). Esc returns to the list.
+//
+// An overlay — not in-place card expansion — because the transcript's
+// committed rows are immutable native scrollback; growing a card there
+// would rewrite committed rows (HardReset corruption class). The overlay
+// paints strictly over the live viewport, same as every other picker.
+Element tool_output_viewer(const Model& m) {
+    const auto* o = tool_viewer_opened(m.ui.tool_viewer);
+    if (!o) return nothing();
+
+    Picker::Config cfg;
+    cfg.min_width  = 60;
+    cfg.viewport_h = picker_viewport_h();
+    cfg.scroll     = &m.ui.tool_viewer_scroll;
+
+    if (!o->viewing) {
+        // ── LIST stage ──
+        cfg.title    = " Tool Outputs ";
+        cfg.accent   = highlight;
+        cfg.selected = o->entries.empty() ? -1 : o->index;
+        cfg.rows.reserve(o->entries.size());
+        for (int i = 0; i < static_cast<int>(o->entries.size()); ++i) {
+            const auto& e = o->entries[static_cast<std::size_t>(i)];
+            Picker::Config::Row row;
+            row.leading        = e.label;
+            row.leading_style  = e.failed ? fg_of(danger) : fg_of(fg);
+            row.trailing       = e.trailing;
+            row.trailing_style = e.failed ? fg_of(danger) : fg_dim(muted);
+            row.selected       = (i == o->index);
+            cfg.rows.push_back(std::move(row));
+        }
+        cfg.footer.push_back(text(""));
+        cfg.footer.push_back(key_hints({
+            {"\xe2\x86\x91\xe2\x86\x93", "move", 5},   // ↑↓
+            {"Enter", "view", 6},
+            {"y", "copy", 4},
+            {"Esc", "close", 3},
+        }));
+        return Picker{std::move(cfg)}.build();
+    }
+
+    // ── BODY stage ──
+    const auto& e = o->entries[static_cast<std::size_t>(
+        std::clamp(o->index, 0, static_cast<int>(o->entries.size()) - 1))];
+    cfg.title    = " Tool Output ";
+    cfg.accent   = e.failed ? danger : highlight;
+    cfg.selected = -1;   // read-only — no cursor row; manual scroll rules
+
+    // Header: the entry label + status/size, mirroring the list row so
+    // the user never loses track of WHICH output they're reading.
+    cfg.header.push_back(text(" " + e.label, fg_bold(cfg.accent)));
+    cfg.header.push_back(text("  " + e.trailing,
+        e.failed ? fg_of(danger) : fg_of(muted)));
+    cfg.header.push_back(sep);
+
+    // Full output in the scrollable region. Line Elements are cheap; the
+    // picker's viewport paints only the visible slice, and the stored
+    // output is ≤ 256 KiB by the conversation-side clamp.
+    {
+        std::string_view body{e.output};
+        std::size_t pos = 0;
+        while (pos <= body.size()) {
+            std::size_t eol = body.find('\n', pos);
+            std::size_t len = (eol == std::string_view::npos ? body.size() : eol) - pos;
+            cfg.items.push_back(text("  " + std::string{body.substr(pos, len)},
+                                     fg_of(muted)));
+            if (eol == std::string_view::npos) break;
+            pos = eol + 1;
+        }
+    }
+
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},   // ↑↓
+        {"y", "copy", 4},
+        {"Esc", "back", 3},
+    }));
+    return Picker{std::move(cfg)}.build();
+}
+
 // Rewind checkpoint picker. One row per checkpointed user turn (oldest at
 // the top, newest at the bottom nearest the composer — same spatial order
 // as the transcript). Each row: turn number + one-line prompt preview

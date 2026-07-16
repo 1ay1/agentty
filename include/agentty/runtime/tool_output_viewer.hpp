@@ -1,0 +1,70 @@
+#pragma once
+// Tool-output inspector — a scrollable overlay for reading the FULL stored
+// output of any settled tool call in the current thread.
+//
+// Why an overlay and not expand/collapse on the timeline cards: the
+// transcript's committed rows live in native terminal scrollback, which is
+// immutable — growing a card in place would rewrite committed rows and
+// force a destructive HardReset (the exact corruption class the frozen-
+// prefix architecture exists to prevent). An overlay paints strictly over
+// the live viewport (same machinery as the pickers / code-block Result
+// card), so the transcript underneath is never touched.
+//
+// Flow:  Ctrl+O → list of recent tool outputs (newest first) → Enter →
+// full output, scrollable → Esc back → Esc close. `y` copies the body.
+//
+// Entries snapshot their output bytes at OPEN time (bounded: kMaxEntries
+// items, kSnapshotBudget total bytes) so the overlay is immune to the
+// transcript mutating underneath it (a streaming turn appending messages,
+// a late ToolExecOutput settling a card). The per-tool stored output is
+// already clamped to 256 KiB (update/tool.cpp kStoredOutputCap), so the
+// snapshot is cheap.
+//
+// This header is UI state only. Reducer wiring lives in
+// update/tool_viewer.cpp, key dispatch in subscribe.cpp, the view in
+// view/pickers.cpp — the same file split as the other pickers.
+
+#include <string>
+#include <variant>
+#include <vector>
+
+namespace agentty {
+
+namespace tool_viewer {
+
+// Snapshot budget: newest-first collection stops once either cap trips.
+inline constexpr std::size_t kMaxEntries     = 50;
+inline constexpr std::size_t kSnapshotBudget = 4u * 1024 * 1024;  // 4 MiB
+
+struct Entry {
+    std::string label;     // "Read  src/foo.cpp  ·  450 lines"
+    std::string trailing;  // "ok · 4.2s · 48 KB"  or  "failed · 0.3s"
+    std::string output;    // full stored output (≤ 256 KiB by upstream cap)
+    bool        failed = false;
+};
+
+struct Closed {};
+
+struct Open {
+    std::vector<Entry> entries;   // newest first
+    int                index   = 0;
+    bool               viewing = false;   // false = list, true = body stage
+};
+
+} // namespace tool_viewer
+
+using ToolViewerState = std::variant<tool_viewer::Closed, tool_viewer::Open>;
+
+[[nodiscard]] inline bool tool_viewer_is_open(const ToolViewerState& s) noexcept {
+    return std::holds_alternative<tool_viewer::Open>(s);
+}
+[[nodiscard]] inline tool_viewer::Open*
+tool_viewer_opened(ToolViewerState& s) noexcept {
+    return std::get_if<tool_viewer::Open>(&s);
+}
+[[nodiscard]] inline const tool_viewer::Open*
+tool_viewer_opened(const ToolViewerState& s) noexcept {
+    return std::get_if<tool_viewer::Open>(&s);
+}
+
+} // namespace agentty

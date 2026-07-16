@@ -83,6 +83,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::OpenThreads:   return agentty::app::update(std::move(m), Msg{OpenThreadList{}});
                 case Command::OpenPlan:      return agentty::app::update(std::move(m), Msg{OpenTodoModal{}});
                 case Command::RunCodeBlock:  return agentty::app::update(std::move(m), Msg{OpenCodeBlockPicker{}});
+                case Command::InspectToolOutputs: return agentty::app::update(std::move(m), Msg{OpenToolOutputViewer{}});
                 case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
                 case Command::RewindCheckpoint:
                     // Open the checkpoint picker so ANY earlier turn is a
