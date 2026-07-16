@@ -954,24 +954,26 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
             # driver commit to static-PIE consistently.
             target_compile_options(agentty PRIVATE -static-pie)
             target_link_options(agentty PRIVATE -static-pie)
-            # Belt on top of the -static-pie suspenders. On Alpine/musl the
-            # GCC driver STILL sometimes resolves the startup to Scrt1.o and
-            # emits a *dynamic*-PIE — an ET_DYN that keeps `NEEDED
-            # libc.musl-*.so` and DROPS PT_INTERP. That artifact runs on
-            # Alpine (its loader exists at the baked path) but SIGSEGVs
-            # instantly on glibc/Debian: no interp → the kernel maps it at a
-            # random base and jumps to an *unrelocated* entry point. That is
-            # EXACTLY the v0.2.7 x86_64 crash (rip at the link-time .text
-            # address, `readelf -d` shows NEEDED libc.musl-x86_64.so.1).
+            # -static-pie ALONE is not enough on Alpine/musl: the GCC driver
+            # still appends its implicit `-lc` in *dynamic* mode, so the link
+            # resolves to the shared `libc.musl-*.so` — producing an ET_DYN
+            # that keeps `NEEDED libc.musl-*.so` and (with the INTERP dropped)
+            # SIGSEGVs on any host but the build image. That is EXACTLY the
+            # v0.2.7 crash (readelf -d shows NEEDED libc.musl-x86_64.so.1).
+            # `-Wl,-Bstatic` doesn't fix it — the driver re-emits -Bdynamic
+            # for its own `-lc`.
             #
-            # `-Wl,-Bstatic` + `--no-dynamic-linker` force the linker to
-            # refuse a dynamic libc and to omit the INTERP program header,
-            # so the driver cannot silently produce a loader-dependent PIE.
-            # Combined with -static-pie this yields a true self-relocating
-            # static-PIE (ET_DYN, PT_PHDR present, no NEEDED, no INTERP) that
-            # runs identically on glibc, musl, Termux/Bionic, and Pi OS.
-            target_link_options(agentty PRIVATE
-                -Wl,-Bstatic -Wl,--no-dynamic-linker)
+            # The GCC-documented lever that actually works is plain `-static`:
+            # "On systems that support dynamic linking, this overrides -pie
+            # and prevents linking with the shared libraries." Combined with
+            # -static-pie (PIE-compiled objects + rcrt1.o), musl-gcc emits a
+            # TRUE self-relocating static-PIE: ET_DYN, no PT_INTERP, and
+            # — crucially — NO NEEDED entry, because libc is pulled from the
+            # static archive. One artifact then runs on glibc, musl,
+            # Termux/Bionic, and Pi OS. (Verified by the POST_BUILD
+            # assert_static_pie.cmake guard below, which fails the build if a
+            # NEEDED / INTERP slips through.)
+            target_link_options(agentty PRIVATE -static)
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
