@@ -125,6 +125,14 @@ winget install agentty.agentty
 curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
 ```
 
+If the prebuilt binary won't run on your system (e.g. a libc mismatch), pass
+`--build` to compile from source instead — the installer also does this
+automatically when the downloaded binary fails to execute:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build
+```
+
 **From source** (needs a C++26 toolchain — GCC 14+ / recent Clang / MSVC)
 
 ```bash

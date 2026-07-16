@@ -5,10 +5,18 @@
 #   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --prefix ~/.local
 #   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --version v0.2.0
+#   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build --prefix ~/.local
 #
 # Detects OS+arch, downloads the matching binary from the GitHub release,
 # verifies SHA256, installs to $PREFIX/bin (default /usr/local/bin or ~/.local/bin
 # when not root). No build toolchain required.
+#
+# --build compiles from source instead of downloading a prebuilt binary — use
+# it when the prebuilt artifact is broken or incompatible with your libc (e.g.
+# a musl static binary that segfaults on glibc). Needs a C++26 toolchain
+# (GCC 14+ / Clang 18+), CMake 3.28+, git, plus libssl-dev + libnghttp2-dev.
+# The installer also auto-falls-back to a source build if the downloaded
+# binary won't run on this system.
 
 set -eu
 
@@ -16,11 +24,67 @@ REPO="1ay1/agentty"
 VERSION="latest"
 PREFIX=""
 BIN_NAME="agentty"
+BUILD=0
 
 err()  { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# build_from_source PREFIX VERSION
+# Clones the repo at the requested ref and compiles a binary into $PREFIX/bin.
+# Used when --build is given, or as an automatic fallback when a downloaded
+# prebuilt binary won't run on this system (wrong libc, no PT_INTERP, etc).
+build_from_source() {
+    _bfs_prefix="$1"
+    _bfs_version="$2"
+    _bfs_bindir="$_bfs_prefix/bin"
+
+    have git   || err "--build needs git installed"
+    have cmake || err "--build needs cmake (3.28+) installed"
+    if ! have g++ && ! have clang++; then
+        err "--build needs a C++26 compiler (g++ 14+ or clang++ 18+)"
+    fi
+
+    # Resolve the git ref. "latest" builds the default branch tip; a pinned
+    # version like v0.2.0 checks out that tag.
+    if [ "$_bfs_version" = "latest" ]; then
+        _bfs_ref="master"
+    else
+        _bfs_ref="$_bfs_version"
+    fi
+
+    _bfs_src=$(mktemp -d)
+    # Don't clobber a $tmp cleanup the download path may have installed — remove
+    # both on exit.
+    # shellcheck disable=SC2064
+    trap "rm -rf '$_bfs_src' \"\${tmp:-}\"" EXIT
+
+    info "cloning $REPO ($_bfs_ref) for source build"
+    git clone --recursive --depth 1 --branch "$_bfs_ref" \
+        "https://github.com/$REPO.git" "$_bfs_src" 2>/dev/null \
+        || git clone --recursive --depth 1 \
+             "https://github.com/$REPO.git" "$_bfs_src" \
+        || err "git clone failed"
+
+    info "configuring (Release, standalone)"
+    cmake -S "$_bfs_src" -B "$_bfs_src/build" \
+        -DCMAKE_BUILD_TYPE=Release -DAGENTTY_STANDALONE=ON \
+        || err "cmake configure failed - install a C++26 toolchain + libssl-dev + libnghttp2-dev"
+
+    info "compiling (this can take a few minutes)"
+    _bfs_jobs=$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) )
+    cmake --build "$_bfs_src/build" -j"$_bfs_jobs" || err "build failed"
+
+    _bfs_bin="$_bfs_src/build/agentty"
+    [ -x "$_bfs_bin" ] || _bfs_bin="$_bfs_src/build/$BIN_NAME"
+    [ -x "$_bfs_bin" ] || err "build produced no binary at $_bfs_src/build/agentty"
+
+    mkdir -p "$_bfs_bindir"
+    chmod +x "$_bfs_bin"
+    mv "$_bfs_bin" "$_bfs_bindir/$BIN_NAME"
+    ok "built + installed $_bfs_bindir/$BIN_NAME"
+}
 
 # fetch URL to stdout, trying curl then wget
 fetch() {
@@ -48,8 +112,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --version) VERSION="$2"; shift 2 ;;
         --prefix)  PREFIX="$2";  shift 2 ;;
+        --build)   BUILD=1;      shift 1 ;;
         -h|--help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) err "unknown arg: $1" ;;
     esac
@@ -90,6 +155,31 @@ else
         aarch64) suffixes="linux-aarch64 linux-arm64" ;;
         *)       suffixes="linux-${arch} linux-amd64" ;;
     esac
+fi
+
+# --- pick prefix (needed by both the build path and the download path) --------
+if [ -z "$PREFIX" ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        PREFIX=/usr/local
+    else
+        PREFIX="$HOME/.local"
+    fi
+fi
+bindir="$PREFIX/bin"
+
+# --- explicit source build ----------------------------------------------------
+# --build skips the prebuilt artifact entirely. Also the right recovery when a
+# release binary is broken for your libc (e.g. v0.2.7's musl static binary
+# segfaulting on glibc).
+if [ "$BUILD" -eq 1 ]; then
+    build_from_source "$PREFIX" "$VERSION"
+    case ":$PATH:" in
+        *":$bindir:"*) ;;
+        *) printf '\n\033[1;33m!\033[0m %s\n' "add $bindir to PATH:"
+           printf '    export PATH=\"%s:\$PATH\"\n\n' "$bindir" ;;
+    esac
+    ok "run: $BIN_NAME"
+    exit 0
 fi
 
 # --- resolve release + asset URL via GitHub API -------------------------------
@@ -136,15 +226,6 @@ if [ -z "$asset_url" ]; then
 fi
 
 asset=$(basename "$asset_url")
-# --- pick prefix --------------------------------------------------------------
-if [ -z "$PREFIX" ]; then
-    if [ "$(id -u)" -eq 0 ]; then
-        PREFIX=/usr/local
-    else
-        PREFIX="$HOME/.local"
-    fi
-fi
-bindir="$PREFIX/bin"
 mkdir -p "$bindir"
 
 # --- download + verify --------------------------------------------------------
@@ -194,6 +275,18 @@ chmod +x "$tmp/$asset"
 mv "$tmp/$asset" "$bindir/$BIN_NAME"
 
 new_version=$("$bindir/$BIN_NAME" --version 2>/dev/null | awk '/^agentty / {print $2}')
+
+# The downloaded binary may be incompatible with this system — a musl static
+# build with no PT_INTERP can segfault on glibc, or an arch/ABI mismatch slips
+# past detection. If it won't even print its version, recover by building from
+# source rather than leaving a broken binary in place. (Skip on Windows: no
+# in-place toolchain assumption, and cross-exec checks don't apply here.)
+if [ -z "$new_version" ] && [ "$os" != "windows" ]; then
+    info "prebuilt binary won't run on this system — falling back to a source build"
+    rm -f "$bindir/$BIN_NAME"
+    build_from_source "$PREFIX" "$VERSION"
+    new_version=$("$bindir/$BIN_NAME" --version 2>/dev/null | awk '/^agentty / {print $2}')
+fi
 
 if [ -n "$prior_version" ] && [ -n "$new_version" ] && [ "$prior_version" != "$new_version" ]; then
     ok "updated $bindir/$BIN_NAME  $prior_version  →  $new_version"
