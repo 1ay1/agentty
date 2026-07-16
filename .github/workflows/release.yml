@@ -144,7 +144,7 @@ jobs:
               # PT_INTERP and no NEEDED. If the -static-pie link silently
               # downgraded (Debian #996326 spec bug) the binary keeps a
               # PT_INTERP / NEEDED libc and will not run on a glibc host —
-              # exactly v0.2.7's failure. Fail the build here rather than ship it.
+              # exactly the v0.2.7 failure. Fail the build here rather than ship it.
               readelf -h build-rel/agentty | grep -E "Type:"
               if readelf -l build-rel/agentty | grep -q INTERP; then
                 echo "FATAL: binary has PT_INTERP (dynamic link, not static-pie)"; exit 1; fi
@@ -240,10 +240,10 @@ jobs:
               # The CMake POST_BUILD guard (cmake/assert_static_pie.cmake) is
               # the authoritative shape check and already ran during the build
               # above. These inline checks are a redundant backstop. The
-              # binary is -static -no-pie (ET_EXEC) by default, so we DON'T
-              # gate on ELF type at all (ET_EXEC and ET_DYN are both fine) —
-              # the only things that mean "won't run off the build image" are
-              # a PT_INTERP or a NEEDED entry (v0.2.7's shape).
+              # binary is -static -no-pie (ET_EXEC) by default, so we do NOT
+              # gate on ELF type at all (ET_EXEC and ET_DYN are both fine); the
+              # only things that mean it will not run off the build image are a
+              # PT_INTERP or a NEEDED entry (v0.2.7 shape).
               if readelf -l build-rel/agentty | grep -q INTERP; then echo "FATAL: has PT_INTERP (needs an external loader)"; exit 1; fi
               if readelf -d build-rel/agentty 2>/dev/null | grep -q NEEDED; then echo "FATAL: has NEEDED (libc not static)"; exit 1; fi
             '
