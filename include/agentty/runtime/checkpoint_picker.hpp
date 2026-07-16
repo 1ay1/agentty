@@ -6,7 +6,8 @@
 // (see workspace/checkpoint.hpp) and renders a checkpoint divider above
 // the turn. Those dividers advertise restorable points; this picker is
 // what makes ALL of them reachable (the palette's old "Rewind" only ever
-// hit the newest). Open it from the command palette or Ctrl+R:
+// hit the newest). Open it from the command palette (Ctrl+K → "Rewind to
+// checkpoint"); there is no dedicated key binding (Ctrl+R is OpenDiffReview):
 //
 //   ↑↓ / j k   move between checkpointed turns (newest at the bottom,
 //              nearest the composer — the same spatial order as the

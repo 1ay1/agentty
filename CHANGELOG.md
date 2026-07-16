@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Checkpoints keep working under `--workspace /` (full-power launches).** The checkpoint layer resolved the enclosing git repo from `util::workspace_root()` — but that root is the filesystem *access* boundary, which power users routinely widen with `-w /` for unrestricted disk access. Probing `git -C / rev-parse` there fails (`/` is never a repo), so every checkpoint silently died: no snapshot on submit, no divider, and "Rewind to checkpoint" toasted "checkpoints need a git repo" even inside a real project. The repo is now discovered from the **process cwd** — the directory agentty was launched from (i.e. the project), which it never chdir's away from — so `git rev-parse` walks up to the true enclosing repo no matter how wide the sandbox gate is. `-w /` now widens *access* without destroying the *project* identity that checkpoints, git tools, and diffs key off. Falls back to the workspace root only if cwd is unreadable.
+
 ### Changed
 - **Compaction boundary now reads as a section break, not a broken turn.** The `Conversation compacted` marker was rendered through the full speaker-`Turn` widget — so it drew a header with a hanging left rail and an empty body, looking like a malformed empty message. It's now a single-row centered labeled rule (`─── ≡ Conversation compacted ───`), the same visual family as the inter-turn divider, dim and unobtrusive. Both places a compaction can surface — the wire-only boundary divider (`seam.hpp`) and a materialized summary message (`turn.cpp`) — share the one definition, so they look identical and the freeze-seam row count stays stable (seam symmetry tests green).
 

@@ -55,10 +55,22 @@ std::string chomp(std::string s) {
 // don't change mid-session; caching avoids two subprocess spawns per
 // checkpoint. (A user running `git init` mid-session picks it up on
 // restart — acceptable.)
+//
+// We probe from the PROCESS CWD, not util::workspace_root(). The
+// workspace root is the filesystem *access* boundary and is routinely
+// widened (`-w /` for full-disk power) — but `-w /` must not make the
+// checkpoint layer think the project is `/` (which is never a repo, so
+// checkpoints would silently die). cwd is the directory the user
+// launched agentty from — i.e. their project — and agentty never
+// chdir's away from it, so `git -C <cwd> rev-parse` walks up to the
+// real enclosing repo regardless of how wide the sandbox gate is.
+// Falls back to the workspace root if cwd is somehow unreadable.
 const RepoInfo& repo() {
     static const RepoInfo info = [] {
         RepoInfo r;
-        const std::string ws = util::workspace_root().string();
+        std::error_code ec;
+        std::string ws = fs::current_path(ec).string();
+        if (ec || ws.empty()) ws = util::workspace_root().string();
         auto top = util::run_argv_s(
             {"git", "-C", ws, "rev-parse", "--show-toplevel"}, 8192,
             std::chrono::seconds{10});
