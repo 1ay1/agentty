@@ -727,7 +727,7 @@ Element checkpoint_picker(const Model& m) {
     Picker::Config cfg;
     cfg.title      = " Rewind to Checkpoint ";
     cfg.accent     = warn;
-    cfg.min_width  = 64;
+    cfg.min_width  = 52;
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.checkpoints_scroll;
     cfg.selected   = o->entries.empty() ? -1 : o->index;
@@ -775,7 +775,7 @@ Element checkpoint_picker(const Model& m) {
 
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(text(
-        "  Restores files to this point AND rewinds the transcript.",
+        "  Restores files and rewinds the transcript here.",
         fg_dim(muted)));
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},   // ↑↓

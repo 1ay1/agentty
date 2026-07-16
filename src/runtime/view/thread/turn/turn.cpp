@@ -950,8 +950,13 @@ SpeakerStyle speaker_style_for(Role role, const Model& m) {
 }
 
 // ── Trailing meta strip for the turn header — `12:34 · 4.2s · turn N`.
+// `checkpoint` appends a subtle `· ↺ checkpoint` tag so a restore-point
+// user turn reads as an ordinary turn carrying a marker, NOT a separate
+// full-width divider widget hanging above the rail (which looked like
+// chrome / a broken empty message).
 std::string format_turn_meta(const Message& msg, int turn_num,
-                             std::optional<float> elapsed_secs) {
+                             std::optional<float> elapsed_secs,
+                             bool checkpoint = false) {
     std::string meta = timestamp_hh_mm(msg.timestamp);
     // Only surface elapsed when it's meaningful. A near-instant local-model
     // reply yields ~0s wall-clock, which `format_duration_compact` renders
@@ -960,6 +965,8 @@ std::string format_turn_meta(const Message& msg, int turn_num,
         meta += "  \xc2\xb7  " + format_duration_compact(*elapsed_secs);
     if (turn_num > 0)
         meta += "  \xc2\xb7  turn " + std::to_string(turn_num);
+    if (checkpoint)
+        meta += "  \xc2\xb7  \xe2\x86\xba checkpoint";   // ↺ checkpoint
     return meta;
 }
 
@@ -1115,30 +1122,34 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     cfg.meta         = format_turn_meta(msg, turn_num,
                           msg.role == Role::Assistant
                               ? assistant_elapsed(msg, m)
-                              : std::nullopt);
+                              : std::nullopt,
+                          /*checkpoint=*/msg.role == Role::User
+                              && msg.checkpoint_id.has_value());
     if (!meta_override.empty()) cfg.meta = std::string{meta_override};
-    cfg.checkpoint_above = (msg.role == Role::User && msg.checkpoint_id.has_value());
-    cfg.checkpoint_color = warn;
 
-    // Compact-boundary turn: a thin one-line divider only. The
-    // summary body itself can be many KB / dozens of rows when the
-    // model is verbose, and rendering it inline would (a) push the
-    // preserved-tail and any subsequent assistant turn off-screen
-    // immediately after compaction lands and (b) tempt the user to
-    // read it (it's prose written for the model, not for them). The
-    // model still receives the full summary text on the wire because
-    // msg.text isn't mutated; the view just elides it. CC does the
-    // same — its `compact_boundary` transcript line type renders as
-    // chrome, not content (binary near offset 114920224).
+    // Compact-boundary turn: rendered as a real, minimal SYSTEM turn
+    // rather than a bare full-width divider (which read as chrome / a
+    // stray rule floating in the transcript). It gets its own quiet
+    // speaker identity — a `≡` glyph, a muted rail, a "Compacted"
+    // label + timestamp meta — and a one-line body that says what
+    // happened. This slots into the conversation as a legible event,
+    // the same shape as a User/Assistant turn, so it no longer looks
+    // broken.
+    //
+    // The model still receives the full summary text on the wire
+    // (msg.text is untouched); the view deliberately elides the raw
+    // summary prose (it's written for the model, can be many KB, and
+    // would push the preserved tail off-screen the instant compaction
+    // lands). CC does the same — its `compact_boundary` transcript line
+    // renders as a marker, not the summary body.
     if (msg.is_compact_summary) {
-        // Render the SAME centered labeled rule as the wire-only
-        // compaction boundary (seam.hpp) so the two ways a compaction can
-        // surface look identical — a clean section break, not an empty
-        // speaker Turn with a hanging left rail. A bare Turn holding the
-        // single divider Element keeps it row-transparent (no rail, no
-        // header) and exactly one row.
-        cfg.bare = true;
-        cfg.body.emplace_back(compaction_divider_row());
+        cfg.glyph      = "\xe2\x89\xa1";              // ≡
+        cfg.label      = "Compacted";
+        cfg.rail_color = muted;
+        cfg.meta       = timestamp_hh_mm(msg.timestamp);
+        cfg.body.emplace_back(maya::Turn::PlainText{
+            .content = "Earlier conversation summarized to reclaim context.",
+            .color   = muted});
         return cfg;
     }
 
