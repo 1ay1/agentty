@@ -581,11 +581,13 @@ jobs:
           gh release upload "$TAG" dist/*.deb dist/*.rpm --clobber
 
   # SHA256SUMS over whatever is on the release. Runs TWICE by design:
-  #   * early  — gated only on the fast x86_64/windows/macos legs, so the
-  #     checksum file exists within ~5 min for everything that's landed.
+  #   * early  — gated only on the Linux legs (all fast now: x86_64/aarch64 on
+  #     native runners, i686 via QEMU), so the checksum file covers every
+  #     Linux binary within ~8 min without waiting on the slower macos/windows
+  #     legs. This is what `install.sh` verifies against, so the primary
+  #     install target must be checksummed ASAP.
   #   * late   — a second job (checksums-final) gated on ALL builds refreshes
-  #     it once the slow QEMU arches (aarch64/i686) finish, so the final file
-  #     covers every asset.
+  #     it once macos/windows finish, so the final file covers every asset.
   # Both use `always()` + hash `*`, so a slow or failed leg never blocks the
   # file for the assets that DID land. This matters because a consumer (e.g.
   # an AUR PKGBUILD verifying against SHA256SUMS) 404s if the file is missing
@@ -595,8 +597,8 @@ jobs:
     needs:
       - prepare
       - build-linux-x86_64
-      - build-macos
-      - build-windows
+      - build-linux-aarch64
+      - build-linux-i686
       - package-linux-x86_64
     if: always()
     runs-on: ubuntu-latest
