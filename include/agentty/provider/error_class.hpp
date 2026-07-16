@@ -220,9 +220,14 @@ inline constexpr int kMaxRetries = 6;
 //       is shedding load and usually hands a Retry-After; ride it out.
 //   Transient connect/dial blips (no content) . kMaxRetries (6) — cheap
 //       to reconnect, almost always recovers on a fresh connection.
-//   Mid-stream stall / unexpected EOF ......... 2 — the wire reached us
-//       and then died; if it keeps dying mid-body the outage is real,
-//       so converge fast instead of stuttering through 6 attempts.
+//   Mid-stream stall / unexpected EOF ......... 4 — the wire reached us
+//       and then died. A chronically overloaded provider (fable / a
+//       proxy edge shedding load) drops mid-body on nearly every turn,
+//       and a cap of 2 surfaced a terminal error almost immediately —
+//       the banner felt permanently stuck. 4 rides out a brown-out more
+//       quietly (the 500ms→2s→5s→12s Transient ladder means attempts 3-4
+//       add ~7-17s of patience, not minutes) while still converging fast
+//       enough that a genuinely dead wire doesn't stutter through 6.
 //
 // `mid_stream` is set by the caller when the failure happened AFTER the
 // stream had proven itself alive this turn (a stall-watchdog fire, or a
@@ -231,7 +236,7 @@ inline constexpr int kMaxRetries = 6;
 [[nodiscard]] inline int max_retries_for(ErrorClass k, bool mid_stream) noexcept {
     switch (k) {
         case ErrorClass::RateLimit: return kMaxRetries;
-        case ErrorClass::Transient: return mid_stream ? 2 : kMaxRetries;
+        case ErrorClass::Transient: return mid_stream ? 4 : kMaxRetries;
         case ErrorClass::Auth:      return kMaxRetries;  // one refresh + slack
         case ErrorClass::Cancelled:
         case ErrorClass::Terminal:  return 0;
