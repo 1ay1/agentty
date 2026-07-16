@@ -907,7 +907,7 @@ Three host files still build elements directly — overlay modals that
 predate the strict controller-only rule:
 
 - `src/runtime/view/login.cpp` — login modal
-- `src/runtime/view/pickers.cpp` — model picker, thread list, command palette, todo modal, code-block picker + run-result card (Ctrl+G — see `docs/RUN_CODE_BLOCK.md`)
+- `src/runtime/view/pickers.cpp` — model picker, thread list, command palette, todo modal, code-block picker + run-result card (Ctrl+G — see `docs/RUN_CODE_BLOCK.md`), checkpoint rewind picker
 - `src/runtime/view/diff_review.cpp` — pending-changes review modal
 
 Future widgets to absorb them:

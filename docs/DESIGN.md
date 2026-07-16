@@ -271,6 +271,10 @@ the truth, the bool is a view of it.
 `pick::OneAxis = variant<Closed, OpenAt{index}>` for the model picker
 and thread list. `pick::TwoAxis = variant<Closed, OpenAtCell{file,
 hunk}>` for diff review. `pick::Modal` for the todo overlay. The
+checkpoint rewind picker (`CheckpointPickerState = variant<Closed,
+Open{index}>`, in `runtime/checkpoint_picker.hpp`) follows the same
+OneAxis shape — one row per user turn, `Select` hands the pinned
+snapshot to the existing `RestoreCheckpoint` rewind. The
 canonical `bool open + int index` anti-pattern (where `index` is
 meaningless when `open == false`) is gone everywhere; opening is
 `m.ui.x = pick::OpenAt{i}`, closing is `m.ui.x = pick::Closed{}`,

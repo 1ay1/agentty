@@ -112,10 +112,10 @@ A naive design inlines every leaf event in one giant variant. That pins
 `sizeof(Msg)` to the heaviest leaf, instantiates an N-wide `std::visit`
 dispatch table, and forces the whole reducer TU to rebuild on any leaf change.
 
-agentty instead groups leaves into ~12 **domain sub-variants** in `msg.hpp`
+agentty instead groups leaves into ~15 **domain sub-variants** in `msg.hpp`
 (`ComposerMsg`, `StreamMsg`, `ToolMsg`, `ModelPickerMsg`, `ThreadListMsg`,
 `CommandPaletteMsg`, `MentionPaletteMsg`, `SymbolPaletteMsg`, `TodoMsg`,
-`LoginMsg`, `DiffReviewMsg`, `MetaMsg`). The top-level reducer in
+`LoginMsg`, `DiffReviewMsg`, `CheckpointMsg`, `MetaMsg`). The top-level reducer in
 `update.cpp` is then a small `std::visit` that forwards each domain to its own
 TU:
 
