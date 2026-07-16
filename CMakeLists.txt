@@ -954,6 +954,24 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
             # driver commit to static-PIE consistently.
             target_compile_options(agentty PRIVATE -static-pie)
             target_link_options(agentty PRIVATE -static-pie)
+            # Belt on top of the -static-pie suspenders. On Alpine/musl the
+            # GCC driver STILL sometimes resolves the startup to Scrt1.o and
+            # emits a *dynamic*-PIE — an ET_DYN that keeps `NEEDED
+            # libc.musl-*.so` and DROPS PT_INTERP. That artifact runs on
+            # Alpine (its loader exists at the baked path) but SIGSEGVs
+            # instantly on glibc/Debian: no interp → the kernel maps it at a
+            # random base and jumps to an *unrelocated* entry point. That is
+            # EXACTLY the v0.2.7 x86_64 crash (rip at the link-time .text
+            # address, `readelf -d` shows NEEDED libc.musl-x86_64.so.1).
+            #
+            # `-Wl,-Bstatic` + `--no-dynamic-linker` force the linker to
+            # refuse a dynamic libc and to omit the INTERP program header,
+            # so the driver cannot silently produce a loader-dependent PIE.
+            # Combined with -static-pie this yields a true self-relocating
+            # static-PIE (ET_DYN, PT_PHDR present, no NEEDED, no INTERP) that
+            # runs identically on glibc, musl, Termux/Bionic, and Pi OS.
+            target_link_options(agentty PRIVATE
+                -Wl,-Bstatic -Wl,--no-dynamic-linker)
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
@@ -981,6 +999,35 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
         # OPENSSL_USE_STATIC_LIBS already handled OpenSSL above. Nothing
         # else to add here — the resulting binary depends only on
         # /usr/lib/libSystem.B.dylib which is on every macOS.
+    endif()
+endif()
+
+# Build-time ELF-shape guard for the fully-static Linux binary. This is the
+# LAST line of defence against the v0.2.7 disaster, and unlike the CI readelf
+# checks it runs on EVERY build path that produces the shipping binary:
+# the release workflow, a local `AGENTTY_FULLY_STATIC=ON` build, AND the
+# installer's `--build` / auto-fallback source build. A correct static-PIE is
+# ET_DYN with a PT_PHDR, no PT_INTERP, and no NEEDED dynamic library. If the
+# musl/Alpine driver silently downgraded the link to a dynamic-PIE (the
+# exact v0.2.7 x86_64 failure: NEEDED libc.musl-*.so + no INTERP → SIGSEGV on
+# glibc), fail the BUILD here — a broken artifact can never reach a release
+# again, no matter which pipeline built it.
+if(AGENTTY_STANDALONE AND AGENTTY_FULLY_STATIC
+        AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
+    find_program(READELF_EXE NAMES readelf llvm-readelf)
+    if(READELF_EXE)
+        add_custom_command(TARGET agentty POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:agentty>
+                -DREADELF=${READELF_EXE}
+                -P ${CMAKE_SOURCE_DIR}/cmake/assert_static_pie.cmake
+            VERBATIM
+            COMMENT "Verifying static-PIE ELF shape (no NEEDED / no INTERP)")
+    else()
+        message(WARNING
+            "agentty: readelf not found — cannot verify the static-PIE ELF "
+            "shape at build time. Install binutils so a downgraded "
+            "dynamic-PIE link (the v0.2.7 crash) fails the build.")
     endif()
 endif()
 
