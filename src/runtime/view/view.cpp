@@ -35,6 +35,7 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
     if (symbol_palette_is_open(m.ui.symbol_palette)) return symbol_palette(m);
     if (code_block_picker_is_open(m.ui.code_blocks)) return code_block_picker(m);
     if (code_block_result_is_open(m.ui.code_blocks)) return code_block_result_card(m);
+    if (checkpoint_picker_is_open(m.ui.checkpoints)) return checkpoint_picker(m);
     if (pick::is_open(m.ui.diff_review))   return diff_review(m);
     if (pick::is_open(m.ui.todo.open))     return todo_modal(m);
     return std::nullopt;

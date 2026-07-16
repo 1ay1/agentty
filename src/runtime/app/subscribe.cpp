@@ -209,6 +209,32 @@ std::optional<Msg> on_code_block_result(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+// Rewind checkpoint picker: ↑↓/j/k move, Enter rewinds the highlighted
+// turn, Esc/q cancel. Home/End jump to oldest/newest. Read-only list
+// (no filter) — the rows are the thread's checkpointed turns.
+std::optional<Msg> on_checkpoint_picker(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Escape:   return CloseCheckpointPicker{};
+            case SpecialKey::Enter:    return CheckpointPickerSelect{};
+            case SpecialKey::Up:       return CheckpointPickerMove{-1};
+            case SpecialKey::Down:     return CheckpointPickerMove{+1};
+            case SpecialKey::PageUp:   return CheckpointPickerMove{-10};
+            case SpecialKey::PageDown: return CheckpointPickerMove{+10};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        switch (ck->codepoint) {
+            case U'k': case U'K': return CheckpointPickerMove{-1};
+            case U'j': case U'J': return CheckpointPickerMove{+1};
+            case U'q': case U'Q': return CloseCheckpointPicker{};
+            default: break;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<Msg> on_model_picker(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -619,6 +645,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
     const bool in_blocks  = code_block_picker_is_open(m.ui.code_blocks);
     const bool in_blockres = code_block_result_is_open(m.ui.code_blocks);
+    const bool in_checkpoints = checkpoint_picker_is_open(m.ui.checkpoints);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
     const bool in_threads = pick::is_open(m.ui.thread_list);
@@ -655,6 +682,7 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_symbol)  return on_symbol_palette(ev);
             if (in_blocks)  return on_code_block_picker(ev);
             if (in_blockres) return on_code_block_result(ev);
+            if (in_checkpoints) return on_checkpoint_picker(ev);
             if (in_models)  return on_model_picker(ev);
             if (in_providers) return on_provider_picker(ev);
             if (in_threads) return on_thread_list(ev);

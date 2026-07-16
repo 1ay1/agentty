@@ -195,6 +195,66 @@ bool current_paths(std::vector<std::string>& out) {
 
 bool in_git_repo() { return repo().in_repo; }
 
+CheckpointDiff checkpoint_summary(const std::string& id) {
+    CheckpointDiff out;
+    if (!repo().in_repo || id.empty()) return out;
+
+    // Resolve the checkpoint commit; bail quietly if it was pruned.
+    auto rev = run_git({"rev-parse", "--verify", "--quiet",
+                        ref_for(id) + "^{commit}"});
+    if (!ok(rev)) return out;
+    const std::string commit = chomp(rev.output);
+
+    // Build a throwaway tree of the CURRENT worktree exactly like
+    // create_checkpoint does (scratch index seeded from the real one so
+    // `add -A` only re-hashes changed files), then numstat-diff the
+    // checkpoint tree against it. Doing it tree-vs-tree (not
+    // tree-vs-worktree) keeps the untracked/new-file accounting identical
+    // to what a rewind would actually revert.
+    std::lock_guard<std::mutex> lk(g_scratch_mu);
+    const std::string idx = prepare_scratch_index();
+    if (!ok(run_git_scratch(idx, {"git", "-C", repo().root, "add", "-A",
+                                  "--ignore-errors"}))) {
+        drop_scratch_index(idx);
+        return out;
+    }
+    auto tree = run_git_scratch(idx, {"git", "-C", repo().root, "write-tree"});
+    drop_scratch_index(idx);
+    if (!ok(tree)) return out;
+    const std::string cur_tree = chomp(tree.output);
+
+    // --numstat: one line per changed file, "<added>\t<deleted>\t<path>".
+    // Binary files report "-\t-\t<path>" — counted as a changed file, no
+    // line deltas. -M enables rename detection so a moved file is one
+    // change, not an add+delete pair.
+    auto ns = run_git({"diff", "--numstat", "-M", commit, cur_tree},
+                      16 * 1024 * 1024);
+    if (!ok(ns)) return out;
+
+    std::istringstream in(ns.output);
+    for (std::string line; std::getline(in, line); ) {
+        line = chomp(std::move(line));
+        if (line.empty()) continue;
+        ++out.files_changed;
+        // Parse the two leading tab-separated integer columns; "-" (binary)
+        // contributes zero line deltas but still a changed file.
+        auto t1 = line.find('\t');
+        if (t1 == std::string::npos) continue;
+        auto t2 = line.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        auto to_int = [](std::string_view s) -> int {
+            if (s == "-" || s.empty()) return 0;
+            int v = 0;
+            for (char c : s) { if (c < '0' || c > '9') return 0; v = v * 10 + (c - '0'); }
+            return v;
+        };
+        out.insertions += to_int(std::string_view{line}.substr(0, t1));
+        out.deletions  += to_int(std::string_view{line}.substr(t1 + 1, t2 - t1 - 1));
+    }
+    out.valid = true;
+    return out;
+}
+
 bool create_checkpoint(const std::string& id) {
     if (!repo().in_repo || id.empty()) return false;
     std::lock_guard<std::mutex> lk(g_scratch_mu);

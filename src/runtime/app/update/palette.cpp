@@ -84,23 +84,13 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::OpenPlan:      return agentty::app::update(std::move(m), Msg{OpenTodoModal{}});
                 case Command::RunCodeBlock:  return agentty::app::update(std::move(m), Msg{OpenCodeBlockPicker{}});
                 case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
-                case Command::RewindCheckpoint: {
-                    // Rewind targets the LATEST checkpointed user turn —
-                    // "undo my last message and everything the agent did
-                    // with it". Walk backwards for the newest message
-                    // carrying a checkpoint_id; no hit → friendly toast
-                    // (thread predates checkpoints, or not a git repo).
-                    const auto& msgs = m.d.current.messages;
-                    for (auto rit = msgs.rbegin(); rit != msgs.rend(); ++rit) {
-                        if (rit->checkpoint_id) {
-                            auto id = *rit->checkpoint_id;
-                            return agentty::app::update(std::move(m),
-                                Msg{RestoreCheckpoint{std::move(id)}});
-                        }
-                    }
-                    auto toast = set_status_toast(m, "no checkpoint in this thread");
-                    return {std::move(m), std::move(toast)};
-                }
+                case Command::RewindCheckpoint:
+                    // Open the checkpoint picker so ANY earlier turn is a
+                    // rewind target (with a per-turn diff preview), not just
+                    // the newest. OpenCheckpointPicker handles the empty /
+                    // not-a-repo / agent-busy cases with a friendly toast.
+                    return agentty::app::update(std::move(m),
+                        Msg{OpenCheckpointPicker{}});
                 case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});
                 case Command::Quit:          return agentty::app::update(std::move(m), Msg{Quit{}});
             }
