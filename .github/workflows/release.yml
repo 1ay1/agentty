@@ -127,7 +127,7 @@ jobs:
       - name: Build static binary (Alpine 3.21 / musl / GCC 14)
         run: |
           docker run --rm --platform linux/amd64 \
-            -e CMARCH='avx2' \
+            -e CMARCH='sse2' \
             -v "$PWD":/src -w /src alpine:3.21 sh -c '
               set -ex
               apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
@@ -140,8 +140,39 @@ jobs:
                     -DAGENTTY_ARCH="$CMARCH"
               cmake --build build-rel -j"$(nproc)"
               strip build-rel/agentty
+              # ELF-shape guard: a correct static-PIE build is ET_DYN with no
+              # PT_INTERP and no NEEDED. If the -static-pie link silently
+              # downgraded (Debian #996326 spec bug) the binary keeps a
+              # PT_INTERP / NEEDED libc and will not run on a glibc host —
+              # exactly v0.2.7's failure. Fail the build here rather than ship it.
+              readelf -h build-rel/agentty | grep -E "Type:"
+              if readelf -l build-rel/agentty | grep -q INTERP; then
+                echo "FATAL: binary has PT_INTERP (dynamic link, not static-pie)"; exit 1; fi
+              if readelf -d build-rel/agentty 2>/dev/null | grep -q NEEDED; then
+                echo "FATAL: binary has NEEDED (libc not statically linked)"; exit 1; fi
               cp build-rel/agentty agentty-linux-x86_64
             '
+      # Runtime smoke test: the ELF-shape checks above are necessary but not
+      # sufficient — a musl static-PIE binary can pass every readelf check and
+      # still crash at startup on a glibc host (TLS/relocation) or SIGILL on an
+      # older CPU than the -march target. The ONLY proof it "runs everywhere"
+      # is to run it on a foreign libc. Execute `--version` (no network, no
+      # auth, exit 0) in a clean Debian (glibc) AND Alpine (musl) container;
+      # fail the release if either can't launch it.
+      - name: Smoke test (glibc + musl)
+        run: |
+          set -e
+          expected="agentty ${{ needs.prepare.outputs.version }}"
+          for img in debian:stable-slim alpine:3.21; do
+            echo "== smoke test on $img =="
+            out=$(docker run --rm --platform linux/amd64 \
+              -v "$PWD/agentty-linux-x86_64":/agentty:ro "$img" /agentty --version)
+            echo "  got: $out"
+            case "$out" in
+              "$expected"*) echo "  OK" ;;
+              *) echo "FATAL: binary did not run on $img (got '$out', want '$expected*')"; exit 1 ;;
+            esac
+          done
       - name: Upload to release + stash for packaging
         run: gh release upload "$TAG" agentty-linux-x86_64 --clobber
       - uses: actions/upload-artifact@v4
@@ -207,10 +238,29 @@ jobs:
               cat aarch64.diag.txt
               etype=$(readelf -h build-rel/agentty | awk "/Type:/{print \$2}")
               cp build-rel/agentty agentty-linux-aarch64
-              if [ "$etype" != "DYN" ]; then echo "WARN: not ET_DYN ($etype)"; fi
-              if readelf -l build-rel/agentty | grep -q INTERP; then echo "WARN: has PT_INTERP (dynamic-pie, not static-pie)"; fi
-              if readelf -d build-rel/agentty 2>/dev/null | grep -q NEEDED; then echo "WARN: has NEEDED (libc not static)"; fi
+              # These were WARN-only, which is how v0.2.7's broken shape
+              # shipped. Make them fatal: a non-DYN type, a PT_INTERP, or a
+              # NEEDED entry all mean the binary won't run on a foreign libc.
+              if [ "$etype" != "DYN" ]; then echo "FATAL: not ET_DYN ($etype)"; exit 1; fi
+              if readelf -l build-rel/agentty | grep -q INTERP; then echo "FATAL: has PT_INTERP (dynamic-pie, not static-pie)"; exit 1; fi
+              if readelf -d build-rel/agentty 2>/dev/null | grep -q NEEDED; then echo "FATAL: has NEEDED (libc not static)"; exit 1; fi
             '
+      # Runtime smoke test on real ARM silicon (this runner is arm64, so no
+      # QEMU) — prove the binary launches on both a glibc and a musl distro.
+      - name: Smoke test (glibc + musl)
+        run: |
+          set -e
+          expected="agentty ${{ needs.prepare.outputs.version }}"
+          for img in debian:stable-slim alpine:3.21; do
+            echo "== smoke test on $img =="
+            out=$(docker run --rm \
+              -v "$PWD/agentty-linux-aarch64":/agentty:ro "$img" /agentty --version)
+            echo "  got: $out"
+            case "$out" in
+              "$expected"*) echo "  OK" ;;
+              *) echo "FATAL: binary did not run on $img (got '$out', want '$expected*')"; exit 1 ;;
+            esac
+          done
       - name: Upload to release + stash for packaging
         run: gh release upload "$TAG" agentty-linux-aarch64 aarch64.diag.txt --clobber
       - uses: actions/upload-artifact@v4
@@ -256,8 +306,29 @@ jobs:
                     -DAGENTTY_ARCH="$CMARCH"
               cmake --build build-rel -j"$(nproc)"
               strip build-rel/agentty
+              if readelf -l build-rel/agentty | grep -q INTERP; then
+                echo "FATAL: binary has PT_INTERP (dynamic link, not static-pie)"; exit 1; fi
+              if readelf -d build-rel/agentty 2>/dev/null | grep -q NEEDED; then
+                echo "FATAL: binary has NEEDED (libc not statically linked)"; exit 1; fi
               cp build-rel/agentty agentty-linux-i686
             '
+      # Smoke test through QEMU (already set up above). A 32-bit static-PIE
+      # binary must launch on both a glibc (i386 Debian) and musl (i386
+      # Alpine) userland.
+      - name: Smoke test (glibc + musl)
+        run: |
+          set -e
+          expected="agentty ${{ needs.prepare.outputs.version }}"
+          for img in i386/debian:stable-slim i386/alpine:3.21; do
+            echo "== smoke test on $img =="
+            out=$(docker run --rm --platform linux/386 \
+              -v "$PWD/agentty-linux-i686":/agentty:ro "$img" /agentty --version)
+            echo "  got: $out"
+            case "$out" in
+              "$expected"*) echo "  OK" ;;
+              *) echo "FATAL: binary did not run on $img (got '$out', want '$expected*')"; exit 1 ;;
+            esac
+          done
       - name: Upload to release
         run: gh release upload "$TAG" agentty-linux-i686 --clobber
 
