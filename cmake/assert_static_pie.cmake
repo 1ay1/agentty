@@ -11,13 +11,16 @@
 # caught it: CI only ran readelf on aarch64, as non-fatal warnings, and never
 # executed the binary.
 #
-# A CORRECT static-PIE is:
-#   * ET_DYN            (Type: DYN)             — so it's PIE / self-relocating
-#   * has NO PT_INTERP  (no external loader)    — fully self-contained
-#   * has NO NEEDED     (no dynamic libraries)  — truly static
-# (A literal PT_PHDR program-header row is NOT required: glibc static-PIE
-#  self-relocates without emitting one, so the discriminators are INTERP
-#  and NEEDED — both present in v0.2.7's crash shape, both absent when static.)
+# A CORRECT fully-static agentty binary is EITHER:
+#   * ET_EXEC (the default -static -no-pie build), OR
+#   * ET_DYN  (the opt-in -static-pie / Termux build),
+# and in BOTH cases has:
+#   * NO PT_INTERP  (no external loader)    — fully self-contained
+#   * NO NEEDED     (no dynamic libraries)  — truly static
+# The v0.2.7 crasher was an ET_DYN WITH a NEEDED libc.musl and no INTERP:
+# a dynamic binary with no loader that SIGSEGVs off its build image. The
+# discriminators that actually matter are therefore INTERP and NEEDED —
+# NOT the ELF type. (A literal PT_PHDR row is not required either.)
 #
 # Any deviation means the link degraded and the artifact will crash on some
 # foreign libc. Fail the BUILD (message FATAL_ERROR → non-zero exit) so the
@@ -31,7 +34,7 @@ if(NOT DEFINED READELF)
     set(READELF readelf)
 endif()
 
-# --- ELF file type: must be DYN (position-independent / self-relocating) ------
+# --- ELF file type: must be DYN or EXEC (not REL/CORE) ------------------------
 execute_process(
     COMMAND ${READELF} -h "${BIN}"
     OUTPUT_VARIABLE _hdr
@@ -40,11 +43,15 @@ execute_process(
 if(NOT _hrc EQUAL 0)
     message(FATAL_ERROR "assert_static_pie: readelf -h failed on '${BIN}':\n${_herr}")
 endif()
-# The Type line looks like: "  Type:  DYN (Position-Independent Executable ...)"
-if(NOT _hdr MATCHES "Type:[ \t]*DYN")
+# The Type line is either "Type: EXEC (Executable file)" (default -no-pie
+# static build) or "Type: DYN (Position-Independent Executable ...)" (the
+# opt-in -static-pie / Termux build). Both are fine; only INTERP + NEEDED
+# (checked below) decide whether the binary actually runs off its build
+# image. A REL/CORE type would mean the link produced something bogus.
+if(NOT _hdr MATCHES "Type:[ \t]*(DYN|EXEC)")
     message(FATAL_ERROR
-        "assert_static_pie: FATAL — '${BIN}' is not ET_DYN (static-PIE). A plain "
-        "ET_EXEC won't load on Android/Bionic; the -static-pie link degraded.\n"
+        "assert_static_pie: FATAL — '${BIN}' is neither ET_EXEC nor ET_DYN; the "
+        "link produced an unexpected object type.\n"
         "readelf -h said:\n${_hdr}")
 endif()
 
@@ -91,5 +98,5 @@ if(_dyn MATCHES "NEEDED")
 endif()
 
 message(STATUS
-    "agentty: static-PIE ELF shape OK — ET_DYN, no PT_INTERP, no NEEDED. "
-    "Runs on glibc, musl, Termux/Bionic, and Pi OS.")
+    "agentty: static ELF shape OK — ET_EXEC/DYN, no PT_INTERP, no NEEDED. "
+    "Runs standalone on glibc, musl, and 64-bit Pi OS.")

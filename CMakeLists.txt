@@ -57,6 +57,13 @@ endif()
 option(AGENTTY_STATIC_RUNTIME "Link the MSVC runtime statically (/MT)" OFF)
 option(AGENTTY_STANDALONE     "Produce a standalone binary with no third-party shared-library deps" OFF)
 option(AGENTTY_FULLY_STATIC   "Fully static link (Linux only, requires musl toolchain)" OFF)
+# By default a fully-static Linux build is `-static -no-pie` (ET_EXEC): a true
+# standalone binary that runs on every Linux userland (glibc, musl, Pi OS).
+# Flip this ON only to target Android/Bionic (Termux), which refuses ET_EXEC
+# and needs a PIE — but ONLY on a musl toolchain whose -static-pie genuinely
+# links libc statically (Alpine's default-PIE GCC does NOT; it produces the
+# v0.2.7 crasher, which the build-time guard then rejects).
+option(AGENTTY_STATIC_PIE      "Emit a static-PIE (ET_DYN) instead of ET_EXEC for the fully-static build — Termux/Android only" OFF)
 
 # mimalloc override — Microsoft's fast allocator. MSVCRT's malloc is notably
 # slow on the small-string churn pattern (std::string everywhere in RenderOp,
@@ -927,49 +934,42 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
         target_link_options(agentty PRIVATE
             -static-libstdc++ -static-libgcc)
         if(AGENTTY_FULLY_STATIC)
-            # -static-pie: produces an ET_DYN, no-INTERP, fully self-contained
-            # binary that carries its own PT_PHDR for self-relocation. Plain
-            # -static emits ET_EXEC, which Android/Bionic (Termux) refuses to
-            # exec ("unexpected e_type: 2"); a bare -pie against shared libc
-            # emits a DYN that keeps a NEEDED + drops the PHDR when the static
-            # startup is half-selected, aborting with "Could not find a PHDR".
-            # static-PIE done right loads on any aarch64 Linux kernel AND on
-            # Android — one artifact covers glibc/musl distros + Termux.
+            # HOW WE LINK A BINARY THAT RUNS EVERYWHERE (and the graveyard of
+            # approaches that don't, all confirmed on Alpine 3.21 / GCC 14.2):
             #
-            # Force it through the driver AND the linker so GCC can't silently
-            # downgrade to a dynamic-PIE link when it picks the wrong CRT
-            # startup object: -static-pie selects rcrt1.o + emits the self-
-            # relocating PT_PHDR; -no-pie is NOT added anywhere for this path.
-            # Requires a toolchain with the static-pie CRT (Alpine musl,
-            # aarch64-linux-musl-cross) — all third-party deps must be .a
-            # (openssl-libs-static, nghttp2-static, zlib-static).
-            # -static-pie must reach BOTH the compile and link driver
-            # invocations. Alpine's default-PIE GCC only selects rcrt1.o (the
-            # self-relocating static-PIE startup) when the DRIVER is in static
-            # mode at link time — and it decides that partly from the compile
-            # flags. Passing it on link options alone let the driver fall back
-            # to Scrt1.o + a -dynamic-linker line, yielding an ET_DYN that kept
-            # NEEDED libc and no usable PT_PHDR (aborts on Bionic with "Could
-            # not find a PHDR"). Setting it as a compile option too makes the
-            # driver commit to static-PIE consistently.
-            target_compile_options(agentty PRIVATE -static-pie)
-            target_link_options(agentty PRIVATE -static-pie)
-            # NOTE on flags: we pass ONLY -static-pie here, deliberately.
-            #   * Plain `-static` is WRONG alongside -static-pie: it drags in
-            #     the NON-pie static CRT (crtbeginT.o), whose R_X86_64_32
-            #     relocation "can not be used when making a PIE object" — the
-            #     link fails outright (collect2: ld returned 1).
-            #   * `-Wl,-Bstatic` alone doesn't stop the driver re-emitting
-            #     -Bdynamic for its implicit -lc.
-            # -static-pie by itself selects the PIE-safe static startup
-            # (rcrt1.o + crtbeginS.o) and, on a correctly-built musl
-            # toolchain, links libc from the static archive — yielding an
-            # ET_DYN with no PT_INTERP and no NEEDED. If a given toolchain
-            # still degrades it to a dynamic-PIE (v0.2.7's failure), the
-            # POST_BUILD assert_static_pie.cmake guard below FAILS THE BUILD
-            # rather than shipping a binary that only runs on the build image.
-            # That guard — not a pile of speculative link flags — is what
-            # guarantees a broken artifact can never reach a release.
+            #   * `-static-pie` (alone, or + compile flag): Alpine's
+            #     default-PIE musl GCC does NOT pull libc from the archive.
+            #     The output is ET_DYN with `NEEDED libc.musl-*.so` and no
+            #     PT_INTERP -> runs on the Alpine build image, SIGSEGVs on
+            #     glibc/Debian. THIS IS THE v0.2.7 CRASH. (Confirmed twice in
+            #     CI: readelf -d shows NEEDED libc.musl-{x86_64,aarch64}.so.)
+            #   * `-static-pie -static`: link error - `-static` drags in the
+            #     NON-pie CRT (crtbeginT.o) whose R_X86_64_32 reloc "can not
+            #     be used when making a PIE object" (collect2: ld returned 1).
+            #   * `-Wl,-Bstatic --no-dynamic-linker`: driver re-emits
+            #     -Bdynamic for its implicit -lc; NEEDED survives.
+            #
+            # What DOES work, bulletproof: plain `-static -no-pie`. It links
+            # libc from the static archive and emits a classic ET_EXEC with
+            # NO NEEDED and NO PT_INTERP - a true standalone binary that runs
+            # on every Linux userland (glibc Debian/Ubuntu/Fedora, musl
+            # Alpine, 64-bit Raspberry Pi OS). The only thing it does NOT run
+            # on is Android/Bionic (Termux), which refuses ET_EXEC and needs
+            # a PIE - a niche the honest default trades away so `curl | sh`
+            # WORKS for the 99% on normal Linux. Opt into the PIE variant
+            # with -DAGENTTY_STATIC_PIE=ON when you specifically target Termux
+            # AND have a musl toolchain whose -static-pie truly links libc
+            # statically (the POST_BUILD guard enforces it either way).
+            if(AGENTTY_STATIC_PIE)
+                target_compile_options(agentty PRIVATE -static-pie)
+                target_link_options(agentty PRIVATE -static-pie)
+            else()
+                # -no-pie must reach BOTH compile and link so the driver
+                # selects the non-PIE static CRT consistently and emits
+                # ET_EXEC (not a half-PIE that keeps a NEEDED).
+                target_compile_options(agentty PRIVATE -no-pie)
+                target_link_options(agentty PRIVATE -static -no-pie)
+            endif()
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
@@ -1095,16 +1095,21 @@ endif()
 # MSVC (has its own /GS /DYNAMICBASE /NXCOMPAT defaults). RELRO/noexecstack are
 # ELF-only; the linker no-ops them elsewhere, but gate to be explicit.
 if(NOT MSVC AND NOT AGENTTY_SANITIZE)
-    target_compile_options(agentty PRIVATE
-        -fstack-protector-strong
-        -fPIE)
+    target_compile_options(agentty PRIVATE -fstack-protector-strong)
+    # -fPIE only for builds that actually produce a PIE. The default
+    # fully-static build is -static -no-pie (ET_EXEC), where -fPIE would
+    # fight -no-pie; skip it there. Every other build (dynamic, or the
+    # opt-in AGENTTY_STATIC_PIE Termux variant) gets -fPIE for full ASLR.
+    if(NOT (AGENTTY_FULLY_STATIC AND NOT AGENTTY_STATIC_PIE))
+        target_compile_options(agentty PRIVATE -fPIE)
+    endif()
     # _FORTIFY_SOURCE requires -O1+; only define it for optimizing configs so
     # a Debug build doesn't emit the "requires optimization" warning per TU.
     target_compile_definitions(agentty PRIVATE
         $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
-    # A fully-static build already passed -static-pie (which implies PIE);
-    # adding a second bare -pie alongside -static confuses some linkers into
-    # emitting a dynamic ET_EXEC. Only add -pie here for the non-static path.
+    # A fully-static build already carries its own PIE decision (-static-pie
+    # or -no-pie); adding a bare -pie here would fight it. Only add -pie for
+    # the non-static path.
     if(UNIX AND NOT APPLE)
         # RELRO + BIND_NOW + non-exec stack are GNU-ld / lld (ELF) features.
         # Apple ld64 rejects -z; MSVC handled above.
