@@ -232,25 +232,79 @@ std::string wrap_summary_as_user_text(const std::string& summary) {
 // (NOT a Thread). Used internally by the soft-trim path; matches the
 // approximation that public estimate_wire_tokens / estimate_prefix_tokens
 // use so all three agree on "is this payload too big."
-int estimate_messages_tokens(const std::vector<Message>& v) {
+// Per-message byte + image tally — the shared kernel behind every token
+// estimate in this file. Split out so the front-trim helpers can price
+// each message ONCE and then find their drop index in a single pass
+// instead of re-summing the whole vector on every erase (the old
+// O(N²)-with-front-shift loop).
+struct MsgWeight { std::size_t bytes = 0; int images = 0; };
+
+MsgWeight message_weight(const Message& m) {
+    MsgWeight w;
+    w.bytes += m.text.size();
+    w.bytes += m.streaming_text.size();
+    w.bytes += m.pending_stream.size();
+    w.images += static_cast<int>(m.images.size());
+    for (const auto& tc : m.tool_calls) {
+        w.bytes += tc.name.value.size();
+        w.bytes += tc.args_streaming.size();
+        w.bytes += tc.output().size();
+        w.bytes += tc.progress_text().size();
+    }
+    return w;
+}
+
+int tokens_from(std::size_t bytes, int images) {
     constexpr double kBytesPerToken  = 3.5;
     constexpr int    kTokensPerImage = 1500;
+    return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
+         + images * kTokensPerImage;
+}
+
+int estimate_messages_tokens(const std::vector<Message>& v) {
     std::size_t bytes = 0;
     int images = 0;
     for (const auto& m : v) {
-        bytes += m.text.size();
-        bytes += m.streaming_text.size();
-        bytes += m.pending_stream.size();
-        images += static_cast<int>(m.images.size());
-        for (const auto& tc : m.tool_calls) {
-            bytes += tc.name.value.size();
-            bytes += tc.args_streaming.size();
-            bytes += tc.output().size();
-            bytes += tc.progress_text().size();
-        }
+        const auto w = message_weight(m);
+        bytes  += w.bytes;
+        images += w.images;
     }
-    return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
-         + images * kTokensPerImage;
+    return tokens_from(bytes, images);
+}
+
+// Single-pass front-trim: given a wire vector, return the number of
+// entries to drop starting at index `keep_head` (1 = preserve the
+// leading entry) so the estimated token cost of the survivors fits
+// `ceiling`. Prices every message once, then peels weight off the
+// front until the running remainder fits — O(N) total, replacing the
+// O(N²) "re-sum + erase(begin())" loops. Returns a drop count relative
+// to `keep_head` (i.e. erase [keep_head, keep_head + drop)).
+std::size_t front_drop_count(const std::vector<Message>& v, int ceiling,
+                             std::size_t keep_head) {
+    if (v.size() <= keep_head) return 0;
+    std::size_t total_bytes = 0;
+    int total_images = 0;
+    for (const auto& m : v) {
+        const auto w = message_weight(m);
+        total_bytes  += w.bytes;
+        total_images += w.images;
+    }
+    std::size_t drop = 0;
+    // Peel entries off the front (after the preserved head) while the
+    // remaining estimate exceeds the ceiling and there's something left
+    // to drop. Mirror the old loops' termination: stop once <= 1 total
+    // entry would remain. A ceiling <= 0 means "drop as much as possible"
+    // (the old compact loop's behaviour when context_max*0.65 rounded to
+    // 0): any non-empty survivor estimates > 0, so it peels down to 1.
+    while (tokens_from(total_bytes, total_images) > ceiling
+           && (v.size() - drop) > 1
+           && (keep_head + drop) < v.size()) {
+        const auto w = message_weight(v[keep_head + drop]);
+        total_bytes  -= w.bytes;
+        total_images -= w.images;
+        ++drop;
+    }
+    return drop;
 }
 
 // Adaptive soft-trim: drop oldest entries from a wire view until its
@@ -274,21 +328,22 @@ int estimate_messages_tokens(const std::vector<Message>& v) {
 // available will send a fatter prefix automatically.
 void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling) {
     if (ceiling <= 0 || v.size() <= 1) return;
-    // Sentinel: the leading entry stays put. Trim from index 1 forward
-    // until we fit. If we run out of trimmable entries we send what
-    // we have — the upstream will hard-reject with a clear error,
+    // Sentinel: the leading entry stays put. Price every message once,
+    // find how many to drop from index 1 forward in a single pass, then
+    // erase them in ONE shift. If we run out of trimmable entries we send
+    // what we have — the upstream will hard-reject with a clear error,
     // which is strictly better than the in-tool-burst yank.
-    while (estimate_messages_tokens(v) > ceiling && v.size() > 1) {
-        v.erase(v.begin() + 1);
-    }
+    const std::size_t drop = front_drop_count(v, ceiling, /*keep_head=*/1);
+    if (drop > 0)
+        v.erase(v.begin() + 1, v.begin() + 1 + static_cast<std::ptrdiff_t>(drop));
     // Drop any leading Assistants exposed by the trim — the wire
     // must start with a User. (If [0] was a compaction-summary user,
     // it remains; if it was a real first-user-turn and we never
     // touched [0], we're already fine. The pathological case is
     // when [0] gets dropped by a future change — defensive guard.)
-    while (!v.empty() && v.front().role == Role::Assistant) {
-        v.erase(v.begin());
-    }
+    std::size_t lead = 0;
+    while (lead < v.size() && v[lead].role == Role::Assistant) ++lead;
+    if (lead > 0) v.erase(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(lead));
 }
 
 
@@ -362,41 +417,23 @@ std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_m
     // compactions don't double-count the summarised prefix.
     std::vector<Message> base = wire_messages_for_impl(t);
 
-    // Trim from the front until we fit ~65% of context_max. Token
-    // estimate uses the same approximation as estimate_prefix_tokens
-    // (bytes / 3.5 + images), inlined here against an arbitrary
-    // vector instead of a Thread.
-    auto estimate = [](const std::vector<Message>& v) -> int {
-        constexpr double kBytesPerToken  = 3.5;
-        constexpr int    kTokensPerImage = 1500;
-        std::size_t bytes = 0;
-        int images = 0;
-        for (const auto& m : v) {
-            bytes += m.text.size();
-            bytes += m.streaming_text.size();
-            bytes += m.pending_stream.size();
-            images += static_cast<int>(m.images.size());
-            for (const auto& tc : m.tool_calls) {
-                bytes += tc.name.value.size();
-                bytes += tc.args_streaming.size();
-                bytes += tc.output().size();
-                bytes += tc.progress_text().size();
-            }
-        }
-        return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
-             + images * kTokensPerImage;
-    };
-
+    // Trim from the front until we fit ~65% of context_max. Prices every
+    // message once and drops the computed prefix in one bulk erase (the
+    // shared front_drop_count kernel) instead of the old re-sum-per-erase
+    // O(N²) loop.
     if (context_max > 0) {
         const int ceiling = static_cast<int>(static_cast<double>(context_max) * 0.65);
-        while (estimate(base) > ceiling && base.size() > 1) {
-            base.erase(base.begin());
-        }
+        const std::size_t drop = front_drop_count(base, ceiling, /*keep_head=*/0);
+        if (drop > 0)
+            base.erase(base.begin(),
+                       base.begin() + static_cast<std::ptrdiff_t>(drop));
         // Drop any leading Assistants exposed by the trim — Anthropic
         // requires the wire to start with a User.
-        while (!base.empty() && base.front().role == Role::Assistant) {
-            base.erase(base.begin());
-        }
+        std::size_t lead = 0;
+        while (lead < base.size() && base[lead].role == Role::Assistant) ++lead;
+        if (lead > 0)
+            base.erase(base.begin(),
+                       base.begin() + static_cast<std::ptrdiff_t>(lead));
     }
 
     // Append the synthetic summarisation prompt as the trailing User.
@@ -420,25 +457,8 @@ int estimate_wire_tokens(const Thread& t) {
     // compaction triggers MUST use this; using the raw-transcript
     // estimate would re-fire compaction immediately after every
     // round because the user-visible transcript never shrinks.
-    constexpr double kBytesPerToken  = 3.5;
-    constexpr int    kTokensPerImage = 1500;
     auto wire = wire_messages_for_impl(t);
-    std::size_t bytes = 0;
-    int images = 0;
-    for (const auto& m : wire) {
-        bytes += m.text.size();
-        bytes += m.streaming_text.size();
-        bytes += m.pending_stream.size();
-        images += static_cast<int>(m.images.size());
-        for (const auto& tc : m.tool_calls) {
-            bytes += tc.name.value.size();
-            bytes += tc.args_streaming.size();
-            bytes += tc.output().size();
-            bytes += tc.progress_text().size();
-        }
-    }
-    return static_cast<int>(static_cast<double>(bytes) / kBytesPerToken)
-         + images * kTokensPerImage;
+    return estimate_messages_tokens(wire);
 }
 
 Cmd<Msg> launch_stream(Model& m) {
