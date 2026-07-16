@@ -1,5 +1,7 @@
 #include "agentty/runtime/view/thread/turn/permission.hpp"
 
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+
 namespace agentty::ui {
 
 maya::Permission::Config inline_permission_config(const PendingPermission& pp,
@@ -11,7 +13,12 @@ maya::Permission::Config inline_permission_config(const PendingPermission& pp,
         desc = tc.args.value("command", "");
     } else if (tc.name == "read" || tc.name == "edit"
             || tc.name == "write" || tc.name == "list_dir") {
-        desc = tc.args.value("path", "");
+        // Alias-aware: write's canonical key is `file_path`, and models
+        // routinely pick filepath/filename for the others. Reading only
+        // `path` left the prompt description BLANK for a write — the
+        // user was asked to approve a file mutation without seeing
+        // which file.
+        desc = pick_arg(tc.args, {"path", "file_path", "filepath", "filename"});
     } else if (tc.name == "web_fetch") {
         desc = tc.args.value("url", "");
     } else if (tc.name == "web_search") {
