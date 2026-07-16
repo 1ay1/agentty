@@ -37,7 +37,9 @@ inline constexpr std::size_t kMaxEntries     = 50;
 inline constexpr std::size_t kSnapshotBudget = 4u * 1024 * 1024;  // 4 MiB
 
 struct Entry {
-    std::string label;     // "Read  src/foo.cpp  ·  450 lines"
+    std::string name;      // raw tool name ("read") — drives the category colour
+    std::string title;     // display name ("Read", "Git Commit")
+    std::string detail;    // one-line detail ("src/foo.cpp @120 · 450 lines")
     std::string trailing;  // "ok · 4.2s · 48 KB"  or  "failed · 0.3s"
     std::string output;    // full stored output (≤ 256 KiB by upstream cap)
     bool        failed = false;

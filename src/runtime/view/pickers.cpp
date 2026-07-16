@@ -10,6 +10,7 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/workspace/files.hpp"
@@ -701,11 +702,14 @@ Element code_block_result_card(const Model& m) {
 
 // Ctrl+O tool-output viewer. Two stages inside one Picker chrome:
 //
-//   LIST  — one row per settled tool call (newest first): "Read src/…"
-//           leading + "ok · 1.2s · 48 KB" trailing. Enter opens the body.
-//   BODY  — the FULL stored output of the selected call in the scrollable
-//           region (the timeline card elides long bodies; this is where
-//           the elided middle lives). Esc returns to the list.
+//   LIST  — one row per settled tool call (newest first): a category-
+//           coloured tool badge ("Read", "Bash", "Edit" — same hue as
+//           the transcript card), the detail line, and "ok · 1.2s ·
+//           48 KB" trailing. Enter opens the body.
+//   BODY  — the FULL stored output of the selected call in the
+//           scrollable region (the timeline card elides long bodies;
+//           this is where the elided middle lives). ←/→ hop straight
+//           to the previous/next output; Esc returns to the list.
 //
 // An overlay — not in-place card expansion — because the transcript's
 // committed rows are immutable native scrollback; growing a card there
@@ -715,25 +719,50 @@ Element tool_output_viewer(const Model& m) {
     const auto* o = tool_viewer_opened(m.ui.tool_viewer);
     if (!o) return nothing();
 
+    const int sz = static_cast<int>(o->entries.size());
+    const int cur = std::clamp(o->index, 0, std::max(0, sz - 1));
+
     Picker::Config cfg;
     cfg.min_width  = 60;
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.tool_viewer_scroll;
 
+    // "n/N" position — shown in both stages so the user always knows
+    // where they are in the output stack.
+    const std::string pos =
+        std::to_string(cur + 1) + "/" + std::to_string(sz);
+
     if (!o->viewing) {
         // ── LIST stage ──
-        cfg.title    = " Tool Outputs ";
+        cfg.title    = " Tool Outputs \xc2\xb7 " + std::to_string(sz) + " ";
         cfg.accent   = highlight;
-        cfg.selected = o->entries.empty() ? -1 : o->index;
+        cfg.selected = sz == 0 ? -1 : cur;
+
+        // Badge column width: longest display name across the entries,
+        // so every detail line starts at the same column and the badge
+        // hues read as a vertical colour strip.
+        std::size_t badge_w = 0;
+        for (const auto& e : o->entries)
+            badge_w = std::max(badge_w, e.title.size());
+
         cfg.rows.reserve(o->entries.size());
-        for (int i = 0; i < static_cast<int>(o->entries.size()); ++i) {
+        for (int i = 0; i < sz; ++i) {
             const auto& e = o->entries[static_cast<std::size_t>(i)];
             Picker::Config::Row row;
-            row.leading        = e.label;
+            row.badge = e.title;
+            row.badge.append(badge_w - e.title.size(), ' ');
+            // Category hue — the same colour identity the transcript
+            // card used, so "which tool was that?" is answered by hue
+            // before the label is even read. Failures go red on the
+            // badge too: status outranks category.
+            row.badge_style    = e.failed ? fg_bold(danger)
+                                          : fg_bold(tool_category_color(e.name));
+            row.leading        = e.detail.empty() ? std::string{"\xe2\x80\xa6"}
+                                                  : e.detail;
             row.leading_style  = e.failed ? fg_of(danger) : fg_of(fg);
             row.trailing       = e.trailing;
             row.trailing_style = e.failed ? fg_of(danger) : fg_dim(muted);
-            row.selected       = (i == o->index);
+            row.selected       = (i == cur);
             cfg.rows.push_back(std::move(row));
         }
         cfg.footer.push_back(text(""));
@@ -747,17 +776,23 @@ Element tool_output_viewer(const Model& m) {
     }
 
     // ── BODY stage ──
-    const auto& e = o->entries[static_cast<std::size_t>(
-        std::clamp(o->index, 0, static_cast<int>(o->entries.size()) - 1))];
-    cfg.title    = " Tool Output ";
-    cfg.accent   = e.failed ? danger : highlight;
+    const auto& e = o->entries[static_cast<std::size_t>(cur)];
+    const Color tool_hue = e.failed ? danger : tool_category_color(e.name);
+    cfg.title    = " " + e.title + " \xc2\xb7 " + pos + " ";
+    cfg.accent   = tool_hue;
     cfg.selected = -1;   // read-only — no cursor row; manual scroll rules
 
-    // Header: the entry label + status/size, mirroring the list row so
-    // the user never loses track of WHICH output they're reading.
-    cfg.header.push_back(text(" " + e.label, fg_bold(cfg.accent)));
-    cfg.header.push_back(text("  " + e.trailing,
-        e.failed ? fg_of(danger) : fg_of(muted)));
+    // Header: coloured tool name + detail, then the status line — the
+    // user never loses track of WHICH output they're reading, and ←/→
+    // visibly swaps this header as they hop entries. Full-width hstack
+    // so the position indicator pins right even on narrow terminals.
+    cfg.header.push_back(
+        hstack().width(Dimension::percent(100))(
+            text(" " + e.title, fg_bold(tool_hue)),
+            text(e.detail.empty() ? "" : "  " + e.detail, fg_of(fg))
+                | clip | grow(1.0f) | shrink(1.0f),
+            text(e.trailing + " ", e.failed ? fg_of(danger) : fg_dim(muted))
+        ).build());
     cfg.header.push_back(sep);
 
     // Full output in the scrollable region. Line Elements are cheap; the
@@ -765,20 +800,21 @@ Element tool_output_viewer(const Model& m) {
     // output is ≤ 256 KiB by the conversation-side clamp.
     {
         std::string_view body{e.output};
-        std::size_t pos = 0;
-        while (pos <= body.size()) {
-            std::size_t eol = body.find('\n', pos);
-            std::size_t len = (eol == std::string_view::npos ? body.size() : eol) - pos;
-            cfg.items.push_back(text("  " + std::string{body.substr(pos, len)},
+        std::size_t pos_b = 0;
+        while (pos_b <= body.size()) {
+            std::size_t eol = body.find('\n', pos_b);
+            std::size_t len = (eol == std::string_view::npos ? body.size() : eol) - pos_b;
+            cfg.items.push_back(text("  " + std::string{body.substr(pos_b, len)},
                                      fg_of(muted)));
             if (eol == std::string_view::npos) break;
-            pos = eol + 1;
+            pos_b = eol + 1;
         }
     }
 
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},   // ↑↓
+        {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},               // ↑↓
+        {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},            // ←→
         {"y", "copy", 4},
         {"Esc", "back", 3},
     }));

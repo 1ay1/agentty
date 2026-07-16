@@ -354,6 +354,8 @@ std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
             case SpecialKey::PageDown: return ToolViewerMove{+10};
             case SpecialKey::Home:     return ToolViewerMove{-1000000};
             case SpecialKey::End:      return ToolViewerMove{+1000000};
+            case SpecialKey::Left:     return ToolViewerStep{-1};
+            case SpecialKey::Right:    return ToolViewerStep{+1};
             default: break;
         }
     }
@@ -361,6 +363,8 @@ std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
         switch (ck->codepoint) {
             case U'k': case U'K': return ToolViewerMove{-1};
             case U'j': case U'J': return ToolViewerMove{+1};
+            case U'h': case U'H': return ToolViewerStep{-1};
+            case U'l': case U'L': return ToolViewerStep{+1};
             case U'y': case U'Y': return ToolViewerCopy{};
             case U'q': case U'Q': return CloseToolOutputViewer{};
             default: break;

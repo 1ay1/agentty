@@ -410,6 +410,10 @@ struct CloseToolOutputViewer {};
 struct ToolViewerMove { int delta; };
 struct ToolViewerSelect {};
 struct ToolViewerCopy {};
+// ←/→: in the body stage, jump straight to the previous/next entry's
+// output without bouncing through the list; in the list stage ←/→ are
+// unbound (the viewer swallows all keys while open, so they simply no-op).
+struct ToolViewerStep { int delta; };
 
 // ── Todo modal ───────────────────────────────────────────────────────────
 struct OpenTodoModal {};
@@ -564,7 +568,7 @@ using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
     PermissionApprove, PermissionReject, PermissionApproveAlways,
     OpenToolOutputViewer, CloseToolOutputViewer,
-    ToolViewerMove, ToolViewerSelect, ToolViewerCopy>;
+    ToolViewerMove, ToolViewerSelect, ToolViewerCopy, ToolViewerStep>;
 
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,

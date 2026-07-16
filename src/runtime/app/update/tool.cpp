@@ -115,12 +115,12 @@ void arm_reconcile_cooldown(Model& m) {
             tool_viewer::Entry e;
             e.failed = tc.is_failed();
             e.output = body;
-            // "Read  src/foo.cpp @120  · 450 lines" — reuse the timeline's
-            // display name + detail line so the list reads exactly like
-            // the transcript cards the user is trying to re-inspect.
-            e.label = ui::tool_display_name(tc.name.value);
-            if (auto detail = ui::tool_timeline_detail(tc); !detail.empty())
-                e.label += "  " + detail;
+            // Raw name drives the category colour badge; display name +
+            // detail reuse the timeline's helpers so the list reads
+            // exactly like the transcript cards being re-inspected.
+            e.name   = tc.name.value;
+            e.title  = ui::tool_display_name(tc.name.value);
+            e.detail = ui::tool_timeline_detail(tc);
             // Trailing: ok/failed · duration · size.
             e.trailing = e.failed ? "failed" : "ok";
             if (float secs = ui::tool_elapsed(tc); secs >= 0.05f) {
@@ -441,6 +441,22 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 return done(std::move(m));
             o->viewing = true;
             m.ui.tool_viewer_scroll.y = 0;
+            return done(std::move(m));
+        },
+        [&](ToolViewerStep& e) -> Step {
+            // ←/→ while reading an output: hop to the neighbouring
+            // entry's body directly. Clamped at the ends (no wrap — the
+            // list is short and wrap-around disorients more than it
+            // helps). List stage: no-op.
+            auto* o = tool_viewer_opened(m.ui.tool_viewer);
+            if (!o || !o->viewing) return done(std::move(m));
+            int sz = static_cast<int>(o->entries.size());
+            if (sz <= 0) return done(std::move(m));
+            int next = std::clamp(o->index + e.delta, 0, sz - 1);
+            if (next != o->index) {
+                o->index = next;
+                m.ui.tool_viewer_scroll.y = 0;
+            }
             return done(std::move(m));
         },
         [&](ToolViewerCopy) -> Step {
