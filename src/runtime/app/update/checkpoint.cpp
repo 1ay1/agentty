@@ -60,7 +60,22 @@ std::string preview_of(const Message& msg) {
     // still reads cleanly.
     std::size_t start = flat.find_first_not_of(" \t");
     if (start == std::string::npos) return "(no prompt text)";
-    return flat.substr(start);
+    flat = flat.substr(start);
+    // Cap the preview so a wall-of-text prompt can't dominate the row.
+    // maya's Picker clips the leading cell to the row width regardless,
+    // but a hard char cap here keeps the entry list cheap to lay out and
+    // gives the async diffstat trailing cell room on even a wide term.
+    // UTF-8-safe: back up off any continuation byte before appending the
+    // ellipsis so we never slice a multibyte codepoint in half.
+    constexpr std::size_t kMaxPreview = 96;
+    if (flat.size() > kMaxPreview) {
+        std::size_t cut = kMaxPreview;
+        while (cut > 0 && (static_cast<unsigned char>(flat[cut]) & 0xC0) == 0x80)
+            --cut;
+        flat.erase(cut);
+        flat += "\xe2\x80\xa6";   // …
+    }
+    return flat;
 }
 
 // Build the entry list from the current thread's checkpointed user
