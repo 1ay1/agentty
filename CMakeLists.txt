@@ -954,26 +954,22 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
             # driver commit to static-PIE consistently.
             target_compile_options(agentty PRIVATE -static-pie)
             target_link_options(agentty PRIVATE -static-pie)
-            # -static-pie ALONE is not enough on Alpine/musl: the GCC driver
-            # still appends its implicit `-lc` in *dynamic* mode, so the link
-            # resolves to the shared `libc.musl-*.so` — producing an ET_DYN
-            # that keeps `NEEDED libc.musl-*.so` and (with the INTERP dropped)
-            # SIGSEGVs on any host but the build image. That is EXACTLY the
-            # v0.2.7 crash (readelf -d shows NEEDED libc.musl-x86_64.so.1).
-            # `-Wl,-Bstatic` doesn't fix it — the driver re-emits -Bdynamic
-            # for its own `-lc`.
-            #
-            # The GCC-documented lever that actually works is plain `-static`:
-            # "On systems that support dynamic linking, this overrides -pie
-            # and prevents linking with the shared libraries." Combined with
-            # -static-pie (PIE-compiled objects + rcrt1.o), musl-gcc emits a
-            # TRUE self-relocating static-PIE: ET_DYN, no PT_INTERP, and
-            # — crucially — NO NEEDED entry, because libc is pulled from the
-            # static archive. One artifact then runs on glibc, musl,
-            # Termux/Bionic, and Pi OS. (Verified by the POST_BUILD
-            # assert_static_pie.cmake guard below, which fails the build if a
-            # NEEDED / INTERP slips through.)
-            target_link_options(agentty PRIVATE -static)
+            # NOTE on flags: we pass ONLY -static-pie here, deliberately.
+            #   * Plain `-static` is WRONG alongside -static-pie: it drags in
+            #     the NON-pie static CRT (crtbeginT.o), whose R_X86_64_32
+            #     relocation "can not be used when making a PIE object" — the
+            #     link fails outright (collect2: ld returned 1).
+            #   * `-Wl,-Bstatic` alone doesn't stop the driver re-emitting
+            #     -Bdynamic for its implicit -lc.
+            # -static-pie by itself selects the PIE-safe static startup
+            # (rcrt1.o + crtbeginS.o) and, on a correctly-built musl
+            # toolchain, links libc from the static archive — yielding an
+            # ET_DYN with no PT_INTERP and no NEEDED. If a given toolchain
+            # still degrades it to a dynamic-PIE (v0.2.7's failure), the
+            # POST_BUILD assert_static_pie.cmake guard below FAILS THE BUILD
+            # rather than shipping a binary that only runs on the build image.
+            # That guard — not a pile of speculative link flags — is what
+            # guarantees a broken artifact can never reach a release.
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
