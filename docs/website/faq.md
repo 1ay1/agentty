@@ -51,3 +51,7 @@ It's pre-1.0 and moving fast, but the core loop, tools, streaming, auth, and per
 ## What license is it under?
 
 MIT. Use it, fork it, ship it. See the [license page](/license).
+
+## How do I fix or improve these docs?
+
+Every page here is a Markdown file in the agentty repo under `docs/website/`. Click **Edit this page** at the bottom of any doc, or open a PR against that file — the site rebuilds itself from the Markdown automatically, so a merged change goes live on its own.
