@@ -38,6 +38,14 @@ struct Selection {
 //   "host[:port]" → OpenAI-compatible against a custom base URL
 [[nodiscard]] Selection parse_selection(std::string_view spec);
 
+// Session-wide custom auth header NAME (--auth-header) for OpenAI-family
+// backends whose gateway doesn't accept `Authorization: Bearer` (e.g.
+// `X-API-Key`). Stored process-globally so every parse_selection — startup
+// AND live provider switches from the picker — stamps it onto the resulting
+// Endpoint. Empty (the default) keeps the standard bearer header.
+void set_custom_auth_header(std::string name);
+[[nodiscard]] std::string custom_auth_header();
+
 // Install the active selection (process-global). Called at startup and by
 // the provider-picker reducer for live switches (UI thread).
 void select(Selection s);

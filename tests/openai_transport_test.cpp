@@ -493,6 +493,57 @@ static void test_endpoint_presets() {
     }
 }
 
+// ── Request headers / --auth-header ─────────────────────────────────────────
+// build_request_headers is the single place the OpenAI-family auth header is
+// emitted (stream, model listing, Ollama probe). Verify the default Bearer
+// arms, the custom-name override, and the empty-key case.
+static void find_header(const agentty::http::Headers& hs, std::string_view name,
+                        const agentty::http::Header** out) {
+    *out = nullptr;
+    for (const auto& h : hs)
+        if (h.name == name) { *out = &h; return; }
+}
+
+static void test_build_request_headers() {
+    oai::Endpoint def;   // no auth_header_name → Bearer
+
+    // Default: both auth arms emit `authorization: Bearer <key>`.
+    const agentty::http::Header* h = nullptr;
+    auto hs = oai::build_request_headers(oai::AuthHeader{oai::ApiKeyHeader{"k1"}}, def);
+    find_header(hs, "authorization", &h);
+    CHECK(h && h->value == "Bearer k1");
+
+    hs = oai::build_request_headers(oai::AuthHeader{oai::BearerHeader{"k2"}}, def);
+    find_header(hs, "authorization", &h);
+    CHECK(h && h->value == "Bearer k2");
+
+    // Custom name: key goes out RAW under the (lowercased) name, and no
+    // authorization header is sent.
+    oai::Endpoint custom;
+    custom.auth_header_name = "X-API-Key";
+    hs = oai::build_request_headers(oai::AuthHeader{oai::ApiKeyHeader{"k3"}}, custom);
+    find_header(hs, "x-api-key", &h);
+    CHECK(h && h->value == "k3");
+    find_header(hs, "authorization", &h);
+    CHECK(h == nullptr);
+
+    // Empty key: no auth header under either scheme (local backends).
+    hs = oai::build_request_headers(oai::AuthHeader{oai::ApiKeyHeader{""}}, custom);
+    find_header(hs, "x-api-key", &h);
+    CHECK(h == nullptr);
+    find_header(hs, "authorization", &h);
+    CHECK(h == nullptr);
+
+    // parse_selection stamps the session override onto the endpoint (and an
+    // empty override leaves it clear).
+    agentty::provider::set_custom_auth_header("Api-Key");
+    auto sel = agentty::provider::parse_selection("my.host:9000");
+    CHECK(sel.openai_endpoint.auth_header_name == "Api-Key");
+    agentty::provider::set_custom_auth_header("");
+    sel = agentty::provider::parse_selection("my.host:9000");
+    CHECK(sel.openai_endpoint.auth_header_name.empty());
+}
+
 // ── Per-preset auth resolution ──────────────────────────────────────────────
 // resolve_auth_for is the single mapping every provider switch goes through
 // (startup AND the picker). Verify each preset kind lands on the right auth:
@@ -904,6 +955,7 @@ int main() {
     test_sse_plain_json_prose_not_salvaged();
     test_sse_structured_tool_still_works_with_salvage_on();
     test_endpoint_presets();
+    test_build_request_headers();
     test_resolve_auth_per_preset();
     // Incremental salvage tests.
     test_sse_salvage_streamed_tokens();

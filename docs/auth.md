@@ -17,9 +17,30 @@ CLI flags:
 |---|---|
 | `-k`, `--key KEY` | API-key override for this session |
 | `-m`, `--model ID` | Model id (e.g. `claude-opus-4-5`) |
+| `--auth-header NAME` | Custom auth header name for OpenAI-compatible backends (see below) |
 | `-h`, `--help` | Print usage |
 
 Subcommand dispatch lives in `src/main.cpp:1400-1435`.
+
+## Custom Providers (`--auth-header`)
+
+OpenAI-compatible backends (`--provider openai | groq | … | host[:port]`)
+authenticate with `Authorization: Bearer <key>` by default. Some self-hosted
+or enterprise gateways expect the key under a different header name instead
+(e.g. `X-API-Key`). `--auth-header NAME` overrides the header name for the
+session; the key (from `-k`, the in-app paste, or `OPENAI_API_KEY` /
+provider-specific env var) is sent **raw** under that name — no `Bearer `
+prefix:
+
+```bash
+agentty --provider my-gateway.lan:9000 --auth-header X-API-Key -k sk-xxx
+# emits:  x-api-key: sk-xxx     (instead of authorization: Bearer sk-xxx)
+```
+
+Session-scoped like `-k` (not persisted). Applies to every OpenAI-family
+request — chat completions, model listing, the Ollama capability probe —
+and survives live provider switches (`^P`). The Anthropic path is
+unaffected. Empty/unset keeps the standard bearer header.
 
 ## Authentication Methods
 

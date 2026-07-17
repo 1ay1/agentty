@@ -63,6 +63,12 @@ struct Endpoint {
     // endpoint applies the model's chat template and answers cleanly. Set
     // for the "ollama" preset only.
     bool        native_api  = false;
+    // Custom auth header NAME (e.g. "X-API-Key") for gateways that don't
+    // accept `Authorization: Bearer`. Empty (the default) keeps the standard
+    // bearer header. When set, the key goes out raw as `<name>: <key>` —
+    // no "Bearer " prefix. Populated from --auth-header via
+    // provider::parse_selection.
+    std::string auth_header_name;
 
     // Built-in presets for the common free / hosted backends. Pass a bare
     // name ("openai", "groq", "openrouter", "together", "cerebras",
@@ -116,6 +122,13 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 // Fetch available models from the endpoint's /v1/models.
 [[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth,
                                                  const Endpoint& endpoint);
+
+// Common request headers (accept/content-type/user-agent + auth). The auth
+// header is `authorization: Bearer <key>` unless `endpoint.auth_header_name`
+// is set, in which case the key goes out raw under that name. Exposed for
+// tests.
+[[nodiscard]] http::Headers build_request_headers(const AuthHeader& auth,
+                                                  const Endpoint& endpoint);
 
 // Extra system-prompt guidance appended ONLY for OpenAI-compatible backends.
 // Weak local models (Ollama qwen2.5-coder, llama.cpp templates) over-call
