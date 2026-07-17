@@ -840,7 +840,12 @@ std::optional<LoopBreak> agent_loop_should_break(
     // human turn boundary.)
     std::size_t run_start = 0;
     for (std::size_t i = messages.size(); i-- > 0;) {
-        if (messages[i].role == Role::User) { run_start = i + 1; break; }
+        // A proactively-retrieved context message is a synthetic User turn,
+        // NOT a human turn boundary — skip it so the run-start lands on the
+        // real user message it was injected after.
+        if (messages[i].role == Role::User && !messages[i].proactive_context) {
+            run_start = i + 1; break;
+        }
     }
 
     int tool_turns = 0;

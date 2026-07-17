@@ -1099,4 +1099,68 @@ void install_host_backends(::mcp::tools::HostServices& svc) {
     // parses the rendered text — there is no structured sink to feed.
 }
 
+// ── Proactive retrieval (SOTA active-RAG / FLARE / Self-RAG) ────────────
+// Runs the SAME AgenttyDocRetriever the search_docs tool uses, but out of
+// band — before the model sees the turn — and only surfaces its result when
+// confidence clears a HIGH bar (higher than the tool's LOW floor: we're
+// spending the user's context-window tokens unprompted, so the hit must be
+// worth it). Parses the confidence out of the retriever's mode string so
+// there's a single source of truth for the score.
+std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) {
+    // Confidence bar for UNPROMPTED injection. The tool's LOW floor is 0.25;
+    // we inject only well above it. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
+    double min_conf = 0.45;
+    if (const char* mc = std::getenv("AGENTTY_RAG_PROACTIVE_MIN"); mc && mc[0]) {
+        // Any non-negative value is honoured; a bar above 1.0 is a
+        // legitimate "never inject" switch (confidence is clamped to [0,1]).
+        try { double v = std::stod(mc); if (v >= 0) min_conf = v; }
+        catch (...) { /* keep default */ }
+    }
+
+    try {
+        AgenttyDocRetriever r;
+        mt::DocQuery q;
+        q.query = query;
+        q.k     = k > 0 ? k : 3;
+        std::string mode, err;
+        auto passages = r.retrieve(q, mode, err);
+        if (!err.empty() || passages.empty()) return std::nullopt;
+
+        // Recover the confidence the pipeline computed (mode carries
+        // ", confidence 0.NN"). If we can't parse it, be conservative and
+        // don't inject.
+        double conf = -1.0;
+        if (auto p = mode.find("confidence "); p != std::string::npos) {
+            try { conf = std::stod(mode.substr(p + 11)); } catch (...) {}
+        }
+        if (conf < min_conf) return std::nullopt;
+
+        // Build the wire block. Fenced + provenance-labelled so the model
+        // treats it as retrieved reference, not the user's words. Bounded.
+        std::string block =
+            "<retrieved-context>\n"
+            "The following passages were auto-retrieved from the user's "
+            "knowledge base (docs/skills/memory) because they look relevant "
+            "to the request. Ground your answer in them where they apply; "
+            "ignore any that don't. Cite the source path when you use one.\n\n";
+        int n = 0;
+        for (const auto& p : passages) {
+            block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
+                   + ":" + p.path;
+            if (p.line_start > 0)
+                block += ":" + std::to_string(p.line_start);
+            block += "]\n";
+            block += p.text;
+            if (!p.text.empty() && p.text.back() != '\n') block += '\n';
+            block += '\n';
+            ++n;
+        }
+        block += "</retrieved-context>";
+
+        return ProactiveHit{std::move(block), conf, n};
+    } catch (...) {
+        return std::nullopt;   // proactive retrieval is best-effort, never fatal
+    }
+}
+
 } // namespace agentty::tools

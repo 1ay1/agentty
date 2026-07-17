@@ -352,6 +352,18 @@ struct Message {
     // post-compact message (binary near offset 92759504).
     bool is_compact_summary = false;
 
+    // True for the synthetic User message that carries PROACTIVELY RETRIEVED
+    // context (SOTA "active retrieval", FLARE/Self-RAG family): when the user
+    // submits a knowledge-shaped question, submit_message silently runs the
+    // RAG pipeline and, only on a HIGH-confidence hit, inserts one of these
+    // just before the assistant placeholder. On the wire it's a normal User
+    // message whose text is a fenced <retrieved-context> block the model can
+    // ground on; in the transcript the view renders a compact one-line
+    // "retrieved context" affordance instead of the raw block. Never shown
+    // as the user's own words. Skipped by the doom-loop / run-start walk
+    // (it's not a real human turn boundary — see agent_loop_should_break).
+    bool proactive_context = false;
+
     // FNV-1a over the fields that turn_element / turn_config consume
     // when building the rendered Element. The view cache stamps the
     // built Element with this key at insert time and re-checks it on
@@ -394,6 +406,7 @@ struct Message {
         for (const auto& tc : tool_calls) mix(tc.compute_render_key());
         mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent
         mix(is_compact_summary ? 1ULL : 0ULL);
+        mix(proactive_context ? 2ULL : 0ULL);
         return k;
     }
 };
