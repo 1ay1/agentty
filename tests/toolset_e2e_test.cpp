@@ -267,6 +267,26 @@ int main() {
         check(has(r, "BM25"), "search_docs: reports BM25-only mode (no embed host)");
     }
 
+    // ── #5 per-turn query cache: an identical query is served from cache ──
+    // The result must be identical AND the mode string must gain ", cached".
+    {
+        auto r = run("search_docs", {{"query", "zebra quagga migration"}});
+        check(has(r, "zebra"), "search_docs: cached hit returns same passage");
+        check(has(r, "cached"), "search_docs: repeat query reports cached mode");
+    }
+
+    // ── #2 corrective retrieval (CRAG): a conversationally-phrased query
+    // that still contains the content word must retrieve. The distiller
+    // strips the stopwords ("can you tell me how the ... works") so the
+    // retry probe lands on "zebra quagga". Confidence-gated, so on a strong
+    // first pass it simply won't fire — either way the passage is found.
+    {
+        auto r = run("search_docs",
+                     {{"query", "can you tell me how the zebra quagga works"}});
+        check(has(r, "zebra"),
+              "search_docs: corrective/distilled retry still finds the passage");
+    }
+
     // ── search_docs × memory: learned facts are a fused knowledge source ──
     // A remembered fact must be retrievable by query — including facts that
     // rolled OUT of the 6 KiB prompt budget — with memory:// provenance.

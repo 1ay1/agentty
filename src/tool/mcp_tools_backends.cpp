@@ -38,6 +38,7 @@
 #include <mcp/tools/host.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +49,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -209,36 +211,24 @@ public:
             if (!root.empty() && indexed_root != root_str) {
                 corpus.build(root, embed);
                 indexed_root = root_str;
+                ++corpus_epoch_;   // #5: invalidate the per-turn query cache
             }
 
-            rag::KnowledgeRouter router;
             rag::CorpusSource docs_source("docs", corpus, embed);
             const bool have_docs = !root.empty() && corpus.chunk_count() > 0;
-            if (have_docs)
-                router.add(std::shared_ptr<rag::KnowledgeSource>(
-                    &docs_source, [](rag::KnowledgeSource*) {}));
 
-            // Skills + learned memory ride the same KnowledgeSource seam —
-            // "search everything the agent knows", provenance-labelled.
-            // Both BM25-only (no embed calls: skills/memory are small and
-            // lexical match is strong on their vocabulary), both cheap.
-            if (skills_rag_enabled()) {
-                if (auto s = skills_source()) router.add(std::move(s));
-            }
-            if (memory_rag_enabled()) {
-                if (auto s = memory_source()) router.add(std::move(s));
-            }
-
-            // OPT-IN: this session's MCP `resources/*`.
+            // OPT-IN: this session's MCP `resources/*` (shared by both funnel
+            // passes below). Built once here so the corrective retry reuses it.
             std::shared_ptr<rag::McpResourceSource> mcp_source;
-            if (mcp_resources_enabled()) {
+            if (mcp_resources_enabled())
                 mcp_source = mcp_resource_source(embed);
-                if (mcp_source)
-                    router.add(std::shared_ptr<rag::KnowledgeSource>(
-                        mcp_source, mcp_source.get()));  // aliasing: shares ownership
-            }
 
-            if (router.source_count() == 0) {
+            // "No knowledge configured" guard: at least one source must exist.
+            const bool any_source = have_docs
+                || (skills_rag_enabled() && skills_source())
+                || (memory_rag_enabled() && memory_source())
+                || static_cast<bool>(mcp_source);
+            if (!any_source) {
                 err = "no knowledge configured. Set AGENTTY_DOCS_DIR to a "
                       "folder of documents (markdown/text/etc.), create "
                       "./docs, install skills, or store memories to give "
@@ -249,63 +239,71 @@ public:
             const std::size_t k = static_cast<std::size_t>(q.k);
             const std::size_t pool_k = std::max<std::size_t>(k * 5, 30);
 
-            std::size_t variant_count = 0;
-            rag::Context ctx;
-            ctx.query = q.query;
-            if (expand_enabled() && have_docs) {
-                rag::ExpandConfig ecfg = expand_config_from_env(embed);
-                auto queries = rag::expand_query(ecfg, q.query);
-                if (queries.size() > 1) variant_count = queries.size() - 1;
-                // Multi-query fusion over the docs corpus; other sources
-                // contribute their single-query best-of through the router.
-                auto fused = docs_source.retrieve_fused(queries, pool_k);
-                rag::KnowledgeRouter rest;
-                if (skills_rag_enabled())
-                    if (auto s = skills_source()) rest.add(std::move(s));
-                if (memory_rag_enabled())
-                    if (auto s = memory_source()) rest.add(std::move(s));
-                if (mcp_source)
-                    rest.add(std::shared_ptr<rag::KnowledgeSource>(
-                        mcp_source, mcp_source.get()));
-                if (rest.source_count() > 0) {
-                    auto extra = rest.retrieve(q.query, pool_k);
-                    fused.insert(fused.end(), extra.begin(), extra.end());
+            // ── #5 PER-TURN QUERY CACHE ────────────────────────────────
+            // A pipeline pass (expand + fan-out + rerank + MMR + compress)
+            // is not free — and an agent frequently re-issues the same
+            // search_docs query inside one ReAct turn (retry after a failed
+            // edit, re-check a fact). Cache the full result keyed by
+            // (query, k, corpus-shape). Cleared whenever the indexed root
+            // changes shape (corpus rebuild bumps corpus_epoch). Bounded.
+            const std::string cache_key =
+                q.query + '\x1f' + std::to_string(k) + '\x1f' + root_str;
+            {
+                std::lock_guard<std::mutex> clk(cache_mu_);
+                if (cache_epoch_ != corpus_epoch_) { query_cache_.clear();
+                                                     cache_epoch_ = corpus_epoch_; }
+                if (auto it = query_cache_.find(cache_key); it != query_cache_.end()) {
+                    mode = it->second.mode + ", cached";
+                    return it->second.passages;
                 }
-                ctx = rag::Context::from_hits(q.query, std::move(fused));
-            } else {
-                ctx = rag::Context::from_hits(
-                    q.query, router.retrieve(q.query, pool_k));
             }
 
-            // The post-retrieval funnel: lexical rerank keeps a mid pool so
-            // the (optional) neural pass and MMR have candidates to work
-            // with; MMR then cuts to k while shedding near-duplicates.
+            // ── #2 CORRECTIVE RETRIEVAL (CRAG) ─────────────────────────
+            // Run the full funnel; if confidence comes back LOW, don't just
+            // report it — ACT: widen the candidate pool and retry once with
+            // a de-noised query (stopword/punct-stripped keywords), then keep
+            // whichever attempt scored higher. Turns the confidence signal
+            // from advisory into corrective. Disable with AGENTTY_RAG_CORRECT=0.
+            std::size_t variant_count = 0;
             const bool neural = neural_rerank_enabled();
-            rag::Pipeline pipe;
-            pipe.add(std::make_shared<rag::RerankStage>(
-                neural ? std::max<std::size_t>(k * 3, 12)
-                       : std::max<std::size_t>(k * 2, 8)));
-            if (neural)
-                pipe.add(std::make_shared<rag::NeuralRerankStage>(
-                    std::max<std::size_t>(k * 2, 8),
-                    neural_config_from_env(embed)));
-            pipe.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
-                .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
-            ctx = pipe.run(std::move(ctx));
-            ctx.compute_confidence();
+            const bool correct = corrective_enabled();
+            constexpr double kLowConf = 0.25;
+
+            rag::Context ctx = run_funnel_(q.query, k, pool_k, neural, have_docs,
+                                           docs_source, mcp_source,
+                                           embed, variant_count);
+
+            bool corrected = false;
+            if (correct && ctx.confidence < kLowConf) {
+                std::string reduced = distill_query_(q.query);
+                if (!reduced.empty() && reduced != q.query) {
+                    std::size_t vc2 = 0;
+                    const std::size_t wide_pool =
+                        std::max<std::size_t>(pool_k * 2, 60);
+                    rag::Context alt = run_funnel_(reduced, k, wide_pool, neural,
+                                                   have_docs, docs_source,
+                                                   mcp_source, embed, vc2);
+                    if (alt.confidence > ctx.confidence) {
+                        ctx = std::move(alt);
+                        variant_count = vc2;
+                        corrected = true;
+                    }
+                }
+            }
 
             std::string mode_str =
                 (have_docs && corpus.has_embeddings()) ? "hybrid+ctx" : "BM25-only";
             mode_str += neural ? ", neural-reranked" : ", reranked";
             if (variant_count > 0)
                 mode_str += ", +" + std::to_string(variant_count) + " query variants";
+            if (corrected) mode_str += ", corrected";
             // Retrieval confidence — the agentic-RAG signal: LOW tells the
             // model to fall back to grep/read instead of trusting weak hits.
             {
                 char buf[32];
                 std::snprintf(buf, sizeof buf, ", confidence %.2f", ctx.confidence);
                 mode_str += buf;
-                if (ctx.confidence < 0.25)
+                if (ctx.confidence < kLowConf)
                     mode_str += " (LOW \xe2\x80\x94 treat results as leads, verify "
                                 "with grep/read)";
             }
@@ -324,6 +322,13 @@ public:
                 p.text       = std::string{c.text()};
                 out.push_back(std::move(p));
             }
+
+            // #5: memoize this turn's result (bounded LRU-ish: clear when full).
+            {
+                std::lock_guard<std::mutex> clk(cache_mu_);
+                if (query_cache_.size() >= kCacheMax) query_cache_.clear();
+                query_cache_.emplace(cache_key, CacheEntry{out, mode});
+            }
             return out;
         } catch (const std::exception& e) {
             err = std::string{"search_docs failed: "} + e.what();
@@ -335,6 +340,104 @@ public:
     }
 
 private:
+    // ── #5 query-cache state ──────────────────────────────────────
+    struct CacheEntry { std::vector<mt::DocPassage> passages; std::string mode; };
+    static constexpr std::size_t kCacheMax = 64;
+    static inline std::mutex cache_mu_;
+    static inline std::unordered_map<std::string, CacheEntry> query_cache_;
+    static inline unsigned long corpus_epoch_ = 0;   // bumped on every rebuild
+    static inline unsigned long cache_epoch_  = ~0UL; // cache's view of the corpus
+
+    static bool corrective_enabled() { return truthy_default_on("AGENTTY_RAG_CORRECT"); }
+
+    // Run the full retrieval funnel for one query and return the ranked,
+    // confidence-scored Context. Shared by the first pass and the CRAG
+    // retry so both paths are identical modulo query + pool width.
+    static rag::Context run_funnel_(
+        const std::string& query, std::size_t k, std::size_t pool_k,
+        bool neural, bool have_docs,
+        rag::CorpusSource& docs_source,
+        const std::shared_ptr<rag::McpResourceSource>& mcp_source,
+        const rag::EmbedConfig& embed, std::size_t& variant_count) {
+
+        rag::KnowledgeRouter router;
+        if (have_docs)
+            router.add(std::shared_ptr<rag::KnowledgeSource>(
+                &docs_source, [](rag::KnowledgeSource*) {}));
+        if (skills_rag_enabled())
+            if (auto s = skills_source()) router.add(std::move(s));
+        if (memory_rag_enabled())
+            if (auto s = memory_source()) router.add(std::move(s));
+        if (mcp_source)
+            router.add(std::shared_ptr<rag::KnowledgeSource>(
+                mcp_source, mcp_source.get()));
+
+        rag::Context ctx;
+        ctx.query = query;
+        if (expand_enabled() && have_docs) {
+            rag::ExpandConfig ecfg = expand_config_from_env(embed);
+            auto queries = rag::expand_query(ecfg, query);
+            if (queries.size() > 1) variant_count = queries.size() - 1;
+            auto fused = docs_source.retrieve_fused(queries, pool_k);
+            rag::KnowledgeRouter rest;
+            if (skills_rag_enabled())
+                if (auto s = skills_source()) rest.add(std::move(s));
+            if (memory_rag_enabled())
+                if (auto s = memory_source()) rest.add(std::move(s));
+            if (mcp_source)
+                rest.add(std::shared_ptr<rag::KnowledgeSource>(
+                    mcp_source, mcp_source.get()));
+            if (rest.source_count() > 0) {
+                auto extra = rest.retrieve(query, pool_k);
+                fused.insert(fused.end(), extra.begin(), extra.end());
+            }
+            ctx = rag::Context::from_hits(query, std::move(fused));
+        } else {
+            ctx = rag::Context::from_hits(query, router.retrieve(query, pool_k));
+        }
+
+        rag::Pipeline pipe;
+        pipe.add(std::make_shared<rag::RerankStage>(
+            neural ? std::max<std::size_t>(k * 3, 12)
+                   : std::max<std::size_t>(k * 2, 8)));
+        if (neural)
+            pipe.add(std::make_shared<rag::NeuralRerankStage>(
+                std::max<std::size_t>(k * 2, 8), neural_config_from_env(embed)));
+        pipe.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
+            .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
+        ctx = pipe.run(std::move(ctx));
+        ctx.compute_confidence();
+        return ctx;
+    }
+
+    // De-noise a query for the CRAG retry: lowercase, strip punctuation to
+    // spaces, drop a small English stopword set, keep tokens ≥3 chars. The
+    // retry probes with the content words only — recovering hits when the
+    // original query was buried in conversational phrasing ("can you tell me
+    // how the foo widget handles bar" → "foo widget handles bar").
+    static std::string distill_query_(const std::string& q) {
+        static const std::unordered_set<std::string> stop = {
+            "the","a","an","of","to","in","on","for","and","or","is","are",
+            "was","were","be","do","does","did","how","what","why","when",
+            "where","which","who","can","you","me","i","we","it","this",
+            "that","with","about","tell","show","please","my","our","your"};
+        std::string cur, out;
+        auto flush = [&] {
+            if (cur.size() >= 3 && !stop.count(cur)) {
+                if (!out.empty()) out += ' ';
+                out += cur;
+            }
+            cur.clear();
+        };
+        for (char c : q) {
+            if (std::isalnum(static_cast<unsigned char>(c)))
+                cur += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            else flush();
+        }
+        flush();
+        return out;
+    }
+
     static fs::path resolve_docs_root() {
         if (const char* env = std::getenv("AGENTTY_DOCS_DIR"))
             if (env[0] != '\0') return fs::path{env};
