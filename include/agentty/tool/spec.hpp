@@ -155,6 +155,7 @@ enum class Kind : std::uint8_t {
     Task,
     Skill,
     SearchDocs,
+    SearchCode,
     RepoMap,
 };
 
@@ -205,6 +206,12 @@ inline constexpr std::array kCatalog = {
     // the trailing lower-ranked block; 60s covers a first-call index
     // build + batch embed of a modest corpus.
     ToolSpec{"search_docs",     Kind::SearchDocs,     {Effect::ReadFs, Effect::Net},        false,   detail::sec{60},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    // search_code — SEMANTIC code retrieval (hybrid complement to grep):
+    // BM25 + optional dense embeddings over source chunks, for conceptual
+    // queries that share no token with the code. Reads the tree (ReadFs) and
+    // queries the local Ollama embed endpoint (Net). First call walks +
+    // indexes the tree, so the 60s budget mirrors search_docs.
+    ToolSpec{"search_code",     Kind::SearchCode,     {Effect::ReadFs, Effect::Net},        false,   detail::sec{60},   30000,  ToolSpec::TruncStrategy::HeadTail},
     // repo_map — aider-style token-budgeted PageRank skeleton of the
     // codebase (def/ref graph, signature lines). The output is already
     // budget-packed by the tool itself (≤60 KB by its own budget arg),
@@ -319,6 +326,7 @@ consteval bool kinds_bijective() {
         Kind::Task,
         Kind::Skill,
         Kind::SearchDocs,
+        Kind::SearchCode,
         Kind::RepoMap,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
@@ -407,12 +415,12 @@ consteval bool only_web_is_net() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Net)) continue;
         if (s.name != "web_fetch" && s.name != "web_search" &&
-            s.name != "search_docs") return false;
+            s.name != "search_docs" && s.name != "search_code") return false;
     }
     return true;
 }
 static_assert(only_web_is_net(),
-              "Only web_fetch/web_search/search_docs may carry Effect::Net");
+              "Only web_fetch/web_search/search_docs/search_code may carry Effect::Net");
 
 // ── Per-tool timeout proofs ─────────────────────────────────────────────
 // Pin the wall-clock-watchdog values so a careless edit (set 0 on the

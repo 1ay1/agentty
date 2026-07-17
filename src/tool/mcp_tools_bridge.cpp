@@ -264,6 +264,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         "todo", "web_fetch", "web_search", "find_definition", "diagnostics",
         "git_status", "git_diff", "git_log", "git_commit",
         "remember", "forget", "wipe_memory", "task", "skill", "search_docs",
+        "search_code",
     };
     auto rank = [](std::string_view n) -> std::size_t {
         for (std::size_t i = 0; i < kOrder.size(); ++i)

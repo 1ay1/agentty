@@ -1502,6 +1502,16 @@ std::string default_system_prompt() {
         << "didn't ask you to remember. Don't store transient state "
         << "(current file you're editing, today's build error). Store "
         << "durable preferences and project conventions.\n"
+        << "  - REFLECTIVE WRITE-BACK is the one exception to the rule "
+        << "above: when you FINISH a non-trivial task (root-caused a bug, "
+        << "discovered the build/test invocation, learned a hard project "
+        << "convention the hard way), distill AT MOST ONE short, durable, "
+        << "verified fact from it and store it with `remember` (scope="
+        << "project, tag by topic) \xe2\x80\x94 future sessions retrieve it via "
+        << "search_docs and proactive retrieval, so today's discovery "
+        << "becomes tomorrow's context. The bar: would a fresh session "
+        << "waste \xe2\x89\xa510 minutes rediscovering this? If yes, store it; "
+        << "if it's routine or speculative, don't. Never store secrets.\n"
         << "</memory-tools>\n";
     // Append CLAUDE.md tiers (User + Project + Local) when present.
     // Lives at the END of the prompt so the always-on rules above

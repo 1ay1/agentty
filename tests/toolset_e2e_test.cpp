@@ -329,6 +329,26 @@ int main() {
         ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
     }
 
+    // ── #3 search_code: semantic code retrieval over the workspace ───────
+    // The retriever walks CWD, so chdir into the sandbox (restored after)
+    // where a distinctive source file exists. BM25-only here (no embed
+    // host); the conceptual-query win needs embeddings, but the lexical
+    // path must already index + retrieve + cite path:lines.
+    {
+        write_file(root / "src" / "throttler.cpp",
+                   "// Request rate limiting\n"
+                   "int backoff_ms(int attempt) {\n"
+                   "    return (1 << attempt) * 100; // exponential backoff\n"
+                   "}\n");
+        auto prev_cwd = fs::current_path();
+        fs::current_path(root);
+        auto r = run("search_code", {{"query", "exponential backoff rate"}});
+        fs::current_path(prev_cwd);
+        check(has(r, "backoff"), "search_code: BM25 retrieval hits the function");
+        check(has(r, "throttler.cpp"), "search_code: result cites the source path");
+        check(has(r, "BM25"), "search_code: reports BM25-only mode (no embed host)");
+    }
+
     // ── task: no subagent runner installed → graceful refusal ────────────
     {
         auto r = run("task", {{"prompt", "explore the codebase"}});

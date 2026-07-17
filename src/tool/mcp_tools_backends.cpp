@@ -43,6 +43,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -685,6 +686,166 @@ private:
     }
 };
 
+// ── CodeRetriever ──────────────────────────────────────────
+//   Backs search_code — SEMANTIC retrieval over source files, the hybrid
+//   complement to grep (2025 consensus: agentic grep for exact/structural,
+//   embeddings for conceptual — Cursor/Sourcegraph ship both; agentty's own
+//   rag.hpp design note reserves doc-RAG for documents and this class fills
+//   the code half). BM25 over identifier-tokenized chunks is always on;
+//   dense embeddings join when Ollama is reachable. Edit-invalidated: a
+//   cheap (size,mtime) fingerprint over the walked tree is recomputed per
+//   call and any drift rebuilds the index — embeddings can go stale between
+//   rebuilds, BM25 cannot lie for long. Bounded walk: skips VCS/build/dep
+//   dirs, binary files, >256 KiB files, and caps the corpus at 4000 files.
+class AgenttyCodeRetriever final : public mt::DocRetriever {
+public:
+    std::vector<mt::DocPassage>
+    retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
+        std::vector<mt::DocPassage> out;
+        try {
+            const rag::EmbedConfig embed = embed_config_from_env_();
+            std::error_code ec;
+            auto root = fs::current_path(ec);
+            if (ec) { err = "search_code: cannot resolve cwd"; return out; }
+
+            static std::mutex mu;
+            static rag::Corpus corpus;
+            static std::uint64_t fingerprint = 0;
+
+            std::lock_guard<std::mutex> lock(mu);
+
+            // Walk + fingerprint. FNV-1a over (path, size, mtime) of every
+            // indexable file — any edit/add/delete flips it.
+            std::vector<std::pair<std::string, fs::path>> files;
+            std::uint64_t fp = 1469598103934665603ULL;
+            auto mix = [&fp](std::uint64_t v) { fp = (fp ^ v) * 1099511628211ULL; };
+            walk_(root, root, files, mix);
+
+            if (files.empty()) {
+                err = "search_code: no source files found under " + root.string();
+                return out;
+            }
+
+            if (fp != fingerprint || corpus.chunk_count() == 0) {
+                std::vector<std::pair<std::string, std::string>> docs;
+                docs.reserve(files.size());
+                for (const auto& [rel, abs] : files) {
+                    std::ifstream in(abs, std::ios::binary);
+                    if (!in) continue;
+                    std::string body((std::istreambuf_iterator<char>(in)),
+                                     std::istreambuf_iterator<char>());
+                    if (body.empty()) continue;
+                    docs.emplace_back(rel, std::move(body));
+                }
+                corpus.build_from_memory(docs, embed);
+                fingerprint = fp;
+            }
+
+            const std::size_t k = static_cast<std::size_t>(q.k);
+            auto hits = corpus.search(q.query, embed,
+                                      std::max<std::size_t>(k * 3, 12));
+
+            // Light MMR-free cut: corpus.search already RRF-fused; take top-k.
+            if (hits.size() > k) hits.resize(k);
+
+            mode = corpus.has_embeddings() ? "hybrid" : "BM25-only";
+            mode += ", " + std::to_string(corpus.chunk_count()) + " chunks from "
+                  + root.string();
+
+            for (const auto& h : hits) {
+                if (!h.chunk) continue;
+                mt::DocPassage p;
+                p.source     = "code";
+                p.path       = h.chunk->path;
+                p.line_start = h.chunk->line_start;
+                p.line_end   = h.chunk->line_end;
+                p.score      = h.score;
+                p.text       = h.chunk->text;
+                out.push_back(std::move(p));
+            }
+            return out;
+        } catch (const std::exception& e) {
+            err = std::string{"search_code failed: "} + e.what();
+            return {};
+        } catch (...) {
+            err = "search_code failed";
+            return {};
+        }
+    }
+
+private:
+    static rag::EmbedConfig embed_config_from_env_() {
+        // Same resolution as the docs retriever (model + host env vars).
+        rag::EmbedConfig cfg;
+        if (const char* m = std::getenv("AGENTTY_EMBED_MODEL"); m && m[0]) cfg.model = m;
+        else cfg.model = "nomic-embed-text";
+        if (const char* h = std::getenv("AGENTTY_OLLAMA_HOST"); h && h[0]) {
+            std::string hs{h};
+            if (auto colon = hs.rfind(':'); colon != std::string::npos) {
+                cfg.host = hs.substr(0, colon);
+                try {
+                    int p = std::stoi(hs.substr(colon + 1));
+                    if (p > 0 && p <= 65535) cfg.port = static_cast<std::uint16_t>(p);
+                } catch (...) { /* keep default */ }
+            } else cfg.host = hs;
+        }
+        return cfg;
+    }
+
+    static bool source_ext_(const fs::path& p) {
+        auto ext = p.extension().string();
+        for (auto& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
+        static const char* kExts[] = {
+            ".c",".cc",".cpp",".cxx",".h",".hh",".hpp",".hxx",".inl",
+            ".py",".js",".jsx",".ts",".tsx",".mjs",".go",".rs",".java",
+            ".kt",".swift",".rb",".php",".cs",".scala",".sh",".bash",
+            ".zig",".lua",".pl",".el",".ex",".exs",".erl",".hs",".ml",
+            ".sql",".proto",".cmake",".gradle"};
+        for (const char* e : kExts) if (ext == e) return true;
+        auto name = p.filename().string();
+        return name == "CMakeLists.txt" || name == "Makefile";
+    }
+
+    static bool skip_dir_(const std::string& name) {
+        static const char* kSkip[] = {
+            ".git",".hg",".svn","node_modules","build","dist","out",
+            "target","venv",".venv","__pycache__",".cache","_deps",
+            "CMakeFiles",".agentty","vendor","third_party"};
+        for (const char* s : kSkip) if (name == s) return true;
+        return !name.empty() && name[0] == '.';
+    }
+
+    template <class MixFn>
+    static void walk_(const fs::path& root, const fs::path& dir,
+                      std::vector<std::pair<std::string, fs::path>>& files,
+                      MixFn&& mix) {
+        constexpr std::size_t kMaxFiles     = 4000;
+        constexpr std::uintmax_t kMaxBytes  = 256 * 1024;
+        std::error_code ec;
+        for (fs::directory_iterator it(dir, ec), end; it != end && files.size() < kMaxFiles;
+             it.increment(ec)) {
+            if (ec) break;
+            const auto& entry = *it;
+            auto name = entry.path().filename().string();
+            if (entry.is_directory(ec)) {
+                if (!skip_dir_(name)) walk_(root, entry.path(), files, mix);
+                continue;
+            }
+            if (!entry.is_regular_file(ec) || !source_ext_(entry.path())) continue;
+            auto sz = entry.file_size(ec);
+            if (ec || sz == 0 || sz > kMaxBytes) continue;
+            auto mt = fs::last_write_time(entry.path(), ec);
+            if (ec) continue;
+            auto rel = fs::relative(entry.path(), root, ec);
+            std::string rel_s = ec ? entry.path().string() : rel.string();
+            mix(std::hash<std::string>{}(rel_s));
+            mix(static_cast<std::uint64_t>(sz));
+            mix(static_cast<std::uint64_t>(mt.time_since_epoch().count()));
+            files.emplace_back(std::move(rel_s), entry.path());
+        }
+    }
+};
+
 // ── SubagentRunner ─────────────────────────────────────────────────────
 //   Backs the task tool. The ENTIRE isolated agent loop — agent-type role
 //   prompts, the per-completion stream reassembly, local tool dispatch, the
@@ -1093,6 +1254,7 @@ void install_host_backends(::mcp::tools::HostServices& svc) {
     svc.memory    = std::make_shared<AgenttyMemoryStore>();
     svc.skills    = std::make_shared<AgenttySkillResolver>();
     svc.retriever = std::make_shared<AgenttyDocRetriever>();
+    svc.code_retriever = std::make_shared<AgenttyCodeRetriever>();
     svc.subagent  = std::make_shared<AgenttySubagentRunner>();
     // svc.todo intentionally left null: the mcp todo shell renders identical
     // text to the native tool with no host state needed, and agentty's TUI
