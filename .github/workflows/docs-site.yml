@@ -1,13 +1,25 @@
-name: Trigger docs site rebuild
+name: Trigger site rebuild
 
-# When the website docs source (docs/website/**) changes on master, tell the
-# agentty.org repo to rebuild + redeploy the site. The docs live here (next to
-# the code); the site just renders them.
+# Tells the agentty.org repo to rebuild + redeploy the static site whenever
+# something the site displays has changed. The site refetches the version,
+# binary sizes, download counts, and star count from GitHub on every deploy, so
+# a redeploy is all it takes to refresh them — we just need to *cause* one.
+#
+# Triggers:
+#   - docs source edited (docs/website/**) → refresh the rendered docs
+#   - a release is published               → refresh the version badge + sizes
+#   - nightly cron                         → backstop for star count / anything
+#   - manual run
 on:
   push:
     branches: [master]
     paths:
       - "docs/website/**"
+  release:
+    types: [published]
+  schedule:
+    - cron: "17 6 * * *" # 06:17 UTC daily
+  workflow_dispatch:
 
 jobs:
   dispatch:
@@ -19,6 +31,7 @@ jobs:
           # with "contents: read" + "metadata: read" is enough to send a
           # repository_dispatch. Store it as the SITE_DISPATCH_TOKEN secret.
           TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+          REASON: ${{ github.event_name }}
         run: |
           if [ -z "$TOKEN" ]; then
             echo "SITE_DISPATCH_TOKEN not set — skipping site dispatch."
@@ -29,6 +42,6 @@ jobs:
             -H "Authorization: Bearer $TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             https://api.github.com/repos/1ay1/agentty.org/dispatches \
-            -d '{"event_type":"docs-updated","client_payload":{"ref":"${{ github.sha }}"}}'
-          echo "Dispatched docs-updated to 1ay1/agentty.org"
+            -d "{\"event_type\":\"site-refresh\",\"client_payload\":{\"reason\":\"$REASON\",\"ref\":\"${{ github.sha }}\"}}"
+          echo "Dispatched site-refresh to 1ay1/agentty.org (reason: $REASON)"
 </content>
