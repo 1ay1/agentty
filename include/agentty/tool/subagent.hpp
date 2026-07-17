@@ -8,9 +8,11 @@
 // without a default model), the tool returns a clear "unavailable"
 // error instead of crashing.
 
+#include <functional>
 #include <string>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/provider/provider.hpp"
 
 namespace agentty::tools::subagent {
 
@@ -19,6 +21,16 @@ struct Config {
     auth::AuthHeader auth;       // wire credential for the sub-stream
     std::string      model;      // model id for sub-agent turns
     bool             installed = false;
+
+    // Provider-agnostic stream seam — the SAME dispatch main.cpp installs
+    // into Deps::stream (routes on provider::active() at call time:
+    // Anthropic / OpenAI-compat / Ollama native). Installed alongside auth
+    // so a subagent talks to whatever backend the USER selected instead of
+    // hardcoding the Anthropic transport — previously `task` failed on
+    // every non-Anthropic provider (wrong wire, wrong auth). Null ⇒ the
+    // runner falls back to the Anthropic transport (old behaviour, keeps
+    // tests that install only auth+model working).
+    std::function<void(provider::Request, provider::EventSink)> stream;
 };
 
 // Install the subagent config (call once at startup, after auth resolves).

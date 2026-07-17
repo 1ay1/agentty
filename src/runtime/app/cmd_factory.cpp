@@ -774,8 +774,13 @@ namespace {
 } // namespace
 
 SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
+    // Scheduling reads spec::sched_effects, NOT the raw permission effects:
+    // `task` gates as Exec (a subagent can run bash) but SCHEDULES as
+    // {ReadFs, Net} so a fan-out of subagents actually runs concurrently —
+    // the whole point of the tool. See spec.hpp::sched_effects.
     auto effects_of = [](const ToolName& n) -> tools::EffectSet {
-        if (const auto* sp = tools::spec::lookup(n.value)) return sp->effects;
+        if (const auto* sp = tools::spec::lookup(n.value))
+            return tools::spec::sched_effects(*sp);
         return tools::EffectSet{{tools::Effect::Exec}};
     };
     tools::EffectSet active_effects;
