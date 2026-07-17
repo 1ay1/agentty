@@ -171,6 +171,24 @@ struct AgenttyApp {
         mix(static_cast<std::uint64_t>(m.ui.todo.open.index()));
         mix(static_cast<std::uint64_t>(m.ui.login.index()));
 
+        // Tool-output viewer: open/closed + list cursor + list↔body stage
+        // + body scroll offset. The body stage scrolls by mutating ONLY
+        // m.ui.tool_viewer_scroll.y (the view windows rows around it —
+        // no widget writeback), so the scroll offset MUST feed the hash
+        // or every ↑/↓/PgDn in the body is gated away until the caret
+        // parity flips ~265 ms later — the "viewer movement is laggy"
+        // symptom, same class as the picker-cursor bug above.
+        mix(static_cast<std::uint64_t>(m.ui.tool_viewer.index()));
+        if (auto* o = tool_viewer_opened(m.ui.tool_viewer)) {
+            mix(static_cast<std::uint64_t>(o->index));
+            mix(o->viewing ? 1ULL : 0ULL);
+            mix(static_cast<std::uint64_t>(m.ui.tool_viewer_scroll.y));
+        }
+        // Code-block picker (and its Result card): same contract.
+        mix(static_cast<std::uint64_t>(m.ui.code_blocks.index()));
+        if (auto* o = code_block_picker_opened(m.ui.code_blocks))
+            mix(static_cast<std::uint64_t>(o->index));
+
         // Checkpoint picker: open/closed + cursor + each entry's async
         // diff-load state (Loading→Ready flips the visible "N files · +A −D"
         // stat, so it MUST advance the hash or the row's diffstat wouldn't

@@ -227,6 +227,25 @@ const std::vector<Axis>& visual_axes() {
         {"todo modal opens", [](Model& m) {
             m.ui.todo.open = agentty::ui::pick::OpenModal{};
         }},
+        {"tool viewer opens", [](Model& m) {
+            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, false};
+        }},
+        {"tool viewer list cursor move", [](Model& m) {
+            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 2, false};
+        }},
+        {"tool viewer list -> body stage", [](Model& m) {
+            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, true};
+        }},
+        {"tool viewer body scroll", [](Model& m) {
+            m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, true};
+            m.ui.tool_viewer_scroll.y = 5;
+        }},
+        {"code block picker opens", [](Model& m) {
+            m.ui.code_blocks = agentty::code_block_picker::Open{{}, 0};
+        }},
+        {"code block picker cursor move", [](Model& m) {
+            m.ui.code_blocks = agentty::code_block_picker::Open{{}, 3};
+        }},
         {"login modal opens", [](Model& m) {
             m.ui.login = agentty::ui::login::Picking{};
         }},
