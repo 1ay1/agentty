@@ -75,6 +75,30 @@ std::string tool_result_content(const std::string& wire, const char* tool_use_id
     return {};
 }
 
+// Build a thread with `n` Assistant tool-call turns, each carrying one Done
+// tool_call whose output is `big`. Returns the thread; the FIRST tool turn is
+// the oldest (highest recency rank), the LAST is the newest (rank 0).
+Thread make_thread_with_n_tool_turns(int n, const std::string& big) {
+    std::vector<Message> msgs;
+    Message user; user.role = Role::User; user.text = "start";
+    msgs.push_back(user);
+    for (int i = 0; i < n; ++i) {
+        ToolUse tc;
+        tc.id   = ToolCallId{"toolu_" + std::to_string(i)};
+        tc.name = ToolName{"grep"};
+        tc.status = ToolUse::Done{
+            std::chrono::steady_clock::now(),
+            std::chrono::steady_clock::now(),
+            big,
+        };
+        Message asst; asst.role = Role::Assistant;
+        asst.text = "call " + std::to_string(i);
+        asst.tool_calls.push_back(std::move(tc));
+        msgs.push_back(std::move(asst));
+    }
+    return Thread{ThreadId{"t"}, "", std::move(msgs), {}, {}};
+}
+
 } // namespace
 
 int main() {
@@ -194,6 +218,91 @@ int main() {
                           "shipped image block has non-empty base64");
                 }
         check(image_blocks == 1, "exactly the one real image ships");
+    }
+
+    // ── 5. Age-tiered clearing: recent full, ancient faded ──
+    // A long tool-burst turn: 20 calls, each dumping 60 KiB. The newest
+    // ~8 must keep the full budget (active working set); the oldest must
+    // collapse to the tight faded budget so stale dumps stop replaying.
+    {
+        std::string big;
+        big += "HEAD_SENTINEL_AAAA\n";
+        big.append(60 * 1024, 'x');
+        big += "\nTAIL_SENTINEL_ZZZZ";
+
+        const int n = 20;
+        Thread t = make_thread_with_n_tool_turns(n, big);
+        std::string wire = ap::messages_json_string(t);
+
+        // Newest call (id toolu_19, rank 0) keeps the full budget.
+        std::string newest = tool_result_content(wire, "toolu_19");
+        check(newest.size() > 40 * 1024,
+              "newest tool result keeps the full (large) budget");
+        check(newest.find("HEAD_SENTINEL_AAAA") != std::string::npos
+           && newest.find("TAIL_SENTINEL_ZZZZ") != std::string::npos,
+              "newest result keeps head+tail");
+
+        // Oldest call (id toolu_0, rank 19) is faded to the tight budget.
+        std::string oldest = tool_result_content(wire, "toolu_0");
+        check(oldest.size() < 6 * 1024,
+              "oldest tool result is faded to the tight budget");
+        check(oldest.find("bytes elided") != std::string::npos,
+              "faded result carries the elision marker");
+        check(oldest.find("HEAD_SENTINEL_AAAA") != std::string::npos
+           && oldest.find("TAIL_SENTINEL_ZZZZ") != std::string::npos,
+              "faded result STILL keeps head+tail (recall, not replay)");
+
+        // A result well inside the recent window (id toolu_15, rank 4)
+        // must NOT be faded.
+        std::string recent = tool_result_content(wire, "toolu_15");
+        check(recent.size() > 40 * 1024,
+              "a result inside the recent window stays full");
+    }
+
+    // ── 6. Error results NEVER fade, however old ──
+    {
+        std::string bigerr;
+        bigerr += "ERR_HEAD_AAAA\n";
+        bigerr.append(60 * 1024, 'e');
+        bigerr += "\nERR_TAIL_ZZZZ";
+
+        // 20 turns; make the OLDEST one a Failed (error) call, the rest Done.
+        std::vector<Message> msgs;
+        Message user; user.role = Role::User; user.text = "start"; msgs.push_back(user);
+        for (int i = 0; i < 20; ++i) {
+            ToolUse tc;
+            tc.id   = ToolCallId{"toolu_e" + std::to_string(i)};
+            tc.name = ToolName{"bash"};
+            if (i == 0) {
+                tc.status = ToolUse::Failed{
+                    std::chrono::steady_clock::now(),
+                    std::chrono::steady_clock::now(), bigerr};
+            } else {
+                tc.status = ToolUse::Done{
+                    std::chrono::steady_clock::now(),
+                    std::chrono::steady_clock::now(), bigerr};
+            }
+            Message asst; asst.role = Role::Assistant; asst.text = "c";
+            asst.tool_calls.push_back(std::move(tc));
+            msgs.push_back(std::move(asst));
+        }
+        Thread t{ThreadId{"t"}, "", std::move(msgs), {}, {}};
+        std::string wire = ap::messages_json_string(t);
+
+        // The oldest call is an ERROR — even at rank 19 it keeps full budget.
+        std::string olderr = tool_result_content(wire, "toolu_e0");
+        check(olderr.size() > 40 * 1024,
+              "oldest ERROR result is NOT faded (model needs it to recover)");
+    }
+
+    // ── 7. Short old results ship verbatim (nothing to fade) ──
+    {
+        const std::string small = "3 matches\n";
+        Thread t = make_thread_with_n_tool_turns(20, small);
+        std::string wire = ap::messages_json_string(t);
+        std::string oldest = tool_result_content(wire, "toolu_0");
+        check(oldest == small,
+              "small old result ships verbatim (no marker, no fade)");
     }
 
     if (g_fails == 0) std::fprintf(stderr, "\nALL PASS\n");
