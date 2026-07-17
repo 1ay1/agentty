@@ -232,6 +232,21 @@ int main() {
         check(has(r, "BM25"), "search_docs: reports BM25-only mode (no embed host)");
     }
 
+    // ── search_docs × memory: learned facts are a fused knowledge source ──
+    // A remembered fact must be retrievable by query — including facts that
+    // rolled OUT of the 6 KiB prompt budget — with memory:// provenance.
+    {
+        (void)run("remember", {{"text", "the flux capacitor requires "
+                                        "gigawatt plutonium calibration"},
+                               {"scope", "user"}});
+        auto r = run("search_docs", {{"query", "flux capacitor plutonium"}});
+        check(has(r, "flux capacitor"),
+              "search_docs: retrieves a remembered fact");
+        check(has(r, "memory"),
+              "search_docs: memory hit carries memory provenance");
+        (void)run("wipe_memory", {{"scope", "user"}, {"confirm", true}});
+    }
+
     // ── task: no subagent runner installed → graceful refusal ────────────
     {
         auto r = run("task", {{"prompt", "explore the codebase"}});

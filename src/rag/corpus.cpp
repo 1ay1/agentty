@@ -85,7 +85,8 @@ embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts) {
 namespace {
 
 constexpr char kCacheName[] = ".agentty_rag_cache.bin";
-constexpr std::uint32_t kCacheMagic   = 0x52414702;  // "RAG\x02" — v2 adds HNSW
+constexpr std::uint32_t kCacheMagic   = 0x52414703;  // "RAG\x03" — v3 adds chunk context (contextual retrieval)
+constexpr std::uint32_t kCacheMagicV2 = 0x52414702;  // legacy v2 (HNSW, no context)
 constexpr std::uint32_t kCacheMagicV1 = 0x52414701;  // legacy v1 (no HNSW)
 
 // Which files we treat as knowledge documents. Code is intentionally
@@ -195,8 +196,12 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
         std::string blob = read_file(root / kCacheName, 512ull * 1024 * 1024);
         std::string_view b{blob};
         std::uint32_t magic = 0;
-        if (get(b, magic) && (magic == kCacheMagic || magic == kCacheMagicV1)) {
-            bool is_v2 = (magic == kCacheMagic);
+        // v1/v2 caches lack the context field AND their embeddings were
+        // computed over the bare body (non-contextual) — loading them would
+        // permanently pin the corpus to pre-contextual quality. Treat them
+        // as a miss: one-time full re-chunk + re-embed, then v3 persists.
+        if (get(b, magic) && magic == kCacheMagic) {
+            bool is_v2 = true;   // v3 keeps the v2 layout + context per chunk
             std::uint32_t dim = 0, nfiles = 0;
             get(b, dim);
             get(b, nfiles);
@@ -214,6 +219,7 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
                     std::int32_t ls = 0, le = 0;
                     std::uint32_t elen = 0;
                     if (!get(b, ls) || !get(b, le) || !get_str(b, c.text) ||
+                        !get_str(b, c.context) ||
                         !get(b, elen)) { ok = false; break; }
                     c.line_start = ls;
                     c.line_end   = le;
@@ -300,7 +306,7 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
             std::vector<std::string> texts;
             texts.reserve(hi - i);
             for (std::size_t j = i; j < hi; ++j)
-                texts.push_back(need_embed[j]->text);
+                texts.push_back(need_embed[j]->embed_input());   // contextual embeddings
             auto vecs = embed_texts(embed, texts);
             if (!vecs || vecs->size() != texts.size()) break;  // degrade to BM25
             for (std::size_t j = i; j < hi; ++j) {
@@ -433,7 +439,7 @@ std::size_t Corpus::add_document(const std::string& path, const std::string& bod
     if (!embed.model.empty()) {
         std::vector<std::string> texts;
         texts.reserve(new_chunks.size());
-        for (const auto& c : new_chunks) texts.push_back(c.text);
+        for (const auto& c : new_chunks) texts.push_back(c.embed_input());
         
         auto vecs = embed_texts(embed, texts);
         if (vecs && vecs->size() == texts.size()) {
@@ -497,7 +503,7 @@ std::size_t Corpus::build_from_memory(
             std::size_t hi = std::min(i + kBatch, chunks_.size());
             std::vector<std::string> texts;
             texts.reserve(hi - i);
-            for (std::size_t j = i; j < hi; ++j) texts.push_back(chunks_[j].text);
+            for (std::size_t j = i; j < hi; ++j) texts.push_back(chunks_[j].embed_input());
             auto vecs = embed_texts(embed, texts);
             if (!vecs || vecs->size() != texts.size()) break;  // degrade to BM25
             for (std::size_t j = i; j < hi; ++j) {
@@ -562,6 +568,7 @@ void Corpus::write_cache_() const {
             put(blob, static_cast<std::int32_t>(c->line_start));
             put(blob, static_cast<std::int32_t>(c->line_end));
             put_str(blob, c->text);
+            put_str(blob, c->context);   // v3: contextual-retrieval breadcrumb
             put(blob, static_cast<std::uint32_t>(c->embedding.size()));
             if (!c->embedding.empty())
                 blob.append(reinterpret_cast<const char*>(c->embedding.data()),
