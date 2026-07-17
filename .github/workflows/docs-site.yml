@@ -1,0 +1,34 @@
+name: Trigger docs site rebuild
+
+# When the website docs source (docs/website/**) changes on master, tell the
+# agentty.org repo to rebuild + redeploy the site. The docs live here (next to
+# the code); the site just renders them.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/website/**"
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify agentty.org to redeploy
+        env:
+          # A fine-grained PAT (or classic repo-scoped token) for 1ay1/agentty.org
+          # with "contents: read" + "metadata: read" is enough to send a
+          # repository_dispatch. Store it as the SITE_DISPATCH_TOKEN secret.
+          TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "SITE_DISPATCH_TOKEN not set — skipping site dispatch."
+            exit 0
+          fi
+          curl -fsSL -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/1ay1/agentty.org/dispatches \
+            -d '{"event_type":"docs-updated","client_payload":{"ref":"${{ github.sha }}"}}'
+          echo "Dispatched docs-updated to 1ay1/agentty.org"
+</content>
