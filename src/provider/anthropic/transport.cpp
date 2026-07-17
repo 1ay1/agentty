@@ -1591,9 +1591,18 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
                 {"text", "You are Claude Code, Anthropic's official CLI for Claude."}
             });
         }
+        // Scrub the system prompt too. Unlike message text (run through
+        // scrub_utf8 in messages_json_string), the system prompt is placed
+        // directly into `body` and serialized by body.dump() below — which
+        // throws type_error.316 on the FIRST malformed UTF-8 byte. The prompt
+        // now carries arbitrary user bytes (CLAUDE.md tiers + `remember`
+        // records, which can round-trip a truncated/broken multi-byte
+        // sequence from a pasted tool output). One bad byte there was failing
+        // EVERY turn on every thread with "invalid UTF-8 in conversation"; a
+        // single scrub here makes the wire well-formed regardless of source.
         sys.push_back({
             {"type", "text"},
-            {"text", req.system_prompt},
+            {"text", scrub_utf8(req.system_prompt)},
             {"cache_control", kCacheCtl}
         });
         body["system"] = std::move(sys);
