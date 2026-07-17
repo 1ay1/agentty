@@ -44,4 +44,3 @@ jobs:
             https://api.github.com/repos/1ay1/agentty.org/dispatches \
             -d "{\"event_type\":\"site-refresh\",\"client_payload\":{\"reason\":\"$REASON\",\"ref\":\"${{ github.sha }}\"}}"
           echo "Dispatched site-refresh to 1ay1/agentty.org (reason: $REASON)"
-</content>
