@@ -607,24 +607,24 @@ const AgentType& resolve_agent_type(std::string_view t) {
          "precise map: the key files, the functions/types involved, how they "
          "connect, and any gotchas. Cite exact file paths and line numbers. "
          "You are READ-ONLY \xe2\x80\x94 never modify anything.",
-         {"read", "grep", "glob", "list_dir", "find_definition", "web_search",
-          "web_fetch"}},
+         {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
+          "web_search", "web_fetch"}},
         {"reviewer", true,
          "Your role: REVIEWER. Critically review the code or change the task "
          "names. Look for bugs, edge cases, race conditions, security issues, "
          "and deviations from the surrounding conventions. Return findings as "
          "a prioritised list (blocker / major / minor / nit), each with the "
          "exact file:line and a concrete fix suggestion. You are READ-ONLY.",
-         {"read", "grep", "glob", "list_dir", "find_definition", "git_diff",
-          "git_log", "git_status"}},
+         {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
+          "git_diff", "git_log", "git_status"}},
         {"tester", false,
          "Your role: TESTER. Reproduce, run, and diagnose. Build/run the "
          "relevant tests or commands the task names, read the failures, and "
          "report the root cause with the exact failing assertion and the "
          "file:line that produced it. Prefer running over guessing. Do NOT "
          "rewrite production code \xe2\x80\x94 only run, read, and diagnose.",
-         {"read", "grep", "glob", "list_dir", "find_definition", "bash",
-          "diagnostics", "git_diff", "git_status"}},
+         {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
+          "bash", "diagnostics", "git_diff", "git_status"}},
         {"coder", false,
          "Your role: CODER. Implement the change the task names end-to-end: "
          "read the relevant code first, make the edits, and verify they build/"

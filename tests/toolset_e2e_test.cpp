@@ -170,6 +170,13 @@ int main() {
         check(has(r, "code.cpp"), "find_definition: locates the function");
     }
 
+    // ── repo_map: ranked skeleton over the sandbox ────────────────────
+    {
+        auto r = run("repo_map", {{"path", root.string()}});
+        check(has(r, "code.cpp"), "repo_map: surfaces the source file");
+        check(has(r, "answer"), "repo_map: shows definition signatures");
+    }
+
     // ── bash (sandbox off) ────────────────────────────────────────────────
     {
         auto r = run("bash", {{"command", "echo e2e-bash-ok"},

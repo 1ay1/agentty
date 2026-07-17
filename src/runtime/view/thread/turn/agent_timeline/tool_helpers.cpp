@@ -29,6 +29,7 @@ std::string tool_display_name(const std::string& n) {
     if (n == "web_fetch")       return "Fetch";
     if (n == "web_search")      return "Search";
     if (n == "find_definition") return "Definition";
+    if (n == "repo_map")        return "Repo Map";
     if (n == "diagnostics")     return "Diag";
     if (n == "git_status")      return "Git Status";
     if (n == "git_diff")        return "Git Diff";

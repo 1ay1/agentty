@@ -155,6 +155,7 @@ enum class Kind : std::uint8_t {
     Task,
     Skill,
     SearchDocs,
+    RepoMap,
 };
 
 inline constexpr std::array kCatalog = {
@@ -204,6 +205,12 @@ inline constexpr std::array kCatalog = {
     // the trailing lower-ranked block; 60s covers a first-call index
     // build + batch embed of a modest corpus.
     ToolSpec{"search_docs",     Kind::SearchDocs,     {Effect::ReadFs, Effect::Net},        false,   detail::sec{60},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    // repo_map — aider-style token-budgeted PageRank skeleton of the
+    // codebase (def/ref graph, signature lines). The output is already
+    // budget-packed by the tool itself (≤60 KB by its own budget arg),
+    // so the dispatcher cap is a safety net. Head: the map is ranked
+    // best-first, so truncation from the tail loses only low-rank files.
+    ToolSpec{"repo_map",        Kind::RepoMap,        {Effect::ReadFs},                     false,   detail::sec{30},   60000,  ToolSpec::TruncStrategy::Head},
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
@@ -312,6 +319,7 @@ consteval bool kinds_bijective() {
         Kind::Task,
         Kind::Skill,
         Kind::SearchDocs,
+        Kind::RepoMap,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto k : kAll) {
@@ -379,7 +387,7 @@ static_assert(lookup("todo")->effects.empty());
 // Read-side tools must NOT have WriteFs / Net / Exec.
 consteval bool readonly_invariants() {
     constexpr std::string_view kReadOnly[] = {
-        "read","grep","glob","list_dir","find_definition",
+        "read","grep","glob","list_dir","find_definition","repo_map",
         "git_status","git_diff","git_log",
     };
     for (auto n : kReadOnly) {

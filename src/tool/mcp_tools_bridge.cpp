@@ -260,6 +260,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // without this the working tools sink to the bottom of the wire payload.
     static const std::vector<std::string_view> kOrder = {
         "read", "edit", "write", "bash", "grep", "glob", "list_dir",
+        "repo_map",
         "todo", "web_fetch", "web_search", "find_definition", "diagnostics",
         "git_status", "git_diff", "git_log", "git_commit",
         "remember", "forget", "wipe_memory", "task", "skill", "search_docs",
