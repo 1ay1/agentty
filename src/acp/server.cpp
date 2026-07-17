@@ -69,6 +69,7 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Glob:           return a::ToolKind::Search;
         case sp::Kind::FindDefinition: return a::ToolKind::Search;
         case sp::Kind::SearchDocs:     return a::ToolKind::Search;
+        case sp::Kind::RepoMap:        return a::ToolKind::Search;
         case sp::Kind::ListDir:        return a::ToolKind::Read;
         case sp::Kind::GitStatus:      return a::ToolKind::Read;
         case sp::Kind::GitDiff:        return a::ToolKind::Read;
