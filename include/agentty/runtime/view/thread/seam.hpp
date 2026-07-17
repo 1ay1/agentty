@@ -43,47 +43,63 @@ inline maya::Element gap_row() {
 inline constexpr int kGapRows = 3;
 
 // Compaction-boundary divider: a single-row centered labeled rule
-//   ─────  ≡ Conversation compacted  ─────
+//   ┈┈┈┈┈  ≡ Conversation compacted  ┈┈┈┈┈
 // emitted before a run that begins on a compaction boundary. Rendered
 // as a real horizontal separator (not a speaker Turn with a hanging
 // left rail, which read as a broken empty message) so the boundary
-// looks like the section break it is — the same visual family as
-// maya::Conversation::divider(), just carrying a centered label.
+// looks like the section break it is. Visually distinct from the
+// inter-turn `─` rule: a lighter QUAD-DASH rule (┈) flanks the label,
+// the `≡` glyph carries the brand accent, and the label itself sits a
+// tone brighter than the rule so the event reads at a glance instead
+// of dissolving into chrome.
 //
 // MUST stay exactly ONE row: freeze_range (frozen.cpp) and
 // build_live_tail (conversation.cpp) both emit this at the boundary, and
 // any height delta at the freeze seam ghosts committed scrollback rows
-// (INLINE_SCROLLBACK.md pin #3). A single width-aware text() row keeps
-// the seam height-stable by construction.
+// (INLINE_SCROLLBACK.md pin #3). A single-row h() of styled segments
+// keeps the seam height-stable by construction — and both builders call
+// THIS function, so the bytes cannot drift either.
+//
+// The label literal "Conversation compacted" is load-bearing: the seam
+// tests (midrun_seam_test) grep for it to count divider copies.
 inline maya::Element compaction_divider_row() {
     using namespace maya::dsl;
     return maya::detail::component([](int w, int /*h*/) -> maya::Element {
         if (w <= 0) return blank().build();
-        // "≡ Conversation compacted" centered, flanked by ─ rules. Built
-        // as ONE string so the row is a single TextElement (exactly one
-        // row, byte-identical across the freeze seam) — the same shape as
-        // maya::Conversation::divider_rule(), just carrying a label.
-        const std::string label = "\xe2\x89\xa1 Conversation compacted";
-        // ≡ is a 3-byte glyph that renders in 1 column; the rest is ASCII.
-        const int label_cells = static_cast<int>(label.size()) - 2;
-        const int rule_total  = w - label_cells - 2;   // 1 space each side
-        std::string line;
-        if (rule_total < 2) {
-            line = "   " + label;                       // too narrow to flank
-        } else {
-            const int left  = rule_total / 2;
-            const int right = rule_total - left;
-            for (int i = 0; i < left; ++i)  line += "\xe2\x94\x80";   // ─
-            line += ' ';
-            line += label;
-            line += ' ';
-            for (int i = 0; i < right; ++i) line += "\xe2\x94\x80";
+        const std::string glyph = "\xe2\x89\xa1";              // ≡ (1 col)
+        const std::string label = "Conversation compacted";    // ASCII
+        // cells: glyph(1) + space(1) + label + two spaces each side
+        const int label_cells = 2 + static_cast<int>(label.size());
+        const int rule_total  = w - label_cells - 4;
+        if (rule_total < 4) {
+            // Too narrow to flank — left-aligned compact form.
+            return h(
+                text("   "),
+                text(glyph + " ", maya::Style{}.with_fg(accent)),
+                text(label, maya::Style{}.with_fg(text_secondary).with_dim())
+            ).build();
         }
-        return text(std::move(line),
-                    maya::Style{}.with_fg(muted).with_dim()).build();
+        const int left  = rule_total / 2;
+        const int right = rule_total - left;
+        std::string lrule, rrule;
+        lrule.reserve(static_cast<std::size_t>(left) * 3);
+        rrule.reserve(static_cast<std::size_t>(right) * 3);
+        for (int i = 0; i < left; ++i)  lrule += "\xe2\x94\x88";   // ┈
+        for (int i = 0; i < right; ++i) rrule += "\xe2\x94\x88";
+        return h(
+            text(std::move(lrule),
+                 maya::Style{}.with_fg(muted).with_dim()),
+            text("  "),
+            text(glyph, maya::Style{}.with_fg(accent)),
+            text(" "),
+            text(label, maya::Style{}.with_fg(text_secondary).with_dim()),
+            text("  "),
+            text(std::move(rrule),
+                 maya::Style{}.with_fg(muted).with_dim())
+        ).build();
     })
     .hash_id(maya::CacheIdBuilder{}
-        .add(std::string_view{"agentty.compaction.divider"})
+        .add(std::string_view{"agentty.compaction.divider.v2"})
         .build());
 }
 
