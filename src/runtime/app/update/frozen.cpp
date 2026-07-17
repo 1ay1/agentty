@@ -597,7 +597,16 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
             return;
         }
 
+        const bool first_overall = m.ui.frozen.empty();
+
+        // Compaction divider, flanked by a full inter-turn gap on BOTH
+        // sides — a leading gap for breathing room above (so the section
+        // break doesn't hug the content above it) plus the trailing gap
+        // below. build_live_tail emits this identical sequence, so the
+        // frozen and live rows stay byte-identical across the freeze seam.
         if (needs_compaction_divider(i)) {
+            if (!first_overall)
+                push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
             push_frozen(m, compaction_divider_row(), 1, /*separator=*/true);
         }
 
@@ -605,7 +614,6 @@ void freeze_range(Model& m, std::size_t from, std::size_t to) {
 
         // Leading gap: one blank row before every turn except the
         // very first frozen row (avoid a top-of-thread gap).
-        const bool first_overall = m.ui.frozen.empty();
         if (!first_overall) {
             push_frozen(m, gap_row(), kGapRows, /*separator=*/true);
         }

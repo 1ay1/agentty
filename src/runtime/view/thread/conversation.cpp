@@ -96,14 +96,18 @@ void build_live_tail(const Model& m, int& running_turn,
         // been deleted — finalize_turn is the only freeze site, so the
         // live tail always starts at a whole-turn boundary.
 
-        // Compaction divider FIRST (before the inter-turn gap), exactly
-        // as freeze_range orders it, so the live and frozen row
+        // Compaction divider, flanked by a full inter-turn gap on BOTH
+        // sides so the section break gets breathing room above (matching
+        // the gap below) instead of hugging the content above it. The
+        // ordering — leading gap, divider, trailing gap — is emitted
+        // identically by freeze_range, so the live and frozen row
         // sequences stay byte-identical across the freeze seam.
+        const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (compaction_boundary(i)) {
+            if (!first_overall) out.push_back(gap_row());   // space ABOVE
             out.push_back(compaction_divider_row());
         }
 
-        const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (!first_overall) {
             out.push_back(gap_row());
         }
