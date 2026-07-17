@@ -22,6 +22,7 @@
 #include "agentty/provider/openai/transport.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -1298,28 +1299,38 @@ json build_tools(const std::vector<provider::ToolSpec>& tools) {
 }
 
 // ── Header builder ───────────────────────────────────────────────────────────
-namespace {
-http::Headers build_request_headers(const AuthHeader& auth) {
+http::Headers build_request_headers(const AuthHeader& auth,
+                                    const Endpoint& endpoint) {
     http::Headers h;
     h.push_back({"accept", "application/json"});
     h.push_back({"content-type", "application/json"});
     h.push_back({"user-agent", "agentty/" AGENTTY_VERSION});
-    // Both header arms emit `Authorization: Bearer <token>` for the OpenAI
-    // family — OpenAI/Groq/OpenRouter all use bearer keys. (ApiKeyHeader's
-    // raw `sk-...` value goes out the same way; there's no `x-api-key` here.)
+    // Extract the key from either arm — both carry a plain string.
+    std::string key;
     std::visit([&](const auto& a) {
         using T = std::decay_t<decltype(a)>;
-        if constexpr (std::is_same_v<T, ApiKeyHeader>) {
-            if (!a.value.empty())
-                h.push_back({"authorization", "Bearer " + a.value});
-        } else if constexpr (std::is_same_v<T, BearerHeader>) {
-            if (!a.token.empty())
-                h.push_back({"authorization", "Bearer " + a.token});
-        }
+        if constexpr (std::is_same_v<T, ApiKeyHeader>)      key = a.value;
+        else if constexpr (std::is_same_v<T, BearerHeader>) key = a.token;
     }, auth);
+    if (key.empty()) return h;
+    if (!endpoint.auth_header_name.empty()) {
+        // Custom header name (--auth-header): key goes out raw, no "Bearer "
+        // prefix, for gateways that authenticate with e.g. `X-API-Key`.
+        // Lowercased — header names are case-insensitive and every other
+        // header agentty sends is lowercase.
+        std::string name = endpoint.auth_header_name;
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        h.push_back({std::move(name), std::move(key)});
+    } else {
+        // Default: `Authorization: Bearer <token>` for the whole OpenAI
+        // family — OpenAI/Groq/OpenRouter all use bearer keys. (ApiKeyHeader's
+        // raw `sk-...` value goes out the same way; there's no `x-api-key`
+        // here.)
+        h.push_back({"authorization", "Bearer " + key});
+    }
     return h;
 }
-} // namespace
 
 // ── Streaming entry point ────────────────────────────────────────────────────
 void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
@@ -1421,7 +1432,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         hreq.dial_host = ov.host;
         hreq.dial_port = ov.port;
     }
-    hreq.headers = build_request_headers(req.auth);
+    hreq.headers = build_request_headers(req.auth, req.endpoint);
     hreq.body    = std::move(body_str);
 
     int  http_status = 0;
@@ -1660,7 +1671,7 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
     hreq.port       = ep.port;
     hreq.path       = "/api/show";
     hreq.plaintext  = !ep.use_tls;
-    hreq.headers    = build_request_headers(auth);
+    hreq.headers    = build_request_headers(auth, ep);
     hreq.body       = json{{"model", model_name}}.dump();
     hreq.max_body_bytes = 512 * 1024;  // /api/show can be large (modelfile)
 
@@ -1722,7 +1733,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
         hreq.dial_host = ov.host;
         hreq.dial_port = ov.port;
     }
-    hreq.headers        = build_request_headers(auth);
+    hreq.headers        = build_request_headers(auth, endpoint);
     hreq.max_body_bytes = 2ull * 1024 * 1024;
 
     http::Timeouts tos;

@@ -118,6 +118,11 @@ void print_usage() {
         "                      like -m. (Switch live in-app with Ctrl-P \xe2\x80\x94 the\n"
         "                      picker has a \"Custom host\xe2\x80\xa6\" entry too.)\n"
         "  -V, --version       Print the agentty version and exit.\n"
+        "      --auth-header N Auth header NAME for OpenAI-compatible backends\n"
+        "                      whose gateway doesn't accept `Authorization:\n"
+        "                      Bearer` (e.g. X-API-Key). The key (-k /\n"
+        "                      OPENAI_API_KEY) is sent raw under that name.\n"
+        "                      Session-scoped like -k; default: Bearer.\n"
         "  -h, --help          Show this message.\n"
         "\n",
         AGENTTY_VERSION);
@@ -131,6 +136,7 @@ struct Args {
     std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
+    std::string cli_auth_header; // custom auth header NAME (e.g. "X-API-Key")
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
@@ -163,6 +169,8 @@ Args parse_args(int argc, char** argv) {
             out.cli_profile = argv[++i];
         } else if (a == "--provider" && i + 1 < argc) {
             out.cli_provider = argv[++i];
+        } else if (a == "--auth-header" && i + 1 < argc) {
+            out.cli_auth_header = argv[++i];
         } else if (a == "-h" || a == "--help") {
             out.subcommand = "help";
         } else if (a == "-V" || a == "--version" || a == "version") {
@@ -332,6 +340,10 @@ int main(int argc, char** argv) {
         }
         persistence::save_settings(s);
     }
+    // Session-scoped --auth-header override; must be installed BEFORE
+    // parse_selection so the initial Selection (and every live-switch
+    // rebuild) stamps it onto the OpenAI-family Endpoint.
+    provider::set_custom_auth_header(args.cli_auth_header);
     auto selection = provider::parse_selection(provider_spec);
     provider::select(selection);
 

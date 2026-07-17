@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`--auth-header NAME` — custom auth header for OpenAI-compatible gateways.** Custom `--provider host[:port]` endpoints (and presets) could only authenticate with the hard-coded `Authorization: Bearer <key>`, which locked out self-hosted / enterprise gateways that expect the key under a different header name (e.g. `X-API-Key`). The new session-scoped flag overrides the header *name*; the key (from `-k` / the in-app paste / `OPENAI_API_KEY`) goes out raw under it, on every OpenAI-family request (chat completions, `/v1/models` listing, the Ollama capability probe), and survives live provider switches (`^P`). Unset keeps the standard bearer header; the Anthropic path is untouched. (#5)
+
 ## [0.2.8] - 2026-07-16
 
 ### Fixed

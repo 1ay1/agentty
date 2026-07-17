@@ -15,12 +15,25 @@ namespace {
 Selection  g_active{};
 std::mutex g_active_mu;   // guards g_active across the UI/worker thread split
 
+std::string g_auth_header;         // --auth-header override, "" = Bearer
+std::mutex  g_auth_header_mu;      // same UI/worker split as g_active
+
 std::string env_or_empty(std::string_view name) {
     if (name.empty()) return {};
     const char* v = std::getenv(std::string{name}.c_str());
     return (v && *v) ? std::string{v} : std::string{};
 }
 } // namespace
+
+void set_custom_auth_header(std::string name) {
+    std::lock_guard lk(g_auth_header_mu);
+    g_auth_header = std::move(name);
+}
+
+std::string custom_auth_header() {
+    std::lock_guard lk(g_auth_header_mu);
+    return g_auth_header;
+}
 
 Selection parse_selection(std::string_view spec) {
     Selection s;
@@ -37,6 +50,10 @@ Selection parse_selection(std::string_view spec) {
     s.kind = Kind::OpenAI;
     s.openai_endpoint = openai::Endpoint::from_spec(
         spec.empty() ? default_provider_id() : spec);
+    // Stamp the session's --auth-header override onto every OpenAI-family
+    // endpoint, here rather than at the call sites so live provider switches
+    // (picker / login reducers) keep it without knowing it exists.
+    s.openai_endpoint.auth_header_name = custom_auth_header();
     return s;
 }
 
