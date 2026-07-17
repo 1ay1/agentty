@@ -177,11 +177,39 @@ int main() {
         check(has(r, "answer"), "repo_map: shows definition signatures");
     }
 
-    // ── bash (sandbox off) ────────────────────────────────────────────────
+    // ── bash (sandbox off) ──────────────────────────────────────────────────
     {
         auto r = run("bash", {{"command", "echo e2e-bash-ok"},
                               {"cd", root.string()}});
         check(has(r, "e2e-bash-ok"), "bash: runs and captures stdout");
+    }
+
+    // ── bash: terminal line-discipline at the capture boundary ────────
+    // A child that emits CSI/OSC escapes (SGR colors, a DECSTBM region
+    // probe, an OSC title) plus CR progress rewinds must come back CLEAN:
+    // no ESC/CR/BS bytes (they'd paint as stray glyphs in the tool card
+    // and commit to scrollback — the "r r" corruption report), SGR text
+    // preserved, and the CR progress line collapsed to its final state.
+    {
+        auto r = run("bash",
+            {{"command",
+              "printf 'p 1\\r'; printf 'p 2\\n';"
+              " printf '\\033[1;32mgreen-e2e\\033[0m\\n';"
+              " printf '\\033[3;24r'; printf '\\033]0;title\\007after-e2e\\n'"},
+             {"cd", root.string()}});
+        const std::string body = text_of(r);
+        bool clean = true;
+        for (unsigned char c : body)
+            if (c == 0x1b || c == '\r' || c == '\b'
+                || (c < 0x20 && c != '\n' && c != '\t'))
+                clean = false;
+        check(clean, "bash: output free of ESC/CR/BS control bytes");
+        check(has(r, "green-e2e"), "bash: SGR-wrapped text survives the strip");
+        check(has(r, "after-e2e"), "bash: text after DECSTBM/OSC survives");
+        check(has(r, "p 2"), "bash: CR progress collapses to final state");
+        check(body.find("[3;24r") == std::string::npos
+                  && body.find(";24r") == std::string::npos,
+              "bash: no stray CSI parameter bytes (the 'r r' glyphs)");
     }
 
     // ── workspace-root boundary: fs tools refuse escapes ─────────────────

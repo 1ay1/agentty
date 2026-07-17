@@ -1,5 +1,6 @@
 #include "agentty/tool/util/utf8.hpp"
 
+#include <algorithm>
 #include <cstdint>
 
 #ifdef _WIN32
@@ -115,6 +116,93 @@ std::string to_valid_utf8(std::string s) {
     }
 #endif
     return sanitize_utf8(s);
+}
+
+std::string strip_terminal_controls(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    // Byte offset in `out` where the CURRENT (unterminated) line starts.
+    // \r rewinds to it; \n advances it past the newline just written.
+    std::size_t line_start = 0;
+
+    for (std::size_t i = 0; i < in.size(); ) {
+        const unsigned char b = static_cast<unsigned char>(in[i]);
+
+        if (b == 0x1b) {                               // ESC — classify
+            if (i + 1 >= in.size()) break;             // dangling ESC at end: drop
+            const unsigned char next = static_cast<unsigned char>(in[i + 1]);
+            if (next == '[') {                         // CSI … final 0x40–0x7E
+                std::size_t j = i + 2;
+                bool complete = false;
+                while (j < in.size()) {
+                    const unsigned char c = static_cast<unsigned char>(in[j++]);
+                    if (c >= 0x40 && c <= 0x7e) { complete = true; break; }
+                }
+                if (!complete) break;                  // cut mid-CSI: drop tail
+                i = j;
+                continue;
+            }
+            if (next == ']' || next == 'P' || next == '^'
+                || next == '_' || next == 'X') {       // OSC/DCS/PM/APC/SOS
+                std::size_t j = i + 2;
+                bool complete = false;
+                // Cap the scan so a garbage buffer full of binary can't
+                // make one unterminated OSC swallow megabytes.
+                const std::size_t cap = std::min(in.size(), j + 8192);
+                while (j < cap) {
+                    const unsigned char c = static_cast<unsigned char>(in[j]);
+                    if (c == 0x07) { ++j; complete = true; break; }
+                    if (c == 0x1b && j + 1 < in.size() && in[j + 1] == '\\') {
+                        j += 2; complete = true; break;
+                    }
+                    ++j;
+                }
+                if (!complete && j >= in.size()) break; // cut mid-string: drop tail
+                i = j;                                  // complete, or cap hit
+                continue;
+            }
+            i += 2;                                    // two-byte ESC pair
+            continue;
+        }
+
+        if (b == '\r') {                               // CR: overwrite semantics
+            if (i + 1 < in.size() && in[i + 1] == '\n') {
+                out.push_back('\n');                   // \r\n → \n
+                line_start = out.size();
+                i += 2;
+                continue;
+            }
+            if (i + 1 >= in.size()) { ++i; continue; } // trailing \r: no-op
+            out.resize(line_start);                    // progress-bar rewind
+            ++i;
+            continue;
+        }
+
+        if (b == '\n') {
+            out.push_back('\n');
+            line_start = out.size();
+            ++i;
+            continue;
+        }
+
+        if (b == '\b') {                               // BS: erase prev codepoint
+            std::size_t p = out.size();
+            while (p > line_start
+                   && (static_cast<unsigned char>(out[p - 1]) & 0xC0) == 0x80)
+                --p;                                   // skip continuations
+            if (p > line_start) --p;                   // the lead / ASCII byte
+            out.resize(p);
+            ++i;
+            continue;
+        }
+
+        if (b < 0x20 && b != '\t') { ++i; continue; }  // other C0: drop
+        if (b == 0x7f) { ++i; continue; }              // DEL: drop
+
+        out.push_back(in[i]);
+        ++i;
+    }
+    return out;
 }
 
 } // namespace agentty::tools::util
