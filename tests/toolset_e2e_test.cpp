@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -300,6 +301,32 @@ int main() {
         check(has(r, "memory"),
               "search_docs: memory hit carries memory provenance");
         (void)run("wipe_memory", {{"scope", "user"}, {"confirm", true}});
+    }
+
+    // ── #1 proactive retrieval: the pre-turn active-RAG path ─────────────
+    // proactive_retrieve() runs the SAME pipeline out of band and only
+    // returns a block when confidence clears the HIGH bar. With the bar
+    // lowered via env, a strong query must produce a fenced context block
+    // that names the source and carries the passage; an off-topic query
+    // must produce nothing (no unprompted token spend).
+    {
+        ::setenv("AGENTTY_RAG_PROACTIVE_MIN", "0.0", 1);
+        auto hit = tools::proactive_retrieve("zebra quagga migration", 3);
+        check(hit.has_value(), "proactive_retrieve: strong query yields a hit");
+        if (hit) {
+            check(hit->block.find("<retrieved-context>") != std::string::npos,
+                  "proactive_retrieve: emits a fenced context block");
+            check(hit->block.find("zebra") != std::string::npos,
+                  "proactive_retrieve: block carries the retrieved passage");
+            check(hit->passages >= 1,
+                  "proactive_retrieve: reports at least one passage");
+        }
+        // With a bar of 1.01 (unreachable), nothing should ever inject.
+        ::setenv("AGENTTY_RAG_PROACTIVE_MIN", "1.01", 1);
+        auto none = tools::proactive_retrieve("zebra quagga migration", 3);
+        check(!none.has_value(),
+              "proactive_retrieve: an unreachable bar suppresses injection");
+        ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
     }
 
     // ── task: no subagent runner installed → graceful refusal ────────────

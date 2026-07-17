@@ -12,11 +12,30 @@
 
 #include <mcp/tools/host.hpp>
 
+#include <optional>
+#include <string>
+
 namespace agentty::tools {
 
 // Populate svc.memory / svc.skills / svc.retriever / svc.subagent with the
 // agentty backends. Leaves svc.todo null (the mcp todo shell needs no host
 // state) and svc.http untouched (the bridge installs the HttpClient).
 void install_host_backends(::mcp::tools::HostServices& svc);
+
+// ── Proactive retrieval (SOTA active-RAG) ──────────────────────────────
+// Run the RAG pipeline OUTSIDE the model's tool loop, for the pre-turn
+// "inject context before the model even sees the question" path
+// (FLARE/Self-RAG family). Returns a ready-to-embed context block ONLY
+// when retrieval cleared the confidence bar; std::nullopt when there is no
+// knowledge configured, nothing relevant was found, or confidence was too
+// low to be worth the tokens. Cheap (BM25 sub-ms; shares the search_docs
+// corpus + per-turn cache). Never throws.
+struct ProactiveHit {
+    std::string block;        // fenced <retrieved-context> text for the wire
+    double      confidence;   // [0,1] retrieval confidence that cleared the bar
+    int         passages;     // how many passages the block carries
+};
+[[nodiscard]] std::optional<ProactiveHit>
+proactive_retrieve(const std::string& query, int k = 3);
 
 } // namespace agentty::tools

@@ -1153,6 +1153,32 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         return cfg;
     }
 
+    // Proactive-retrieval context turn: like the compact boundary, this is
+    // a synthetic User message the MODEL sees in full (msg.text carries the
+    // <retrieved-context> block) but the transcript renders as a quiet
+    // one-liner so the raw passages don't dominate the user's view. Its
+    // own muted identity (a book glyph, "Retrieved context" label) marks
+    // it as auto-injected reference, not the user's words.
+    if (msg.proactive_context) {
+        // Count passages by the [source:path] headers in the block — cheap,
+        // and lets the one-liner say how much was pulled in.
+        int n = 0;
+        for (std::size_t p = msg.text.find("\n["); p != std::string::npos;
+             p = msg.text.find("\n[", p + 1))
+            ++n;
+        cfg.glyph      = "\xf0\x9f\x93\x9a";          // 📚
+        cfg.label      = "Retrieved context";
+        cfg.rail_color = muted;
+        cfg.meta       = timestamp_hh_mm(msg.timestamp);
+        std::string line = "Auto-retrieved "
+            + std::to_string(n > 0 ? n : 1)
+            + (n == 1 ? " passage" : " passages")
+            + " from your knowledge base to ground the answer.";
+        cfg.body.emplace_back(maya::Turn::PlainText{
+            .content = std::move(line), .color = muted});
+        return cfg;
+    }
+
     if (msg.role == Role::User) {
         // Substitute chip placeholders (\x01ATT:N\x01) with their
         // human-readable captions so a 400-line paste renders as

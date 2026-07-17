@@ -7,7 +7,9 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
+#include <cctype>
 #include <chrono>
+#include <optional>
 #include <utility>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -17,6 +19,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/workspace/checkpoint.hpp"
@@ -239,6 +242,73 @@ Step submit_message(Model m) {
         checkpoint_to_create = user.id.value;
     }
 
+    // ── #1 PROACTIVE RETRIEVAL (SOTA active-RAG / FLARE / Self-RAG) ────
+    // Before the model even sees this turn, if the message looks like a
+    // QUESTION about the user's own knowledge (not a command like "edit
+    // X", not a greeting), silently run the RAG pipeline and — only on a
+    // HIGH-confidence hit — stage a synthetic context message to insert
+    // right after the user's turn. This makes RAG fire even when the model
+    // doesn't think to call search_docs itself: retrieval becomes part of
+    // the loop, not just a tool the model may forget. Off with
+    // AGENTTY_RAG_PROACTIVE=0. Cheap: BM25 is sub-ms and shares the
+    // search_docs corpus + per-turn cache; best-effort, never blocks submit.
+    std::optional<tools::ProactiveHit> proactive;
+    {
+        auto proactive_on = [] {
+            const char* v = std::getenv("AGENTTY_RAG_PROACTIVE");
+            if (!v || !v[0]) return true;   // default ON
+            std::string s{v};
+            return s != "0" && s != "false" && s != "FALSE" && s != "False";
+        };
+        // Human-readable view of the query: strip chip placeholders so the
+        // retriever probes real words, not sentinel bytes. Skip when the
+        // turn is a slash-command / skill activation (already handled) or a
+        // plain @file drop with no prose.
+        std::string probe;
+        probe.reserve(user.text.size());
+        for (std::size_t i = 0; i < user.text.size();) {
+            if (static_cast<unsigned char>(user.text[i]) == attachment::kSentinel) {
+                auto len = attachment::placeholder_len_at(user.text, i);
+                if (len > 0) { i += len; continue; }
+            }
+            probe.push_back(user.text[i++]);
+        }
+        // Knowledge-shaped gate: enough words to be a real question, and
+        // not an imperative file-mutation command (those want grep/edit,
+        // not doc RAG). Cheap heuristics — the confidence bar inside
+        // proactive_retrieve is the real filter; this just avoids wasting a
+        // BM25 pass on "hi" / "edit foo.cpp" / "run the tests".
+        auto word_count = [](const std::string& s) {
+            int n = 0; bool in = false;
+            for (char c : s) {
+                bool w = std::isalnum(static_cast<unsigned char>(c));
+                if (w && !in) ++n;
+                in = w;
+            }
+            return n;
+        };
+        auto looks_imperative = [](const std::string& s) {
+            // Lowercased first word matches a mutation/command verb.
+            std::string w;
+            for (char c : s) {
+                if (std::isalpha(static_cast<unsigned char>(c)))
+                    w += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                else if (!w.empty()) break;
+            }
+            static const char* verbs[] = {
+                "edit","write","fix","run","add","remove","delete","create",
+                "make","build","commit","refactor","rename","move","install",
+                "update","change","implement","test","format","rebase","merge"};
+            for (const char* v : verbs) if (w == v) return true;
+            return false;
+        };
+        const bool slash = !user.text.empty() && user.text.front() == '/';
+        if (proactive_on() && !slash && !probe.empty()
+            && word_count(probe) >= 3 && !looks_imperative(probe)) {
+            proactive = tools::proactive_retrieve(probe, /*k=*/3);
+        }
+    }
+
     // Freeze the prior turn AND the freshly-pushed User in one pass —
     // the agent_session SessionStart analog (it pushes gap() + the user
     // Turn into m.frozen the moment the user submits). The prior turn
@@ -251,6 +321,19 @@ Step submit_message(Model m) {
     // instead of being re-built every frame for the whole run, and the
     // settle-time freeze has one fewer seam to hand off.
     m.d.current.messages.push_back(std::move(user));
+
+    // #1: stage the proactive-context message right after the user's turn,
+    // so the model reads the retrieved passages inline with the question.
+    // It's a normal User message on the wire (like the compaction summary)
+    // but flagged proactive_context so the view renders it as a compact
+    // "retrieved context" affordance, not the user's own words.
+    if (proactive) {
+        Message ctx_msg;
+        ctx_msg.role              = Role::User;
+        ctx_msg.text              = std::move(proactive->block);
+        ctx_msg.proactive_context = true;
+        m.d.current.messages.push_back(std::move(ctx_msg));
+    }
     // Force the prior turn's reveal to settle BEFORE the freeze snapshot.
     // Normally the deferred settle-freeze (meta.cpp) waits for the reveal
     // to drain on its own, but a user can submit while it's still mid-
