@@ -242,6 +242,16 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // silently no-ops here.
             with_live_tool(m, e.id, [&](ToolUse& tc) {
                 if (auto* r = std::get_if<ToolUse::Running>(&tc.status)) {
+                    // Belt-and-braces terminal line-discipline. The in-tree
+                    // subprocess runners already clean at the capture
+                    // boundary, but snapshots can also arrive from paths
+                    // that don't ride them (external MCP servers streaming
+                    // progress, subagent feeds echoing tool output). A raw
+                    // ESC/CR/BS byte reaching the card body paints control
+                    // bytes as cells and commits them to scrollback — the
+                    // stray-glyph corruption class. Cheap: O(n) scan, and
+                    // the common (already-clean) case only copies.
+                    e.snapshot = tools::util::strip_terminal_controls(e.snapshot);
                     // Cap the stored snapshot: the body preview shows
                     // the trailing window only, but `tc.progress_text`
                     // gets COPIED into a ToolBodyPreview Config every

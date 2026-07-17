@@ -46,6 +46,22 @@ namespace agentty::tools::util {
 
 namespace {
 
+// Terminal line-discipline + UTF-8 repair, applied to EVERY byte that
+// leaves the subprocess runners — live progress snapshots and the final
+// captured output alike. The live path is the one that used to leak raw
+// escapes: bash progress snapshots went straight to the UI card, so a
+// child that thought it owned a tty (ls --color, cargo, top -b, anything
+// probing with DECSTBM/SGR) painted its CSI parameter bytes as literal
+// glyphs ("[1;24r" → stray "r" cells), which then committed to native
+// scrollback — the reported per-frame corruption during bash tool use.
+std::string clean_capture(std::string s) {
+    return to_valid_utf8(strip_terminal_controls(s));
+}
+
+} // namespace
+
+namespace {
+
 // Best-effort progress flush throttle. 80 ms keeps the UI responsive without
 // drowning the event queue — the worst case (30 KB / flush) is a few hundred
 // µs of UTF-8 decode work, negligible against the subprocess wall clock.
@@ -327,7 +343,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
 
         auto after = now_ms();
         if (opts.on_progress && (after - last_emit) >= kEmitGap) {
-            opts.on_progress(to_valid_utf8(snapshot()));
+            opts.on_progress(clean_capture(snapshot()));
             last_emit = after;
         }
     }
@@ -355,14 +371,14 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     reader.join();
 
     if (opts.on_progress) {
-        opts.on_progress(to_valid_utf8(snapshot()));
+        opts.on_progress(clean_capture(snapshot()));
     }
     ::CloseHandle(pi.hProcess);
     ::CloseHandle(pi.hThread);
     {
         std::lock_guard lk(buf_mu);
         r.truncated = shared_truncated;
-        r.output    = to_valid_utf8(shared_buf.str());
+        r.output    = clean_capture(shared_buf.str());
     }
     return r;
 }
@@ -646,7 +662,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
 
     auto emit_progress = [&]{
         if (!opts.on_progress) return;
-        opts.on_progress(to_valid_utf8(out.str()));
+        opts.on_progress(clean_capture(out.str()));
         last_emit = clock::now();
     };
 
@@ -748,7 +764,7 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     else if (WIFSIGNALED(wait_status)) r.exit_code = 128 + WTERMSIG(wait_status);
     r.timed_out = timed_out;
     r.truncated = truncated;
-    r.output    = to_valid_utf8(out.str());
+    r.output    = clean_capture(out.str());
     return r;
 }
 
