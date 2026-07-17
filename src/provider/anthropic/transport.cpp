@@ -964,7 +964,34 @@ void write_tool_use_block(std::string& out, const ToolUse& tc, bool pin_cache) {
     out.push_back('}');
 }
 
-void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache) {
+// Age-tiered tool-result wire budget (Anthropic "tool result clearing").
+// The full transcript is immutable; only the WIRE copy of each tool_result
+// is sized by how RECENT the call is. Rationale, straight from Anthropic's
+// context-engineering guidance: "once a tool has been called deep in the
+// message history, why would the agent need to see the raw result again?"
+// Claude Code keeps the most-recently-accessed results at full fidelity and
+// fades the rest. We do the same:
+//
+//   rank 0 .. kFullResultWindow-1  → full 64 KiB budget (active working set)
+//   rank >= kFullResultWindow      → tight 2 KiB head+tail (enough to recall
+//                                    WHAT the tool returned, not replay it)
+//
+// `recency_rank` is 0 for the newest terminal tool result in the thread and
+// grows toward the oldest. Two invariants keep this loss-free for reasoning:
+//   • ERROR results are NEVER faded — the model needs the full failure text
+//     to recover, however old. (Non-terminal / failed / rejected.)
+//   • Results already smaller than the faded budget ship verbatim regardless
+//     of age — there's nothing to gain by touching them.
+//
+// The result: on a 40-tool-call turn, the ~8 freshest results stay full and
+// the 32 stale ones collapse from up-to-64 KiB each to ~2 KiB — a large wire
+// saving every subsequent turn, with the model's live context untouched.
+constexpr std::size_t kToolResultFullBudget  = 64u * 1024u;
+constexpr std::size_t kToolResultFadedBudget = 2u  * 1024u;
+constexpr int         kFullResultWindow      = 8;
+
+void write_tool_result_block(std::string& out, const ToolUse& tc,
+                             bool pin_cache, int recency_rank) {
     out.push_back('{');
     bool first = true;
     json_write_field(out, "type", "tool_result", first);
@@ -981,6 +1008,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     auto raw_output = tc.output();
     std::string scrubbed;
     const bool non_terminal = !tc.is_terminal();
+    const bool is_error = non_terminal || tc.is_failed() || tc.is_rejected();
     if (non_terminal) {
         json_write_field(out, "content",
             "(tool call did not complete \u2014 previous turn ended before this tool produced a result)",
@@ -988,17 +1016,17 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     } else if (raw_output.empty()) {
         json_write_field(out, "content", "(no output)", first);
     } else {
-        // Per-result wire cap. 64 KiB comfortably holds a full 2000-line
-        // read or a large grep page while preventing one pathological
-        // result (500 KiB grep, dump of a binary) from replaying on every
-        // subsequent turn. Independent of compaction -- this fires per
-        // request, immediately, with no transcript mutation.
-        constexpr std::size_t kToolResultWireBudget = 64u * 1024u;
-        std::string capped = cap_tool_result(raw_output, kToolResultWireBudget);
+        // Pick the wire budget from recency. Recent results (and ALL error
+        // results, at any age) keep the full budget so the model can act on
+        // them; stale successful results fade to a tight head+tail so a
+        // 60 KiB read from 30 calls ago stops replaying in full every turn.
+        const bool faded = !is_error && recency_rank >= kFullResultWindow;
+        const std::size_t budget = faded ? kToolResultFadedBudget
+                                         : kToolResultFullBudget;
+        std::string capped = cap_tool_result(raw_output, budget);
         scrubbed = scrub_utf8(capped);
         json_write_field(out, "content", scrubbed, first);
     }
-    const bool is_error = non_terminal || tc.is_failed() || tc.is_rejected();
     json_write_bool_field(out, "is_error", is_error, first);
     if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
     out.push_back('}');
@@ -1015,6 +1043,12 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     // output array, so an Assistant turn with terminal tool_calls
     // contributes TWO messages (assistant + tool_results follow-up).
     int total_msgs = 0;
+    // Also count how many terminal tool results the thread carries so we can
+    // assign each a recency rank (0 = newest) for the age-tiered wire budget
+    // in write_tool_result_block. Only terminal results with non-empty
+    // output participate in fading; the count is a ceiling, ranks are
+    // assigned as we emit below.
+    int total_tool_results = 0;
     for (const auto& m : t.messages) {
         const bool has_images = (m.role == Role::User && has_wire_image(m));
         if (!m.text.empty()
@@ -1022,7 +1056,10 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
          || (m.role == Role::Assistant && !m.tool_calls.empty())) {
             ++total_msgs;
         }
-        if (is_assistant_with_results(m)) ++total_msgs;
+        if (is_assistant_with_results(m)) {
+            ++total_msgs;
+            total_tool_results += static_cast<int>(m.tool_calls.size());
+        }
     }
     const int pin_last       = total_msgs - 1;
     const int pin_second_last = total_msgs - 2;
@@ -1035,6 +1072,10 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
     out.push_back('[');
 
     int emitted = 0;
+    // Running count of tool results emitted so far (oldest first). The
+    // recency rank of the next result is total_tool_results-1-emitted, so
+    // the LAST-emitted (newest) result gets rank 0.
+    int tool_results_emitted = 0;
     auto emit_msg_open = [&] {
         if (emitted > 0) out.push_back(',');
         ++emitted;
@@ -1147,7 +1188,11 @@ void write_tool_result_block(std::string& out, const ToolUse& tc, bool pin_cache
             for (const auto& tc : m.tool_calls) {
                 if (result_emitted++ > 0) out.push_back(',');
                 const bool last_block = (result_emitted == total_results);
-                write_tool_result_block(out, tc, do_pin && last_block);
+                const int recency_rank =
+                    total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
+                write_tool_result_block(out, tc, do_pin && last_block,
+                                        recency_rank);
             }
             out.append("]}");
         }
@@ -1439,6 +1484,13 @@ std::string default_system_prompt() {
         << "deep tree, a 50 K-line build log, or `find . -type f` in "
         << "node_modules will land in your context as one big tool "
         << "result and shorten the session for everyone.\n"
+        << "  - Old tool results FADE: once a result is more than a "
+        << "handful of tool calls back, only a ~2 KB head+tail of it "
+        << "stays on the wire (errors and recent results stay full). "
+        << "So when a large read/grep/bash output tells you something "
+        << "you'll need later, act on it or note the key fact NOW "
+        << "(e.g. `remember`) rather than assuming you can re-scroll the "
+        << "full dump ten calls from now.\n"
         << "</context-economy>\n\n"
         << "<big-codebases>\n"
         << "  In a large or unfamiliar repository, call `repo_map` FIRST "
