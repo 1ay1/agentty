@@ -172,28 +172,33 @@ public:
     }
 };
 
-// ── DocRetriever ───────────────────────────────────────────────────────
-//   Backs search_docs. Runs agentty's full SOTA RAG pipeline (hybrid
-//   BM25+dense fused, wide-pool rerank, compress, optional RAG-Fusion query
-//   expansion) and returns flat passages. The `mode` string carries the
-//   rich provenance the native tool printed in its header (root path,
-//   reranked, +N query variants) so no signal is lost when the shell
-//   renders the result.
+// ── DocRetriever ───────────────────────────────────────────────
+//   Backs search_docs. Runs agentty's full SOTA RAG pipeline and returns
+//   flat passages. The funnel (2026 canonical shape):
+//
+//     sources:  docs folder (contextual hybrid BM25+dense+RRF, HNSW)
+//               ∪ skills (agentskills.io bodies, BM25, lazy)   [default ON]
+//               ∪ memory (learned facts, BM25, lazy)           [default ON]
+//               ∪ MCP resources                                [opt-in]
+//     query:    optional RAG-Fusion expansion (opt-in, needs local LLM)
+//     retrieve: WIDE pool (k*5, ≥30) fan-out + RRF fusion
+//     rerank:   feature-fusion lexical rerank → k*3
+//               → optional neural (cross-encoder-style) rerank → k*2
+//     diversify: MMR (λ=0.75) → k
+//     compress: extractive query-relevant span per chunk
+//
+//   The `mode` string carries the rich provenance (root path, mode,
+//   reranked, +N variants, confidence) so no signal is lost when the
+//   shell renders the result.
 class AgenttyDocRetriever final : public mt::DocRetriever {
 public:
     std::vector<mt::DocPassage>
     retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
         std::vector<mt::DocPassage> out;
         try {
-            auto root = resolve_docs_root();
-            if (root.empty()) {
-                err = "no knowledge directory configured. Set AGENTTY_DOCS_DIR "
-                      "to a folder of documents (markdown/text/etc.) to enable "
-                      "search_docs, or create ./docs.";
-                return out;
-            }
-
             const rag::EmbedConfig embed = embed_config_from_env();
+
+            auto root = resolve_docs_root();
             std::string root_str = root.string();
 
             static std::mutex mu;
@@ -201,20 +206,30 @@ public:
             static std::string indexed_root;
 
             std::lock_guard<std::mutex> lock(mu);
-            if (indexed_root != root_str) {
+            if (!root.empty() && indexed_root != root_str) {
                 corpus.build(root, embed);
                 indexed_root = root_str;
             }
 
-            rag::CorpusSource docs_source("docs", corpus, embed);
             rag::KnowledgeRouter router;
-            router.add(std::shared_ptr<rag::KnowledgeSource>(
-                &docs_source, [](rag::KnowledgeSource*) {}));
+            rag::CorpusSource docs_source("docs", corpus, embed);
+            const bool have_docs = !root.empty() && corpus.chunk_count() > 0;
+            if (have_docs)
+                router.add(std::shared_ptr<rag::KnowledgeSource>(
+                    &docs_source, [](rag::KnowledgeSource*) {}));
 
-            // OPT-IN second source: index this session's MCP `resources/*`
-            // and fuse them with the docs folder. Built once (process-wide,
-            // lazy) and reused. Enabled by AGENTTY_RAG_MCP=1; with no MCP
-            // configured the source self-indexes to empty and costs nothing.
+            // Skills + learned memory ride the same KnowledgeSource seam —
+            // "search everything the agent knows", provenance-labelled.
+            // Both BM25-only (no embed calls: skills/memory are small and
+            // lexical match is strong on their vocabulary), both cheap.
+            if (skills_rag_enabled()) {
+                if (auto s = skills_source()) router.add(std::move(s));
+            }
+            if (memory_rag_enabled()) {
+                if (auto s = memory_source()) router.add(std::move(s));
+            }
+
+            // OPT-IN: this session's MCP `resources/*`.
             std::shared_ptr<rag::McpResourceSource> mcp_source;
             if (mcp_resources_enabled()) {
                 mcp_source = mcp_resource_source(embed);
@@ -223,22 +238,37 @@ public:
                         mcp_source, mcp_source.get()));  // aliasing: shares ownership
             }
 
-            const std::size_t pool_k =
-                std::max<std::size_t>(static_cast<std::size_t>(q.k) * 5, 30);
+            if (router.source_count() == 0) {
+                err = "no knowledge configured. Set AGENTTY_DOCS_DIR to a "
+                      "folder of documents (markdown/text/etc.), create "
+                      "./docs, install skills, or store memories to give "
+                      "search_docs something to retrieve from.";
+                return out;
+            }
+
+            const std::size_t k = static_cast<std::size_t>(q.k);
+            const std::size_t pool_k = std::max<std::size_t>(k * 5, 30);
 
             std::size_t variant_count = 0;
             rag::Context ctx;
             ctx.query = q.query;
-            if (expand_enabled()) {
+            if (expand_enabled() && have_docs) {
                 rag::ExpandConfig ecfg = expand_config_from_env(embed);
                 auto queries = rag::expand_query(ecfg, q.query);
                 if (queries.size() > 1) variant_count = queries.size() - 1;
-                // Multi-query fusion over the docs corpus. When an MCP source
-                // is active, fold its best-of hits in via the router so the
-                // two sources still fuse (the docs side keeps RAG-Fusion).
+                // Multi-query fusion over the docs corpus; other sources
+                // contribute their single-query best-of through the router.
                 auto fused = docs_source.retrieve_fused(queries, pool_k);
-                if (mcp_source) {
-                    auto extra = mcp_source->retrieve(q.query, pool_k);
+                rag::KnowledgeRouter rest;
+                if (skills_rag_enabled())
+                    if (auto s = skills_source()) rest.add(std::move(s));
+                if (memory_rag_enabled())
+                    if (auto s = memory_source()) rest.add(std::move(s));
+                if (mcp_source)
+                    rest.add(std::shared_ptr<rag::KnowledgeSource>(
+                        mcp_source, mcp_source.get()));
+                if (rest.source_count() > 0) {
+                    auto extra = rest.retrieve(q.query, pool_k);
                     fused.insert(fused.end(), extra.begin(), extra.end());
                 }
                 ctx = rag::Context::from_hits(q.query, std::move(fused));
@@ -247,16 +277,39 @@ public:
                     q.query, router.retrieve(q.query, pool_k));
             }
 
+            // The post-retrieval funnel: lexical rerank keeps a mid pool so
+            // the (optional) neural pass and MMR have candidates to work
+            // with; MMR then cuts to k while shedding near-duplicates.
+            const bool neural = neural_rerank_enabled();
             rag::Pipeline pipe;
-            pipe.add(std::make_shared<rag::RerankStage>(static_cast<std::size_t>(q.k)))
+            pipe.add(std::make_shared<rag::RerankStage>(
+                neural ? std::max<std::size_t>(k * 3, 12)
+                       : std::max<std::size_t>(k * 2, 8)));
+            if (neural)
+                pipe.add(std::make_shared<rag::NeuralRerankStage>(
+                    std::max<std::size_t>(k * 2, 8),
+                    neural_config_from_env(embed)));
+            pipe.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
                 .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
             ctx = pipe.run(std::move(ctx));
+            ctx.compute_confidence();
 
-            std::string mode_str = corpus.has_embeddings() ? "hybrid" : "BM25-only";
-            mode_str += ", reranked";
+            std::string mode_str =
+                (have_docs && corpus.has_embeddings()) ? "hybrid+ctx" : "BM25-only";
+            mode_str += neural ? ", neural-reranked" : ", reranked";
             if (variant_count > 0)
                 mode_str += ", +" + std::to_string(variant_count) + " query variants";
-            mode_str += " from " + root_str;
+            // Retrieval confidence — the agentic-RAG signal: LOW tells the
+            // model to fall back to grep/read instead of trusting weak hits.
+            {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, ", confidence %.2f", ctx.confidence);
+                mode_str += buf;
+                if (ctx.confidence < 0.25)
+                    mode_str += " (LOW \xe2\x80\x94 treat results as leads, verify "
+                                "with grep/read)";
+            }
+            if (have_docs) mode_str += " from " + root_str;
             mode = std::move(mode_str);
 
             for (const auto& c : ctx.chunks) {
@@ -322,6 +375,142 @@ private:
         if (!v || v[0] == '\0') return false;
         std::string s{v};
         return s != "0" && s != "false" && s != "FALSE" && s != "False";
+    }
+
+    // Default-ON toggles (set =0 to disable): skills + memory as fused
+    // knowledge sources. Both are tiny, local, BM25-only — zero network,
+    // sub-ms — so on-by-default is safe; the env vars exist for A/B.
+    static bool truthy_default_on(const char* var) {
+        const char* v = std::getenv(var);
+        if (!v || v[0] == '\0') return true;
+        std::string s{v};
+        return s != "0" && s != "false" && s != "FALSE" && s != "False";
+    }
+    static bool skills_rag_enabled() { return truthy_default_on("AGENTTY_RAG_SKILLS"); }
+    static bool memory_rag_enabled() { return truthy_default_on("AGENTTY_RAG_MEMORY"); }
+
+    // Neural (cross-encoder-style) rerank via a local Ollama generative
+    // model. OPT-IN: one LLM call per candidate chunk.
+    static bool neural_rerank_enabled() {
+        const char* v = std::getenv("AGENTTY_RAG_NEURAL");
+        if (!v || v[0] == '\0') return false;
+        std::string s{v};
+        return s != "0" && s != "false" && s != "FALSE" && s != "False";
+    }
+    static rag::NeuralRerankConfig neural_config_from_env(const rag::EmbedConfig& embed) {
+        rag::NeuralRerankConfig cfg;
+        cfg.host = embed.host;
+        cfg.port = embed.port;
+        if (const char* m = std::getenv("AGENTTY_RAG_NEURAL_MODEL"); m && m[0])
+            cfg.model = m;
+        else
+            cfg.model = "llama3.2";
+        return cfg;
+    }
+
+    // ── Skills as a knowledge source ──────────────────────────────
+    // Every installed SKILL.md body, chunked + BM25-indexed in a private
+    // in-memory corpus. A hit tells the model WHICH skill covers the topic
+    // (provenance path = "skill://<name>/SKILL.md") — it can then activate
+    // the skill with the `skill` tool. Lazy: built on the first search_docs
+    // call, rebuilt only when the discovered skill set changes shape.
+    static std::shared_ptr<rag::KnowledgeSource> skills_source() {
+        class SkillsSource final : public rag::KnowledgeSource {
+        public:
+            std::string_view name() const noexcept override { return "skills"; }
+            std::vector<rag::Hit>
+            retrieve(std::string_view query, std::size_t k) const override {
+                try {
+                    ensure_built_();
+                    if (corpus_.chunk_count() == 0) return {};
+                    auto hits = corpus_.search(query, {}, k);   // BM25-only
+                    for (auto& h : hits) h.source = this;
+                    return hits;
+                } catch (...) { return {}; }
+            }
+        private:
+            void ensure_built_() const {
+                const auto& all = skills::all();
+                // Cheap shape key: rebuild when skills appear/disappear.
+                std::size_t key = all.size();
+                for (const auto& s : all) key ^= std::hash<std::string>{}(s.name);
+                if (built_ && key == built_key_) return;
+                built_ = true;
+                built_key_ = key;
+                std::vector<std::pair<std::string, std::string>> docs;
+                docs.reserve(all.size());
+                for (const auto& s : all) {
+                    if (s.body.empty()) continue;
+                    // Description leads the doc so the skill's own summary
+                    // vocabulary is retrievable even when the body is terse.
+                    std::string body = s.description;
+                    if (!body.empty()) body += "\n\n";
+                    body += s.body;
+                    docs.emplace_back("skill://" + s.name + "/SKILL.md",
+                                      std::move(body));
+                }
+                corpus_.build_from_memory(docs, {});   // BM25-only
+            }
+            mutable rag::Corpus corpus_;
+            mutable bool        built_ = false;
+            mutable std::size_t built_key_ = 0;
+        };
+        static auto src = std::make_shared<SkillsSource>();
+        return src;
+    }
+
+    // ── Learned memory as a knowledge source ────────────────────────
+    // Both memory scopes (user + project) as one BM25 corpus, one doc per
+    // record (path = "memory://<scope>/<id>"). The system prompt only
+    // carries the tail-N/6 KiB slice of memory; retrieval reaches ALL 200
+    // records per scope — facts that rolled out of the prompt stay
+    // findable. Rebuilt whenever the store's record-count/id shape moves
+    // (remember/forget touch it rarely; rebuild is sub-ms on ≤400 records).
+    static std::shared_ptr<rag::KnowledgeSource> memory_source() {
+        class MemorySource final : public rag::KnowledgeSource {
+        public:
+            std::string_view name() const noexcept override { return "memory"; }
+            std::vector<rag::Hit>
+            retrieve(std::string_view query, std::size_t k) const override {
+                try {
+                    ensure_built_();
+                    if (corpus_.chunk_count() == 0) return {};
+                    auto hits = corpus_.search(query, {}, k);   // BM25-only
+                    for (auto& h : hits) h.source = this;
+                    return hits;
+                } catch (...) { return {}; }
+            }
+        private:
+            void ensure_built_() const {
+                auto user = memory::load_all(memory::Scope::User);
+                auto proj = memory::load_all(memory::Scope::Project);
+                std::size_t key = user.size() * 31 + proj.size();
+                for (const auto& r : user) key ^= std::hash<std::string>{}(r.id);
+                for (const auto& r : proj) key ^= std::hash<std::string>{}(r.id);
+                if (built_ && key == built_key_) return;
+                built_ = true;
+                built_key_ = key;
+                std::vector<std::pair<std::string, std::string>> docs;
+                docs.reserve(user.size() + proj.size());
+                auto add = [&](const memory::Record& r) {
+                    if (r.text.empty()) return;
+                    std::string body = r.text;
+                    for (const auto& t : r.tags) { body += ' '; body += t; }
+                    docs.emplace_back(
+                        "memory://" + std::string{memory::to_string(r.scope)}
+                            + "/" + r.id,
+                        std::move(body));
+                };
+                for (const auto& r : user) add(r);
+                for (const auto& r : proj) add(r);
+                corpus_.build_from_memory(docs, {});   // BM25-only
+            }
+            mutable rag::Corpus corpus_;
+            mutable bool        built_ = false;
+            mutable std::size_t built_key_ = 0;
+        };
+        static auto src = std::make_shared<MemorySource>();
+        return src;
     }
 
     // OPT-IN: fold MCP `resources/*` into the search_docs corpus. Off unless

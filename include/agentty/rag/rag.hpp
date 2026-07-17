@@ -53,6 +53,20 @@ struct Chunk {
     int          line_end   = 0;  // 1-based, inclusive
     std::string  text;        // the chunk body (what gets fed to the model)
 
+    // CONTEXTUAL RETRIEVAL (Anthropic 2024: −49% retrieval failures).
+    // A short situating string — the document name + the markdown heading
+    // breadcrumb the chunk sits under ("guide.md › Installation › Linux").
+    // It participates in BOTH index sides (tokenized into the BM25 doc and
+    // prepended to the embedding input) so a chunk that says "run the
+    // installer" is findable by "linux install" even though neither word
+    // appears in the body. It is NEVER shown to the model as content —
+    // `text` stays the verbatim body; provenance already carries the path.
+    // Built for free during chunking (the chunker tracks the heading stack
+    // anyway) — the LLM-generated variant of contextual retrieval costs a
+    // model call per chunk; the breadcrumb captures most of the win at zero
+    // cost and stays fully deterministic/offline.
+    std::string  context;
+
     // Dense embedding. Empty when embeddings are unavailable (BM25-only
     // mode) or not yet computed. Length == Corpus::embed_dim when present.
     std::vector<float> embedding;
@@ -61,6 +75,16 @@ struct Chunk {
     // "type" ("api", "tutorial", "reference"), "language", "date".
     // Populated from frontmatter or directory structure during chunking.
     std::unordered_map<std::string, std::string> metadata;
+
+    // The string the EMBEDDER sees: context-prefixed body (contextual
+    // embeddings). BM25 gets the same treatment inside build_bm25.
+    [[nodiscard]] std::string embed_input() const {
+        if (context.empty()) return text;
+        std::string s;
+        s.reserve(context.size() + 2 + text.size());
+        s += context; s += '\n'; s += text;
+        return s;
+    }
 };
 
 // Forward decl so Hit can carry source provenance without a cycle.

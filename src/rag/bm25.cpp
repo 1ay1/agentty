@@ -74,6 +74,12 @@ Bm25Index build_bm25(const std::vector<Chunk>& chunks) {
     for (std::uint32_t d = 0; d < chunks.size(); ++d) {
         toks.clear();
         tokenize(chunks[d].text, toks);
+        // CONTEXTUAL BM25 (Anthropic contextual retrieval): the situating
+        // breadcrumb participates in the index, so heading/document terms
+        // match chunks whose bodies never repeat them. Tokenized once here
+        // — zero cost at query time.
+        if (!chunks[d].context.empty())
+            tokenize(chunks[d].context, toks);
         idx.doc_len[d] = static_cast<std::uint32_t>(toks.size());
         total_len += toks.size();
 
@@ -216,10 +222,32 @@ bool is_blank(std::string_view line) {
 }
 
 // Track semantic context: are we inside a fenced code block or list?
+// Also carries the HEADING BREADCRUMB (contextual retrieval): the stack of
+// markdown headings enclosing the current line, e.g. {"Install","Linux"}.
 struct ChunkContext {
     bool in_code_fence = false;
     int  list_indent   = -1;  // -1 = not in list; >= 0 = list item indent level
+    // (level, text) pairs, outermost first. Level = number of '#'.
+    std::vector<std::pair<int, std::string>> headings;
 };
+
+// Parse an ATX heading: returns its level (1-6) and stores the stripped
+// title in `out`. 0 when the line is not a heading.
+int parse_heading(std::string_view line, std::string& out) {
+    std::size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    std::size_t h = i;
+    while (h < line.size() && line[h] == '#') ++h;
+    int level = static_cast<int>(h - i);
+    if (level < 1 || level > 6) return 0;
+    if (h < line.size() && line[h] != ' ' && line[h] != '\t') return 0;
+    while (h < line.size() && (line[h] == ' ' || line[h] == '\t')) ++h;
+    std::size_t e = line.size();
+    while (e > h && (line[e-1] == ' ' || line[e-1] == '\t'
+                     || line[e-1] == '#' || line[e-1] == '\r')) --e;
+    out.assign(line.substr(h, e - h));
+    return out.empty() ? 0 : level;
+}
 
 // Determine if this line is a safe break point given the context.
 bool is_safe_break(std::string_view line, const ChunkContext& ctx) {
@@ -250,6 +278,18 @@ void update_context(std::string_view line, ChunkContext& ctx) {
     }
     if (ctx.in_code_fence) return;  // Inside code, don't track list.
 
+    // Heading: pop deeper-or-equal levels, push this one (breadcrumb).
+    {
+        std::string title;
+        if (int lvl = parse_heading(line, title); lvl > 0) {
+            while (!ctx.headings.empty() && ctx.headings.back().first >= lvl)
+                ctx.headings.pop_back();
+            ctx.headings.emplace_back(lvl, std::move(title));
+            ctx.list_indent = -1;
+            return;
+        }
+    }
+
     // Track list indent.
     if (is_list_item(line)) {
         std::size_t indent = 0;
@@ -260,6 +300,26 @@ void update_context(std::string_view line, ChunkContext& ctx) {
         ctx.list_indent = -1;  // List ended.
     }
     // Non-blank, non-list, non-heading lines continue the current block.
+}
+
+// Situating string for a chunk: "path › H1 › H2 › H3" from the breadcrumb
+// captured at the chunk's start. Capped so a pathological heading doesn't
+// bloat every embedding input.
+std::string breadcrumb_context(const std::string& path,
+                               const ChunkContext& ctx) {
+    std::string s = path;
+    for (const auto& [lvl, title] : ctx.headings) {
+        s += " \xe2\x80\xba ";   // ›
+        s += title;
+    }
+    if (s.size() > 256) {
+        std::size_t cut = 256;
+        // Back off continuation bytes so the cap can't split a code point.
+        while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80)
+            --cut;
+        s.resize(cut);
+    }
+    return s;
 }
 
 } // namespace
@@ -345,6 +405,9 @@ chunk_document(const std::string& path, const std::string& body,
             c.line_start = static_cast<int>(begin + 1);
             c.line_end   = static_cast<int>(end);
             c.text = std::move(text);
+            // Contextual retrieval: situate the chunk with the heading
+            // breadcrumb in force at its START (chunk_ctx snapshot).
+            c.context = breadcrumb_context(path, chunk_ctx);
             out.push_back(std::move(c));
         }
 

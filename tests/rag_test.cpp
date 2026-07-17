@@ -136,12 +136,68 @@ static void test_corpus_bm25_only_search() {
     CHECK(hits.front().chunk->path == "deploy.md");
 }
 
+// ── 6. Contextual retrieval (Anthropic-style heading breadcrumb) ──────────
+// The chunker situates each chunk with "path › heading › subheading", and
+// build_bm25 indexes those tokens — so a chunk whose BODY never mentions the
+// topic is still retrievable via the heading it sits under. This is the
+// pipeline half of the −49%-failures technique; without it the test's query
+// has zero body overlap and the chunk is unfindable.
+static void test_contextual_breadcrumb() {
+    const std::string doc =
+        "# Installation\n"
+        "\n"
+        "## Linux\n"
+        "\n"
+        "Run the setup script and accept the license.\n"
+        "\n"
+        "## Windows\n"
+        "\n"
+        "Double-click the installer executable.\n";
+    auto chunks = rag::chunk_document("guide.md", doc);
+    CHECK(!chunks.empty());
+
+    // Every chunk carries a breadcrumb starting with the doc path.
+    bool crumbs_ok = true;
+    for (const auto& c : chunks)
+        if (c.context.rfind("guide.md", 0) != 0) crumbs_ok = false;
+    CHECK(crumbs_ok);
+
+    // The Linux body chunk's breadcrumb names the heading chain.
+    bool linux_crumb = false;
+    for (const auto& c : chunks)
+        if (c.text.find("setup script") != std::string::npos
+            && c.context.find("Linux") != std::string::npos
+            && c.context.find("Installation") != std::string::npos)
+            linux_crumb = true;
+    CHECK(linux_crumb);
+
+    // BM25 finds the setup-script chunk by HEADING terms absent from its
+    // body ("linux installation") — the contextual-BM25 win.
+    rag::Corpus corpus;
+    corpus.set_chunks_for_test(std::move(chunks));
+    auto hits = corpus.search("linux installation", {}, 3);
+    bool found = false;
+    for (const auto& h : hits)
+        if (h.chunk && h.chunk->text.find("setup script") != std::string::npos)
+            found = true;
+    CHECK(found);
+
+    // embed_input() prefixes the breadcrumb (contextual embeddings side).
+    rag::Chunk c;
+    c.text = "body";
+    c.context = "doc.md \xe2\x80\xba Section";
+    CHECK(c.embed_input() == "doc.md \xe2\x80\xba Section\nbody");
+    c.context.clear();
+    CHECK(c.embed_input() == "body");
+}
+
 int main() {
     test_chunker_line_aligned();
     test_bm25_ranks_exact_term();
     test_rrf_fusion();
     test_cosine();
     test_corpus_bm25_only_search();
+    test_contextual_breadcrumb();
 
     if (g_failures == 0) {
         std::printf("rag_test: all checks passed\n");
