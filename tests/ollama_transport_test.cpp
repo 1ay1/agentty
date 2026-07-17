@@ -109,6 +109,65 @@ static void test_build_messages_tool_calls() {
     CHECK(arr[1]["content"] == "myhost");
 }
 
+// Age-tiered tool-result clearing (shared wire::cap_tool_result_aged). Local
+// models have the SMALLEST context windows, so a stale 60 KiB dump replaying
+// in full every turn hurts most here. Exercised on BOTH the native role:"tool"
+// path and the JSON-protocol "TOOL RESULT (name):" user-turn path.
+static void test_build_messages_age_tiering() {
+    std::string big = "HEAD_SENTINEL_AAAA\n";
+    big.append(60 * 1024, 'x');
+    big += "\nTAIL_SENTINEL_ZZZZ";
+
+    const int n = 20;
+    auto make = [&]() {
+        std::vector<Message> msgs;
+        Message u; u.role = Role::User; u.text = "start"; msgs.push_back(u);
+        for (int i = 0; i < n; ++i) {
+            Message a; a.role = Role::Assistant; a.text = "c";
+            ToolUse tc;
+            tc.id   = ToolCallId{"call_" + std::to_string(i)};
+            tc.name = ToolName{"grep"};
+            tc.status = ToolUse::Done{{}, {}, big};
+            a.tool_calls.push_back(std::move(tc));
+            msgs.push_back(std::move(a));
+        }
+        return msgs;
+    };
+
+    // Native path: results are role:"tool" messages, in emit order (oldest
+    // first). The FIRST tool message is the oldest (faded); the LAST is newest.
+    {
+        auto arr = oll::build_messages(make(), /*json_protocol=*/false);
+        std::string oldest, newest;
+        for (const auto& msg : arr)
+            if (msg.value("role", "") == "tool") {
+                if (oldest.empty()) oldest = msg.value("content", "");
+                newest = msg.value("content", "");
+            }
+        CHECK(newest.size() > 40 * 1024);
+        CHECK(oldest.size() < 6 * 1024);
+        CHECK(oldest.find("bytes elided") != std::string::npos);
+        CHECK(oldest.find("HEAD_SENTINEL_AAAA") != std::string::npos);
+        CHECK(oldest.find("TAIL_SENTINEL_ZZZZ") != std::string::npos);
+    }
+
+    // JSON-protocol path: results are role:"user" "TOOL RESULT (name):" turns.
+    {
+        auto arr = oll::build_messages(make(), /*json_protocol=*/true);
+        std::string oldest, newest;
+        for (const auto& msg : arr)
+            if (msg.value("role", "") == "user") {
+                auto c = msg.value("content", "");
+                if (c.rfind("TOOL RESULT", 0) != 0) continue;
+                if (oldest.empty()) oldest = c;
+                newest = c;
+            }
+        CHECK(newest.size() > 40 * 1024);
+        CHECK(oldest.size() < 6 * 1024);
+        CHECK(oldest.find("bytes elided") != std::string::npos);
+    }
+}
+
 static void test_build_messages_images() {
     std::vector<Message> msgs;
     Message u; u.role = Role::User; u.text = "what is this?";
@@ -748,6 +807,7 @@ static void test_prose_starting_with_brace_not_dropped() {
 int main() {
     test_build_messages_text();
     test_build_messages_tool_calls();
+    test_build_messages_age_tiering();
     test_build_messages_images();
     test_ndjson_plain_text();
     test_ndjson_structured_tool_call();

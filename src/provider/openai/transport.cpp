@@ -981,6 +981,15 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
 // as role:"tool" with `tool_name`.
 [[nodiscard]] json build_native_messages(const std::vector<Message>& msgs) {
     json arr = json::array();
+    // Count terminal-carrying tool results so each can be assigned a recency
+    // rank (0 = newest) for the shared age-tiered wire budget. See
+    // wire::cap_tool_result_aged — old dumps fade to a tight head+tail so a
+    // 60 KiB read from 30 calls ago stops replaying in full every turn.
+    int total_tool_results = 0;
+    for (const auto& m : msgs)
+        if (is_assistant_with_results(m))
+            total_tool_results += static_cast<int>(m.tool_calls.size());
+    int tool_results_emitted = 0;
     for (const auto& m : msgs) {
         const bool has_text  = !m.text.empty();
         const bool has_tools = is_assistant_with_results(m);
@@ -1020,10 +1029,15 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
         }
         if (has_tools) {
             for (const auto& tc : m.tool_calls) {
+                const int recency_rank = total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
                 std::string out = tc.output();
+                bool is_error = !tc.is_terminal() || tc.is_failed() || tc.is_rejected();
                 if (out.empty()) {
                     if (tc.is_rejected())       out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else {
+                    out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
                 arr.push_back({
                     {"role", "tool"},
@@ -1198,6 +1212,13 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
 //     "data:<mime>;base64,<...>"}}]`.
 json build_messages(const Thread& t) {
     json arr = json::array();
+    // Recency ranks for the shared age-tiered wire budget (0 = newest tool
+    // result). Same policy as Anthropic — see wire::cap_tool_result_aged.
+    int total_tool_results = 0;
+    for (const auto& m : t.messages)
+        if (is_assistant_with_results(m))
+            total_tool_results += static_cast<int>(m.tool_calls.size());
+    int tool_results_emitted = 0;
     for (const auto& m : t.messages) {
         const bool has_text   = !m.text.empty();
         // Skip empty-bytes images (a drained draft attachment that leaked
@@ -1263,13 +1284,18 @@ json build_messages(const Thread& t) {
         // Tool results as separate role:"tool" messages.
         if (has_tools) {
             for (const auto& tc : m.tool_calls) {
+                const int recency_rank = total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
                 // Send whatever output we have; non-terminal calls (rare on
                 // the OpenAI path) still need a paired tool message or the
                 // next request 400s on an unanswered tool_call_id.
                 std::string out = tc.output();
+                bool is_error = !tc.is_terminal() || tc.is_failed() || tc.is_rejected();
                 if (out.empty()) {
                     if (tc.is_rejected())      out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else {
+                    out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
                 arr.push_back({
                     {"role", "tool"},

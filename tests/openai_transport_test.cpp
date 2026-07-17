@@ -140,6 +140,62 @@ static void test_build_messages_tool_roundtrip() {
     CHECK(arr[1]["content"] == "file contents here");
 }
 
+// Age-tiered tool-result clearing (shared wire::cap_tool_result_aged): on a
+// long tool-burst thread the newest results keep the full budget and stale
+// ones fade to a tight head+tail so a big dump stops replaying every turn.
+static std::string oai_tool_content(const nlohmann::json& arr, const char* id) {
+    for (const auto& msg : arr)
+        if (msg.value("role", "") == "tool"
+            && msg.value("tool_call_id", "") == id)
+            return msg.value("content", "");
+    return {};
+}
+
+static void test_build_messages_age_tiering() {
+    std::string big = "HEAD_SENTINEL_AAAA\n";
+    big.append(60 * 1024, 'x');
+    big += "\nTAIL_SENTINEL_ZZZZ";
+
+    Thread t;
+    Message u; u.role = Role::User; u.text = "start"; t.messages.push_back(u);
+    const int n = 20;
+    for (int i = 0; i < n; ++i) {
+        Message a; a.role = Role::Assistant; a.text = "c";
+        ToolUse tc;
+        tc.id   = ToolCallId{"call_" + std::to_string(i)};
+        tc.name = ToolName{"grep"};
+        tc.status = ToolUse::Done{{}, {}, big};
+        a.tool_calls.push_back(std::move(tc));
+        t.messages.push_back(std::move(a));
+    }
+    auto arr = oai::build_messages(t);
+
+    // Newest (call_19, rank 0) stays full; oldest (call_0, rank 19) is faded.
+    std::string newest = oai_tool_content(arr, "call_19");
+    std::string oldest = oai_tool_content(arr, "call_0");
+    CHECK(newest.size() > 40 * 1024);
+    CHECK(oldest.size() < 6 * 1024);
+    CHECK(oldest.find("bytes elided") != std::string::npos);
+    // Faded result still keeps head+tail (recall, not replay).
+    CHECK(oldest.find("HEAD_SENTINEL_AAAA") != std::string::npos);
+    CHECK(oldest.find("TAIL_SENTINEL_ZZZZ") != std::string::npos);
+
+    // A short old result ships verbatim (nothing to fade).
+    Thread t2;
+    Message u2; u2.role = Role::User; u2.text = "start"; t2.messages.push_back(u2);
+    for (int i = 0; i < n; ++i) {
+        Message a; a.role = Role::Assistant; a.text = "c";
+        ToolUse tc;
+        tc.id   = ToolCallId{"call_" + std::to_string(i)};
+        tc.name = ToolName{"grep"};
+        tc.status = ToolUse::Done{{}, {}, "3 matches\n"};
+        a.tool_calls.push_back(std::move(tc));
+        t2.messages.push_back(std::move(a));
+    }
+    auto arr2 = oai::build_messages(t2);
+    CHECK(oai_tool_content(arr2, "call_0") == "3 matches\n");
+}
+
 static void test_sse_text_stream() {
     // A plain text completion: two content deltas, finish_reason stop, [DONE].
     std::string sse =
@@ -940,6 +996,7 @@ int main() {
     test_build_tools();
     test_build_messages_basic();
     test_build_messages_tool_roundtrip();
+    test_build_messages_age_tiering();
     test_sse_text_stream();
     test_sse_tool_call_stream();
     test_sse_two_tool_calls();

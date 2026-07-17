@@ -209,4 +209,113 @@ private:
     std::size_t data_accum_max_;
 };
 
+// ── Tool-result wire budget (age-tiered "tool result clearing") ───────────
+//
+// SINGLE SOURCE OF TRUTH for how much of a tool's output ships on the wire.
+// Every transport (Anthropic, OpenAI-compat, Ollama native) used to size tool
+// results differently — Anthropic had the full head+tail cap + age-tiering;
+// the others shipped the raw output with only a coarse global scrub cap. A
+// giant `read`/`grep`/`bash` dump therefore replayed IN FULL on every
+// subsequent turn on the OpenAI/Ollama paths, burning context on the very
+// models (local + smaller-window) that can least afford it. Now the policy
+// lives once, here, and all three transports call it.
+//
+// The full TRANSCRIPT is never touched — only the WIRE copy of each tool
+// result is sized by (a) its byte length and (b) how RECENT the call is.
+// Rationale, from Anthropic's context-engineering guidance: "once a tool has
+// been called deep in the message history, why would the agent need to see
+// the raw result again?" Claude Code keeps the most-recent results at full
+// fidelity and fades the rest.
+//
+//   rank 0 .. kFullResultWindow-1  → full budget (active working set)
+//   rank >= kFullResultWindow      → tight head+tail (recall WHAT it returned,
+//                                    not replay it)
+//
+// `recency_rank` is 0 for the newest terminal tool result in the thread and
+// grows toward the oldest. Two invariants keep this loss-free for reasoning:
+//   • ERROR results are NEVER faded — the model needs the full failure text
+//     to recover, however old.
+//   • Results already smaller than the faded budget ship verbatim regardless
+//     of age — there's nothing to gain by touching them (cap_tool_result is a
+//     no-op under budget).
+
+inline constexpr std::size_t kToolResultFullBudget  = 64u * 1024u;
+inline constexpr std::size_t kToolResultFadedBudget = 2u  * 1024u;
+inline constexpr int         kFullResultWindow      = 8;
+
+// Back up an index to the start of the UTF-8 code point it lands in. `i` is a
+// prospective cut point; if it falls inside a multi-byte sequence we walk left
+// until a lead byte (or 0). Bounded at 3 continuation bytes (max UTF-8
+// sequence is 4 bytes).
+[[nodiscard]] inline std::size_t utf8_floor(std::string_view s, std::size_t i) noexcept {
+    if (i >= s.size()) return s.size();
+    std::size_t steps = 0;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80 && steps < 3) {
+        --i; ++steps;
+    }
+    return i;
+}
+
+// Advance an index forward to the next UTF-8 code-point boundary.
+[[nodiscard]] inline std::size_t utf8_ceil(std::string_view s, std::size_t i) noexcept {
+    std::size_t steps = 0;
+    while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80 && steps < 3) {
+        ++i; ++steps;
+    }
+    return i;
+}
+
+// Wire-only byte-budget cap for a single tool result. A 500 KiB grep or a
+// `read` of a giant file otherwise bloats EVERY subsequent request (the result
+// replays on each turn) until auto-compaction eventually kicks in. Mirrors
+// Zed's take_text_within_byte_budget (thread.rs): cap at a byte budget, cut on
+// a UTF-8 boundary, splice a marker so the model knows bytes were elided. We
+// keep head + tail (not just head) because tool output often carries the
+// operative summary or error at the END (compiler tally, "N matches", exit
+// status). Transcript is untouched — the user still sees the full output; only
+// the wire copy is trimmed.
+[[nodiscard]] inline std::string cap_tool_result(std::string_view in, std::size_t budget) {
+    if (in.size() <= budget) return std::string{in};
+
+    const std::size_t elided = in.size() - budget;
+    std::string marker = "\n\n...[" + std::to_string(elided)
+                       + " bytes elided to fit wire budget; full output is "
+                         "in the transcript]...\n\n";
+
+    // Pathologically small budget: hard-truncate the head on a boundary.
+    if (marker.size() + 16 >= budget) {
+        return std::string{in.substr(0, utf8_floor(in, budget))};
+    }
+
+    const std::size_t body_budget = budget - marker.size();
+    const std::size_t head_len    = (body_budget * 7) / 10;
+    const std::size_t tail_len    = body_budget - head_len;
+
+    const std::size_t head_cut  = utf8_floor(in, head_len);
+    const std::size_t tail_from = utf8_ceil(in, in.size() - tail_len);
+
+    std::string out;
+    out.reserve(head_cut + marker.size() + (in.size() - tail_from));
+    out.append(in.substr(0, head_cut));
+    out.append(marker);
+    out.append(in.substr(tail_from));
+    return out;
+}
+
+// The wire budget for a tool result at the given recency rank. Errors keep the
+// full budget at any age; recent results keep it; stale successful results
+// fade to the tight head+tail budget.
+[[nodiscard]] inline std::size_t faded_tool_budget(int recency_rank, bool is_error) noexcept {
+    const bool faded = !is_error && recency_rank >= kFullResultWindow;
+    return faded ? kToolResultFadedBudget : kToolResultFullBudget;
+}
+
+// Convenience: cap a tool result by its age. One call every transport shares —
+// pick the budget from (recency_rank, is_error), then head+tail-cap to it.
+[[nodiscard]] inline std::string cap_tool_result_aged(std::string_view raw,
+                                                      int recency_rank,
+                                                      bool is_error) {
+    return cap_tool_result(raw, faded_tool_budget(recency_rank, is_error));
+}
+
 } // namespace agentty::provider::wire

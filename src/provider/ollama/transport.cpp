@@ -1124,6 +1124,17 @@ std::string memory_blocks() {
 // exactly the shape the system prompt promised.
 json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
     json arr = json::array();
+    // Recency ranks for the shared age-tiered wire budget (0 = newest tool
+    // result). Stale successful dumps fade to a tight head+tail so a big read
+    // from many calls ago stops replaying in full — doubly valuable here,
+    // where local models have the SMALLEST context windows. Both the
+    // JSON-protocol "TOOL RESULT (name):" user turn and the native role:"tool"
+    // turn share the same counter. See wire::cap_tool_result_aged.
+    int total_tool_results = 0;
+    for (const auto& m : msgs)
+        if (is_assistant_with_results(m))
+            total_tool_results += static_cast<int>(m.tool_calls.size());
+    int tool_results_emitted = 0;
     for (const auto& m : msgs) {
         const bool has_text  = !m.text.empty();
         const bool has_tools = is_assistant_with_results(m);
@@ -1142,6 +1153,8 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                                {"content", scrub_utf8(m.text)}});
             }
             for (const auto& tc : m.tool_calls) {
+                const int recency_rank = total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
                 json obj;
                 obj["tool_name"] = tc.name.value;
                 obj["tool_args"] = tc.args.is_null() ? json::object() : tc.args;
@@ -1150,9 +1163,12 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                                {"content", scrub_utf8(obj.dump())}});
                 // Result as a USER turn the model was taught to read next.
                 std::string out = tc.output();
+                bool is_error = !tc.is_terminal() || tc.is_failed() || tc.is_rejected();
                 if (out.empty()) {
                     if (tc.is_rejected())       out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else {
+                    out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
                 std::string body = "TOOL RESULT (" + tc.name.value + "):\n" + out;
                 arr.push_back({{"role", "user"},
@@ -1192,10 +1208,15 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
         }
         if (has_tools) {
             for (const auto& tc : m.tool_calls) {
+                const int recency_rank = total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
                 std::string out = tc.output();
+                bool is_error = !tc.is_terminal() || tc.is_failed() || tc.is_rejected();
                 if (out.empty()) {
                     if (tc.is_rejected())       out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else {
+                    out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
                 arr.push_back({
                     {"role", "tool"},
