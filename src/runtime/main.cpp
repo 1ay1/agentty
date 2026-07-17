@@ -397,10 +397,13 @@ int main(int argc, char** argv) {
         .auth          = provider_auth,
     });
 
-    // ── Wire the subagent (`task` tool) seam ────────────────────────────
+    // ── Wire the subagent (`task` tool) seam ────────────────────
     // Process-global config the `task` tool reads to spin up an isolated
     // sub-agent loop. Resolve the model the same way the TUI / ACP paths
-    // do (-m override → saved setting → built-in default).
+    // do (-m override → saved setting → built-in default). The stream fn
+    // is the SAME provider dispatch Deps::stream uses (routes on
+    // provider::active() at call time), so subagents work on Anthropic,
+    // OpenAI-compat, and Ollama alike — not just the Anthropic transport.
     {
         auto sa_settings = persistence::load_settings();
         std::string sa_model =
@@ -408,7 +411,7 @@ int main(int argc, char** argv) {
           : !sa_settings.model_id.empty() ? sa_settings.model_id.value
           :                                 std::string{"claude-opus-4-5"};
         tools::subagent::install(tools::subagent::Config{
-            provider_auth, std::move(sa_model), true});
+            provider_auth, std::move(sa_model), true, stream_fn});
     }
 
     // ── MCP server mode: serve agentty's native tools over MCP (stdio) ──

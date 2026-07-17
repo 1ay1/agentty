@@ -20,9 +20,12 @@
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
 #include "agentty/tool/tool.hpp"       // tool::DynamicDispatch, ToolUse, Message …
+#include "agentty/tool/util/partial_json.hpp"   // args salvage for truncated tool JSON
 
+#include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/selection.hpp"
 
 #include "agentty/rag/rag.hpp"
 #include "agentty/rag/rerank.hpp"
@@ -43,6 +46,8 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -303,8 +308,8 @@ private:
                 try {
                     int p = std::stoi(hs.substr(colon + 1));
                     if (p > 0 && p <= 65535) cfg.port = static_cast<std::uint16_t>(p);
-                } catch (const std::exception& e) { util::dbglog("rag.embed_endpoint.port", e.what()); /* keep default port */ }
-                catch (...) { util::dbglog("rag.embed_endpoint.port", "non-std exception"); }
+                } catch (const std::exception& e) { ::agentty::util::dbglog("rag.embed_endpoint.port", e.what()); /* keep default port */ }
+                catch (...) { ::agentty::util::dbglog("rag.embed_endpoint.port", "non-std exception"); }
             } else {
                 cfg.host = hs;
             }
@@ -381,8 +386,8 @@ private:
                 if (n < 1) n = 1;
                 if (n > 8) n = 8;
                 cfg.n = static_cast<std::size_t>(n);
-            } catch (const std::exception& e) { util::dbglog("rag.expand_n.env", e.what()); /* keep default */ }
-            catch (...) { util::dbglog("rag.expand_n.env", "non-std exception"); }
+            } catch (const std::exception& e) { ::agentty::util::dbglog("rag.expand_n.env", e.what()); /* keep default */ }
+            catch (...) { ::agentty::util::dbglog("rag.expand_n.env", "non-std exception"); }
         }
         return cfg;
     }
@@ -497,11 +502,16 @@ std::string summarize_call(const ToolUse& tc) {
 StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
                               const AgentType& type,
                               std::string& log, std::string& err_out) {
-    namespace ap = provider::anthropic;
-    ap::Request req;
+    // Provider-agnostic request — the generic shape every transport accepts.
+    // fresh_auth_header refreshes the ANTHROPIC OAuth token from disk; on any
+    // other backend it would CLOBBER the provider's key with Anthropic
+    // credentials, so gate it on the active provider kind.
+    provider::Request req;
     req.model         = cfg.model;
     req.system_prompt = subagent_system_prompt(type);
-    req.auth          = auth::fresh_auth_header(cfg.auth);
+    req.auth          = provider::active().kind == provider::Kind::Anthropic
+                      ? auth::fresh_auth_header(cfg.auth)
+                      : cfg.auth;
     req.max_tokens    = 32000;
     req.messages      = thread.messages;
 
@@ -533,7 +543,16 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
     StopReason stop = StopReason::Unspecified;
     std::string cur_tool_json;
 
-    auto pump = [&] {
+    // Throttled feed pump: a fast model streams hundreds of text deltas
+    // per second, and every progress::emit crosses a thread boundary as a
+    // ToolExecProgress Msg. ~12 fps is indistinguishable on the card and
+    // keeps a parallel fan-out of subagents from flooding the UI queue.
+    auto last_pump = std::chrono::steady_clock::now()
+                   - std::chrono::milliseconds(100);
+    auto pump = [&](bool force = false) {
+        auto now = std::chrono::steady_clock::now();
+        if (!force && now - last_pump < std::chrono::milliseconds(80)) return;
+        last_pump = now;
         std::string snap = log;
         if (!asst.text.empty()) {
             snap += "\n  \xe2\x96\xb8 ";
@@ -542,8 +561,7 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
         progress::emit(snap);
     };
 
-    ap::run_stream_sync(std::move(req),
-        [&](Msg m) {
+    auto sink = [&](Msg m) {
             auto* sm = std::get_if<msg::StreamMsg>(&m);
             if (!sm) return;
             std::visit([&](auto&& e) {
@@ -564,28 +582,52 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
                     if (!asst.tool_calls.empty() && !cur_tool_json.empty()) {
                         try {
                             asst.tool_calls.back().args = json::parse(cur_tool_json);
-                        } catch (const std::exception& ex) {
-                            util::dbglog("subagent.tool_args.parse", ex.what());
-                            /* leave null; marked failed below */
                         } catch (...) {
-                            util::dbglog("subagent.tool_args.parse", "non-std exception");
+                            // Truncated/unbalanced args JSON (stream cut, weak
+                            // model). Salvage by synthesising the missing
+                            // closers — but NEVER when the cut landed inside a
+                            // string VALUE: the repaired JSON would parse fine
+                            // and silently run a tool with a half-written body.
+                            if (!util::ended_inside_string(cur_tool_json)) {
+                                try {
+                                    asst.tool_calls.back().args = json::parse(
+                                        util::close_partial_json(cur_tool_json));
+                                    ::agentty::util::dbglog("subagent.tool_args.repaired",
+                                                 cur_tool_json);
+                                } catch (...) {
+                                    ::agentty::util::dbglog("subagent.tool_args.parse",
+                                                 cur_tool_json);
+                                }
+                            } else {
+                                ::agentty::util::dbglog("subagent.tool_args.mid_string",
+                                             cur_tool_json);
+                            }
                         }
                     }
                     cur_tool_json.clear();
                     if (!asst.tool_calls.empty()) {
                         log += "\n  \xe2\x9a\x99 ";
                         log += summarize_call(asst.tool_calls.back());
-                        pump();
+                        pump(/*force=*/true);
                     }
                 } else if constexpr (std::same_as<T, StreamFinished>) {
                     stop = e.stop_reason;
                 } else if constexpr (std::same_as<T, StreamError>) {
                     err_out = e.message;
-                    log += "\n  \xe2\x9a\xa0 error: " + e.message;
-                    pump();
                 }
             }, *sm);
-        });
+        };
+
+    // Route through the SAME provider dispatch the parent uses (installed
+    // at startup); fall back to the Anthropic transport when no seam is
+    // wired (tests that install only auth+model).
+    if (cfg.stream) {
+        cfg.stream(std::move(req), sink);
+    } else {
+        provider::anthropic::AnthropicProvider p;
+        p.stream(std::move(req), sink);
+    }
+    pump(/*force=*/true);   // flush the throttled tail
 
     thread.messages.push_back(std::move(asst));
     return stop;
@@ -629,16 +671,56 @@ public:
         }
 
         int turns = 0;
-        std::string log = "\xe2\x97\x86 " + std::string{type.name} + " subagent\n";
+        std::string log = "\xe2\x97\x86 " + std::string{type.name} + " agent";
         std::string last_error;
-        while (turns < subagent::kMaxTurns) {
+        // Transient stream failures (429/529 brown-out, TLS reset, transport
+        // hiccup) are RETRIED with backoff instead of aborting the whole
+        // subagent — "task fails a lot" was mostly one flaky completion
+        // killing an otherwise healthy loop. Consecutive counter: any
+        // successful completion resets it.
+        constexpr int kMaxStreamRetries = 3;
+        int stream_failures = 0;
+        // Repeat-failure breaker (same rule as the parent's doom-loop
+        // breaker): the identical tool call failing 3× means the loop is
+        // stuck — stop burning turns and report what we have.
+        std::unordered_map<std::string, int> failed_calls;
+        bool doomed = false;
+
+        while (turns < subagent::kMaxTurns && !doomed) {
             ++turns;
-            log += (turns == 1 ? "" : "\n");
-            log += "\xe2\x80\xa2 turn " + std::to_string(turns);
-            progress::emit(log);
             std::string err;
             StopReason stop = run_one_completion(thread, cfg, type, log, err);
-            if (!err.empty()) last_error = err;
+            (void)stop;   // loop advance is decided by ran_a_tool below
+
+            if (!err.empty()) {
+                last_error = err;
+                ++stream_failures;
+                // run_one_completion pushed a (possibly partial) assistant
+                // message for the failed completion. Drop it unconditionally:
+                // a partial turn carrying tool_use blocks with no tool_results
+                // would 400 the retry request (wire pairing), and partial text
+                // would duplicate once the retry streams the full reply.
+                if (!thread.messages.empty()
+                    && thread.messages.back().role == Role::Assistant)
+                    thread.messages.pop_back();
+                if (stream_failures > kMaxStreamRetries) {
+                    log += "\n  \xe2\x9a\xa0 stream failed "
+                         + std::to_string(stream_failures) + "\xc3\x97 \xe2\x80\x94 giving up: "
+                         + err;
+                    progress::emit(log);
+                    break;
+                }
+                const int wait_s = 1 << (stream_failures - 1);   // 1,2,4s
+                log += "\n  \xe2\x86\xbb retry " + std::to_string(stream_failures)
+                     + "/" + std::to_string(kMaxStreamRetries)
+                     + " in " + std::to_string(wait_s) + "s (" + err + ")";
+                progress::emit(log);
+                std::this_thread::sleep_for(std::chrono::seconds(wait_s));
+                --turns;   // a retried completion doesn't consume budget
+                continue;
+            }
+            stream_failures = 0;
+            last_error.clear();
 
             Message& asst = thread.messages.back();
             bool ran_a_tool = false;
@@ -647,28 +729,39 @@ public:
                 for (auto& tc : asst.tool_calls) {
                     if (tc.args.is_null()) {
                         tc.status = ToolUse::Failed{now, now,
-                            "subagent tool args failed to parse"};
+                            "tool args failed to parse \xe2\x80\x94 re-emit the call "
+                            "with complete, valid JSON arguments"};
                         log += "\n    \xe2\x9c\x97 " + tc.name.value + ": bad args";
                         progress::emit(log);
+                        // A parse failure still counts as a tool ROUND-TRIP:
+                        // the model sees the error tool_result and can
+                        // re-emit. Without this the loop broke out on the
+                        // first bad-args call and the whole task died.
+                        ran_a_tool = true;
                         continue;
                     }
                     ran_a_tool = true;
                     auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
                     if (res) {
                         tc.status = ToolUse::Done{now, now, std::move(res->text)};
-                        log += "\n    \xe2\x9c\x93 " + tc.name.value;
+                        log += "\n    \xe2\x9c\x93 " + summarize_call(tc);
                     } else {
                         tc.status = ToolUse::Failed{now, now, res.error().render()};
-                        log += "\n    \xe2\x9c\x97 " + tc.name.value + ": "
+                        log += "\n    \xe2\x9c\x97 " + summarize_call(tc) + "  \xe2\x80\x94 "
                              + res.error().render();
+                        // Identical failing call 3× → the loop is stuck.
+                        std::string key = tc.name.value + '\0'
+                            + (tc.args.is_null() ? std::string{} : tc.args.dump());
+                        if (++failed_calls[key] >= 3) {
+                            doomed = true;
+                            log += "\n  \xe2\x9a\xa0 same call failed 3\xc3\x97 \xe2\x80\x94 stopping";
+                        }
                     }
                     progress::emit(log);
                 }
             }
 
-            if (stop != StopReason::ToolUse && !ran_a_tool) break;
-            if (stop == StopReason::ToolUse && !ran_a_tool) break;
-            if (!err.empty() && !ran_a_tool) break;
+            if (!ran_a_tool) break;   // final text answer (or nothing left to do)
         }
 
         std::string report;
@@ -682,6 +775,9 @@ public:
             std::string why;
             if (!last_error.empty())
                 why = "[subagent failed: " + last_error + "]";
+            else if (doomed)
+                why = "[subagent stopped: the same tool call failed 3\xc3\x97 "
+                      "in a row without converging]";
             else if (turns >= subagent::kMaxTurns)
                 why = "[subagent hit its turn budget without producing a final report]";
             else

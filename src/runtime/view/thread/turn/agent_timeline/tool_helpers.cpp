@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/tool/util/utf8.hpp"
 
 namespace agentty::ui {
 
@@ -33,6 +34,7 @@ std::string tool_display_name(const std::string& n) {
     if (n == "git_diff")        return "Git Diff";
     if (n == "git_log")         return "Git Log";
     if (n == "git_commit")      return "Git Commit";
+    if (n == "task")            return "Agent";
     return n;
 }
 
@@ -58,6 +60,7 @@ maya::Color tool_category_color(const std::string& n) {
     if (n == "edit" || n == "write")  return role_brand;
     if (n == "bash")                  return code_text;
     if (n == "todo")                  return status_warn;
+    if (n == "task")                  return role_brand_alt;   // agent identity
     if (n.rfind("git_", 0) == 0)      return role_info;
     return code_path;
 }
@@ -66,6 +69,7 @@ std::string_view tool_category_label(const std::string& n) {
     if (n == "edit" || n == "write")  return "mutate";
     if (n == "bash")                  return "execute";
     if (n == "todo")                  return "plan";
+    if (n == "task")                  return "agent";
     if (n.rfind("git_", 0) == 0)      return "vcs";
     return "inspect";
 }
@@ -384,17 +388,37 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         return "\xe2\x80\xa6";
     }
     if (n == "task") {
-        // Header detail = the model's one-line display_description; once the
-        // subagent settles, append its turn count parsed from the report
-        // header ("Subagent report (N turns):") so the card doubles as a
-        // compact result log without expanding.
-        std::string detail = safe("display_description");
-        if (detail.empty()) detail = "subagent";
+        // Header detail: "type · what it's doing". The agent type leads —
+        // in a parallel fan-out of subagents it's the discriminator the
+        // user scans for. Falls back to the prompt's first line when the
+        // model omitted display_description. Once settled, append the turn
+        // count parsed from the report header ("Subagent report (type, N
+        // turns):") so the card doubles as a compact result log.
+        std::string type = safe("agent_type");
+        if (type.empty()) type = "general";
+        std::string what = safe("display_description");
+        if (what.empty()) {
+            what = safe("prompt");
+            if (auto nl = what.find('\n'); nl != std::string::npos)
+                what.resize(nl);
+            if (what.size() > 60) {
+                what.resize(tools::util::safe_utf8_cut(what, 57));
+                what += "\xe2\x80\xa6";
+            }
+        }
+        std::string detail = type;
+        if (!what.empty()) detail += "  \xc2\xb7  " + what;
         if (tc.is_terminal()) {
             const auto& out = tc.output();
             if (auto p = out.find("report ("); p != std::string::npos) {
-                if (auto end = out.find(')', p); end != std::string::npos)
-                    detail += "  \xc2\xb7  " + out.substr(p + 8, end - (p + 8));
+                if (auto end = out.find(')', p); end != std::string::npos) {
+                    // "(type, N turns)" — keep only the "N turns" half; the
+                    // type is already leading the detail.
+                    std::string inner = out.substr(p + 8, end - (p + 8));
+                    if (auto comma = inner.find(", "); comma != std::string::npos)
+                        inner = inner.substr(comma + 2);
+                    detail += "  \xc2\xb7  " + inner;
+                }
             }
             if (tc.is_failed()) detail += "  \xc2\xb7  failed";
         }

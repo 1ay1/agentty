@@ -178,6 +178,44 @@ int main() {
               !has(d.promote, 1) && has(d.promote, 2), promoted_str(d.promote));
     }
 
+    // (k) task FAN-OUT: several subagents in one wave ALL run concurrently.
+    //     This is the tool's whole point — sched_effects maps task to
+    //     {ReadFs, Net} (composable) while its PERMISSION gate stays Exec.
+    {
+        std::vector<ToolUse> b = {
+            pending("task", {{"prompt", "explore module A"}}),
+            pending("task", {{"prompt", "explore module B"}}),
+            pending("task", {{"prompt", "review the diff"}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        check("task fan-out all parallel", d.promote.size() == 3,
+              promoted_str(d.promote));
+    }
+
+    // (l) task + reads compose (a subagent runs alongside direct reads).
+    {
+        std::vector<ToolUse> b = {
+            pending("task", {{"prompt", "map the codebase"}}),
+            pending("read", {{"path", "a.cpp"}}),
+            pending("grep", {{"pattern", "foo"}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        check("task + reads run together", d.promote.size() == 3,
+              promoted_str(d.promote));
+    }
+
+    // (m) task does NOT ride alongside bash: Exec is exclusive and task's
+    //     sched view still carries ReadFs/Net which conflict with Exec.
+    {
+        std::vector<ToolUse> b = {
+            pending("bash", {{"command", "make -j8"}}),
+            pending("task", {{"prompt", "explore while building"}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        check("bash excludes task", d.promote.size() == 1 && has(d.promote, 0),
+              promoted_str(d.promote));
+    }
+
     std::printf("\n%d/%d checks passed\n", total - failures, total);
     return failures == 0 ? 0 : 1;
 }

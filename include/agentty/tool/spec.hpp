@@ -229,6 +229,31 @@ inline constexpr std::array kCatalog = {
     return nullptr;
 }
 
+// ── Scheduling-effects view ──────────────────────────────────────
+// `effects` answers the PERMISSION question ("how much trust does this
+// tool need?"); this answers the CONCURRENCY question ("what does it
+// actually contend on?"). They coincide for every tool except `task`:
+//
+//   • task carries Effect::Exec for permission — a subagent can run bash,
+//     so it must gate like bash.
+//   • But for SCHEDULING, Exec means "exclusive: unbounded blast radius,
+//     nothing else may run" — which serialised every task and blocked all
+//     sibling tools behind a running subagent. That defeats the tool's
+//     entire purpose: task exists precisely so the model can fan out
+//     several isolated investigations CONCURRENTLY (Claude Code runs its
+//     Task tool in parallel waves for the same reason). The subagent's
+//     own tool calls are individually effect-gated + path-scheduled
+//     inside its loop, so the parent scheduling it as coarse-Exec is
+//     double-counting contention that the inner dispatch already manages.
+//
+// So task schedules as {ReadFs, Net} — composable with reads, with other
+// tasks, and with disjoint-path writers — while its permission gate stays
+// Exec. Any future tool with the same split gets a row here.
+[[nodiscard]] constexpr EffectSet sched_effects(const ToolSpec& s) noexcept {
+    if (s.name == "task") return {Effect::ReadFs, Effect::Net};
+    return s.effects;
+}
+
 // Fixed-string non-type template parameter so a tool factory can write
 // `spec::require<"bash">()` and have the misspelling caught at compile
 // time. The instantiation site evaluates `lookup` in a constant

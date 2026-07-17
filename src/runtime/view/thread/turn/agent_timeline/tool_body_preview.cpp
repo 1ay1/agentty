@@ -568,18 +568,20 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
     //    BashOutput gives the tail-oriented "watch it work" look while
     //    running; CodeBlock shows the full report once settled.
     if (n == "task") {
-        // Hard 5-row ceiling on the card body: a subagent report can be
-        // long, but the timeline card is a glance-able summary — the full
-        // report is always in the transcript. Both the live feed and the
-        // settled report are head-capped to kTaskBodyRows.
-        constexpr std::size_t kTaskBodyRows = 5;
+        // Card body ceilings: the LIVE feed gets more room (it's the only
+        // window into what the subagent is doing — ⚙ calls, ✓/✗ results,
+        // ↻ retries — and it's transient), while the SETTLED report stays a
+        // tight glance-able summary; the full report is in the transcript
+        // and the Ctrl+O viewer.
+        constexpr std::size_t kTaskLiveRows   = 8;
+        constexpr std::size_t kTaskReportRows = 5;
         if (tc.is_running()) {
             if (!tc.progress_text().empty()) {
                 out.kind = Kind::BashOutput;
                 // BashOutput is tail-oriented (newest activity at the
                 // bottom) — keep the last few feed lines so the running
                 // card shows the CURRENT step, not the stale header.
-                out.text = tail_window(tc.progress_text(), kTaskBodyRows);
+                out.text = tail_window(tc.progress_text(), kTaskLiveRows);
                 out.text_color = text_tertiary;
                 out.is_streaming = true;
             }
@@ -598,8 +600,8 @@ maya::ToolBodyPreview::Config tool_body_preview_config(
                     body.remove_prefix(1);
             }
             out.kind = Kind::CodeBlock;
-            // keep 4 content lines + 1 "⋯ N more" marker = 5 rows max.
-            out.text = head_window(body, kTaskBodyRows - 1);
+            // keep content lines + 1 "⋯ N more" marker = ceiling rows max.
+            out.text = head_window(body, kTaskReportRows - 1);
             out.text_color = text_tertiary;
             // We pre-sliced to the ceiling; render it verbatim (no further
             // head+tail elision that would fight our marker).
