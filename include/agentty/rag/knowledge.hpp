@@ -65,9 +65,15 @@ struct Context {
     std::string               query;   // the (possibly normalized) probe
     std::vector<ContextChunk> chunks;  // ranked, enrichable by each stage
 
-    // Confidence signal: derived from score distribution. High confidence
-    // when top scores are high and clustered; low when scores are weak or
-    // spread. Range [0,1]. Computed by compute_confidence() after ranking.
+    // Confidence signal in [0,1]. CALIBRATED: anchored on the ABSOLUTE
+    // lexical coverage of the query in the top hits (do the query's content
+    // words actually appear in what we retrieved?), tempered by the relative
+    // score agreement of the candidate set. Rank-derived scores alone are
+    // NOT trustworthy here — the feature reranker min-max-normalizes per
+    // candidate set, so the top hit's score is ~1.0 by construction even
+    // when every candidate is garbage. Computed by compute_confidence()
+    // after ranking and BEFORE MMR (diversification deliberately spreads
+    // scores; reading that spread as doubt would punish MMR for working).
     double confidence = 0.0;
 
     [[nodiscard]] bool        empty()  const noexcept { return chunks.empty(); }
@@ -83,27 +89,10 @@ struct Context {
         return c;
     }
 
-    // Compute confidence from the score distribution. Call after ranking.
-    void compute_confidence() noexcept {
-        if (chunks.empty()) { confidence = 0.0; return; }
-        if (chunks.size() == 1) { confidence = std::min(1.0, chunks[0].hit.score); return; }
-
-        // Confidence = f(top_score, score_variance). High top + low variance → confident.
-        double top = chunks[0].hit.score;
-        double sum = 0.0, sum_sq = 0.0;
-        for (const auto& c : chunks) {
-            sum    += c.hit.score;
-            sum_sq += c.hit.score * c.hit.score;
-        }
-        double mean = sum / static_cast<double>(chunks.size());
-        double var  = sum_sq / static_cast<double>(chunks.size()) - mean * mean;
-        double std_dev = (var > 0.0) ? std::sqrt(var) : 0.0;
-
-        // Heuristic: confidence = top_score * (1 - normalized_stddev).
-        // High top + tight cluster → confident. Low top OR high spread → uncertain.
-        double norm_std = (top > 0.0) ? std_dev / top : 1.0;
-        confidence = std::clamp(top * (1.0 - std::min(norm_std, 1.0)), 0.0, 1.0);
-    }
+    // Compute confidence from `query` + the ranked chunks. Call after
+    // ranking, before MMR. Never throws (any internal failure → 0.0).
+    // Defined in knowledge.cpp (needs the rerank tokenizer).
+    void compute_confidence() noexcept;
 };
 
 // ── Retriever: HOW (essay §1) ─────────────────────────────────────────────

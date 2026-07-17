@@ -204,16 +204,9 @@ public:
             auto root = resolve_docs_root();
             std::string root_str = root.string();
 
-            static std::mutex mu;
-            static rag::Corpus corpus;
-            static std::string indexed_root;
-
-            std::lock_guard<std::mutex> lock(mu);
-            if (!root.empty() && indexed_root != root_str) {
-                corpus.build(root, embed);
-                indexed_root = root_str;
-                ++corpus_epoch_;   // #5: invalidate the per-turn query cache
-            }
+            std::lock_guard<std::mutex> lock(docs_mu_);
+            ensure_docs_index_locked_(root, root_str, embed);
+            rag::Corpus& corpus = docs_corpus_;
 
             rag::CorpusSource docs_source("docs", corpus, embed);
             const bool have_docs = !root.empty() && corpus.chunk_count() > 0;
@@ -240,19 +233,23 @@ public:
             const std::size_t k = static_cast<std::size_t>(q.k);
             const std::size_t pool_k = std::max<std::size_t>(k * 5, 30);
 
-            // ── #5 PER-TURN QUERY CACHE ────────────────────────────────
+            // ── #5 PER-TURN QUERY CACHE ────────────────────────────
             // A pipeline pass (expand + fan-out + rerank + MMR + compress)
             // is not free — and an agent frequently re-issues the same
             // search_docs query inside one ReAct turn (retry after a failed
             // edit, re-check a fact). Cache the full result keyed by
-            // (query, k, corpus-shape). Cleared whenever the indexed root
-            // changes shape (corpus rebuild bumps corpus_epoch). Bounded.
+            // (query, k, corpus-shape). Invalidated when ANY fused source
+            // moves: docs rebuild bumps corpus_epoch_, and the epoch below
+            // folds in the memory-store shape, the skill set, and the MCP
+            // resource generation — so `remember` followed by the same query
+            // surfaces the new fact instead of a stale cached result.
             const std::string cache_key =
                 q.query + '\x1f' + std::to_string(k) + '\x1f' + root_str;
+            const std::uint64_t knowledge_epoch = knowledge_epoch_();
             {
                 std::lock_guard<std::mutex> clk(cache_mu_);
-                if (cache_epoch_ != corpus_epoch_) { query_cache_.clear();
-                                                     cache_epoch_ = corpus_epoch_; }
+                if (cache_epoch_ != knowledge_epoch) { query_cache_.clear();
+                                                       cache_epoch_ = knowledge_epoch; }
                 if (auto it = query_cache_.find(cache_key); it != query_cache_.end()) {
                     mode = it->second.mode + ", cached";
                     return it->second.passages;
@@ -341,13 +338,141 @@ public:
     }
 
 private:
-    // ── #5 query-cache state ──────────────────────────────────────
+    // ── #5 query-cache state ────────────────────────────────
     struct CacheEntry { std::vector<mt::DocPassage> passages; std::string mode; };
     static constexpr std::size_t kCacheMax = 64;
     static inline std::mutex cache_mu_;
     static inline std::unordered_map<std::string, CacheEntry> query_cache_;
     static inline unsigned long corpus_epoch_ = 0;   // bumped on every rebuild
-    static inline unsigned long cache_epoch_  = ~0UL; // cache's view of the corpus
+    static inline std::uint64_t cache_epoch_  = ~0ULL; // cache's view of ALL sources
+
+    // ── docs corpus state (process-wide; guarded by docs_mu_) ──────────
+    // Class-scoped (not function-local statics) so the async pre-warm seam
+    // (tools::warm_doc_index_async) can reach the same instance.
+    static inline std::mutex     docs_mu_;
+    static inline rag::Corpus    docs_corpus_;
+    static inline std::string    docs_indexed_root_;
+    static inline std::uint64_t  docs_fp_ = 0;
+
+public:
+    // FRESHNESS: (re)build whenever the docs tree DRIFTS, not only when the
+    // root path changes. Without this the corpus was frozen for the whole
+    // session — a doc edited mid-session kept serving its stale chunks
+    // until restart. The (path,size,mtime) fingerprint walk is cheap (docs
+    // dirs are small), and Corpus::build() is already incremental (per-file
+    // mtime cache: unchanged files are reused, only changed files re-chunk/
+    // re-embed), so a no-drift call costs one directory walk and a drifted
+    // call costs only the delta. Caller must hold docs_mu_.
+    static void ensure_docs_index_locked_(const fs::path& root,
+                                          const std::string& root_str,
+                                          const rag::EmbedConfig& embed) {
+        if (root.empty()) return;
+        const std::uint64_t fp = docs_tree_fingerprint_(root);
+        if (docs_indexed_root_ != root_str || fp != docs_fp_) {
+            docs_corpus_.build(root, embed);
+            docs_indexed_root_ = root_str;
+            docs_fp_ = fp;
+            ++corpus_epoch_;   // #5: invalidate the per-turn query cache
+        }
+    }
+
+    // Non-blocking warm probe: TRUE when the docs index is already built
+    // and fresh for the current root (or there is no docs root at all —
+    // memory/skills sources are BM25-only and sub-ms, always "warm").
+    // try_lock so a build in progress reports cold instead of blocking the
+    // caller (this runs on the TUI update thread).
+    static bool index_warm() {
+        auto root = resolve_docs_root();
+        if (root.empty()) return true;
+        std::unique_lock<std::mutex> lock(docs_mu_, std::try_to_lock);
+        if (!lock.owns_lock()) return false;   // build in flight → cold
+        return docs_indexed_root_ == root.string()
+            && docs_fp_ == docs_tree_fingerprint_(root);
+    }
+
+    // Kick a background (detached, best-effort) index build so a FUTURE
+    // turn finds the corpus warm. Single-flight: a second call while one
+    // is running returns immediately.
+    static void warm_async() {
+        static std::atomic<bool> in_flight{false};
+        bool expected = false;
+        if (!in_flight.compare_exchange_strong(expected, true)) return;
+        std::thread([] {
+            try {
+                const rag::EmbedConfig embed = embed_config_from_env();
+                auto root = resolve_docs_root();
+                if (!root.empty()) {
+                    std::lock_guard<std::mutex> lock(docs_mu_);
+                    ensure_docs_index_locked_(root, root.string(), embed);
+                }
+            } catch (...) { /* warm-up is best-effort */ }
+            in_flight.store(false);
+        }).detach();
+    }
+
+private:
+
+    // Cheap (path,size,mtime) fingerprint of the docs tree. Mirrors the
+    // walk in Corpus::build (same is_doc_file gate lives there; extensions
+    // here are a superset check via the same rules the corpus applies — any
+    // file the corpus would index participates). FNV-1a/64.
+    static std::uint64_t docs_tree_fingerprint_(const fs::path& root) {
+        std::uint64_t fp = 1469598103934665603ULL;
+        auto mix = [&fp](std::uint64_t v) { fp = (fp ^ v) * 1099511628211ULL; };
+        std::error_code ec;
+        std::size_t seen = 0;
+        for (auto it = fs::recursive_directory_iterator(
+                 root, fs::directory_options::skip_permission_denied, ec);
+             it != fs::recursive_directory_iterator() && seen < 20000;
+             it.increment(ec)) {
+            if (ec) { ec.clear(); continue; }
+            const auto& entry = *it;
+            std::error_code e2;
+            if (entry.is_directory(e2)) {
+                auto name = entry.path().filename().string();
+                if (name.starts_with(".")) it.disable_recursion_pending();
+                continue;
+            }
+            if (!entry.is_regular_file(e2)) continue;
+            // Cache blob changes on every rebuild — excluding it keeps the
+            // fingerprint from flapping (rebuild → new cache mtime → "drift").
+            auto fname = entry.path().filename().string();
+            if (fname.starts_with(".")) continue;
+            ++seen;
+            mix(std::hash<std::string>{}(entry.path().string()));
+            mix(static_cast<std::uint64_t>(entry.file_size(e2)));
+            mix(static_cast<std::uint64_t>(
+                entry.last_write_time(e2).time_since_epoch().count()));
+        }
+        return fp;
+    }
+
+    // Combined shape of EVERY fused knowledge source — the query cache is
+    // only valid while all of them hold still. Docs: corpus_epoch_ (bumped
+    // on rebuild). Memory: (size,mtime) of both scope files — stat-cheap,
+    // no record parsing. Skills: count+names hash. MCP: server generation.
+    static std::uint64_t knowledge_epoch_() {
+        std::uint64_t h = 1469598103934665603ULL;
+        auto mix = [&h](std::uint64_t v) { h = (h ^ v) * 1099511628211ULL; };
+        mix(corpus_epoch_);
+        for (auto scope : {memory::Scope::User, memory::Scope::Project}) {
+            std::error_code ec;
+            auto p = memory::path_for(scope);
+            if (p.empty()) continue;
+            mix(static_cast<std::uint64_t>(fs::exists(p, ec)
+                ? fs::file_size(p, ec) : 0));
+            auto t = fs::last_write_time(p, ec);
+            mix(ec ? 0ULL : static_cast<std::uint64_t>(
+                t.time_since_epoch().count()));
+        }
+        if (skills_rag_enabled()) {
+            const auto& all = skills::all();
+            mix(all.size());
+            for (const auto& s : all) mix(std::hash<std::string>{}(s.name));
+        }
+        if (mcp_resources_enabled()) mix(mcp::mcp_generation());
+        return h;
+    }
 
     static bool corrective_enabled() { return truthy_default_on("AGENTTY_RAG_CORRECT"); }
 
@@ -404,27 +529,34 @@ private:
         if (neural)
             pipe.add(std::make_shared<rag::NeuralRerankStage>(
                 std::max<std::size_t>(k * 2, 8), neural_config_from_env(embed)));
-        pipe.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
-            .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
         ctx = pipe.run(std::move(ctx));
+
+        // Confidence is measured on the RANKED list, BEFORE MMR: the
+        // diversifier deliberately spreads the survivors across topics/
+        // files, and reading that spread as uncertainty would punish MMR
+        // for doing its job (the better it diversified, the lower the
+        // "confidence" fell — anti-correlated with quality).
         ctx.compute_confidence();
+        const double conf = ctx.confidence;
+
+        rag::Pipeline narrow;
+        narrow.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
+              .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
+        ctx = narrow.run(std::move(ctx));
+        ctx.confidence = conf;   // MMR/compress must not overwrite the signal
         return ctx;
     }
 
     // De-noise a query for the CRAG retry: lowercase, strip punctuation to
-    // spaces, drop a small English stopword set, keep tokens ≥3 chars. The
-    // retry probes with the content words only — recovering hits when the
-    // original query was buried in conversational phrasing ("can you tell me
-    // how the foo widget handles bar" → "foo widget handles bar").
+    // spaces, drop stopwords (the SAME set the reranker's query_terms uses —
+    // one vocabulary, one behaviour), keep tokens ≥3 chars. The retry probes
+    // with the content words only — recovering hits when the original query
+    // was buried in conversational phrasing ("can you tell me how the foo
+    // widget handles bar" → "foo widget handles bar").
     static std::string distill_query_(const std::string& q) {
-        static const std::unordered_set<std::string> stop = {
-            "the","a","an","of","to","in","on","for","and","or","is","are",
-            "was","were","be","do","does","did","how","what","why","when",
-            "where","which","who","can","you","me","i","we","it","this",
-            "that","with","about","tell","show","please","my","our","your"};
         std::string cur, out;
         auto flush = [&] {
-            if (cur.size() >= 3 && !stop.count(cur)) {
+            if (cur.size() >= 3 && !rag::is_stopword(cur)) {
                 if (!out.empty()) out += ' ';
                 out += cur;
             }
@@ -711,6 +843,9 @@ public:
             static std::mutex mu;
             static rag::Corpus corpus;
             static std::uint64_t fingerprint = 0;
+            // Per-file (size,mtime) fingerprints from the last index pass —
+            // the diff base for INCREMENTAL re-indexing.
+            static std::unordered_map<std::string, std::uint64_t> file_fps;
 
             std::lock_guard<std::mutex> lock(mu);
 
@@ -727,18 +862,71 @@ public:
             }
 
             if (fp != fingerprint || corpus.chunk_count() == 0) {
-                std::vector<std::pair<std::string, std::string>> docs;
-                docs.reserve(files.size());
+                // Per-file fingerprints for the drift diff.
+                std::unordered_map<std::string, std::uint64_t> cur_fps;
+                cur_fps.reserve(files.size());
                 for (const auto& [rel, abs] : files) {
-                    std::ifstream in(abs, std::ios::binary);
-                    if (!in) continue;
-                    std::string body((std::istreambuf_iterator<char>(in)),
-                                     std::istreambuf_iterator<char>());
-                    if (body.empty()) continue;
-                    docs.emplace_back(rel, std::move(body));
+                    std::error_code fe;
+                    std::uint64_t f = 1469598103934665603ULL;
+                    auto fmix = [&f](std::uint64_t v) { f = (f ^ v) * 1099511628211ULL; };
+                    fmix(static_cast<std::uint64_t>(fs::file_size(abs, fe)));
+                    fmix(static_cast<std::uint64_t>(
+                        fs::last_write_time(abs, fe).time_since_epoch().count()));
+                    cur_fps.emplace(rel, f);
                 }
-                corpus.build_from_memory(docs, embed);
+
+                // Changed/new + removed sets vs the last pass.
+                std::vector<std::string> changed, removed;
+                for (const auto& [rel, f] : cur_fps) {
+                    auto it2 = file_fps.find(rel);
+                    if (it2 == file_fps.end() || it2->second != f)
+                        changed.push_back(rel);
+                }
+                for (const auto& [rel, f] : file_fps)
+                    if (!cur_fps.count(rel)) removed.push_back(rel);
+
+                // INCREMENTAL path: a small drift (the common case — one
+                // file saved between calls) patches the live corpus via
+                // remove_document/add_document, re-embedding ONLY the
+                // changed files. The old behaviour re-embedded the ENTIRE
+                // tree (up to 4000 files through Ollama) on any one-byte
+                // save. Full rebuild only when the corpus is empty or the
+                // drift is wholesale (first index, branch switch, …) —
+                // add_document rebuilds BM25+HNSW per call, so batching a
+                // large delta through it would be quadratic.
+                constexpr std::size_t kIncrementalMax = 32;
+                const bool can_patch = corpus.chunk_count() > 0
+                    && (changed.size() + removed.size()) <= kIncrementalMax;
+
+                if (can_patch) {
+                    for (const auto& rel : removed)
+                        corpus.remove_document(rel);
+                    for (const auto& rel : changed) {
+                        auto pit = std::find_if(files.begin(), files.end(),
+                            [&rel](const auto& pr) { return pr.first == rel; });
+                        if (pit == files.end()) continue;
+                        std::ifstream in(pit->second, std::ios::binary);
+                        if (!in) continue;
+                        std::string body((std::istreambuf_iterator<char>(in)),
+                                         std::istreambuf_iterator<char>());
+                        if (body.empty()) { corpus.remove_document(rel); continue; }
+                        corpus.add_document(rel, body, embed);
+                    }
+                } else {
+                    std::vector<std::pair<std::string, std::string>> docs;
+                    docs.reserve(files.size());
+                    for (const auto& [rel, abs] : files) {
+                        std::ifstream in(abs, std::ios::binary);
+                        if (!in) continue;
+                        std::string body((std::istreambuf_iterator<char>(in)),
+                                         std::istreambuf_iterator<char>());
+                        if (body.empty()) continue;
+                        docs.emplace_back(rel, std::move(body));
+                    }
+                    corpus.build_from_memory(docs, embed);
+                }
                 fingerprint = fp;
+                file_fps = std::move(cur_fps);
             }
 
             const std::size_t k = static_cast<std::size_t>(q.k);
@@ -1262,6 +1450,52 @@ void install_host_backends(::mcp::tools::HostServices& svc) {
 }
 
 // ── Proactive retrieval (SOTA active-RAG / FLARE / Self-RAG) ────────────
+namespace {
+
+// TRUE when the memory record behind `mem_path` ("memory://<scope>/<id>")
+// is ALREADY rendered in the system prompt's <learned-memory> block —
+// injecting it again via <retrieved-context> would spend context tokens on
+// bytes the model can already see. Mirrors the transport's selection
+// exactly (load_recent_* → select_for_prompt) and caches the id set,
+// invalidated by the same (size,mtime) stat the RAG epoch uses.
+bool memory_fact_in_prompt_(const std::string& mem_path) {
+    auto slash = mem_path.rfind('/');
+    if (slash == std::string::npos || slash + 1 >= mem_path.size()) return false;
+    const std::string id = mem_path.substr(slash + 1);
+
+    static std::mutex mu;
+    static std::unordered_set<std::string> prompt_ids;
+    static std::uint64_t stamp = ~0ULL;
+
+    std::uint64_t now_stamp = 1469598103934665603ULL;
+    auto mix = [&now_stamp](std::uint64_t v) {
+        now_stamp = (now_stamp ^ v) * 1099511628211ULL;
+    };
+    for (auto scope : {memory::Scope::User, memory::Scope::Project}) {
+        std::error_code ec;
+        auto p = memory::path_for(scope);
+        if (p.empty()) continue;
+        mix(static_cast<std::uint64_t>(
+            fs::exists(p, ec) ? fs::file_size(p, ec) : 0));
+        auto t = fs::last_write_time(p, ec);
+        mix(ec ? 0ULL
+               : static_cast<std::uint64_t>(t.time_since_epoch().count()));
+    }
+
+    std::lock_guard<std::mutex> lock(mu);
+    if (stamp != now_stamp) {
+        stamp = now_stamp;
+        prompt_ids.clear();
+        for (auto load : {&memory::load_recent_user, &memory::load_recent_project}) {
+            auto picked = memory::select_for_prompt(load());
+            for (const auto& r : picked.records) prompt_ids.insert(r.id);
+        }
+    }
+    return prompt_ids.count(id) > 0;
+}
+
+} // namespace
+
 // Runs the SAME AgenttyDocRetriever the search_docs tool uses, but out of
 // band — before the model sees the turn — and only surfaces its result when
 // confidence clears a HIGH bar (higher than the tool's LOW floor: we're
@@ -1280,6 +1514,20 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
     }
 
     try {
+        // ── LATENCY GUARD ───────────────────────────────────────
+        // proactive_retrieve runs on the SUBMIT path (TUI update thread).
+        // A COLD docs corpus means corpus.build(): chunk the whole tree +
+        // batch-embed every chunk through Ollama — seconds to minutes on a
+        // large docs dir. Freezing the UI for that is never acceptable for
+        // an unprompted feature. So: if the index isn't warm, SKIP this
+        // turn's injection and kick a detached background build — the NEXT
+        // turn (and any explicit search_docs call) finds it hot. Warm-path
+        // cost stays what it was: one fingerprint walk + one query embed.
+        if (!AgenttyDocRetriever::index_warm()) {
+            AgenttyDocRetriever::warm_async();
+            return std::nullopt;
+        }
+
         AgenttyDocRetriever r;
         mt::DocQuery q;
         q.query = query;
@@ -1307,6 +1555,14 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
             "ignore any that don't. Cite the source path when you use one.\n\n";
         int n = 0;
         for (const auto& p : passages) {
+            // CONTEXT-ECONOMY: memory facts already rendered in the system
+            // prompt's <learned-memory> block would be pure double-spend —
+            // the model can see them. select_for_prompt() decides that
+            // rendering; mirror it here and drop any memory passage whose
+            // record made the prompt cut. (Docs/skills/MCP passages are
+            // never in the system prompt — always kept.)
+            if (p.source == "memory" && memory_fact_in_prompt_(p.path))
+                continue;
             block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
                    + ":" + p.path;
             if (p.line_start > 0)
@@ -1319,6 +1575,7 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
         }
         block += "</retrieved-context>";
 
+        if (n == 0) return std::nullopt;   // everything deduped away
         return ProactiveHit{std::move(block), conf, n};
     } catch (...) {
         return std::nullopt;   // proactive retrieval is best-effort, never fatal

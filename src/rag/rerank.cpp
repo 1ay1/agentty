@@ -50,10 +50,33 @@ void normalize01(std::vector<double>& v) {
 
 } // namespace
 
+bool is_stopword(std::string_view token) noexcept {
+    // Compact English stopword list shared by the reranker's query_terms and
+    // (via this export) the CRAG distiller. Deliberately conservative: only
+    // glue words that essentially never carry retrieval intent. Domain-y
+    // short words ("api", "gpu", "ssh") are NOT here.
+    static const std::unordered_set<std::string_view> kStop = {
+        "the","a","an","of","to","in","on","for","and","or","is","are",
+        "was","were","be","been","being","do","does","did","how","what",
+        "why","when","where","which","who","whom","can","could","will",
+        "would","should","you","your","yours","me","my","mine","we","our",
+        "ours","it","its","this","that","these","those","with","about",
+        "tell","show","please","there","here","from","into","than","then",
+        "them","they","their","have","has","had","not","but","all","any",
+        "some","just","also","very","more","most","such","so","at","by",
+        "as","if","up","out","get","got","one","two","way","i","am","us"};
+    return kStop.count(token) != 0;
+}
+
 std::vector<std::string> query_terms(std::string_view query) {
     auto toks = tokenize(query);
     std::vector<std::string> out;
     std::unordered_set<std::string> seen;
+    for (auto& t : toks)
+        if (!is_stopword(t) && seen.insert(t).second) out.push_back(t);
+    if (!out.empty()) return out;
+    // All-stopword query ("what is this"): fall back to the raw tokens so
+    // coverage/proximity still have something to match rather than zeroing.
     for (auto& t : toks) if (seen.insert(t).second) out.push_back(t);
     return out;
 }
@@ -233,9 +256,16 @@ compress(std::string_view query, std::string_view text,
     for (std::size_t s = 1; s < spans.size(); ++s)
         if (score[s] > score[seed]) seed = s;
 
-    // If NOTHING matched, fall back to the head slice (better than nothing).
+    // If NOTHING matched lexically, DON'T pretend the head of the chunk is
+    // the relevant part — a zero-overlap chunk that survived to top-k got
+    // there via DENSE similarity, and its semantically-relevant span is as
+    // likely to be in the middle or tail as the head. Return empty: the
+    // ContextChunk contract (`compressed.empty() → use the full chunk`)
+    // keeps the whole passage, which is strictly safer than a misleading
+    // truncation. Callers that need a hard budget can slice AFTER deciding
+    // the chunk is worth keeping.
     if (score[seed] <= 0.0)
-        return std::string{text.substr(0, target_chars)};
+        return {};
 
     std::size_t lo = seed, hi = seed;
     auto span_len = [&](std::size_t a, std::size_t b) {
@@ -441,7 +471,11 @@ mmr_diversify(std::vector<Hit> hits, std::size_t out_k, double lambda) {
     if (hits.size() <= out_k) return hits;
     lambda = std::clamp(lambda, 0.0, 1.0);
 
-    // Precompute a token SET per chunk ONCE (not per comparison).
+    // Similarity backend: EMBEDDING COSINE when the candidates carry dense
+    // vectors (they're already in memory — free, and strictly better at
+    // "same idea, different words" redundancy than lexical overlap), with
+    // token-set Jaccard as the embedding-free fallback. Mixed pairs (one
+    // side missing its vector) also fall back to Jaccard.
     std::vector<std::unordered_set<std::string>> toks(hits.size());
     for (std::size_t i = 0; i < hits.size(); ++i) {
         if (hits[i].chunk) {
@@ -450,6 +484,17 @@ mmr_diversify(std::vector<Hit> hits, std::size_t out_k, double lambda) {
                 std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
         }
     }
+    auto pair_sim = [&](std::size_t a, std::size_t b) noexcept -> double {
+        const Chunk* ca = hits[a].chunk;
+        const Chunk* cb = hits[b].chunk;
+        if (ca && cb && !ca->embedding.empty()
+            && ca->embedding.size() == cb->embedding.size()) {
+            // Cosine of normalized-ish embeddings lands in [-1,1]; clamp the
+            // negative tail to 0 so it composes with the [0,1] relevance term.
+            return std::max(0.0, cosine(ca->embedding, cb->embedding));
+        }
+        return jaccard_sim(toks[a], toks[b]);
+    };
 
     // Normalize relevance to [0,1] so it composes with the [0,1] similarity.
     double max_rel = 0.0;
@@ -459,9 +504,9 @@ mmr_diversify(std::vector<Hit> hits, std::size_t out_k, double lambda) {
     std::vector<std::size_t> selected;
     selected.reserve(out_k);
     std::vector<char> used(hits.size(), 0);
-    // sim_to_sel[i] = max Jaccard of candidate i to ANY already-selected chunk.
-    // Maintained incrementally so each round only compares against the ONE
-    // newly selected chunk — total work O(out_k · n) instead of O(out_k · n²).
+    // sim_to_sel[i] = max similarity of candidate i to ANY already-selected
+    // chunk. Maintained incrementally so each round only compares against
+    // the ONE newly selected chunk — total work O(out_k · n), not O(out_k · n²).
     std::vector<double> sim_to_sel(hits.size(), 0.0);
 
     while (selected.size() < out_k) {
@@ -479,7 +524,7 @@ mmr_diversify(std::vector<Hit> hits, std::size_t out_k, double lambda) {
         // Update each remaining candidate's max-similarity against `best` only.
         for (std::size_t i = 0; i < hits.size(); ++i) {
             if (used[i]) continue;
-            sim_to_sel[i] = std::max(sim_to_sel[i], jaccard_sim(toks[i], toks[best]));
+            sim_to_sel[i] = std::max(sim_to_sel[i], pair_sim(i, best));
         }
     }
 

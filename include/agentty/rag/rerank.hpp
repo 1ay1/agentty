@@ -61,8 +61,16 @@ compress(std::string_view query, std::string_view text,
          std::size_t target_chars = 600);
 
 // Helper exposed for tests: lowercase alphanumeric query terms (≥2 chars),
-// deduplicated, preserving first-seen order.
+// deduplicated, preserving first-seen order. English STOPWORDS are dropped
+// ("how does the X work" → {x, work}): glue words carry no retrieval signal
+// and, worse, inflate term-coverage/proximity features toward chunks full of
+// prose filler. Falls back to the unfiltered tokens when filtering would
+// leave nothing (all-stopword query).
 [[nodiscard]] std::vector<std::string> query_terms(std::string_view query);
+
+// True when `token` (already lowercase) is in the shared English stopword
+// set used by query_terms and the CRAG query distiller.
+[[nodiscard]] bool is_stopword(std::string_view token) noexcept;
 
 // ── Neural (cross-encoder style) reranking via Ollama ─────────────────────
 //

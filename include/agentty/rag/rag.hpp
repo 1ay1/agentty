@@ -111,6 +111,11 @@ struct EmbedConfig {
     std::string host = "127.0.0.1";
     std::uint16_t port = 11434;
     std::string model;        // e.g. "nomic-embed-text"; empty → BM25-only
+    // Total HTTP budget per /api/embed call, ms. Index-time batches keep the
+    // generous default; QUERY-time single-text embeds are separately capped
+    // at 10s inside Corpus so one wedged Ollama can never stall a search
+    // (let alone the pre-turn proactive path) for two minutes.
+    long timeout_ms = 120'000;
 };
 
 // Embed a batch of texts via Ollama /api/embed. Returns one vector per input
@@ -283,6 +288,11 @@ private:
     HnswIndex              hnsw_;
     bool                   hnsw_built_ = false;
     std::size_t            embed_dim_ = 0;
+    // Identity of the model the persisted embeddings were computed with
+    // (v4 cache header). Two models can share a dimension while living in
+    // completely different vector spaces — without this, switching
+    // AGENTTY_EMBED_MODEL would silently mix spaces and misrank everything.
+    std::string            embed_model_;
 };
 
 // ── Reciprocal Rank Fusion ────────────────────────────────────────────────
