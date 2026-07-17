@@ -1,17 +1,25 @@
 name: ci
 
-# Single build + test gate matching the LOCAL toolchain (GCC on Linux,
-# Release). No cross-compiler matrix, no sanitizer legs, no macOS/Windows
-# runners — those churn and fail on toolchains nobody builds with here.
-# One job: does it compile with the same compiler used locally, and do the
-# smoke tests pass. Fast and deterministic.
+# Two gates:
+#   1. build-test (linux gcc) — the primary gate matching the LOCAL
+#      toolchain (GCC, Release): does it compile with the same compiler
+#      used locally, and do the smoke tests pass. Fast + deterministic.
+#   2. windows-compile (msvc) — a COMPILE-ONLY gate that mirrors the
+#      release workflow's Windows configure (vcpkg static + MSVC) but
+#      stops at the build; no MSI, no signing, no upload. It exists
+#      because MSVC-only breakage (POSIX-only headers like <unistd.h> /
+#      <ext/stdio_filebuf.h> compiled into mcp-cpp's tests/examples, which
+#      agentty's standalone build pulls in) is invisible to the Linux gate
+#      and used to surface only at release time (C1083). Catch it per-push.
 #
 # NOTE: if GitHub still shows phantom failing checks named linux-clang19,
-# sanitizers (...), macos-gcc, windows-msvc, or "fuzz harness smoke", those
-# are REQUIRED STATUS CHECKS configured by NAME in the repo's branch-
-# protection rules (Settings → Branches → master). No workflow in this repo
-# produces them, so they hang forever. Remove those names from the required-
-# checks list there — this workflow only emits the single job below.
+# sanitizers (...), macos-gcc, or "fuzz harness smoke", those are REQUIRED
+# STATUS CHECKS configured by NAME in the repo's branch-protection rules
+# (Settings → Branches → master). No workflow in this repo produces them,
+# so they hang forever. Remove those names from the required-checks list
+# there — this workflow only emits the two jobs below (the windows check is
+# named "windows compile (msvc)", so a required "windows-msvc" name still
+# won't match; use the exact job name or drop it).
 
 on:
   push:
@@ -79,3 +87,46 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # Compile-only Windows gate. Mirrors release.yml's build-windows configure
+  # (vcpkg static openssl+nghttp2, MSVC, Release) but stops at the build:
+  # no MSI, no signing, no upload. Purpose is narrow but important — prove
+  # the tree still COMPILES under MSVC so a POSIX-only header or API sneaking
+  # into a TU that Windows builds (notably mcp-cpp's tests/examples, which
+  # agentty's standalone build pulls in) is caught here on every push instead
+  # of blowing up the Windows release leg with C1083 ~19 min into a release.
+  windows-compile:
+    name: windows compile (msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - name: Install deps (vcpkg static)
+        shell: pwsh
+        run: |
+          git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth 1 origin master
+          git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
+      - name: Configure + build (compile only)
+        shell: pwsh
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+            -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          cmake --build build --config Release -j
+
