@@ -12,6 +12,7 @@
 #include "agentty/diff/diff.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/tool/spec.hpp"       // spec catalog — effects authority
 #include "agentty/tool/util/fs_helpers.hpp"   // agentty workspace_root()
 
 #include <mcp/tools/toolset.hpp>
@@ -217,12 +218,22 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         def.name        = ToolName{spec.name};
         def.description  = spec.description.has_value() ? *spec.description : std::string{};
         def.input_schema = ::mcp::to_json(spec.inputSchema);
-        def.effects      = EffectSet{mt::effects_for_builtin(spec.name).bits()};
-        // eager_input_streaming: write/edit/bash/git_commit benefit from
-        // token-by-token tool-input streaming (multi-KB bodies).
-        const std::string& n = spec.name;
-        def.eager_input_streaming =
-            (n == "write" || n == "edit" || n == "bash" || n == "git_commit");
+        // Effects: agentty's spec catalog is the AUTHORITY for built-in
+        // tools — the permission policy reads ToolDef::effects, the parallel
+        // scheduler reads spec::lookup()->effects, and the catalog's
+        // compile-time proofs (only_known_exec_tools, no_writefs_and_exec_
+        // combo, readonly_invariants) are stated against it. mcp-cpp's
+        // effects_for_builtin table had drifted (remember/forget/wipe were
+        // "pure" there — no prompt despite writing memory.jsonl — and task
+        // lacked Exec despite a subagent being able to run bash), which
+        // split the gate from the scheduler. Prefer the catalog; the mcp
+        // table only covers tools the catalog doesn't know.
+        if (const auto* sp = tools::spec::lookup(spec.name)) {
+            def.effects                = sp->effects;
+            def.eager_input_streaming  = sp->eager_input_streaming;
+        } else {
+            def.effects = EffectSet{mt::effects_for_builtin(spec.name).bits()};
+        }
 
         std::string tool_name = spec.name;
         def.execute = [provider, tool_name](const nlohmann::json& args) -> ExecResult {

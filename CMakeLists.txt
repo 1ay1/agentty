@@ -378,8 +378,13 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
         "agentty: the mcp-cpp submodule is missing but it now provides the "
         "entire tool set. Run `git submodule update --init --recursive`.")
 endif()
-set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(MCP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+# mcp-cpp's own test suite + example server ride along in agentty's ctest:
+# the tests prove the Tier-1 tool IMPLEMENTATIONS (fs/search/web/toolset/
+# codec/protocol/cap/scheduler) and the example server un-skips
+# mcp_bridge_test's real spawn+handshake e2e. Cheap (<1s total) and they
+# guard the layer every agentty tool now lives in.
+set(MCP_BUILD_TESTS    ON  CACHE BOOL "" FORCE)
+set(MCP_BUILD_EXAMPLES ON  CACHE BOOL "" FORCE)
 add_subdirectory(mcp-cpp)
 agentty_pull_submodule_latest(mcp-cpp master mcp)
 if(TARGET mcp)
@@ -1593,6 +1598,16 @@ if(AGENTTY_BUILD_TESTS)
     # spliced, UTF-8 boundary respected) while small outputs ship verbatim.
     agentty_add_full_test(tool_result_budget_test)
 
+    # toolset_e2e_test — drives EVERY built-in tool through the REAL
+    # production dispatch path (registry() → mcp_tools_bridge → mcp-cpp
+    # toolset → decode_result). Proves agentty's WIRING of the tools:
+    # schema presence, effects parity with the spec catalog, FileChange
+    # decode, workspace-root refusal, memory/skill/search_docs/task host
+    # backends, and the git quartet over a real temp repo. Offline: web
+    # tools only on refusal paths, search_docs on the BM25-only fallback.
+    agentty_add_full_test(toolset_e2e_test)
+    set_tests_properties(toolset_e2e_test PROPERTIES TIMEOUT 120)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
@@ -1621,11 +1636,12 @@ if(AGENTTY_BUILD_TESTS)
     if(AGENTTY_MCP)
         agentty_add_full_test(mcp_bridge_test LIBS mcp::mcp)
         set_tests_properties(mcp_bridge_test PROPERTIES TIMEOUT 60)
-        # Point the e2e at the mcp-cpp example server when it's been built, so
-        # ctest exercises the real spawn+handshake path instead of skipping.
-        # The test still SKIPs gracefully if the binary isn't there.
+        # Point the e2e at the mcp-cpp example server (now built in-tree via
+        # MCP_BUILD_EXAMPLES) so ctest exercises the real spawn+handshake
+        # path instead of skipping. The test still SKIPs gracefully if the
+        # binary isn't there.
         set_tests_properties(mcp_bridge_test PROPERTIES
-            ENVIRONMENT "AGENTTY_MCP_E2E_SERVER=${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/build/examples/mcp_server_example")
+            ENVIRONMENT "AGENTTY_MCP_E2E_SERVER=${CMAKE_BINARY_DIR}/mcp-cpp/examples/mcp_server_example")
 
         # mcp_http_test — e2e for the Streamable HTTP transport. Stands up a
         # tiny in-process HTTP/1.1 MCP server and drives make_http_provider()
@@ -1729,6 +1745,7 @@ if(AGENTTY_BUILD_TESTS)
         reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test
+        toolset_e2e_test
         salvage_dedup_test
         doom_loop_test
         acp_integration_test
