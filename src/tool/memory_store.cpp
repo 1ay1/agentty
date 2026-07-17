@@ -14,6 +14,7 @@
 #include "agentty/tool/memory_store.hpp"
 
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/utf8.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -772,7 +773,11 @@ std::string render_for_prompt(const Record& r) {
     out += r.id;
     out += "] ";
     if (r.pinned) out += "\xe2\x98\x85 ";   // ★ — visual cue for pinned
-    out += r.text;
+    // A record can round-trip arbitrary bytes from a pasted tool output or a
+    // clipboard capture (e.g. a truncated multi-byte UTF-8 sequence). Repair
+    // it here so the system prompt — which is serialized by the provider's
+    // JSON dump — is always well-formed. Cheap no-op when already valid.
+    out += tools::util::to_valid_utf8(r.text);
     if (!r.tags.empty()) {
         out += "  {";
         for (std::size_t i = 0; i < r.tags.size(); ++i) {
