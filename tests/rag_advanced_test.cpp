@@ -85,28 +85,32 @@ static void test_mmr_diversification() {
     CHECK(k8s_count < 3);  // MMR should diversify.
 }
 
-// ── 3. Confidence Signal ─────────────────────────────────────────────────────
+// ── 3. Confidence Signal ─────────────────────────────────────────────────────────────────
 static void test_confidence_signal() {
-    // High confidence: high top score, tight cluster.
+    // CALIBRATED confidence is anchored on ABSOLUTE query-term coverage of
+    // the retrieved text, not on the (rank-normalized) score distribution.
+    // High confidence: the top hits actually contain the query's content
+    // words, and two distinct docs corroborate.
     std::vector<rag::Hit> high_conf_hits;
-    rag::Chunk c1{"a.md", 1, 1, "text", {}};
-    rag::Chunk c2{"b.md", 1, 1, "text", {}};
+    rag::Chunk c1{"a.md", 1, 1, "how to deploy the zebra service to production", {}};
+    rag::Chunk c2{"b.md", 1, 1, "zebra service deploy steps and rollback", {}};
     high_conf_hits.push_back({&c1, 0.9});
     high_conf_hits.push_back({&c2, 0.85});
-    
-    auto ctx1 = rag::Context::from_hits("query", std::move(high_conf_hits));
-    CHECK(ctx1.confidence > 0.5);  // Should be high.
-    
-    // Low confidence: low scores.
+
+    auto ctx1 = rag::Context::from_hits("deploy zebra service", std::move(high_conf_hits));
+    CHECK(ctx1.confidence > 0.5);  // Covered + corroborated → high.
+
+    // Low confidence: high SCORES but the text shares nothing with the
+    // query — the exact garbage-in case the calibration exists to catch.
     std::vector<rag::Hit> low_conf_hits;
-    rag::Chunk c3{"c.md", 1, 1, "text", {}};
-    rag::Chunk c4{"d.md", 1, 1, "text", {}};
-    low_conf_hits.push_back({&c3, 0.1});
-    low_conf_hits.push_back({&c4, 0.05});
-    
-    auto ctx2 = rag::Context::from_hits("query", std::move(low_conf_hits));
-    CHECK(ctx2.confidence < 0.3);  // Should be low.
-    
+    rag::Chunk c3{"c.md", 1, 1, "unrelated prose about cooking pasta", {}};
+    rag::Chunk c4{"d.md", 1, 1, "gardening tips for spring tomatoes", {}};
+    low_conf_hits.push_back({&c3, 0.95});
+    low_conf_hits.push_back({&c4, 0.9});
+
+    auto ctx2 = rag::Context::from_hits("deploy zebra service", std::move(low_conf_hits));
+    CHECK(ctx2.confidence < 0.3);  // Zero coverage → low, whatever the scores.
+
     // Empty results: zero confidence.
     auto ctx3 = rag::Context::from_hits("query", {});
     CHECK(ctx3.confidence == 0.0);

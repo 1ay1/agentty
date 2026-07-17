@@ -28,5 +28,8 @@ dotfiles/
 packaging/windows/license.rtf
 Testing/
 
+# RAG on-disk index cache (rebuilt from the docs tree; never committed)
+.agentty_rag_cache.bin
+
 # Local scratchpad — repro/diag sources, build artifacts (.exe/.obj), logs
 scratch/

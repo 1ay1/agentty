@@ -121,10 +121,11 @@ static void test_compress_extracts_relevant() {
     std::string shortt = "just a short note about oauth";
     CHECK(rag::compress("oauth", shortt, 600) == shortt);
 
-    // A query that matches nothing returns a non-empty head slice within budget.
+    // A query that matches nothing returns EMPTY — the "no relevant span
+    // found" signal. Consumers (ContextChunk::text()) fall back to the full
+    // chunk instead of a misleading head truncation.
     auto none = rag::compress("zzzznotpresent", text, 100);
-    CHECK(!none.empty());
-    CHECK(none.size() <= 100 + 8);  // small slack
+    CHECK(none.empty());
 }
 
 // ── 6. compress is extractive (output is a substring of the source) ──────────

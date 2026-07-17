@@ -24,7 +24,6 @@ namespace fs = std::filesystem;
 std::optional<std::vector<std::vector<float>>>
 embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts) {
     if (cfg.model.empty() || texts.empty()) return std::nullopt;
-
     json body;
     body["model"] = cfg.model;
     // /api/embed accepts a string OR an array of strings in `input` and
@@ -47,7 +46,8 @@ embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts) {
 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(3'000);
-    tos.total   = std::chrono::milliseconds(120'000);  // batch can be large
+    tos.total   = std::chrono::milliseconds(
+        cfg.timeout_ms > 0 ? cfg.timeout_ms : 120'000);
 
     auto resp = http::default_client().send(req, tos);
     if (!resp || resp->status != 200) return std::nullopt;
@@ -80,14 +80,58 @@ embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts) {
     }
 }
 
+namespace {
+
+// ── Asymmetric-retrieval task prefixes ─────────────────────────────
+// nomic-embed-text (agentty's default embedder) is instruction-tuned: it
+// expects documents as "search_document: …" and queries as
+// "search_query: …". Embedding both raw measurably degrades doc↔query
+// cosine (the model was never trained on prefix-less asymmetric pairs).
+// e5-family models use the same idea with "passage: "/"query: ". Applied
+// ONLY for models known to want them — a wrong prefix hurts other models.
+// Cache note: prefixed embeddings are incompatible with prefix-less ones,
+// which is one of the reasons kCacheMagic is at v4.
+enum class PrefixStyle { None, Nomic, E5 };
+
+PrefixStyle prefix_style(const std::string& model) {
+    std::string m = model;
+    for (auto& c : m) c = static_cast<char>(std::tolower((unsigned char)c));
+    if (m.find("nomic-embed") != std::string::npos) return PrefixStyle::Nomic;
+    if (m.find("e5") != std::string::npos &&
+        m.find("nomic") == std::string::npos)       return PrefixStyle::E5;
+    return PrefixStyle::None;
+}
+
+std::string with_doc_prefix(const EmbedConfig& cfg, std::string text) {
+    switch (prefix_style(cfg.model)) {
+        case PrefixStyle::Nomic: return "search_document: " + text;
+        case PrefixStyle::E5:    return "passage: " + text;
+        case PrefixStyle::None:  break;
+    }
+    return text;
+}
+
+std::string with_query_prefix(const EmbedConfig& cfg, std::string text) {
+    switch (prefix_style(cfg.model)) {
+        case PrefixStyle::Nomic: return "search_query: " + text;
+        case PrefixStyle::E5:    return "query: " + text;
+        case PrefixStyle::None:  break;
+    }
+    return text;
+}
+
+} // namespace
+
 // ── Corpus ──────────────────────────────────────────────────────────────────
 
 namespace {
 
 constexpr char kCacheName[] = ".agentty_rag_cache.bin";
-constexpr std::uint32_t kCacheMagic   = 0x52414703;  // "RAG\x03" — v3 adds chunk context (contextual retrieval)
-constexpr std::uint32_t kCacheMagicV2 = 0x52414702;  // legacy v2 (HNSW, no context)
-constexpr std::uint32_t kCacheMagicV1 = 0x52414701;  // legacy v1 (no HNSW)
+constexpr std::uint32_t kCacheMagic   = 0x52414705;  // "RAG\x05" — v5: + embed-model identity in header
+[[maybe_unused]] constexpr std::uint32_t kCacheMagicV4 = 0x52414704;  // legacy v4 (task prefixes, no model id)
+[[maybe_unused]] constexpr std::uint32_t kCacheMagicV3 = 0x52414703;  // legacy v3 (contextual, prefix-less embeddings)
+[[maybe_unused]] constexpr std::uint32_t kCacheMagicV2 = 0x52414702;  // legacy v2 (HNSW, no context)
+[[maybe_unused]] constexpr std::uint32_t kCacheMagicV1 = 0x52414701;  // legacy v1 (no HNSW)
 
 // Which files we treat as knowledge documents. Code is intentionally
 // excluded — agentic search (grep/read) covers code better than embeddings.
@@ -175,6 +219,7 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     root_ = root;
     chunks_.clear();
     embed_dim_ = 0;
+    embed_model_ = embed.model;   // v5 cache identity: who made these vectors
 
     std::error_code ec;
     if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) {
@@ -196,15 +241,31 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
         std::string blob = read_file(root / kCacheName, 512ull * 1024 * 1024);
         std::string_view b{blob};
         std::uint32_t magic = 0;
-        // v1/v2 caches lack the context field AND their embeddings were
-        // computed over the bare body (non-contextual) — loading them would
-        // permanently pin the corpus to pre-contextual quality. Treat them
-        // as a miss: one-time full re-chunk + re-embed, then v3 persists.
+        // v1–v4 caches predate the embed-model identity header (v3 also
+        // lacks task prefixes; v1/v2 additionally lack the context field) —
+        // loading them would risk mixing vector spaces or pinning stale-
+        // quality vectors. Treat them as a miss: one-time full re-chunk +
+        // re-embed, then v5 persists.
         if (get(b, magic) && magic == kCacheMagic) {
-            bool is_v2 = true;   // v3 keeps the v2 layout + context per chunk
+            bool is_v2 = true;   // v5 keeps the v2 layout + context per chunk
             std::uint32_t dim = 0, nfiles = 0;
+            std::string cached_model;
+            get_str(b, cached_model);   // v5: model the vectors came from
             get(b, dim);
             get(b, nfiles);
+            // EMBED-MODEL IDENTITY: two models can share a dimension while
+            // living in disjoint vector spaces. If the session's model
+            // differs from the one the cached vectors were computed with,
+            // keep the chunk TEXT (BM25 side is model-independent) but drop
+            // every cached embedding + the HNSW graph so build() re-embeds
+            // under the new model instead of silently misranking.
+            // A BM25-only session (empty model — e.g. Ollama not running)
+            // is NOT a switch: keep the vectors and their identity so the
+            // next embedding-capable session doesn't re-embed from scratch.
+            const bool model_match =
+                embed.model.empty() || cached_model == embed.model;
+            if (embed.model.empty() && !cached_model.empty())
+                embed_model_ = cached_model;   // carry identity through
             for (std::uint32_t fi = 0; fi < nfiles; ++fi) {
                 std::string path;
                 CachedFile cf;
@@ -233,13 +294,15 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
                     cf.chunks.push_back(std::move(c));
                 }
                 if (!ok) break;
+                if (!model_match)
+                    for (auto& cc : cf.chunks) cc.embedding.clear();
                 cache.emplace(std::move(path), std::move(cf));
             }
             // v2 cache: HNSW graph follows the chunk data, preceded by the
             // corpus signature it was built against (so a stale graph whose
             // positional ids no longer match this session's chunk order is
             // detected and rebuilt below rather than returning wrong chunks).
-            if (is_v2 && !b.empty()) {
+            if (is_v2 && model_match && !b.empty()) {
                 if (get(b, cached_sig))
                     hnsw_loaded = hnsw_.deserialize(b);
                 if (hnsw_loaded) embed_dim_ = dim;
@@ -306,7 +369,8 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
             std::vector<std::string> texts;
             texts.reserve(hi - i);
             for (std::size_t j = i; j < hi; ++j)
-                texts.push_back(need_embed[j]->embed_input());   // contextual embeddings
+                texts.push_back(with_doc_prefix(
+                    embed, need_embed[j]->embed_input()));   // contextual + task prefix
             auto vecs = embed_texts(embed, texts);
             if (!vecs || vecs->size() != texts.size()) break;  // degrade to BM25
             for (std::size_t j = i; j < hi; ++j) {
@@ -375,7 +439,14 @@ void Corpus::ranked_lists_for_query_(
 
     // Dense ranked list (only when the corpus AND the query can be embedded).
     if (embed_dim_ > 0 && !embed.model.empty()) {
-        auto qv = embed_texts(embed, {std::string{query}});
+        // QUERY-time embed gets a short leash: this call sits on the
+        // search_docs path (and the pre-turn proactive path). A single
+        // short text should embed in tens of ms; if Ollama is wedged or
+        // cold-loading a model, degrade to BM25-only for THIS query rather
+        // than hanging the search for the index-time 120s budget.
+        EmbedConfig qcfg = embed;
+        qcfg.timeout_ms = std::min<long>(qcfg.timeout_ms, 10'000);
+        auto qv = embed_texts(qcfg, {with_query_prefix(embed, std::string{query})});
         if (qv && qv->size() == 1 && (*qv)[0].size() == embed_dim_) {
             const auto& q = (*qv)[0];
             std::vector<std::uint32_t> dense_rank;
@@ -439,7 +510,8 @@ std::size_t Corpus::add_document(const std::string& path, const std::string& bod
     if (!embed.model.empty()) {
         std::vector<std::string> texts;
         texts.reserve(new_chunks.size());
-        for (const auto& c : new_chunks) texts.push_back(c.embed_input());
+        for (const auto& c : new_chunks)
+            texts.push_back(with_doc_prefix(embed, c.embed_input()));
         
         auto vecs = embed_texts(embed, texts);
         if (vecs && vecs->size() == texts.size()) {
@@ -487,6 +559,7 @@ std::size_t Corpus::build_from_memory(
     root_.clear();
     chunks_.clear();
     embed_dim_ = 0;
+    embed_model_ = embed.model;   // keep identity coherent on this path too
     hnsw_ = HnswIndex{};
     hnsw_built_ = false;
 
@@ -503,7 +576,8 @@ std::size_t Corpus::build_from_memory(
             std::size_t hi = std::min(i + kBatch, chunks_.size());
             std::vector<std::string> texts;
             texts.reserve(hi - i);
-            for (std::size_t j = i; j < hi; ++j) texts.push_back(chunks_[j].embed_input());
+            for (std::size_t j = i; j < hi; ++j)
+                texts.push_back(with_doc_prefix(embed, chunks_[j].embed_input()));
             auto vecs = embed_texts(embed, texts);
             if (!vecs || vecs->size() != texts.size()) break;  // degrade to BM25
             for (std::size_t j = i; j < hi; ++j) {
@@ -546,6 +620,7 @@ void Corpus::write_cache_() const {
 
     std::string blob;
     put(blob, kCacheMagic);
+    put_str(blob, embed_model_);   // v5: identity of the vectors' model
     put(blob, static_cast<std::uint32_t>(embed_dim_));
     put(blob, static_cast<std::uint32_t>(by_path.size()));
 

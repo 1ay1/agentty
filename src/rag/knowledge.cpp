@@ -12,11 +12,138 @@
 #include "agentty/rag/rerank.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace agentty::rag {
+
+// ── Context::compute_confidence ───────────────────────────────────────
+//
+// CALIBRATED confidence. The previous formula read the score distribution
+// of the ranked list — but rerank() min-max-normalizes features per
+// candidate set, so the top score is ~1.0 BY CONSTRUCTION even when every
+// candidate is garbage (a zero-overlap query over an unrelated corpus
+// scored "high confidence" and the proactive path injected noise into the
+// user's context). Confidence must be anchored on something ABSOLUTE.
+//
+// Anchor: does the retrieved text actually contain the query's content
+// words? We measure per-chunk term coverage over the top hits:
+//   • cover_top  — fraction of content terms present in the #1 hit
+//   • cover_pool — fraction present anywhere in the top 3 hits
+//   • corroboration bonus when ≥2 distinct sources each cover ≥half the
+//     query (independent agreement is the classic precision signal)
+// Stopwords and <3-char tokens are excluded so "the/and/it" matching
+// everywhere can't inflate the score. When the query has NO content terms
+// (emoji, pure stopwords) we return a deliberately UNCERTAIN score — the
+// proactive HIGH bar (0.45) must not clear on evidence we can't measure.
+namespace {
+
+const std::unordered_set<std::string>& confidence_stopwords() {
+    static const std::unordered_set<std::string> stop = {
+        "the","and","for","are","was","were","you","your","our","has",
+        "have","had","this","that","with","about","into","from","what",
+        "when","where","which","who","why","how","can","could","should",
+        "would","does","did","not","but","all","any","its","it","is",
+        "in","on","of","to","a","an","or","be","do","me","my","we",
+        "i","at","by","as","so","if","out","get","make","want","need",
+        "tell","show","please","thanks","just","like","some","more"};
+    return stop;
+}
+
+// Lowercase alnum-run tokens of length ≥2 (mirrors the rerank tokenizer
+// closely enough for containment checks; no stemming — the prefix rule
+// below absorbs mild morphological drift).
+void confidence_tokens(std::string_view s, std::unordered_set<std::string>& out) {
+    std::string cur;
+    cur.reserve(24);
+    auto flush = [&] {
+        if (cur.size() >= 2) out.insert(cur);
+        cur.clear();
+    };
+    for (unsigned char c : s) {
+        if (std::isalnum(c)) cur.push_back(static_cast<char>(std::tolower(c)));
+        else                 flush();
+    }
+    flush();
+}
+
+// Term ∈ tokens? Exact match, or (for terms ≥4 chars) either side is a
+// prefix of the other ("deploy" ↔ "deployment", "config" ↔ "configure").
+bool term_covered(const std::unordered_set<std::string>& toks,
+                  const std::string& term) {
+    if (toks.count(term)) return true;
+    if (term.size() < 4) return false;
+    for (const auto& t : toks) {
+        if (t.size() < 4) continue;
+        const auto& shorter = t.size() < term.size() ? t : term;
+        const auto& longer  = t.size() < term.size() ? term : t;
+        if (longer.compare(0, shorter.size(), shorter) == 0) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+void Context::compute_confidence() noexcept {
+    confidence = 0.0;
+    if (chunks.empty()) return;
+    try {
+        // Content terms of the query (stopwords + short tokens dropped).
+        std::vector<std::string> qterms;
+        {
+            const auto& stop = confidence_stopwords();
+            for (auto& t : query_terms(query))
+                if (t.size() >= 3 && !stop.count(t)) qterms.push_back(std::move(t));
+        }
+        if (qterms.empty()) {
+            // No measurable evidence — report UNCERTAIN, never confident.
+            // (Scores are rank-relative; trusting them here re-opens the
+            // "normalized garbage looks perfect" hole this fix closes.)
+            double top = std::clamp(chunks[0].hit.score, 0.0, 1.0);
+            confidence = 0.20 * top;
+            return;
+        }
+
+        const std::size_t m = std::min<std::size_t>(3, chunks.size());
+        std::vector<double> cov(m, 0.0);
+        std::unordered_set<std::string> pool_covered;
+        for (std::size_t i = 0; i < m; ++i) {
+            const Chunk* c = chunks[i].hit.chunk;
+            if (!c) continue;
+            std::unordered_set<std::string> toks;
+            confidence_tokens(c->text, toks);
+            if (!c->context.empty()) confidence_tokens(c->context, toks);
+            // The path often carries the topic ("docs/oauth.md").
+            confidence_tokens(c->path, toks);
+            std::size_t n = 0;
+            for (const auto& t : qterms)
+                if (term_covered(toks, t)) { ++n; pool_covered.insert(t); }
+            cov[i] = static_cast<double>(n)
+                   / static_cast<double>(qterms.size());
+        }
+        const double cover_top  = cov[0];
+        const double cover_pool = static_cast<double>(pool_covered.size())
+                                / static_cast<double>(qterms.size());
+
+        // Corroboration: ≥2 hits from DISTINCT paths each covering ≥ half
+        // the query is strong independent agreement.
+        double bonus = 0.0;
+        {
+            std::unordered_set<std::string> paths;
+            for (std::size_t i = 0; i < m; ++i)
+                if (cov[i] >= 0.5 && chunks[i].hit.chunk)
+                    paths.insert(chunks[i].hit.chunk->path);
+            if (paths.size() >= 2) bonus = 0.10;
+        }
+
+        confidence = std::clamp(0.65 * cover_top + 0.35 * cover_pool + bonus,
+                                0.0, 1.0);
+    } catch (...) {
+        confidence = 0.0;   // noexcept promise: any failure → unconfident
+    }
+}
 
 // ── CorpusSource ──────────────────────────────────────────────────────────
 
