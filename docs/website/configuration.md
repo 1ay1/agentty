@@ -24,8 +24,15 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_CLIPBOARD_CMD` | Shell command that writes image bytes to stdout — used for Ctrl+V image paste over SSH. |
 | `AGENTTY_MCP_CONFIG` | Explicit path to an mcp.json, overriding the project/user lookup. |
 | `AGENTTY_MCP_ALLOW_PROJECT` | Set truthy to trust a project-local .agentty/mcp.json (gated off by default). |
-| `AGENTTY_DOCS_DIR` | Folder of documents to index for the search_docs RAG tool (defaults to ./docs). |
-| `AGENTTY_EMBED_MODEL / AGENTTY_OLLAMA_HOST` | Embedding model + Ollama host for the local search_docs RAG pipeline. |
+| `AGENTTY_DOCS_DIR` | Folder of documents to index for the search_docs RAG tool. Auto-discovers `./docs` then `./.agentty/knowledge` when unset. Even with no docs, `search_docs` still searches your installed **skills** and **learned memory**. |
+| `AGENTTY_EMBED_MODEL / AGENTTY_OLLAMA_HOST` | Embedding model (default `nomic-embed-text`) + Ollama host (`host:port`) for the dense half of the hybrid RAG pipeline. No Ollama → RAG degrades to BM25 only, still works. |
+| `AGENTTY_RAG_SKILLS / AGENTTY_RAG_MEMORY` | Fold installed skills / learned memory into the search_docs corpus. **On by default** (local, BM25-only, sub-ms); set `=0` to disable. |
+| `AGENTTY_RAG_PROACTIVE / AGENTTY_RAG_PROACTIVE_MIN` | Pre-turn auto-retrieval that injects a `<retrieved-context>` block when a query looks knowledge-shaped. On by default; `=0` disables. `_MIN` is the confidence bar to inject (default `0.45`). |
+| `AGENTTY_RAG_EMBED_RERANK / AGENTTY_RAG_RERANK_MODEL` | Batched embedding cross-encoder rerank (one `/api/embed` re-scores the candidate pool). On by default when embeddings are available; `=0` disables. `_MODEL` overrides the rerank embed model (else reuses the index model). |
+| `AGENTTY_RAG_NEURAL / AGENTTY_RAG_NEURAL_MODEL` | Heavyweight generative cross-encoder rerank — one LLM call per candidate. **Off by default** (expensive); set truthy to enable. `_MODEL` picks the model (default `llama3.2`). |
+| `AGENTTY_RAG_EXPAND / AGENTTY_RAG_EXPAND_MODEL / AGENTTY_RAG_EXPAND_N` | RAG-Fusion query expansion (LLM rewrites the query into N variants, fuses results). Off by default; truthy enables. `_N` is the variant count (default 4, 1–8). |
+| `AGENTTY_RAG_CORRECT` | Corrective-RAG retry: on a low-confidence first pass, strip stopwords + widen the pool and retry. On by default; `=0` disables. |
+| `AGENTTY_RAG_MCP` | Fold connected MCP `resources/*` into the search_docs corpus. Off unless truthy **and** an MCP config is present. |
 | `AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE` | Set AGENTTY_DEBUG_API=1 to dump streaming provider events to AGENTTY_DEBUG_FILE. |
 | `SSL_CERT_FILE / SSL_CERT_DIR / CURL_CA_BUNDLE` | Override the TLS root store agentty trusts (standard OpenSSL vars). |
 
