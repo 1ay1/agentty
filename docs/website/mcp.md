@@ -51,3 +51,7 @@ The reverse also works: drop a `.agentty/mcp.json` in your project and agentty c
 :::note
 MCP consumption is lazy and opt-in — with no `.agentty/mcp.json` present, startup is a single `stat()` that returns nothing, so there is zero overhead when you aren't using it.
 :::
+
+## Searching an MCP server's resources
+
+Beyond tools, an MCP server can expose **resources** (`resources/*`) — documents, wiki pages, reference material. agentty can fold those into its [retrieval engine](/docs/retrieval) so `search_docs` searches them alongside your local docs, skills, and memory, all fused into one ranked, source-tagged result set. It's off by default; enable with `AGENTTY_RAG_MCP=1` (requires an MCP config to be present). From the model's view a docs folder and an MCP server are the same thing — a knowledge source behind one interface.

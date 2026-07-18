@@ -31,6 +31,8 @@ description: This project's commit + code conventions. Load before committing or
 
 The `description` is what the model sees in the catalog — write it so it's obvious *when* to load the skill. The body is only pulled into context on demand.
 
+Skills are also **searchable**: they're indexed into agentty's [retrieval engine](/docs/retrieval) by default, so `search_docs` (and the proactive pre-turn retrieval) can surface a relevant skill even before the model thinks to load it. Turn this off with `AGENTTY_RAG_SKILLS=0`.
+
 ## Where skills live
 
 agentty scans these roots for `<name>/SKILL.md`. Earlier roots win when two skills share a name (project shadows personal; native `.agentty` shadows the interop dirs):

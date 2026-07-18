@@ -48,10 +48,10 @@ Every shell call runs inside bwrap (Linux) / sandbox-exec (macOS). File tools re
 Run on a box with no internet. Your laptop relays the bytes over SSH with TLS pinned end-to-end.
 
 ### 🔧 Full tool suite
-read · write · edit · bash · grep · glob · git · web · search_docs · task — each with a purpose-built widget.
+read · write · edit · bash · grep · glob · git · web · search_docs · search_code · task — each with a purpose-built widget.
 
 ### 🧠 Learns your codebase
-Agent Skills + remember/forget memory. Teach it once, every session knows your conventions.
+Agent Skills + remember/forget memory, plus a state-of-the-art **local RAG** engine (hybrid BM25 + embeddings, reranked) over your docs, skills, and memory. Teach it once, every session knows your conventions.
 
 </td>
 </tr>

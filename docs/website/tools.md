@@ -24,7 +24,8 @@ Each tool gets a purpose-built widget: diffs render as diffs, search results gro
 | `diagnostics` | Shell | Run the project's build/lint and surface errors and warnings. |
 | `skill` | Pure | Load a named skill's full instructions from .agentty/skills/ before attempting a task it covers. |
 | `task` | Network | Spawn an autonomous subagent (explorer / reviewer / tester / coder / general) with its own context and tool budget; returns one condensed report. |
-| `search_docs` | Network | Query your knowledge base — docs, installed skills, and learned memory — with agentty's hybrid BM25 + dense RAG pipeline; returns the most relevant passages, source-tagged. Works with zero docs configured (skills + memory are always indexed). |
+| `search_docs` | Network | Query your knowledge base — docs, installed skills, and learned memory — with agentty's hybrid BM25 + dense [retrieval engine](/docs/retrieval); returns the most relevant passages, source-tagged. Works with zero docs configured (skills + memory are always indexed). |
+| `search_code` | Read | Semantic search over source code by *meaning*, not literal text — finds the relevant function for a conceptual query ("where is retry backoff handled") even with zero shared keywords. See [Retrieval](/docs/retrieval). |
 | `git_status` | Read | Show branch, staged/unstaged changes, untracked files. |
 | `git_diff` | Read | Show a diff (unstaged, staged, or a ref range). |
 | `git_log` | Read | Show commit history. |
