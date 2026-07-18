@@ -277,6 +277,17 @@ public:
     [[nodiscard]] std::vector<Hit>
     retrieve(std::string_view query, std::size_t k, std::size_t per_source_k = 0) const;
 
+    // MULTI-QUERY fan-out (RAG-Fusion / HyDE, source-agnostic). Retrieve for
+    // EACH query in `queries` across EVERY source, then fuse all the ranked
+    // lists together with one RRF pass. This is what makes query expansion
+    // and HyDE work for *any* knowledge configuration — docs, skills-only,
+    // memory-only, MCP, or any mix — instead of only when a docs folder is
+    // present. `queries` should lead with the original query. An empty or
+    // single-element list is equivalent to retrieve(). Never throws.
+    [[nodiscard]] std::vector<Hit>
+    retrieve_multi(const std::vector<std::string>& queries, std::size_t k,
+                   std::size_t per_source_k = 0) const;
+
 private:
     std::vector<std::shared_ptr<KnowledgeSource>> sources_;
 };

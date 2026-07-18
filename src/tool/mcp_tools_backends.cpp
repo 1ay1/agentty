@@ -501,42 +501,39 @@ private:
 
         rag::Context ctx;
         ctx.query = query;
-        // The multi-query (RRF-fused) retrieval path fires when EITHER
-        // RAG-Fusion expansion OR HyDE is enabled — they're independent
-        // recall boosters that both feed extra probes into the same fusion.
-        if ((expand_enabled() || hyde_enabled()) && have_docs) {
+
+        // ── Build the probe set (source-agnostic) ─────────────────────────
+        // The query itself, plus optional RAG-Fusion paraphrases and an
+        // optional HyDE hypothetical-answer passage. Every probe is fanned
+        // across EVERY registered source (docs, skills, memory, MCP) and all
+        // the ranked lists fuse in one RRF pass — so expansion and HyDE now
+        // help in ANY knowledge configuration, not just when a docs folder
+        // happens to exist.
+        std::vector<std::string> queries{query};
+        if ((expand_enabled() || hyde_enabled())) {
             rag::ExpandConfig ecfg = expand_config_from_env(embed);
-            std::vector<std::string> queries{query};
             if (expand_enabled()) {
-                queries = rag::expand_query(ecfg, query);
-                if (queries.size() > 1) variant_count = queries.size() - 1;
+                auto variants = rag::expand_query(ecfg, query);
+                if (variants.size() > 1) {
+                    variant_count = variants.size() - 1;
+                    queries = std::move(variants);   // already leads with `query`
+                }
             }
-            // HyDE: fold a hypothetical answer-passage in as an EXTRA probe.
-            // It rides the same multi-query RRF fusion as the expansion
-            // variants, so a passage that matches the hallucinated answer
-            // (dense-space) rises alongside literal-phrasing matches. Opt-in;
-            // empty on any failure → no extra probe, no regression.
+            // HyDE: a hallucinated answer-passage as an EXTRA probe. Rides the
+            // same multi-query RRF fusion; empty on any failure → no probe, no
+            // regression. Only worthwhile when SOME source has dense vectors
+            // (a hypothetical answer helps semantic match, not pure BM25) —
+            // but harmless otherwise, so we gate only on the toggle.
             if (hyde_enabled()) {
                 std::string hyde = rag::hyde_document(ecfg, query);
                 if (!hyde.empty()) { queries.push_back(std::move(hyde)); ++variant_count; }
             }
-            auto fused = docs_source.retrieve_fused(queries, pool_k);
-            rag::KnowledgeRouter rest;
-            if (skills_rag_enabled())
-                if (auto s = skills_source()) rest.add(std::move(s));
-            if (memory_rag_enabled())
-                if (auto s = memory_source()) rest.add(std::move(s));
-            if (mcp_source)
-                rest.add(std::shared_ptr<rag::KnowledgeSource>(
-                    mcp_source, mcp_source.get()));
-            if (rest.source_count() > 0) {
-                auto extra = rest.retrieve(query, pool_k);
-                fused.insert(fused.end(), extra.begin(), extra.end());
-            }
-            ctx = rag::Context::from_hits(query, std::move(fused));
-        } else {
-            ctx = rag::Context::from_hits(query, router.retrieve(query, pool_k));
         }
+
+        auto seed = (queries.size() > 1)
+                        ? router.retrieve_multi(queries, pool_k)
+                        : router.retrieve(query, pool_k);
+        ctx = rag::Context::from_hits(query, std::move(seed));
 
         rag::Pipeline pipe;
         // Default reranker is now semantics-aware: hand it the embed config so

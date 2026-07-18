@@ -212,57 +212,73 @@ KnowledgeRouter::retrieve(std::string_view query, std::size_t k,
     if (sources_.size() == 1)
         return sources_.front()->retrieve(query, k);
 
+    return retrieve_multi({std::string(query)}, k, per_source_k);
+}
+
+std::vector<Hit>
+KnowledgeRouter::retrieve_multi(const std::vector<std::string>& queries,
+                                std::size_t k, std::size_t per_source_k) const {
+    if (sources_.empty() || k == 0) return {};
+
+    // Collapse to the empty / single-query case cleanly.
+    std::vector<std::string> qs;
+    for (const auto& q : queries) if (!q.empty()) qs.push_back(q);
+    if (qs.empty()) return {};
+
+    // Single source AND single query: short-circuit (zero fusion overhead).
+    if (sources_.size() == 1 && qs.size() == 1)
+        return sources_.front()->retrieve(qs.front(), k);
+
     if (per_source_k == 0) per_source_k = k;
 
-    // Gather each source's ranked list AND keep the hits addressable by a
-    // stable key so we can rebuild the fused list after RRF chooses ids.
-    // RRF operates on per-list rank position, so we feed it integer ids that
+    // Gather EACH (query, source) ranked list into ONE fused pool. RRF
+    // operates on per-list rank position, so we feed it integer ids that
     // index a flat pool of (source-stamped) hits.
     //
-    // CRUCIAL: the SAME chunk surfaced by two sources (overlapping corpora,
-    // or one doc indexed in both a folder and an MCP source) must collapse to
-    // ONE pool id. Otherwise RRF sees two distinct documents and (a) can't
-    // reinforce a chunk that appears in multiple lists — the entire point of
-    // fusion — and (b) the output carries visible duplicate chunks. Key on
-    // (path, line span) so identical chunks share an id and their per-list
-    // rank contributions sum.
+    // CRUCIAL: the SAME chunk surfaced by two sources OR under two query
+    // phrasings must collapse to ONE pool id. Otherwise RRF sees distinct
+    // documents and (a) can't reinforce a chunk that appears in multiple
+    // lists — the entire point of fusion — and (b) the output carries visible
+    // duplicate chunks. Key on (path, line span) so identical chunks share an
+    // id and their per-list rank contributions sum. A chunk that both a
+    // paraphrase AND HyDE surface therefore rises, exactly as intended.
     std::vector<Hit>                       pool;     // id -> hit
-    std::vector<std::vector<std::uint32_t>> lists;   // per-source ranked ids
+    std::vector<std::vector<std::uint32_t>> lists;   // per (query,source) ranked ids
     std::unordered_map<std::string, std::uint32_t> id_of;  // chunk key -> id
-    lists.reserve(sources_.size());
+    lists.reserve(sources_.size() * qs.size());
 
     auto key_of = [](const Hit& h) {
         const Chunk* c = h.chunk;
         if (!c) return std::string{};
-        std::string k = c->path;
-        k.push_back('\0');
-        k += std::to_string(c->line_start);
-        k.push_back(':');
-        k += std::to_string(c->line_end);
-        return k;
+        std::string kk = c->path;
+        kk.push_back('\0');
+        kk += std::to_string(c->line_start);
+        kk.push_back(':');
+        kk += std::to_string(c->line_end);
+        return kk;
     };
 
-    for (const auto& src : sources_) {
-        auto hits = src->retrieve(query, per_source_k);
-        std::vector<std::uint32_t> ids;
-        ids.reserve(hits.size());
-        std::unordered_set<std::uint32_t> seen_this_list;  // de-dup within a source
-        for (auto& h : hits) {
-            std::string key = key_of(h);
-            std::uint32_t id;
-            auto it = key.empty() ? id_of.end() : id_of.find(key);
-            if (it != id_of.end()) {
-                id = it->second;
-            } else {
-                id = static_cast<std::uint32_t>(pool.size());
-                pool.push_back(h);   // already source-stamped by the source
-                if (!key.empty()) id_of.emplace(std::move(key), id);
+    for (const auto& qq : qs) {
+        for (const auto& src : sources_) {
+            auto hits = src->retrieve(qq, per_source_k);
+            std::vector<std::uint32_t> ids;
+            ids.reserve(hits.size());
+            std::unordered_set<std::uint32_t> seen_this_list;  // de-dup within a list
+            for (auto& h : hits) {
+                std::string key = key_of(h);
+                std::uint32_t id;
+                auto it = key.empty() ? id_of.end() : id_of.find(key);
+                if (it != id_of.end()) {
+                    id = it->second;
+                } else {
+                    id = static_cast<std::uint32_t>(pool.size());
+                    pool.push_back(h);   // already source-stamped by the source
+                    if (!key.empty()) id_of.emplace(std::move(key), id);
+                }
+                if (seen_this_list.insert(id).second) ids.push_back(id);
             }
-            // A source listing the same chunk twice must not double-count it
-            // in its own ranked list (RRF rank is per-list-position).
-            if (seen_this_list.insert(id).second) ids.push_back(id);
+            if (!ids.empty()) lists.push_back(std::move(ids));
         }
-        if (!ids.empty()) lists.push_back(std::move(ids));
     }
     if (pool.empty()) return {};
 
