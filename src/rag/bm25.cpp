@@ -15,16 +15,20 @@ namespace agentty::rag {
 
 namespace {
 
-// Porter stemming is OPT-IN (off by default): it collapses morphological
-// variants ("deploy/deployment/deploying") to one term, improving recall on
-// natural-language docs but occasionally over-conflating. Enable with
-// BM25_USE_STEMMER=1. The flag is read ONCE and cached — the same setting
-// MUST hold for index build AND query (both go through tokenize() below), so
-// a process-lifetime constant is exactly right.
+// Porter stemming collapses morphological variants ("deploy/deployment/
+// deploying", "run/runs/running") to one term — a real recall win on
+// natural-language docs, which is the common case for this corpus. ON by
+// default; set BM25_USE_STEMMER=0 to disable (e.g. a code-symbol corpus where
+// over-conflation hurts). Read ONCE and cached — the same setting MUST hold
+// for index build AND query (both go through tokenize() below), so a
+// process-lifetime constant is exactly right. BM25 postings are never
+// persisted (rebuilt from chunk text every build), so flipping this is safe
+// against stale caches.
 bool stemmer_enabled() noexcept {
     static const bool on = [] {
         const char* v = std::getenv("BM25_USE_STEMMER");
-        return v && v[0] && v[0] != '0' &&
+        if (!v || !v[0]) return true;   // default ON
+        return v[0] != '0' &&
                std::string_view{v} != "false" && std::string_view{v} != "FALSE";
     }();
     return on;
