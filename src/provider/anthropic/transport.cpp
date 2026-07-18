@@ -1510,7 +1510,7 @@ std::string default_system_prompt() {
         << "project, tag by topic) \xe2\x80\x94 future sessions retrieve it via "
         << "search_docs and proactive retrieval, so today's discovery "
         << "becomes tomorrow's context. The bar: would a fresh session "
-        << "waste \xe2\x89\xa510 minutes rediscovering this? If yes, store it; "
+        << "waste \xe2\x89\xa5" "10 minutes rediscovering this? If yes, store it; "
         << "if it's routine or speculative, don't. Never store secrets.\n"
         << "</memory-tools>\n";
     // Append CLAUDE.md tiers (User + Project + Local) when present.
