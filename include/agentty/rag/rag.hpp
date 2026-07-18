@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -231,7 +232,11 @@ public:
         const std::vector<std::string>& queries,
         const EmbedConfig& embed, std::size_t k) const;
 
-    [[nodiscard]] std::size_t chunk_count() const noexcept { return chunks_.size(); }
+    // Live chunk count (tombstoned/lazily-removed chunks excluded). Callers
+    // gate corpus-empty / drift logic on this, so it must reflect reality.
+    [[nodiscard]] std::size_t chunk_count() const noexcept {
+        return chunks_.size() - dead_.size();
+    }
     [[nodiscard]] bool        has_embeddings() const noexcept { return embed_dim_ > 0; }
     [[nodiscard]] std::size_t embed_dim() const noexcept { return embed_dim_; }
 
@@ -271,8 +276,30 @@ private:
     // (Re)build the HNSW ANN graph from the current chunks_ when the corpus
     // is large enough to beat brute-force cosine; otherwise drop it. Keeps
     // node ids aligned with chunk positions (search() materializes via
-    // &chunks_[id]), so it MUST run after any structural change to chunks_.
+    // &chunks_[id]), so it MUST run after any structural change that shifts
+    // chunk positions.
     void rebuild_hnsw_();
+
+    // INCREMENTAL insert: extend the live HNSW graph with the chunks in
+    // [first_new, chunks_.size()). Appends never shift existing positions, so
+    // node id == chunk position stays true and we avoid the O(N log N) full
+    // rebuild for the hot-reload / editor-watch path (edit one file → one
+    // add_document → O(new · log N)). If no graph is live yet (below the
+    // threshold, or embeddings absent) this crosses over to rebuild_hnsw_()
+    // once the corpus grows past the threshold. Returns true if the graph is
+    // live afterwards.
+    bool append_to_hnsw_(std::size_t first_new);
+
+    // Drop tombstoned chunks and rebuild indices, restoring dense position ==
+    // id. Called when the tombstone fraction crosses kCompactFraction so the
+    // wasted vector/graph memory (and search-time filtering) stays bounded.
+    void compact_();
+
+    // Is chunk id `i` a live (non-tombstoned) chunk? O(1). Read paths consult
+    // this so a lazily-removed chunk never surfaces in results.
+    [[nodiscard]] bool is_live_(std::uint32_t i) const noexcept {
+        return dead_.find(i) == dead_.end();
+    }
 
     // Append this query's ranked candidate lists (BM25, plus dense when the
     // corpus AND query embed) to `lists`, each as a vector of chunk ids.
@@ -291,11 +318,21 @@ private:
     HnswIndex              hnsw_;
     bool                   hnsw_built_ = false;
     std::size_t            embed_dim_ = 0;
+    // Tombstones: chunk ids removed since the last full (re)build. Kept out
+    // of results by is_live_(); the physical slot stays so HNSW node ids and
+    // chunk positions never shift under the graph. Compacted away once the
+    // tombstone fraction crosses kCompactFraction (see compact_()).
+    std::unordered_set<std::uint32_t> dead_;
     // Identity of the model the persisted embeddings were computed with
     // (v4 cache header). Two models can share a dimension while living in
     // completely different vector spaces — without this, switching
     // AGENTTY_EMBED_MODEL would silently mix spaces and misrank everything.
     std::string            embed_model_;
+
+    // Compact (physically drop tombstones + rebuild) once this fraction of
+    // the corpus is dead. Bounds wasted memory + per-query filter cost while
+    // still amortizing removals to O(1).
+    static constexpr double kCompactFraction = 0.25;
 };
 
 // ── Reciprocal Rank Fusion ────────────────────────────────────────────────

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <system_error>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -209,6 +210,7 @@ std::uint64_t corpus_signature(const std::vector<Chunk>& chunks) noexcept {
 
 void Corpus::set_chunks_for_test(std::vector<Chunk> chunks) {
     chunks_ = std::move(chunks);
+    dead_.clear();
     embed_dim_ = 0;
     for (const auto& c : chunks_)
         if (!c.embedding.empty()) { embed_dim_ = c.embedding.size(); break; }
@@ -218,6 +220,7 @@ void Corpus::set_chunks_for_test(std::vector<Chunk> chunks) {
 void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     root_ = root;
     chunks_.clear();
+    dead_.clear();
     embed_dim_ = 0;
     embed_model_ = embed.model;   // v5 cache identity: who made these vectors
 
@@ -420,12 +423,54 @@ void Corpus::rebuild_hnsw_() {
     ids.reserve(chunks_.size());
     embs.reserve(chunks_.size());
     for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+        if (!is_live_(i)) continue;   // tombstoned — keep out of the graph
         if (chunks_[i].embedding.size() == embed_dim_) {
             ids.push_back(i);
             embs.push_back(&chunks_[i].embedding);
         }
     }
     if (!ids.empty()) { hnsw_.build(ids, embs); hnsw_built_ = !hnsw_.empty(); }
+}
+
+// Extend the live graph with the appended chunks [first_new, size). Appends
+// never move existing positions, so node id == chunk position stays true.
+bool Corpus::append_to_hnsw_(std::size_t first_new) {
+    constexpr std::size_t kHnswThreshold = 2000;
+    if (embed_dim_ == 0) { hnsw_ = HnswIndex{}; hnsw_built_ = false; return false; }
+
+    // If we don't yet have a live graph but the corpus has now grown past the
+    // threshold, cross over to a one-time full build (which also indexes the
+    // pre-existing chunks). Below threshold, brute-force cosine handles it.
+    if (!hnsw_built_ || hnsw_.empty()) {
+        if (chunks_.size() >= kHnswThreshold) rebuild_hnsw_();
+        return hnsw_built_;
+    }
+    // Dim drift (e.g. model switch mid-session) invalidates the graph.
+    if (hnsw_.dim() != embed_dim_) { rebuild_hnsw_(); return hnsw_built_; }
+
+    for (std::uint32_t i = static_cast<std::uint32_t>(first_new);
+         i < chunks_.size(); ++i) {
+        if (!is_live_(i)) continue;
+        if (chunks_[i].embedding.size() == embed_dim_)
+            hnsw_.add(i, chunks_[i].embedding);
+    }
+    hnsw_built_ = !hnsw_.empty();
+    return hnsw_built_;
+}
+
+// Physically drop tombstoned chunks and rebuild from scratch, restoring the
+// dense chunk-position == node-id invariant. Amortizes removals to O(1): we
+// only pay this O(N) pass once tombstones exceed kCompactFraction.
+void Corpus::compact_() {
+    if (dead_.empty()) return;
+    std::vector<Chunk> live;
+    live.reserve(chunks_.size() - dead_.size());
+    for (std::uint32_t i = 0; i < chunks_.size(); ++i)
+        if (is_live_(i)) live.push_back(std::move(chunks_[i]));
+    chunks_ = std::move(live);
+    dead_.clear();
+    bm25_ = build_bm25(chunks_);
+    rebuild_hnsw_();
 }
 
 void Corpus::ranked_lists_for_query_(
@@ -449,10 +494,11 @@ void Corpus::ranked_lists_for_query_(
         return 1.3;
     }();
 
-    // BM25 ranked list (always available).
+    // BM25 ranked list (always available). Skip tombstoned ids so a lazily
+    // removed chunk never surfaces before the next compaction.
     std::vector<std::uint32_t> bm25_rank;
     for (auto& [id, score] : bm25_search(bm25_, query, pool))
-        bm25_rank.push_back(id);
+        if (is_live_(id)) bm25_rank.push_back(id);
     lists.push_back(std::move(bm25_rank));
     if (weights) weights->push_back(w_lex);
 
@@ -474,11 +520,12 @@ void Corpus::ranked_lists_for_query_(
                 // O(n) scan below. Widen ef beyond the pool for recall.
                 for (auto& [id, sim] : hnsw_.search(
                          q, pool, std::max<std::size_t>(pool * 2, 64)))
-                    dense_rank.push_back(id);
+                    if (is_live_(id)) dense_rank.push_back(id);
             } else {
                 std::vector<std::pair<std::uint32_t, double>> sims;
                 sims.reserve(chunks_.size());
                 for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+                    if (!is_live_(i)) continue;
                     if (chunks_[i].embedding.size() != embed_dim_) continue;
                     sims.push_back({i, cosine(q, chunks_[i].embedding)});
                 }
@@ -548,29 +595,43 @@ std::size_t Corpus::add_document(const std::string& path, const std::string& bod
     }
     
     std::size_t added = new_chunks.size();
+    std::size_t first_new = chunks_.size();
     for (auto& c : new_chunks)
         chunks_.push_back(std::move(c));
 
-    // Rebuild lexical + ANN indices over the full corpus (positions changed).
+    // Appends never shift existing chunk positions, so HNSW node id == chunk
+    // position stays true: extend the live graph incrementally instead of the
+    // O(N log N) full rebuild. BM25 is rebuilt (cheap, and it has no stable
+    // incremental-append API here); the O(N) win we care about is the graph.
     bm25_ = build_bm25(chunks_);
-    rebuild_hnsw_();
+    append_to_hnsw_(first_new);
     return added;
 }
 
 std::size_t Corpus::remove_document(const std::string& path) {
-    std::size_t before = chunks_.size();
-    chunks_.erase(
-        std::remove_if(chunks_.begin(), chunks_.end(),
-            [&path](const Chunk& c) { return c.path == path; }),
-        chunks_.end());
-
-    std::size_t removed = before - chunks_.size();
+    // TOMBSTONE the matching chunks instead of erasing them: erasing shifts
+    // every later chunk's position and invalidates all HNSW node ids (forcing
+    // an O(N) rebuild on every edit). Dead ids are kept out of results by
+    // is_live_() and physically dropped by compact_() once they pile up.
+    std::size_t removed = 0;
+    for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+        if (is_live_(i) && chunks_[i].path == path) {
+            dead_.insert(i);
+            ++removed;
+        }
+    }
     if (removed == 0) return 0;
 
-    // Chunk positions shifted — rebuild both indices so HNSW node ids stay
-    // aligned with chunks_ (search() materializes via &chunks_[id]).
+    // Rebuild BM25 over the (still position-stable) corpus; is_live_() filters
+    // dead ids from its results. Compact — which physically drops tombstones
+    // and rebuilds the graph — only fires once the dead fraction crosses the
+    // threshold, amortizing removal to O(1).
     bm25_ = build_bm25(chunks_);
-    rebuild_hnsw_();
+    if (!chunks_.empty() &&
+        static_cast<double>(dead_.size()) >=
+            kCompactFraction * static_cast<double>(chunks_.size())) {
+        compact_();
+    }
     return removed;
 }
 
@@ -582,6 +643,7 @@ std::size_t Corpus::build_from_memory(
     // memory.
     root_.clear();
     chunks_.clear();
+    dead_.clear();
     embed_dim_ = 0;
     embed_model_ = embed.model;   // keep identity coherent on this path too
     hnsw_ = HnswIndex{};
@@ -640,8 +702,11 @@ std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
 void Corpus::write_cache_() const {
     if (root_.empty()) return;
     // Group chunks by source path to write per-file records with size+mtime.
+    // Tombstoned (lazily removed) chunks are skipped so a reload doesn't
+    // resurrect them.
     std::unordered_map<std::string, std::vector<const Chunk*>> by_path;
-    for (const auto& c : chunks_) by_path[c.path].push_back(&c);
+    for (std::uint32_t i = 0; i < chunks_.size(); ++i)
+        if (is_live_(i)) by_path[chunks_[i].path].push_back(&chunks_[i]);
 
     std::string blob;
     put(blob, kCacheMagic);
@@ -679,7 +744,11 @@ void Corpus::write_cache_() const {
     // v2: append the corpus signature + HNSW graph after chunk data. The
     // signature is the structural fingerprint the graph's positional node ids
     // were built against; build() compares it before reusing the graph.
-    if (hnsw_built_ && !hnsw_.empty()) {
+    // Skip persisting when tombstones are live: the on-disk chunk records are
+    // compacted (dense) but the in-memory graph's node ids reference the
+    // uncompacted positions, so its signature wouldn't match on reload.
+    // Dropping it just triggers a one-time rebuild next session (safe).
+    if (hnsw_built_ && !hnsw_.empty() && dead_.empty()) {
         put(blob, corpus_signature(chunks_));
         hnsw_.serialize(blob);
     }
