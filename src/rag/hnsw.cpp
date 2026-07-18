@@ -297,6 +297,15 @@ void HnswIndex::serialize(std::string& out) const {
 }
 
 bool HnswIndex::deserialize(std::string_view& in) {
+    auto reset_fail = [&]() -> bool {
+        nodes_.clear();
+        id_of_.clear();
+        dim_ = 0;
+        max_layer_ = -1;
+        entry_ = 0;
+        return false;   // caller falls through to a clean rebuild
+    };
+
     nodes_.clear();
     id_of_.clear();
     dim_ = 0;
@@ -310,6 +319,11 @@ bool HnswIndex::deserialize(std::string_view& in) {
     std::uint32_t entry = 0, n = 0;
     if (!get(in, dim) || !get(in, maxl) || !get(in, entry) || !get(in, n))
         return false;
+    // A corrupt/truncated header can carry a garbage `n` (e.g. 0xFFFFFFFF).
+    // reserve(n) on that is a multi-GB allocation → bad_alloc. Each node needs
+    // at least 3 u32 on the wire (id, vlen, nlayers), so cap n by the bytes
+    // actually remaining before reserving.
+    if (n > in.size() / (3 * sizeof(std::uint32_t))) return reset_fail();
     dim_ = dim;
     max_layer_ = maxl;
     entry_ = entry;
@@ -319,19 +333,21 @@ bool HnswIndex::deserialize(std::string_view& in) {
     for (std::uint32_t i = 0; i < n; ++i) {
         HnswNode nd;
         std::uint32_t vlen = 0, nlayers = 0;
-        if (!get(in, nd.id) || !get(in, vlen)) return false;
+        if (!get(in, nd.id) || !get(in, vlen)) return reset_fail();
+        // Every stored vector must share the header dim (search dots them).
+        if (vlen != dim_) return reset_fail();
         if (vlen) {
-            if (in.size() < vlen * sizeof(float)) return false;
+            if (in.size() < vlen * sizeof(float)) return reset_fail();
             nd.vec.resize(vlen);
             std::memcpy(nd.vec.data(), in.data(), vlen * sizeof(float));
             in.remove_prefix(vlen * sizeof(float));
         }
-        if (!get(in, nlayers)) return false;
+        if (!get(in, nlayers)) return reset_fail();
         nd.links.resize(nlayers);
         for (std::uint32_t l = 0; l < nlayers; ++l) {
             std::uint32_t cnt = 0;
-            if (!get(in, cnt)) return false;
-            if (in.size() < cnt * sizeof(std::uint32_t)) return false;
+            if (!get(in, cnt)) return reset_fail();
+            if (in.size() < cnt * sizeof(std::uint32_t)) return reset_fail();
             nd.links[l].resize(cnt);
             if (cnt) {
                 std::memcpy(nd.links[l].data(), in.data(),
@@ -342,6 +358,24 @@ bool HnswIndex::deserialize(std::string_view& in) {
         id_of_.push_back(nd.id);
         nodes_.push_back(std::move(nd));
     }
+
+    // VALIDATE graph topology before anyone walks it: search() indexes
+    // nodes_[entry_] and follows link ids as node indices, and the corpus
+    // materializes hits as &chunks_[node.id]. A corrupt-but-parseable file
+    // (intact byte lengths, garbage values) would otherwise OOB-read on the
+    // first query. Reject → clean rebuild.
+    const std::uint32_t nn = static_cast<std::uint32_t>(nodes_.size());
+    if (nn == 0) {
+        // Empty graph is only coherent with the empty-graph sentinels.
+        entry_ = 0;
+        max_layer_ = -1;
+        return true;
+    }
+    if (entry_ >= nn) return reset_fail();
+    for (const auto& node : nodes_)
+        for (const auto& layer : node.links)
+            for (std::uint32_t lid : layer)
+                if (lid >= nn) return reset_fail();
     return true;
 }
 

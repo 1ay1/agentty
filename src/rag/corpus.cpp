@@ -564,7 +564,8 @@ std::vector<Hit> Corpus::search(std::string_view query,
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)
-        hits.push_back(Hit{&chunks_[id], score});
+        if (id < chunks_.size())   // defensive: never OOB on a stale/corrupt id
+            hits.push_back(Hit{&chunks_[id], score});
     return hits;
 }
 
@@ -695,7 +696,8 @@ std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)
-        hits.push_back(Hit{&chunks_[id], score});
+        if (id < chunks_.size())   // defensive: never OOB on a stale/corrupt id
+            hits.push_back(Hit{&chunks_[id], score});
     return hits;
 }
 

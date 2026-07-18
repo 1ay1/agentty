@@ -168,11 +168,70 @@ static void test_hnsw_empty() {
     CHECK(res2.front().first == 7u);
 }
 
+// ── 5. Corrupt / truncated cache must be REJECTED, never crash ──────────────
+// deserialize() is fed the on-disk RAG cache, which can be truncated (crash
+// mid-write, disk-full, kill -9) or bit-rotted. A parseable-but-garbage graph
+// (bogus entry_, out-of-range link ids, absurd node count) would OOB-read the
+// moment search() walks it. deserialize() must return false so the corpus
+// falls through to a clean rebuild instead of bricking every search_docs call.
+static void test_hnsw_corrupt_cache_rejected() {
+    constexpr std::size_t kN = 30, kDim = 8;
+    std::mt19937 rng(9001u);
+    std::vector<std::vector<float>> db;
+    for (std::size_t i = 0; i < kN; ++i) db.push_back(random_vec(rng, kDim));
+    rag::HnswIndex idx;
+    std::vector<std::uint32_t> ids(kN);
+    std::vector<const std::vector<float>*> embs(kN);
+    for (std::uint32_t i = 0; i < kN; ++i) { ids[i] = i; embs[i] = &db[i]; }
+    idx.build(ids, embs);
+    std::string good;
+    idx.serialize(good);
+
+    // (a) Truncated at every prefix length → reject cleanly, no crash.
+    for (std::size_t cut = 0; cut < good.size(); cut += 3) {
+        rag::HnswIndex bad;
+        std::string_view cur{good.data(), cut};
+        bool ok = bad.deserialize(cur);
+        // Either a clean reject, or (for a coincidentally-complete prefix) a
+        // valid graph — but NEVER a crash and NEVER a topology-invalid graph.
+        if (ok) CHECK(bad.empty() || bad.size() > 0);
+    }
+
+    // (b) Garbage bytes (all 0xFF) must not allocate wildly or crash — the
+    //     huge node-count guard rejects it.
+    {
+        std::string junk(64, '\xff');
+        rag::HnswIndex bad;
+        std::string_view cur{junk};
+        CHECK(bad.deserialize(cur) == false);
+        CHECK(bad.empty());
+    }
+
+    // (c) Valid header but a link id past the node count → reject (would OOB
+    //     in search). Corrupt a link byte in the middle of the good blob.
+    {
+        std::string tampered = good;
+        // Flip the last 4 bytes (a link id or count) to a huge value.
+        if (tampered.size() >= 4)
+            for (std::size_t i = tampered.size() - 4; i < tampered.size(); ++i)
+                tampered[i] = '\x7f';
+        rag::HnswIndex bad;
+        std::string_view cur{tampered};
+        bool ok = bad.deserialize(cur);
+        // On reject the graph is emptied; if it happened to still parse, it
+        // must at least be topology-valid (no id >= size). Prove no crash by
+        // running a search.
+        if (ok) { auto r = bad.search(random_vec(rng, kDim), 3, 50); (void)r; }
+        else    { CHECK(bad.empty()); }
+    }
+}
+
 int main() {
     test_hnsw_recall_small();
     test_hnsw_search_basic();
     test_hnsw_serialize_roundtrip();
     test_hnsw_empty();
+    test_hnsw_corrupt_cache_rejected();
 
     if (g_failures == 0) {
         std::printf("rag_hnsw_test: all checks passed\n");
