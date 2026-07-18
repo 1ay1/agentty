@@ -42,6 +42,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -1519,6 +1520,34 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
     return prompt_ids.count(id) > 0;
 }
 
+// Cross-turn de-duplication for PROACTIVE injection. Without this, a stable
+// high-confidence corpus re-injects the SAME passages into <retrieved-context>
+// on every single turn of a thread — pure context-window spend for zero new
+// information (the model already saw them last turn). We remember the keys
+// (source:path:line) of recently-injected passages in a bounded FIFO and skip
+// any we've surfaced before, so proactive injection only ever spends tokens on
+// passages the model hasn't been shown yet this session.
+//
+// Bounded (kMax) so a long thread can't grow this without limit; once a key
+// ages out of the window it MAY be re-injected, which is the correct behaviour
+// (it's relevant again and long-since scrolled out of the model's attention).
+bool proactive_already_injected_(const std::string& key) {
+    static std::mutex mu;
+    static std::unordered_set<std::string> seen;
+    static std::deque<std::string> fifo;
+    constexpr std::size_t kMax = 256;
+
+    std::lock_guard<std::mutex> lock(mu);
+    if (seen.count(key)) return true;
+    seen.insert(key);
+    fifo.push_back(key);
+    while (fifo.size() > kMax) {
+        seen.erase(fifo.front());
+        fifo.pop_front();
+    }
+    return false;
+}
+
 } // namespace
 
 // Runs the SAME AgenttyDocRetriever the search_docs tool uses, but out of
@@ -1588,6 +1617,16 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
             // never in the system prompt — always kept.)
             if (p.source == "memory" && memory_fact_in_prompt_(p.path))
                 continue;
+
+            // CROSS-TURN DEDUP: don't re-inject a passage the model was
+            // already shown earlier this session — that's context spend for
+            // zero new signal. Key on source:path:line so distinct chunks of
+            // the same file are treated separately.
+            std::string key = (p.source.empty() ? std::string{"docs"} : p.source)
+                            + ":" + p.path + ":" + std::to_string(p.line_start);
+            if (proactive_already_injected_(key))
+                continue;
+
             block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
                    + ":" + p.path;
             if (p.line_start > 0)
