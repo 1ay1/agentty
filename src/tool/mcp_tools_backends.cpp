@@ -526,9 +526,19 @@ private:
         pipe.add(std::make_shared<rag::RerankStage>(
             neural ? std::max<std::size_t>(k * 3, 12)
                    : std::max<std::size_t>(k * 2, 8)));
-        if (neural)
+        if (neural) {
+            // Top tier: per-chunk generative cross-encoder (expensive, opt-in).
             pipe.add(std::make_shared<rag::NeuralRerankStage>(
                 std::max<std::size_t>(k * 2, 8), neural_config_from_env(embed)));
+        } else if (!embed.model.empty() && embed_rerank_enabled()) {
+            // Middle tier (DEFAULT-ON when embeddings are configured): one
+            // batched /api/embed round-trip re-scores the lexically-reranked
+            // pool by fresh cosine. Degrades to the input order if the backend
+            // is unreachable, so it's safe to leave on.
+            pipe.add(std::make_shared<rag::EmbedRerankStage>(
+                std::max<std::size_t>(k * 2, 8),
+                embed_rerank_config_from_env(embed)));
+        }
         ctx = pipe.run(std::move(ctx));
 
         // Confidence is measured on the RANKED list, BEFORE MMR: the
@@ -641,6 +651,21 @@ private:
             cfg.model = m;
         else
             cfg.model = "llama3.2";
+        return cfg;
+    }
+
+    // Batched embedding cross-encoder rerank: re-score the post-lexical pool
+    // by cosine against a FRESH single-batch embedding of query+passages.
+    // DEFAULT-ON when embeddings are available (one /api/embed round-trip, no
+    // per-chunk decode) — set AGENTTY_RAG_EMBED_RERANK=0 to disable. Skipped
+    // when the heavyweight neural reranker is enabled (that's the top tier).
+    static bool embed_rerank_enabled() { return truthy_default_on("AGENTTY_RAG_EMBED_RERANK"); }
+    static rag::EmbedRerankConfig embed_rerank_config_from_env(const rag::EmbedConfig& embed) {
+        rag::EmbedRerankConfig cfg;
+        cfg.embed = embed;
+        // A dedicated, possibly STRONGER rerank embed model (else reuse index's).
+        if (const char* m = std::getenv("AGENTTY_RAG_RERANK_MODEL"); m && m[0])
+            cfg.embed.model = m;
         return cfg;
     }
 

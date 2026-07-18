@@ -443,6 +443,92 @@ neural_rerank(std::string_view query, std::vector<Hit> hits,
     return out;
 }
 
+// ── Batched embedding cross-encoder rerank ──────────────────────────
+
+namespace {
+
+// Asymmetric query/document prefixes for the embed reranker. Mirrors the
+// index-time logic (corpus.cpp) so query and passage land in the same
+// asymmetric space the model was trained for. Kept local (small) rather than
+// exporting the corpus statics.
+std::string rr_prefix(const std::string& model, std::string text, bool is_query) {
+    std::string m;
+    for (char c : model) m.push_back(static_cast<char>(std::tolower((unsigned char)c)));
+    const bool nomic = m.find("nomic-embed") != std::string::npos;
+    const bool e5    = !nomic && m.find("e5") != std::string::npos;
+    if (nomic) return (is_query ? "search_query: " : "search_document: ") + text;
+    if (e5)    return (is_query ? "query: " : "passage: ") + text;
+    return text;
+}
+
+} // namespace
+
+std::vector<Hit>
+embed_rerank(std::string_view query, std::vector<Hit> hits,
+             std::size_t out_k, const EmbedRerankConfig& cfg) {
+    auto truncate = [&](std::vector<Hit> h) {
+        if (h.size() > out_k) h.resize(out_k);
+        return h;
+    };
+    if (cfg.embed.model.empty() || hits.empty() || out_k == 0)
+        return truncate(std::move(hits));
+
+    // Build ONE batch: [query, passage_0, passage_1, ...]. Passages are
+    // bounded (long tails neither help scoring nor are worth the tokens).
+    // hits with a null chunk contribute an empty passage (they'll score 0
+    // and sink), keeping index alignment 1:1 with `hits`.
+    std::vector<std::string> batch;
+    batch.reserve(hits.size() + 1);
+    batch.push_back(cfg.apply_prefixes
+                        ? rr_prefix(cfg.embed.model, std::string(query), true)
+                        : std::string(query));
+    for (const auto& h : hits) {
+        std::string_view t = h.chunk ? std::string_view(h.chunk->text)
+                                     : std::string_view{};
+        std::string p(t.substr(0, std::min<std::size_t>(t.size(), 2000)));
+        batch.push_back(cfg.apply_prefixes
+                            ? rr_prefix(cfg.embed.model, std::move(p), false)
+                            : std::move(p));
+    }
+
+    // Single batched /api/embed round-trip (vs N generate calls). Reuse the
+    // whole-batch timeout budget.
+    EmbedConfig ec = cfg.embed;
+    ec.timeout_ms = static_cast<long>(cfg.timeout_s * 1000.0);
+    auto vecs = embed_texts(ec, batch);
+
+    // Backend down / malformed / dim-inconsistent → degrade to input order.
+    if (!vecs || vecs->size() != batch.size() || vecs->front().empty())
+        return truncate(std::move(hits));
+
+    const std::vector<float>& qv = vecs->front();
+    std::vector<double> scores(hits.size(), 0.0);
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        const std::vector<float>& pv = (*vecs)[i + 1];
+        if (pv.size() != qv.size() || pv.empty()) { scores[i] = 0.0; continue; }
+        // Cosine in [-1,1]; clamp the negative tail to 0 so unscored/irrelevant
+        // passages sink but never invert the ordering.
+        scores[i] = std::max(0.0, cosine(qv, pv));
+    }
+
+    // Stable sort by cosine desc; ties keep upstream order via original score.
+    std::vector<std::size_t> order(hits.size());
+    for (std::size_t i = 0; i < hits.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        if (scores[a] != scores[b]) return scores[a] > scores[b];
+        return hits[a].score > hits[b].score;
+    });
+
+    std::vector<Hit> out;
+    out.reserve(std::min(out_k, order.size()));
+    for (std::size_t i = 0; i < order.size() && i < out_k; ++i) {
+        Hit h = hits[order[i]];
+        h.score = scores[order[i]];   // expose the rerank cosine
+        out.push_back(h);
+    }
+    return out;
+}
+
 // ── MMR diversification ─────────────────────────────────────────────
 
 namespace {

@@ -100,6 +100,37 @@ struct NeuralRerankConfig {
 neural_rerank(std::string_view query, std::vector<Hit> hits,
               std::size_t out_k, const NeuralRerankConfig& cfg);
 
+// ── BATCHED embedding cross-encoder rerank ─────────────────────────────────
+//
+// The middle ground between the free-but-shallow lexical reranker and the
+// accurate-but-expensive per-chunk generative neural_rerank (N LLM decodes).
+// Re-embed the query and ALL candidate passages in ONE /api/embed batch call,
+// then re-score by cosine(query, passage). One network round-trip instead of
+// N; the embedding endpoint has no decode loop so it's an order of magnitude
+// faster than neural_rerank, and it can use a STRONGER or asymmetric embed
+// model than the one that built the index (a bi-encoder "reranker").
+//
+// Why this beats the stored dense score already in each Hit: (1) the index may
+// have been built by a different/weaker model or with stale vectors; (2) the
+// candidate pool here is post-fusion+lexical-rerank, so a fresh focused embed
+// of just these passages against this exact query sharpens the ordering; (3)
+// asymmetric query/document prefixes (search_query:/search_document:) are
+// applied, which the raw stored cosine may not reflect.
+//
+// On ANY failure (no model, backend down, dim/size mismatch) it returns the
+// input truncated to out_k — graceful degradation, identical contract to
+// neural_rerank. Pure single-batch network call; deterministic given the
+// backend's embeddings.
+struct EmbedRerankConfig {
+    EmbedConfig embed;         // embed.model empty → skip (degrade to input)
+    double      timeout_s = 15.0;   // whole-batch timeout
+    bool        apply_prefixes = true;  // asymmetric query/doc prefixes
+};
+
+[[nodiscard]] std::vector<Hit>
+embed_rerank(std::string_view query, std::vector<Hit> hits,
+             std::size_t out_k, const EmbedRerankConfig& cfg);
+
 // ── MMR (Maximal Marginal Relevance) diversification ───────────────────────
 //
 // After reranking, the top-k can contain near-duplicate chunks (e.g. overlapping

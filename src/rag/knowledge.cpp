@@ -337,6 +337,16 @@ Context NeuralRerankStage::process(Context ctx) const {
     return Context::from_hits(std::move(ctx.query), std::move(ranked));
 }
 
+Context EmbedRerankStage::process(Context ctx) const {
+    // Lift hits, run the batched embedding cross-encoder rerank, re-wrap.
+    std::vector<Hit> hits;
+    hits.reserve(ctx.chunks.size());
+    for (auto& c : ctx.chunks) hits.push_back(c.hit);
+
+    auto ranked = embed_rerank(ctx.query, std::move(hits), out_k_, cfg_);
+    return Context::from_hits(std::move(ctx.query), std::move(ranked));
+}
+
 Context MMRStage::process(Context ctx) const {
     // Lift hits, run MMR diversification, re-wrap.
     std::vector<Hit> hits;

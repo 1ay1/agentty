@@ -545,6 +545,127 @@ static void test_folder_cache_roundtrip() {
     fs::remove_all(root, ec);
 }
 
+// ── 13. Tombstone-based incremental add/remove (HNSW-append path) ─────
+// remove_document now TOMBSTONES rather than erasing (keeps chunk positions
+// stable so the HNSW node-id == position invariant survives, letting
+// add_document append to the graph instead of rebuilding it). This test
+// hammers the add/remove/update cycle — including enough removals to cross
+// the compaction threshold — and asserts results stay correct throughout.
+static void test_tombstone_incremental() {
+    rag::Corpus corpus;
+    rag::EmbedConfig embed;  // BM25-only; positions/tombstones are model-agnostic.
+
+    // Seed several docs. Unique tokens are letter-suffixed (zqx<i>zqx) so no
+    // token is a prefix/substring of another (avoids BM25 cross-matching
+    // "...1" against "...11").
+    const int N = 12;
+    auto uniq = [](int i) { return "zqx" + std::to_string(i) + "zqx"; };
+    for (int i = 0; i < N; ++i) {
+        std::string path = "doc" + std::to_string(i) + ".md";
+        std::string body = "topic " + uniq(i) + " shared content\n";
+        CHECK(corpus.add_document(path, body, embed) > 0);
+    }
+    CHECK(corpus.chunk_count() == static_cast<std::size_t>(N));
+
+    // Each unique term resolves to its own doc.
+    for (int i = 0; i < N; ++i) {
+        auto hits = corpus.search(uniq(i), embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "doc" + std::to_string(i) + ".md");
+    }
+
+    // Remove the even-numbered docs one at a time. This crosses the 25%
+    // compaction threshold partway through — the corpus must stay coherent
+    // across the compaction (which physically drops tombstones + rebuilds).
+    for (int i = 0; i < N; i += 2) {
+        std::size_t removed = corpus.remove_document("doc" + std::to_string(i) + ".md");
+        CHECK(removed > 0);
+    }
+    CHECK(corpus.chunk_count() == static_cast<std::size_t>(N / 2));
+
+    // Removed docs are gone; odd docs still resolve.
+    for (int i = 0; i < N; ++i) {
+        auto hits = corpus.search(uniq(i), embed, 3);
+        if (i % 2 == 0) {
+            for (const auto& h : hits)
+                CHECK(h.chunk->path != "doc" + std::to_string(i) + ".md");
+        } else {
+            CHECK(!hits.empty());
+            CHECK(hits.front().chunk->path == "doc" + std::to_string(i) + ".md");
+        }
+    }
+
+    // Re-add a previously-removed doc (append after tombstone) — searchable.
+    CHECK(corpus.add_document("doc0.md", "topic " + uniq(0) + " reborn\n", embed) > 0);
+    {
+        auto hits = corpus.search(uniq(0) + " reborn", embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "doc0.md");
+    }
+
+    // Update an existing doc (tombstone old chunks + append new) — no stale hit.
+    CHECK(corpus.add_document("doc1.md", "topic " + uniq(1) + " UPDATED_MARKER\n", embed) > 0);
+    {
+        auto hits = corpus.search("UPDATED_MARKER", embed, 3);
+        CHECK(!hits.empty());
+        CHECK(hits.front().chunk->path == "doc1.md");
+        // The unique token still resolves to doc1 (single live copy).
+        auto still = corpus.search(uniq(1), embed, 3);
+        CHECK(!still.empty());
+        CHECK(still.front().chunk->path == "doc1.md");
+    }
+
+    // Removing a non-existent path is a no-op.
+    CHECK(corpus.remove_document("nope.md") == 0);
+}
+
+// ── 14. embed_rerank graceful degradation (no backend) ─────────────
+static void test_embed_rerank_degrades() {
+    std::vector<rag::Chunk> store;
+    store.push_back({"a.md", 1, 1, "alpha document about networking", {}});
+    store.push_back({"b.md", 1, 1, "beta document about storage", {}});
+    store.push_back({"c.md", 1, 1, "gamma document about compute", {}});
+
+    std::vector<rag::Hit> hits;
+    for (std::size_t i = 0; i < store.size(); ++i)
+        hits.push_back(rag::Hit{&store[i], 1.0 - i * 0.1});
+
+    // (a) Empty embed model → no network; input order truncated to out_k.
+    {
+        rag::EmbedRerankConfig cfg;  // cfg.embed.model empty
+        auto r = rag::embed_rerank("networking", hits, 2, cfg);
+        CHECK(r.size() == 2);
+        CHECK(r[0].chunk->path == "a.md");
+        CHECK(r[1].chunk->path == "b.md");
+    }
+
+    // (b) Model set, backend unreachable → degrade to upstream order.
+    {
+        rag::EmbedRerankConfig cfg;
+        cfg.embed.model = "does-not-exist";
+        cfg.embed.host  = "127.0.0.1";
+        cfg.embed.port  = 1;      // refused fast
+        cfg.timeout_s   = 1.0;
+        auto r = rag::embed_rerank("networking", hits, 3, cfg);
+        CHECK(r.size() == 3);     // degraded, not dropped
+        CHECK(r[0].chunk->path == "a.md");
+    }
+
+    // (c) Empty input → empty output.
+    {
+        rag::EmbedRerankConfig cfg;
+        cfg.embed.model = "x";
+        CHECK(rag::embed_rerank("q", {}, 5, cfg).empty());
+    }
+
+    // (d) out_k == 0 → empty output.
+    {
+        rag::EmbedRerankConfig cfg;
+        cfg.embed.model = "x";
+        CHECK(rag::embed_rerank("q", hits, 0, cfg).empty());
+    }
+}
+
 int main() {
     test_porter_stemmer();
     test_mmr_diversification();
@@ -558,6 +679,8 @@ int main() {
     test_mcp_resource_source();
     test_neural_rerank_degrades();
     test_folder_cache_roundtrip();
+    test_tombstone_incremental();
+    test_embed_rerank_degrades();
 
     if (g_failures == 0) {
         std::printf("rag_advanced_test: all checks passed\n");

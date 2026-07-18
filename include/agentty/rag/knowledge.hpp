@@ -337,6 +337,22 @@ private:
     NeuralRerankConfig  cfg_;
 };
 
+// EmbedRerankStage — wraps rag::embed_rerank. Re-scores the candidate pool by
+// cosine against a FRESH batched embedding of the query + all passages (one
+// /api/embed round-trip). An order of magnitude cheaper than NeuralRerankStage
+// (no per-chunk LLM decode) while still beating the lexical feature-fusion
+// reranker on paraphrase. Falls back to the input order on backend failure.
+class EmbedRerankStage final : public RetrievalStage {
+public:
+    EmbedRerankStage(std::size_t out_k, EmbedRerankConfig cfg)
+        : out_k_(out_k), cfg_(std::move(cfg)) {}
+    [[nodiscard]] std::string_view name() const noexcept override { return "embed_rerank"; }
+    [[nodiscard]] Context process(Context ctx) const override;
+private:
+    std::size_t       out_k_;
+    EmbedRerankConfig cfg_;
+};
+
 // MMRStage — wraps rag::mmr_diversify. Greedily re-selects chunks to balance
 // relevance and diversity. Useful after reranking when top-k contains
 // near-duplicate overlapping chunks.
