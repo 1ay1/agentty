@@ -298,16 +298,23 @@ private:
 };
 
 // RerankStage — wraps rag::rerank (feature-fusion reranker). Narrows the wide
-// pool down to out_k by re-scoring against the original query.
+// pool down to out_k by re-scoring against the original query. When given an
+// EmbedConfig with a model, it embeds the query ONCE and feeds the calibrated
+// cosine(query, chunk) in as a rerank feature (the chunk vectors are already
+// resident) — making the DEFAULT reranker semantics-aware. Degrades to the
+// pure-lexical reranker when no embed model / backend is available.
 class RerankStage final : public RetrievalStage {
 public:
     RerankStage(std::size_t out_k, RerankWeights w = {})
         : out_k_(out_k), w_(w) {}
+    RerankStage(std::size_t out_k, EmbedConfig embed, RerankWeights w = {})
+        : out_k_(out_k), w_(w), embed_(std::move(embed)) {}
     [[nodiscard]] std::string_view name() const noexcept override { return "rerank"; }
     [[nodiscard]] Context process(Context ctx) const override;
 private:
     std::size_t   out_k_;
     RerankWeights w_;
+    EmbedConfig   embed_{};   // empty model → no dense feature (lexical only)
 };
 
 // CompressStage — wraps rag::compress. Fills each surviving ContextChunk's

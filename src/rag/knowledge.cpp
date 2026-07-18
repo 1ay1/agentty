@@ -315,7 +315,20 @@ Context RerankStage::process(Context ctx) const {
     hits.reserve(ctx.chunks.size());
     for (auto& c : ctx.chunks) hits.push_back(c.hit);
 
-    auto ranked = rerank(ctx.query, std::move(hits), out_k_, w_);
+    // Semantics-aware default reranking: embed the query ONCE (query-time
+    // capped, so a wedged Ollama can't stall the pipeline) and feed the
+    // calibrated cosine(query, chunk) in as a rerank feature. No model / no
+    // backend → empty vector → rerank() falls back to pure lexical.
+    std::vector<float> qvec;
+    if (!embed_.model.empty() && !hits.empty()) {
+        EmbedConfig ec = embed_;
+        ec.timeout_ms = 10'000;   // query path: never block on a slow backend
+        if (auto v = embed_texts(ec, {std::string{ctx.query}}); v && !v->empty())
+            qvec = std::move((*v)[0]);
+    }
+
+    auto ranked = rerank(ctx.query, std::move(hits), out_k_, w_,
+                         qvec.empty() ? nullptr : &qvec);
     return Context::from_hits(std::move(ctx.query), std::move(ranked));
 }
 

@@ -83,8 +83,47 @@ std::vector<std::string> query_terms(std::string_view query) {
 
 std::vector<Hit>
 rerank(std::string_view query, std::vector<Hit> hits,
-       std::size_t out_k, const RerankWeights& w) {
+       std::size_t out_k, const RerankWeights& w,
+       const std::vector<float>* query_vec) {
     if (hits.empty()) return hits;
+
+    // COLLAPSE overlapping-window near-duplicates from the SAME file before
+    // scoring. The chunker emits overlapping windows (overlap_lines), so a
+    // relevant region can surface as 2-3 chunks with near-identical text; left
+    // in the pool they let one document crowd out the top-k and starve other
+    // sources. Keep, per (path, overlapping line-range cluster), only the
+    // highest first-pass-scored chunk. Sources are distinguished so identical
+    // ranges from different KnowledgeSources are NOT merged.
+    {
+        // Highest score first so the survivor of each cluster is the best hit;
+        // stable so equal scores keep first-pass order.
+        std::vector<std::size_t> ord(hits.size());
+        for (std::size_t i = 0; i < hits.size(); ++i) ord[i] = i;
+        std::stable_sort(ord.begin(), ord.end(),
+            [&](std::size_t a, std::size_t b) { return hits[a].score > hits[b].score; });
+
+        struct Range { const void* src; std::string path; int lo, hi; };
+        std::vector<Range> kept_ranges;
+        std::vector<Hit> deduped;
+        deduped.reserve(hits.size());
+        for (std::size_t idx : ord) {
+            const Hit& h = hits[idx];
+            const Chunk* c = h.chunk;
+            if (!c) { deduped.push_back(h); continue; }
+            bool dup = false;
+            for (const auto& r : kept_ranges) {
+                if (r.src != static_cast<const void*>(h.source)) continue;
+                if (r.path != c->path) continue;
+                // Overlap (inclusive ranges) or touching → same region.
+                if (c->line_start <= r.hi && r.lo <= c->line_end) { dup = true; break; }
+            }
+            if (dup) continue;
+            kept_ranges.push_back({static_cast<const void*>(h.source), c->path,
+                                   c->line_start, c->line_end});
+            deduped.push_back(h);
+        }
+        hits = std::move(deduped);
+    }
 
     const auto qterms = query_terms(query);
     std::string qlower{query};
@@ -105,7 +144,10 @@ rerank(std::string_view query, std::vector<Hit> hits,
     }
 
     const std::size_t n = hits.size();
-    std::vector<double> f_fused(n), f_cover(n), f_prox(n), f_path(n), f_phrase(n);
+    std::vector<double> f_fused(n), f_dense(n), f_cover(n), f_prox(n), f_path(n), f_phrase(n);
+
+    // Dense feature is live only when we were handed a usable query vector.
+    const bool have_qvec = query_vec && !query_vec->empty();
 
     std::unordered_set<std::string> qset(qterms.begin(), qterms.end());
 
@@ -113,6 +155,12 @@ rerank(std::string_view query, std::vector<Hit> hits,
         const Chunk* c = hits[i].chunk;
         f_fused[i] = hits[i].score;
         if (!c) continue;
+
+        // CALIBRATED dense similarity: cosine(query, chunk) recovers the score
+        // magnitude RRF's rank fusion threw away. 0 when either side lacks a
+        // (matching-dim) embedding — BM25-only builds behave exactly as before.
+        if (have_qvec && c->embedding.size() == query_vec->size())
+            f_dense[i] = std::max(0.0, cosine(*query_vec, c->embedding));
 
         // Tokenize the chunk once.
         auto ctoks = tokenize(c->text);
@@ -163,6 +211,7 @@ rerank(std::string_view query, std::vector<Hit> hits,
     }
 
     normalize01(f_fused);
+    normalize01(f_dense);
     normalize01(f_cover);
     normalize01(f_prox);
     // path/phrase are already 0/1; leave as-is.
@@ -170,6 +219,7 @@ rerank(std::string_view query, std::vector<Hit> hits,
     std::vector<std::pair<double, std::size_t>> scored(n);
     for (std::size_t i = 0; i < n; ++i) {
         double s = w.fused        * f_fused[i]
+                 + w.dense        * f_dense[i]
                  + w.term_coverage* f_cover[i]
                  + w.proximity    * f_prox[i]
                  + w.path_match   * f_path[i]

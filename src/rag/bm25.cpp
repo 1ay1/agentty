@@ -53,6 +53,20 @@ void tokenize(std::string_view s, std::vector<std::string>& out) {
 constexpr double kK1 = 1.5;   // term-frequency saturation
 constexpr double kB  = 0.75;  // length normalization
 
+// How many copies of the heading breadcrumb to fold into a chunk's token bag
+// (field boost). 3 total is a modest, well-behaved default; 1 disables the
+// boost (breadcrumb still indexed once). Read once, cached.
+int heading_boost() {
+    static const int v = [] {
+        if (const char* e = std::getenv("BM25_HEADING_BOOST"); e && e[0]) {
+            int n = std::atoi(e);
+            if (n >= 1 && n <= 16) return n;
+        }
+        return 3;
+    }();
+    return v;
+}
+
 } // namespace
 
 void Bm25Index::clear() {
@@ -78,8 +92,20 @@ Bm25Index build_bm25(const std::vector<Chunk>& chunks) {
         // breadcrumb participates in the index, so heading/document terms
         // match chunks whose bodies never repeat them. Tokenized once here
         // — zero cost at query time.
-        if (!chunks[d].context.empty())
-            tokenize(chunks[d].context, toks);
+        //
+        // FIELD BOOST: a query term matching in a HEADING is a much stronger
+        // relevance signal than one buried in body prose ("# Installation" vs
+        // the word "install" in a sentence). BM25 has no field concept, so we
+        // boost the standard way — repeat the heading tokens kHeadingBoost
+        // times, raising their tf. This also lifts doc_len, but avgdl
+        // normalization amortizes that across the corpus, so the net effect is
+        // heading terms out-scoring equally-frequent body terms. Tunable via
+        // BM25_HEADING_BOOST (default 3 total copies; 1 = no boost).
+        if (!chunks[d].context.empty()) {
+            const int copies = heading_boost();
+            for (int r = 0; r < copies; ++r)
+                tokenize(chunks[d].context, toks);
+        }
         idx.doc_len[d] = static_cast<std::uint32_t>(toks.size());
         total_len += toks.size();
 

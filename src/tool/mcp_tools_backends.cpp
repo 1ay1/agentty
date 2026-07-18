@@ -524,9 +524,14 @@ private:
         }
 
         rag::Pipeline pipe;
+        // Default reranker is now semantics-aware: hand it the embed config so
+        // it feeds calibrated cosine(query, chunk) in as a feature (empty
+        // model → pure-lexical, unchanged). This recovers the score magnitude
+        // that rank-based RRF fusion discards, on the default path.
         pipe.add(std::make_shared<rag::RerankStage>(
             neural ? std::max<std::size_t>(k * 3, 12)
-                   : std::max<std::size_t>(k * 2, 8)));
+                   : std::max<std::size_t>(k * 2, 8),
+            embed));
         if (neural) {
             // Top tier: per-chunk generative cross-encoder (expensive, opt-in).
             pipe.add(std::make_shared<rag::NeuralRerankStage>(

@@ -140,6 +140,102 @@ static void test_compress_preserves_bytes() {
     CHECK(text.find(out) != std::string::npos);
 }
 
+// ── 7. rerank dense feature: calibrated cosine breaks a lexical tie ───────────
+static void test_rerank_dense_feature() {
+    std::vector<rag::Chunk> store;
+    // Two chunks, identical lexical relevance to the query (same words), same
+    // first-pass score — the lexical features can't separate them. Their
+    // embeddings differ: store[1] is far closer to the query vector. The dense
+    // feature must promote store[1].
+    auto hits = make_hits(store, {
+        {"widget run command launches the daemon", 0.50},
+        {"widget run command launches the daemon", 0.50},
+    }, {"a.md", "b.md"});
+    // 3-dim toy embeddings; query points along +z.
+    std::vector<float> qv = {0.0f, 0.0f, 1.0f};
+    store[0].embedding = {1.0f, 0.0f, 0.0f};   // orthogonal → cosine 0
+    store[1].embedding = {0.0f, 0.2f, 0.98f};  // nearly parallel → cosine ~1
+
+    // Without the query vector: tie — first-pass order preserved (store[0]).
+    {
+        auto h2 = hits;   // copy (same chunk pointers)
+        auto out = rag::rerank("widget run command", std::move(h2), 2, rag::RerankWeights{});
+        CHECK(out.size() == 2);
+        CHECK(out.front().chunk == &store[0]);
+    }
+    // With the query vector: the semantically-closer chunk wins.
+    {
+        auto out = rag::rerank("widget run command", std::move(hits), 2,
+                               rag::RerankWeights{}, &qv);
+        CHECK(out.size() == 2);
+        CHECK(out.front().chunk == &store[1]);
+    }
+}
+
+// ── 8. rerank collapses same-file overlapping-window near-dupes ───────────────
+static void test_rerank_dedup_overlapping_windows() {
+    std::vector<rag::Chunk> store;
+    store.reserve(4);
+    auto mk = [&](const char* path, int lo, int hi, const char* text, double sc) {
+        rag::Chunk c; c.path = path; c.line_start = lo; c.line_end = hi; c.text = text;
+        store.push_back(std::move(c));
+        return sc;
+    };
+    std::vector<double> scores;
+    scores.push_back(mk("guide.md", 1, 10, "install the widget on linux", 0.90));
+    scores.push_back(mk("guide.md", 6, 15, "install the widget on linux and configure", 0.85)); // overlaps 1-10
+    scores.push_back(mk("guide.md", 40, 50, "unrelated troubleshooting section", 0.60));         // disjoint
+    scores.push_back(mk("other.md", 1, 10, "install the widget on linux", 0.55));                // different file
+    std::vector<rag::Hit> hits;
+    for (std::size_t i = 0; i < store.size(); ++i)
+        hits.push_back(rag::Hit{&store[i], scores[i]});
+
+    auto out = rag::rerank("install widget linux", std::move(hits), 10);
+    // The two overlapping guide.md windows collapse to one (the higher-scored,
+    // store[0]); the disjoint guide.md range and other.md survive → 3 hits.
+    CHECK(out.size() == 3);
+    bool saw_first = false, saw_overlap = false, saw_disjoint = false, saw_other = false;
+    for (const auto& h : out) {
+        if (h.chunk == &store[0]) saw_first = true;
+        if (h.chunk == &store[1]) saw_overlap = true;
+        if (h.chunk == &store[2]) saw_disjoint = true;
+        if (h.chunk == &store[3]) saw_other = true;
+    }
+    CHECK(saw_first);
+    CHECK(!saw_overlap);   // collapsed into store[0]
+    CHECK(saw_disjoint);
+    CHECK(saw_other);
+}
+
+// ── 9. BM25 heading field boost lifts a heading match ────────────────────────
+static void test_bm25_heading_boost() {
+    // Two chunks. store[0] has "kubernetes" only in its heading breadcrumb;
+    // store[1] mentions it once in the body. With the field boost, the
+    // heading match should score at least as high as the incidental body
+    // mention — heading terms are stronger relevance signals.
+    std::vector<rag::Chunk> chunks;
+    {
+        rag::Chunk c;
+        c.path = "a.md"; c.line_start = 1; c.line_end = 5;
+        c.context = "guide.md › Kubernetes › Scaling";
+        c.text = "increase the replica count and the pods spread across nodes";
+        chunks.push_back(std::move(c));
+    }
+    {
+        rag::Chunk c;
+        c.path = "b.md"; c.line_start = 1; c.line_end = 5;
+        c.context = "guide.md › Appendix";
+        c.text = "a passing mention of kubernetes buried in a long unrelated "
+                 "paragraph about many other topics and words filler filler";
+        chunks.push_back(std::move(c));
+    }
+    auto idx = rag::build_bm25(chunks);
+    auto res = rag::bm25_search(idx, "kubernetes", 5);
+    CHECK(!res.empty());
+    // The heading-boosted chunk (id 0) must rank first.
+    CHECK(res.front().first == 0u);
+}
+
 int main() {
     test_query_terms();
     test_rerank_promotes_term_coverage();
@@ -147,6 +243,9 @@ int main() {
     test_rerank_out_k();
     test_compress_extracts_relevant();
     test_compress_preserves_bytes();
+    test_rerank_dense_feature();
+    test_rerank_dedup_overlapping_windows();
+    test_bm25_heading_boost();
 
     if (g_failures == 0) {
         std::printf("rag_rerank_test: all checks passed\n");

@@ -36,20 +36,31 @@ namespace agentty::rag {
 // the cheap lexical/structural signals break ties and pull exact-coverage
 // passages up. All terms are normalized to [0,1] before weighting.
 struct RerankWeights {
-    double fused          = 0.40;  // first-pass RRF score (BM25+dense)
-    double term_coverage  = 0.25;  // fraction of distinct query terms present
-    double proximity      = 0.15;  // query terms appearing close together
-    double path_match     = 0.10;  // query term appears in the file path
-    double phrase_match   = 0.10;  // the full query phrase appears verbatim
+    double fused          = 0.30;  // first-pass RRF score (BM25+dense), rank-based
+    double dense          = 0.20;  // CALIBRATED cosine(query, chunk) magnitude
+    double term_coverage  = 0.22;  // fraction of distinct query terms present
+    double proximity      = 0.13;  // query terms appearing close together
+    double path_match     = 0.08;  // query term appears in the file path
+    double phrase_match   = 0.07;  // the full query phrase appears verbatim
 };
 
 // Re-score and re-sort `hits` against `query`, returning the top `out_k`.
 // `hits` is expected to be the WIDE candidate pool from Corpus::search; the
 // reranker narrows it. Deterministic; no network. Stable tie-break by the
 // chunk's original position so equal scores keep first-pass order.
+//
+// `query_vec` (optional): the query's embedding. When non-null and non-empty,
+// the reranker adds a CALIBRATED dense feature — cosine(query_vec, chunk
+// embedding) — recovering the score MAGNITUDE that rank-based RRF discards
+// (a chunk at dense-rank 3 with cosine 0.89 vs rank 4 with cosine 0.55 look
+// identical to `fused` alone). Zero new network/deps: the chunk vectors are
+// already resident and the query vector is already computed during retrieval.
+// Null / empty / dimension-mismatched → the dense feature is 0 for that hit,
+// i.e. behaviour identical to the pre-dense reranker (graceful on BM25-only).
 [[nodiscard]] std::vector<Hit>
 rerank(std::string_view query, std::vector<Hit> hits,
-       std::size_t out_k, const RerankWeights& w = {});
+       std::size_t out_k, const RerankWeights& w = {},
+       const std::vector<float>* query_vec = nullptr);
 
 // Extractive context compression. Split `text` into sentences, score each by
 // overlap with the query terms, and return the best contiguous run of
