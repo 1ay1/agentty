@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "agentty/rag/rag.hpp"
@@ -252,6 +253,81 @@ void test_router_cross_source_dedup() {
     CHECK(hits.front().chunk->path == "shared.md");
 }
 
+// (h) retrieve_multi: multiple query phrasings fanned across a SINGLE source
+// (the expansion / HyDE shape). Chunks that match under any phrasing surface;
+// a chunk hit by MULTIPLE phrasings is reinforced (rises).
+void test_router_multi_query_single_source() {
+    auto corpus = make_corpus();
+    auto src = std::make_shared<rag::CorpusSource>("docs", corpus, kNoEmbed);
+    rag::KnowledgeRouter router;
+    router.add(src);
+
+    // Two phrasings both point at the k8s chunk; a third at the db chunk.
+    std::vector<std::string> queries{
+        "kubernetes deployment", "replicas control plane pods", "database transactions"};
+    auto hits = router.retrieve_multi(queries, 10);
+    CHECK(!hits.empty());
+
+    // k8s.md was hit by TWO phrasings → reinforced → ranks first.
+    CHECK(hits.front().chunk->path == "k8s.md");
+    // Every returned chunk appears exactly once (cross-query dedup).
+    std::unordered_map<std::string,int> seen;
+    for (const auto& h : hits) { CHECK(h.source == src.get()); ++seen[h.chunk->path]; }
+    for (const auto& [p, n] : seen) { CHECK(n == 1); }
+    // The db chunk (hit by one phrasing) is also present.
+    CHECK(seen.count("db.md") == 1);
+}
+
+// (i) retrieve_multi: multiple queries AND multiple sources fuse into ONE
+// ranked list (the full expansion-×-router matrix the funnel now uses for
+// EVERY knowledge configuration).
+void test_router_multi_query_multi_source() {
+    auto corpus = make_corpus();
+    auto docs = std::make_shared<rag::CorpusSource>("docs", corpus, kNoEmbed);
+    auto fake = std::make_shared<FakeSource>("fake");
+    rag::KnowledgeRouter router;
+    router.add(docs);
+    router.add(fake);
+
+    std::vector<std::string> queries{"kubernetes replicas", "orchestrated pods"};
+    auto hits = router.retrieve_multi(queries, 10);
+    CHECK(hits.size() >= 2);
+
+    bool saw_docs = false, saw_fake = false;
+    for (const auto& h : hits) {
+        CHECK(h.source != nullptr);
+        CHECK(h.score > 0.0);
+        if (h.source == docs.get()) saw_docs = true;
+        if (h.source == fake.get()) saw_fake = true;
+    }
+    CHECK(saw_docs);
+    CHECK(saw_fake);
+}
+
+// (j) retrieve_multi degrades: empty query list, all-empty queries, k==0,
+// and no sources all yield an empty result without throwing. A single
+// non-empty query is equivalent to retrieve().
+void test_router_multi_query_degrades() {
+    auto corpus = make_corpus();
+    auto src = std::make_shared<rag::CorpusSource>("docs", corpus, kNoEmbed);
+    rag::KnowledgeRouter router;
+    router.add(src);
+
+    CHECK(router.retrieve_multi({}, 5).empty());                 // no queries
+    CHECK(router.retrieve_multi({"", ""}, 5).empty());           // all blank
+    CHECK(router.retrieve_multi({"kubernetes"}, 0).empty());     // k==0
+
+    rag::KnowledgeRouter empty;
+    CHECK(empty.retrieve_multi({"kubernetes"}, 5).empty());      // no sources
+
+    // Single query ≡ retrieve().
+    auto a = router.retrieve_multi({"kubernetes deployment"}, 3);
+    auto b = router.retrieve("kubernetes deployment", 3);
+    CHECK(a.size() == b.size());
+    if (!a.empty() && !b.empty())
+        CHECK(a.front().chunk->path == b.front().chunk->path);
+}
+
 } // namespace
 
 int main() {
@@ -262,6 +338,9 @@ int main() {
     test_pipeline_rerank_compress();
     test_context_chunk_text_fallback();
     test_router_cross_source_dedup();
+    test_router_multi_query_single_source();
+    test_router_multi_query_multi_source();
+    test_router_multi_query_degrades();
 
     if (g_failures == 0) {
         std::printf("knowledge_test: all checks passed\n");
