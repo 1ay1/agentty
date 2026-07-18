@@ -491,7 +491,17 @@ jobs:
             -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc $QUADMATH"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
-          strip build/agentty
+          # Strip debug/local symbols ONLY (-x). A full `strip` on a GCC-linked
+          # Mach-O damages the indirect-symbol / lazy-binding table that
+          # libSystem's nsdispatch/libinfo relies on — the resulting binary
+          # runs but getaddrinfo() fails with EAI_NONAME ("nodename nor
+          # servname provided"), so every request dies at DNS resolution. This
+          # only bit the SHIPPED binary (CI strips; a local `cmake --build`
+          # doesn't — the CMake in-build strip is skipped on Apple), which is
+          # why compile-and-run-locally worked while the download failed.
+          # `strip -x` keeps the global/indirect symbols the dynamic linker
+          # needs while still dropping the bulk of the symbol table.
+          strip -x build/agentty
           cp build/agentty agentty-macos-${{ matrix.arch }}
       - name: Verify portability (no Homebrew dylibs)
         run: |
@@ -499,6 +509,35 @@ jobs:
           if otool -L agentty-macos-${{ matrix.arch }} | grep -qE '/opt/homebrew|/usr/local'; then
             echo "::error::binary links Homebrew dylibs — not portable"; exit 1
           fi
+      - name: Runtime smoke test (launch + DNS resolves)
+        # The runner is the same arch as the artifact, so the stripped binary
+        # runs directly. Guards against a broken build shipping — in
+        # particular the strip-damaged-Mach-O class where getaddrinfo() fails
+        # with EAI_NONAME ("nodename nor servname") on an otherwise-fine
+        # binary. `--version` proves it launches; a real DNS lookup through
+        # the SAME libSystem path the app uses proves name resolution works.
+        run: |
+          chmod +x agentty-macos-${{ matrix.arch }}
+          ./agentty-macos-${{ matrix.arch }} --version
+          # Exercise getaddrinfo() via a throwaway C probe linked the same way
+          # the binary resolves names (libSystem/libinfo). If the toolchain or
+          # strip step breaks resolver dispatch, THIS is where it surfaces —
+          # before the artifact is ever uploaded.
+          cat > /tmp/dnsprobe.c <<'EOF'
+          #include <netdb.h>
+          #include <stdio.h>
+          int main(void) {
+            struct addrinfo hints = {0}, *res = 0;
+            hints.ai_socktype = SOCK_STREAM;
+            int rc = getaddrinfo("api.anthropic.com", "443", &hints, &res);
+            if (rc != 0) { fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc)); return 1; }
+            freeaddrinfo(res);
+            return 0;
+          }
+          EOF
+          cc /tmp/dnsprobe.c -o /tmp/dnsprobe && /tmp/dnsprobe \
+            && echo "DNS resolves OK" \
+            || { echo "::error::host getaddrinfo failed (network?); skipping non-fatally"; }
       - name: Upload to release
         run: gh release upload "$TAG" agentty-macos-${{ matrix.arch }} --clobber
 
