@@ -97,6 +97,33 @@ static void test_rrf_fusion() {
     CHECK(saw_9);
 }
 
+// ── 3b. Weighted RRF ─────────────────────────────────────────────────────────
+static void test_rrf_weighted() {
+    // Two lists rank two different docs first. With equal weight the tie
+    // breaks by lower id; with a heavy weight on list B, B's top doc wins.
+    std::vector<std::vector<std::uint32_t>> lists = {
+        {10, 20},   // list A (lexical): 10 first
+        {20, 10},   // list B (dense):   20 first
+    };
+    // Equal weights → symmetric scores → lower id (10) wins the tie.
+    auto even = rag::reciprocal_rank_fusion_weighted(lists, {1.0, 1.0}, 60.0, 10);
+    CHECK(even.front().first == 10u);
+
+    // Heavy weight on the dense list (B) pulls its top doc (20) to first.
+    auto tilt = rag::reciprocal_rank_fusion_weighted(lists, {1.0, 5.0}, 60.0, 10);
+    CHECK(tilt.front().first == 20u);
+
+    // Empty weights vector == all-ones == the unweighted overload.
+    auto same = rag::reciprocal_rank_fusion_weighted(lists, {}, 60.0, 10);
+    auto base = rag::reciprocal_rank_fusion(lists, 60.0, 10);
+    CHECK(same.size() == base.size());
+    CHECK(same.front().first == base.front().first);
+
+    // A zero weight drops a list entirely.
+    auto dropped = rag::reciprocal_rank_fusion_weighted(lists, {0.0, 1.0}, 60.0, 10);
+    CHECK(dropped.front().first == 20u);  // only list B counted
+}
+
 // ── 4. Cosine ────────────────────────────────────────────────────────────────
 static void test_cosine() {
     std::vector<float> v = {1.0f, 2.0f, 3.0f};
@@ -195,6 +222,7 @@ int main() {
     test_chunker_line_aligned();
     test_bm25_ranks_exact_term();
     test_rrf_fusion();
+    test_rrf_weighted();
     test_cosine();
     test_corpus_bm25_only_search();
     test_contextual_breadcrumb();

@@ -161,14 +161,18 @@ double cosine(const std::vector<float>& a, const std::vector<float>& b) noexcept
 }
 
 std::vector<std::pair<std::uint32_t, double>>
-reciprocal_rank_fusion(
+reciprocal_rank_fusion_weighted(
     const std::vector<std::vector<std::uint32_t>>& ranked_lists,
+    const std::vector<double>& weights,
     double k, std::size_t out_k) {
     std::unordered_map<std::uint32_t, double> fused;
-    for (const auto& list : ranked_lists) {
+    for (std::size_t li = 0; li < ranked_lists.size(); ++li) {
+        const auto& list = ranked_lists[li];
+        const double w = (li < weights.size()) ? weights[li] : 1.0;
+        if (w == 0.0) continue;
         for (std::size_t rank = 0; rank < list.size(); ++rank) {
             // rank is 0-based; RRF uses 1-based rank.
-            fused[list[rank]] += 1.0 / (k + static_cast<double>(rank + 1));
+            fused[list[rank]] += w / (k + static_cast<double>(rank + 1));
         }
     }
     std::vector<std::pair<std::uint32_t, double>> out(fused.begin(), fused.end());
@@ -178,6 +182,14 @@ reciprocal_rank_fusion(
     });
     if (out.size() > out_k) out.resize(out_k);
     return out;
+}
+
+std::vector<std::pair<std::uint32_t, double>>
+reciprocal_rank_fusion(
+    const std::vector<std::vector<std::uint32_t>>& ranked_lists,
+    double k, std::size_t out_k) {
+    // The unweighted fusion is the weighted one with all weights == 1.0.
+    return reciprocal_rank_fusion_weighted(ranked_lists, /*weights=*/{}, k, out_k);
 }
 
 // ── Chunker ──────────────────────────────────────────────────────────────────────

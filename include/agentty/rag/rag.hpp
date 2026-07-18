@@ -276,11 +276,14 @@ private:
 
     // Append this query's ranked candidate lists (BM25, plus dense when the
     // corpus AND query embed) to `lists`, each as a vector of chunk ids.
-    // Shared by search() and search_fused() so the per-query retrieval logic
-    // lives in exactly one place.
+    // When `weights` is non-null, append the matching per-list fusion weight
+    // for each list pushed (lexical then dense), so callers can drive
+    // reciprocal_rank_fusion_weighted. Shared by search() and search_fused()
+    // so the per-query retrieval logic lives in exactly one place.
     void ranked_lists_for_query_(
         std::string_view query, const EmbedConfig& embed, std::size_t pool,
-        std::vector<std::vector<std::uint32_t>>& lists) const;
+        std::vector<std::vector<std::uint32_t>>& lists,
+        std::vector<double>* weights = nullptr) const;
 
     std::filesystem::path  root_;
     std::vector<Chunk>     chunks_;
@@ -301,6 +304,19 @@ private:
 [[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
 reciprocal_rank_fusion(
     const std::vector<std::vector<std::uint32_t>>& ranked_lists,
+    double k, std::size_t out_k);
+
+// WEIGHTED RRF: RRF(d) = Σ_lists w_list · 1/(k + rank_list(d)). A per-list
+// weight lets hybrid retrieval favour the dense list over lexical (or vice
+// versa) — the single most effective hybrid-tuning lever in the literature,
+// since dense catches paraphrase and BM25 catches exact terms, and which
+// matters depends on the query. `weights` is aligned to `ranked_lists`;
+// a shorter/empty weights vector defaults missing entries to 1.0 (so the
+// unweighted overload above is exactly this with all-ones).
+[[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
+reciprocal_rank_fusion_weighted(
+    const std::vector<std::vector<std::uint32_t>>& ranked_lists,
+    const std::vector<double>& weights,
     double k, std::size_t out_k);
 
 // Cosine similarity of two equal-length dense vectors. Returns 0 for a
