@@ -501,10 +501,25 @@ private:
 
         rag::Context ctx;
         ctx.query = query;
-        if (expand_enabled() && have_docs) {
+        // The multi-query (RRF-fused) retrieval path fires when EITHER
+        // RAG-Fusion expansion OR HyDE is enabled — they're independent
+        // recall boosters that both feed extra probes into the same fusion.
+        if ((expand_enabled() || hyde_enabled()) && have_docs) {
             rag::ExpandConfig ecfg = expand_config_from_env(embed);
-            auto queries = rag::expand_query(ecfg, query);
-            if (queries.size() > 1) variant_count = queries.size() - 1;
+            std::vector<std::string> queries{query};
+            if (expand_enabled()) {
+                queries = rag::expand_query(ecfg, query);
+                if (queries.size() > 1) variant_count = queries.size() - 1;
+            }
+            // HyDE: fold a hypothetical answer-passage in as an EXTRA probe.
+            // It rides the same multi-query RRF fusion as the expansion
+            // variants, so a passage that matches the hallucinated answer
+            // (dense-space) rises alongside literal-phrasing matches. Opt-in;
+            // empty on any failure → no extra probe, no regression.
+            if (hyde_enabled()) {
+                std::string hyde = rag::hyde_document(ecfg, query);
+                if (!hyde.empty()) { queries.push_back(std::move(hyde)); ++variant_count; }
+            }
             auto fused = docs_source.retrieve_fused(queries, pool_k);
             rag::KnowledgeRouter rest;
             if (skills_rag_enabled())
@@ -631,6 +646,17 @@ private:
 
     static bool expand_enabled() {
         const char* v = std::getenv("AGENTTY_RAG_EXPAND");
+        if (!v || v[0] == '\0') return false;
+        std::string s{v};
+        return s != "0" && s != "false" && s != "FALSE" && s != "False";
+    }
+
+    // HyDE (Hypothetical Document Embeddings): before retrieving, ask the LLM
+    // to hallucinate a short answer-passage and fold it in as an extra probe.
+    // OPT-IN (a generation per search) — lifts dense recall on question-shaped
+    // queries where the answer's vocabulary differs from the question's.
+    static bool hyde_enabled() {
+        const char* v = std::getenv("AGENTTY_RAG_HYDE");
         if (!v || v[0] == '\0') return false;
         std::string s{v};
         return s != "0" && s != "false" && s != "FALSE" && s != "False";

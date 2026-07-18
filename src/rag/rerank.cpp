@@ -395,12 +395,24 @@ std::optional<double> score_one(const NeuralRerankConfig& cfg,
 
     json body;
     body["model"]   = cfg.model;
+    // Graded rubric with anchored levels scores FAR more consistently across
+    // small local models than a bare "0–10" instruction: the anchors pin the
+    // scale so "6" means the same thing call-to-call, and the emphasis on
+    // ANSWERING (not merely mentioning terms) is what separates a real
+    // cross-encoder from lexical overlap. Still deterministic (temp 0),
+    // still a single integer out — the parser is unchanged.
     body["prompt"]  = std::string(
-        "You are a relevance scoring assistant. Given a query and a passage, "
-        "output ONLY a single integer from 0 to 10 indicating how relevant "
-        "the passage is to the query. 0=completely irrelevant, 10=perfectly "
-        "relevant. Output NOTHING else, just the number.\n\nQuery: ")
-        + std::string(query) + "\n\nPassage: " + std::string(pass) + "\n\nScore:";
+        "You are a precise relevance judge (a cross-encoder). Rate how well "
+        "the PASSAGE answers or directly informs the QUERY, on this scale:\n"
+        "  0  = unrelated; different topic entirely\n"
+        "  2  = same broad area but does NOT address the query\n"
+        "  4  = mentions the query's terms but doesn't answer it\n"
+        "  6  = partially answers, or answers a related sub-question\n"
+        "  8  = answers the query, possibly needing minor inference\n"
+        "  10 = directly and completely answers the query\n"
+        "Judge by whether the passage ANSWERS the query, not by shared "
+        "keywords. Output ONLY the single integer, nothing else.\n\nQUERY: ")
+        + std::string(query) + "\n\nPASSAGE: " + std::string(pass) + "\n\nRELEVANCE:";
     body["stream"]  = false;
     body["options"] = {{"temperature", 0.0}, {"num_predict", 8}};
 

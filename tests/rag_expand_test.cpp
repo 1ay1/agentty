@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "agentty/rag/rag.hpp"
+#include "agentty/rag/expand.hpp"
 
 using namespace agentty;
 
@@ -121,12 +122,38 @@ void test_search_fused_single_query_matches_search() {
     CHECK(fused.front().chunk->path == "logging.md");
 }
 
+// (d) HyDE degradation contract. hyde_document must NEVER throw and must
+//     return an empty string on every failure mode, so the caller falls back
+//     to the plain query and retrieval never regresses. We can't assert a
+//     real generation (no LLM in CI), only the graceful-empty paths.
+void test_hyde_degrades() {
+    // Empty model → no call, empty result.
+    {
+        rag::ExpandConfig cfg;   // model empty
+        CHECK(rag::hyde_document(cfg, "how do I configure oauth").empty());
+    }
+    // Empty query → empty result even with a model set.
+    {
+        rag::ExpandConfig cfg; cfg.model = "llama3.2";
+        CHECK(rag::hyde_document(cfg, "").empty());
+    }
+    // Unreachable backend (bogus port) → empty, no throw/hang beyond timeout.
+    {
+        rag::ExpandConfig cfg;
+        cfg.model = "llama3.2";
+        cfg.host  = "127.0.0.1";
+        cfg.port  = 1;            // nothing listens here
+        CHECK(rag::hyde_document(cfg, "anything").empty());
+    }
+}
+
 } // namespace
 
 int main() {
     test_search_fused_multi_query();
     test_search_fused_empty_queries();
     test_search_fused_single_query_matches_search();
+    test_hyde_degrades();
 
     if (g_failures == 0) {
         std::printf("rag_expand_test: all checks passed\n");

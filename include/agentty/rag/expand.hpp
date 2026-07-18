@@ -40,4 +40,23 @@ struct ExpandConfig {
 [[nodiscard]] std::vector<std::string>
 expand_query(const ExpandConfig& cfg, const std::string& query);
 
+// HyDE — Hypothetical Document Embeddings (Gao et al. 2022).
+//
+// A query is a QUESTION; the passages we're searching are ANSWERS. In
+// embedding space a question and its answer can sit surprisingly far apart
+// (different vocabulary, different register), which caps dense recall. HyDE
+// closes that gap: ask the LLM to HALLUCINATE a short, plausible answer
+// passage for the query, then embed THAT hypothetical document instead of
+// (or alongside) the raw query. The fake answer need not be factually
+// correct — it only has to LOOK like the kind of passage that would answer
+// the query, so its embedding lands in the right neighbourhood and pulls in
+// the real passages nearby.
+//
+// Reuses the same one-shot local /api/generate call as expand_query (the
+// generative model, not the embedder). OPT-IN (a generation per search) and
+// degrades to an empty string on ANY failure, so the caller falls back to
+// the plain query and retrieval never regresses. Never throws.
+[[nodiscard]] std::string
+hyde_document(const ExpandConfig& cfg, const std::string& query);
+
 } // namespace agentty::rag

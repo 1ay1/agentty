@@ -132,4 +132,62 @@ expand_query(const ExpandConfig& cfg, const std::string& query) {
     return out;
 }
 
+std::string
+hyde_document(const ExpandConfig& cfg, const std::string& query) {
+    if (cfg.model.empty() || query.empty()) return {};
+
+    // Ask for a short, direct passage that ANSWERS the query — the register of
+    // a documentation paragraph, not a chat reply. "Be specific, use concrete
+    // terms" steers the model toward the vocabulary real answer-passages use,
+    // which is exactly what we want the embedding to sit near. Factual
+    // accuracy is irrelevant; embedding-space proximity is the whole game.
+    std::string prompt =
+        "Write a short, factual passage (2–4 sentences) that directly answers "
+        "the following question, as if excerpted from documentation or a "
+        "reference article. Be specific and use concrete technical terms. "
+        "Output ONLY the passage, no preamble.\n\nQuestion: " + query +
+        "\n\nPassage:";
+
+    json body;
+    body["model"]  = cfg.model;
+    body["prompt"] = prompt;
+    body["stream"] = false;
+    body["options"] = {{"temperature", 0.3}, {"num_predict", 220}};
+
+    std::string body_str;
+    try { body_str = body.dump(); } catch (...) { return {}; }
+
+    http::Request req;
+    req.method    = http::HttpMethod::Post;
+    req.host      = cfg.host;
+    req.port      = cfg.port;
+    req.path      = "/api/generate";
+    req.plaintext = true;
+    req.headers   = {{"content-type", "application/json"}};
+    req.body      = std::move(body_str);
+    req.max_body_bytes = 4ull * 1024 * 1024;
+
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(3'000);
+    tos.total   = std::chrono::milliseconds(30'000);
+
+    auto resp = http::default_client().send(req, tos);
+    if (!resp || resp->status != 200) return {};
+
+    std::string text;
+    try {
+        auto j = json::parse(resp->body);
+        if (j.contains("response") && j["response"].is_string())
+            text = j["response"].get<std::string>();
+    } catch (...) { return {}; }
+
+    // Trim surrounding whitespace; guard against a degenerate empty/echo reply.
+    std::size_t a = 0, b = text.size();
+    while (a < b && std::isspace((unsigned char)text[a])) ++a;
+    while (b > a && std::isspace((unsigned char)text[b - 1])) --b;
+    text = text.substr(a, b - a);
+    if (text.size() < 8) return {};   // too short to be a useful hypothetical
+    return text;
+}
+
 } // namespace agentty::rag
