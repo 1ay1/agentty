@@ -55,6 +55,38 @@ static void test_chunker_line_aligned() {
     CHECK(saw_usage);
 }
 
+// A pathologically long single line (minified blob) must be HARD-SPLIT so no
+// chunk overruns max_chars, and multibyte UTF-8 must not be cut mid-codepoint.
+static void test_chunker_hard_splits_long_line() {
+    const std::size_t kMax = 200;
+    // One 5000-char line, no newlines — the old chunker took it whole.
+    std::string body(5000, 'x');
+    auto chunks = rag::chunk_document("min.js", body, /*max_lines=*/40, kMax, 0);
+    CHECK(!chunks.empty());
+    for (const auto& c : chunks) {
+        // text carries a trailing '\n' per line; allow a small slack for it.
+        CHECK(c.text.size() <= kMax + 2);
+    }
+
+    // UTF-8 safety: a long run of 3-byte codepoints (‘…’ U+2026, 0xE2 0x80 0xA6)
+    // split at kMax must never leave a dangling continuation byte at a chunk
+    // edge (which would be invalid UTF-8 the embedder/model chokes on).
+    std::string ell;
+    for (int i = 0; i < 400; ++i) ell += "\xE2\x80\xA6";  // 1200 bytes
+    auto uc = rag::chunk_document("u.md", ell, 40, kMax, 0);
+    CHECK(!uc.empty());
+    for (const auto& c : uc) {
+        std::string_view t = c.text;
+        // Strip the trailing newline the assembler adds.
+        if (!t.empty() && t.back() == '\n') t.remove_suffix(1);
+        // First byte of the chunk must be a lead byte, not a continuation.
+        if (!t.empty())
+            CHECK((static_cast<unsigned char>(t.front()) & 0xC0) != 0x80);
+        // Byte count must be a multiple of 3 (whole … codepoints only).
+        CHECK(t.size() % 3 == 0);
+    }
+}
+
 // ── 2. BM25 ranks the chunk containing the exact term first ──────────────────
 static void test_bm25_ranks_exact_term() {
     std::vector<rag::Chunk> chunks;
@@ -220,6 +252,7 @@ static void test_contextual_breadcrumb() {
 
 int main() {
     test_chunker_line_aligned();
+    test_chunker_hard_splits_long_line();
     test_bm25_ranks_exact_term();
     test_rrf_fusion();
     test_rrf_weighted();
