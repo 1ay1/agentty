@@ -666,6 +666,101 @@ static void test_embed_rerank_degrades() {
     }
 }
 
+// ── 15. Corpus::neighbors() — sibling lookup for parent-document retrieval ─
+static void test_corpus_neighbors() {
+    rag::Corpus corpus;
+    // Three chunks from ONE document (adjacent line ranges) + one from another.
+    std::vector<rag::Chunk> store;
+    store.push_back({"guide.md",  1, 10, "intro alpha",   {}});   // 0
+    store.push_back({"guide.md", 11, 20, "body beta",     {}});   // 1
+    store.push_back({"guide.md", 21, 30, "tail gamma",    {}});   // 2
+    store.push_back({"other.md",  1, 10, "unrelated delta", {}}); // 3
+    corpus.set_chunks_for_test(store);
+
+    // Middle chunk, radius 1 → one sibling each side, in line order, hit excluded.
+    auto mid = corpus.neighbors("guide.md", 11, 20, 1);
+    CHECK(mid.size() == 2);
+    CHECK(mid[0]->line_start == 1);    // before
+    CHECK(mid[1]->line_start == 21);   // after
+
+    // First chunk, radius 1 → only the one after it (no before).
+    auto first = corpus.neighbors("guide.md", 1, 10, 1);
+    CHECK(first.size() == 1);
+    CHECK(first[0]->line_start == 11);
+
+    // Radius 2 from the first chunk → both later siblings.
+    auto wide = corpus.neighbors("guide.md", 1, 10, 2);
+    CHECK(wide.size() == 2);
+
+    // A doc with a single chunk has no siblings.
+    auto lone = corpus.neighbors("other.md", 1, 10, 2);
+    CHECK(lone.empty());
+
+    // Unknown span → empty, no crash. Radius 0 → always empty.
+    CHECK(corpus.neighbors("guide.md", 99, 100, 1).empty());
+    CHECK(corpus.neighbors("guide.md", 11, 20, 0).empty());
+}
+
+// ── 16. ParentExpandStage — stitches siblings around a small-chunk hit ─────
+static void test_parent_expand_stage() {
+    rag::Corpus corpus;
+    std::vector<rag::Chunk> store;
+    store.push_back({"guide.md",  1, 10, "PARA_BEFORE surrounding context", {}}); // 0
+    store.push_back({"guide.md", 11, 20, "HIT_BODY the precise passage",    {}}); // 1
+    store.push_back({"guide.md", 21, 30, "PARA_AFTER more context",         {}}); // 2
+    corpus.set_chunks_for_test(store);
+
+    rag::EmbedConfig embed;  // BM25-only.
+    rag::CorpusSource src("docs", corpus, embed);
+
+    // Build a Context holding just the middle chunk, provenance-stamped so the
+    // stage can reach back to the source for siblings. Reach the live middle
+    // chunk pointer via a retrieve.
+    auto hits = src.retrieve("HIT_BODY precise passage", 1);
+    CHECK(!hits.empty());
+    CHECK(hits.front().chunk->text.find("HIT_BODY") != std::string::npos);
+    CHECK(hits.front().source == &src);          // provenance stamped
+
+    auto ctx = rag::Context::from_hits("HIT_BODY precise passage", std::move(hits));
+
+    rag::ParentExpandStage stage(/*radius=*/1, /*budget_chars=*/4000);
+    ctx = stage.process(std::move(ctx));
+    CHECK(!ctx.chunks.empty());
+
+    // The shown text now carries the hit sandwiched between both neighbours,
+    // in document order.
+    std::string shown(ctx.chunks.front().text());
+    auto pb = shown.find("PARA_BEFORE");
+    auto hb = shown.find("HIT_BODY");
+    auto pa = shown.find("PARA_AFTER");
+    CHECK(pb != std::string::npos);
+    CHECK(hb != std::string::npos);
+    CHECK(pa != std::string::npos);
+    CHECK(pb < hb);                 // before precedes hit
+    CHECK(hb < pa);                 // hit precedes after
+
+    // Radius 0 → no expansion (expanded stays empty, text() falls back).
+    {
+        auto hits2 = src.retrieve("HIT_BODY precise passage", 1);
+        auto ctx2  = rag::Context::from_hits("q", std::move(hits2));
+        rag::ParentExpandStage noop(/*radius=*/0);
+        ctx2 = noop.process(std::move(ctx2));
+        CHECK(ctx2.chunks.front().expanded.empty());
+    }
+
+    // A source-less hit is a graceful no-op (no crash, nothing stitched).
+    {
+        std::vector<rag::Chunk> lone{{"x.md", 1, 1, "ORPHAN", {}}};
+        rag::Hit oh{&lone[0], 1.0};   // .source == nullptr
+        std::vector<rag::Hit> ohs{oh};
+        auto ctx3 = rag::Context::from_hits("q", std::move(ohs));
+        rag::ParentExpandStage stg(1);
+        ctx3 = stg.process(std::move(ctx3));
+        CHECK(ctx3.chunks.front().expanded.empty());
+        CHECK(std::string(ctx3.chunks.front().text()) == "ORPHAN");
+    }
+}
+
 int main() {
     test_porter_stemmer();
     test_mmr_diversification();
@@ -681,6 +776,8 @@ int main() {
     test_folder_cache_roundtrip();
     test_tombstone_incremental();
     test_embed_rerank_degrades();
+    test_corpus_neighbors();
+    test_parent_expand_stage();
 
     if (g_failures == 0) {
         std::printf("rag_advanced_test: all checks passed\n");

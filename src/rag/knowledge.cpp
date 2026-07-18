@@ -340,6 +340,53 @@ Context CompressStage::process(Context ctx) const {
     return ctx;
 }
 
+Context ParentExpandStage::process(Context ctx) const {
+    if (radius_ == 0) return ctx;
+    for (auto& c : ctx.chunks) {
+        if (!c.hit.chunk || !c.hit.source) continue;   // no source → no siblings
+        const Chunk& hit = *c.hit.chunk;
+        auto sibs = c.hit.source->neighbors(hit, radius_);
+        if (sibs.empty()) continue;
+
+        // The text we're expanding AROUND is whatever the pipeline decided to
+        // show so far (a compressed span, or the raw body). Siblings are the
+        // FULL neighbouring bodies — their surrounding prose is the point.
+        std::string_view shown = c.text();
+
+        // Partition siblings into those reading BEFORE the hit and AFTER it,
+        // by line position, so the stitch preserves document order.
+        std::string before, after;
+        for (const Chunk* s : sibs) {
+            if (!s) continue;
+            std::string& dst = (s->line_start < hit.line_start) ? before : after;
+            if (!dst.empty()) dst += "\n\n";
+            dst += s->text;
+        }
+
+        std::string stitched;
+        stitched.reserve(before.size() + shown.size() + after.size() + 4);
+        if (!before.empty()) { stitched += before; stitched += "\n\n"; }
+        stitched += shown;
+        if (!after.empty())  { stitched += "\n\n"; stitched += after; }
+
+        // Cap the stitched window so one expanded chunk can't dominate the
+        // context slice. If we'd overrun, prefer keeping the (higher-signal)
+        // shown text + trailing context and trim from the leading side.
+        if (budget_chars_ && stitched.size() > budget_chars_) {
+            std::string kept = std::string(shown);
+            if (!after.empty() && kept.size() + 2 + after.size() <= budget_chars_)
+                kept += "\n\n" + after;
+            if (kept.size() > budget_chars_) kept.resize(budget_chars_);
+            stitched = std::move(kept);
+        }
+
+        // Only take the expansion when it actually adds context.
+        if (stitched.size() > shown.size())
+            c.expanded = std::move(stitched);
+    }
+    return ctx;
+}
+
 Context NeuralRerankStage::process(Context ctx) const {
     // Lift hits, run neural rerank, re-wrap.
     std::vector<Hit> hits;

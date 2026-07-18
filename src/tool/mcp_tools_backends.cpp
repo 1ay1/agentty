@@ -558,6 +558,13 @@ private:
         rag::Pipeline narrow;
         narrow.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
               .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
+        // PARENT-DOCUMENT (small-to-big): stitch each surviving small chunk
+        // back into its surrounding siblings so the model reads it IN CONTEXT.
+        // Runs LAST so it wraps the compressed span, not the raw body. Pure
+        // in-memory sibling lookup (no network) — default-on, safe to leave.
+        if (parent_expand_enabled())
+            narrow.add(std::make_shared<rag::ParentExpandStage>(
+                parent_expand_radius(), /*budget_chars=*/2400));
         ctx = narrow.run(std::move(ctx));
         ctx.confidence = conf;   // MMR/compress must not overwrite the signal
         return ctx;
@@ -673,6 +680,23 @@ private:
         if (const char* m = std::getenv("AGENTTY_RAG_RERANK_MODEL"); m && m[0])
             cfg.embed.model = m;
         return cfg;
+    }
+
+    // PARENT-DOCUMENT (small-to-big) retrieval: stitch a hit's adjacent
+    // sibling chunks back around it so small precise chunks read in context.
+    // DEFAULT-ON — pure in-memory, no network. Set AGENTTY_RAG_PARENT=0 off.
+    static bool parent_expand_enabled() { return truthy_default_on("AGENTTY_RAG_PARENT"); }
+    // How many chunks before/after the hit to fold in (default 1 each side).
+    static std::size_t parent_expand_radius() {
+        if (const char* v = std::getenv("AGENTTY_RAG_PARENT_RADIUS"); v && v[0]) {
+            try {
+                int r = std::stoi(v);
+                if (r < 0) r = 0;
+                if (r > 4) r = 4;
+                return static_cast<std::size_t>(r);
+            } catch (...) { /* keep default */ }
+        }
+        return 1;
     }
 
     // ── Skills as a knowledge source ──────────────────────────────

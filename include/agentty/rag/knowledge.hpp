@@ -52,10 +52,16 @@ namespace agentty::rag {
 struct ContextChunk {
     Hit         hit;          // chunk ptr + fused score + source provenance
     std::string compressed;   // best query-relevant span; empty == use hit.chunk->text
+    std::string expanded;     // parent-document stitch (compressed/body + siblings)
 
-    // The text a consumer should actually show: the compressed span when a
-    // CompressStage ran, else the full chunk body.
+    // The text a consumer should actually show. Precedence:
+    //   expanded (parent-document stitch)  >  compressed span  >  full body.
+    // A ParentExpandStage, when it runs, fills `expanded` with the shown text
+    // surrounded by adjacent sibling chunks so a precise small-chunk hit is
+    // read back in context; it runs last so it wraps the compressed span, not
+    // the raw body.
     [[nodiscard]] std::string_view text() const noexcept {
+        if (!expanded.empty()) return expanded;
         if (!compressed.empty()) return compressed;
         return hit.chunk ? std::string_view{hit.chunk->text} : std::string_view{};
     }
@@ -129,6 +135,17 @@ public:
     // throw.
     [[nodiscard]] virtual std::vector<Hit>
     retrieve(std::string_view query, std::size_t k) const = 0;
+
+    // PARENT-DOCUMENT (small-to-big) expansion hook. Given a hit chunk from
+    // THIS source, return the adjacent sibling chunks (same document, within
+    // `radius` chunks) so a stage can stitch surrounding context back around
+    // a precise small-chunk hit. Default: no siblings (a source with no
+    // notion of document adjacency simply opts out and expansion is a no-op
+    // for its hits). Must not throw.
+    [[nodiscard]] virtual std::vector<const Chunk*>
+    neighbors(const Chunk& /*hit*/, std::size_t /*radius*/) const {
+        return {};
+    }
 };
 
 // ── CorpusSource: the built-in folder source ──────────────────────────────
@@ -153,6 +170,12 @@ public:
     // Routed through Corpus::search_fused, then provenance-stamped.
     [[nodiscard]] std::vector<Hit>
     retrieve_fused(const std::vector<std::string>& queries, std::size_t k) const;
+
+    // Parent-document expansion: delegate to the wrapped Corpus.
+    [[nodiscard]] std::vector<const Chunk*>
+    neighbors(const Chunk& hit, std::size_t radius) const override {
+        return corpus_->neighbors(hit.path, hit.line_start, hit.line_end, radius);
+    }
 
 private:
     std::string   name_;
@@ -215,6 +238,12 @@ public:
     // Number of chunks currently indexed (0 before the first retrieve()).
     [[nodiscard]] std::size_t indexed_chunks() const noexcept {
         return corpus_.chunk_count();
+    }
+
+    // Parent-document expansion: delegate to the private in-memory Corpus.
+    [[nodiscard]] std::vector<const Chunk*>
+    neighbors(const Chunk& hit, std::size_t radius) const override {
+        return corpus_.neighbors(hit.path, hit.line_start, hit.line_end, radius);
     }
 
 private:
@@ -392,6 +421,34 @@ public:
     [[nodiscard]] Context process(Context ctx) const override;
 private:
     Config cfg_;
+};
+
+// ParentExpandStage — small-to-big / parent-document retrieval.
+//
+// Small chunks retrieve PRECISELY (a tight passage matches the query cleanly)
+// but read out of context once handed to the model: a definition without its
+// surrounding prose, a code snippet without the sentence that motivates it.
+// This stage runs LAST (after rerank/compress narrow the set) and, for each
+// surviving chunk, asks its source for the adjacent sibling chunks (same
+// document, within `radius`) and stitches them back around the shown text —
+// giving the model the surrounding paragraph without ever WIDENING the
+// retrieval probe (recall stays precise, only the delivered window grows).
+//
+// Cheap and offline: pure in-memory sibling lookup over the already-built
+// corpus (no embedding, no LLM). A source with no notion of document
+// adjacency (KnowledgeSource::neighbors default) yields nothing and the stage
+// is a no-op for its hits. `budget_chars` caps the stitched result so an
+// expanded chunk can't blow past a sane context slice.
+class ParentExpandStage final : public RetrievalStage {
+public:
+    explicit ParentExpandStage(std::size_t radius = 1,
+                               std::size_t budget_chars = 2400)
+        : radius_(radius), budget_chars_(budget_chars) {}
+    [[nodiscard]] std::string_view name() const noexcept override { return "parent_expand"; }
+    [[nodiscard]] Context process(Context ctx) const override;
+private:
+    std::size_t radius_;
+    std::size_t budget_chars_;
 };
 
 } // namespace agentty::rag

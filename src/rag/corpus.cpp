@@ -217,6 +217,42 @@ void Corpus::set_chunks_for_test(std::vector<Chunk> chunks) {
     bm25_ = build_bm25(chunks_);
 }
 
+std::vector<const Chunk*>
+Corpus::neighbors(const std::string& path, int line_start, int line_end,
+                  std::size_t radius) const {
+    if (radius == 0) return {};
+    // Collect every live chunk from the same document, in document order.
+    // Chunks of one file are appended contiguously during build(), and their
+    // line spans are monotonic, so sorting by line_start recovers reading
+    // order even across cache-merge paths.
+    std::vector<std::uint32_t> sibs;
+    for (std::uint32_t i = 0; i < chunks_.size(); ++i) {
+        if (!is_live_(i)) continue;
+        if (chunks_[i].path == path) sibs.push_back(i);
+    }
+    if (sibs.size() < 2) return {};
+    std::sort(sibs.begin(), sibs.end(), [&](std::uint32_t a, std::uint32_t b) {
+        if (chunks_[a].line_start != chunks_[b].line_start)
+            return chunks_[a].line_start < chunks_[b].line_start;
+        return chunks_[a].line_end < chunks_[b].line_end;
+    });
+    // Locate the hit by its (line_start, line_end) identity.
+    std::size_t at = sibs.size();
+    for (std::size_t k = 0; k < sibs.size(); ++k) {
+        const Chunk& c = chunks_[sibs[k]];
+        if (c.line_start == line_start && c.line_end == line_end) { at = k; break; }
+    }
+    if (at == sibs.size()) return {};
+    std::size_t lo = (at > radius) ? at - radius : 0;
+    std::size_t hi = std::min(sibs.size() - 1, at + radius);
+    std::vector<const Chunk*> out;
+    for (std::size_t k = lo; k <= hi; ++k) {
+        if (k == at) continue;            // exclude the hit itself
+        out.push_back(&chunks_[sibs[k]]);
+    }
+    return out;
+}
+
 void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     root_ = root;
     chunks_.clear();

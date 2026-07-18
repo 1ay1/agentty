@@ -270,6 +270,19 @@ public:
     // Exposed for tests: install a prebuilt corpus without disk/network.
     void set_chunks_for_test(std::vector<Chunk> chunks);
 
+    // PARENT-DOCUMENT (small-to-big) retrieval. Given a chunk that scored a
+    // hit (identified by its path + line span), return the live sibling
+    // chunks from the SAME document whose line ranges sit within `radius`
+    // chunks before/after it, ordered by line_start (the hit itself is
+    // EXCLUDED — the caller already has it). Small chunks retrieve precisely
+    // but read out of context; stitching a couple of neighbours back in
+    // gives the model the surrounding prose without widening the retrieval
+    // probe. Empty when no siblings exist or the chunk isn't found. O(N) scan
+    // over the corpus (called only for the handful of surviving top-k hits).
+    [[nodiscard]] std::vector<const Chunk*>
+    neighbors(const std::string& path, int line_start, int line_end,
+              std::size_t radius = 1) const;
+
 private:
     void write_cache_() const;
 
