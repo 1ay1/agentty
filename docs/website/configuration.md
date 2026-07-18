@@ -33,6 +33,7 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_RAG_EXPAND / AGENTTY_RAG_EXPAND_MODEL / AGENTTY_RAG_EXPAND_N` | RAG-Fusion query expansion (LLM rewrites the query into N variants, fuses results). Off by default; truthy enables. `_N` is the variant count (default 4, 1–8). |
 | `AGENTTY_RAG_CORRECT` | Corrective-RAG retry: on a low-confidence first pass, strip stopwords + widen the pool and retry. On by default; `=0` disables. |
 | `AGENTTY_RAG_MCP` | Fold connected MCP `resources/*` into the search_docs corpus. Off unless truthy **and** an MCP config is present. |
+| `BM25_USE_STEMMER / BM25_HEADING_BOOST` | Lexical tuning. Porter stemming ("run/runs/running" match) is **on by default**; set `BM25_USE_STEMMER=0` to disable (e.g. a code-symbol corpus). `BM25_HEADING_BOOST` (default 3) is how many times a chunk's heading breadcrumb is folded into its BM25 tokens — heading matches out-score body matches; 1 disables the boost. |
 | `AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE` | Set AGENTTY_DEBUG_API=1 to dump streaming provider events to AGENTTY_DEBUG_FILE. |
 | `SSL_CERT_FILE / SSL_CERT_DIR / CURL_CA_BUNDLE` | Override the TLS root store agentty trusts (standard OpenSSL vars). |
 

@@ -236,6 +236,28 @@ static void test_bm25_heading_boost() {
     CHECK(res.front().first == 0u);
 }
 
+// ── 10. BM25 stemming (on by default) matches morphological variants ───────
+static void test_bm25_stemming_default_on() {
+    // The doc says "running"; the query says "runs". With Porter stemming
+    // (default on) both stem to "run" and match — a miss with raw tokens.
+    std::vector<rag::Chunk> chunks;
+    {
+        rag::Chunk c; c.path = "a.md"; c.line_start = 1; c.line_end = 3;
+        c.text = "the service is running across the cluster tonight";
+        chunks.push_back(std::move(c));
+    }
+    {
+        rag::Chunk c; c.path = "b.md"; c.line_start = 1; c.line_end = 3;
+        c.text = "an unrelated paragraph about weather patterns and oceans";
+        chunks.push_back(std::move(c));
+    }
+    auto idx = rag::build_bm25(chunks);
+    auto res = rag::bm25_search(idx, "runs", 5);
+    CHECK(!res.empty());
+    if (!res.empty())
+        CHECK(res.front().first == 0u);   // "running" chunk matched via stem
+}
+
 int main() {
     test_query_terms();
     test_rerank_promotes_term_coverage();
@@ -246,6 +268,7 @@ int main() {
     test_rerank_dense_feature();
     test_rerank_dedup_overlapping_windows();
     test_bm25_heading_boost();
+    test_bm25_stemming_default_on();
 
     if (g_failures == 0) {
         std::printf("rag_rerank_test: all checks passed\n");
