@@ -4,13 +4,17 @@
 
 #include "agentty/rag/rag.hpp"
 
+#include "agentty/rag/rerank.hpp"   // is_stopword
+#include "agentty/rag/stemmer.hpp"  // stem
 #include "agentty/io/http.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
@@ -250,6 +254,90 @@ Corpus::neighbors(const std::string& path, int line_start, int line_end,
         if (k == at) continue;            // exclude the hit itself
         out.push_back(&chunks_[sibs[k]]);
     }
+    return out;
+}
+
+std::vector<std::string>
+Corpus::prf_expansion_terms(std::string_view query, std::size_t fb_docs,
+                            std::size_t fb_terms) const {
+    if (fb_terms == 0 || fb_docs == 0 || chunks_.empty()) return {};
+
+    // 1) Initial BM25 pass → the pseudo-relevant set (assume the top hits are
+    //    relevant; harvest their vocabulary). Uses the SAME tokenizer/stemmer
+    //    the index was built with, so terms stay in one vocabulary.
+    auto seeds = bm25_search(bm25_, query, fb_docs);
+    if (seeds.empty()) return {};
+
+    // Tokenizer mirroring bm25.cpp: lowercase alnum runs ≥2 chars, Porter-
+    // stemmed when the index was (BM25_USE_STEMMER, default on). Query terms
+    // and stopwords are excluded so expansion adds NEW discriminative signal.
+    static const bool do_stem = [] {
+        const char* v = std::getenv("BM25_USE_STEMMER");
+        if (!v || !v[0]) return true;
+        return v[0] != '0' && std::string_view{v} != "false"
+                           && std::string_view{v} != "FALSE";
+    }();
+    auto toks_of = [](std::string_view s, std::vector<std::string>& out) {
+        std::string cur; cur.reserve(24);
+        auto flush = [&] {
+            if (cur.size() >= 2) out.push_back(do_stem ? stem(cur) : cur);
+            cur.clear();
+        };
+        for (unsigned char c : s) {
+            if (std::isalnum(c)) cur.push_back(static_cast<char>(std::tolower(c)));
+            else flush();
+        }
+        flush();
+    };
+
+    // Original query terms — never re-emit them as "expansion".
+    std::unordered_set<std::string> qterms;
+    { std::vector<std::string> qt; toks_of(query, qt);
+      for (auto& t : qt) qterms.insert(std::move(t)); }
+
+    // 2) Accumulate feedback term frequency across the pseudo-relevant docs.
+    std::unordered_map<std::string, std::uint32_t> fb_tf;
+    for (auto& [doc, score] : seeds) {
+        if (doc >= chunks_.size() || !is_live_(doc)) continue;
+        std::vector<std::string> toks;
+        toks_of(chunks_[doc].text, toks);
+        // Count each term once per doc (document frequency within feedback
+        // set) — blunts a single verbose chunk from dominating the expansion.
+        std::unordered_set<std::string> seen_here;
+        for (auto& t : toks) {
+            if (qterms.count(t) || is_stopword(t)) continue;
+            if (seen_here.insert(t).second) ++fb_tf[t];
+        }
+    }
+    if (fb_tf.empty()) return {};
+
+    // 3) Score each candidate by feedback-df × corpus-idf: a term that recurs
+    //    across the relevant set AND is rare corpus-wide is the strongest
+    //    discriminator (classic RM3/tf-idf feedback weighting).
+    const double N = static_cast<double>(bm25_.doc_count);
+    std::vector<std::pair<std::string, double>> scored;
+    scored.reserve(fb_tf.size());
+    for (auto& [term, df] : fb_tf) {
+        if (df < 2 && seeds.size() > 2) continue;  // require corroboration
+        double idf = 1.0;
+        auto it = bm25_.term_ids.find(term);
+        if (it != bm25_.term_ids.end() && N > 0.0) {
+            double cdf = static_cast<double>(bm25_.postings[it->second].size());
+            idf = std::log((N - cdf + 0.5) / (cdf + 0.5) + 1.0);
+            if (idf < 0.0) idf = 0.0;
+        }
+        scored.emplace_back(term, static_cast<double>(df) * idf);
+    }
+    if (scored.empty()) return {};
+    std::sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;   // deterministic tiebreak
+    });
+
+    std::vector<std::string> out;
+    out.reserve(std::min(fb_terms, scored.size()));
+    for (std::size_t i = 0; i < scored.size() && out.size() < fb_terms; ++i)
+        out.push_back(std::move(scored[i].first));
     return out;
 }
 
@@ -529,6 +617,18 @@ void Corpus::ranked_lists_for_query_(
         if (v && v[0]) { try { double d = std::stod(v); if (d >= 0) return d; } catch (...) {} }
         return 1.3;
     }();
+    // Pseudo-relevance-feedback expansion weight (its BM25 list is fused in as
+    // a SECONDARY, down-weighted probe so it lifts recall without diluting the
+    // primary query's precision). Default-on at 0.5× lexical; set to 0 (or
+    // AGENTTY_RAG_PRF=0) to disable entirely. Read once, cached.
+    static const double w_prf = [] {
+        const char* off = std::getenv("AGENTTY_RAG_PRF");
+        if (off && (off[0] == '0' || std::string_view{off} == "false"
+                                  || std::string_view{off} == "FALSE")) return 0.0;
+        const char* v = std::getenv("AGENTTY_RAG_W_PRF");
+        if (v && v[0]) { try { double d = std::stod(v); if (d >= 0) return d; } catch (...) {} }
+        return 0.5;
+    }();
 
     // BM25 ranked list (always available). Skip tombstoned ids so a lazily
     // removed chunk never surfaces before the next compaction.
@@ -537,6 +637,28 @@ void Corpus::ranked_lists_for_query_(
         if (is_live_(id)) bm25_rank.push_back(id);
     lists.push_back(std::move(bm25_rank));
     if (weights) weights->push_back(w_lex);
+
+    // PSEUDO-RELEVANCE FEEDBACK (RM3-lite): harvest discriminative terms from
+    // the top BM25 hits and issue a SECOND, down-weighted BM25 probe over
+    // {query + expansion terms}. A chunk that both the literal query AND the
+    // expanded vocabulary surface is reinforced by RRF — recovering
+    // vocabulary-mismatch hits with zero model/network cost. Deterministic
+    // and default-on; degrades to nothing when the corpus is small or the
+    // initial pass is empty.
+    if (w_prf > 0.0) {
+        auto exp_terms = prf_expansion_terms(query, /*fb_docs=*/5, /*fb_terms=*/6);
+        if (!exp_terms.empty()) {
+            std::string eq{query};
+            for (const auto& t : exp_terms) { eq.push_back(' '); eq += t; }
+            std::vector<std::uint32_t> prf_rank;
+            for (auto& [id, score] : bm25_search(bm25_, eq, pool))
+                if (is_live_(id)) prf_rank.push_back(id);
+            if (!prf_rank.empty()) {
+                lists.push_back(std::move(prf_rank));
+                if (weights) weights->push_back(w_prf);
+            }
+        }
+    }
 
     // Dense ranked list (only when the corpus AND the query can be embedded).
     if (embed_dim_ > 0 && !embed.model.empty()) {

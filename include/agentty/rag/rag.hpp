@@ -283,6 +283,19 @@ public:
     neighbors(const std::string& path, int line_start, int line_end,
               std::size_t radius = 1) const;
 
+    // PSEUDO-RELEVANCE FEEDBACK (RM3-lite) query expansion. Runs an initial
+    // BM25 pass, treats the top `fb_docs` chunks as "pseudo-relevant", and
+    // harvests the most DISCRIMINATIVE terms from them (feedback term-freq ×
+    // corpus idf), excluding the original query terms and stopwords. Returns
+    // up to `fb_terms` expansion terms ordered by weight. Appending these to
+    // the probe recovers vocabulary the query never used (synonyms, the exact
+    // spelling the docs prefer) — the classic pre-neural recall win, fully
+    // deterministic, model-free, sub-millisecond. Empty when the corpus is
+    // BM25-empty or the initial pass finds nothing. Never throws.
+    [[nodiscard]] std::vector<std::string>
+    prf_expansion_terms(std::string_view query, std::size_t fb_docs = 5,
+                        std::size_t fb_terms = 6) const;
+
 private:
     void write_cache_() const;
 

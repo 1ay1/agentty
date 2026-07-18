@@ -761,6 +761,46 @@ static void test_parent_expand_stage() {
     }
 }
 
+// ── 17. Pseudo-relevance feedback (RM3-lite) query expansion ────────────
+static void test_prf_expansion() {
+    rag::Corpus corpus;
+    std::vector<rag::Chunk> store;
+    // A cluster of chunks about kubernetes that all co-mention "replicas" and
+    // "pods" — discriminative terms a bare "kubernetes" query never types.
+    store.push_back({"a.md", 1, 10,
+        "kubernetes orchestrates pods and replicas across worker nodes", {}});
+    store.push_back({"b.md", 1, 10,
+        "kubernetes deployment manages replicas and pods declaratively", {}});
+    store.push_back({"c.md", 1, 10,
+        "kubernetes controllers reconcile pods replicas to desired state", {}});
+    // Unrelated chunks so idf of the cluster terms stays meaningful.
+    store.push_back({"d.md", 1, 10, "the database stores rows in btree tables", {}});
+    store.push_back({"e.md", 1, 10, "tcp handshake establishes a byte stream", {}});
+    corpus.set_chunks_for_test(store);
+
+    // Expanding "kubernetes" should surface the co-occurring cluster
+    // vocabulary (pods/replicas), stemmed, excluding the query term itself.
+    auto terms = corpus.prf_expansion_terms("kubernetes", /*fb_docs=*/3, /*fb_terms=*/6);
+    CHECK(!terms.empty());
+    bool has_cluster = false;
+    for (const auto& t : terms) {
+        CHECK(t != "kubernet" && t != "kubernetes");   // never re-emit query term
+        if (t.rfind("pod", 0) == 0 || t.rfind("replica", 0) == 0) has_cluster = true;
+    }
+    CHECK(has_cluster);
+
+    // Degradation: empty query, zero budgets, and a no-hit query all return
+    // empty without throwing.
+    CHECK(corpus.prf_expansion_terms("", 3, 6).empty());
+    CHECK(corpus.prf_expansion_terms("kubernetes", 0, 6).empty());
+    CHECK(corpus.prf_expansion_terms("kubernetes", 3, 0).empty());
+    CHECK(corpus.prf_expansion_terms("zzzznonexistentterm", 3, 6).empty());
+
+    // Empty corpus → empty, no crash.
+    rag::Corpus blank;
+    CHECK(blank.prf_expansion_terms("anything", 3, 6).empty());
+}
+
 int main() {
     test_porter_stemmer();
     test_mmr_diversification();
@@ -778,6 +818,7 @@ int main() {
     test_embed_rerank_degrades();
     test_corpus_neighbors();
     test_parent_expand_stage();
+    test_prf_expansion();
 
     if (g_failures == 0) {
         std::printf("rag_advanced_test: all checks passed\n");
