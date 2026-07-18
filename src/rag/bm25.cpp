@@ -352,6 +352,39 @@ chunk_document(const std::string& path, const std::string& body,
         }
     }
 
+    // HARD-SPLIT pathologically long single lines (minified JS/CSS, a giant
+    // one-line JSON blob, a base64 data URI) BEFORE chunking. Otherwise the
+    // chunk loop always takes the first line whole — `taken == 0` bypasses
+    // every overflow guard — so one 50KB line became one 50KB chunk, blowing
+    // max_chars by 30×: wasted embed tokens and, if retrieved, a giant blob
+    // dumped into the model's window. Split at UTF-8 boundaries so no piece
+    // exceeds max_chars and no multibyte codepoint is cut. Pieces stay views
+    // into `body`. Guard against a zero cap.
+    if (max_chars > 4) {
+        std::vector<std::string_view> split_lines;
+        split_lines.reserve(lines.size());
+        for (std::string_view ln : lines) {
+            if (ln.size() <= max_chars) { split_lines.push_back(ln); continue; }
+            std::size_t off = 0;
+            while (ln.size() - off > max_chars) {
+                std::size_t cut = off + max_chars;
+                // Walk back off a UTF-8 continuation byte (0b10xxxxxx) so we
+                // never split a multibyte codepoint. Bounded to 3 steps (max
+                // UTF-8 sequence length after the lead byte).
+                std::size_t guard = 0;
+                while (cut > off + 1 && guard < 4 &&
+                       (static_cast<unsigned char>(ln[cut]) & 0xC0) == 0x80) {
+                    --cut; ++guard;
+                }
+                split_lines.emplace_back(ln.data() + off, cut - off);
+                off = cut;
+            }
+            if (off < ln.size())
+                split_lines.emplace_back(ln.data() + off, ln.size() - off);
+        }
+        lines.swap(split_lines);
+    }
+
     std::vector<Chunk> out;
     std::size_t i = 0;
     const std::size_t n = lines.size();
