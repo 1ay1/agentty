@@ -430,12 +430,31 @@ void Corpus::rebuild_hnsw_() {
 
 void Corpus::ranked_lists_for_query_(
     std::string_view query, const EmbedConfig& embed, std::size_t pool,
-    std::vector<std::vector<std::uint32_t>>& lists) const {
+    std::vector<std::vector<std::uint32_t>>& lists,
+    std::vector<double>* weights) const {
+    // Fusion weights (SOTA hybrid tuning). Dense retrieval catches paraphrase
+    // and semantic near-matches; BM25 catches exact terms/proper nouns. The
+    // literature consistently finds a modest dense-over-lexical tilt wins on
+    // natural-language doc corpora, so dense defaults to 1.3× lexical. Both
+    // are env-tunable (AGENTTY_RAG_W_LEXICAL / AGENTTY_RAG_W_DENSE) for A/B
+    // without a rebuild. Read once, cached for the process.
+    static const double w_lex = [] {
+        const char* v = std::getenv("AGENTTY_RAG_W_LEXICAL");
+        if (v && v[0]) { try { double d = std::stod(v); if (d >= 0) return d; } catch (...) {} }
+        return 1.0;
+    }();
+    static const double w_dense = [] {
+        const char* v = std::getenv("AGENTTY_RAG_W_DENSE");
+        if (v && v[0]) { try { double d = std::stod(v); if (d >= 0) return d; } catch (...) {} }
+        return 1.3;
+    }();
+
     // BM25 ranked list (always available).
     std::vector<std::uint32_t> bm25_rank;
     for (auto& [id, score] : bm25_search(bm25_, query, pool))
         bm25_rank.push_back(id);
     lists.push_back(std::move(bm25_rank));
+    if (weights) weights->push_back(w_lex);
 
     // Dense ranked list (only when the corpus AND the query can be embedded).
     if (embed_dim_ > 0 && !embed.model.empty()) {
@@ -471,7 +490,10 @@ void Corpus::ranked_lists_for_query_(
                 dense_rank.reserve(sims.size());
                 for (auto& [id, s] : sims) dense_rank.push_back(id);
             }
-            if (!dense_rank.empty()) lists.push_back(std::move(dense_rank));
+            if (!dense_rank.empty()) {
+                lists.push_back(std::move(dense_rank));
+                if (weights) weights->push_back(w_dense);
+            }
         }
     }
 }
@@ -486,10 +508,12 @@ std::vector<Hit> Corpus::search(std::string_view query,
     const std::size_t pool = std::max<std::size_t>(k * 8, 32);
 
     std::vector<std::vector<std::uint32_t>> lists;
-    ranked_lists_for_query_(query, embed, pool, lists);
+    std::vector<double> weights;
+    ranked_lists_for_query_(query, embed, pool, lists, &weights);
 
-    // Fuse with RRF (k=60 canonical) and materialize the hits.
-    auto fused = reciprocal_rank_fusion(lists, /*k=*/60.0, k);
+    // Fuse with WEIGHTED RRF (k=60 canonical; dense out-weights lexical) and
+    // materialize the hits.
+    auto fused = reciprocal_rank_fusion_weighted(lists, weights, /*k=*/60.0, k);
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)
@@ -602,9 +626,10 @@ std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
     if (chunks_.empty() || k == 0 || queries.empty()) return {};
     const std::size_t pool = std::max<std::size_t>(k * 8, 32);
     std::vector<std::vector<std::uint32_t>> lists;
+    std::vector<double> weights;
     for (const auto& q : queries)
-        ranked_lists_for_query_(q, embed, pool, lists);  // BM25(+dense) each
-    auto fused = reciprocal_rank_fusion(lists, 60.0, k);
+        ranked_lists_for_query_(q, embed, pool, lists, &weights);  // BM25(+dense) each
+    auto fused = reciprocal_rank_fusion_weighted(lists, weights, 60.0, k);
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)
