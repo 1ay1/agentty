@@ -65,15 +65,26 @@ Step login_pick_method(Model m, char32_t key) {
         // The URL lives in state so the modal can show it as a fallback
         // if the system browser opener fails silently (broken xdg-open,
         // headless SSH session, etc.).
-        auth::PkceVerifier verifier{auth::random_urlsafe(128)};
-        auth::OAuthState   state{auth::random_urlsafe(32)};
-        std::string url = auth::oauth_authorize_url(verifier, state);
-        login::OAuthCode oc;
-        oc.verifier      = std::move(verifier);
-        oc.state         = std::move(state);
-        oc.authorize_url = url;
-        m.ui.login = std::move(oc);
-        return {std::move(m), cmd::open_browser_async(std::move(url))};
+        //
+        // random_urlsafe throws if the OpenSSL CSPRNG is unavailable
+        // (astronomically rare, but a pure reducer must not propagate an
+        // exception into maya's update loop). Fail closed into the login
+        // modal's Failed state instead of minting a weak/empty secret.
+        try {
+            auth::PkceVerifier verifier{auth::random_urlsafe(128)};
+            auth::OAuthState   state{auth::random_urlsafe(32)};
+            std::string url = auth::oauth_authorize_url(verifier, state);
+            login::OAuthCode oc;
+            oc.verifier      = std::move(verifier);
+            oc.state         = std::move(state);
+            oc.authorize_url = url;
+            m.ui.login = std::move(oc);
+            return {std::move(m), cmd::open_browser_async(std::move(url))};
+        } catch (const std::exception& e) {
+            m.ui.login = login::Failed{
+                std::string{"could not start secure login: "} + e.what()};
+            return done(std::move(m));
+        }
     }
     if (key == U'2') {
         m.ui.login = login::ApiKeyInput{};

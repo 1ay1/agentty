@@ -26,11 +26,30 @@
 // app-specific context string. A fresh random 128-bit salt + 96-bit nonce
 // are generated on every save, so re-encrypting identical plaintext never
 // produces identical ciphertext.
+//
+// ── Optional passphrase mode (SECURITY_AUDIT hardening) ──────────────────
+// The machine-only key above does NOT protect against a local attacker who
+// can run code as the SAME user (they re-derive the same seed). Set a
+// passphrase to close that gap: the key then also folds in a memory-hard
+// scrypt(passphrase, salt) factor, so the file can't be decrypted without
+// BOTH the machine AND the secret the user holds in their head.
+//
+// Enable by either:
+//   • exporting AGENTTY_PASSPHRASE=… (non-interactive / CI), or
+//   • exporting AGENTTY_ENCRYPT_PASSPHRASE=1 to be prompted once on /dev/tty.
+// When neither is set, behaviour is exactly the machine-only path (v1) and
+// existing files keep working. Passphrase envelopes are v2 and carry the
+// scrypt params so unseal can reproduce the derivation.
 
 #include <optional>
 #include <string>
 
 namespace agentty::auth::crypt {
+
+// True iff a passphrase has been configured for this process (env var set,
+// or an interactive prompt has been answered). Cheap; used by callers that
+// want to tell the user their vault is passphrase-protected.
+bool passphrase_active();
 
 // Encrypt `plaintext` into the JSON envelope described above. Returns
 // std::nullopt only on a hard OpenSSL failure (out of memory / broken

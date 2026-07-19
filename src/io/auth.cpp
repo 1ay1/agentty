@@ -15,8 +15,8 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
-#include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -26,9 +26,11 @@
 
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <openssl/sha.h>
 
 #include "agentty/auth/cred_crypt.hpp"
+#include "agentty/auth/keystore.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/env.hpp"
 
@@ -165,6 +167,14 @@ fs::path config_dir() {
     fs::path p = base / "agentty";
     std::error_code ec;
     fs::create_directories(p, ec);
+    // Tighten to owner-only (SECURITY_AUDIT): the directory holds
+    // credentials.json; a world-listable/traversable parent is an
+    // unnecessary information leak even though the file itself is 0600.
+    // Best-effort — chmod failures (e.g. Windows, restricted FS) are
+    // non-fatal; the file's own 0600 remains the real barrier.
+#ifndef _WIN32
+    ::chmod(p.c_str(), S_IRWXU);
+#endif
     return p;
 }
 
@@ -198,7 +208,9 @@ static void restrict_perms(const fs::path& p) {
 }
 
 // POSIX: create the file with mode 0600 from the start so there is no window
-// where it exists world-readable between open() and chmod().
+// where it exists world-readable between open() and chmod(), and write it
+// ATOMICALLY (SECURITY_AUDIT) via a sibling temp file + fsync + rename so a
+// crash mid-write can never leave a truncated/corrupt credentials.json.
 // Windows: fall back to std::ofstream (ACLs are out of scope here).
 static bool write_private(const fs::path& p, const std::string& content) {
 #ifdef _WIN32
@@ -207,10 +219,17 @@ static bool write_private(const fs::path& p, const std::string& content) {
     ofs.write(content.data(), (std::streamsize)content.size());
     return static_cast<bool>(ofs);
 #else
-    int fd = ::open(p.c_str(),
+    // Temp path in the SAME directory as the target so rename(2) is atomic
+    // (rename across filesystems is not). Include the pid to avoid clobbering
+    // a concurrent writer's temp.
+    fs::path tmp = p;
+    tmp += ".tmp." + std::to_string(::getpid());
+
+    int fd = ::open(tmp.c_str(),
                     O_WRONLY | O_CREAT | O_TRUNC,
                     S_IRUSR | S_IWUSR);
     if (fd < 0) return false;
+
     const char* buf = content.data();
     size_t remaining = content.size();
     while (remaining > 0) {
@@ -218,20 +237,51 @@ static bool write_private(const fs::path& p, const std::string& content) {
         if (n < 0) {
             if (errno == EINTR) continue;
             ::close(fd);
+            ::unlink(tmp.c_str());
             return false;
         }
         buf += n;
         remaining -= (size_t)n;
     }
-    return ::close(fd) == 0;
+    // Flush the data to disk before the rename so the rename can't land
+    // pointing at a file whose contents haven't been persisted yet.
+    if (::fsync(fd) != 0) {
+        ::close(fd);
+        ::unlink(tmp.c_str());
+        return false;
+    }
+    if (::close(fd) != 0) {
+        ::unlink(tmp.c_str());
+        return false;
+    }
+    // Atomic replace: readers see either the old file or the fully-written
+    // new one, never a partial write.
+    if (::rename(tmp.c_str(), p.c_str()) != 0) {
+        ::unlink(tmp.c_str());
+        return false;
+    }
+    return true;
 #endif
 }
 
 std::optional<Credentials> load_credentials() {
-    std::ifstream ifs(credentials_path(), std::ios::binary);
-    if (!ifs) return std::nullopt;
-    std::string raw((std::istreambuf_iterator<char>(ifs)),
-                     std::istreambuf_iterator<char>());
+    std::string raw;
+    // Prefer the OS keystore when enabled — it holds the sealed envelope.
+    // Fall back to the on-disk file when the keystore is off, empty, or the
+    // item is missing (e.g. first run after opting in).
+    if (keystore::available()) {
+        std::string ks;
+        if (keystore::retrieve("credentials", ks) == keystore::Status::Ok
+            && !ks.empty()) {
+            raw = std::move(ks);
+        }
+    }
+    if (raw.empty()) {
+        std::ifstream ifs(credentials_path(), std::ios::binary);
+        if (!ifs) return std::nullopt;
+        raw.assign((std::istreambuf_iterator<char>(ifs)),
+                    std::istreambuf_iterator<char>());
+    }
     if (raw.empty()) return std::nullopt;
 
     // Encrypted-at-rest (SECURITY_AUDIT #1). New files are sealed
@@ -299,12 +349,21 @@ bool save_credentials(const Credentials& c) {
     std::string payload = j.dump(2);
     auto sealed = crypt::seal(payload);
     if (!sealed) return false;
+    // When the OS keystore is enabled, it becomes the primary store for the
+    // sealed envelope. We still write the encrypted file too, so a later run
+    // with the keystore disabled (or a keychain that won't unlock) can still
+    // load. The file is already machine-bound-encrypted, so this is not a
+    // downgrade — it's the same protection that shipped before the keystore.
+    if (keystore::available())
+        keystore::store("credentials", *sealed);
     if (!write_private(p, *sealed)) return false;
     restrict_perms(p);
     return true;
 }
 
 bool clear_credentials() {
+    if (keystore::available())
+        keystore::remove("credentials");
     std::error_code ec;
     fs::remove(credentials_path(), ec);
     return !ec;
@@ -338,15 +397,29 @@ std::string base64url_no_pad(const unsigned char* data, size_t len) {
     return out;
 }
 
+// Cryptographically-secure URL-safe random string (SECURITY_AUDIT: PKCE).
+// The OAuth code_verifier and anti-CSRF state MUST be unpredictable — a
+// non-CSPRNG (mt19937) is recoverable from a handful of outputs, which would
+// let an attacker forge a verifier or predict state. RAND_bytes is the OpenSSL
+// CSPRNG (already linked; used in cred_crypt.cpp). We draw one secure byte per
+// output char and fold it into the 64-char alphabet: 64 divides 256 evenly, so
+// the modulo is unbiased (each char equally likely). RAND_bytes failure is
+// treated as fatal — better to abort login than to emit low-entropy secrets.
 std::string random_urlsafe(size_t n) {
     static const char charset[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    std::random_device rd;
-    std::mt19937_64 rng(((uint64_t)rd() << 32) ^ rd());
-    std::uniform_int_distribution<int> dist(0, sizeof(charset) - 2);
+    // charset has 64 usable chars (sizeof-1 for the NUL); 256 % 64 == 0 so
+    // masking the low 6 bits of a uniform byte is itself uniform — no bias,
+    // no rejection loop needed.
+    static_assert(sizeof(charset) - 1 == 64, "alphabet must be 64 for unbiased mask");
+    std::vector<unsigned char> buf(n);
+    if (n > 0 && RAND_bytes(buf.data(), static_cast<int>(n)) != 1) {
+        // CSPRNG unavailable — do NOT fall back to a weak generator.
+        throw std::runtime_error("RAND_bytes failed: no secure entropy source");
+    }
     std::string out;
     out.reserve(n);
-    for (size_t i = 0; i < n; ++i) out.push_back(charset[dist(rng)]);
+    for (size_t i = 0; i < n; ++i) out.push_back(charset[buf[i] & 0x3f]);
     return out;
 }
 
@@ -545,10 +618,36 @@ std::string oauth_authorize_url(const PkceVerifier& verifier,
 TokenResult exchange_code(const OAuthCode& code,
                           const PkceVerifier& verifier,
                           const OAuthState& state) {
-    // Claude's callback often returns "<code>#<state>" joined. Split if present.
+    // Claude's callback returns "<code>#<state>" joined. Split into the two
+    // halves: everything before '#' is the authorization code, everything
+    // after is the state the IdP echoed back.
     std::string actual_code = code.value;
-    auto hash = actual_code.find('#');
-    if (hash != std::string::npos) actual_code = actual_code.substr(0, hash);
+    std::string returned_state;
+    if (auto hash = actual_code.find('#'); hash != std::string::npos) {
+        returned_state = actual_code.substr(hash + 1);
+        actual_code    = actual_code.substr(0, hash);
+    }
+
+    // Anti-CSRF (SECURITY_AUDIT): verify the echoed state matches the one we
+    // generated for THIS login. A mismatch means the pasted code belongs to a
+    // different authorization request (CSRF / mix-up / stale paste) — refuse
+    // to exchange it. Constant-time compare so we don't leak the expected
+    // value through timing. We only enforce when the IdP actually echoed a
+    // state (returned_state non-empty); an older callback page that omits it
+    // still relies on PKCE binding the code to the verifier.
+    if (!returned_state.empty()) {
+        const std::string& expected = state.value;
+        bool ok = returned_state.size() == expected.size();
+        unsigned char diff = ok ? 0u : 1u;
+        for (size_t i = 0; i < expected.size() && i < returned_state.size(); ++i)
+            diff |= static_cast<unsigned char>(expected[i] ^ returned_state[i]);
+        if (!ok || diff != 0) {
+            return std::unexpected(OAuthError{
+                OAuthErrorKind::BadResponse,
+                "state mismatch — the pasted code does not match this login "
+                "request (possible CSRF or a stale/foreign code). Re-run login."});
+        }
+    }
 
     auto r = http_post_form(OAuthConfig::token_url, {
         {"grant_type",    "authorization_code"},
@@ -865,6 +964,18 @@ int cmd_status() {
         std::cout << "Refresh token: "
                   << (o->refresh_token.empty() ? "(none)" : "present") << "\n";
     }
+    // At-rest encryption mode for the credentials file.
+    std::cout << "At-rest encryption: aes-256-gcm ("
+              << (crypt::passphrase_active()
+                    ? "machine + passphrase"
+                    : "machine-bound; set AGENTTY_PASSPHRASE or "
+                      "AGENTTY_ENCRYPT_PASSPHRASE=1 to add a passphrase")
+              << ")\n";
+    // OS keystore backing (opt-in via AGENTTY_USE_KEYSTORE).
+    std::cout << "OS keystore: " << keystore::backend_name();
+    if (!keystore::available())
+        std::cout << " (set AGENTTY_USE_KEYSTORE=1 to enable)";
+    std::cout << "\n";
     return 0;
 }
 

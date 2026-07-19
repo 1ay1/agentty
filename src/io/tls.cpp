@@ -8,9 +8,11 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
@@ -195,6 +197,93 @@ bool load_system_roots(SSL_CTX* ctx) {
 #endif
 
 // --------------------------------------------------------------------------
+// Opt-in SPKI public-key pinning (SECURITY_AUDIT).
+//
+// Standard chain + hostname verification already defends against a random
+// bad cert. Pinning additionally defends against a mis-issued-but-validly-
+// chained cert (a compromised or coerced CA) for the API host. We do NOT pin
+// by default — a silent server-side key rotation would brick every client
+// that couldn't update in time. Instead pinning is OPT-IN via env:
+//
+//   AGENTTY_TLS_PINS="base64sha256spki[,base64sha256spki...]"
+//
+// Each pin is base64(SHA-256(DER SubjectPublicKeyInfo)) — the same value as
+// an HPKP "pin-sha256" / the `openssl ... | openssl dgst -sha256 -binary |
+// openssl enc -base64` recipe. If ANY configured pin matches the leaf cert's
+// SPKI, the connection proceeds; if none match, the handshake is refused even
+// when the chain is otherwise valid. Set includes a backup pin.
+// --------------------------------------------------------------------------
+const std::vector<std::string>& configured_pins() {
+    static const std::vector<std::string> pins = [] {
+        std::vector<std::string> out;
+        const char* raw = std::getenv("AGENTTY_TLS_PINS");
+        if (!raw || !*raw) return out;
+        std::string s{raw};
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t comma = s.find(',', start);
+            std::string tok = s.substr(start,
+                comma == std::string::npos ? std::string::npos : comma - start);
+            // trim ASCII whitespace
+            size_t a = tok.find_first_not_of(" \t\r\n");
+            size_t b = tok.find_last_not_of(" \t\r\n");
+            if (a != std::string::npos) out.push_back(tok.substr(a, b - a + 1));
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        return out;
+    }();
+    return pins;
+}
+
+bool pinning_enabled() { return !configured_pins().empty(); }
+
+// base64(SHA-256(DER SubjectPublicKeyInfo)) of a leaf cert, matching the HPKP
+// pin format. Returns empty on any encoding error.
+std::string spki_pin_of(X509* leaf) {
+    if (!leaf) return {};
+    unsigned char* der = nullptr;
+    int len = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(leaf), &der);
+    if (len <= 0 || !der) return {};
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(der, static_cast<size_t>(len), digest);
+    OPENSSL_free(der);
+
+    // base64-encode the 32-byte digest via OpenSSL's EVP encoder.
+    int enc_len = 4 * ((SHA256_DIGEST_LENGTH + 2) / 3);
+    std::string b64(static_cast<size_t>(enc_len), '\0');
+    int n = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(b64.data()),
+                            digest, SHA256_DIGEST_LENGTH);
+    if (n <= 0) return {};
+    b64.resize(static_cast<size_t>(n));
+    return b64;
+}
+
+// OpenSSL verify callback: runs for every cert in the chain. We let the
+// library's own chain/hostname decision stand (preverify_ok), then, only
+// when pinning is configured, ALSO require the leaf (depth 0) to match a pin.
+// A pin miss flips an otherwise-OK verify to a hard failure.
+int pin_verify_cb(int preverify_ok, X509_STORE_CTX* store_ctx) {
+    if (!preverify_ok) return 0;                 // chain already rejected it
+    if (!pinning_enabled()) return preverify_ok; // pinning off — nothing to add
+    if (X509_STORE_CTX_get_error_depth(store_ctx) != 0)
+        return preverify_ok;                     // only pin the leaf
+
+    X509* leaf = X509_STORE_CTX_get_current_cert(store_ctx);
+    std::string got = spki_pin_of(leaf);
+    if (got.empty()) {
+        X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+        return 0;
+    }
+    for (const auto& want : configured_pins())
+        if (got == want) return 1;               // pin matched — accept
+
+    // No configured pin matched the presented leaf key.
+    X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+    return 0;
+}
+
+// --------------------------------------------------------------------------
 // One-time SSL_CTX build. Two contexts: one with peer verification, one
 // insecure (for AGENTTY_INSECURE=1 / --insecure).  Lazy-initialized under a
 // mutex; the first caller pays the setup cost, the rest see the cached ptr.
@@ -255,7 +344,9 @@ SSL_CTX* build_ctx(bool insecure) {
     if (insecure) {
         SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
     } else {
-        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+        // Chain + hostname verification, plus opt-in SPKI pinning layered in
+        // via the callback (a no-op unless AGENTTY_TLS_PINS is set).
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, pin_verify_cb);
         load_system_roots(ctx);
     }
     return ctx;

@@ -521,6 +521,7 @@ set(AGENTTY_IO_SOURCES
     src/io/tls.cpp
     src/io/auth.cpp
     src/io/cred_crypt.cpp
+    src/io/keystore.cpp
     src/io/persistence.cpp
     src/io/clipboard.cpp
     src/util/base64.cpp
@@ -911,9 +912,10 @@ if(WIN32)
     # gdi32    — DIB / BITMAPFILEHEADER consumers used in the same path
     # gdiplus  — DIB → PNG re-encoding for clipboard images
     # shlwapi  — SHCreateMemStream backing GDI+'s decode / encode
+    # advapi32 — CredWriteW/CredReadW/CredDeleteW (keystore.cpp)
     target_link_libraries(agentty PRIVATE
         ws2_32 crypt32 shell32 winmm
-        user32 gdi32 gdiplus shlwapi)
+        user32 gdi32 gdiplus shlwapi advapi32)
     # Static OpenSSL on Windows additionally pulls in these system libs
     # (used by libcrypto's CSP / certificate APIs). Innocuous in dynamic
     # builds — the linker dedupes — but required when AGENTTY_STANDALONE=ON.
@@ -1407,6 +1409,50 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME skills_engine_test COMMAND skills_engine_test)
 
+    # cred_crypt_test — at-rest credential sealing. Forks children to cover
+    # the process-global passphrase states independently: v1 machine-only
+    # (+ tamper rejection), v2 with a passphrase (argon2id default), v2
+    # forced-scrypt, and the fail-closed paths (v2 without / with wrong
+    # passphrase). Standalone: cred_crypt.cpp + base64.cpp + OpenSSL.
+    add_executable(cred_crypt_test EXCLUDE_FROM_ALL
+        tests/cred_crypt_test.cpp
+        src/io/cred_crypt.cpp
+        src/util/base64.cpp
+    )
+    target_include_directories(cred_crypt_test PRIVATE include)
+    target_link_libraries(cred_crypt_test PRIVATE
+        nlohmann_json::nlohmann_json
+        OpenSSL::SSL
+        OpenSSL::Crypto)
+    add_test(NAME cred_crypt_test COMMAND cred_crypt_test)
+    set_tests_properties(cred_crypt_test PROPERTIES TIMEOUT 60)
+
+    # keystore_test — OS keystore round-trip (store/retrieve/remove/notfound).
+    # SKIPS with success when no backend is available/enabled (headless CI),
+    # so it never blocks a build lacking a Secret Service / keychain. Links
+    # keystore.cpp + the subprocess/fs/utf8 TUs it drives, plus the registry
+    # TU for tools::progress::emit referenced by run_argv_s.
+    add_executable(keystore_test EXCLUDE_FROM_ALL
+        tests/keystore_test.cpp
+        src/io/keystore.cpp
+        src/tool/util/subprocess.cpp
+        src/tool/util/fs_helpers.cpp
+        src/tool/util/utf8.cpp
+        src/tool/registry.cpp
+    )
+    target_include_directories(keystore_test PRIVATE include)
+    target_link_libraries(keystore_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json)
+    if(TARGET mcp::tools)
+        target_link_libraries(keystore_test PRIVATE mcp::tools)
+    endif()
+    if(WIN32)
+        target_link_libraries(keystore_test PRIVATE advapi32)
+    endif()
+    add_test(NAME keystore_test COMMAND keystore_test)
+    set_tests_properties(keystore_test PROPERTIES TIMEOUT 60)
+
     # midrun_freeze_test — correctness for freeze_settled_subturns: the
     # mid-run split (frozen prefix + live continuation tail) must be
     # visually seamless (one header, all content present, no elision).
@@ -1721,6 +1767,8 @@ if(AGENTTY_BUILD_TESTS)
         fsm_test
         model_label_test
         skills_engine_test
+        cred_crypt_test
+        keystore_test
         midrun_freeze_test
         midrun_seam_test
         midrun_wire_test
