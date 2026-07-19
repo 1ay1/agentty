@@ -101,27 +101,114 @@ authenticated" message.
 
 `config_dir()` honours `XDG_CONFIG_HOME`, then falls back to `$HOME/.config`,
 then `$USERPROFILE/.config` on Windows. The directory is created on first read
-(`src/auth.cpp:57-73`).
+(`src/io/auth.cpp`) and `chmod 0700`'d best-effort.
+
+### At-Rest Encryption (opt-in)
+
+By default the credentials file is plaintext JSON protected only by `0600`
+file permissions — fine on a single-user machine, but readable by any process
+running as the same uid. Two independent, opt-in hardening layers are
+available (`src/io/cred_crypt.cpp`, `include/agentty/auth/cred_crypt.hpp`):
+
+**1. Passphrase-derived encryption.** When enabled, the credential blob is
+sealed with AES-256-GCM under a key derived from a passphrase. The on-disk
+envelope (v2) stamps the KDF and its parameters so old files keep opening.
+
+| Env var | Effect |
+|---|---|
+| `AGENTTY_ENCRYPT_PASSPHRASE=1` | Prompt for a passphrase on `/dev/tty` (echo off) and seal new writes |
+| `AGENTTY_PASSPHRASE=<secret>` | Supply the passphrase non-interactively (CI/scripts) |
+| `AGENTTY_KDF=scrypt` | Force the portable scrypt KDF instead of Argon2id |
+
+KDF selection is automatic: **Argon2id** (t=3, m=64 MiB, p=1) when the linked
+OpenSSL exposes it (≥ 3.2, probed at runtime via `EVP_KDF_fetch("ARGON2ID")`),
+otherwise **scrypt** (N=2¹⁵, r=8, p=1), the portable floor available since
+OpenSSL 3.0. Unsealing dispatches on the KDF recorded in the envelope, so a
+file written on an Argon2id-capable build still opens on a scrypt-only one only
+if it was written with scrypt — mixing is not silent, it fails closed. Wrong
+passphrase or a v2 file opened without a passphrase both refuse rather than
+returning garbage.
+
+**2. OS keystore** — see the next section. The two can be combined; when both
+are on, the keystore stores the (already passphrase-sealed) blob.
+
+## OS Keystore (opt-in)
+
+Set `AGENTTY_USE_KEYSTORE=1` to store the credential blob in the platform
+secret store instead of (well, in addition to) the file
+(`src/io/keystore.cpp`, `include/agentty/auth/keystore.hpp`):
+
+| Platform | Backend | Mechanism |
+|---|---|---|
+| Linux | libsecret / Secret Service | `secret-tool store/lookup/clear`, secret fed over **stdin** |
+| macOS | Keychain | `security {add,find,delete}-generic-password` |
+| Windows | Credential Manager | `CredWriteW` / `CredReadW` / `CredDeleteW` (DPAPI-backed) |
+
+Integration in `src/io/auth.cpp`:
+
+- `load_credentials` prefers the keystore, then falls back to the file.
+- `save_credentials` writes **both** the keystore and the file.
+- `clear_credentials` (`agentty logout`) removes the keystore item and deletes
+  the file.
+
+When no backend is available (no `secret-tool`, headless macOS, etc.) the
+keystore silently reports "unsupported" and agentty falls back to the file —
+enabling the flag never breaks login.
+
+**Secret hygiene.** The secret is never placed in a command line where `ps`
+or the process table could reveal it:
+
+- Linux `secret-tool store` reads the secret from **stdin**.
+- macOS `security add-generic-password -w` is invoked with **no value**, so
+  `security` prompts for the password via `readpassphrase()`. The child is
+  spawned into its own session (`POSIX_SPAWN_SETSID`) so it has no controlling
+  tty and `readpassphrase` falls back to the stdin pipe agentty feeds — the
+  secret never reaches argv.
+- Windows passes the blob through the `CredWriteW` API, not a command line.
+
+`agentty status` reports both layers (`At-rest encryption:` and `OS keystore:`
+lines) so you can confirm what's active.
 
 ## TLS / Certificate Trust
 
 `auth::apply_tls_options(curl)` is called on every libcurl handle agentty creates
-(`src/auth.cpp:75-88`). It honours:
+(`src/io/auth.cpp`). It honours:
 
 | Env var | Effect |
 |---|---|
 | `CURL_CA_BUNDLE` | `CURLOPT_CAINFO = $CURL_CA_BUNDLE` |
 | `SSL_CERT_FILE` | Same, used only if `CURL_CA_BUNDLE` is unset |
 | `AGENTTY_INSECURE=1` | Disables `SSL_VERIFYPEER` and `SSL_VERIFYHOST` (debug only) |
+| `AGENTTY_TLS_PINS` | Opt-in public-key (SPKI) pinning — see below |
 
 Both `CURL_CA_BUNDLE` and `SSL_CERT_FILE` are commonly set by Nix, certain
 corporate VPN proxies, and tools like `mitmproxy`. `AGENTTY_INSECURE` should never
 be set against a real Anthropic endpoint.
 
+### Public-Key Pinning (`AGENTTY_TLS_PINS`)
+
+Off by default. When set, agentty installs a custom verify callback
+(`pin_verify_cb`, `src/io/tls.cpp`) on top of the normal chain verification
+(`SSL_VERIFY_PEER`): after the platform trust store validates the chain, the
+leaf certificate's **Subject Public Key Info** is SHA-256'd and compared
+against the configured pin set. If none match, the handshake fails closed.
+
+```bash
+# One or more base64(SHA-256(SPKI)) values, comma-separated.
+# Include a backup pin (next cert's key) so rotation can't brick clients.
+export AGENTTY_TLS_PINS="LQfSFZEKft9yS7oIKOIO5Vu7Fj33L2H3SDN8/uADlWg=,<backup>"
+```
+
+The pin format is HPKP-style (base64 SHA-256 of the DER SPKI, matching
+`openssl x509 -pubkey | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64`).
+Because a bad pin makes the endpoint unreachable, this is opt-in and expects
+the operator to manage rotation with a backup pin.
+
 ## OAuth PKCE Flow
 
 The interactive login (`agentty login` → option 1) implements Authorization Code
-with PKCE (`src/auth.cpp:409-478`, `cmd_login()`):
+with PKCE (`src/io/auth.cpp`, `cmd_login()`). `random_urlsafe()` draws from
+OpenSSL `RAND_bytes` (CSPRNG) with an unbiased 6-bit mask:
 
 ```
 ┌─ agentty ────────────────────────────────────────────────────┐
@@ -146,8 +233,10 @@ with PKCE (`src/auth.cpp:409-478`, `cmd_login()`):
                             ▼
 ┌─ agentty ────────────────────────────────────────────────────┐
 │                                                           │
-│  6. exchange_code() splits on '#', keeps the code half    │
-│     (src/auth.cpp:299-319)                                │
+│  6. exchange_code() splits on '#'; the code half is kept and
+│     the echoed state half is constant-time-compared against the
+│     expected state (fails closed on mismatch, when echoed).
+│     (src/io/auth.cpp)                                      │
 │                                                           │
 │  7. POST application/x-www-form-urlencoded to             │
 │     platform.claude.com/v1/oauth/token:                   │
@@ -363,7 +452,12 @@ main()                                                    (src/main.cpp:1400)
 | File | Purpose |
 |---|---|
 | `include/agentty/auth.hpp` | Public types: `Method`, `Style`, `Credentials`, `OAuthConfig`, `TokenResponse`; function declarations |
-| `src/auth.cpp` | All auth logic: paths, TLS opts, load/save/clear, PKCE helpers, token exchange/refresh, `resolve()`, login/logout/status subcommands |
+| `include/agentty/auth/cred_crypt.hpp` | Passphrase at-rest encryption interface (`seal`/`unseal`, `passphrase_active`) |
+| `include/agentty/auth/keystore.hpp` | OS keystore interface (`store`/`retrieve`/`remove`, `Status`) |
+| `src/io/auth.cpp` | All auth logic: paths, TLS opts, load/save/clear (keystore-aware), PKCE helpers, token exchange/refresh, `resolve()`, login/logout/status subcommands |
+| `src/io/tls.cpp` | libcurl TLS options + opt-in SPKI pinning (`pin_verify_cb`) |
+| `src/io/cred_crypt.cpp` | Passphrase-derived AES-256-GCM sealing; scrypt / Argon2id KDF with runtime probe |
+| `src/io/keystore.cpp` | Linux libsecret / macOS security / Windows CredMan backends |
 | `include/agentty/anthropic.hpp` | `Request` struct (carries `auth_header` + `auth_style`), `run_stream_sync()` |
 | `src/anthropic.cpp` | Attaches auth headers, rewrites system prompt with billing block for OAuth |
 | `src/main.cpp` | CLI arg parsing, subcommand dispatch, calls `auth::resolve()`, wires `Credentials` into each `Request` |

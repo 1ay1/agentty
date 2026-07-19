@@ -17,9 +17,14 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `OPENAI_API_KEY` | Key for --provider openai, and the fallback key for every other OpenAI-compatible provider. |
 | `GROQ_API_KEY / OPENROUTER_API_KEY / TOGETHER_API_KEY / CEREBRAS_API_KEY` | Provider-specific keys, checked before OPENAI_API_KEY for that provider. Ollama needs none. |
 | `AGENTTY_SOCKS_PROXY` | Route all TCP through this SOCKS5 proxy host:port (set automatically by airgap mode). |
-| `AGENTTY_API_HOST` | Override the API host (host[:port]) — dial a different upstream while keeping TLS pinning. |
+| `AGENTTY_API_HOST` | Override the API host (host[:port]) — dial a different upstream, keeping normal TLS chain verification (and any `AGENTTY_TLS_PINS` you set). |
 | `AGENTTY_OAUTH_HOST` | Override the OAuth host (host[:port]). |
 | `AGENTTY_INSECURE` | Set to 1 to skip TLS peer verification. Last-resort only — never ship it. |
+| `AGENTTY_TLS_PINS` | Opt-in public-key pinning: comma-separated base64 SHA-256 SPKI hashes; the handshake fails closed if the leaf cert's key matches none. Off by default. Include a backup pin so cert rotation can't lock you out. |
+| `AGENTTY_USE_KEYSTORE` | Set to 1 to store credentials in the OS secret store (Linux libsecret / macOS Keychain / Windows Credential Manager) in addition to the file. Falls back to the file when no backend is present. |
+| `AGENTTY_ENCRYPT_PASSPHRASE` | Set to 1 to encrypt the credentials file at rest with a passphrase (prompted on the tty, echo off). Sealed with AES-256-GCM under an Argon2id (or scrypt) key. |
+| `AGENTTY_PASSPHRASE` | Supply the at-rest encryption passphrase non-interactively (CI/scripts) instead of the tty prompt. |
+| `AGENTTY_KDF` | Set to `scrypt` to force the portable scrypt KDF instead of the default Argon2id for at-rest encryption. |
 | `AGENTTY_AIRGAP_SSH` | Extra flags injected into the ssh invocation for airgap (laptop side). |
 | `AGENTTY_CLIPBOARD_CMD` | Shell command that writes image bytes to stdout — used for Ctrl+V image paste over SSH. |
 | `AGENTTY_MCP_CONFIG` | Explicit path to an mcp.json, overriding the project/user lookup. |
@@ -44,7 +49,7 @@ agentty is configured through flags, environment variables, and two on-disk path
 
 Credentials live under XDG config; everything else lives under `~/.agentty`.
 
-- `~/.config/agentty/credentials.json` — Claude OAuth token or API key, mode `0600` (honours `$XDG_CONFIG_HOME`).
+- `~/.config/agentty/credentials.json` — Claude OAuth token or API key, mode `0600` (honours `$XDG_CONFIG_HOME`). Plaintext JSON by default; optionally sealed with AES-256-GCM (`AGENTTY_ENCRYPT_PASSPHRASE`) and/or stored in the OS keystore (`AGENTTY_USE_KEYSTORE`). See [Authentication](/docs/auth) for the hardening options.
 - `~/.agentty/settings.json` — persisted provider, model, per-provider models, reasoning effort, favourite models, permission profile, and in-app-pasted provider keys.
 - `~/.agentty/threads/<id>.json` — one JSON file per thread (flat, keyed by thread id).
 - `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts.
