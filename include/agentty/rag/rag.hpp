@@ -240,6 +240,14 @@ public:
     [[nodiscard]] bool        has_embeddings() const noexcept { return embed_dim_ > 0; }
     [[nodiscard]] std::size_t embed_dim() const noexcept { return embed_dim_; }
 
+    // Read-only view of the chunk storage (MAY include tombstoned chunks —
+    // callers that walk this for analysis/link-graphs must tolerate stale
+    // entries; they are compacted away lazily). Used by the advanced
+    // stages (GraphExpandStage's markdown link-graph scan) — cold path only.
+    [[nodiscard]] const std::vector<Chunk>& raw_chunks() const noexcept {
+        return chunks_;
+    }
+
     // ── Hot reload API ───────────────────────────────────────────────────
     // Add/remove individual documents without a full rebuild. Useful for
     // live file watchers or editor integrations. Indices are rebuilt

@@ -56,8 +56,10 @@ Each chunk carries a *breadcrumb* of its document title and markdown heading pat
 First-pass fusion is recall-oriented and noisy at the very top, so the pool is re-scored:
 
 - **Feature-fusion reranker** *(default-on)* — cheap, deterministic signals the first pass ignores: exact query-term coverage, phrase proximity, title/path match, and (when embeddings are present) calibrated cosine similarity. Pure C++, zero network.
-- **Embedding cross-encoder rerank** *(default-on when embeddings are available)* — one batched `/api/embed` round-trip re-scores the candidate pool by fresh cosine. Degrades to the input order if the backend is unreachable, so it's safe to leave on.
+- **Late-interaction rerank (sentence MaxSim)** *(default-on when embeddings are available)* — a chunk-level vector blurs a multi-topic chunk; ColBERT-style late interaction re-scores each candidate by its **best sentence** against the query (blended with the runner-up, so one lucky sentence in a sea of noise doesn't win). Costs the same single batched `/api/embed` round-trip as chunk-level cosine. `AGENTTY_RAG_LATE=0` falls back to the chunk-level rerank below.
+- **Embedding cross-encoder rerank** *(fallback tier)* — one batched `/api/embed` round-trip re-scores the candidate pool by fresh whole-chunk cosine. Degrades to the input order if the backend is unreachable, so it's safe to leave on.
 - **Generative cross-encoder rerank** *(opt-in — `AGENTTY_RAG_NEURAL=1`)* — a graded 0–10 relevance judgment per candidate from a local generative model. The strongest reranker, but one LLM call per candidate, so it's off by default.
+- **Learned prior** *(default-on)* — the learning loop's read side (see below): each chunk's score gets a bounded nudge (×0.85–×1.15) from its historical usefulness. Neutral with no history — a fresh workspace ranks exactly as before.
 
 ### 5. MMR diversification — no near-duplicates *(default-on)*
 
@@ -71,9 +73,28 @@ Rather than dump a whole 1600-char chunk into the model's window, each surviving
 
 Small chunks retrieve *precisely* but read out of context. After ranking, each surviving chunk is stitched back into its **adjacent sibling chunks** from the same document, so the model sees the precise hit *inside* its surrounding prose — without widening the retrieval probe. Pure in-memory, no network. Tune the window with `AGENTTY_RAG_PARENT_RADIUS`; disable with `AGENTTY_RAG_PARENT=0`.
 
-### 8. Corrective retry — a second chance on a weak result *(default-on)*
+### 8. Graph expansion — follow the links the author drew *(default-on)*
+
+Markdown links between documents are an **author-curated relevance graph** most engines ignore. The top hits' outbound `](other-doc.md)` links are followed one hop, and the linked documents' lead chunks join the result as supporting material — always scored below every direct hit. The cross-document cousin of parent expansion: deterministic, in-memory, no model. Disable with `AGENTTY_RAG_GRAPH=0`.
+
+### 9. Corrective retry — a second chance on a weak result *(default-on)*
 
 agentty computes a **confidence** signal for the result set. If the first pass looks weak, it strips stopwords, widens the pool, and retries — recovering hits when the original query was buried in conversational phrasing. Disable with `AGENTTY_RAG_CORRECT=0`.
+
+## Conversation-aware retrieval *(default-on)*
+
+The query you type is not always the query you mean — especially mid-conversation. Two deterministic rewrites widen the probe set (never replacing your original query, so recall can only rise):
+
+- **Carryover** — a recency-decayed salience pool tracks the content terms of your recent queries. A vague follow-up ("how does **it** handle errors?") gets the top carried-over terms appended as an *extra* probe, resolving the pronoun to the entities under discussion. `AGENTTY_RAG_CARRYOVER=0` disables.
+- **Multi-hop decomposition** — a compositional question ("how the auth flow works **and** how the sandbox blocks paths") has no single covering chunk. It's split on clause connectives into per-facet probes that ride the same RRF fusion, so each facet retrieves on its own strength. Gated conservatively (≥2 clauses, ≥2 content terms each) so ordinary queries pass through untouched. `AGENTTY_RAG_MULTIHOP=0` disables.
+
+## The learning loop *(default-on)*
+
+agentty is the rare retrieval engine that **sees what happens after it answers** — and it uses that. Every passage `search_docs` surfaces counts a *use*; when the agent follows up by `read`ing the file a passage pointed at, that counts a *win* (an implicit relevance judgment — the passage pointed somewhere worth acting on). The Beta-smoothed win-rate per passage persists to `.agentty/rag_feedback.tsv` (human-inspectable TSV) and folds back into ranking as a bounded nudge — passages that repeatedly help rise, chronic noise sinks, and near-ties resolve toward what has actually worked *in this workspace*. Retrieval gets better the more you use it. `AGENTTY_RAG_LEARN=0` disables; delete the TSV to forget.
+
+## Measure it: `agentty rag-bench`
+
+A pipeline you can't measure is a pile of vibes. `agentty rag-bench [dir]` benchmarks the funnel **on your own corpus**, offline, in milliseconds: it synthesizes known-item queries from sampled chunks (their most discriminative terms by tf×idf — deterministic and reproducible, no LLM needed), then reports **recall@k, MRR, and nDCG** across the retrieval ladder — BM25-only → hybrid+PRF → +rerank → +MMR — so every stage's contribution (or regression) on *your* docs is attributable and every `AGENTTY_RAG_*` knob can be tuned against numbers instead of guesses. Run it with a local embedder up to exercise the dense rungs.
 
 ## Opt-in recall boosters (they cost a model call)
 

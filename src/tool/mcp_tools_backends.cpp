@@ -31,6 +31,7 @@
 #include "agentty/rag/rerank.hpp"
 #include "agentty/rag/expand.hpp"
 #include "agentty/rag/knowledge.hpp"
+#include "agentty/rag/advanced.hpp"
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
 #include "agentty/util/dbglog.hpp"
@@ -322,6 +323,20 @@ public:
                 out.push_back(std::move(p));
             }
 
+            // LEARNING LOOP (write side) + CARRYOVER observation. Every
+            // surfaced passage counts a "use" and enters the recent window
+            // for win attribution (a follow-up `read` of its file counts a
+            // "win" — see tools::rag_note_file_opened). The query's content
+            // terms feed the conversation-salience pool so a later vague
+            // follow-up can be rewritten. Both best-effort, never fatal.
+            {
+                std::vector<std::string> keys;
+                keys.reserve(out.size());
+                for (const auto& p : out) keys.push_back(p.source + ":" + p.path);
+                rag::feedback::note_shown(keys);
+                rag::carryover::note(q.query);
+            }
+
             // #5: memoize this turn's result (bounded LRU-ish: clear when full).
             {
                 std::lock_guard<std::mutex> clk(cache_mu_);
@@ -510,13 +525,39 @@ private:
         // help in ANY knowledge configuration, not just when a docs folder
         // happens to exist.
         std::vector<std::string> queries{query};
+
+        // CONVERSATION CARRYOVER (deterministic, default-on): a vague
+        // follow-up ("how does it handle errors?") gets the salient terms of
+        // the recent conversation appended — as an EXTRA probe, never a
+        // replacement, so RRF fusion can only gain recall. AGENTTY_RAG_CARRYOVER=0 off.
+        if (carryover_enabled()) {
+            std::string rewritten = rag::carryover::rewrite(query);
+            if (rewritten != query) { queries.push_back(std::move(rewritten)); ++variant_count; }
+        }
+
+        // MULTI-HOP DECOMPOSITION (deterministic, default-on): a compositional
+        // query ("how auth works and how the sandbox blocks paths") splits
+        // into per-facet probes so each facet retrieves on its own strength;
+        // the facets ride the same multi-query RRF fusion. Conservative gate
+        // (≥2 clauses, ≥2 content terms each) so ordinary queries pass
+        // through untouched. AGENTTY_RAG_MULTIHOP=0 disables.
+        if (multihop_enabled()) {
+            for (auto& facet : rag::decompose_query(query)) {
+                queries.push_back(std::move(facet));
+                ++variant_count;
+            }
+        }
+
         if ((expand_enabled() || hyde_enabled())) {
             rag::ExpandConfig ecfg = expand_config_from_env(embed);
             if (expand_enabled()) {
                 auto variants = rag::expand_query(ecfg, query);
                 if (variants.size() > 1) {
-                    variant_count = variants.size() - 1;
-                    queries = std::move(variants);   // already leads with `query`
+                    variant_count += variants.size() - 1;
+                    // Keep the deterministic probes; splice the paraphrases in
+                    // after the original query they already lead with.
+                    for (std::size_t i = 1; i < variants.size(); ++i)
+                        queries.push_back(std::move(variants[i]));
                 }
             }
             // HyDE: a hallucinated answer-passage as an EXTRA probe. Rides the
@@ -549,14 +590,31 @@ private:
             pipe.add(std::make_shared<rag::NeuralRerankStage>(
                 std::max<std::size_t>(k * 2, 8), neural_config_from_env(embed)));
         } else if (!embed.model.empty() && embed_rerank_enabled()) {
-            // Middle tier (DEFAULT-ON when embeddings are configured): one
-            // batched /api/embed round-trip re-scores the lexically-reranked
-            // pool by fresh cosine. Degrades to the input order if the backend
-            // is unreachable, so it's safe to leave on.
-            pipe.add(std::make_shared<rag::EmbedRerankStage>(
-                std::max<std::size_t>(k * 2, 8),
-                embed_rerank_config_from_env(embed)));
+            if (late_interaction_enabled()) {
+                // Middle tier UPGRADE (default-on with embeddings): sentence-
+                // level late interaction (ColBERT-style MaxSim). Same cost
+                // class as the chunk-level embed rerank it replaces — ONE
+                // batched /api/embed round-trip — but the query aligns to the
+                // BEST sentence of each candidate instead of the blurred
+                // whole-chunk vector. AGENTTY_RAG_LATE=0 falls back to the
+                // chunk-level cosine tier below.
+                pipe.add(std::make_shared<rag::LateInteractionStage>(
+                    std::max<std::size_t>(k * 2, 8),
+                    embed_rerank_config_from_env(embed)));
+            } else {
+                // Middle tier (chunk-level): one batched /api/embed round-trip
+                // re-scores the lexically-reranked pool by fresh cosine.
+                pipe.add(std::make_shared<rag::EmbedRerankStage>(
+                    std::max<std::size_t>(k * 2, 8),
+                    embed_rerank_config_from_env(embed)));
+            }
         }
+        // LEARNED PRIOR (the learning loop's read side): nudge each chunk by
+        // its Beta-smoothed historical win-rate — passages the agent has
+        // repeatedly ACTED on rise, chronic noise sinks. Neutral (×1.0) with
+        // no history, so a fresh workspace is byte-identical to the old
+        // ranking. Runs after the heavyweight tiers as a final tie-breaker.
+        pipe.add(std::make_shared<rag::LearnedPriorStage>());
         ctx = pipe.run(std::move(ctx));
 
         // Confidence is measured on the RANKED list, BEFORE MMR: the
@@ -570,6 +628,14 @@ private:
         rag::Pipeline narrow;
         narrow.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
               .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
+        // GRAPHRAG-LITE (default-on, deterministic, in-memory): follow the
+        // top hits' outbound markdown links one hop and fold the linked
+        // documents' lead chunks in as supporting material — the author-
+        // curated relevance graph nobody else uses. Runs before parent
+        // expansion so graph additions get stitched into context too.
+        if (have_docs && graph_expand_enabled())
+            narrow.add(std::make_shared<rag::GraphExpandStage>(
+                docs_corpus_, /*max_extra=*/2));
         // PARENT-DOCUMENT (small-to-big): stitch each surviving small chunk
         // back into its surrounding siblings so the model reads it IN CONTEXT.
         // Runs LAST so it wraps the compressed span, not the raw body. Pure
@@ -670,6 +736,11 @@ private:
     }
     static bool skills_rag_enabled() { return truthy_default_on("AGENTTY_RAG_SKILLS"); }
     static bool memory_rag_enabled() { return truthy_default_on("AGENTTY_RAG_MEMORY"); }
+    // Advanced default-on toggles (deterministic / same network cost class).
+    static bool carryover_enabled()        { return truthy_default_on("AGENTTY_RAG_CARRYOVER"); }
+    static bool multihop_enabled()         { return truthy_default_on("AGENTTY_RAG_MULTIHOP"); }
+    static bool late_interaction_enabled() { return truthy_default_on("AGENTTY_RAG_LATE"); }
+    static bool graph_expand_enabled()     { return truthy_default_on("AGENTTY_RAG_GRAPH"); }
 
     // Neural (cross-encoder-style) rerank via a local Ollama generative
     // model. OPT-IN: one LLM call per candidate chunk.

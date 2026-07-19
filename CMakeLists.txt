@@ -575,6 +575,8 @@ set(AGENTTY_RAG_SOURCES
     src/rag/rerank.cpp
     src/rag/expand.cpp
     src/rag/knowledge.cpp
+    src/rag/advanced.cpp
+    src/rag/bench.cpp
     src/rag/stemmer.cpp
     src/rag/simd.cpp
 )

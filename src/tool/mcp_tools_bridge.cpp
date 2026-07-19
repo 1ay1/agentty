@@ -11,6 +11,7 @@
 
 #include "agentty/diff/diff.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/rag/advanced.hpp"   // feedback::note_file_opened (learning loop)
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
 #include "agentty/tool/util/fs_helpers.hpp"   // agentty workspace_root()
@@ -246,6 +247,14 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             // tool runs.
             ::mcp::tools::util::progress::Scope mcp_progress{
                 [](std::string_view snap) { tools::progress::emit(snap); }};
+            // LEARNING LOOP (win side): the agent opening a file shortly
+            // after search_docs surfaced a passage from it is the implicit
+            // relevance signal — the passage pointed somewhere worth acting
+            // on. Sub-microsecond no-op when nothing was recently surfaced.
+            if (tool_name == "read") {
+                if (auto it = args.find("path"); it != args.end() && it->is_string())
+                    rag::feedback::note_file_opened(it->get_ref<const std::string&>());
+            }
             auto r = provider->execute(::mcp::cap::Request{tool_name, args});
             return decode_result(tool_name, std::move(r));
         };

@@ -48,6 +48,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/mcp/serve.hpp"
+#include "agentty/rag/bench.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
@@ -90,6 +91,8 @@ void print_usage() {
         "                    Point any MCP client at `agentty mcp-serve`.\n"
         "  skills            List discovered skills with spec-lint diagnostics\n"
         "                    (exit 1 on warnings — CI-friendly validate)\n"
+        "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
+        "                    (recall@k / MRR / nDCG per pipeline stage)\n"
         "  version           Print the agentty version and exit\n"
         "  help              Show this message\n"
         "\n"
@@ -137,6 +140,7 @@ struct Args {
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
     std::string cli_auth_header; // custom auth header NAME (e.g. "X-API-Key")
+    std::string cli_bench_root;  // rag-bench: docs root override (positional)
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
@@ -149,6 +153,11 @@ Args parse_args(int argc, char** argv) {
         if (a == "login" || a == "logout" || a == "status" || a == "help"
          || a == "acp" || a == "skills" || a == "mcp-serve") {
             out.subcommand = std::move(a);
+        } else if (a == "rag-bench") {
+            // Optional positional docs root: `agentty rag-bench [dir]`.
+            out.subcommand = std::move(a);
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                out.cli_bench_root = argv[++i];
         } else if (a == "airgap") {
             // Hand the remaining argv tail to the airgap subcommand verbatim
             // so it can run its own flag parsing without re-implementing
@@ -230,6 +239,8 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "rag-bench")
+        return rag::bench::run(args.cli_bench_root);
     if (args.subcommand == "airgap")
         return airgap::cmd_airgap(args.airgap_argc, args.airgap_argv);
 
