@@ -58,11 +58,6 @@ EmbedConfig embed_from_env() {
     return cfg;
 }
 
-// Chunk identity for gold matching: path + line_start.
-std::string chunk_key(const Chunk& c) {
-    return c.path + ":" + std::to_string(c.line_start);
-}
-
 struct Metrics {
     double recall = 0, mrr = 0, ndcg = 0;
     double us = 0;                       // mean per-query latency
@@ -81,10 +76,34 @@ struct Metrics {
     }
 };
 
-std::ptrdiff_t rank_of(const std::vector<Hit>& hits, const std::string& gold) {
-    for (std::size_t i = 0; i < hits.size(); ++i)
-        if (hits[i].chunk && chunk_key(*hits[i].chunk) == gold)
+// The gold LABEL for a synthesized query: the exact chunk it was drawn from.
+// We keep its identity (path + owning source + line span) rather than a bare
+// "path:line_start" string so rank_of can credit a COVERING chunk — see below.
+struct Gold {
+    std::string  path;
+    const void*  source = nullptr;   // owning KnowledgeSource (opaque identity)
+    int          line_start = 0;
+    int          line_end   = 0;
+};
+
+// A returned chunk counts as a HIT when it COVERS the gold region: same file,
+// same owning source, and overlapping line spans. Exact-identity matching
+// ("path:line_start") systematically undercounts the reranker, whose dedup
+// step deliberately collapses overlapping-window siblings into ONE survivor —
+// the survivor's line_start may differ from gold's even though it contains the
+// exact gold region and is what the user actually reads. Coverage matching
+// measures true retrieval success, which is what every downstream stage (dedup,
+// parent-stitch) is engineered to preserve.
+std::ptrdiff_t rank_of(const std::vector<Hit>& hits, const Gold& gold) {
+    for (std::size_t i = 0; i < hits.size(); ++i) {
+        const Chunk* c = hits[i].chunk;
+        if (!c) continue;
+        if (c->path != gold.path) continue;
+        if (static_cast<const void*>(hits[i].source) != gold.source) continue;
+        // Inclusive line-range overlap (touching ranges count as covering).
+        if (c->line_start <= gold.line_end && gold.line_start <= c->line_end)
             return static_cast<std::ptrdiff_t>(i);
+    }
     return -1;
 }
 
@@ -145,7 +164,7 @@ int run(const std::string& docs_root, std::size_t queries, std::size_t k) {
     Bm25Index idx = build_bm25(chunks);
     const double N = static_cast<double>(chunks.size());
 
-    struct Q { std::string text, gold; };
+    struct Q { std::string text; Gold gold; };
     std::vector<Q> qs;
     const std::size_t stride = std::max<std::size_t>(1, chunks.size() / queries);
     for (std::size_t ci = 0; ci < chunks.size() && qs.size() < queries; ci += stride) {
@@ -173,7 +192,8 @@ int run(const std::string& docs_root, std::size_t queries, std::size_t k) {
             if (!q.empty()) q += ' ';
             q += scored[i].second;
         }
-        qs.push_back({std::move(q), chunk_key(c)});
+        qs.push_back({std::move(q),
+                      Gold{c.path, nullptr, c.line_start, c.line_end}});
     }
     if (qs.empty()) {
         std::fprintf(stderr, "rag-bench: could not synthesize queries\n");
