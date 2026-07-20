@@ -62,6 +62,23 @@ rerank(std::string_view query, std::vector<Hit> hits,
        std::size_t out_k, const RerankWeights& w = {},
        const std::vector<float>* query_vec = nullptr);
 
+// Pick a rerank-weight PROFILE from the SHAPE of the query — deterministic,
+// zero network, sub-microsecond. First-pass fusion is one-size-fits-all, but
+// the right feature balance depends on what the user typed:
+//
+//   • IDENTIFIER / PATH / QUOTED queries ("McpResourceSource", "src/rag/*.cpp",
+//     "\"exactly this\"") are lexical/exact by nature — the answer contains the
+//     literal token. Weight phrase/path/coverage UP, dense DOWN: a paraphrase
+//     match is noise when the user typed a symbol name.
+//   • CONCEPTUAL / NL queries ("how does retry backoff work") want semantic
+//     matching — the answer rarely repeats the question's words. Weight dense
+//     UP, phrase DOWN.
+//   • Anything in between keeps the balanced defaults.
+//
+// Returns balanced RerankWeights{} for empty/ambiguous input, so callers can
+// use it unconditionally.
+[[nodiscard]] RerankWeights weights_for_query(std::string_view query) noexcept;
+
 // Extractive context compression. Split `text` into sentences, score each by
 // overlap with the query terms, and return the best contiguous run of
 // sentences whose combined length stays under `target_chars`. Always returns
@@ -140,7 +157,8 @@ struct EmbedRerankConfig {
 
 [[nodiscard]] std::vector<Hit>
 embed_rerank(std::string_view query, std::vector<Hit> hits,
-             std::size_t out_k, const EmbedRerankConfig& cfg);
+             std::size_t out_k, const EmbedRerankConfig& cfg,
+             const std::vector<float>* query_vec = nullptr);
 
 // ── MMR (Maximal Marginal Relevance) diversification ───────────────────────
 //

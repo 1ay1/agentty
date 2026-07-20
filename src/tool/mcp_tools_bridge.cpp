@@ -247,13 +247,19 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             // tool runs.
             ::mcp::tools::util::progress::Scope mcp_progress{
                 [](std::string_view snap) { tools::progress::emit(snap); }};
-            // LEARNING LOOP (win side): the agent opening a file shortly
+            // LEARNING LOOP (win side): the agent ACTING on a file shortly
             // after search_docs surfaced a passage from it is the implicit
             // relevance signal — the passage pointed somewhere worth acting
-            // on. Sub-microsecond no-op when nothing was recently surfaced.
-            if (tool_name == "read") {
+            // on. `read` is the baseline signal; `edit`/`write` are STRONGER
+            // (a confirmed mutation, not just a look), so credit those paths
+            // too. Sub-microsecond no-op when nothing was recently surfaced.
+            if (tool_name == "read" || tool_name == "edit" ||
+                tool_name == "write") {
                 if (auto it = args.find("path"); it != args.end() && it->is_string())
                     rag::feedback::note_file_opened(it->get_ref<const std::string&>());
+                else if (auto fp = args.find("file_path");
+                         fp != args.end() && fp->is_string())
+                    rag::feedback::note_file_opened(fp->get_ref<const std::string&>());
             }
             auto r = provider->execute(::mcp::cap::Request{tool_name, args});
             return decode_result(tool_name, std::move(r));

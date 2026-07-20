@@ -199,19 +199,36 @@ class AgenttyDocRetriever final : public mt::DocRetriever {
 public:
     std::vector<mt::DocPassage>
     retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
+        return retrieve_impl(q, mode, err, /*skip_docs=*/false);
+    }
+
+    // Skills+memory-ONLY retrieval: never touches the docs corpus (no build,
+    // no fingerprint walk). Those sources are BM25-only and sub-ms, so this
+    // is safe to call on a latency-sensitive path (proactive pre-turn) even
+    // when the docs index is cold. Public so proactive_retrieve can reach it.
+    std::vector<mt::DocPassage>
+    retrieve_warm_only(const mt::DocQuery& q, std::string& mode, std::string& err) {
+        return retrieve_impl(q, mode, err, /*skip_docs=*/true);
+    }
+
+private:
+    std::vector<mt::DocPassage>
+    retrieve_impl(const mt::DocQuery& q, std::string& mode, std::string& err,
+                  bool skip_docs) {
         std::vector<mt::DocPassage> out;
         try {
             const rag::EmbedConfig embed = embed_config_from_env();
 
-            auto root = resolve_docs_root();
+            auto root = skip_docs ? fs::path{} : resolve_docs_root();
             std::string root_str = root.string();
 
             std::lock_guard<std::mutex> lock(docs_mu_);
-            ensure_docs_index_locked_(root, root_str, embed);
+            if (!skip_docs) ensure_docs_index_locked_(root, root_str, embed);
             rag::Corpus& corpus = docs_corpus_;
 
             rag::CorpusSource docs_source("docs", corpus, embed);
-            const bool have_docs = !root.empty() && corpus.chunk_count() > 0;
+            const bool have_docs =
+                !skip_docs && !root.empty() && corpus.chunk_count() > 0;
 
             // OPT-IN: this session's MCP `resources/*` (shared by both funnel
             // passes below). Built once here so the corrective retry reuses it.
@@ -1020,6 +1037,25 @@ public:
             // the diff base for INCREMENTAL re-indexing.
             static std::unordered_map<std::string, std::uint64_t> file_fps;
 
+            // ── PER-TURN QUERY CACHE ──────────────────────────────
+            // An agent re-issues the same search_code query within one ReAct
+            // turn all the time (retry after a failed edit, re-check a symbol).
+            // Each miss re-walks + re-fingerprints the tree and re-runs the
+            // hybrid search. Cache the full result keyed by (query, k) and
+            // invalidate on `fingerprint` — the SAME edit-drift signal that
+            // rebuilds the corpus. So an edit between two identical queries
+            // busts the cache; an unchanged tree serves the memoized hit.
+            struct CodeCacheEntry {
+                std::vector<mt::DocPassage> passages;
+                std::string mode;
+            };
+            static std::mutex cache_mu;
+            static std::unordered_map<std::string, CodeCacheEntry> query_cache;
+            static std::uint64_t cache_fp = ~0ULL;
+            constexpr std::size_t kCodeCacheMax = 64;
+            const std::string cache_key =
+                q.query + '\x1f' + std::to_string(q.k);
+
             std::lock_guard<std::mutex> lock(mu);
 
             // Walk + fingerprint. FNV-1a over (path, size, mtime) of every
@@ -1102,6 +1138,18 @@ public:
                 file_fps = std::move(cur_fps);
             }
 
+            // Cache is valid only while the tree holds still. `fp` is the
+            // current edit-drift fingerprint; a rebuild above already synced
+            // `fingerprint`. Invalidate the whole cache on any drift.
+            {
+                std::lock_guard<std::mutex> clk(cache_mu);
+                if (cache_fp != fp) { query_cache.clear(); cache_fp = fp; }
+                if (auto it = query_cache.find(cache_key); it != query_cache.end()) {
+                    mode = it->second.mode + ", cached";
+                    return it->second.passages;
+                }
+            }
+
             const std::size_t k = static_cast<std::size_t>(q.k);
             auto hits = corpus.search(q.query, embed,
                                       std::max<std::size_t>(k * 3, 12));
@@ -1123,6 +1171,13 @@ public:
                 p.score      = h.score;
                 p.text       = h.chunk->text;
                 out.push_back(std::move(p));
+            }
+
+            // Memoize this turn's result (bounded; clear when full).
+            {
+                std::lock_guard<std::mutex> clk(cache_mu);
+                if (query_cache.size() >= kCodeCacheMax) query_cache.clear();
+                query_cache.emplace(cache_key, CodeCacheEntry{out, mode});
             }
             return out;
         } catch (const std::exception& e) {
@@ -1720,21 +1775,24 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
         // A COLD docs corpus means corpus.build(): chunk the whole tree +
         // batch-embed every chunk through Ollama — seconds to minutes on a
         // large docs dir. Freezing the UI for that is never acceptable for
-        // an unprompted feature. So: if the index isn't warm, SKIP this
-        // turn's injection and kick a detached background build — the NEXT
-        // turn (and any explicit search_docs call) finds it hot. Warm-path
-        // cost stays what it was: one fingerprint walk + one query embed.
-        if (!AgenttyDocRetriever::index_warm()) {
-            AgenttyDocRetriever::warm_async();
-            return std::nullopt;
-        }
-
+        // an unprompted feature. So: if the docs index isn't warm, kick a
+        // detached background build for NEXT turn — but DON'T give up on
+        // this turn. Skills+memory are BM25-only and sub-ms (always warm),
+        // so still run a skills+memory-ONLY pass: the first turn of a session
+        // (often the most important) gets grounding immediately, and docs
+        // fold in from the next turn once the background build lands.
         AgenttyDocRetriever r;
         mt::DocQuery q;
         q.query = query;
         q.k     = k > 0 ? k : 3;
         std::string mode, err;
-        auto passages = r.retrieve(q, mode, err);
+        std::vector<mt::DocPassage> passages;
+        if (!AgenttyDocRetriever::index_warm()) {
+            AgenttyDocRetriever::warm_async();
+            passages = r.retrieve_warm_only(q, mode, err);
+        } else {
+            passages = r.retrieve(q, mode, err);
+        }
         if (!err.empty() || passages.empty()) return std::nullopt;
 
         // Recover the confidence the pipeline computed (mode carries

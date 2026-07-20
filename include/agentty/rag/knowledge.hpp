@@ -71,6 +71,16 @@ struct Context {
     std::string               query;   // the (possibly normalized) probe
     std::vector<ContextChunk> chunks;  // ranked, enrichable by each stage
 
+    // The query's embedding, computed AT MOST ONCE per funnel run and shared
+    // across every stage that needs it (semantics-aware rerank, chunk-level
+    // embed rerank, late interaction). Empty until some stage embeds; the
+    // first stage that does stashes it here so the others skip the redundant
+    // /api/embed round-trip. `query_vec_dims`==0 means "not yet computed";
+    // an embed that FAILED sets dims=0 and leaves the vector empty so a later
+    // stage can retry rather than treating the miss as a real empty vector.
+    std::vector<float>        query_vec;        // shared query embedding
+    std::size_t               query_vec_dims = 0;  // 0 == uncomputed
+
     // Confidence signal in [0,1]. CALIBRATED: anchored on the ABSOLUTE
     // lexical coverage of the query in the top hits (do the query's content
     // words actually appear in what we retrieved?), tempered by the relative
@@ -351,10 +361,19 @@ public:
         : out_k_(out_k), w_(w), embed_(std::move(embed)) {}
     [[nodiscard]] std::string_view name() const noexcept override { return "rerank"; }
     [[nodiscard]] Context process(Context ctx) const override;
+
+    // QUERY-SHAPE-ADAPTIVE weights (default ON): when enabled, the stage
+    // derives its feature weights per-query via weights_for_query() — lexical
+    // queries (identifiers/paths/quotes) lean on exact-match features, NL
+    // questions lean on the dense feature. Explicitly-passed non-default `w_`
+    // still wins (the adaptive profile only applies when the caller left the
+    // weights at the balanced default). Turn off for deterministic tests.
+    RerankStage& set_adaptive(bool on) noexcept { adaptive_ = on; return *this; }
 private:
     std::size_t   out_k_;
     RerankWeights w_;
     EmbedConfig   embed_{};   // empty model → no dense feature (lexical only)
+    bool          adaptive_ = true;
 };
 
 // CompressStage — wraps rag::compress. Fills each surviving ContextChunk's

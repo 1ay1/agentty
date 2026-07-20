@@ -322,6 +322,17 @@ Context RetrieveStage::process(Context ctx) const {
     return Context::from_hits(std::move(ctx.query), std::move(hits));
 }
 
+// True when `w` is the balanced default profile (RerankWeights{}). Used to
+// decide whether query-shape-adaptive weights may override — an explicit
+// caller-tuned profile is always respected.
+static bool is_default_weights_(const RerankWeights& w) noexcept {
+    const RerankWeights d{};
+    auto eq = [](double a, double b) { return a == b; };
+    return eq(w.fused, d.fused) && eq(w.dense, d.dense) &&
+           eq(w.term_coverage, d.term_coverage) && eq(w.proximity, d.proximity) &&
+           eq(w.path_match, d.path_match) && eq(w.phrase_match, d.phrase_match);
+}
+
 Context RerankStage::process(Context ctx) const {
     // rerank() works on a flat Hit vector; lift the hits out of the Context,
     // rerank, then re-wrap. Compressed text (if any was set earlier — it
@@ -331,21 +342,42 @@ Context RerankStage::process(Context ctx) const {
     hits.reserve(ctx.chunks.size());
     for (auto& c : ctx.chunks) hits.push_back(c.hit);
 
-    // Semantics-aware default reranking: embed the query ONCE (query-time
-    // capped, so a wedged Ollama can't stall the pipeline) and feed the
-    // calibrated cosine(query, chunk) in as a rerank feature. No model / no
-    // backend → empty vector → rerank() falls back to pure lexical.
-    std::vector<float> qvec;
-    if (!embed_.model.empty() && !hits.empty()) {
+    // Semantics-aware default reranking: feed the calibrated cosine(query,
+    // chunk) in as a rerank feature. The query embedding is computed AT MOST
+    // ONCE per funnel run and cached on the Context — if an upstream stage
+    // already embedded it we reuse that vector for free; otherwise we embed
+    // here (query-time capped, so a wedged Ollama can't stall the pipeline)
+    // and stash the result so the downstream embed-rerank / late-interaction
+    // tiers skip a second /api/embed round-trip. No model / no backend →
+    // empty vector → rerank() falls back to pure lexical.
+    std::vector<float> qvec = ctx.query_vec;
+    if (ctx.query_vec_dims == 0 && !embed_.model.empty() && !hits.empty()) {
         EmbedConfig ec = embed_;
         ec.timeout_ms = 10'000;   // query path: never block on a slow backend
         if (auto v = embed_texts(ec, {std::string{ctx.query}}); v && !v->empty())
             qvec = std::move((*v)[0]);
+        // Mark computed either way (empty on failure) so we don't retry the
+        // same wedged backend on every later stage this run.
+        ctx.query_vec      = qvec;
+        ctx.query_vec_dims = 1;
     }
 
-    auto ranked = rerank(ctx.query, std::move(hits), out_k_, w_,
+    // QUERY-SHAPE-ADAPTIVE weights: if the caller left w_ at the balanced
+    // default and adaptivity is on, derive a per-query profile (lexical vs
+    // conceptual). A caller that passed explicit non-default weights keeps
+    // full control. Deterministic, zero network.
+    RerankWeights eff = w_;
+    if (adaptive_ && is_default_weights_(w_))
+        eff = weights_for_query(ctx.query);
+
+    auto ranked = rerank(ctx.query, std::move(hits), out_k_, eff,
                          qvec.empty() ? nullptr : &qvec);
-    return Context::from_hits(std::move(ctx.query), std::move(ranked));
+    Context out = Context::from_hits(std::move(ctx.query), std::move(ranked));
+    // from_hits builds a fresh Context; carry the shared query embedding
+    // forward so downstream stages inherit the cache.
+    out.query_vec      = std::move(qvec);
+    out.query_vec_dims = ctx.query_vec_dims ? ctx.query_vec_dims : (out.query_vec.empty() ? 0 : 1);
+    return out;
 }
 
 Context CompressStage::process(Context ctx) const {
@@ -419,8 +451,14 @@ Context EmbedRerankStage::process(Context ctx) const {
     hits.reserve(ctx.chunks.size());
     for (auto& c : ctx.chunks) hits.push_back(c.hit);
 
-    auto ranked = embed_rerank(ctx.query, std::move(hits), out_k_, cfg_);
-    return Context::from_hits(std::move(ctx.query), std::move(ranked));
+    // Reuse the query embedding the rerank stage already cached this run.
+    const std::vector<float>* qv =
+        ctx.query_vec.empty() ? nullptr : &ctx.query_vec;
+    auto ranked = embed_rerank(ctx.query, std::move(hits), out_k_, cfg_, qv);
+    Context out = Context::from_hits(std::move(ctx.query), std::move(ranked));
+    out.query_vec      = std::move(ctx.query_vec);
+    out.query_vec_dims = ctx.query_vec_dims;
+    return out;
 }
 
 Context MMRStage::process(Context ctx) const {

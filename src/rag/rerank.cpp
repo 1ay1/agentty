@@ -81,6 +81,76 @@ std::vector<std::string> query_terms(std::string_view query) {
     return out;
 }
 
+RerankWeights weights_for_query(std::string_view query) noexcept {
+    RerankWeights w{};  // balanced default
+    // Signals that the query is LEXICAL/EXACT rather than conceptual. Cheap,
+    // deterministic, no allocation beyond the small scan.
+    bool has_quote = false;   // "exact phrase" or 'x'
+    bool has_path  = false;   // slash / dot-extension / glob
+    bool has_ident = false;   // CamelCase, snake_case, ::, digits-in-word
+    std::size_t words = 0;
+    bool in_word = false;
+    bool word_has_upper_inner = false, word_has_lower = false,
+         word_has_underscore = false, word_had_first = false;
+    char prev = ' ';
+    for (char c : query) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (c == '"' || c == '\'') has_quote = true;
+        if (c == '/' || c == '*' || c == '?') has_path = true;
+        if (c == ':' && prev == ':') has_ident = true;
+        const bool wordy = std::isalnum(uc) || c == '_' || c == '.';
+        if (wordy) {
+            if (!in_word) {
+                in_word = true; ++words;
+                word_has_upper_inner = word_has_lower =
+                    word_has_underscore = word_had_first = false;
+            }
+            if (c == '_') word_has_underscore = true;
+            else if (c == '.' ) { /* maybe extension/path */ }
+            else if (std::isupper(uc)) { if (word_had_first) word_has_upper_inner = true; }
+            else if (std::islower(uc)) word_has_lower = true;
+            else if (std::isdigit(uc)) { if (word_had_first) has_ident = true; }
+            word_had_first = true;
+            // a.b or a.ext inside a word → path-ish
+            if (c == '.' ) has_path = true;
+        } else {
+            if (in_word) {
+                if ((word_has_upper_inner && word_has_lower) || word_has_underscore)
+                    has_ident = true;  // CamelCase or snake_case token
+            }
+            in_word = false;
+        }
+        prev = c;
+    }
+    if (in_word && ((word_has_upper_inner && word_has_lower) || word_has_underscore))
+        has_ident = true;
+
+    const bool lexical    = has_quote || has_path || has_ident;
+    // Conceptual: a multi-word natural-language question with none of the
+    // exact-match tells. Short (1-2 word) queries stay balanced — too little
+    // signal to commit either way.
+    const bool conceptual = !lexical && words >= 4;
+
+    if (lexical) {
+        // Push exact-match features up, dense/paraphrase down.
+        w.phrase_match  = 0.16;
+        w.path_match    = 0.14;
+        w.term_coverage = 0.28;
+        w.dense         = 0.10;
+        w.proximity     = 0.14;
+        w.fused         = 0.30;
+    } else if (conceptual) {
+        // Push semantic matching up; the answer rarely repeats the words.
+        w.dense         = 0.32;
+        w.phrase_match  = 0.03;
+        w.term_coverage = 0.16;
+        w.proximity     = 0.10;
+        w.path_match    = 0.06;
+        w.fused         = 0.33;
+    }
+    return w;
+}
+
 std::vector<Hit>
 rerank(std::string_view query, std::vector<Hit> hits,
        std::size_t out_k, const RerankWeights& w,
@@ -527,7 +597,8 @@ std::string rr_prefix(const std::string& model, std::string text, bool is_query)
 
 std::vector<Hit>
 embed_rerank(std::string_view query, std::vector<Hit> hits,
-             std::size_t out_k, const EmbedRerankConfig& cfg) {
+             std::size_t out_k, const EmbedRerankConfig& cfg,
+             const std::vector<float>* query_vec) {
     auto truncate = [&](std::vector<Hit> h) {
         if (h.size() > out_k) h.resize(out_k);
         return h;
@@ -535,15 +606,26 @@ embed_rerank(std::string_view query, std::vector<Hit> hits,
     if (cfg.embed.model.empty() || hits.empty() || out_k == 0)
         return truncate(std::move(hits));
 
-    // Build ONE batch: [query, passage_0, passage_1, ...]. Passages are
-    // bounded (long tails neither help scoring nor are worth the tokens).
-    // hits with a null chunk contribute an empty passage (they'll score 0
-    // and sink), keeping index alignment 1:1 with `hits`.
+    // When the caller already embedded the query this funnel run (shared
+    // Context::query_vec), skip re-embedding it: embed ONLY the passages and
+    // splice the cached query vector back to the front. Saves one text in the
+    // batch. Guarded by apply_prefixes==false — with prefixes on, the query
+    // and passages use DIFFERENT instruction prefixes, so a query vector
+    // embedded without the rerank prefix isn't comparable; fall back to the
+    // self-contained batch in that case.
+    const bool reuse_qvec =
+        query_vec && !query_vec->empty() && !cfg.apply_prefixes;
+
+    // Build the batch. With reuse: [passage_0, passage_1, ...]. Without:
+    // [query, passage_0, ...]. Passages are bounded (long tails neither help
+    // scoring nor are worth the tokens). hits with a null chunk contribute an
+    // empty passage (they'll score 0 and sink), keeping alignment 1:1.
     std::vector<std::string> batch;
     batch.reserve(hits.size() + 1);
-    batch.push_back(cfg.apply_prefixes
-                        ? rr_prefix(cfg.embed.model, std::string(query), true)
-                        : std::string(query));
+    if (!reuse_qvec)
+        batch.push_back(cfg.apply_prefixes
+                            ? rr_prefix(cfg.embed.model, std::string(query), true)
+                            : std::string(query));
     for (const auto& h : hits) {
         std::string_view t = h.chunk ? std::string_view(h.chunk->text)
                                      : std::string_view{};
@@ -560,13 +642,15 @@ embed_rerank(std::string_view query, std::vector<Hit> hits,
     auto vecs = embed_texts(ec, batch);
 
     // Backend down / malformed / dim-inconsistent → degrade to input order.
-    if (!vecs || vecs->size() != batch.size() || vecs->front().empty())
+    const std::size_t want = reuse_qvec ? hits.size() : hits.size() + 1;
+    if (!vecs || vecs->size() != want || vecs->front().empty())
         return truncate(std::move(hits));
 
-    const std::vector<float>& qv = vecs->front();
+    const std::vector<float>& qv = reuse_qvec ? *query_vec : vecs->front();
+    const std::size_t pass_base  = reuse_qvec ? 0 : 1;
     std::vector<double> scores(hits.size(), 0.0);
     for (std::size_t i = 0; i < hits.size(); ++i) {
-        const std::vector<float>& pv = (*vecs)[i + 1];
+        const std::vector<float>& pv = (*vecs)[i + pass_base];
         if (pv.size() != qv.size() || pv.empty()) { scores[i] = 0.0; continue; }
         // Cosine in [-1,1]; clamp the negative tail to 0 so unscored/irrelevant
         // passages sink but never invert the ordering.

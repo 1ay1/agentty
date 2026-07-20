@@ -258,6 +258,47 @@ static void test_bm25_stemming_default_on() {
         CHECK(res.front().first == 0u);   // "running" chunk matched via stem
 }
 
+// ── query-shape-adaptive rerank weights ──────────────────────────────────────
+static void test_weights_for_query() {
+    using rag::weights_for_query;
+    const rag::RerankWeights def{};
+
+    // Balanced default for empty / short / ambiguous input.
+    {
+        auto w = weights_for_query("");
+        CHECK(w.dense == def.dense && w.phrase_match == def.phrase_match);
+        auto w2 = weights_for_query("retry logic");   // 2 words, no exact tell
+        CHECK(w2.dense == def.dense);
+    }
+
+    // LEXICAL shapes lean on exact-match features, dense drops.
+    {
+        auto ident = weights_for_query("McpResourceSource");        // CamelCase
+        CHECK(ident.dense < def.dense);
+        CHECK(ident.phrase_match > def.phrase_match);
+
+        auto snake = weights_for_query("note_file_opened");         // snake_case
+        CHECK(snake.dense < def.dense);
+
+        auto path = weights_for_query("src/rag/rerank.cpp");        // path
+        CHECK(path.path_match > def.path_match);
+        CHECK(path.dense < def.dense);
+
+        auto quoted = weights_for_query("\"exact phrase here\"");    // quotes
+        CHECK(quoted.phrase_match > def.phrase_match);
+
+        auto ns = weights_for_query("rag::weights_for_query");      // :: qualifier
+        CHECK(ns.dense < def.dense);
+    }
+
+    // CONCEPTUAL NL question leans on the dense feature.
+    {
+        auto w = weights_for_query("how does the retry backoff actually work");
+        CHECK(w.dense > def.dense);
+        CHECK(w.phrase_match < def.phrase_match);
+    }
+}
+
 int main() {
     test_query_terms();
     test_rerank_promotes_term_coverage();
@@ -269,6 +310,7 @@ int main() {
     test_rerank_dedup_overlapping_windows();
     test_bm25_heading_boost();
     test_bm25_stemming_default_on();
+    test_weights_for_query();
 
     if (g_failures == 0) {
         std::printf("rag_rerank_test: all checks passed\n");
