@@ -39,8 +39,22 @@
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/util/ranked_lock.hpp"
 
 namespace agentty::acp {
+
+// ── Lock hierarchy ────────────────────────────────────────────────────────
+// The two mutexes below form a STRICT ordering enforced by the type system
+// (util::ranked_lock): the outer lock has the LOWER rank and is always taken
+// first. Nesting them in the wrong order is a compile error (assert_lock_order)
+// or a debug abort (the thread-local held-rank tripwire) — never a silent
+// production deadlock. See RUST-CRITIQUE.md #2.
+//   SessionRank (10)  session map + per-session config (profile/model/cwd)
+//   ThreadRank  (20)  per-session thread.messages
+constexpr unsigned kSessionRank = 10;
+constexpr unsigned kThreadRank  = 20;
+using SessionMutex = util::RankedMutex<kSessionRank>;
+using ThreadMutex  = util::RankedMutex<kThreadRank>;
 
 // The provider call, type-erased: (Request, EventSink) → void. Matches
 // provider::Provider::stream.
@@ -60,17 +74,19 @@ struct Session {
     std::shared_ptr<http::CancelToken> cancel;
     std::set<std::string> grants;   // session-scoped "always allow", by tool
     // Guards ALL access to `thread.messages` (and the tool_calls / status
-    // fields nested in its elements). The turn loop runs on a DETACHED worker
-    // thread that appends assistant messages and mutates tool-call statuses,
-    // while the reader thread can concurrently snapshot the thread for
-    // session/load|resume (replay) or persist. session_mtx_ only protects the
-    // session MAP + the cancel handle, not the thread contents, so without
-    // this a load-during-turn is a data race on the messages vector (a read
-    // racing a push_back). Held briefly around each mutation / snapshot —
-    // NEVER across network streaming or tool execution. shared_ptr so it stays
-    // valid for a worker that captured the Session by shared_ptr even after a
-    // concurrent session/close erases the map entry.
-    std::shared_ptr<std::mutex> thread_mtx = std::make_shared<std::mutex>();
+    // fields nested in its elements). The turn loop runs on an OWNED,
+    // exception-isolated worker (util::isolated_thread) that appends assistant
+    // messages and mutates tool-call statuses, while the reader thread can
+    // concurrently snapshot the thread for session/load|resume (replay) or
+    // persist. session_mtx_ only protects the session MAP + config, not the
+    // thread contents, so without this a load-during-turn is a data race on
+    // the messages vector (a read racing a push_back). Held briefly around
+    // each mutation / snapshot — NEVER across network streaming or tool
+    // execution. shared_ptr so it stays valid for a worker that captured the
+    // Session by shared_ptr even after a concurrent session/close erases the
+    // map entry. RANK 20 (kThreadRank): the INNER lock — only ever taken while
+    // holding, or not holding, session_mtx_ (rank 10), never the reverse.
+    std::shared_ptr<ThreadMutex> thread_mtx = std::make_shared<ThreadMutex>();
 };
 
 class AgentServer {
@@ -160,9 +176,10 @@ private:
     unsigned long                   wire_tools_gen_   = 0;
     std::vector<provider::ToolSpec> wire_tools_;
 
-    std::mutex                                              session_mtx_;
-    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
     std::mutex                                              index_mtx_;
+    // Rank 10 (kSessionRank): the OUTER lock of the session/thread hierarchy.
+    SessionMutex                                           session_mtx_;
+    std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
 };
 
 } // namespace agentty::acp

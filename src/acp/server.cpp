@@ -37,6 +37,7 @@
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/isolated_thread.hpp"
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -265,7 +266,7 @@ int AgentServer::serve() {
 }
 
 std::shared_ptr<Session> AgentServer::find_session(const std::string& id) {
-    std::lock_guard<std::mutex> lk(session_mtx_);
+    util::RankedLock lk(session_mtx_);
     auto it = sessions_.find(id);
     return it == sessions_.end() ? nullptr : it->second;
 }
@@ -294,7 +295,7 @@ void AgentServer::persist(const Session& sess) {
     // then write outside the lock to keep the hold short.
     Thread snapshot;
     {
-        std::lock_guard<std::mutex> lk(*sess.thread_mtx);
+        util::RankedLock lk(*sess.thread_mtx);
         snapshot = sess.thread;
     }
     persistence::save_thread(snapshot);
@@ -374,7 +375,7 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
 }
 
 a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
-    std::lock_guard<std::mutex> lk(session_mtx_);
+    util::RankedLock lk(session_mtx_);
     // Skill activations belong to the previous session's context. The
     // tracker is process-wide, so this is best-effort under concurrent
     // sessions — worst case a re-activation re-injects (token cost only).
@@ -412,14 +413,14 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     Profile profile = profile_;
 
     {
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         if (auto it = sessions_.find(sid); it != sessions_.end()) {
             if (!cwd.empty()) it->second->cwd = cwd;   // guarded by session_mtx_ (held)
             // Snapshot the thread under the per-session thread mutex so a
             // worker turn appending an assistant message concurrently can't
             // race this copy (a read racing a push_back on the same vector).
             // Lock order: session_mtx_ then thread_mtx, as in on_prompt.
-            std::lock_guard<std::mutex> tlk(*it->second->thread_mtx);
+            util::RankedLock tlk(*it->second->thread_mtx);
             thread      = it->second->thread;
             profile     = it->second->profile;
             from_memory = true;
@@ -432,7 +433,7 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
         if (!loaded) throw std::runtime_error("session/load: no such session: " + sid);
         thread = std::move(*loaded);
 
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         Session s;
         s.id = sid; s.cwd = cwd; s.profile = profile; s.thread = thread;
         sessions_.insert_or_assign(sid, std::make_shared<Session>(std::move(s)));
@@ -448,7 +449,7 @@ void AgentServer::on_cancel(const a::CancelParams& p) {
     // data race.
     std::shared_ptr<http::CancelToken> tok;
     if (auto s = find_session(p.sessionId.value); s) {
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         tok = s->cancel;
     }
     if (tok) tok->cancel();
@@ -494,7 +495,7 @@ void AgentServer::on_set_mode(const a::SetModeParams& p) {
         // (run_tools) with the same lock. Without this the enum write races
         // a concurrent read. Lock is session_mtx_ (the config guard); never
         // held across I/O.
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         s->profile = profile_from_mode_id(p.modeId.value, s->profile);
         applied = s->profile;
     }
@@ -509,7 +510,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         // Guard the write: a detached worker turn reads sess.model
         // (stream_completion) under the same lock. Without this the
         // std::string write races a concurrent read — a torn read / UAF.
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         s->model = p.value;
     } else {
         // Surface an unknown config id rather than silently accepting and
@@ -573,7 +574,7 @@ a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams&
     json index = load_session_index();
 
     {
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         for (const auto& [id, s] : sessions_)
             if (!index.contains(id))
                 index[id] = json{{"cwd", s->cwd}, {"title", s->thread.title}};
@@ -607,12 +608,12 @@ a::ResumeSessionResult AgentServer::on_resume_session(const a::ResumeSessionPara
 }
 
 void AgentServer::on_close_session(const a::CloseSessionParams& p) {
-    std::lock_guard<std::mutex> lk(session_mtx_);
+    util::RankedLock lk(session_mtx_);
     sessions_.erase(p.sessionId.value);
 }
 
 void AgentServer::on_delete_session(const a::DeleteSessionParams& p) {
-    { std::lock_guard<std::mutex> lk(session_mtx_); sessions_.erase(p.sessionId.value); }
+    { util::RankedLock lk(session_mtx_); sessions_.erase(p.sessionId.value); }
     persistence::delete_thread(ThreadId{p.sessionId.value});
     unindex_session(p.sessionId.value);
 }
@@ -623,7 +624,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     std::string text = prompt_text_from_blocks(p.prompt);
 
     {
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         auto it = sessions_.find(sid);
         if (it == sessions_.end()) {
             resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
@@ -650,7 +651,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             // the worker's snapshot/read sites (which do NOT hold
             // session_mtx_) are excluded. Lock order: session_mtx_ then
             // thread_mtx, consistently everywhere.
-            std::lock_guard<std::mutex> tlk(*it->second->thread_mtx);
+            util::RankedLock tlk(*it->second->thread_mtx);
             it->second->thread.messages.push_back(std::move(um));
         }
         it->second->cancel = std::make_shared<http::CancelToken>();
@@ -659,9 +660,17 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     // Run the whole turn off the reader thread; the engine stays free to
     // deliver our outbound permission responses. The Responder resolves the
     // deferred session/prompt when the turn settles.
-    std::thread([this, sid = std::move(sid), r = std::move(resp)]() mutable {
-        run_turn(std::move(sid), std::move(r));
-    }).detach();
+    //
+    // run_isolated_detached (util::isolated_thread) instead of a raw
+    // std::thread(...).detach(): the worker body is wrapped so NO exception
+    // — std or otherwise — can reach std::terminate and kill every other
+    // session. Terminate is structurally unreachable from here; the outer
+    // try/catch inside run_turn is now belt-and-suspenders, not the only line
+    // of defence. See RUST-CRITIQUE.md #3.
+    util::run_isolated_detached("acp.turn_worker",
+        [this, sid = std::move(sid), r = std::move(resp)]() mutable {
+            run_turn(std::move(sid), std::move(r));
+        });
 }
 
 void AgentServer::run_turn(std::string session_id, Responder resp) {
@@ -724,7 +733,7 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
             // holding the lock across it is safe (no lock-order cycle: the
             // reader takes session_mtx_ then thread_mtx; we hold only
             // thread_mtx here).
-            std::lock_guard<std::mutex> tlk(*cs->thread_mtx);
+            util::RankedLock tlk(*cs->thread_mtx);
             Message& back = cs->thread.messages.back();
             if (back.role == Role::Assistant) {
                 bool any_salvaged = false, mem_leak = false;
@@ -773,7 +782,7 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
         {
             // Reset the cancel handle under session_mtx_ so it doesn't race
             // an on_cancel reading the same shared_ptr instance.
-            std::lock_guard<std::mutex> lk(session_mtx_);
+            util::RankedLock lk(session_mtx_);
             s->cancel.reset();
         }
         persist(*s);
@@ -803,7 +812,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     // std::string read. A model change mid-turn applies to the NEXT turn.
     std::string sess_model;
     {
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         sess_model = sess.model;
     }
     req.model         = sess_model.empty() ? model_id_ : sess_model;
@@ -947,7 +956,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     // vector or race the reallocation. Held only for the push, not the
     // stream above.
     {
-        std::lock_guard<std::mutex> lk(*sess.thread_mtx);
+        util::RankedLock lk(*sess.thread_mtx);
         sess.thread.messages.push_back(std::move(assistant));
     }
     return stop;
@@ -964,7 +973,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     // mid-turn takes effect next turn.
     Profile profile;
     {
-        std::lock_guard<std::mutex> lk(session_mtx_);
+        util::RankedLock lk(session_mtx_);
         profile = sess.profile;
     }
 
@@ -1016,7 +1025,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         }
     };
     auto set_status = [&](ToolUse& tc, ToolUse::Status st) {
-        std::lock_guard<std::mutex> tlk(*sess.thread_mtx);
+        util::RankedLock tlk(*sess.thread_mtx);
         assert_no_realloc();
         tc.status = std::move(st);
     };
@@ -1110,9 +1119,12 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         }
 
         if (tool_cancelled || tool_timed_out) {
-            // Detach: keep the shared_future alive on a throwaway thread so
+            // Detach: keep the shared_future alive on an isolated reaper so
             // the worker can finish and clean up without us blocking on it.
-            std::thread([fut]() mutable { fut.wait(); }).detach();
+            // isolated so a throw in the abandoned task's cleanup can't
+            // terminate the process.
+            util::run_isolated_detached("acp.tool_reaper",
+                [fut]() mutable { fut.wait(); });
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
             set_status(tc, ToolUse::Failed{{}, {}, why});
