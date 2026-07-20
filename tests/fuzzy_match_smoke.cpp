@@ -1,10 +1,12 @@
-// Smoke test for the line-DP fuzzy matcher. Builds against the agentty
-// fuzzy_match TU directly (no GoogleTest dependency).
+// Smoke test for the line-DP fuzzy matcher. Builds against the mcp-cpp
+// fuzzy_match TU directly (no GoogleTest dependency). That TU is the SINGLE
+// source of truth for the edit tool's matcher — the agentty-local fork was
+// removed; the `edit` tool (mcp-cpp/src/tools/fs_edit.cpp) uses this one.
 //
 // Cases mirror Zed's StreamingFuzzyMatcher test suite — they're the
 // regressions we want to keep passing.
 
-#include "agentty/tool/util/fuzzy_match.hpp"
+#include <mcp/tools/util/fuzzy_match.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,7 +14,7 @@
 #include <string>
 #include <string_view>
 
-using agentty::tools::util::fuzzy_find;
+using mcp::tools::util::fuzzy_find;
 
 namespace {
 

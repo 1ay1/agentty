@@ -590,7 +590,6 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/util/sandbox.cpp
     src/tool/util/arg_reader.cpp
     src/tool/util/partial_json.cpp
-    src/tool/util/fuzzy_match.cpp
     src/tool/subagent.cpp
     src/tool/skills.cpp
     src/tool/memory_store.cpp
@@ -1346,12 +1345,13 @@ if(AGENTTY_BUILD_TESTS)
 
     # fuzzy_match_smoke — small correctness smoke for the line-DP
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
-    # runtime), so it compiles against just the fuzzy_match TU.
+    # runtime): compiles directly against the mcp-cpp fuzzy_match TU,
+    # which is the SINGLE source of truth for the matcher.
     add_executable(fuzzy_match_smoke EXCLUDE_FROM_ALL
         tests/fuzzy_match_smoke.cpp
-        src/tool/util/fuzzy_match.cpp
+        mcp-cpp/src/tools/util/fuzzy_match.cpp
     )
-    target_include_directories(fuzzy_match_smoke PRIVATE include)
+    target_include_directories(fuzzy_match_smoke PRIVATE mcp-cpp/include)
     target_link_libraries(fuzzy_match_smoke PRIVATE
         nlohmann_json::nlohmann_json)
     add_test(NAME fuzzy_match_smoke COMMAND fuzzy_match_smoke)
