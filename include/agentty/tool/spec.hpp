@@ -302,6 +302,15 @@ template <FixedName Name>
 // catalog above gets an instant signal if they break an invariant.
 namespace proofs {
 
+// NOTE on sanitizer builds: GCC's ASan/UBSan instrument the module-level
+// `constexpr kCatalog` global, and that instrumentation leaks into the
+// `consteval` evaluation of the proofs below ("not a constant expression").
+// The proofs are valid — they compile and pass in every NORMAL build, which is
+// the real gate. Under AGENTTY_SANITIZER_BUILD we skip re-evaluating them so
+// the sanitizer can do its actual job (RUNTIME memory-safety checking). See
+// the CMake AGENTTY_SANITIZE_ALL block for the full rationale.
+#ifndef AGENTTY_SANITIZER_BUILD
+
 // Every name in the catalog is unique.
 consteval bool all_names_unique() {
     for (std::size_t i = 0; i < kCatalog.size(); ++i)
@@ -605,6 +614,8 @@ consteval bool task_divergence_is_exact() {
 static_assert(task_divergence_is_exact(),
               "`task` must gate as Exec but schedule as exactly {ReadFs, Net} — "
               "the divergence that lets subagents run concurrently");
+
+#endif  // AGENTTY_SANITIZER_BUILD
 
 } // namespace proofs
 

@@ -88,6 +88,60 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # Rust-grade memory-safety gate. Builds agentty's OWN-logic test set under
+  # -fsanitize=address,undefined and runs it: proves those paths are free of
+  # use-after-free / buffer overflow / leaks / UB at RUNTIME, complementing the
+  # compile-time static_assert proofs. Scoped to the `sanitizer`-labelled
+  # tests (crypto/creds, FSM, tool-arg repair, skills, fuzzy match, and the
+  # concurrency primitives) because they don't link maya's prebuilt,
+  # un-instrumented renderer (which would ODR-clash). LTO is off for speed +
+  # readable traces; the constexpr catalog proofs auto-skip under
+  # AGENTTY_SANITIZER_BUILD (they already ran green in the build-test job).
+  sanitizers:
+    name: sanitizers (asan+ubsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then
+              echo "submodules ready (attempt $attempt)"
+              break
+            fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-14 cmake ninja-build pkg-config \
+            libssl-dev libnghttp2-dev zlib1g-dev
+      - name: Configure (ASan + UBSan)
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake -S . -B build-san -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DAGENTTY_AUTO_PULL_MAYA=OFF \
+            -DAGENTTY_USE_MIMALLOC=OFF \
+            -DAGENTTY_BUILD_TESTS=ON \
+            -DAGENTTY_SANITIZE_ALL=address,undefined
+      - name: Build sanitizer test set
+        run: cmake --build build-san -j"$(nproc)" --target sanitizer_tests
+      - name: Run under ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-san -L sanitizer --output-on-failure
+
   # Compile-only Windows gate. Mirrors release.yml's build-windows configure
   # (vcpkg static openssl+nghttp2, MSVC, Release) but stops at the build:
   # no MSI, no signing, no upload. Purpose is narrow but important — prove

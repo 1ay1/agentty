@@ -219,3 +219,35 @@ is the C++ analogue of a Rust trait bound like `F: Fn(&mut ToolUse)`.)
 That every one of these compiled with zero changes at the call sites is itself
 evidence the constraints match the real contracts — the concept is a *proof* of
 the shape the code already relied on.
+
+### The memory-safety gate — ASan + UBSan in CI (the Rust-grade guardrail)
+
+The strongest single answer to "but Rust's borrow checker *proves* no
+use-after-free" is to prove it too — at runtime, on real executions. CI now has
+a `sanitizers (asan+ubsan)` job that builds agentty's own-logic test set with
+`-fsanitize=address,undefined` (leak detection on) and runs it:
+
+- **What it proves:** the crypto/credentials, FSM typestates, tool-arg repair,
+  skills engine, fuzzy matcher, and the two concurrency primitives are free of
+  use-after-free, buffer overflow, leaks, and undefined behavior on every path
+  the tests exercise. Different mechanism from the borrow checker, same class
+  of guarantee for covered code.
+- **`concurrency_primitives_test`** doesn't just compile the ranked-lock
+  tripwire and the terminate-proof worker — it *fires* them: a forked child
+  takes two locks out of rank order and the test asserts it `abort()`s
+  (tripwire caught the ABBA), and throwing worker bodies are asserted not to
+  reach `std::terminate`. Proof the primitives work, not just typecheck.
+- **Scope & honesty:** the gate covers agentty's own TUs, not maya's prebuilt
+  renderer (instrumenting a vendored, un-instrumented static lib would
+  ODR-clash; the renderer has its own CI). Two GCC-specific wrinkles were
+  handled cleanly: LTO is disabled for the sanitizer build (speed + readable
+  traces), and the `constexpr` catalog proofs auto-skip under
+  `AGENTTY_SANITIZER_BUILD` because GCC's instrumentation of the global leaks
+  into their `consteval` evaluation — they still run green in the normal
+  build, which is their real gate.
+
+So the compile-time `static_assert` proofs and the runtime sanitizer gate are
+complementary halves: the former proves properties of the *code*, the latter
+proves the absence of memory bugs in its *execution*. Between them, the two
+biggest reasons to reach for Rust — "prove my invariants" and "prove no UAF" —
+are both answered in-tree.

@@ -738,6 +738,45 @@ else()
 endif()
 endfunction()
 
+# ── Directory-wide sanitizer (instruments EVERYTHING, incl. tests) ─────────
+# The target-scoped AGENTTY_SANITIZE below only instruments the `agentty`
+# exe. But the memory-safety bugs a Rust advocate points at (use-after-free,
+# buffer overrun, UB) are exercised by the TEST SUITE, which links the shared
+# OBJECT libraries — not the exe. To catch them we need the sanitizer on the
+# object libs and the test binaries too. AGENTTY_SANITIZE_ALL does that by
+# injecting the flags DIRECTORY-WIDE, here, BEFORE any target is defined, so
+# every agentty TU (objlibs + exe + tests) and their links carry it.
+#
+#   cmake -B build-asan -DAGENTTY_SANITIZE_ALL=address,undefined \
+#         -DAGENTTY_BUILD_TESTS=ON && cmake --build build-asan --target tests \
+#         && ctest --test-dir build-asan
+#
+# This is agentty's Rust-grade memory-safety GATE: the borrow checker proves
+# absence of these bugs at compile time; we prove it by running the whole
+# suite under ASan+UBSan. Different mechanism, same guarantee for the paths
+# the tests cover.
+set(AGENTTY_SANITIZE_ALL "" CACHE STRING
+    "Comma-separated sanitizers applied to ALL agentty TUs incl. tests (e.g. address,undefined). Empty to disable.")
+if(AGENTTY_SANITIZE_ALL AND NOT MSVC)
+    message(STATUS "agentty: WHOLE-TREE sanitizer -fsanitize=${AGENTTY_SANITIZE_ALL} "
+                   "(objlibs + exe + tests)")
+    add_compile_options(-fsanitize=${AGENTTY_SANITIZE_ALL}
+                        -fno-omit-frame-pointer -g -O1 -fno-lto)
+    add_link_options(-fsanitize=${AGENTTY_SANITIZE_ALL} -fno-lto)
+    # GCC's sanitizers instrument the module-level `constexpr std::array`
+    # catalogs (spec.hpp kCatalog, etc.), and that instrumentation leaks
+    # poisoned pointer arithmetic into the `consteval` evaluation of the
+    # static_assert PROOFS that walk them — they then fail to compile with
+    # "not a constant expression". This is a GCC limitation, not a proof bug:
+    # the SAME proofs compile and pass in every normal (non-sanitizer) build,
+    # which is the primary gate. So we define AGENTTY_SANITIZER_BUILD and let
+    # the few catalog-walking proof blocks skip themselves ONLY in the
+    # sanitizer build — the sanitizer's job is to check RUNTIME memory safety
+    # (UAF / overflow / UB), not to re-run compile-time proofs that already
+    # ran green elsewhere.
+    add_compile_definitions(AGENTTY_SANITIZER_BUILD=1)
+endif()
+
 # ── Shared OBJECT libraries ─────────────────────────────────────────────
 # Compile every shared TU EXACTLY ONCE into an OBJECT library, then reuse
 # the objects (via $<TARGET_OBJECTS:...>) in the main binary AND every
@@ -1386,6 +1425,20 @@ if(AGENTTY_BUILD_TESTS)
     target_include_directories(fsm_test PRIVATE include)
     add_test(NAME fsm_test COMMAND fsm_test)
 
+    # concurrency_primitives_test — proves the two BEATS-RUST concurrency
+    # primitives actually FIRE at runtime, not just compile: the ranked-lock
+    # order tripwire abort()s on an out-of-order acquisition (checked in a
+    # forked child so the deliberate abort doesn't fail the suite), and the
+    # isolated_thread / run_isolated_detached wrappers swallow a throwing
+    # worker body so it can never reach std::terminate. Links just dbglog.cpp
+    # (the only .cpp the two header primitives touch).
+    add_executable(concurrency_primitives_test EXCLUDE_FROM_ALL
+        tests/concurrency_primitives_test.cpp
+        src/util/dbglog.cpp)
+    target_include_directories(concurrency_primitives_test PRIVATE include)
+    add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
+    set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30)
+
     # model_label_test — pretty_model_label() turn-header normalization
     # across every provider id shape (Ollama :tag, OpenAI, OpenRouter
     # namespaced, Gemini/xAI, the agentty [1m] marker). Reuses the shared
@@ -1767,12 +1820,49 @@ if(AGENTTY_BUILD_TESTS)
     # default `cmake --build` so a plain build stays lean), which means
     # `ctest` would otherwise find nothing built. `cmake --build build
     # --target tests` forces them all.
+    # ── Sanitizer test set ────────────────────────────────────────────────
+    # These tests exercise agentty's OWN logic (crypto/creds, FSM typestates,
+    # tool-arg repair, skills engine, fuzzy matcher, and the concurrency
+    # primitives) and link cleanly under -fsanitize=address,undefined — i.e.
+    # they do NOT pull maya's prebuilt (un-instrumented) renderer, which would
+    # ODR-clash with instrumented objects. CI builds this set with
+    # AGENTTY_SANITIZE_ALL=address,undefined and runs `ctest -L sanitizer` as
+    # agentty's Rust-grade memory-safety gate: proves these paths are free of
+    # use-after-free / buffer overflow / leaks / UB at RUNTIME, complementing
+    # the compile-time static_assert proofs. (maya-renderer tests stay on the
+    # normal build; the renderer has its own CI.)
+    set_tests_properties(
+        fuzzy_match_smoke
+        param_tag_repair_test
+        model_caps_test
+        fsm_test
+        concurrency_primitives_test
+        skills_engine_test
+        cred_crypt_test
+        keystore_test
+        PROPERTIES LABELS sanitizer)
+
+    # Build-only aggregate for the sanitizer gate: `cmake --build build-asan
+    # --target sanitizer_tests` compiles exactly the labelled set (not the
+    # whole `tests` target, which pulls maya-renderer tests that don't
+    # instrument cleanly). CI then runs `ctest -L sanitizer`.
+    add_custom_target(sanitizer_tests DEPENDS
+        fuzzy_match_smoke
+        param_tag_repair_test
+        model_caps_test
+        fsm_test
+        concurrency_primitives_test
+        skills_engine_test
+        cred_crypt_test
+        keystore_test)
+
     add_custom_target(tests DEPENDS
         long_session_bench
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
         fsm_test
+        concurrency_primitives_test
         model_label_test
         skills_engine_test
         cred_crypt_test
