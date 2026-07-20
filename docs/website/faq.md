@@ -14,7 +14,7 @@ Yes — OAuth against your existing Pro/Max plan is the main path. No extra bill
 
 ## Is it really a drop-in for claude-code?
 
-It targets the same workflow — a coding agent in your terminal with the same Claude auth — as a single native binary. Claude is the default, but agentty also runs against OpenAI, Groq, OpenRouter, Together, Cerebras, and local Ollama models. See [Providers & Models](/docs/providers).
+It targets the same workflow — a coding agent in your terminal with the same Claude auth — as a single native binary. Claude is the default, but agentty also runs against OpenAI, Groq, OpenRouter, Together, Cerebras, and local Ollama models. See the full [agentty vs Claude Code](/docs/vs-claude-code) comparison and [Providers & Models](/docs/providers).
 
 ## Can I use models other than Claude?
 
