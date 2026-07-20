@@ -12,6 +12,8 @@ Track status here as each is submitted / merged.
 | awesome-cli-coding-agents | Awesome list (PR) | **PR open #212** | https://github.com/bradAGI/awesome-cli-coding-agents/pull/212 |
 | awesome-ai-coding-tools | Awesome list (PR) | **PR open #558** | https://github.com/ai-for-developers/awesome-ai-coding-tools/pull/558 |
 | awesome-cli-apps (agarrharr, 20k★) | Awesome list (PR) | **PR open #1245** | https://github.com/agarrharr/awesome-cli-apps/pull/1245 |
+| awesome-tuis (rothgar, 19.8k★) | Awesome list (PR) | **PR open #774** | https://github.com/rothgar/awesome-tuis/pull/774 |
+| awesome-cpp (fffaraz, 72k★) | Awesome list | **SKIPPED** — libraries-only + auto-blocks post-2023 repos | https://github.com/fffaraz/awesome-cpp |
 | Terminal Trove | Directory (submit form) | TODO (web form) | https://terminaltrove.com/submit/ |
 | AlternativeTo | Directory (submit form) | TODO (web form) | https://alternativeto.net/manage/suggest-software/ |
 | Show HN | Post | TODO | https://news.ycombinator.com/submit |
