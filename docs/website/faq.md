@@ -12,6 +12,12 @@ Quick answers to the questions people ask most.
 
 Yes — OAuth against your existing Pro/Max plan is the main path. No extra billing; same account you already pay for. You can also use an `ANTHROPIC_API_KEY`, or a different [provider](/docs/providers) entirely.
 
+## Will using my Claude subscription with agentty get my account banned?
+
+The honest answer: agentty is a third-party client, so it carries the same footing as any third-party client that speaks to Anthropic's API. What agentty actually does is deliberately unexotic — it completes the **same OAuth flow** and uses the **same `CLAUDE_CODE_OAUTH_TOKEN`** mechanism Claude Code itself uses, sends ordinary Messages-API requests over HTTPS, and adds nothing that spoofs, scrapes, or circumvents rate limits. Credentials live only in `~/.config/agentty/credentials.json` (mode `0600`); nothing is sent anywhere except Anthropic.
+
+We're not affiliated with Anthropic and can't speak for their enforcement, and their terms can change. If you want **zero ambiguity**, use an `ANTHROPIC_API_KEY` (pay-as-you-go, unquestionably in-bounds) or point agentty at [another provider](/docs/providers) — OpenAI, Groq, OpenRouter, or a local Ollama model — with `--provider`. See [Authentication](/docs/authentication).
+
 ## Is it really a drop-in for claude-code?
 
 It targets the same workflow — a coding agent in your terminal with the same Claude auth — as a single native binary. Claude is the default, but agentty also runs against OpenAI, Groq, OpenRouter, Together, Cerebras, and local Ollama models. See the full [agentty vs Claude Code](/docs/vs-claude-code) comparison and [Providers & Models](/docs/providers).
