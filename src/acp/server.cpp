@@ -69,6 +69,7 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Glob:           return a::ToolKind::Search;
         case sp::Kind::FindDefinition: return a::ToolKind::Search;
         case sp::Kind::SearchDocs:     return a::ToolKind::Search;
+        case sp::Kind::SearchCode:     return a::ToolKind::Search;
         case sp::Kind::RepoMap:        return a::ToolKind::Search;
         case sp::Kind::ListDir:        return a::ToolKind::Read;
         case sp::Kind::GitStatus:      return a::ToolKind::Read;
@@ -83,7 +84,11 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Task:           return a::ToolKind::Think;
         case sp::Kind::Skill:          return a::ToolKind::Read;
     }
-    return a::ToolKind::Other;
+    // No default:/fall-through return — the switch is exhaustive over Kind, so
+    // adding a new tool Kind re-triggers -Wswitch here (build error under
+    // -Werror) instead of silently mapping to Other. This is the DESIGN.md
+    // "sum type gains an arm → build error, not runtime ghost" rule.
+    return a::ToolKind::Other;   // unreachable
 }
 
 // One-line human title for a tool call card.
@@ -409,7 +414,7 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     {
         std::lock_guard<std::mutex> lk(session_mtx_);
         if (auto it = sessions_.find(sid); it != sessions_.end()) {
-            if (!cwd.empty()) it->second->cwd = cwd;
+            if (!cwd.empty()) it->second->cwd = cwd;   // guarded by session_mtx_ (held)
             // Snapshot the thread under the per-session thread mutex so a
             // worker turn appending an assistant message concurrently can't
             // race this copy (a read racing a push_back on the same vector).
@@ -483,15 +488,28 @@ a::SessionModeState AgentServer::mode_state(Profile current) {
 void AgentServer::on_set_mode(const a::SetModeParams& p) {
     auto s = find_session(p.sessionId.value);
     if (!s) throw std::runtime_error("session/set_mode: unknown sessionId: " + p.sessionId.value);
-    s->profile = profile_from_mode_id(p.modeId.value, s->profile);
+    Profile applied;
+    {
+        // Guard the write: a detached worker turn reads sess.profile
+        // (run_tools) with the same lock. Without this the enum write races
+        // a concurrent read. Lock is session_mtx_ (the config guard); never
+        // held across I/O.
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        s->profile = profile_from_mode_id(p.modeId.value, s->profile);
+        applied = s->profile;
+    }
     send_update(p.sessionId.value,
-        a::SU_CurrentMode{a::SessionModeId{mode_id_for(s->profile)}, json::object()});
+        a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
 }
 
 a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
     auto s = find_session(p.sessionId.value);
     if (!s) throw std::runtime_error("session/set_config_option: unknown sessionId: " + p.sessionId.value);
     if (p.configId == "model") {
+        // Guard the write: a detached worker turn reads sess.model
+        // (stream_completion) under the same lock. Without this the
+        // std::string write races a concurrent read — a torn read / UAF.
+        std::lock_guard<std::mutex> lk(session_mtx_);
         s->model = p.value;
     } else {
         // Surface an unknown config id rather than silently accepting and
@@ -780,7 +798,15 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                                           std::string& out_error,
                                           bool suppress_tools) {
     provider::Request req;
-    req.model         = sess.model.empty() ? model_id_ : sess.model;
+    // Snapshot the mutable per-session model ONCE under session_mtx_ so a
+    // concurrent session/set_config_option (engine thread) can't tear this
+    // std::string read. A model change mid-turn applies to the NEXT turn.
+    std::string sess_model;
+    {
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        sess_model = sess.model;
+    }
+    req.model         = sess_model.empty() ? model_id_ : sess_model;
     // Per-model output-token ceiling (mirrors cmd_factory::launch_stream).
     // Without this the default 16384 is shared across reasoning + tool JSON
     // and a large `edit` truncates mid-input_json. context_window is left 0
@@ -904,7 +930,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     if (sess.cancel && sess.cancel->is_cancelled()) out_cancelled = true;
 
     if (have_usage) {
-        const std::string model = sess.model.empty() ? model_id_ : sess.model;
+        const std::string model = sess_model.empty() ? model_id_ : sess_model;
         long long used = static_cast<long long>(last_usage.input_tokens) +
                          last_usage.cache_creation_input_tokens +
                          last_usage.cache_read_input_tokens +
@@ -932,7 +958,15 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     Message& last = sess.thread.messages.back();
     if (last.role != Role::Assistant || last.tool_calls.empty()) return false;
 
-    const Profile profile = sess.profile;
+    // Snapshot the mutable per-session profile ONCE under session_mtx_ so a
+    // concurrent session/set_mode (engine thread) can't race this read. The
+    // gate uses one stable profile for the whole tool batch; a mode change
+    // mid-turn takes effect next turn.
+    Profile profile;
+    {
+        std::lock_guard<std::mutex> lk(session_mtx_);
+        profile = sess.profile;
+    }
 
     // Tool-scheduling note: unlike the TUI path (cmd_factory), which uses
     // effects::is_parallel_safe(active, want) to fan out compose-safe tools
@@ -951,10 +985,39 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     // thread_mtx. We CAN'T hold thread_mtx across a tool's execution (minutes
     // for a slow bash/web_fetch would stall load/persist), so each status
     // assignment is guarded individually via this helper. The reference
-    // `last` stays valid across the loop because the worker never push_backs
-    // during run_tools (no reallocation), and the reader only reads.
+    // `last` (and every `tc` iterator into last.tool_calls) stays valid
+    // across the loop ONLY because the worker never push_backs to
+    // `messages` during run_tools (no reallocation) and the reader only
+    // reads.
+    //
+    // A Rust borrow checker would ENFORCE that invariant at compile time
+    // (you can't hold `&mut messages.back()` and also mutate `messages`).
+    // We can't, so we make the invariant LOUD instead of silent: capture the
+    // vector's storage identity up front and assert it every mutation. If a
+    // future edit ever appends to `messages` inside this loop, `last`/`tc`
+    // would dangle — this turns that latent use-after-realloc (silent UB)
+    // into an immediate, debuggable abort. Same "abort-not-corrupt"
+    // discipline as domain/session.hpp's .value() sites.
+    const Message* const   msgs_data0 = sess.thread.messages.data();
+    const std::size_t      msgs_size0 = sess.thread.messages.size();
+    const ToolUse* const   tcs_data0  = last.tool_calls.data();
+    const std::size_t      tcs_size0  = last.tool_calls.size();
+    auto assert_no_realloc = [&] {
+        // If either vector reallocated or shrank, `last`/`tc` dangle. Fail
+        // loudly rather than corrupt.
+        if (sess.thread.messages.data() != msgs_data0 ||
+            sess.thread.messages.size() <  msgs_size0 ||
+            last.tool_calls.data()      != tcs_data0  ||
+            last.tool_calls.size()      <  tcs_size0) {
+            util::dbglog("acp.run_tools.INVARIANT",
+                         "messages/tool_calls reallocated mid-turn — "
+                         "held reference would dangle");
+            std::abort();
+        }
+    };
     auto set_status = [&](ToolUse& tc, ToolUse::Status st) {
         std::lock_guard<std::mutex> tlk(*sess.thread_mtx);
+        assert_no_realloc();
         tc.status = std::move(st);
     };
 

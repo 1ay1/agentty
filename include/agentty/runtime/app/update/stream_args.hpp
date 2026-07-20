@@ -186,10 +186,15 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
         case K::GitLog:
         case K::GitStatus:
         case K::WebSearch:
+        case K::RepoMap:
+        case K::SearchCode:
         case K::Todo:
             return {};
     }
-    return {};   // unreachable: switch is exhaustive over Kind
+    // No default: — switch is exhaustive over Kind, so a new tool Kind
+    // re-triggers -Wswitch here (a build error under -Werror) rather than
+    // silently falling through to "no required fields". DESIGN.md rule.
+    return {};   // unreachable
 }
 
 } // namespace agentty::app::detail
