@@ -558,6 +558,54 @@ static_assert(eager_streaming_is_justified(),
               "a pure (effect-less) tool other than `todo` opted into "
               "eager_input_streaming — review the rationale");
 
+// ── Scheduling-effects divergence proof ─────────────────────────────────
+// `sched_effects` answers the CONCURRENCY question and is allowed to
+// differ from `effects` (the PERMISSION question) for exactly one tool:
+// `task`. The divergence is load-bearing — it's what lets subagents fan
+// out concurrently instead of serialising behind a coarse Exec lock — but
+// until now nothing pinned it. A rename of `task`, a change to its
+// catalog effects, or a stray edit to `sched_effects` could silently
+// collapse the divergence (re-serialising every subagent) or spread it to
+// another tool (letting an Exec tool run unscheduled). These proofs make
+// any such drift a build error at the point it's introduced.
+
+// For every tool EXCEPT `task`, scheduling effects == permission effects.
+// No tool may quietly acquire a scheduling identity that differs from the
+// capabilities the policy gates on.
+consteval bool sched_effects_match_except_task() {
+    for (const auto& s : kCatalog) {
+        if (s.name == "task") continue;   // the one sanctioned divergence
+        if (sched_effects(s) != s.effects) return false;
+    }
+    return true;
+}
+static_assert(sched_effects_match_except_task(),
+              "a tool other than `task` has sched_effects != effects — "
+              "scheduling identity must match the permission capability set "
+              "for every tool but the sanctioned `task` divergence");
+
+// `task`'s divergence is EXACT, not incidental: it gates as Exec (a
+// subagent can run bash, so permission must be strict) but SCHEDULES as
+// {ReadFs, Net} (composable with reads, other tasks, and disjoint-path
+// writers). Pin both halves so neither can rot independently.
+consteval bool task_divergence_is_exact() {
+    auto* t = lookup("task");
+    if (!t) return false;
+    // Permission side: strict Exec, nothing weaker.
+    if (!t->effects.has(Effect::Exec)) return false;
+    // Scheduling side: exactly {ReadFs, Net} — Exec DROPPED so subagents
+    // don't serialise behind a coarse exclusive lock.
+    auto sched = sched_effects(*t);
+    if (sched.has(Effect::Exec))     return false;
+    if (!sched.has(Effect::ReadFs))  return false;
+    if (!sched.has(Effect::Net))     return false;
+    if (sched.has(Effect::WriteFs))  return false;
+    return true;
+}
+static_assert(task_divergence_is_exact(),
+              "`task` must gate as Exec but schedule as exactly {ReadFs, Net} — "
+              "the divergence that lets subagents run concurrently");
+
 } // namespace proofs
 
 } // namespace agentty::tools::spec
