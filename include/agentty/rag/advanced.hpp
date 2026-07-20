@@ -140,23 +140,43 @@ private:
 };
 
 // ── GraphRAG expansion stage ─────────────────────────────────────
-// Retrieval over the corpus's DOCUMENT GRAPH (nodes = docs, edges = markdown
-// links), built once and memo-cached per corpus shape. Candidates come from
-// three tiers around the top hits — outbound links (docs a hit vouches for),
-// BACKLINKS (docs that cite a hit: usually the overview that contextualizes
-// it), and the highest-PageRank hub of the top hits' shared community
-// (deterministic label propagation; the no-LLM analogue of a GraphRAG
-// community report). Ties break on PageRank authority. Appended below the
-// surviving pool as supporting material; adds at most `max_extra` chunks.
+// Retrieval over the corpus's DOCUMENT GRAPH: nodes = docs, edges = markdown
+// links PLUS entity co-occurrence (salient identifiers/terms shared by few
+// docs — deterministic tf-idf extraction, no LLM), built once and
+// memo-cached per corpus shape. Candidates come from four tiers around the
+// top hits — outbound links (docs a hit vouches for), BACKLINKS (docs that
+// cite a hit: usually the overview that contextualizes it), ENTITY
+// NEIGHBOURS (docs sharing the hit's rare entities — related even when the
+// author drew no link), and the highest-PageRank hub of the top hits'
+// shared community (deterministic label propagation). Ties break on
+// PageRank authority. Appended below the surviving pool as supporting
+// material; adds at most `max_extra` chunks.
+//
+// COMMUNITY SUMMARIES (full GraphRAG, opt-in): with `summary.model` set, a
+// 2-3 sentence community report is generated ONCE per community via the
+// local Ollama, persisted to .agentty/rag_graph_summaries.tsv, and attached
+// to the hub passage — so a corpus-level question is answered by a
+// pre-digested overview, not just a lead chunk. Any failure degrades to the
+// plain hub chunk.
+struct GraphSummaryConfig {
+    std::string   host = "127.0.0.1";
+    std::uint16_t port = 11434;
+    std::string   model;          // empty → summaries off (default)
+    double        timeout_s = 20.0;
+};
+
 class GraphExpandStage final : public RetrievalStage {
 public:
-    GraphExpandStage(const Corpus& corpus, std::size_t max_extra = 2)
-        : corpus_(&corpus), max_extra_(max_extra) {}
+    GraphExpandStage(const Corpus& corpus, std::size_t max_extra = 2,
+                     GraphSummaryConfig summary = {})
+        : corpus_(&corpus), max_extra_(max_extra),
+          summary_(std::move(summary)) {}
     [[nodiscard]] std::string_view name() const noexcept override { return "graph_expand"; }
     [[nodiscard]] Context process(Context ctx) const override;
 private:
-    const Corpus* corpus_;   // non-owning; outlives the stage (funnel-scoped)
-    std::size_t   max_extra_;
+    const Corpus*      corpus_;   // non-owning; outlives the stage (funnel-scoped)
+    std::size_t        max_extra_;
+    GraphSummaryConfig summary_;
 };
 
 } // namespace agentty::rag

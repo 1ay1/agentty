@@ -4,6 +4,9 @@
 // degradation as the rest of the funnel).
 
 #include "agentty/rag/advanced.hpp"
+#include "agentty/io/http.hpp"
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -574,16 +577,20 @@ std::string file_name_lower(std::string_view p) {
     return s;
 }
 
-// The document graph: one node per distinct corpus path, one directed edge
-// per resolved markdown link. Everything derived (PageRank, communities,
-// lead chunks) is computed at build time so process() only walks adjacency.
+// The document graph: one node per distinct corpus path; edges = resolved
+// markdown links PLUS entity co-occurrence. Everything derived (PageRank,
+// entities, communities, lead chunks) is computed at build time so
+// process() only walks adjacency.
 struct DocGraph {
-    std::vector<std::string>                       paths;   // node → path
-    std::vector<const Chunk*>                      lead;    // node → lead chunk
-    std::vector<std::vector<std::uint32_t>>        out, in; // adjacency
-    std::vector<double>                            rank;    // PageRank
-    std::vector<std::uint32_t>                     comm;    // community label
-    std::unordered_map<std::string, std::uint32_t> id_of;   // path → node
+    std::vector<std::string>                       paths;    // node → path
+    std::vector<const Chunk*>                      lead;     // node → lead chunk
+    std::vector<std::vector<std::uint32_t>>        out, in;  // link adjacency
+    std::vector<std::vector<std::uint32_t>>        ent_adj;  // entity edges (undirected)
+    std::vector<std::vector<std::string>>          ents;     // node → salient entities
+    std::vector<double>                            rank;     // PageRank (link graph)
+    std::vector<std::uint32_t>                     comm;     // community label
+    std::unordered_map<std::string, std::uint32_t> id_of;    // path → node
+    std::uint64_t                                  sig = 0;  // corpus signature
 };
 
 // Same order-sensitive structural fingerprint corpus.cpp uses for its HNSW
@@ -605,16 +612,20 @@ std::uint64_t graph_signature(const std::vector<Chunk>& chunks) noexcept {
     return h;
 }
 
-std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus) {
+std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus,
+                                                std::uint64_t sig) {
     auto g = std::make_shared<DocGraph>();
+    g->sig = sig;
     const auto& all = corpus.raw_chunks();
 
     // ── Nodes: one per distinct path; lead chunk = smallest line_start.
     // Outbound link targets are collected per doc as lowercased filenames
     // (corpus paths are root-relative, link targets doc-relative — the
-    // filename is the stable join key, as before).
+    // filename is the stable join key, as before). Doc-level term counts
+    // are accumulated in the same pass for the entity layer.
     std::vector<std::vector<std::string>> tgt_fnames;
     std::unordered_map<std::string, std::vector<std::uint32_t>> by_fname;
+    std::vector<std::unordered_map<std::string, int>> doc_tf;
     for (const auto& ch : all) {
         auto [it, fresh] = g->id_of.try_emplace(
             ch.path, static_cast<std::uint32_t>(g->paths.size()));
@@ -622,6 +633,7 @@ std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus) {
             g->paths.push_back(ch.path);
             g->lead.push_back(&ch);
             tgt_fnames.emplace_back();
+            doc_tf.emplace_back();
             by_fname[file_name_lower(ch.path)].push_back(it->second);
         }
         const std::uint32_t id = it->second;
@@ -632,13 +644,34 @@ std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus) {
             auto f = file_name_lower(t);
             if (!f.empty()) tgt_fnames[id].push_back(std::move(f));
         }
+        // Entity candidates: lowercase alnum/underscore runs ≥4 chars, not
+        // stopwords, not pure digits. Bounded per doc.
+        auto& tf = doc_tf[id];
+        std::string cur;
+        bool has_alpha = false;
+        auto flush = [&] {
+            if (cur.size() >= 4 && has_alpha && !is_stopword(cur)
+                && tf.size() < 4096)
+                ++tf[cur];
+            cur.clear();
+            has_alpha = false;
+        };
+        for (unsigned char c : ch.text) {
+            if (std::isalnum(c) || c == '_') {
+                if (std::isalpha(c)) has_alpha = true;
+                cur += static_cast<char>(std::tolower(c));
+            } else flush();
+        }
+        flush();
     }
     const std::size_t n = g->paths.size();
     g->out.resize(n);
     g->in.resize(n);
+    g->ent_adj.resize(n);
+    g->ents.resize(n);
 
-    // ── Edges: resolve target filenames to nodes. A filename claimed by
-    // more than one doc is AMBIGUOUS — skip it rather than guess (a wrong
+    // ── Link edges: resolve target filenames to nodes. A filename claimed
+    // by more than one doc is AMBIGUOUS — skip it rather than guess (a wrong
     // edge poisons PageRank and communities; a missing one just no-ops).
     for (std::uint32_t u = 0; u < n; ++u) {
         std::unordered_set<std::uint32_t> seen;
@@ -652,8 +685,63 @@ std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus) {
         }
     }
 
-    // ── PageRank (power iteration, damping 0.85, dangling mass spread
-    // uniformly). Deterministic; ~20 iterations is ample at doc-graph scale.
+    // ── Entity layer (the LLM-free half of GraphRAG's entity graph). A
+    // term is a SALIENT ENTITY of doc D when it's among D's top-8 terms by
+    // tf·idf AND is rare corpus-wide (df ≥ 2 so it can link, df ≤ max(3,
+    // n/4) so it discriminates). Docs sharing ≥2 salient entities get an
+    // entity edge — related even when the author drew no markdown link.
+    if (n >= 2) {
+        std::unordered_map<std::string, int> df;
+        for (std::uint32_t u = 0; u < n; ++u)
+            for (const auto& [t, f] : doc_tf[u]) ++df[t];
+        const int df_max = std::max(3, static_cast<int>(n / 4));
+        std::unordered_map<std::string, std::vector<std::uint32_t>> ent_docs;
+        for (std::uint32_t u = 0; u < n; ++u) {
+            std::vector<std::pair<double, std::string>> scored;
+            scored.reserve(doc_tf[u].size());
+            for (const auto& [t, f] : doc_tf[u]) {
+                const int d = df[t];
+                if (d < 2 || d > df_max) continue;
+                scored.emplace_back(
+                    f * std::log(static_cast<double>(n) / d), t);
+            }
+            // Deterministic top-8: score desc, then term asc.
+            std::sort(scored.begin(), scored.end(),
+                      [](const auto& a, const auto& b) {
+                          if (a.first != b.first) return a.first > b.first;
+                          return a.second < b.second;
+                      });
+            for (std::size_t i = 0; i < scored.size() && i < 8; ++i) {
+                g->ents[u].push_back(scored[i].second);
+                ent_docs[scored[i].second].push_back(u);
+            }
+        }
+        // Pairwise co-occurrence → edges. Entities claimed by >8 docs are
+        // too common to be discriminative (and quadratic) — skipped.
+        std::unordered_map<std::uint64_t, int> pair_count;
+        for (const auto& [t, ds] : ent_docs) {
+            if (ds.size() < 2 || ds.size() > 8) continue;
+            for (std::size_t i = 0; i < ds.size(); ++i)
+                for (std::size_t j = i + 1; j < ds.size(); ++j) {
+                    const std::uint64_t key =
+                        (static_cast<std::uint64_t>(ds[i]) << 32) | ds[j];
+                    ++pair_count[key];
+                }
+        }
+        for (const auto& [key, cnt] : pair_count) {
+            if (cnt < 2) continue;   // ≥2 shared entities — one may be noise
+            const auto a = static_cast<std::uint32_t>(key >> 32);
+            const auto b = static_cast<std::uint32_t>(key & 0xffffffffu);
+            g->ent_adj[a].push_back(b);
+            g->ent_adj[b].push_back(a);
+        }
+        for (auto& adj : g->ent_adj) std::sort(adj.begin(), adj.end());
+    }
+
+    // ── PageRank over the LINK graph only (authority = being cited by an
+    // author; entity edges are symmetric similarity, not endorsement).
+    // Power iteration, damping 0.85, dangling mass spread uniformly.
+    // Deterministic; ~20 iterations is ample at doc-graph scale.
     g->rank.assign(n, n ? 1.0 / static_cast<double>(n) : 0.0);
     if (n >= 2) {
         const double d = 0.85;
@@ -681,16 +769,19 @@ std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus) {
     }
 
     // ── Communities: asynchronous label propagation over the UNDIRECTED
-    // graph, fixed ascending node order + smallest-label tiebreak — fully
-    // deterministic. Converges in a handful of rounds at this scale.
+    // union of link + entity edges (GraphRAG's communities live on the
+    // entity graph; ours span both evidence kinds), fixed ascending node
+    // order + smallest-label tiebreak — fully deterministic. Converges in a
+    // handful of rounds at this scale.
     g->comm.resize(n);
     for (std::uint32_t u = 0; u < n; ++u) g->comm[u] = u;
     for (int iter = 0; iter < 8; ++iter) {
         bool changed = false;
         for (std::uint32_t u = 0; u < n; ++u) {
             std::unordered_map<std::uint32_t, int> freq;
-            for (std::uint32_t v : g->out[u]) ++freq[g->comm[v]];
-            for (std::uint32_t v : g->in[u])  ++freq[g->comm[v]];
+            for (std::uint32_t v : g->out[u])     ++freq[g->comm[v]];
+            for (std::uint32_t v : g->in[u])      ++freq[g->comm[v]];
+            for (std::uint32_t v : g->ent_adj[u]) ++freq[g->comm[v]];
             if (freq.empty()) continue;
             std::uint32_t best = g->comm[u];
             int best_n = 0;
@@ -729,12 +820,224 @@ std::shared_ptr<const DocGraph> doc_graph_for(const Corpus& corpus) {
     std::lock_guard<std::mutex> lk(m.mu);
     if (m.g && m.corpus == &corpus && m.store == store && m.sig == sig)
         return m.g;
-    auto g = build_doc_graph(corpus);
+    auto g = build_doc_graph(corpus, sig);
     m.corpus = &corpus;
     m.store  = store;
     m.sig    = sig;
     m.g      = g;
     return g;
+}
+
+// ── Community summaries (full GraphRAG, opt-in) ───────────────────────
+// One 2-3 sentence LLM report per community, generated at most once per
+// (corpus signature, community member set) and persisted to
+// .agentty/rag_graph_summaries.tsv so the cost is paid once per corpus
+// shape — across sessions. TSV: key \t summary (summary
+// newline-escaped). Any failure → empty string (caller degrades to the
+// plain hub chunk); a failure is NOT cached so a later session with the
+// backend up can fill it in.
+
+fs::path summaries_path() {
+    if (const char* p = std::getenv("AGENTTY_RAG_GRAPH_SUMMARIES_PATH"); p && p[0])
+        return fs::path{p};
+    std::error_code ec;
+    auto cwd = fs::current_path(ec);
+    if (ec) return {};
+    return cwd / ".agentty" / "rag_graph_summaries.tsv";
+}
+
+struct SummaryStore {
+    std::mutex mu;
+    bool loaded = false;
+    std::unordered_map<std::string, std::string> cache;   // key → summary
+    static constexpr std::size_t kMax = 512;
+};
+
+SummaryStore& summary_store() { static SummaryStore s; return s; }
+
+std::string escape_nl(std::string s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\n') out += "\\n";
+        else if (c == '\t') out += ' ';
+        else if (c != '\r') out += c;
+    }
+    return out;
+}
+
+std::string unescape_nl(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == 'n') {
+            out += '\n';
+            ++i;
+        } else out += s[i];
+    }
+    return out;
+}
+
+void summaries_load_locked(SummaryStore& s) {
+    if (s.loaded) return;
+    s.loaded = true;
+    auto p = summaries_path();
+    if (p.empty()) return;
+    std::ifstream in(p);
+    if (!in) return;
+    std::string line;
+    while (std::getline(in, line) && s.cache.size() < SummaryStore::kMax) {
+        auto t = line.find('\t');
+        if (t == std::string::npos || t == 0) continue;
+        s.cache.emplace(line.substr(0, t), unescape_nl(
+            std::string_view{line}.substr(t + 1)));
+    }
+}
+
+void summaries_flush_locked(SummaryStore& s) {
+    auto p = summaries_path();
+    if (p.empty()) return;
+    std::error_code ec;
+    fs::create_directories(p.parent_path(), ec);
+    auto tmp = p;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out) return;
+        for (const auto& [k, v] : s.cache)
+            out << k << '\t' << escape_nl(v) << '\n';
+    }
+    fs::rename(tmp, p, ec);
+    if (ec) fs::remove(tmp, ec);
+}
+
+// One /api/generate call, temp 0. Returns "" on any failure. Mirrors the
+// neural reranker's transport (same endpoint, same degradation contract).
+std::string generate_summary(const GraphSummaryConfig& cfg,
+                             const std::string& prompt) noexcept {
+    try {
+        nlohmann::json body;
+        body["model"]   = cfg.model;
+        body["prompt"]  = prompt;
+        body["stream"]  = false;
+        body["options"] = {{"temperature", 0.0}, {"num_predict", 160}};
+
+        http::Request req;
+        req.method         = http::HttpMethod::Post;
+        req.host           = cfg.host;
+        req.port           = cfg.port;
+        req.path           = "/api/generate";
+        req.plaintext      = true;
+        req.headers        = {{"content-type", "application/json"}};
+        req.body           = body.dump();
+        req.max_body_bytes = 256 * 1024;
+
+        http::Timeouts tos;
+        tos.connect = std::chrono::milliseconds(3'000);
+        tos.total   = std::chrono::milliseconds(
+            static_cast<long long>(cfg.timeout_s * 1000.0));
+
+        auto resp = http::default_client().send(req, tos);
+        if (!resp || resp->status != 200) return {};
+        auto j = nlohmann::json::parse(resp->body, nullptr, false);
+        if (j.is_discarded() || !j.contains("response")) return {};
+        std::string out = j["response"].get<std::string>();
+        // Trim + bound: a summary is a paragraph, not a page.
+        while (!out.empty() && std::isspace(static_cast<unsigned char>(out.front())))
+            out.erase(out.begin());
+        while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back())))
+            out.pop_back();
+        if (out.size() > 900) out.resize(900);
+        return out;
+    } catch (...) { return {}; }
+}
+
+// Cache key: corpus signature + sorted community member paths — stable
+// across sessions for the same corpus shape, invalidated by any doc change.
+std::string community_key(std::uint64_t sig,
+                          const std::vector<std::uint32_t>& members,
+                          const DocGraph& g) {
+    std::uint64_t h = sig;
+    auto mix = [&h](const void* p, std::size_t n) noexcept {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; }
+    };
+    for (std::uint32_t v : members) mix(g.paths[v].data(), g.paths[v].size());
+    char buf[20];
+    std::snprintf(buf, sizeof buf, "%016llx",
+                  static_cast<unsigned long long>(h));
+    return buf;
+}
+
+// Fetch-or-generate the community report for `label`. Members sorted for
+// determinism; prompt carries each member doc's lead text + the community's
+// shared entities. Cached hit → zero network.
+std::string community_summary(const GraphSummaryConfig& cfg,
+                              const DocGraph& g, std::uint64_t sig,
+                              std::uint32_t label) {
+    if (cfg.model.empty()) return {};
+    try {
+        std::vector<std::uint32_t> members;
+        for (std::uint32_t v = 0;
+             v < static_cast<std::uint32_t>(g.paths.size()); ++v)
+            if (g.comm[v] == label) members.push_back(v);
+        if (members.size() < 2) return {};   // singleton: the doc IS the report
+        std::sort(members.begin(), members.end(),
+                  [&](std::uint32_t a, std::uint32_t b) {
+                      return g.paths[a] < g.paths[b];
+                  });
+
+        const std::string key = community_key(sig, members, g);
+        auto& s = summary_store();
+        std::lock_guard<std::mutex> lk(s.mu);
+        summaries_load_locked(s);
+        if (auto it = s.cache.find(key); it != s.cache.end()) return it->second;
+        if (s.cache.size() >= SummaryStore::kMax) return {};
+
+        // Build the report prompt: shared entities + per-doc lead excerpts.
+        std::string prompt =
+            "These documents form one topic cluster in a documentation set. "
+            "Write a 2-3 sentence overview of what this cluster covers as a "
+            "whole — the shared subject, the main components, and how the "
+            "documents relate. Plain prose, no preamble, no list.\n\n";
+        {
+            std::unordered_map<std::string, int> ent_votes;
+            for (std::uint32_t v : members)
+                for (const auto& e : g.ents[v]) ++ent_votes[e];
+            std::vector<std::pair<int, std::string>> top;
+            for (auto& [e, k] : ent_votes)
+                if (k >= 2) top.emplace_back(k, e);
+            std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+                if (a.first != b.first) return a.first > b.first;
+                return a.second < b.second;
+            });
+            if (!top.empty()) {
+                prompt += "Recurring terms:";
+                for (std::size_t i = 0; i < top.size() && i < 10; ++i) {
+                    prompt += ' ';
+                    prompt += top[i].second;
+                }
+                prompt += "\n\n";
+            }
+        }
+        std::size_t used = 0;
+        for (std::uint32_t v : members) {
+            if (used >= 8) break;   // bound the prompt on huge communities
+            const Chunk* lead = g.lead[v];
+            if (!lead) continue;
+            prompt += "### " + g.paths[v] + "\n";
+            std::string_view t = lead->text;
+            prompt += std::string{t.substr(0, std::min<std::size_t>(t.size(), 500))};
+            prompt += "\n\n";
+            ++used;
+        }
+
+        std::string summary = generate_summary(cfg, prompt);
+        if (summary.empty()) return {};   // failure NOT cached — retry later
+        s.cache.emplace(key, summary);
+        summaries_flush_locked(s);
+        return summary;
+    } catch (...) { return {}; }
 }
 
 } // namespace
@@ -764,9 +1067,11 @@ Context GraphExpandStage::process(Context ctx) const {
         }
         if (tops.empty()) return ctx;
 
-        // Candidates in tiers: 0 = cited BY a hit (outbound — the hit vouches
-        // for it), 1 = CITES a hit (backlink — usually the overview that
-        // contextualizes it), 2 = community hub (corpus-topology authority).
+        // Candidates in tiers: 0 = cited BY a hit (outbound — the hit
+        // vouches for it), 1 = CITES a hit (backlink — usually the overview
+        // that contextualizes it), 2 = ENTITY NEIGHBOUR (shares ≥2 salient
+        // entities with a hit — related even without an authored link),
+        // 3 = community hub (corpus-topology authority).
         struct Cand { std::uint32_t node; int tier; };
         std::vector<Cand> cands;
         std::unordered_set<std::uint32_t> cseen;
@@ -779,10 +1084,17 @@ Context GraphExpandStage::process(Context ctx) const {
             for (std::uint32_t v : g->out[u]) push(v, 0);
         for (std::uint32_t u : tops)
             for (std::uint32_t v : g->in[u]) push(v, 1);
+        for (std::uint32_t u : tops)
+            for (std::uint32_t v : g->ent_adj[u]) push(v, 2);
 
         // Community hub: only when the top hits AGREE on a community (≥2 in
         // the same one, or a lone top doc) — its highest-PageRank member is
-        // the closest thing to a GraphRAG community report without an LLM.
+        // the corpus-topology authority for the neighbourhood. With a
+        // summary model configured (opt-in), the hub carries the cached
+        // community REPORT — full GraphRAG global-ish search.
+        std::uint32_t hub_node = 0;
+        std::uint32_t hub_label = 0;
+        bool have_hub = false;
         {
             std::unordered_map<std::uint32_t, int> votes;
             for (std::uint32_t u : tops) ++votes[g->comm[u]];
@@ -799,7 +1111,12 @@ Context GraphExpandStage::process(Context ctx) const {
                         best = g->rank[v];
                         hub  = v;
                     }
-                if (best > 0.0) push(hub, 2);
+                if (best > 0.0) {
+                    push(hub, 3);
+                    hub_node  = hub;
+                    hub_label = label;
+                    have_hub  = true;
+                }
             }
         }
         if (cands.empty()) return ctx;
@@ -824,6 +1141,17 @@ Context GraphExpandStage::process(Context ctx) const {
             // Below the surviving pool: supporting material, never above a
             // direct hit. Decay per addition keeps insertion order stable.
             c.hit.score = floor_score * 0.9 - 1e-6 * static_cast<double>(added);
+            // OPT-IN community report: the hub passage carries the cached
+            // 2-3 sentence cluster overview instead of its raw lead chunk
+            // (via `compressed` — the pipeline's "text to show" slot).
+            // Cache miss → ONE bounded LLM call, persisted; failure → the
+            // plain lead chunk. Deterministic given the cache.
+            if (have_hub && cand.node == hub_node && cand.tier == 3) {
+                std::string report =
+                    community_summary(summary_, *g, g->sig, hub_label);
+                if (!report.empty())
+                    c.compressed = "[community overview] " + std::move(report);
+            }
             ctx.chunks.push_back(std::move(c));
             ++added;
         }

@@ -628,14 +628,17 @@ private:
         rag::Pipeline narrow;
         narrow.add(std::make_shared<rag::MMRStage>(k, /*lambda=*/0.75))
               .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
-        // GRAPHRAG-LITE (default-on, deterministic, in-memory): follow the
-        // top hits' outbound markdown links one hop and fold the linked
-        // documents' lead chunks in as supporting material — the author-
-        // curated relevance graph nobody else uses. Runs before parent
+        // GRAPHRAG (default-on, deterministic, in-memory): expand around the
+        // top hits over the memo-cached document graph — outbound links,
+        // backlinks, entity neighbours, community hub — the author-curated
+        // + entity-inferred relevance graph nobody else uses. With
+        // AGENTTY_RAG_GRAPH_SUMMARY=1 (opt-in LLM), the hub carries a cached
+        // per-community report — full GraphRAG. Runs before parent
         // expansion so graph additions get stitched into context too.
         if (have_docs && graph_expand_enabled())
             narrow.add(std::make_shared<rag::GraphExpandStage>(
-                docs_corpus_, /*max_extra=*/2));
+                docs_corpus_, /*max_extra=*/2,
+                graph_summary_config_from_env(embed)));
         // PARENT-DOCUMENT (small-to-big): stitch each surviving small chunk
         // back into its surrounding siblings so the model reads it IN CONTEXT.
         // Runs LAST so it wraps the compressed span, not the raw body. Pure
@@ -741,6 +744,27 @@ private:
     static bool multihop_enabled()         { return truthy_default_on("AGENTTY_RAG_MULTIHOP"); }
     static bool late_interaction_enabled() { return truthy_default_on("AGENTTY_RAG_LATE"); }
     static bool graph_expand_enabled()     { return truthy_default_on("AGENTTY_RAG_GRAPH"); }
+
+    // Community summaries (full GraphRAG): OPT-IN — one bounded LLM call per
+    // community per corpus shape, persisted to .agentty/rag_graph_summaries.tsv.
+    static bool graph_summary_enabled() {
+        const char* v = std::getenv("AGENTTY_RAG_GRAPH_SUMMARY");
+        if (!v || v[0] == '\0') return false;
+        std::string s{v};
+        return s != "0" && s != "false" && s != "FALSE" && s != "False";
+    }
+    static rag::GraphSummaryConfig
+    graph_summary_config_from_env(const rag::EmbedConfig& embed) {
+        rag::GraphSummaryConfig cfg;   // model empty → summaries off
+        if (!graph_summary_enabled()) return cfg;
+        cfg.host = embed.host;
+        cfg.port = embed.port;
+        if (const char* m = std::getenv("AGENTTY_RAG_GRAPH_SUMMARY_MODEL"); m && m[0])
+            cfg.model = m;
+        else
+            cfg.model = "llama3.2";
+        return cfg;
+    }
 
     // Neural (cross-encoder-style) rerank via a local Ollama generative
     // model. OPT-IN: one LLM call per candidate chunk.
