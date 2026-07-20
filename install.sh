@@ -17,6 +17,12 @@
 # (GCC 14+ / Clang 18+), CMake 3.28+, git, plus libssl-dev + libnghttp2-dev.
 # The installer also auto-falls-back to a source build if the downloaded
 # binary won't run on this system.
+#
+# Source builds default to -j2 (low RAM/CPU footprint — safe on Termux/phones
+# where each template-heavy TU peaks near ~1.5 GB). Override with
+# AGENTTY_BUILD_JOBS, e.g.
+#   AGENTTY_BUILD_JOBS=8 curl -fsSL .../install.sh | sh -s -- --build   # faster, more cores
+#   AGENTTY_BUILD_JOBS=1 curl -fsSL .../install.sh | sh -s -- --build   # RAM-starved
 
 set -eu
 
@@ -76,7 +82,11 @@ build_from_source() {
         || err "cmake configure failed - install a C++26 toolchain + libssl-dev + libnghttp2-dev"
 
     info "compiling (this can take a few minutes)"
-    _bfs_jobs=$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) )
+    # Default to 2 parallel jobs, not nproc: this tree is template-heavy and
+    # each TU peaks at ~1-1.5 GB, so -j$(nproc) OOM-kills phones (Termux) and
+    # small VMs. 2 is a safe low-footprint default; override with e.g.
+    #   AGENTTY_BUILD_JOBS=8 ...   (more cores)  or  AGENTTY_BUILD_JOBS=1 (RAM-starved)
+    _bfs_jobs="${AGENTTY_BUILD_JOBS:-2}"
     cmake --build "$_bfs_src/build" -j"$_bfs_jobs" || err "build failed"
 
     _bfs_bin="$_bfs_src/build/agentty"
@@ -117,7 +127,7 @@ while [ $# -gt 0 ]; do
         --prefix)  PREFIX="$2";  shift 2 ;;
         --build)   BUILD=1;      shift 1 ;;
         -h|--help)
-            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) err "unknown arg: $1" ;;
     esac
