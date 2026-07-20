@@ -9,11 +9,11 @@ Track status here as each is submitted / merged.
 
 | Target | Type | Status | URL |
 |---|---|---|---|
-| awesome-cli-coding-agents | Awesome list (PR) | TODO | https://github.com/bradAGI/awesome-cli-coding-agents |
-| Terminal Trove | Directory (submit form) | TODO | https://terminaltrove.com/submit/ |
-| AlternativeTo | Directory (submit form) | TODO | https://alternativeto.net/manage/suggest-software/ |
-| awesome-claude / awesome-ai-coding | Awesome list (PR) | TODO | search GitHub `awesome claude code` |
-| awesome-tui / awesome-cli-apps | Awesome list (PR) | TODO | https://github.com/toolleeo/awesome-cli-apps |
+| awesome-cli-coding-agents | Awesome list (PR) | **PR open #212** | https://github.com/bradAGI/awesome-cli-coding-agents/pull/212 |
+| awesome-ai-coding-tools | Awesome list (PR) | **PR open #558** | https://github.com/ai-for-developers/awesome-ai-coding-tools/pull/558 |
+| awesome-cli-apps (agarrharr, 20k★) | Awesome list (PR) | **PR open #1245** | https://github.com/agarrharr/awesome-cli-apps/pull/1245 |
+| Terminal Trove | Directory (submit form) | TODO (web form) | https://terminaltrove.com/submit/ |
+| AlternativeTo | Directory (submit form) | TODO (web form) | https://alternativeto.net/manage/suggest-software/ |
 | Show HN | Post | TODO | https://news.ycombinator.com/submit |
 
 ---
