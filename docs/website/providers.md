@@ -6,27 +6,21 @@ nav_order: 50
 slug: providers
 ---
 
-agentty ships with Claude as the default, but it speaks to any OpenAI-compatible backend. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model).
+agentty is **bring-your-own-model**: it speaks to any OpenAI-compatible backend, plus Anthropic and local Ollama. Pick one with `--provider`, or switch live mid-thread with `^P` (provider) and `^/` (model).
 
-## The default: Claude
+## Pick a provider
 
-With no flags, agentty talks to Anthropic using your [Claude Pro/Max OAuth](/docs/authentication) subscription or an `sk-ant-…` API key. Nothing to configure.
-
-```bash
-agentty                        # Claude, OAuth or API key
-agentty -m claude-opus-4-5     # pick a specific Claude model
-```
-
-## Switching providers
-
-`--provider` selects the backend. It is persisted between runs just like `-m`, so you only pass it when you want to change it.
+Run agentty with an API key for any hosted provider, or point it at a local Ollama model that needs no key at all. Anthropic works with an `sk-ant-…` key or your [Claude Pro/Max OAuth](/docs/authentication).
 
 ```bash
 agentty --provider openai -m gpt-4o        # GPT
 agentty --provider groq -m llama-3.3-70b   # Groq
 agentty --provider ollama -m qwen2.5-coder # local model, no key
 agentty --provider openrouter              # any model via OpenRouter
+agentty -m claude-opus-4-5                 # Claude (API key or Pro/Max OAuth)
 ```
+
+`--provider` and `-m` are persisted between runs, so you only pass them when you want to change the backend.
 
 Inside a thread, press `^P` to switch provider and `^/` to switch model — no restart, no re-auth. Both are also reachable from the command palette (`^K`). The next turn uses the new backend.
 
@@ -34,7 +28,7 @@ Inside a thread, press `^P` to switch provider and `^/` to switch model — no r
 
 | ID | Backend | Key |
 |---|---|---|
-| `anthropic` | Claude — OAuth (Pro/Max) or API key. **The default.** | `agentty login` |
+| `anthropic` | Claude — API key or Pro/Max OAuth | `agentty login` |
 | `openai` | GPT / o-series on `api.openai.com` | `OPENAI_API_KEY` |
 | `groq` | Llama / Mixtral on Groq LPUs — very fast | `GROQ_API_KEY` |
 | `openrouter` | Any model via `openrouter.ai` | `OPENROUTER_API_KEY` |
@@ -65,5 +59,5 @@ agentty --provider ollama -m qwen2.5-coder
 ```
 
 :::note
-`--provider` and `-m` persist between sessions. Run `agentty --provider anthropic` to switch back to Claude, or just press `^P` in-app.
+`--provider` and `-m` persist between sessions. Run `agentty --provider anthropic` to switch to Claude, or just press `^P` in-app.
 :::

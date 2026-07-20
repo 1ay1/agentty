@@ -52,7 +52,7 @@ Form at https://terminaltrove.com/submit/. Fields:
 - **Homepage:** https://agentty.org
 - **Repo:** https://github.com/1ay1/agentty
 - **Short description:** A blazing-fast native C++26 coding agent in your terminal — a single static binary, sub-ms cold start, sandboxed by default, any model.
-- **Long description:** agentty is a drop-in claude-code alternative written in C++26. One ~13.6 MB static binary with no runtime dependencies (no Node, Python, or Electron). Signs in with your Claude Pro/Max subscription, or points at OpenAI, Groq, OpenRouter, Together, Cerebras, or a local Ollama model. Every shell call is sandboxed by default (bwrap / sandbox-exec). Runs inside Zed over ACP, and can drive an agent on an air-gapped host with a single SSH command. Linux, macOS, Windows, and Termux/Android. MIT.
+- **Long description:** agentty is a drop-in claude-code alternative written in C++26. One ~13.6 MB static binary with no runtime dependencies (no Node, Python, or Electron). Bring your own model — point it at OpenAI, Groq, OpenRouter, Together, Cerebras, an Anthropic API key, or a local Ollama model, or sign in with your Claude Pro/Max OAuth. Every shell call is sandboxed by default (bwrap / sandbox-exec). Runs inside Zed over ACP, and can drive an agent on an air-gapped host with a single SSH command. Linux, macOS, Windows, and Termux/Android. MIT.
 
 ---
 

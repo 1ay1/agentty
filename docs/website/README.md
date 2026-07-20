@@ -38,7 +38,7 @@ blockquote, hr) **plus** these site extensions:
 - **Callouts:** a fenced block with `:::`
   ```
   :::tip
-  OAuth against your Pro/Max subscription is the main path.
+  Bring your own model: an API key, a local Ollama model, or Claude OAuth.
   :::
   ```
   Types: `:::note`, `:::tip`, `:::warn`. Optional label: `:::warn Heads up`.

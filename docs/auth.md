@@ -1,6 +1,6 @@
 # Authentication
 
-agentty supports two authentication methods for the Claude API: **OAuth** (Claude.ai login) and **API key**. OAuth reuses Claude Code's OAuth client, so users with a Pro/Max subscription can authenticate without separate API billing.
+agentty is bring-your-own-model. For **any provider** (OpenAI, Groq, OpenRouter, Together, Cerebras, or a local Ollama model) it reads an API key from the provider's env var or the in-app modal. For the **Anthropic** backend specifically it supports two methods: an **API key** and **OAuth** (Claude.ai login). OAuth reuses Claude Code's OAuth client, so users with a Pro/Max subscription can authenticate without separate API billing. The in-app modal and `agentty login` both present the API-key path first.
 
 ## Quick Start
 

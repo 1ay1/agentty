@@ -21,11 +21,11 @@ agentty
 
 First launch opens an auth modal. Pick one:
 
-- **OAuth (Claude Pro/Max)** — opens your browser; the callback writes the token to `~/.config/agentty/credentials.json` (mode `0600`).
-- **API key** — paste an `sk-ant-…` token, saved to the same file.
+- **API key** — paste an Anthropic `sk-ant-…` token, or any provider's key. Saved to `~/.config/agentty/credentials.json` (mode `0600`). Unambiguously in-bounds, and works headless/over SSH.
+- **OAuth (Claude Pro/Max)** — opens your browser to sign in with your existing subscription; the callback writes the token to the same file.
 
 :::tip
-OAuth against your existing Pro/Max subscription is the main path — no extra billing, same account you already pay for. See [Authentication](/docs/authentication).
+No Anthropic account? Run a **local Ollama model** with no key at all — press [[Esc]], then [[Ctrl+P]] and pick `ollama`. See [Authentication](/docs/authentication).
 :::
 
 :::note

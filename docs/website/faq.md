@@ -20,7 +20,7 @@ We're not affiliated with Anthropic and can't speak for their enforcement, and t
 
 ## Is it really a drop-in for claude-code?
 
-It targets the same workflow — a coding agent in your terminal with the same Claude auth — as a single native binary. Claude is the default, but agentty also runs against OpenAI, Groq, OpenRouter, Together, Cerebras, and local Ollama models. See the full [agentty vs Claude Code](/docs/vs-claude-code) comparison and [Providers & Models](/docs/providers).
+It targets the same workflow — a coding agent in your terminal — as a single native binary, and it can use the same Claude auth. But it's bring-your-own-model: alongside Claude it runs against OpenAI, Groq, OpenRouter, Together, Cerebras, and local Ollama models. See the full [agentty vs Claude Code](/docs/vs-claude-code) comparison and [Providers & Models](/docs/providers).
 
 ## Can I use models other than Claude?
 
@@ -32,11 +32,11 @@ No. agentty is a single static C++26 binary. No Node runtime, no `npm install`, 
 
 ## What platforms are supported?
 
-Linux, macOS, and Windows — all built and tested daily. Prebuilt binaries ship for Linux (x86_64, aarch64) and Windows (x86_64); macOS builds from source in seconds.
+Linux, macOS, and Windows — all built and tested daily. Prebuilt binaries ship for Linux (x86_64, aarch64) and Windows (x86_64); macOS builds from source in seconds. It also builds natively on **Termux/Android** (no root, no proot) — see [Installation](/docs/installation#termux--android).
 
 ## How is it sandboxed?
 
-Every shell/build call runs in `bwrap` (Linux) or `sandbox-exec` (macOS). The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows runs unsandboxed for now.
+Every shell/build call runs in `bwrap` (Linux) or `sandbox-exec` (macOS). The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows and unrooted Android/Termux run unsandboxed (no user-namespace backend available there); agentty detects this and prints `sandbox: unavailable, running unsandboxed`.
 
 ## Can I run it on a machine with no internet?
 

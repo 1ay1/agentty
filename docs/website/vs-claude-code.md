@@ -6,7 +6,7 @@ nav_order: 15
 slug: vs-claude-code
 ---
 
-**Short version:** agentty is a drop-in [claude-code](https://github.com/anthropics/claude-code) alternative that targets the *same workflow* — a coding agent in your terminal, signed in with your existing Claude Pro/Max subscription — but ships as a single native **C++26** binary instead of a Node.js app, starts in **under a millisecond**, sandboxes every shell call by default, and runs against **any model** (Claude, GPT, Groq, OpenRouter, Together, Cerebras, or a local Ollama model) rather than Claude only.
+**Short version:** agentty is a drop-in [claude-code](https://github.com/anthropics/claude-code) alternative that targets the *same workflow* — a coding agent in your terminal — but ships as a single native **C++26** binary instead of a Node.js app, starts in **under a millisecond**, sandboxes every shell call by default, and is **bring-your-own-model**: run it with an API key, a local Ollama model, or your existing Claude Pro/Max OAuth. It works with **any model** (Claude, GPT, Groq, OpenRouter, Together, Cerebras, or local Ollama), not Claude only.
 
 If you already like Claude Code's workflow but want it faster, dependency-free, model-agnostic, and sandboxed, agentty is built for you.
 
@@ -33,9 +33,9 @@ If you already like Claude Code's workflow but want it faster, dependency-free, 
 
 Claude Code is distributed as an npm package and boots a Node.js runtime on every invocation. agentty is a single statically-linked C++26 executable ({{sizeMB}}) — `curl | sh` and you have one file with **no runtime dependencies**. Cold start is under a millisecond, and the TUI never pauses for garbage collection mid-stream. No version drift between machines, no `npm install`, no `node_modules`.
 
-### Any model, not just Claude
+### Any model, bring your own key
 
-Claude is agentty's default and OAuth works with your existing Pro/Max plan — but you can point it at **OpenAI, Groq, OpenRouter, Together, Cerebras, or a local Ollama model** with `--provider`, and switch backends live in-app with `^P`. See [Providers & Models](/docs/providers). If you want Claude Code's ergonomics with a local, zero-API-cost model, that's a one-flag change.
+agentty is model-agnostic — run it with an API key for **OpenAI, Groq, OpenRouter, Together, Cerebras, or Anthropic**, a fully local **Ollama** model (no key, no cloud), or your existing Claude Pro/Max OAuth. Switch backends live in-app with `^P`, or pass `--provider`. See [Providers & Models](/docs/providers). If you want Claude Code's ergonomics with a local, zero-API-cost model, that's a one-flag change.
 
 ### Sandboxed by default, not as an afterthought
 
@@ -72,4 +72,4 @@ cd your-project
 agentty
 ```
 
-First launch opens auth — sign in with your Claude Pro/Max subscription or paste an API key, and you're in. See the [Quick Start](/docs/quick-start) or the full [Installation guide](/docs/installation).
+First launch opens auth — paste an API key (any provider), use a local Ollama model with no key, or sign in with your Claude Pro/Max subscription. See the [Quick Start](/docs/quick-start) or the full [Installation guide](/docs/installation).

@@ -24,7 +24,7 @@ cd your-project
 agentty
 ```
 
-First launch opens auth — OAuth (uses your Claude Pro/Max subscription) or paste an API key. Once you're in, a first-run welcome card suggests a few things to try; just type and hit Enter.
+First launch opens auth — **paste an API key** (Anthropic `sk-ant-…`, or any provider's key) or use a local Ollama model that needs no key at all. You can also sign in with your Claude Pro/Max OAuth if you prefer. Once you're in, a first-run welcome card suggests a few things to try; just type and hit Enter.
 
 ## Features
 
@@ -60,11 +60,12 @@ Agent Skills + remember/forget memory, plus a fully **local RAG** engine — hyb
 ## Providers
 
 ```bash
-agentty                                    # Claude (default)
+agentty                                    # bring your own key/model
 agentty --provider openai -m gpt-4o        # GPT
 agentty --provider groq -m llama-3.3-70b   # Groq
-agentty --provider ollama -m qwen2.5-coder # Local model
-agentty --provider openrouter              # Any model via OpenRouter
+agentty --provider ollama -m qwen2.5-coder # local model, no key
+agentty --provider openrouter              # any model via OpenRouter
+agentty -m claude-opus-4-5                 # Claude (API key or Pro/Max OAuth)
 ```
 
 `--provider` persists. Switch live in-app with `^P`.
@@ -198,6 +199,20 @@ scoop bucket add 1ay1 https://github.com/1ay1/scoop-bucket; scoop install agentt
 winget install agentty.agentty
 ```
 
+**Termux / Android** (no root, no proot)
+
+agentty builds natively against Termux's Bionic/libc++ toolchain. The install
+script detects Termux and installs into `$PREFIX/bin` (on your PATH):
+
+```bash
+pkg install git cmake clang openssl libnghttp2
+curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build
+```
+
+Shell/build tools run **unsandboxed** on unrooted Android (Bubblewrap needs
+user namespaces Android doesn't grant) — everything else works. See
+[`packaging/termux/`](packaging/termux/) for the `pkg install agentty` recipe.
+
 **Anywhere (no package manager)**
 
 ```bash
@@ -219,7 +234,7 @@ git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
 
-All binaries are a single fully-static executable (x86_64 + aarch64 on Linux, Intel + Apple Silicon on macOS). Packaging details: [`packaging/README.md`](packaging/README.md).
+All binaries are a single fully-static executable (x86_64 + aarch64 on Linux, Intel + Apple Silicon on macOS; Termux/Android builds from source). Packaging details: [`packaging/README.md`](packaging/README.md).
 
 </details>
 

@@ -14,8 +14,8 @@ ShortDescription: Blazing-fast Claude in your terminal — a C++26 alternative t
 Description: >-
   agentty is a native C++26 terminal coding agent and a drop-in alternative to
   claude-code. A single static binary with sub-millisecond cold start, sandboxed
-  by default, and one-command SSH air-gap. No Node, Python, or Electron. Signs in
-  with your Claude Pro/Max subscription or an ANTHROPIC_API_KEY.
+  by default, and one-command SSH air-gap. No Node, Python, or Electron. Bring
+  your own model: any provider API key, a local Ollama model, or Claude Pro/Max OAuth.
 Moniker: agentty
 Tags:
   - ai
