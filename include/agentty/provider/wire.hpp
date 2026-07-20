@@ -31,12 +31,31 @@
 // of a live stream, so the per-line dispatch must inline. No virtuals, no
 // std::function on the hot path.
 
+#include <concepts>
 #include <cstddef>
 #include <cstring>
 #include <string>
 #include <string_view>
 
 namespace agentty::provider::wire {
+
+// ── Callback contracts ────────────────────────────────────────────────────
+// The framers are templated on their dispatch callback (it must inline on the
+// hot path — no std::function). These concepts pin the EXACT call shape each
+// framer expects, so passing a wrong-arity / wrong-type callable is a clean
+// one-line concept-mismatch at the call site instead of a deep
+// template-instantiation error inside feed(). The required signature that used
+// to live only in a comment is now checked by the compiler.
+//
+//   LineSink   — invoked as on_line(std::string_view)
+//   EventSink  — invoked as on_event(std::string_view name,
+//                                     std::string_view data, char* padded)
+template <class F>
+concept LineSink = std::invocable<F&, std::string_view>;
+
+template <class F>
+concept EventSink =
+    std::invocable<F&, std::string_view, std::string_view, char*>;
 
 // Trailing readable bytes SseFramer keeps live past the end of every
 // dispatched `data:` payload. Set equal to simdjson::SIMDJSON_PADDING (64) so
@@ -82,7 +101,7 @@ public:
     // invoked as `on_line(std::string_view)`; the view is valid only for the
     // duration of the call (it points into the internal buffer, which may be
     // compacted afterward).
-    template <class OnLine>
+    template <LineSink OnLine>
     void feed(const char* data, std::size_t len, OnLine&& on_line) {
         buf_.append(data, len);
         std::string_view buf{buf_};
@@ -147,7 +166,7 @@ public:
     // trailing bytes (for an in-place simdjson ondemand parse with no
     // memcpy). `padded_data` is nullptr only for the degenerate empty payload.
     // All are valid only for the duration of the call.
-    template <class OnEvent>
+    template <EventSink OnEvent>
     void feed(const char* data, std::size_t len, OnEvent&& on_event) {
         lines_.feed(data, len, [&](std::string_view line) {
             if (line.empty()) {

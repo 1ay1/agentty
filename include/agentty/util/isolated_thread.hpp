@@ -29,6 +29,7 @@
 //     but hands ownership to a self-joining reaper instead of raw detach.
 //     Even "detached" work is exception-isolated; that's the improvement.
 
+#include <concepts>
 #include <exception>
 #include <source_location>
 #include <string>
@@ -39,6 +40,13 @@
 #include "agentty/util/dbglog.hpp"
 
 namespace agentty::util {
+
+// A worker body is any callable invocable with no arguments (the unit of work
+// a thread runs). Naming it turns "you passed a non-callable / wrong-arity
+// thing" into a one-line concept error at the spawn call, not a template-depth
+// error inside std::thread.
+template <class Body>
+concept WorkerBody = std::invocable<Body>;
 
 // Format a source_location into a compact "file:line function" breadcrumb so a
 // worker panic reports WHERE it was spawned, auto-captured, never mislabeled.
@@ -54,7 +62,7 @@ inline std::string spawn_site(const std::source_location& loc) {
 // body is reported via `where` + the captured spawn site (dbglog) and
 // swallowed; the thread then exits normally. std::terminate is unreachable
 // from `body`.
-template <class Body>
+template <WorkerBody Body>
 auto make_terminate_proof(std::string where, Body body) {
     return [where = std::move(where), body = std::move(body)]() mutable noexcept {
         try {
@@ -77,7 +85,7 @@ public:
     // `where` is a semantic tag; the spawn site (file:line function) is
     // auto-captured via source_location and folded into the panic breadcrumb,
     // so it can never be mislabeled or drift from the code.
-    template <class Body>
+    template <WorkerBody Body>
     isolated_thread(std::string_view where, Body body,
                     std::source_location loc = std::source_location::current())
         : t_(make_terminate_proof(std::string(where) + " @ " + spawn_site(loc),
@@ -108,7 +116,7 @@ private:
 // Ownership note: the caller must ensure any state `body` captures by
 // reference outlives the work (same contract as detach). Prefer capturing by
 // value / shared_ptr, exactly as the ACP turn worker already does.
-template <class Body>
+template <WorkerBody Body>
 void run_isolated_detached(std::string_view where, Body body,
                            std::source_location loc = std::source_location::current()) {
     std::thread(make_terminate_proof(std::string(where) + " @ " + spawn_site(loc),

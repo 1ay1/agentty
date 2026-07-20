@@ -4,6 +4,7 @@
 // update.hpp. Lives under include/ rather than a private src/ header so the
 // three update/*.cpp files and update.cpp can all see the same declarations.
 
+#include <concepts>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -222,7 +223,14 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // mutation ran. A stale id (tool whose turn was already frozen) returns
 // false — caller treats it as a no-op, matching the existing
 // "idempotent on terminal" behaviour of apply_tool_output.
+//
+// The callback is invoked as `f(ToolUse&)`. `ToolMutator` pins that shape so a
+// wrong-signature lambda is a clean concept error at the call site, not a
+// template-depth error inside the loop.
 template <class F>
+concept ToolMutator = std::invocable<F&, ToolUse&>;
+
+template <ToolMutator F>
 bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
     for (std::size_t i = m.ui.frozen_through;
          i < m.d.current.messages.size(); ++i) {

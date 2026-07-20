@@ -198,3 +198,24 @@ The theme is the same one this whole document turns on: where Rust's default
 is a runtime `#[test]` or a `//` comment, modern C++ lets us push the check
 down to *compile time* or into the *type*, so it can't be skipped, forgotten,
 or left to drift.
+
+### Concepts tightening — callback contracts are now checked, not commented
+
+Several hot-path templates took an unconstrained `class F` / `class Body` /
+`class P` whose required call shape lived only in a comment. Passing the wrong
+callable produced a deep template-instantiation error *inside* the function.
+Each now names its contract as a concept, so a mismatch is a clean one-line
+error at the CALL site — self-documenting and far friendlier to diagnose. (This
+is the C++ analogue of a Rust trait bound like `F: Fn(&mut ToolUse)`.)
+
+| Concept | Site | Contract pinned |
+|---------|------|-----------------|
+| `wire::LineSink` | `provider/wire.hpp` `LineFramer::feed` | callback is `on_line(std::string_view)` |
+| `wire::EventSink` | `provider/wire.hpp` `SseFramer::feed` | callback is `on_event(name, data, char* padded)` |
+| `app::detail::ToolMutator` | `runtime/app/update/internal.hpp` `with_live_tool` | callback is `f(ToolUse&)` |
+| `util::WorkerBody` | `util/isolated_thread.hpp` spawn helpers | body is nullary-invocable |
+| `pick::PickerState` | `runtime/picker.hpp` `is_open` | variant carries the `Closed` alternative |
+
+That every one of these compiled with zero changes at the call sites is itself
+evidence the constraints match the real contracts — the concept is a *proof* of
+the shape the code already relied on.

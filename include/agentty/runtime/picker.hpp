@@ -21,6 +21,7 @@
 //   TwoAxis  — diff review (file × hunk cursor)
 //   Modal    — todo overlay (no cursor; just gates rendering)
 
+#include <concepts>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -45,9 +46,18 @@ struct OpenModal {};
 using Modal = std::variant<Closed, OpenModal>;
 
 // ── Helpers ───────────────────────────────────────────────────────────
+// A picker state is any variant that carries the `Closed` alternative (all
+// three shapes above do). Naming the requirement means `is_open` rejects a
+// non-picker type with a one-line concept error instead of a cryptic failure
+// deep inside std::holds_alternative.
+template <class P>
+concept PickerState = requires(const P& p) {
+    { std::holds_alternative<Closed>(p) } -> std::same_as<bool>;
+};
+
 // Generic "is this variant in any non-Closed state?" — works for all
 // three shapes so call sites read uniformly: `if (pick::is_open(x))`.
-template <class P>
+template <PickerState P>
 [[nodiscard]] inline bool is_open(const P& p) noexcept {
     return !std::holds_alternative<Closed>(p);
 }
