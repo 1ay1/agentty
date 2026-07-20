@@ -3,7 +3,7 @@ TERMUX_PKG_DESCRIPTION="AI pair programming in your terminal — one static bina
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="LICENSE"
 TERMUX_PKG_MAINTAINER="@1ay1"
-TERMUX_PKG_VERSION="0.2.6"
+TERMUX_PKG_VERSION="0.2.8"
 # agentty pulls maya / acp-cpp / mcp-cpp as git submodules, and its CMake
 # FetchContent's nlohmann-json + simdjson at configure time. A GitHub source
 # TARBALL contains none of that, so we build from a recursive git clone

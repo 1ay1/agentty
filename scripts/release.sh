@@ -396,9 +396,22 @@ fi  # end host-OS-specific binary builds
 if [ "$HOST_OS" = linux ] || [ "$HOST_OS" = macos ]; then
 hr "source tarball"
 tarball="agentty-$VERSION.tar.gz"
-git -C "$root" archive --format=tar.gz --prefix="agentty-$VERSION/" \
-    -o "$dist/$tarball" HEAD
-ok "$tarball ($(du -h "$dist/$tarball" | awk '{print $1}'))"
+# git archive alone OMITS submodule contents (mcp-cpp/), which breaks any
+# downstream that BUILDS FROM SOURCE (Termux build.sh, distro from-source
+# packages). Fold each submodule's own `git archive` into the same prefixed
+# tree so the tarball is self-contained. Homebrew (prebuilt-binary consumer)
+# is unaffected; from-source consumers now work.
+_srctmp=$(mktemp -d)
+git -C "$root" archive --format=tar --prefix="agentty-$VERSION/" HEAD \
+    -o "$_srctmp/base.tar"
+tar -C "$_srctmp" -xf "$_srctmp/base.tar"
+git -C "$root" submodule --quiet foreach '
+    git archive --format=tar --prefix="agentty-'"$VERSION"'/$sm_path/" HEAD \
+        | tar -C "'"$_srctmp"'" -xf -
+' 2>/dev/null || warn "submodule archive step failed — tarball may lack submodules"
+tar -C "$_srctmp" -czf "$dist/$tarball" "agentty-$VERSION"
+rm -rf "$_srctmp"
+ok "$tarball ($(du -h "$dist/$tarball" | awk '{print $1}'), submodules bundled)"
 upload_one "$dist/$tarball"
 fi
 

@@ -22,6 +22,9 @@ set -eu
 
 REPO="1ay1/agentty"
 VERSION="latest"
+# Capture Termux's exported $PREFIX (…/com.termux/files/usr) BEFORE we clear our
+# own PREFIX var below — it's the correct, on-PATH install root on Android.
+TERMUX_PREFIX_ENV="${PREFIX:-}"
 PREFIX=""
 BIN_NAME="agentty"
 BUILD=0
@@ -159,7 +162,13 @@ fi
 
 # --- pick prefix (needed by both the build path and the download path) --------
 if [ -z "$PREFIX" ]; then
-    if [ "$(id -u)" -eq 0 ]; then
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux/files/usr ]; then
+        # Termux/Android: $PREFIX (…/com.termux/files/usr) is the ONLY dir on
+        # the default PATH. /usr/local and ~/.local don't exist / aren't on PATH,
+        # so installing there leaves `agentty` uncallable. Prefer the exported
+        # $PREFIX we captured at startup; fall back to the canonical path.
+        PREFIX="${TERMUX_PREFIX_ENV:-/data/data/com.termux/files/usr}"
+    elif [ "$(id -u)" -eq 0 ]; then
         PREFIX=/usr/local
     else
         PREFIX="$HOME/.local"
