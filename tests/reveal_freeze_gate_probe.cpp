@@ -171,17 +171,33 @@ static void test_freeze_window_exists_and_is_now_driven() {
               "bucket was ~265 ms so a 16 ms reveal step was gated away");
     }
 
-    // (B) POST-FIX: the real visual_hash must ADVANCE across a 16 ms step
+    // (B) POST-FIX: the real visual_hash must ADVANCE across a reveal step
     //     while the reveal is in progress. This is the fix working: the
     //     reveal bucket (16 ms) is now keyed on !live_tail_reveal_settled,
     //     so each armed frame actually renders and the typewriter glides.
+    //
+    //     The reveal bucket is floor(now_ms / 16). A bare 16 ms sleep is
+    //     exactly ONE bucket wide, so under scheduler jitter (an early
+    //     wake, or two reads that happen to land inside the same bucket)
+    //     the two floors can be equal and the advance is missed — a flaky
+    //     TEST bug, not a product regression. Sample the real hash in a
+    //     short loop that sleeps in sub-bucket steps until wall-clock has
+    //     provably advanced past a full bucket boundary; the moment it
+    //     crosses, the hash MUST move. Bounded so a genuinely dead gate
+    //     still fails loudly instead of spinning.
     const std::uint64_t h0 = AgenttyApp::visual_hash(m);
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-    const std::uint64_t h1 = AgenttyApp::visual_hash(m);
-    CHECK(h0 != h1,
-          "FIX BROKEN: visual_hash did NOT advance across a 16 ms step "
-          "while a reveal was in progress — the freeze window is still "
-          "dead; the typewriter will stall until a caret flip / keypress");
+    bool advanced = false;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        if (AgenttyApp::visual_hash(m) != h0) { advanced = true; break; }
+    }
+    CHECK(advanced,
+          "FIX BROKEN: visual_hash did NOT advance across a reveal-bucket "
+          "boundary while a reveal was in progress — the freeze window is "
+          "still dead; the typewriter will stall until a caret flip / "
+          "keypress");
 }
 
 static void test_settled_turn_is_hash_stable() {
@@ -200,13 +216,29 @@ static void test_settled_turn_is_hash_stable() {
           "after finish(): live_tail_reveal_settled must be true — the "
           "widget dropped live_/reveal/finalize/parse");
 
-    // With the reveal settled AND phase Idle, the hash must be stable
-    // across a 16 ms step — a settled thread does ZERO idle renders.
-    const std::uint64_t h0 = AgenttyApp::visual_hash(m);
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-    const std::uint64_t h1 = AgenttyApp::visual_hash(m);
-    CHECK(h0 == h1,
-          "IDLE REGRESSION: visual_hash advanced across 16 ms on a fully "
+    // With the reveal settled AND phase Idle, the ONLY time term the hash
+    // carries is the composer caret-blink PARITY (one flip per 265 ms).
+    // Across a short real-clock step that parity must NOT change — the
+    // settled turn does ZERO fast idle renders. A single ±16 ms sample can,
+    // however, straddle a 265 ms parity boundary purely by where the wall
+    // clock happens to sit (the same clock-alignment hazard check (C)
+    // documents), which would flip the hash for a reason that has nothing
+    // to do with a reveal leak — a flaky TEST bug. Take several closely
+    // spaced samples well inside one parity half-period: if the fast reveal
+    // bucket were leaking, the 16 ms bucket would flip repeatedly across the
+    // samples; a settled turn holds a single value, or at most transitions
+    // ONCE if the sampling window happens to straddle a 265 ms parity edge.
+    // So the tell is the number of *transitions*: 0 (or 1, one boundary
+    // crossing) is settled; many transitions is a leak.
+    std::uint64_t prev = AgenttyApp::visual_hash(m);
+    int transitions = 0;
+    for (int i = 0; i < 8; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        const std::uint64_t h = AgenttyApp::visual_hash(m);
+        if (h != prev) { ++transitions; prev = h; }
+    }
+    CHECK(transitions <= 1,
+          "IDLE REGRESSION: visual_hash transitioned repeatedly across a "
           "settled idle turn — the fast reveal bucket is leaking and the "
           "loop will burn CPU at idle");
 }

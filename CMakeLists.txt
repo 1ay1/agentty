@@ -583,6 +583,7 @@ set(AGENTTY_RAG_SOURCES
 
 set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
+    src/tool/progress.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
     src/tool/util/subprocess.cpp
@@ -1432,20 +1433,25 @@ if(AGENTTY_BUILD_TESTS)
     # keystore_test — OS keystore round-trip (store/retrieve/remove/notfound).
     # SKIPS with success when no backend is available/enabled (headless CI),
     # so it never blocks a build lacking a Secret Service / keychain. Links
-    # keystore.cpp + the subprocess/fs/utf8 TUs it drives, plus the registry
-    # TU for tools::progress::emit referenced by run_argv_s.
+    # keystore.cpp + the subprocess/fs/utf8 TUs it drives, plus progress.cpp
+    # for tools::progress::emit referenced by subprocess run_argv_s. Uses the
+    # standalone progress TU rather than registry.cpp so the test does NOT drag
+    # in build_registry() and the whole MCP bridge behind it.
     add_executable(keystore_test EXCLUDE_FROM_ALL
         tests/keystore_test.cpp
         src/io/keystore.cpp
         src/tool/util/subprocess.cpp
         src/tool/util/fs_helpers.cpp
         src/tool/util/utf8.cpp
-        src/tool/registry.cpp
+        src/tool/progress.cpp
     )
     target_include_directories(keystore_test PRIVATE include)
     target_link_libraries(keystore_test PRIVATE
         maya::maya
         nlohmann_json::nlohmann_json)
+    # fs_helpers.cpp (compiled in above) unconditionally mirrors the
+    # workspace root into mcp-cpp's util layer via <mcp/tools/util/...>, so
+    # it needs mcp::tools' include dir resolvable — same as skills_engine_test.
     if(TARGET mcp::tools)
         target_link_libraries(keystore_test PRIVATE mcp::tools)
     endif()

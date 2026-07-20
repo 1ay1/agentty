@@ -73,14 +73,9 @@ std::string to_string(EffectSet e) {
 // cmd_factory installs/clears the sink on that worker via a RAII Scope.
 // Subprocess runners (see util/subprocess.cpp) call progress::emit from the
 // same thread, so it's a plain load from TLS — no atomics, no locking.
-namespace progress {
-namespace {
-    thread_local Sink g_sink;
-}
-void set(Sink s)                       { g_sink = std::move(s); }
-void clear()                           { g_sink = nullptr; }
-void emit(std::string_view snapshot)   { if (g_sink) g_sink(snapshot); }
-}
+// The tools::progress sink itself now lives in its own TU (tool/progress.cpp)
+// so subprocess-only consumers can link it without pulling in build_registry()
+// and the MCP bridge behind it.
 
 namespace {
 

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -111,17 +112,29 @@ int main(int argc, char** argv) {
             frame_us.push_back(
                 std::chrono::duration<double, std::micro>(t1 - t0).count());
         }
-        // quartile means
-        auto qmean = [&](std::size_t a, std::size_t b) {
-            double s = 0; std::size_t n = 0;
-            for (std::size_t i = a; i < b && i < frame_us.size(); ++i) { s += frame_us[i]; ++n; }
-            return n ? s / n : 0.0;
+        // Per-quartile MEDIAN, not mean. A mean is dragged up by sporadic
+        // scheduler-preemption spikes (see the multi-millisecond `worst`
+        // values) that have nothing to do with cache behaviour — under a
+        // loaded `ctest -j` those outliers can push a small-q1 / spiky-q4
+        // ratio over the escape threshold and flake the probe. The median
+        // tracks the TREND (an O(N) leak shifts the whole distribution) while
+        // rejecting isolated stalls, so it stays honest under contention.
+        auto qmed = [&](std::size_t a, std::size_t b) {
+            std::vector<double> w;
+            for (std::size_t i = a; i < b && i < frame_us.size(); ++i)
+                w.push_back(frame_us[i]);
+            if (w.empty()) return 0.0;
+            std::sort(w.begin(), w.end());
+            return w[w.size() / 2];
         };
         std::size_t N = frame_us.size();
-        double q1 = qmean(0, N/4), q2 = qmean(N/4, N/2),
-               q3 = qmean(N/2, 3*N/4), q4 = qmean(3*N/4, N);
+        double q1 = qmed(0, N/4), q2 = qmed(N/4, N/2),
+               q3 = qmed(N/2, 3*N/4), q4 = qmed(3*N/4, N);
         double worst = 0; for (double f : frame_us) if (f > worst) worst = f;
-        // growth ratio: last quartile vs first (>3x and >1ms = escaped memo)
+        // growth ratio: last quartile vs first (>3x and >1ms = escaped memo).
+        // Both conditions must hold: the median rejects contention outliers,
+        // and the 1ms floor keeps sub-millisecond jitter from tripping a
+        // benign ratio.
         double ratio = q1 > 0 ? q4 / q1 : 0.0;
         bool flag = q4 > 1000.0 && ratio > 3.0;
         if (flag) bad = true;
