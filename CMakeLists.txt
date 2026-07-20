@@ -13,6 +13,46 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ── C++26 → C++23 graceful fallback (Termux / older clang) ─────────────────
+# The tree ASKS for C++26 on non-MSVC compilers, but uses NO C++26-only
+# LIBRARY facility — every TU compiles cleanly at C++23 (the MSVC leg already
+# proves this by building the whole tree at /std:c++23-equivalent). So rather
+# than hard-FAIL configure with CMake's raw
+#     "Target ... requires the language dialect "CXX26" ... not supported"
+# on a compiler that doesn't advertise cxx_std_26 (clang < 18, gcc < 14),
+# fall back to C++23 and tell the user exactly what happened. Termux is the
+# common case here: a fresh `pkg install clang` is 18+, but older installs
+# and other embedded toolchains land at 17.
+if(NOT MSVC AND NOT "cxx_std_26" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+    if("cxx_std_23" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+        set(CMAKE_CXX_STANDARD 23)
+        message(STATUS
+            "agentty: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} "
+            "does not advertise C++26 — falling back to C++23 (fully supported; "
+            "no C++26-only library facility is used).")
+    else()
+        set(_agentty_is_termux OFF)
+        if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"
+                   OR DEFINED ENV{TERMUX_VERSION}
+                   OR EXISTS "/data/data/com.termux/files/usr")
+            set(_agentty_is_termux ON)
+        endif()
+        if(_agentty_is_termux)
+            message(FATAL_ERROR
+                "agentty needs at least C++23, but this Termux clang "
+                "(${CMAKE_CXX_COMPILER_VERSION}) is too old. Run "
+                "`pkg upgrade clang` (Termux ships clang 18+, which is more "
+                "than enough), then re-run cmake.")
+        else()
+            message(FATAL_ERROR
+                "agentty needs a compiler that supports C++23 (clang >= 16, "
+                "gcc >= 12). Detected ${CMAKE_CXX_COMPILER_ID} "
+                "${CMAKE_CXX_COMPILER_VERSION}, which advertises neither "
+                "cxx_std_26 nor cxx_std_23. Please upgrade the compiler.")
+        endif()
+    endif()
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
