@@ -51,10 +51,16 @@ namespace agentty::acp {
 // production deadlock. See RUST-CRITIQUE.md #2.
 //   SessionRank (10)  session map + per-session config (profile/model/cwd)
 //   ThreadRank  (20)  per-session thread.messages
+//   IndexRank   (30)  the on-disk session index (acp_sessions.json) — a LEAF:
+//                     always taken alone, never with session/thread held, so
+//                     the highest rank makes any accidental nesting-under it a
+//                     tripwire hit.
 constexpr unsigned kSessionRank = 10;
 constexpr unsigned kThreadRank  = 20;
+constexpr unsigned kIndexRank   = 30;
 using SessionMutex = util::RankedMutex<kSessionRank>;
 using ThreadMutex  = util::RankedMutex<kThreadRank>;
+using IndexMutex   = util::RankedMutex<kIndexRank>;
 
 // The provider call, type-erased: (Request, EventSink) → void. Matches
 // provider::Provider::stream.
@@ -176,7 +182,9 @@ private:
     unsigned long                   wire_tools_gen_   = 0;
     std::vector<provider::ToolSpec> wire_tools_;
 
-    std::mutex                                              index_mtx_;
+    // Rank 30 (kIndexRank): a LEAF lock over the on-disk session index; taken
+    // alone, never nested with the session/thread hierarchy.
+    IndexMutex                                             index_mtx_;
     // Rank 10 (kSessionRank): the OUTER lock of the session/thread hierarchy.
     SessionMutex                                           session_mtx_;
     std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;

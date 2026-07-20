@@ -8,6 +8,10 @@ slug: architecture
 
 agentty is small enough to read in an afternoon. The whole thing is a pure update loop with a single render function and a closed set of effects.
 
+:::tip
+Curious *why* it's C++26 and not Rust? See [Why modern C++ (not Rust)](/docs/why-not-rust) for the case, and [The Rust critique, answered](/docs/rust-critique) for the honest opposition research.
+:::
+
 ## The update loop
 
 Everything is one pure function: `(Model, Msg) → (Model, Cmd)`. State transitions are total and inspectable. Strong ID newtypes — `ToolCallId`, `ThreadId`, `OAuthCode`, `PkceVerifier` — mean swapping two arguments is a compile error, not a debugging session.

@@ -530,7 +530,7 @@ void AgentServer::on_logout() {
 
 // ── Session lifecycle: list / resume / close / delete ────────────────────────
 json AgentServer::load_session_index() {
-    std::lock_guard<std::mutex> lk(index_mtx_);
+    util::RankedLock lk(index_mtx_);
     std::ifstream ifs(persistence::threads_dir() / "acp_sessions.json");
     if (!ifs) return json::object();
     try { json j; ifs >> j; if (j.is_object()) return j; }
@@ -540,7 +540,7 @@ json AgentServer::load_session_index() {
 }
 
 void AgentServer::index_session(const Session& sess) {
-    std::lock_guard<std::mutex> lk(index_mtx_);
+    util::RankedLock lk(index_mtx_);
     auto path = persistence::threads_dir() / "acp_sessions.json";
     json j = json::object();
     { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.index_session", e.what()); j = json::object(); } catch (...) { j = json::object(); } } }
@@ -559,7 +559,7 @@ void AgentServer::index_session(const Session& sess) {
 }
 
 void AgentServer::unindex_session(const std::string& id) {
-    std::lock_guard<std::mutex> lk(index_mtx_);
+    util::RankedLock lk(index_mtx_);
     auto path = persistence::threads_dir() / "acp_sessions.json";
     json j = json::object();
     { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.unindex_session", e.what()); return; } catch (...) { return; } } }
