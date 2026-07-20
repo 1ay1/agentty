@@ -61,6 +61,8 @@ Credentials live under XDG config; everything else lives under `~/.agentty`.
 - `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts.
 - `~/.agentty/skills/`, `~/.agents/skills/`, `~/.claude/skills/` — personal [Agent Skills](/docs/skills); the same three dirs under `<project>/` shadow them.
 - `~/.agentty/mcp.json` (trusted) and `<project>/.agentty/mcp.json` (gated behind `AGENTTY_MCP_ALLOW_PROJECT`) — [MCP servers](/docs/mcp) to connect on startup. `AGENTTY_MCP_CONFIG` overrides both.
+- `<project>/.agentty/rag_feedback.tsv` — the [retrieval](/docs/retrieval) learning loop's per-passage use/win counts (human-inspectable TSV). Delete to forget; override with `AGENTTY_RAG_FEEDBACK_PATH`, disable with `AGENTTY_RAG_LEARN=0`.
+- `<project>/.agentty/rag_graph_summaries.tsv` — cached GraphRAG community reports, one per community per corpus shape (only written when `AGENTTY_RAG_GRAPH_SUMMARY=1`). Override with `AGENTTY_RAG_GRAPH_SUMMARIES_PATH`; delete to regenerate.
 
 ## CLAUDE.md guidance
 

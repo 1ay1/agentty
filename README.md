@@ -51,7 +51,7 @@ Run on a box with no internet. Your laptop relays the bytes over SSH with TLS pi
 read · write · edit · bash · grep · glob · git · web · search_docs · search_code · task — each with a purpose-built widget.
 
 ### 🧠 Learns your codebase
-Agent Skills + remember/forget memory, plus a fully **local RAG** engine — hybrid BM25 + embeddings, RRF-fused, reranked, and diversified — over your docs, skills, and memory. Teach it once, every session knows your conventions. [How it works ↓](#retrieval-rag)
+Agent Skills + remember/forget memory, plus a fully **local RAG** engine — hybrid BM25 + embeddings, RRF-fused, reranked, diversified, and expanded over a **GraphRAG** document graph — over your docs, skills, and memory. Teach it once, every session knows your conventions. [How it works ↓](#retrieval-rag)
 
 </td>
 </tr>
@@ -121,20 +121,28 @@ calls** — it's fast, deterministic, and safe to leave fully on.
    "20k noisy tokens" → "2k useful tokens."
 7. **Parent-document expansion** — stitches the precise hit back into its
    adjacent sibling chunks so the model reads it in context.
-8. **Corrective retry (CRAG)** — on a low-confidence result, de-noises the
+8. **GraphRAG expansion** — builds the corpus's document graph (nodes = docs;
+   edges = markdown links + tf·idf entity co-occurrence), runs PageRank and
+   community detection over it, and pulls in supporting docs from four tiers
+   around the top hits (outbound links, backlinks, entity neighbours, and the
+   community hub). Deterministic, in-memory, no model.
+9. **Corrective retry (CRAG)** — on a low-confidence result, de-noises the
    query, widens the pool, and keeps whichever attempt scored higher.
 
 **Opt-in recall boosters** (cost a model call, off by default):
-RAG-Fusion query expansion (`AGENTTY_RAG_EXPAND=1`) and
-HyDE hypothetical-document embeddings (`AGENTTY_RAG_HYDE=1`).
+RAG-Fusion query expansion (`AGENTTY_RAG_EXPAND=1`),
+HyDE hypothetical-document embeddings (`AGENTTY_RAG_HYDE=1`), and
+GraphRAG community summaries (`AGENTTY_RAG_GRAPH_SUMMARY=1` — a cached
+natural-language report per topic cluster, generated once per corpus shape).
 
 Beyond the explicit tool, a **proactive path** runs the funnel *before you ask*
 when your message looks knowledge-shaped, injecting a source-tagged
 `<retrieved-context>` block above a confidence bar — grounding without a tool
 round-trip.
 
-BM25, RRF, HNSW, the reranker, MMR, compression, PRF, and the chunker are all
-in-house C++/STL. Every stage degrades gracefully and is tunable via
+BM25, RRF, HNSW, the reranker, MMR, compression, PRF, the chunker, and the
+GraphRAG document graph (PageRank, entity extraction, community detection) are
+all in-house C++/STL. Every stage degrades gracefully and is tunable via
 `AGENTTY_RAG_*` env vars. Full write-up:
 [`docs/website/retrieval.md`](docs/website/retrieval.md).
 

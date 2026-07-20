@@ -32,6 +32,7 @@ agentty --sandbox on                   # require an OS sandbox for bash/diagnost
 | `agentty acp` | Run headless as an [Agent Client Protocol](/docs/acp) agent for Zed (JSON-RPC over stdio). |
 | `agentty mcp-serve` | Serve agentty's native tools over [MCP](/docs/mcp) (stdio). Point any MCP client at it. |
 | `agentty skills` | List discovered [Agent Skills](/docs/skills) with spec-lint diagnostics (exit 1 on warnings — CI-friendly). |
+| `agentty rag-bench [dir]` | Benchmark [`search_docs` retrieval](/docs/retrieval#measure-it-agentty-rag-bench) on your own corpus — recall@k / MRR / nDCG per pipeline stage. Defaults to the auto-discovered docs folder; pass a directory to override. |
 | `agentty --version` | Print `agentty <version>` and exit. |
 | `agentty --help` | Print usage and exit. |
 

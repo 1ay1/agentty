@@ -15,7 +15,7 @@ The whole engine is **local, dependency-free, and degrades gracefully**. With no
 
 ## The one-paragraph version
 
-You ask a question. agentty retrieves a wide candidate pool with **hybrid search** (keyword BM25 + dense embeddings, fused), re-ranks it for precision, diversifies away near-duplicates, compresses each hit to its most relevant span, and stitches small chunks back into their surrounding context — then hands the model a short, high-signal, source-tagged set of passages. Every stage that costs nothing runs by default; anything that costs a model call is opt-in.
+You ask a question. agentty retrieves a wide candidate pool with **hybrid search** (keyword BM25 + dense embeddings, fused), re-ranks it for precision, diversifies away near-duplicates, compresses each hit to its most relevant span, stitches small chunks back into their surrounding context, and expands along the corpus's **document graph** (author-drawn links + inferred entity relationships) to pull in the connecting context a flat index misses — then hands the model a short, high-signal, source-tagged set of passages. Every stage that costs nothing runs by default; anything that costs a model call is opt-in.
 
 ## What gets indexed
 
@@ -73,11 +73,35 @@ Rather than dump a whole 1600-char chunk into the model's window, each surviving
 
 Small chunks retrieve *precisely* but read out of context. After ranking, each surviving chunk is stitched back into its **adjacent sibling chunks** from the same document, so the model sees the precise hit *inside* its surrounding prose — without widening the retrieval probe. Pure in-memory, no network. Tune the window with `AGENTTY_RAG_PARENT_RADIUS`; disable with `AGENTTY_RAG_PARENT=0`.
 
-### 8. Graph expansion — retrieval over the document graph *(default-on)*
+### 8. GraphRAG expansion — retrieval over the document graph *(default-on)*
 
-Markdown links between documents are an **author-curated relevance graph** most engines ignore. agentty builds the real document graph once per corpus (memo-cached): nodes = docs, edges = resolved links **plus entity co-occurrence** — salient identifiers extracted deterministically by tf·idf, so two docs that share rare terms are connected even when the author drew no link. Candidates come from four tiers around the top hits — **outbound links** (docs a hit vouches for), **backlinks** (docs that cite a hit — usually the overview that contextualizes it), **entity neighbours** (docs sharing the hit's rare entities), and the highest-**PageRank** hub of the top hits' shared **community** (deterministic label propagation over the link + entity graph). Ties break on PageRank authority; additions always score below every direct hit. Deterministic, in-memory, no model. Disable with `AGENTTY_RAG_GRAPH=0`.
+A flat chunk index treats every passage as an island. Real knowledge bases aren't flat: documents **link** to each other, and documents about the same thing **share vocabulary**. agentty builds that structure into an explicit **document graph** and retrieves over it — the full [GraphRAG](https://microsoft.github.io/graphrag/) recipe (entity graph → communities → community summaries → graph-aware retrieval), but with the expensive LLM ingredients made **deterministic and free** by default.
 
-With `AGENTTY_RAG_GRAPH_SUMMARY=1` (**opt-in**, needs a local Ollama) the community hub carries a pre-digested **community report** — a 2-3 sentence LLM overview of the whole cluster, generated once per community per corpus shape and persisted to `.agentty/rag_graph_summaries.tsv`, so a corpus-level question is answered by the overview rather than one lead chunk. That's the full GraphRAG recipe: entity graph → communities → cached community summaries → graph-aware retrieval. Any failure degrades to the plain hub chunk.
+**The graph** (nodes = documents) is built once per corpus and memo-cached — invalidated only when the corpus itself changes. It has two kinds of edge:
+
+- **Link edges** — resolved markdown links (`](other-doc.md)`). An author-curated relevance signal most engines throw away. Ambiguous targets (a filename owned by two docs) are skipped rather than guessed, so a wrong edge never poisons the graph.
+- **Entity edges** — the LLM-free half of GraphRAG's entity graph. Each doc's **salient entities** are its top terms by tf·idf that are also *rare* corpus-wide (they discriminate). Two documents that share ≥2 such entities get an edge — related even when the author drew no link (`quantizer.md` ↔ `codebook.md` connect because they co-mention the same rare identifiers).
+
+**Authority.** [PageRank](https://en.wikipedia.org/wiki/PageRank) runs over the *link* graph only (being cited by an author is an endorsement; entity similarity is symmetric, not a vote). It supplies a deterministic authority prior — hub docs win ties.
+
+**Communities.** Deterministic label propagation over the *union* of link + entity edges (a dependency-free stand-in for Leiden clustering) partitions the corpus into topic clusters.
+
+**Retrieval** expands around the top hits through four tiers, in priority order, each ranked internally by PageRank, all scored *below every direct hit* so expansion is supporting material and never displaces a real answer:
+
+| Tier | Signal | Why it helps |
+|---|---|---|
+| **Outbound links** | docs a hit links to | the hit vouches for them |
+| **Backlinks** | docs that link *to* a hit | usually the overview that contextualizes it |
+| **Entity neighbours** | docs sharing the hit's rare entities | related-by-topic even with no authored link |
+| **Community hub** | highest-PageRank doc in the top hits' shared community | the authority for the neighbourhood you're asking about |
+
+All of it is deterministic, in-memory, and needs no model. Disable with `AGENTTY_RAG_GRAPH=0`.
+
+#### Community summaries — the full GraphRAG global search *(opt-in)*
+
+The one ingredient that genuinely needs a model is the **community report**: a short natural-language summary of what a whole cluster is *about*, which lets a corpus-level question ("how does the retrieval engine fit together?") be answered by a digest instead of one lead chunk. Enable it with `AGENTTY_RAG_GRAPH_SUMMARY=1` (needs a local Ollama). When the community hub is selected, its passage carries a **2-3 sentence LLM overview** of the cluster in place of its raw lead chunk.
+
+The cost is paid **once per community per corpus shape**, not per query: summaries are keyed on the corpus signature plus the community's member paths and persisted to `.agentty/rag_graph_summaries.tsv` (override with `AGENTTY_RAG_GRAPH_SUMMARIES_PATH`), so every later session — and every later query touching that community — reads a cached line with zero network. Editing any document invalidates exactly the affected communities. Any failure (backend down, parse error) degrades to the plain hub chunk and is **not** cached, so a later session with the model up fills it in. Pick the model with `AGENTTY_RAG_GRAPH_SUMMARY_MODEL` (default `llama3.2`).
 
 ### 9. Corrective retry — a second chance on a weak result *(default-on)*
 
@@ -96,14 +120,19 @@ agentty is the rare retrieval engine that **sees what happens after it answers**
 
 ## Measure it: `agentty rag-bench`
 
-A pipeline you can't measure is a pile of vibes. `agentty rag-bench [dir]` benchmarks the funnel **on your own corpus**, offline, in milliseconds: it synthesizes known-item queries from sampled chunks (their most discriminative terms by tf×idf — deterministic and reproducible, no LLM needed), then reports **recall@k, MRR, and nDCG** across the retrieval ladder — BM25-only → hybrid+PRF → +rerank → +MMR — so every stage's contribution (or regression) on *your* docs is attributable and every `AGENTTY_RAG_*` knob can be tuned against numbers instead of guesses. Run it with a local embedder up to exercise the dense rungs.
+A pipeline you can't measure is a pile of vibes. `agentty rag-bench [dir]` benchmarks the funnel **on your own corpus**, offline, in milliseconds. It synthesizes **known-item queries** from sampled chunks — each query is a chunk's most discriminative terms by tf×idf, so the chunk it came from is the known gold answer (deterministic and reproducible, no LLM needed). Then it runs the retrieval **ladder** — `bm25-only` → `hybrid+prf` → `+feature-rerank` → `+mmr` — over every query and reports **recall@k, MRR, and nDCG** per rung. Because each rung adds exactly one stage, a metric that *drops* at a rung points at the stage worth tuning, and every `AGENTTY_RAG_*` knob can be set against numbers instead of guesses.
+
+Gold matching is **coverage-based**, not exact-identity: a returned chunk counts as a hit when it *covers* the gold chunk's region (same document + overlapping line span). This matters because the reranker deliberately collapses overlapping-window siblings into one survivor — which contains the gold region but may start on a different line. Scoring that as a miss would falsely flag the reranker as a regression; coverage matching measures the retrieval outcome the user actually gets.
+
+Known-item synthesis exercises the funnel's *mechanics*; run it with a local embedder up to also exercise the dense (embedding) rungs, which is where semantic paraphrase wins show.
 
 ## Opt-in recall boosters (they cost a model call)
 
-Two of the strongest techniques need a generative model, so they add latency and are **off by default**. When enabled they help **every** knowledge configuration — docs, skills-only, memory-only, MCP, or any mix — because they feed extra probes into the same source-agnostic fusion.
+Three of the strongest techniques need a generative model, so they add latency and are **off by default**. When enabled they help **every** knowledge configuration — docs, skills-only, memory-only, MCP, or any mix — because they feed extra probes into the same source-agnostic fusion.
 
 - **RAG-Fusion query expansion** (`AGENTTY_RAG_EXPAND=1`) — the LLM rewrites your query into several alternative phrasings; each is retrieved and all results are fused. Vocabulary mismatch on any one phrasing stops being fatal. Variant count via `AGENTTY_RAG_EXPAND_N` (default 4).
 - **HyDE — Hypothetical Document Embeddings** (`AGENTTY_RAG_HYDE=1`) — a question and its answer can sit far apart in embedding space. The LLM hallucinates a short *answer-passage* for your query; embedding that fake answer lands the probe near the real passages. The answer needn't be correct — only look like one. Composes with, and is independent of, query expansion.
+- **GraphRAG community summaries** (`AGENTTY_RAG_GRAPH_SUMMARY=1`) — a cached natural-language report per topic cluster, so corpus-level questions are answered by a digest rather than one chunk (see [§8](#8-graphrag-expansion-retrieval-over-the-document-graph-default-on)). Unlike the two above, the model cost here is paid **once per community per corpus shape**, not per query — the rest of the graph is free and on by default.
 
 ## The proactive path
 
@@ -134,7 +163,9 @@ Every environment variable — defaults, ranges, and effects — is documented i
 
 ## Design notes
 
-- **No dependencies.** BM25, RRF, HNSW, the reranker, MMR, compression, PRF, and the chunker are all in-house C++/STL. The only optional network hop is localhost Ollama.
-- **Graceful degradation everywhere.** No embeddings → BM25-only. Ollama unreachable mid-search → the affected stage no-ops and retrieval continues. Empty corpus, blank query, zero-k → empty result, never an error.
+- **No dependencies.** BM25, RRF, HNSW, the reranker, MMR, compression, PRF, the chunker, and the GraphRAG document graph (PageRank, entity extraction, community detection) are all in-house C++/STL. The only optional network hop is localhost Ollama.
+- **Graceful degradation everywhere.** No embeddings → BM25-only. Ollama unreachable mid-search → the affected stage no-ops and retrieval continues. Community-summary backend down → the plain hub chunk. Empty corpus, blank query, zero-k → empty result, never an error.
+- **Deterministic by default.** Every default-on stage — including the whole GraphRAG graph, its PageRank, and its communities — is deterministic given the corpus, so results are reproducible and `rag-bench` numbers are stable. Only the opt-in LLM stages introduce a model.
+- **Cached, not recomputed.** The document graph is memo-cached per corpus shape; community summaries and the learning-loop feedback are persisted to disk (`.agentty/rag_graph_summaries.tsv`, `.agentty/rag_feedback.tsv`) so expensive work is paid once and survives across sessions.
 - **Sensible defaults.** Everything that's free and safe runs by default; anything that costs a model call is opt-in, so the default `search_docs` is fast and predictable.
 - **One seam for RAG and MCP.** From the model's view a docs folder and an MCP server are the same thing — a `KnowledgeSource` behind one interface — so they fuse identically.
