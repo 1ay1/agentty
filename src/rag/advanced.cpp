@@ -13,6 +13,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
@@ -524,7 +525,18 @@ Context LateInteractionStage::process(Context ctx) const {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// GraphExpandStage — markdown link-graph expansion
+// GraphExpandStage — GraphRAG over the markdown link graph
+//
+// The structural half of "advanced GraphRAG" (Microsoft-style), minus the
+// LLM-built entity graph: the DOCUMENT graph is real, built ONCE from the
+// corpus's markdown links and memo-cached per corpus shape. On top of it:
+//   • PageRank        — deterministic authority prior; hub docs win ties.
+//   • Backlinks       — a doc that CITES a hit is usually the overview that
+//                       contextualizes it (inbound edges, previously ignored).
+//   • Communities     — deterministic label propagation (a Leiden stand-in);
+//                       when the top hits concentrate in one community, its
+//                       highest-authority hub is surfaced — the no-LLM
+//                       analogue of a GraphRAG "community report".
 // ══════════════════════════════════════════════════════════════════════════
 namespace {
 
@@ -562,54 +574,257 @@ std::string file_name_lower(std::string_view p) {
     return s;
 }
 
+// The document graph: one node per distinct corpus path, one directed edge
+// per resolved markdown link. Everything derived (PageRank, communities,
+// lead chunks) is computed at build time so process() only walks adjacency.
+struct DocGraph {
+    std::vector<std::string>                       paths;   // node → path
+    std::vector<const Chunk*>                      lead;    // node → lead chunk
+    std::vector<std::vector<std::uint32_t>>        out, in; // adjacency
+    std::vector<double>                            rank;    // PageRank
+    std::vector<std::uint32_t>                     comm;    // community label
+    std::unordered_map<std::string, std::uint32_t> id_of;   // path → node
+};
+
+// Same order-sensitive structural fingerprint corpus.cpp uses for its HNSW
+// cache (FNV-1a over path + line span, in chunk order): any drift in the
+// chunk array — file edited, added, removed, reordered — changes it, which
+// is exactly the invalidation the memo-cached graph needs. Chunk POINTERS
+// stored in `lead` are only valid for the corpus shape that produced them.
+std::uint64_t graph_signature(const std::vector<Chunk>& chunks) noexcept {
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&h](const void* p, std::size_t n) noexcept {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 0x100000001b3ull; }
+    };
+    for (const auto& c : chunks) {
+        mix(c.path.data(), c.path.size());
+        std::int32_t ls = c.line_start, le = c.line_end;
+        mix(&ls, sizeof ls); mix(&le, sizeof le);
+    }
+    return h;
+}
+
+std::shared_ptr<const DocGraph> build_doc_graph(const Corpus& corpus) {
+    auto g = std::make_shared<DocGraph>();
+    const auto& all = corpus.raw_chunks();
+
+    // ── Nodes: one per distinct path; lead chunk = smallest line_start.
+    // Outbound link targets are collected per doc as lowercased filenames
+    // (corpus paths are root-relative, link targets doc-relative — the
+    // filename is the stable join key, as before).
+    std::vector<std::vector<std::string>> tgt_fnames;
+    std::unordered_map<std::string, std::vector<std::uint32_t>> by_fname;
+    for (const auto& ch : all) {
+        auto [it, fresh] = g->id_of.try_emplace(
+            ch.path, static_cast<std::uint32_t>(g->paths.size()));
+        if (fresh) {
+            g->paths.push_back(ch.path);
+            g->lead.push_back(&ch);
+            tgt_fnames.emplace_back();
+            by_fname[file_name_lower(ch.path)].push_back(it->second);
+        }
+        const std::uint32_t id = it->second;
+        if (ch.line_start < g->lead[id]->line_start) g->lead[id] = &ch;
+        std::vector<std::string> targets;
+        extract_link_targets(ch.text, targets);
+        for (auto& t : targets) {
+            auto f = file_name_lower(t);
+            if (!f.empty()) tgt_fnames[id].push_back(std::move(f));
+        }
+    }
+    const std::size_t n = g->paths.size();
+    g->out.resize(n);
+    g->in.resize(n);
+
+    // ── Edges: resolve target filenames to nodes. A filename claimed by
+    // more than one doc is AMBIGUOUS — skip it rather than guess (a wrong
+    // edge poisons PageRank and communities; a missing one just no-ops).
+    for (std::uint32_t u = 0; u < n; ++u) {
+        std::unordered_set<std::uint32_t> seen;
+        for (const auto& f : tgt_fnames[u]) {
+            auto it = by_fname.find(f);
+            if (it == by_fname.end() || it->second.size() != 1) continue;
+            const std::uint32_t v = it->second[0];
+            if (v == u || !seen.insert(v).second) continue;
+            g->out[u].push_back(v);
+            g->in[v].push_back(u);
+        }
+    }
+
+    // ── PageRank (power iteration, damping 0.85, dangling mass spread
+    // uniformly). Deterministic; ~20 iterations is ample at doc-graph scale.
+    g->rank.assign(n, n ? 1.0 / static_cast<double>(n) : 0.0);
+    if (n >= 2) {
+        const double d = 0.85;
+        std::vector<double> next(n);
+        for (int iter = 0; iter < 20; ++iter) {
+            double dangling = 0.0;
+            for (std::uint32_t u = 0; u < n; ++u)
+                if (g->out[u].empty()) dangling += g->rank[u];
+            const double base =
+                (1.0 - d) / static_cast<double>(n) +
+                d * dangling / static_cast<double>(n);
+            std::fill(next.begin(), next.end(), base);
+            for (std::uint32_t u = 0; u < n; ++u) {
+                if (g->out[u].empty()) continue;
+                const double share =
+                    d * g->rank[u] / static_cast<double>(g->out[u].size());
+                for (std::uint32_t v : g->out[u]) next[v] += share;
+            }
+            double delta = 0.0;
+            for (std::uint32_t u = 0; u < n; ++u)
+                delta += std::fabs(next[u] - g->rank[u]);
+            g->rank.swap(next);
+            if (delta < 1e-9) break;
+        }
+    }
+
+    // ── Communities: asynchronous label propagation over the UNDIRECTED
+    // graph, fixed ascending node order + smallest-label tiebreak — fully
+    // deterministic. Converges in a handful of rounds at this scale.
+    g->comm.resize(n);
+    for (std::uint32_t u = 0; u < n; ++u) g->comm[u] = u;
+    for (int iter = 0; iter < 8; ++iter) {
+        bool changed = false;
+        for (std::uint32_t u = 0; u < n; ++u) {
+            std::unordered_map<std::uint32_t, int> freq;
+            for (std::uint32_t v : g->out[u]) ++freq[g->comm[v]];
+            for (std::uint32_t v : g->in[u])  ++freq[g->comm[v]];
+            if (freq.empty()) continue;
+            std::uint32_t best = g->comm[u];
+            int best_n = 0;
+            for (const auto& [label, k] : freq)
+                if (k > best_n || (k == best_n && label < best)) {
+                    best = label;
+                    best_n = k;
+                }
+            if (best != g->comm[u]) { g->comm[u] = best; changed = true; }
+        }
+        if (!changed) break;
+    }
+    return g;
+}
+
+// Memo: one graph per (corpus identity, chunk storage address, corpus
+// shape). The stored Chunk pointers are only valid while the corpus's chunk
+// vector still lives at the same address with the same structural layout —
+// keying on data() catches a rebuild that reallocates while producing an
+// identical signature (same docs re-indexed), where sig alone would alias.
+struct GraphMemo {
+    std::mutex mu;
+    const Corpus* corpus = nullptr;
+    const void*   store  = nullptr;   // chunks_.data() the graph points into
+    std::uint64_t sig = 0;
+    std::shared_ptr<const DocGraph> g;
+};
+
+GraphMemo& graph_memo() { static GraphMemo m; return m; }
+
+std::shared_ptr<const DocGraph> doc_graph_for(const Corpus& corpus) {
+    const auto& chunks = corpus.raw_chunks();
+    const std::uint64_t sig = graph_signature(chunks);
+    const void* store = static_cast<const void*>(chunks.data());
+    auto& m = graph_memo();
+    std::lock_guard<std::mutex> lk(m.mu);
+    if (m.g && m.corpus == &corpus && m.store == store && m.sig == sig)
+        return m.g;
+    auto g = build_doc_graph(corpus);
+    m.corpus = &corpus;
+    m.store  = store;
+    m.sig    = sig;
+    m.g      = g;
+    return g;
+}
+
 } // namespace
 
 Context GraphExpandStage::process(Context ctx) const {
     try {
         if (!corpus_ || ctx.chunks.empty() || max_extra_ == 0) return ctx;
+        auto g = doc_graph_for(*corpus_);
+        if (!g || g->paths.size() < 2) return ctx;
 
         // Docs already represented in the context (don't re-add).
         std::unordered_set<std::string> have_docs;
         for (const auto& c : ctx.chunks)
             if (c.hit.chunk) have_docs.insert(c.hit.chunk->path);
 
-        // Collect outbound link targets from the TOP hits' chunk bodies
-        // (top 3 — the graph should expand around what won, not the tail).
-        std::vector<std::string> targets;
-        std::size_t scanned = 0;
+        // Distinct doc nodes of the TOP hits (≤3, rank order) — the graph
+        // should expand around what won, not the tail. Hits from other
+        // sources (skills/memory) simply don't resolve and are skipped.
+        std::vector<std::uint32_t> tops;
         for (const auto& c : ctx.chunks) {
-            if (scanned >= 3) break;
+            if (tops.size() >= 3) break;
             if (!c.hit.chunk) continue;
-            extract_link_targets(c.hit.chunk->text, targets);
-            ++scanned;
+            auto it = g->id_of.find(c.hit.chunk->path);
+            if (it == g->id_of.end()) continue;
+            if (std::find(tops.begin(), tops.end(), it->second) == tops.end())
+                tops.push_back(it->second);
         }
-        if (targets.empty()) return ctx;
+        if (tops.empty()) return ctx;
 
-        // Resolve each target to its document's LEAD chunk in the corpus
-        // (filename suffix match — corpus paths are root-relative, link
-        // targets are doc-relative; the filename is the stable join key).
-        const auto& all = corpus_->raw_chunks();
-        double floor_score = ctx.chunks.back().hit.score;
-        std::size_t added = 0;
-        std::unordered_set<std::string> seen_targets;
-        for (const auto& t : targets) {
-            if (added >= max_extra_) break;
-            auto fname = file_name_lower(t);
-            if (fname.empty() || !seen_targets.insert(fname).second) continue;
-            const Chunk* lead = nullptr;
-            for (const auto& ch : all) {
-                if (file_name_lower(ch.path) != fname) continue;
-                if (have_docs.count(ch.path)) { lead = nullptr; break; }
-                if (!lead || ch.line_start < lead->line_start) lead = &ch;
+        // Candidates in tiers: 0 = cited BY a hit (outbound — the hit vouches
+        // for it), 1 = CITES a hit (backlink — usually the overview that
+        // contextualizes it), 2 = community hub (corpus-topology authority).
+        struct Cand { std::uint32_t node; int tier; };
+        std::vector<Cand> cands;
+        std::unordered_set<std::uint32_t> cseen;
+        auto push = [&](std::uint32_t v, int tier) {
+            if (have_docs.count(g->paths[v])) return;
+            if (!cseen.insert(v).second) return;
+            cands.push_back({v, tier});
+        };
+        for (std::uint32_t u : tops)
+            for (std::uint32_t v : g->out[u]) push(v, 0);
+        for (std::uint32_t u : tops)
+            for (std::uint32_t v : g->in[u]) push(v, 1);
+
+        // Community hub: only when the top hits AGREE on a community (≥2 in
+        // the same one, or a lone top doc) — its highest-PageRank member is
+        // the closest thing to a GraphRAG community report without an LLM.
+        {
+            std::unordered_map<std::uint32_t, int> votes;
+            for (std::uint32_t u : tops) ++votes[g->comm[u]];
+            std::uint32_t label = 0;
+            int most = 0;
+            for (const auto& [l, k] : votes)
+                if (k > most || (k == most && l < label)) { label = l; most = k; }
+            if (most >= 2 || tops.size() == 1) {
+                std::uint32_t hub = 0;
+                double best = -1.0;
+                for (std::uint32_t v = 0;
+                     v < static_cast<std::uint32_t>(g->paths.size()); ++v)
+                    if (g->comm[v] == label && g->rank[v] > best) {
+                        best = g->rank[v];
+                        hub  = v;
+                    }
+                if (best > 0.0) push(hub, 2);
             }
-            if (!lead || have_docs.count(lead->path)) continue;
+        }
+        if (cands.empty()) return ctx;
+
+        // Deterministic priority: tier, then PageRank authority, then path.
+        std::stable_sort(cands.begin(), cands.end(),
+                         [&](const Cand& a, const Cand& b) {
+                             if (a.tier != b.tier) return a.tier < b.tier;
+                             if (g->rank[a.node] != g->rank[b.node])
+                                 return g->rank[a.node] > g->rank[b.node];
+                             return g->paths[a.node] < g->paths[b.node];
+                         });
+
+        const double floor_score = ctx.chunks.back().hit.score;
+        std::size_t added = 0;
+        for (const auto& cand : cands) {
+            if (added >= max_extra_) break;
+            const Chunk* lead = g->lead[cand.node];
+            if (!lead) continue;
             ContextChunk c;
             c.hit.chunk = lead;
             // Below the surviving pool: supporting material, never above a
             // direct hit. Decay per addition keeps insertion order stable.
             c.hit.score = floor_score * 0.9 - 1e-6 * static_cast<double>(added);
             ctx.chunks.push_back(std::move(c));
-            have_docs.insert(lead->path);
             ++added;
         }
         return ctx;

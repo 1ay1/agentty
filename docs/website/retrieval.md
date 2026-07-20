@@ -73,9 +73,9 @@ Rather than dump a whole 1600-char chunk into the model's window, each surviving
 
 Small chunks retrieve *precisely* but read out of context. After ranking, each surviving chunk is stitched back into its **adjacent sibling chunks** from the same document, so the model sees the precise hit *inside* its surrounding prose — without widening the retrieval probe. Pure in-memory, no network. Tune the window with `AGENTTY_RAG_PARENT_RADIUS`; disable with `AGENTTY_RAG_PARENT=0`.
 
-### 8. Graph expansion — follow the links the author drew *(default-on)*
+### 8. Graph expansion — retrieval over the document graph *(default-on)*
 
-Markdown links between documents are an **author-curated relevance graph** most engines ignore. The top hits' outbound `](other-doc.md)` links are followed one hop, and the linked documents' lead chunks join the result as supporting material — always scored below every direct hit. The cross-document cousin of parent expansion: deterministic, in-memory, no model. Disable with `AGENTTY_RAG_GRAPH=0`.
+Markdown links between documents are an **author-curated relevance graph** most engines ignore. agentty builds the real document graph once per corpus (nodes = docs, edges = resolved links, memo-cached) and runs GraphRAG over it: candidates come from three tiers around the top hits — **outbound links** (docs a hit vouches for), **backlinks** (docs that cite a hit — usually the overview that contextualizes it), and the highest-**PageRank** hub of the top hits' shared **community** (deterministic label propagation — the no-LLM analogue of a GraphRAG community report). Ties break on PageRank authority; additions always score below every direct hit. Deterministic, in-memory, no model. Disable with `AGENTTY_RAG_GRAPH=0`.
 
 ### 9. Corrective retry — a second chance on a weak result *(default-on)*
 

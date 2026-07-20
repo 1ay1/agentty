@@ -139,12 +139,15 @@ private:
     EmbedRerankConfig cfg_;
 };
 
-// ── GraphRAG-lite expansion stage ─────────────────────────────────────────
-// Follows markdown links ("](target.md)") from the top hits' source
-// documents one hop and appends the linked documents' lead chunks to the
-// context (deduped, scored below the surviving pool so they read as
-// supporting material). The link graph is scanned from the live corpus and
-// memo-cached per corpus shape. Adds at most `max_extra` chunks.
+// ── GraphRAG expansion stage ─────────────────────────────────────
+// Retrieval over the corpus's DOCUMENT GRAPH (nodes = docs, edges = markdown
+// links), built once and memo-cached per corpus shape. Candidates come from
+// three tiers around the top hits — outbound links (docs a hit vouches for),
+// BACKLINKS (docs that cite a hit: usually the overview that contextualizes
+// it), and the highest-PageRank hub of the top hits' shared community
+// (deterministic label propagation; the no-LLM analogue of a GraphRAG
+// community report). Ties break on PageRank authority. Appended below the
+// surviving pool as supporting material; adds at most `max_extra` chunks.
 class GraphExpandStage final : public RetrievalStage {
 public:
     GraphExpandStage(const Corpus& corpus, std::size_t max_extra = 2)
