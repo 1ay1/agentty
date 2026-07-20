@@ -10,7 +10,7 @@ Quick answers to the questions people ask most.
 
 ## Does it work with my Claude Pro/Max subscription?
 
-Yes — OAuth against your existing Pro/Max plan is the main path. No extra billing; same account you already pay for. You can also use an `ANTHROPIC_API_KEY`, or a different [provider](/docs/providers) entirely.
+Yes — OAuth against your existing Pro/Max plan is supported (no extra billing, same account). But it's not the only path or even the recommended one: agentty is bring-your-own-model, so most people run it with an API key or a local Ollama model. See [Authentication](/docs/authentication).
 
 ## Will using my Claude subscription with agentty get my account banned?
 

@@ -19,7 +19,7 @@ If you already like Claude Code's workflow but want it faster, dependency-free, 
 | **Install size** | {{sizeMB}}, one file | Node runtime + `node_modules` |
 | **Dependencies** | None (no Node, Python, Electron, npm) | Node.js ≥ 18 |
 | **Models** | Claude, OpenAI, Groq, OpenRouter, Together, Cerebras, local Ollama, any OpenAI-compatible host | Claude only |
-| **Auth** | Claude Pro/Max OAuth *or* API key *or* any provider | Claude Pro/Max OAuth or API key |
+| **Auth** | Any provider API key, local Ollama (no key), *or* Claude Pro/Max OAuth | Claude Pro/Max OAuth or API key |
 | **Shell sandbox** | On by default (`bwrap` / `sandbox-exec`) | Permission prompts, no OS sandbox |
 | **Editor integration** | Runs inside Zed over [ACP](/docs/acp) | Terminal + IDE extensions |
 | **Air-gapped hosts** | One-command [SSH air-gap](/docs/airgap) | — |

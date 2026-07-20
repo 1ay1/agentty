@@ -8,7 +8,7 @@ slug: ""
 
 agentty is a native C++26 terminal coding agent — a drop-in alternative to `claude-code` that ships as a single {{sizeMB}} static binary.
 
-It signs in with your existing **Claude Pro/Max OAuth** subscription (or an `ANTHROPIC_API_KEY`) — or points at **OpenAI, Groq, OpenRouter, Together, Cerebras**, or a local **Ollama** model. It runs every shell call in a sandbox by default, and can drive an agent on an air-gapped host through a single SSH command. No Node, no Python, no Electron, no `npm install`.
+It's **bring-your-own-model**: point it at **OpenAI, Groq, OpenRouter, Together, Cerebras**, an `ANTHROPIC_API_KEY`, or a fully local **Ollama** model — or sign in with your existing **Claude Pro/Max OAuth**, the same way Claude Code does. It runs every shell call in a sandbox by default, and can drive an agent on an air-gapped host through a single SSH command. No Node, no Python, no Electron, no `npm install`.
 
 ## Who it's for
 
