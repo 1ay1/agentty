@@ -38,8 +38,12 @@ namespace agentty::util {
 // check still fires for the nested case regardless of NDEBUG).
 namespace detail {
 
-inline thread_local unsigned held_ranks[64] = {};
-inline thread_local int       held_depth    = 0;
+// The tripwire's correctness rests on these two thread-local slots being ZERO
+// before this thread takes its first lock. `constinit` makes that a COMPILE
+// error if anyone ever makes them dynamically-initialized — the invariant is
+// enforced by the type system, not assumed by a reviewer. Zero codegen change.
+constinit inline thread_local unsigned held_ranks[64] = {};
+constinit inline thread_local int       held_depth    = 0;
 
 // Highest rank currently held on this thread, or 0 if none.
 inline unsigned top_held_rank() noexcept {

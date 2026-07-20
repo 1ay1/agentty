@@ -214,8 +214,15 @@ std::string DeserializeError::render() const {
         "json_parse", "missing_field", "invalid_value",
         "invalid_variant_tag", "io",
     };
+    // Pin the table to the enum: adding a DeserializeErrorKind arm without a
+    // matching row is a COMPILE error, not a silent out-of-bounds read. `Io`
+    // is the last arm, so its underlying value + 1 is the arm count.
+    static_assert(std::size(kind_str)
+                      == std::to_underlying(DeserializeErrorKind::Io) + 1u,
+                  "kind_str is out of sync with DeserializeErrorKind — "
+                  "add the missing row");
     std::string out = "[";
-    out += kind_str[static_cast<std::size_t>(kind)];
+    out += kind_str[std::to_underlying(kind)];
     out += "] ";
     if (!field.empty()) { out += field; out += ": "; }
     out += detail;

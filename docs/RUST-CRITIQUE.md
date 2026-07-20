@@ -177,3 +177,24 @@ Plus two `-Wswitch` gaps closed and both switches made provably exhaustive.
 The codebase no longer merely *argues* modern C++ is enough — on the exact
 axes people move to Rust for, it now demonstrably does more, with the proofs
 in the headers and a green zero-warning build as the receipt.
+
+---
+
+## Appendix — modern-C++ hardening pass (C++23/26 features earning their keep)
+
+A follow-up audit converted several "works, but the invariant is only in a
+comment" spots into language-enforced ones, using features the toolchain
+(GCC 16, C++26) already ships. These aren't cosmetic — each closes a real
+failure mode:
+
+| Feature | Site | What it now guarantees |
+|---------|------|------------------------|
+| `constinit` | `util/ranked_lock.hpp` TLS | The deadlock-tripwire's held-rank slots are **compile-guaranteed** zero-initialized before first use. A dynamic-init regression is now a build error, not a garbage-depth mis-fire. |
+| `std::source_location` | `util/isolated_thread.hpp` | Worker-panic breadcrumbs auto-capture `file:line function` at the spawn site — the "where" tag can no longer drift from the actual code, at zero call-site cost. |
+| `std::span` | `rag/simd.hpp` + hnsw/bm25 callers | The SIMD dot/L2 hot path's `(ptr, ptr, n)` triple — which silently trusts both buffers are ≥ n — is replaced by a length-carrying `span` overload; a mismatched embedding dim returns 0 instead of reading past the end. |
+| `std::to_underlying` + `static_assert` | `io/persistence.cpp` `render()` | The error-kind string table is pinned to the enum: adding a `DeserializeErrorKind` arm without a matching row is a **compile error**, not a silent out-of-bounds read. |
+
+The theme is the same one this whole document turns on: where Rust's default
+is a runtime `#[test]` or a `//` comment, modern C++ lets us push the check
+down to *compile time* or into the *type*, so it can't be skipped, forgotten,
+or left to drift.

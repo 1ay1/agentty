@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <span>
 #include <cstdlib>
 #include <unordered_map>
 
@@ -182,10 +183,10 @@ double cosine(const std::vector<float>& a, const std::vector<float>& b) noexcept
     // accumulators are dot products, so route them through the runtime-
     // dispatched SIMD path. Accumulate in float (SIMD) then widen for the
     // final divide — ample precision for ranking 768-dim unit-ish vectors.
-    const std::size_t n = a.size();
-    const double dot = static_cast<double>(simd::dot(a.data(), b.data(), n));
-    const double na  = static_cast<double>(simd::dot(a.data(), a.data(), n));
-    const double nb  = static_cast<double>(simd::dot(b.data(), b.data(), n));
+    // Span overloads carry length with the data (sizes already equal above).
+    const double dot = static_cast<double>(simd::dot(std::span<const float>(a), std::span<const float>(b)));
+    const double na  = static_cast<double>(simd::dot(std::span<const float>(a), std::span<const float>(a)));
+    const double nb  = static_cast<double>(simd::dot(std::span<const float>(b), std::span<const float>(b)));
     if (na <= 0.0 || nb <= 0.0) return 0.0;
     return dot / (std::sqrt(na) * std::sqrt(nb));
 }

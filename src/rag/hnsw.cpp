@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <span>
 #include <queue>
 #include <string_view>
 #include <unordered_set>
@@ -32,9 +33,12 @@ float HnswIndex::dot_(const std::vector<float>& a,
     // Both are unit-normalized, so dot == cosine. This is THE hot loop of the
     // graph walk (thousands of calls per query); route it through the runtime-
     // dispatched SIMD path (AVX2/SSE4.2/NEON) which is 2-4x the scalar loop on
-    // 768-dim embeddings. simd::dot handles the length guard + tail.
+    // 768-dim embeddings. simd::dot handles the length guard + tail. The span
+    // overload carries the length WITH each pointer — no bare (ptr,ptr,n)
+    // triple that could read past the shorter buffer.
     const std::size_t n = std::min(a.size(), b.size());
-    return simd::dot(a.data(), b.data(), n);
+    return simd::dot(std::span<const float>(a).first(n),
+                     std::span<const float>(b).first(n));
 }
 
 int HnswIndex::random_level_() {

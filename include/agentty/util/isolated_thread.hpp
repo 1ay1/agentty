@@ -30,7 +30,9 @@
 //     Even "detached" work is exception-isolated; that's the improvement.
 
 #include <exception>
-#include <functional>
+#include <source_location>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -38,12 +40,23 @@
 
 namespace agentty::util {
 
+// Format a source_location into a compact "file:line function" breadcrumb so a
+// worker panic reports WHERE it was spawned, auto-captured, never mislabeled.
+inline std::string spawn_site(const std::source_location& loc) {
+    std::string f = loc.file_name();
+    // Keep just the basename — full build paths are noise in a log line.
+    if (auto slash = f.find_last_of("/\\"); slash != std::string::npos)
+        f.erase(0, slash + 1);
+    return f + ":" + std::to_string(loc.line()) + " " + loc.function_name();
+}
+
 // Wrap any nullary callable so that NOTHING it throws can escape. A throwing
-// body is reported via `where` (dbglog) and swallowed; the thread then exits
-// normally. std::terminate is unreachable from `body`.
+// body is reported via `where` + the captured spawn site (dbglog) and
+// swallowed; the thread then exits normally. std::terminate is unreachable
+// from `body`.
 template <class Body>
-auto make_terminate_proof(const char* where, Body body) {
-    return [where, body = std::move(body)]() mutable noexcept {
+auto make_terminate_proof(std::string where, Body body) {
+    return [where = std::move(where), body = std::move(body)]() mutable noexcept {
         try {
             body();
         } catch (const std::exception& e) {
@@ -61,9 +74,14 @@ class isolated_thread {
 public:
     isolated_thread() = default;
 
+    // `where` is a semantic tag; the spawn site (file:line function) is
+    // auto-captured via source_location and folded into the panic breadcrumb,
+    // so it can never be mislabeled or drift from the code.
     template <class Body>
-    isolated_thread(const char* where, Body body)
-        : t_(make_terminate_proof(where, std::move(body))) {}
+    isolated_thread(std::string_view where, Body body,
+                    std::source_location loc = std::source_location::current())
+        : t_(make_terminate_proof(std::string(where) + " @ " + spawn_site(loc),
+                                  std::move(body))) {}
 
     isolated_thread(isolated_thread&&) noexcept            = default;
     isolated_thread& operator=(isolated_thread&&) noexcept = default;
@@ -91,8 +109,10 @@ private:
 // reference outlives the work (same contract as detach). Prefer capturing by
 // value / shared_ptr, exactly as the ACP turn worker already does.
 template <class Body>
-void run_isolated_detached(const char* where, Body body) {
-    std::thread(make_terminate_proof(where, std::move(body))).detach();
+void run_isolated_detached(std::string_view where, Body body,
+                           std::source_location loc = std::source_location::current()) {
+    std::thread(make_terminate_proof(std::string(where) + " @ " + spawn_site(loc),
+                                     std::move(body))).detach();
 }
 
 } // namespace agentty::util
