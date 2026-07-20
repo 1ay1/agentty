@@ -81,7 +81,7 @@ void print_usage() {
         "usage: agentty [subcommand] [options]\n"
         "\n"
         "subcommands:\n"
-        "  login             Authenticate (OAuth via claude.ai or API key)\n"
+        "  login             Authenticate (API key, or OAuth via claude.ai)\n"
         "  logout            Remove saved credentials\n"
         "  status            Show current auth status\n"
         "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"

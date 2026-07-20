@@ -60,7 +60,7 @@ Step login_pick_method(Model m, char32_t key) {
     if (!std::holds_alternative<login::Picking>(m.ui.login)
         && !std::holds_alternative<login::Failed>(m.ui.login))
         return done(std::move(m));
-    if (key == U'1') {
+    if (key == U'2') {
         // OAuth: mint PKCE pair, open browser, transition to OAuthCode.
         // The URL lives in state so the modal can show it as a fallback
         // if the system browser opener fails silently (broken xdg-open,
@@ -86,7 +86,7 @@ Step login_pick_method(Model m, char32_t key) {
             return done(std::move(m));
         }
     }
-    if (key == U'2') {
+    if (key == U'1') {
         m.ui.login = login::ApiKeyInput{};
         return done(std::move(m));
     }

@@ -153,10 +153,10 @@ Element url_panel(std::string_view url) {
 
 Element panel_picking(bool failed, std::string_view fail_msg) {
     std::vector<Element> rows;
-    rows.push_back(text("Authenticate with Claude", fg_bold(fg)));
+    rows.push_back(text("Sign in to agentty", fg_bold(fg)));
     rows.push_back(body_text(
-        "Pick how you want to sign in. You can change this any time "
-        "from the command palette.",
+        "Bring your own model. Pick how you want to connect — you can "
+        "change this any time from the command palette.",
         fg_dim(muted)));
     rows.push_back(text(""));
     if (failed) {
@@ -171,22 +171,28 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
     // / description / hint rows. The title sits next to the number badge;
     // the subtitle continuation indents by exactly the badge width ("1) "
     // = 3 chars) so it visually hangs under the title, not under the number.
+    //
+    // API key is presented FIRST: it's the unambiguous, provider-neutral
+    // path (any Anthropic/OpenAI-family key), whereas subscription OAuth is
+    // a third-party-client path some users would rather avoid. Leading with
+    // the key keeps the un-controversial option one keystroke away.
     rows.push_back(h(text("1) ", fg_bold(highlight)),
-                     text("OAuth via claude.ai", fg_bold(fg))).build());
+                     text("Paste an API key", fg_bold(fg))).build());
     rows.push_back(h(text("   ", fg_of(fg)),
-                     body_text("for Claude Pro / Max subscribers",
+                     body_text("Anthropic sk-ant-…, or any provider's key",
                                fg_dim(muted))).build());
     rows.push_back(text(""));
     rows.push_back(h(text("2) ", fg_bold(highlight)),
-                     text("Paste an Anthropic API key", fg_bold(fg))).build());
+                     text("OAuth via claude.ai", fg_bold(fg))).build());
     rows.push_back(h(text("   ", fg_of(fg)),
-                     body_text("starts with sk-ant-…", fg_dim(muted))).build());
+                     body_text("use your Claude Pro / Max subscription",
+                               fg_dim(muted))).build());
     rows.push_back(text(""));
     // Other backends (OpenAI, Groq, OpenRouter, Ollama, …) authenticate via
     // an env var, not this modal. Point first-run users who don't have a
     // Claude account at the provider picker so they're never stuck here.
     rows.push_back(body_text(
-        "Using OpenAI, Groq, OpenRouter or a local model instead? "
+        "Using OpenAI, Groq, OpenRouter or a local Ollama model instead? "
         "Press Esc, then Ctrl-P to pick it — you can paste its key right there.",
         fg_dim(muted)));
     rows.push_back(text(""));

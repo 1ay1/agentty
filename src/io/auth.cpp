@@ -869,15 +869,20 @@ void open_browser(const std::string& url) {
 // ---------------------------------------------------------------------------
 
 int cmd_login() {
-    std::cout << "agentty — authenticate with Claude\n\n"
-              << "  1) OAuth via claude.ai (Pro/Max subscription)\n"
-              << "  2) Paste an Anthropic API key (sk-ant-...)\n"
+    std::cout << "agentty — sign in (bring your own model)\n\n"
+              << "  1) Paste an API key (Anthropic sk-ant-..., or any provider)\n"
+              << "  2) OAuth via claude.ai (Pro/Max subscription)\n"
               << "\nChoice [1/2]: " << std::flush;
     std::string choice;
     std::getline(std::cin, choice);
     for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
 
-    if (choice == "2" || choice == "api" || choice == "key") {
+    // Default (empty / "1" / "api" / "key") is the API-key path; OAuth is
+    // the explicit "2"/"oauth" opt-in. Dispatch is on the string, not on
+    // positional order, so the displayed numbering above is presentation-only.
+    const bool want_oauth = (choice == "2" || choice == "oauth"
+                             || choice == "claude");
+    if (!want_oauth) {
         std::cout << "\nPaste API key: " << std::flush;
         std::string key;
         std::getline(std::cin, key);
