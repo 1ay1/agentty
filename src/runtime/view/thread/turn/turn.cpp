@@ -1201,7 +1201,9 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
         cfg.glyph      = "\xf0\x9f\x93\x9a";          // 📚
         cfg.label      = "Retrieved context";
-        cfg.rail_color = muted;
+        // Blue rail: this is a CONTEXT / reference turn (status_info axis),
+        // which also lifts the whole card out of the flat muted gray.
+        cfg.rail_color = status_info;
         // Passage count rides the meta line (right-aligned, like elapsed
         // time on assistant turns) so the body is free for the sources.
         const int shown_n = n > 0 ? n : 1;
@@ -1214,42 +1216,62 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             .color   = muted});
 
         // Confidence bar — a compact 10-cell gauge of the retrieval
-        // confidence that cleared the injection floor, so the user can
-        // weigh how much to trust the grounding at a glance. Only drawn
-        // when a real value was threaded through (>= 0); older/cached
-        // proactive messages without it just skip the bar.
+        // confidence that cleared the injection floor, colored by level so
+        // the user reads trust at a glance: green (strong), yellow
+        // (moderate), muted (weak). Filled cells carry the level color;
+        // empty cells stay muted. Only drawn when a real value was threaded
+        // through (>= 0); older/cached proactive messages skip the bar.
         if (msg.proactive_confidence >= 0.0) {
+            using namespace maya::dsl;
             const double c = msg.proactive_confidence > 1.0
                                  ? 1.0 : msg.proactive_confidence;
             constexpr int kCells = 10;
             const int filled = static_cast<int>(c * kCells + 0.5);
-            std::string bar;
-            for (int i = 0; i < kCells; ++i)
-                bar += (i < filled) ? "\xe2\x96\xb0"    // ▰ filled
-                                    : "\xe2\x96\xb1";   // ▱ empty
+            const maya::Color lvl = c >= 0.60 ? status_ok
+                                  : c >= 0.35 ? status_warn
+                                              : muted;
+            std::string on, off;
+            for (int i = 0; i < filled; ++i)          on  += "\xe2\x96\xb0";
+            for (int i = filled; i < kCells; ++i)     off += "\xe2\x96\xb1";
             const int pct = static_cast<int>(c * 100.0 + 0.5);
-            cfg.body.emplace_back(maya::Turn::PlainText{
-                .content = "  confidence " + bar + " "
-                    + std::to_string(pct) + "%",
-                .color   = muted});
+            cfg.body.emplace_back(maya::Turn::BodySlot{
+                h(text("  confidence ", fg_of(muted)),
+                  text(on,  fg_of(lvl)),
+                  text(off, fg_of(muted)),
+                  text(" " + std::to_string(pct) + "%", fg_bold(lvl)))
+                    .build()});
         }
 
-        // One dim line per distinct source — a tree-ish "└ " bullet so it
-        // reads as provenance, not prose. Capped so a wide multi-file hit
-        // can't dominate the transcript; the overflow collapses to a
+        // One row per distinct source — a tree-ish "└ " bullet + a muted
+        // "source ·" prefix, with the PATH in code-reference cyan so it
+        // pops as the actionable provenance. Capped so a wide multi-file
+        // hit can't dominate the transcript; overflow collapses to a
         // "…and N more" tail.
-        constexpr std::size_t kMaxSources = 6;
-        const std::size_t total = sources.size();
-        for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
-            cfg.body.emplace_back(maya::Turn::PlainText{
-                .content = "  \xe2\x94\x94 " + sources[i],   // └
-                .color   = muted});
-        }
-        if (total > kMaxSources) {
-            cfg.body.emplace_back(maya::Turn::PlainText{
-                .content = "  \xe2\x80\xa6 and "                // …
-                    + std::to_string(total - kMaxSources) + " more",
-                .color   = muted});
+        {
+            using namespace maya::dsl;
+            constexpr std::size_t kMaxSources = 6;
+            const std::size_t total = sources.size();
+            for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
+                // sources[i] is "src · path" (or just "src"); split on the
+                // first " · " so the path can take the cyan.
+                const std::string& s = sources[i];
+                std::string pre = s, path;
+                if (auto d = s.find(" \xc2\xb7 "); d != std::string::npos) {
+                    pre  = s.substr(0, d + 4);   // include " · " separator
+                    path = s.substr(d + 4);
+                }
+                cfg.body.emplace_back(maya::Turn::BodySlot{
+                    h(text("  \xe2\x94\x94 ", fg_of(muted)),   // └
+                      text(pre,  fg_of(muted)),
+                      text(path, fg_of(code_path)))
+                        .build()});
+            }
+            if (total > kMaxSources) {
+                cfg.body.emplace_back(maya::Turn::PlainText{
+                    .content = "  \xe2\x80\xa6 and "                // …
+                        + std::to_string(total - kMaxSources) + " more",
+                    .color   = muted});
+            }
         }
         return cfg;
     }
