@@ -171,7 +171,8 @@ Every environment variable — defaults, ranges, and effects — is documented i
 
 ## Design notes
 
-- **No dependencies.** BM25, RRF, HNSW, the reranker, MMR, compression, PRF, the chunker, and the GraphRAG document graph (PageRank, entity extraction, community detection) are all in-house C++/STL. The only optional network hop is localhost Ollama.
+- **No dependencies.** BM25, RRF (and Relative Score Fusion), HNSW — with optional Matryoshka truncation and binary (sign-code) quantization — the reranker, MMR, compression, PRF, the chunker, and the GraphRAG document graph (PageRank, entity extraction, community detection) are all in-house C++/STL. The only optional network hop is localhost Ollama.
+- **One embed round-trip per source.** However many probes a search fans into — the query, carryover/multi-hop facets, RAG-Fusion paraphrases, a HyDE passage — their dense embeddings batch into a single `/api/embed` call per source, so expansion never multiplies network latency. Sources fan out through one `retrieve_multi` seam, so the batching reaches every knowledge configuration (docs, skills, memory, MCP).
 - **Graceful degradation everywhere.** No embeddings → BM25-only. Ollama unreachable mid-search → the affected stage no-ops and retrieval continues. Community-summary backend down → the plain hub chunk. Empty corpus, blank query, zero-k → empty result, never an error.
 - **Deterministic by default.** Every default-on stage — including the whole GraphRAG graph, its PageRank, and its communities — is deterministic given the corpus, so results are reproducible and `rag-bench` numbers are stable. Only the opt-in LLM stages introduce a model.
 - **Cached, not recomputed.** The document graph is memo-cached per corpus shape; community summaries and the learning-loop feedback are persisted to disk (`.agentty/rag_graph_summaries.tsv`, `.agentty/rag_feedback.tsv`) so expensive work is paid once and survives across sessions.

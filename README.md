@@ -106,7 +106,9 @@ calls** — it's fast, deterministic, and safe to leave fully on.
 
 1. **Hybrid retrieval** — BM25 (keyword, Porter-stemmed) and dense embeddings
    (HNSW-indexed at scale) each rank a wide candidate pool; the two lists are
-   fused with **Reciprocal Rank Fusion**.
+   fused with **Reciprocal Rank Fusion** (or opt-in Relative Score Fusion,
+   `AGENTTY_RAG_FUSION=rsf`). Every dense probe a search fans out — expansion,
+   HyDE, multi-hop — embeds in **one batched round-trip**, not one per probe.
 2. **Pseudo-relevance feedback (RM3)** — harvests discriminative terms from the
    top hits and fuses a second down-weighted probe, recovering the vocabulary
    you didn't type. Sub-millisecond, no model.
@@ -147,7 +149,11 @@ weigh — what the model was standing on.
 BM25, RRF, HNSW, the reranker, MMR, compression, PRF, the chunker, and the
 GraphRAG document graph (PageRank, entity extraction, community detection) are
 all in-house C++/STL. Every stage degrades gracefully and is tunable via
-`AGENTTY_RAG_*` env vars. Full write-up:
+`AGENTTY_RAG_*` env vars. For big corpora, two opt-in vector-cost levers keep
+the ANN cheap while the full-precision rerank recovers quality: **Matryoshka**
+dimension truncation (`AGENTTY_RAG_ANN_DIM=256`, ~2.3× faster walk) and
+**binary quantization** (`AGENTTY_RAG_BINARY=1`, popcount-Hamming walk + float
+rescore, ~2.5×). Full write-up:
 [`docs/website/retrieval.md`](docs/website/retrieval.md).
 
 </details>
