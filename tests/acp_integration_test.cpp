@@ -272,9 +272,9 @@ int main() {
     // diff card is shown before the tool runs — on both the tool_call update
     // and the permission request. This is the claude-code-acp parity work.
     { std::lock_guard lk(transcript_mu);
-      CHECK(tc_title.rfind("write ", 0) == 0);
+      CHECK(tc_title.rfind("Write ", 0) == 0);
       CHECK(tc_title.find('/') == std::string::npos);   // relative, no dir sep
-      CHECK(perm_title.rfind("write ", 0) == 0); }
+      CHECK(perm_title.rfind("Write ", 0) == 0); }
     CHECK(tc_is_edit_kind.load());
     CHECK(tc_announce_diff.load());
     CHECK(perm_announce_diff.load());

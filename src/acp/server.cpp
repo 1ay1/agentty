@@ -163,88 +163,98 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
     switch (kind) {
         case sp::Kind::Read: {
             std::string p = path_arg();
-            if (p.empty()) return n;
+            if (p.empty()) return "Read";
             auto off = num("offset"); if (!off) off = num("start_line");
             auto lim = num("limit");
             auto end = num("end_line");
-            if (off && end) return p + " (" + std::to_string(*off) + "-" + std::to_string(*end) + ")";
-            if (off && lim) return p + " (" + std::to_string(*off) + "-" + std::to_string(*off + *lim - 1) + ")";
-            if (off)        return p + " (from " + std::to_string(*off) + ")";
-            return p;
+            if (off && end) return "Read " + p + " (" + std::to_string(*off) + " - " + std::to_string(*end) + ")";
+            if (off && lim) return "Read " + p + " (" + std::to_string(*off) + " - " + std::to_string(*off + *lim - 1) + ")";
+            if (off)        return "Read " + p + " (from line " + std::to_string(*off) + ")";
+            return "Read " + p;
         }
-        case sp::Kind::Edit:
+        case sp::Kind::Edit: {
+            std::string p = path_arg();
+            return p.empty() ? "Edit" : "Edit " + p;
+        }
         case sp::Kind::Write: {
             std::string p = path_arg();
-            return p.empty() ? n : n + " " + p;
+            return p.empty() ? "Write" : "Write " + p;
         }
         case sp::Kind::Bash:
         case sp::Kind::Diagnostics: {
             std::string c = str("command");
-            if (c.empty()) c = str("display_description");
-            return c.empty() ? n : n + ": " + clip(c, 72);
+            if (!c.empty()) return clip(c, 96);
+            std::string d = str("display_description");
+            return d.empty() ? "Terminal" : d;
         }
         case sp::Kind::GitCommit: {
             std::string m = str("message");
-            return m.empty() ? n : "git commit: " + clip(m, 60);
+            return m.empty() ? "git commit" : "git commit: " + clip(m, 60);
         }
         case sp::Kind::Grep:
             return grep_command(args);
         case sp::Kind::Glob: {
             std::string p = str("pattern");
             std::string root = display_path(str("path"), cwd);
-            if (p.empty()) return n;
-            return root.empty() ? "glob " + p : "glob " + p + " in " + root;
+            std::string label = "Find";
+            if (!root.empty()) label += " `" + root + "`";
+            if (!p.empty())    label += " `" + p + "`";
+            return label;
         }
         case sp::Kind::FindDefinition: {
             std::string s = str("symbol");
-            return s.empty() ? n : "find definition: " + s;
+            return s.empty() ? "Find definition" : "Find definition `" + s + "`";
         }
         case sp::Kind::SearchDocs:
         case sp::Kind::SearchCode: {
             std::string q = str("query");
-            return q.empty() ? n : n + ": " + clip(q, 60);
+            std::string label = (kind == sp::Kind::SearchDocs) ? "Search docs" : "Search code";
+            return q.empty() ? label : label + ": \"" + clip(q, 60) + "\"";
         }
         case sp::Kind::RepoMap: {
             std::string f = str("focus");
-            return f.empty() ? "repo map" : "repo map: " + clip(f, 50);
+            return f.empty() ? "Repo map" : "Repo map: " + clip(f, 50);
         }
         case sp::Kind::ListDir: {
             std::string p = display_path(str("path"), cwd);
-            return p.empty() ? "list_dir" : "list_dir " + p;
+            return p.empty() ? "List directory" : "List `" + p + "`";
         }
         case sp::Kind::GitStatus: return "git status";
         case sp::Kind::GitDiff:   return "git diff";
         case sp::Kind::GitLog:    return "git log";
         case sp::Kind::WebFetch: {
             std::string u = str("url");
-            return u.empty() ? n : "fetch " + u;
+            return u.empty() ? "Fetch" : "Fetch " + u;
         }
         case sp::Kind::WebSearch: {
             std::string q = str("query");
-            return q.empty() ? n : "search: " + clip(q, 60);
+            return q.empty() ? "Web search" : "\"" + clip(q, 60) + "\"";
         }
         case sp::Kind::Todo: {
             if (args.contains("todos") && args["todos"].is_array()) {
-                std::string d = str("display_description");
-                if (!d.empty()) return d;
-                return "update plan (" + std::to_string(args["todos"].size()) + " items)";
+                std::string joined;
+                for (const auto& t : args["todos"]) {
+                    if (t.is_object() && t.contains("content") && t["content"].is_string()) {
+                        if (!joined.empty()) joined += ", ";
+                        joined += t["content"].get<std::string>();
+                    }
+                }
+                if (!joined.empty()) return "Update TODOs: " + clip(joined, 80);
             }
-            return "update plan";
+            return "Update TODOs";
         }
         case sp::Kind::Task: {
             std::string d = str("display_description");
             if (d.empty()) d = clip(str("prompt"), 60);
-            std::string type = str("agent_type");
-            std::string label = type.empty() ? "subagent" : type + " subagent";
-            return d.empty() ? label : label + ": " + d;
+            return d.empty() ? "Task" : d;
         }
         case sp::Kind::Skill: {
             std::string s = str("name");
-            return s.empty() ? "skill" : "skill: " + s;
+            return s.empty() ? "Skill" : "Skill: " + s;
         }
-        case sp::Kind::Remember: return "remember";
-        case sp::Kind::Forget:   return "forget";
-        case sp::Kind::Wipe:     return "wipe memory";
+        case sp::Kind::Remember: return "Remember";
+        case sp::Kind::Forget:   return "Forget";
+        case sp::Kind::Wipe:     return "Wipe memory";
     }
     return n;   // unreachable; switch is exhaustive over Kind
 }
@@ -1142,7 +1152,11 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                         cur_tool_json.clear();
                         a::ToolCall call;
                         call.toolCallId = a::ToolCallId{ev.id.value};
-                        call.title      = ev.name.value;
+                        // Args haven't streamed yet, so this is the kind-based
+                        // fallback ("Read", "Write", "Terminal", …) — never the
+                        // bare lowercase tool name. The SU_ToolCallUpdate on
+                        // StreamToolUseEnd refines it with the arg detail.
+                        call.title      = tool_title(assistant.tool_calls.back(), scwd);
                         call.kind       = acp_tool_kind(ev.name.value);
                         call.status     = a::ToolCallStatus::Pending;
                         send_update(sid, a::SU_ToolCall{std::move(call)});
