@@ -367,7 +367,15 @@ private:
         std::string_view query, const EmbedConfig& embed, std::size_t pool,
         std::vector<std::vector<std::uint32_t>>& lists,
         std::vector<double>* weights = nullptr,
-        const std::vector<float>* precomputed_qvec = nullptr) const;
+        const std::vector<float>* precomputed_qvec = nullptr,
+        std::vector<std::vector<std::pair<std::uint32_t, double>>>* scored
+            = nullptr) const;
+
+    // Fusion mode (AGENTTY_RAG_FUSION), read once. false = RRF (rank-based,
+    // the robust default); true = Relative Score Fusion (min-max score
+    // fusion). When true, search()/search_fused() ask ranked_lists_for_query_
+    // to also capture per-list raw scores and fuse those instead of ranks.
+    [[nodiscard]] static bool fusion_is_rsf_();
 
     // Embed a batch of query strings in ONE /api/embed round-trip (each gets
     // the model's query-side prefix — "search_query: " for nomic, etc). The
@@ -437,6 +445,24 @@ reciprocal_rank_fusion_weighted(
     const std::vector<std::vector<std::uint32_t>>& ranked_lists,
     const std::vector<double>& weights,
     double k, std::size_t out_k);
+
+// RELATIVE SCORE FUSION (Weaviate's relativeScoreFusion; a.k.a. normalized
+// score fusion). Where RRF throws away score MAGNITUDE and fuses on rank
+// position alone, RSF min-max-normalizes each list's raw scores to [0,1] and
+// takes the weighted sum — so "how much better" a hit is (a dense cosine of
+// 0.9 vs 0.6, a BM25 spike on an exact proper-noun match) survives into the
+// fused ranking. RRF is the robust default (immune to score-scale quirks);
+// RSF wins when the per-list score distributions are calibrated + informative
+// — hence an A/B toggle rather than a replacement. Each inner list is
+// {id, raw_score} in that list's own scale; normalization is per-list so BM25
+// (unbounded) and cosine ([-1,1]) become comparable before the weighted sum.
+// A list whose scores are all equal contributes a flat 1.0 to each member.
+// `weights` aligns to `scored_lists` (missing → 1.0), same convention as RRF.
+[[nodiscard]] std::vector<std::pair<std::uint32_t, double>>
+relative_score_fusion_weighted(
+    const std::vector<std::vector<std::pair<std::uint32_t, double>>>& scored_lists,
+    const std::vector<double>& weights,
+    std::size_t out_k);
 
 // Cosine similarity of two equal-length dense vectors. Returns 0 for a
 // length mismatch or a zero vector.

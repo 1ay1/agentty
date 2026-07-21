@@ -310,6 +310,53 @@ static void test_multiquery_embed_batched() {
     rag::set_embed_backend(nullptr);   // reset so later tests are unaffected
 }
 
+// ── 10. Relative Score Fusion (min-max normalized weighted sum) ─────────────
+// RSF should: (a) normalize each list to [0,1] before summing, so an
+// unbounded BM25 list and a cosine list contribute comparably; (b) honour
+// per-list weights; (c) rank a doc that scores WELL in both lists above one
+// that merely appears in both at mediocre scores (the magnitude signal RRF
+// discards).
+static void test_relative_score_fusion() {
+    // List A (say BM25, unbounded scale): doc 1 dominates, doc 2 mid, 3 low.
+    // List B (say cosine, [0,1] scale): doc 2 dominates, doc 1 mid, 3 low.
+    std::vector<std::vector<std::pair<std::uint32_t, double>>> lists = {
+        {{1, 40.0}, {2, 12.0}, {3, 1.0}},     // A
+        {{2, 0.95}, {1, 0.60}, {3, 0.10}},    // B
+    };
+    // Equal weights. Per-list min-max: A -> {1:1.0, 2:0.282, 3:0}; B ->
+    // {2:1.0, 1:0.588, 3:0}. Sums: 1:1.588, 2:1.282, 3:0. So 1 > 2 > 3.
+    auto out = rag::relative_score_fusion_weighted(lists, {1.0, 1.0}, 3);
+    CHECK(out.size() == 3);
+    CHECK(out[0].first == 1);
+    CHECK(out[1].first == 2);
+    CHECK(out[2].first == 3);
+    CHECK(out[0].second > out[1].second);
+
+    // Weighting list B up flips the winner to doc 2 (B's champion).
+    auto outw = rag::relative_score_fusion_weighted(lists, {1.0, 3.0}, 3);
+    CHECK(outw.size() == 3);
+    CHECK(outw[0].first == 2);
+
+    // A degenerate all-equal list votes a flat 1.0 for each member (no NaN).
+    std::vector<std::vector<std::pair<std::uint32_t, double>>> flat = {
+        {{5, 7.0}, {6, 7.0}},
+    };
+    auto outf = rag::relative_score_fusion_weighted(flat, {2.0}, 5);
+    CHECK(outf.size() == 2);
+    CHECK(std::abs(outf[0].second - 2.0) < 1e-9);
+    CHECK(std::abs(outf[1].second - 2.0) < 1e-9);
+
+    // Empty input is empty (no crash).
+    CHECK(rag::relative_score_fusion_weighted({}, {}, 5).empty());
+}
+
+// End-to-end RSF toggle is intentionally NOT unit-tested here: fusion_is_rsf_
+// reads AGENTTY_RAG_FUSION once per process (a static local), and earlier
+// tests in this binary trigger a search first — so the env can't be flipped
+// mid-run to exercise the RSF branch deterministically. test_relative_score_
+// fusion above proves the fusion math; the search()/search_fused() wiring is
+// a one-line branch verified by inspection + compilation.
+
 int main() {
     test_chunker_line_aligned();
     test_chunker_hard_splits_long_line();
@@ -320,6 +367,7 @@ int main() {
     test_corpus_bm25_only_search();
     test_contextual_breadcrumb();
     test_multiquery_embed_batched();
+    test_relative_score_fusion();
 
     if (g_failures == 0) {
         std::printf("rag_test: all checks passed\n");

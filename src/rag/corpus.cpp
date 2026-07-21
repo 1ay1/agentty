@@ -576,6 +576,19 @@ HnswIndex Corpus::make_hnsw_() const {
     return HnswIndex{cfg};
 }
 
+bool Corpus::fusion_is_rsf_() {
+    // AGENTTY_RAG_FUSION=rsf (or "relative"/"score") selects Relative Score
+    // Fusion; anything else (unset, "rrf") keeps the rank-based default.
+    static const bool rsf = [] {
+        const char* v = std::getenv("AGENTTY_RAG_FUSION");
+        if (!v || !v[0]) return false;
+        std::string s;
+        for (const char* p = v; *p; ++p) s.push_back(static_cast<char>(std::tolower((unsigned char)*p)));
+        return s == "rsf" || s == "relative" || s == "score";
+    }();
+    return rsf;
+}
+
 void Corpus::rebuild_hnsw_() {
     constexpr std::size_t kHnswThreshold = 2000;
     hnsw_ = make_hnsw_();
@@ -644,7 +657,8 @@ void Corpus::ranked_lists_for_query_(
     std::string_view query, const EmbedConfig& embed, std::size_t pool,
     std::vector<std::vector<std::uint32_t>>& lists,
     std::vector<double>* weights,
-    const std::vector<float>* precomputed_qvec) const {
+    const std::vector<float>* precomputed_qvec,
+    std::vector<std::vector<std::pair<std::uint32_t, double>>>* scored) const {
     // Fusion weights (SOTA hybrid tuning). Dense retrieval catches paraphrase
     // and semantic near-matches; BM25 catches exact terms/proper nouns. The
     // literature consistently finds a modest dense-over-lexical tilt wins on
@@ -675,12 +689,18 @@ void Corpus::ranked_lists_for_query_(
     }();
 
     // BM25 ranked list (always available). Skip tombstoned ids so a lazily
-    // removed chunk never surfaces before the next compaction.
+    // removed chunk never surfaces before the next compaction. When `scored`
+    // is requested (RSF mode) we capture the raw BM25 score alongside each id.
     std::vector<std::uint32_t> bm25_rank;
+    std::vector<std::pair<std::uint32_t, double>> bm25_scored;
     for (auto& [id, score] : bm25_search(bm25_, query, pool))
-        if (is_live_(id)) bm25_rank.push_back(id);
+        if (is_live_(id)) {
+            bm25_rank.push_back(id);
+            if (scored) bm25_scored.push_back({id, score});
+        }
     lists.push_back(std::move(bm25_rank));
     if (weights) weights->push_back(w_lex);
+    if (scored) scored->push_back(std::move(bm25_scored));
 
     // PSEUDO-RELEVANCE FEEDBACK (RM3-lite): harvest discriminative terms from
     // the top BM25 hits and issue a SECOND, down-weighted BM25 probe over
@@ -695,11 +715,16 @@ void Corpus::ranked_lists_for_query_(
             std::string eq{query};
             for (const auto& t : exp_terms) { eq.push_back(' '); eq += t; }
             std::vector<std::uint32_t> prf_rank;
+            std::vector<std::pair<std::uint32_t, double>> prf_scored;
             for (auto& [id, score] : bm25_search(bm25_, eq, pool))
-                if (is_live_(id)) prf_rank.push_back(id);
+                if (is_live_(id)) {
+                    prf_rank.push_back(id);
+                    if (scored) prf_scored.push_back({id, score});
+                }
             if (!prf_rank.empty()) {
                 lists.push_back(std::move(prf_rank));
                 if (weights) weights->push_back(w_prf);
+                if (scored) scored->push_back(std::move(prf_scored));
             }
         }
     }
@@ -728,12 +753,16 @@ void Corpus::ranked_lists_for_query_(
         if (qptr) {
             const auto& q = *qptr;
             std::vector<std::uint32_t> dense_rank;
+            std::vector<std::pair<std::uint32_t, double>> dense_scored;
             if (hnsw_built_) {
                 // ANN candidate generation — O(log n) vs the brute-force
                 // O(n) scan below. Widen ef beyond the pool for recall.
                 for (auto& [id, sim] : hnsw_.search(
                          q, pool, std::max<std::size_t>(pool * 2, 64)))
-                    if (is_live_(id)) dense_rank.push_back(id);
+                    if (is_live_(id)) {
+                        dense_rank.push_back(id);
+                        if (scored) dense_scored.push_back({id, sim});
+                    }
             } else {
                 std::vector<std::pair<std::uint32_t, double>> sims;
                 sims.reserve(chunks_.size());
@@ -748,11 +777,15 @@ void Corpus::ranked_lists_for_query_(
                 });
                 if (sims.size() > pool) sims.resize(pool);
                 dense_rank.reserve(sims.size());
-                for (auto& [id, s] : sims) dense_rank.push_back(id);
+                for (auto& [id, s] : sims) {
+                    dense_rank.push_back(id);
+                    if (scored) dense_scored.push_back({id, s});
+                }
             }
             if (!dense_rank.empty()) {
                 lists.push_back(std::move(dense_rank));
                 if (weights) weights->push_back(w_dense);
+                if (scored) scored->push_back(std::move(dense_scored));
             }
         }
     }
@@ -769,11 +802,17 @@ std::vector<Hit> Corpus::search(std::string_view query,
 
     std::vector<std::vector<std::uint32_t>> lists;
     std::vector<double> weights;
-    ranked_lists_for_query_(query, embed, pool, lists, &weights);
+    std::vector<std::vector<std::pair<std::uint32_t, double>>> scored;
+    const bool rsf = fusion_is_rsf_();
+    ranked_lists_for_query_(query, embed, pool, lists, &weights,
+                            /*precomputed_qvec=*/nullptr,
+                            rsf ? &scored : nullptr);
 
-    // Fuse with WEIGHTED RRF (k=60 canonical; dense out-weights lexical) and
-    // materialize the hits.
-    auto fused = reciprocal_rank_fusion_weighted(lists, weights, /*k=*/60.0, k);
+    // Fuse and materialize the hits. RRF (rank-based, k=60 canonical) is the
+    // robust default; RSF (min-max score fusion) is opt-in via env for corpora
+    // where the raw score magnitudes are informative.
+    auto fused = rsf ? relative_score_fusion_weighted(scored, weights, k)
+                     : reciprocal_rank_fusion_weighted(lists, weights, 60.0, k);
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)
@@ -939,12 +978,16 @@ std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
 
     std::vector<std::vector<std::uint32_t>> lists;
     std::vector<double> weights;
+    std::vector<std::vector<std::pair<std::uint32_t, double>>> scored;
+    const bool rsf = fusion_is_rsf_();
     for (std::size_t i = 0; i < queries.size(); ++i) {
         const std::vector<float>* qv =
             (i < qvecs.size() && !qvecs[i].empty()) ? &qvecs[i] : nullptr;
-        ranked_lists_for_query_(queries[i], embed, pool, lists, &weights, qv);
+        ranked_lists_for_query_(queries[i], embed, pool, lists, &weights, qv,
+                                rsf ? &scored : nullptr);
     }
-    auto fused = reciprocal_rank_fusion_weighted(lists, weights, 60.0, k);
+    auto fused = rsf ? relative_score_fusion_weighted(scored, weights, k)
+                     : reciprocal_rank_fusion_weighted(lists, weights, 60.0, k);
     std::vector<Hit> hits;
     hits.reserve(fused.size());
     for (auto& [id, score] : fused)

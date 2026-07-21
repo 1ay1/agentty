@@ -223,6 +223,38 @@ reciprocal_rank_fusion(
     return reciprocal_rank_fusion_weighted(ranked_lists, /*weights=*/{}, k, out_k);
 }
 
+std::vector<std::pair<std::uint32_t, double>>
+relative_score_fusion_weighted(
+    const std::vector<std::vector<std::pair<std::uint32_t, double>>>& scored_lists,
+    const std::vector<double>& weights,
+    std::size_t out_k) {
+    std::unordered_map<std::uint32_t, double> fused;
+    for (std::size_t li = 0; li < scored_lists.size(); ++li) {
+        const auto& list = scored_lists[li];
+        if (list.empty()) continue;
+        const double w = (li < weights.size()) ? weights[li] : 1.0;
+        if (w == 0.0) continue;
+        // Min-max over THIS list's raw scores so lists on different scales
+        // (unbounded BM25 vs cosine in [-1,1]) become comparable before the
+        // weighted sum. A degenerate all-equal list maps every member to 1.0
+        // (it still votes, just without internal ordering).
+        double lo = list.front().second, hi = list.front().second;
+        for (const auto& [id, s] : list) { lo = std::min(lo, s); hi = std::max(hi, s); }
+        const double span = hi - lo;
+        for (const auto& [id, s] : list) {
+            const double norm = span > 0.0 ? (s - lo) / span : 1.0;
+            fused[id] += w * norm;
+        }
+    }
+    std::vector<std::pair<std::uint32_t, double>> out(fused.begin(), fused.end());
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+    if (out.size() > out_k) out.resize(out_k);
+    return out;
+}
+
 // ── Chunker ──────────────────────────────────────────────────────────────────────
 
 namespace {
