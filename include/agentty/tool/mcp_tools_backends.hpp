@@ -34,6 +34,12 @@ struct ProactiveHit {
     std::string block;        // fenced <retrieved-context> text for the wire
     double      confidence;   // [0,1] retrieval confidence that cleared the bar
     int         passages;     // how many passages the block carries
+    // Cross-turn dedup keys (source:path:line) for the passages this block
+    // ACTUALLY carries. proactive_retrieve builds the block on a worker that
+    // may be abandoned on a latency-budget overrun, so the keys are only
+    // COMMITTED to the dedup FIFO once the hit is really returned to the
+    // caller — an abandoned worker never suppresses a passage it didn't show.
+    std::vector<std::string> dedup_keys;
 };
 [[nodiscard]] std::optional<ProactiveHit>
 proactive_retrieve(const std::string& query, int k = 3);

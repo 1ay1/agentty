@@ -138,6 +138,8 @@ Three of the strongest techniques need a generative model, so they add latency a
 
 Beyond the explicit `search_docs` tool, agentty can retrieve **before you even ask**. When your message looks knowledge-shaped, it runs the funnel pre-turn and injects a `<retrieved-context>` block (source-tagged, deduplicated across turns) into the prompt — grounding the answer in your docs/skills/memory without a tool round-trip. This is on by default (`AGENTTY_RAG_PROACTIVE=1`) and only injects above a confidence bar (`AGENTTY_RAG_PROACTIVE_MIN`, default `0.45`).
 
+Because this runs on the submit thread, it is bounded by a hard wall-clock budget (`AGENTTY_RAG_PROACTIVE_BUDGET_MS`, default `350`): on a large or slow corpus where the funnel — including the synchronous query-embed round-trip — would overrun, the attempt is abandoned for this turn rather than freezing the UI on Enter. The passages then fold in on a later turn from the now-warm per-turn cache, and the cross-turn dedup FIFO is only committed for blocks that were actually shown, so an abandoned attempt never suppresses a passage you never saw.
+
 ## Provenance
 
 Every returned passage is tagged with its source (`docs:`, `skill:`, `memory:`, or an MCP URI) and its file + line range. agentty never discards where a piece of information came from — cite it, open it, or follow it.

@@ -15,12 +15,14 @@
 // redirected to the temp dir BEFORE any agentty code runs, so remember/
 // forget/wipe_memory land in the sandbox, never in the user's real store.
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -326,6 +328,47 @@ int main() {
         auto none = tools::proactive_retrieve("zebra quagga migration", 3);
         check(!none.has_value(),
               "proactive_retrieve: an unreachable bar suppresses injection");
+        ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
+    }
+
+    // ── latency-budget guard: proactive retrieval must NEVER freeze the ──
+    // submit thread. A tiny wall-clock budget abandons the funnel this turn
+    // (skip → nullopt) instead of blocking; critically, abandoning must NOT
+    // poison the cross-turn dedup FIFO — so once the budget is restored a
+    // NEW query (never before injected) must still yield its passage.
+    {
+        ::setenv("AGENTTY_RAG_PROACTIVE_MIN", "0.0", 1);
+        // A dedicated doc so this passage has NEVER been injected before —
+        // the dedup FIFO is keyed on source:path:line, so reusing zebra.md
+        // (already injected above) couldn't prove the no-poison property.
+        write_file(root / "docs" / "okapi.md",
+                   "# Okapi range\n\nThe okapi bongo forages the Ituri "
+                   "rainforest understory at dawn.\n");
+        // Force the corpus to pick up the new file (the index is warm from
+        // the search_docs calls above and only re-scans on an explicit
+        // retrieve). Assert it's retrievable so a later miss can only mean
+        // dedup poisoning, not a stale index.
+        {
+            auto seed = run("search_docs", {{"query", "okapi bongo rainforest"}});
+            check(has(seed, "okapi"),
+                  "proactive_retrieve: okapi seed doc is indexed");
+        }
+        // 0 ms budget: skip synchronously, kick the funnel detached.
+        ::setenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS", "0", 1);
+        auto skipped = tools::proactive_retrieve("okapi bongo rainforest", 3);
+        check(!skipped.has_value(),
+              "proactive_retrieve: a 0ms budget skips this turn (no freeze)");
+
+        // Restore a generous budget — the query must now succeed, proving
+        // the abandoned worker didn't mark its passage injected. Give the
+        // detached 0ms worker a moment to finish so the two don't race on
+        // the per-turn query cache.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        ::setenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS", "5000", 1);
+        auto after = tools::proactive_retrieve("okapi bongo rainforest", 3);
+        check(after.has_value(),
+              "proactive_retrieve: budgeted-skip did not poison dedup");
+        ::unsetenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS");
         ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
     }
 

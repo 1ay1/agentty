@@ -46,6 +46,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -1733,21 +1734,43 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
 // Bounded (kMax) so a long thread can't grow this without limit; once a key
 // ages out of the window it MAY be re-injected, which is the correct behaviour
 // (it's relevant again and long-since scrolled out of the model's attention).
-bool proactive_already_injected_(const std::string& key) {
-    static std::mutex mu;
-    static std::unordered_set<std::string> seen;
-    static std::deque<std::string> fifo;
-    constexpr std::size_t kMax = 256;
+//
+// SPLIT into peek (proactive_seen_) and commit (proactive_mark_injected_):
+// proactive_retrieve builds candidate blocks on a WORKER that the caller may
+// ABANDON when it blows the latency budget. If the funnel both checked AND
+// recorded keys, an abandoned worker would mark passages "injected" that the
+// user never saw — permanently suppressing them. So the funnel only PEEKS,
+// and the caller commits the surviving keys ONLY when it actually returns the
+// hit to the wire. Both share one mutex/FIFO.
+namespace {
+std::mutex& proactive_dedup_mu_() { static std::mutex mu; return mu; }
+std::unordered_set<std::string>& proactive_dedup_seen_() {
+    static std::unordered_set<std::string> seen; return seen;
+}
+std::deque<std::string>& proactive_dedup_fifo_() {
+    static std::deque<std::string> fifo; return fifo;
+}
+constexpr std::size_t kProactiveDedupMax = 256;
+}
 
-    std::lock_guard<std::mutex> lock(mu);
-    if (seen.count(key)) return true;
+// PEEK: true if `key` was already injected this session. Does NOT record it.
+bool proactive_seen_(const std::string& key) {
+    std::lock_guard<std::mutex> lock(proactive_dedup_mu_());
+    return proactive_dedup_seen_().count(key) > 0;
+}
+
+// COMMIT: record `key` as injected (bounded FIFO eviction). Idempotent.
+void proactive_mark_injected_(const std::string& key) {
+    std::lock_guard<std::mutex> lock(proactive_dedup_mu_());
+    auto& seen = proactive_dedup_seen_();
+    if (seen.count(key)) return;
     seen.insert(key);
+    auto& fifo = proactive_dedup_fifo_();
     fifo.push_back(key);
-    while (fifo.size() > kMax) {
+    while (fifo.size() > kProactiveDedupMax) {
         seen.erase(fifo.front());
         fifo.pop_front();
     }
-    return false;
 }
 
 } // namespace
@@ -1769,18 +1792,41 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
         catch (...) { /* keep default */ }
     }
 
-    try {
-        // ── LATENCY GUARD ───────────────────────────────────────
-        // proactive_retrieve runs on the SUBMIT path (TUI update thread).
-        // A COLD docs corpus means corpus.build(): chunk the whole tree +
-        // batch-embed every chunk through Ollama — seconds to minutes on a
-        // large docs dir. Freezing the UI for that is never acceptable for
-        // an unprompted feature. So: if the docs index isn't warm, kick a
-        // detached background build for NEXT turn — but DON'T give up on
-        // this turn. Skills+memory are BM25-only and sub-ms (always warm),
-        // so still run a skills+memory-ONLY pass: the first turn of a session
-        // (often the most important) gets grounding immediately, and docs
-        // fold in from the next turn once the background build lands.
+    // ── LATENCY GUARD ─────────────────────────────────────────────
+    // proactive_retrieve runs on the SUBMIT path (TUI update thread), so
+    // ANY blocking here freezes the UI between the user pressing Enter and
+    // their turn appearing. Two independent stalls hide in the funnel:
+    //
+    //   (1) COLD docs corpus → corpus.build(): chunk the whole tree +
+    //       batch-embed every chunk through Ollama (seconds to minutes on a
+    //       large tree). Handled below by the index_warm() gate: if the docs
+    //       index isn't warm we kick a detached background build for NEXT
+    //       turn and run only the always-warm skills+memory BM25 pass.
+    //
+    //   (2) WARM docs corpus but SLOW query: r.retrieve() still makes a
+    //       synchronous Ollama query-EMBED round-trip (up to 10s if the
+    //       backend is cold-loading a model) plus BM25/HNSW/RRF/rerank/MMR
+    //       over a huge index. On a large codebase this is the freeze users
+    //       hit — the cold gate above does nothing for it.
+    //
+    // So the whole funnel runs on a detached worker under a HARD wall-clock
+    // budget. If it can't finish in time we abandon it (the worker keeps
+    // running to warm the per-turn cache, and detaches so it never blocks
+    // shutdown) and return nullopt: the context simply folds in on a LATER
+    // turn from the now-warm cache — exactly the graceful degradation the
+    // cold path already relies on. Unprompted grounding is never worth a
+    // frozen keystroke. Budget tunable via AGENTTY_RAG_PROACTIVE_BUDGET_MS.
+    long budget_ms = 350;
+    if (const char* bm = std::getenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS");
+        bm && bm[0]) {
+        try { long v = std::stol(bm); if (v >= 0) budget_ms = v; }
+        catch (...) { /* keep default */ }
+    }
+
+    // The funnel body. Returns the built block + confidence, or nullopt.
+    // Runs on a worker so the caller can bound it with wait_for.
+    auto funnel = [query, k, min_conf]() -> std::optional<ProactiveHit> {
+      try {
         AgenttyDocRetriever r;
         mt::DocQuery q;
         q.query = query;
@@ -1813,6 +1859,7 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
             "to the request. Ground your answer in them where they apply; "
             "ignore any that don't. Cite the source path when you use one.\n\n";
         int n = 0;
+        std::vector<std::string> keys;
         for (const auto& p : passages) {
             // CONTEXT-ECONOMY: memory facts already rendered in the system
             // prompt's <learned-memory> block would be pure double-spend —
@@ -1826,11 +1873,15 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
             // CROSS-TURN DEDUP: don't re-inject a passage the model was
             // already shown earlier this session — that's context spend for
             // zero new signal. Key on source:path:line so distinct chunks of
-            // the same file are treated separately.
+            // the same file are treated separately. PEEK only here — we
+            // record the key in the returned hit and let the CALLER commit
+            // it, so an abandoned over-budget worker can't suppress a passage
+            // that was never actually shown.
             std::string key = (p.source.empty() ? std::string{"docs"} : p.source)
                             + ":" + p.path + ":" + std::to_string(p.line_start);
-            if (proactive_already_injected_(key))
+            if (proactive_seen_(key))
                 continue;
+            keys.push_back(key);
 
             block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
                    + ":" + p.path;
@@ -1845,9 +1896,52 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
         block += "</retrieved-context>";
 
         if (n == 0) return std::nullopt;   // everything deduped away
-        return ProactiveHit{std::move(block), conf, n};
-    } catch (...) {
+        return ProactiveHit{std::move(block), conf, n, std::move(keys)};
+      } catch (...) {
         return std::nullopt;   // proactive retrieval is best-effort, never fatal
+      }
+    };
+
+    // A budget of 0 means "never block the submit thread at all" — skip the
+    // synchronous attempt entirely but still kick the funnel detached so the
+    // per-turn cache warms for the next turn. Nothing is injected (and so the
+    // funnel's PEEK-only dedup is never committed), which is correct.
+    if (budget_ms == 0) {
+        std::thread([funnel] { (void)funnel(); }).detach();
+        return std::nullopt;
+    }
+
+    try {
+        // std::async(launch::async) guarantees a fresh worker thread (not a
+        // deferred lazy eval that would run inline on .get()). We wait at
+        // most budget_ms; if it hasn't landed we DETACH the future's shared
+        // state so its destructor doesn't block (a plain std::future from
+        // std::async blocks in ~future until the task finishes — that would
+        // reintroduce the very freeze we're removing). Move it to the heap
+        // and hand it to a reaper: the worker finishes on its own, warms
+        // the cache, and the process is long-lived so this is bounded by the
+        // number of over-budget turns, not unbounded.
+        auto fut = std::make_shared<std::future<std::optional<ProactiveHit>>>(
+            std::async(std::launch::async, funnel));
+        if (fut->wait_for(std::chrono::milliseconds(budget_ms))
+                == std::future_status::ready) {
+            auto hit = fut->get();
+            // COMMIT the dedup keys only now that we're actually returning
+            // the block to the wire — so these passages aren't re-injected
+            // next turn, while an abandoned over-budget worker (below) never
+            // suppresses passages it didn't show.
+            if (hit)
+                for (const auto& key : hit->dedup_keys)
+                    proactive_mark_injected_(key);
+            return hit;
+        }
+        // Over budget: hand ownership to a detached reaper so ~future never
+        // blocks the caller, and give up on injecting THIS turn. The worker's
+        // result (and its PEEK-only dedup keys) is discarded uncommitted.
+        std::thread([fut] { (void)fut->get(); }).detach();
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;   // best-effort, never fatal
     }
 }
 
