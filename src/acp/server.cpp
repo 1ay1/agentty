@@ -186,7 +186,7 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status) {
 
 } // namespace
 
-AgentServer::AgentServer(a::StdioTransport& transport,
+AgentServer::AgentServer(a::FdTransport& transport,
                          StreamFn          stream,
                          auth::AuthHeader  auth,
                          std::string       model_id,
@@ -203,6 +203,7 @@ a::AgentHandlers AgentServer::make_handlers() {
     h.on_initialize  = [this](const a::InitializeParams& p)  { return on_initialize(p); };
     h.on_session_new = [this](const a::NewSessionParams& p)  { return on_new_session(p); };
     h.on_session_cancel = [this](const a::CancelParams& p)   { on_cancel(p); };
+    h.on_cancel_request = [this](const a::RpcId& id)         { on_cancel_request(id); };
     h.on_session_prompt_async =
         [this](const a::PromptParams& p, Responder r) { on_prompt(p, std::move(r)); };
 
@@ -309,6 +310,12 @@ void AgentServer::send_update(const std::string& session_id, a::SessionUpdate up
 }
 
 void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
+    // Coalesce the whole replay fan-out into ONE writev + one flush: replay
+    // emits many session/update notifications back-to-back, and flushing each
+    // separately is pure syscall overhead. The batch guard buffers every frame
+    // written on this (reader) thread until it goes out of scope.
+    auto _batch = transport_.batch();
+
     // Replay is a synchronous fan-out to the wire on the reader thread (one
     // blocking write per message + per tool call), so an arbitrarily large
     // on-disk thread would block every other request for the whole replay.
@@ -358,7 +365,11 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
 
 a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     a::InitializeResult r;
-    r.protocolVersion = (p.protocolVersion >= 1) ? a::kProtocolVersion : p.protocolVersion;
+    // Negotiate to min(what we support, what the client offered). We advertise
+    // up to kMaxProtocolVersion (v1 by default; v2 only if the acp-cpp build
+    // opted into the Draft via -DACP_ENABLE_V2_DRAFT). A v1-only client still
+    // lands on v1; a v2 client lands on v2 only when we were built for it.
+    r.protocolVersion = a::negotiate_version(a::kMaxProtocolVersion, p.protocolVersion);
 
     r.agentInfo = a::Just<a::ImplementationInfo>(
         {"agentty", a::Nothing, a::Just<std::string>(AGENTTY_VERSION)});
@@ -371,6 +382,11 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     caps.sessionCapabilities.resume    = a::Just(a::Unit{});
     caps.sessionCapabilities.close     = a::Just(a::Unit{});
     caps.sessionCapabilities.deleteCap = a::Just(a::Unit{});
+    // Advertise generic JSON-RPC request cancellation ($/cancel_request,
+    // stabilized 2026-06-29) via _meta — the spec carries extension
+    // capabilities there. A client that sees this may cancel an in-flight
+    // request by its id; we honour it for session/prompt requests.
+    caps.meta["cancelRequest"] = true;
     return r;
 }
 
@@ -451,6 +467,24 @@ void AgentServer::on_cancel(const a::CancelParams& p) {
     if (auto s = find_session(p.sessionId.value); s) {
         util::RankedLock lk(session_mtx_);
         tok = s->cancel;
+    }
+    if (tok) tok->cancel();
+}
+
+void AgentServer::on_cancel_request(const a::RpcId& id) {
+    // Generic JSON-RPC $/cancel_request: the client wants to cancel the
+    // request with this id. We only track in-flight session/prompt requests
+    // (the only long-running ones), so map the id back to its session and
+    // cancel that turn — identical effect to a session/cancel, just addressed
+    // by request id instead of sessionId. Unknown ids (already-settled turns,
+    // or non-prompt requests) are a no-op, which is spec-legal.
+    std::shared_ptr<http::CancelToken> tok;
+    {
+        util::RankedLock lk(session_mtx_);
+        auto mit = prompt_reqid_to_session_.find(id.dump());
+        if (mit == prompt_reqid_to_session_.end()) return;
+        auto sit = sessions_.find(mit->second);
+        if (sit != sessions_.end()) tok = sit->second->cancel;
     }
     if (tok) tok->cancel();
 }
@@ -655,7 +689,15 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             it->second->thread.messages.push_back(std::move(um));
         }
         it->second->cancel = std::make_shared<http::CancelToken>();
+        // Record this prompt's JSON-RPC id so a generic $/cancel_request
+        // targeting it can find and cancel the right session's turn. Same
+        // lock as sessions_; erased when the turn settles (run_turn).
+        prompt_reqid_to_session_[resp.id().dump()] = sid;
     }
+
+    // Capture the request id before `resp` is moved into the worker; run_turn
+    // uses it to drop the reqid→session mapping when the turn settles.
+    std::string req_id_dump = resp.id().dump();
 
     // Run the whole turn off the reader thread; the engine stays free to
     // deliver our outbound permission responses. The Responder resolves the
@@ -668,12 +710,14 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     // try/catch inside run_turn is now belt-and-suspenders, not the only line
     // of defence. See RUST-CRITIQUE.md #3.
     util::run_isolated_detached("acp.turn_worker",
-        [this, sid = std::move(sid), r = std::move(resp)]() mutable {
-            run_turn(std::move(sid), std::move(r));
+        [this, sid = std::move(sid), rid = std::move(req_id_dump),
+         r = std::move(resp)]() mutable {
+            run_turn(std::move(sid), std::move(rid), std::move(r));
         });
 }
 
-void AgentServer::run_turn(std::string session_id, Responder resp) {
+void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
+                           Responder resp) {
   // This runs on a DETACHED worker thread, entirely outside acp-cpp's
   // handle_request try/catch. An uncaught throw here would call
   // std::terminate() and kill every session in the process; and a return
@@ -781,12 +825,19 @@ void AgentServer::run_turn(std::string session_id, Responder resp) {
     if (auto s = find_session(session_id)) {
         {
             // Reset the cancel handle under session_mtx_ so it doesn't race
-            // an on_cancel reading the same shared_ptr instance.
+            // an on_cancel reading the same shared_ptr instance. Drop the
+            // reqid→session mapping in the same critical section — the turn
+            // is settling, so a later $/cancel_request for this id is a no-op.
             util::RankedLock lk(session_mtx_);
             s->cancel.reset();
+            prompt_reqid_to_session_.erase(req_id_dump);
         }
         persist(*s);
         index_session(*s);
+    } else {
+        // Session vanished mid-turn (close/delete): still drop the mapping.
+        util::RankedLock lk(session_mtx_);
+        prompt_reqid_to_session_.erase(req_id_dump);
     }
 
     a::PromptResult result;

@@ -484,7 +484,12 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        ::acp::StdioTransport transport(std::cin, std::cout);
+        // Fast fd transport: raw read(2)/writev(2) on stdin(0)/stdout(1).
+        // Bypasses std::iostream sync + per-message flush that std::cin/cout
+        // would impose. Ensure any buffered C++ stream output is flushed first
+        // so it can't interleave with the raw fd writes.
+        std::cout.flush();
+        ::acp::FdTransport transport = ::acp::FdTransport::process();
         agentty::acp::AgentServer server(
             transport,
             stream_fn,

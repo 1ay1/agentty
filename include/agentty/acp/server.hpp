@@ -101,7 +101,7 @@ public:
     // test double). `auth` is the resolved wire credential; may be empty (then
     // prompts report authentication-required). `model_id` is the default model
     // for new sessions.
-    AgentServer(::acp::StdioTransport& transport,
+    AgentServer(::acp::FdTransport& transport,
                 StreamFn          stream,
                 auth::AuthHeader  auth,
                 std::string       model_id,
@@ -127,13 +127,16 @@ private:
     void                        on_logout();
     void                        on_prompt(const ::acp::PromptParams&, Responder);
     void                        on_cancel(const ::acp::CancelParams&);
+    // Generic $/cancel_request: cancel the turn whose session/prompt request
+    // has this JSON-RPC id (falls back to a no-op for an unknown id).
+    void                        on_cancel_request(const ::acp::RpcId& id);
 
     // Build the AgentHandlers bundle (captures this). Called in the init list
     // to construct conn_; safe because member storage exists at that point.
     ::acp::AgentHandlers make_handlers();
 
     // ── The headless turn loop ───────────────────────────────────────────
-    void run_turn(std::string session_id, Responder resp);
+    void run_turn(std::string session_id, std::string req_id_dump, Responder resp);
 
     StopReason stream_completion(Session& sess, bool& out_cancelled,
                                  std::string& out_error,
@@ -170,7 +173,7 @@ private:
 
     const std::vector<provider::ToolSpec>& wire_tools();
 
-    ::acp::StdioTransport&    transport_;
+    ::acp::FdTransport&       transport_;
     ::acp::ClientConnection   conn_;
     StreamFn                  stream_;
     auth::AuthHeader          auth_;
@@ -188,6 +191,12 @@ private:
     // Rank 10 (kSessionRank): the OUTER lock of the session/thread hierarchy.
     SessionMutex                                           session_mtx_;
     std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
+
+    // Maps the JSON-RPC id (id.dump()) of an in-flight session/prompt request
+    // to its session id, so a generic $/cancel_request targeting that request
+    // id can cancel the right turn. Populated in on_prompt, erased when the
+    // turn settles. Guarded by session_mtx_ (same lock as sessions_).
+    std::unordered_map<std::string, std::string>           prompt_reqid_to_session_;
 };
 
 } // namespace agentty::acp
