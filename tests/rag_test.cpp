@@ -250,6 +250,66 @@ static void test_contextual_breadcrumb() {
     CHECK(c.embed_input() == "body");
 }
 
+// ── 9. Multi-query dense retrieval batches into ONE embed round-trip ────────
+// Regression lock for the search_fused batching win: N query variants must
+// embed in a SINGLE /api/embed call (one batch of N texts), not N serial
+// calls. Uses the pluggable embed backend to count invocations + batch sizes
+// without a network.
+static void test_multiquery_embed_batched() {
+    // Deterministic 8-dim embedder: hashes each text to a unit-ish vector.
+    // Records how many times it was CALLED and the batch size of each call.
+    static int calls = 0;
+    static std::vector<std::size_t> batch_sizes;
+    calls = 0; batch_sizes.clear();
+    rag::set_embed_backend([](const rag::EmbedConfig&,
+                              const std::vector<std::string>& texts)
+            -> std::optional<std::vector<std::vector<float>>> {
+        ++calls;
+        batch_sizes.push_back(texts.size());
+        std::vector<std::vector<float>> out;
+        out.reserve(texts.size());
+        for (const auto& t : texts) {
+            std::vector<float> v(8, 0.0f);
+            std::size_t h = std::hash<std::string>{}(t);
+            for (int d = 0; d < 8; ++d) v[d] = float((h >> (d * 4)) & 0xF) + 1.0f;
+            out.push_back(std::move(v));
+        }
+        return out;
+    });
+
+    // Build a small corpus WITH embeddings so the dense path is live (brute-
+    // force cosine; set_chunks_for_test sets embed_dim_ from the vectors).
+    std::vector<rag::Chunk> chunks;
+    for (int i = 0; i < 6; ++i) {
+        rag::Chunk c;
+        c.path = "doc" + std::to_string(i) + ".md";
+        c.line_start = 1; c.line_end = 3;
+        c.text = "widget installation guide section number " + std::to_string(i);
+        c.embedding.assign(8, float(i % 3) + 0.5f);
+        chunks.push_back(std::move(c));
+    }
+    rag::Corpus corpus;
+    corpus.set_chunks_for_test(std::move(chunks));
+    CHECK(corpus.has_embeddings());
+
+    rag::EmbedConfig embed;
+    embed.model = "test-embed";   // non-empty → dense path active
+
+    // FIVE query variants (the shape of carryover + multihop + expansion).
+    std::vector<std::string> queries = {
+        "widget installation", "how to install the widget",
+        "setup guide", "widget setup steps", "install instructions"};
+    auto hits = corpus.search_fused(queries, embed, /*k=*/4);
+
+    // THE assertion: one batched round-trip, not five serial ones.
+    CHECK(calls == 1);
+    CHECK(batch_sizes.size() == 1);
+    if (!batch_sizes.empty()) CHECK(batch_sizes[0] == queries.size());
+    CHECK(!hits.empty());   // dense retrieval actually produced results
+
+    rag::set_embed_backend(nullptr);   // reset so later tests are unaffected
+}
+
 int main() {
     test_chunker_line_aligned();
     test_chunker_hard_splits_long_line();
@@ -259,6 +319,7 @@ int main() {
     test_cosine();
     test_corpus_bm25_only_search();
     test_contextual_breadcrumb();
+    test_multiquery_embed_batched();
 
     if (g_failures == 0) {
         std::printf("rag_test: all checks passed\n");

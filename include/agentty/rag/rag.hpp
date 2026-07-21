@@ -125,6 +125,20 @@ struct EmbedConfig {
 [[nodiscard]] std::optional<std::vector<std::vector<float>>>
 embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts);
 
+// Pluggable embedding backend. When installed, embed_texts routes EVERY call
+// through this instead of the built-in Ollama HTTP path — the seam for (a)
+// tests that need deterministic vectors + a round-trip counter, and (b)
+// future alternative embedders (a different local server, an in-process
+// model) without touching the retrieval code. The signature mirrors
+// embed_texts: one vector per input in order, or nullopt to signal failure
+// (callers degrade to BM25). Install nullptr to restore the default backend.
+// Not thread-safe against concurrent embed_texts calls; set it at startup or
+// inside a test's single-threaded section.
+using EmbedBackend = std::function<
+    std::optional<std::vector<std::vector<float>>>(
+        const EmbedConfig&, const std::vector<std::string>&)>;
+void set_embed_backend(EmbedBackend fn);
+
 // ── BM25 ────────────────────────────────────────────────────────────────
 // Classic Okapi BM25 over the chunk corpus. Tokenization is lowercase
 // alphanumeric runs; no stemming (kept simple + fast + dependency-free).
@@ -341,10 +355,31 @@ private:
     // for each list pushed (lexical then dense), so callers can drive
     // reciprocal_rank_fusion_weighted. Shared by search() and search_fused()
     // so the per-query retrieval logic lives in exactly one place.
+    //
+    // `precomputed_qvec` (optional) is this query's dense embedding, already
+    // computed by the caller in a SINGLE batched /api/embed round-trip (see
+    // embed_queries_). When present and dimension-correct it is used as-is —
+    // the function issues NO embed call of its own. When null, the function
+    // falls back to embedding the query itself (the single-query search()
+    // path and the degraded per-query fallback). This is what lets
+    // search_fused collapse N serial query embeds into one batch.
     void ranked_lists_for_query_(
         std::string_view query, const EmbedConfig& embed, std::size_t pool,
         std::vector<std::vector<std::uint32_t>>& lists,
-        std::vector<double>* weights = nullptr) const;
+        std::vector<double>* weights = nullptr,
+        const std::vector<float>* precomputed_qvec = nullptr) const;
+
+    // Embed a batch of query strings in ONE /api/embed round-trip (each gets
+    // the model's query-side prefix — "search_query: " for nomic, etc). The
+    // per-call timeout is clamped to the short QUERY leash so a wedged/cold
+    // Ollama degrades to BM25 for this search instead of stalling. Returns a
+    // vector aligned to `queries`; a row is empty when embeddings are off, the
+    // batch failed, or that row's dimension didn't match embed_dim_. Never
+    // throws. This is the single-round-trip primitive behind search_fused
+    // (collapsing what used to be one blocking embed per query variant).
+    [[nodiscard]] std::vector<std::vector<float>>
+    embed_queries_(const std::vector<std::string>& queries,
+                   const EmbedConfig& embed) const;
 
     std::filesystem::path  root_;
     std::vector<Chunk>     chunks_;

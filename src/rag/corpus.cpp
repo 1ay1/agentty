@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <system_error>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,8 +27,22 @@ namespace fs = std::filesystem;
 
 // ── Embeddings (Ollama /api/embed) ─────────────────────────────────────────
 
+namespace {
+// Installed embedding backend override (tests / alternative embedders). Null
+// = use the built-in Ollama HTTP path. See set_embed_backend in rag.hpp.
+EmbedBackend g_embed_backend;
+} // namespace
+
+void set_embed_backend(EmbedBackend fn) { g_embed_backend = std::move(fn); }
+
 std::optional<std::vector<std::vector<float>>>
 embed_texts(const EmbedConfig& cfg, const std::vector<std::string>& texts) {
+    // Backend override wins when installed — the whole HTTP path is bypassed
+    // so a test (or an alternative embedder) sees the exact call shape,
+    // including how many texts are batched per invocation.
+    if (g_embed_backend) {
+        try { return g_embed_backend(cfg, texts); } catch (...) { return std::nullopt; }
+    }
     if (cfg.model.empty() || texts.empty()) return std::nullopt;
     json body;
     body["model"] = cfg.model;
@@ -600,7 +615,8 @@ void Corpus::compact_() {
 void Corpus::ranked_lists_for_query_(
     std::string_view query, const EmbedConfig& embed, std::size_t pool,
     std::vector<std::vector<std::uint32_t>>& lists,
-    std::vector<double>* weights) const {
+    std::vector<double>* weights,
+    const std::vector<float>* precomputed_qvec) const {
     // Fusion weights (SOTA hybrid tuning). Dense retrieval catches paraphrase
     // and semantic near-matches; BM25 catches exact terms/proper nouns. The
     // literature consistently finds a modest dense-over-lexical tilt wins on
@@ -662,16 +678,27 @@ void Corpus::ranked_lists_for_query_(
 
     // Dense ranked list (only when the corpus AND the query can be embedded).
     if (embed_dim_ > 0 && !embed.model.empty()) {
+        // The query vector is either handed in already-computed (search_fused
+        // batches ALL variants into ONE /api/embed call and passes each row
+        // here) or embedded on the spot for the single-query search() path.
         // QUERY-time embed gets a short leash: this call sits on the
         // search_docs path (and the pre-turn proactive path). A single
         // short text should embed in tens of ms; if Ollama is wedged or
         // cold-loading a model, degrade to BM25-only for THIS query rather
         // than hanging the search for the index-time 120s budget.
-        EmbedConfig qcfg = embed;
-        qcfg.timeout_ms = std::min<long>(qcfg.timeout_ms, 10'000);
-        auto qv = embed_texts(qcfg, {with_query_prefix(embed, std::string{query})});
-        if (qv && qv->size() == 1 && (*qv)[0].size() == embed_dim_) {
-            const auto& q = (*qv)[0];
+        std::vector<float> local_qv;
+        const std::vector<float>* qptr = nullptr;
+        if (precomputed_qvec && precomputed_qvec->size() == embed_dim_) {
+            qptr = precomputed_qvec;   // batched upstream — no round-trip here
+        } else {
+            EmbedConfig qcfg = embed;
+            qcfg.timeout_ms = std::min<long>(qcfg.timeout_ms, 10'000);
+            auto qv = embed_texts(qcfg, {with_query_prefix(embed, std::string{query})});
+            if (qv && qv->size() == 1 && (*qv)[0].size() == embed_dim_)
+                { local_qv = std::move((*qv)[0]); qptr = &local_qv; }
+        }
+        if (qptr) {
+            const auto& q = *qptr;
             std::vector<std::uint32_t> dense_rank;
             if (hnsw_built_) {
                 // ANN candidate generation — O(log n) vs the brute-force
@@ -841,15 +868,54 @@ std::size_t Corpus::build_from_memory(
     return chunks_.size();
 }
 
+std::vector<std::vector<float>>
+Corpus::embed_queries_(const std::vector<std::string>& queries,
+                       const EmbedConfig& embed) const {
+    std::vector<std::vector<float>> out;
+    if (embed_dim_ == 0 || embed.model.empty() || queries.empty()) return out;
+    // ONE round-trip for ALL variants. /api/embed accepts an array and
+    // returns rows aligned to the input order (see embed_texts). Each query
+    // gets the model's query-side prefix so the doc↔query asymmetry the index
+    // was built with is preserved. Short QUERY leash: degrade to BM25 (empty
+    // rows) rather than stall the search on a cold/wedged backend.
+    EmbedConfig qcfg = embed;
+    qcfg.timeout_ms = std::min<long>(qcfg.timeout_ms > 0 ? qcfg.timeout_ms
+                                                          : 120'000, 10'000);
+    std::vector<std::string> texts;
+    texts.reserve(queries.size());
+    for (const auto& q : queries)
+        texts.push_back(with_query_prefix(embed, q));
+    auto vs = embed_texts(qcfg, texts);
+    if (!vs || vs->size() != queries.size()) return out;   // all-or-nothing
+    // Keep only dimension-correct rows; a mismatched row (model drift) is
+    // left empty so the per-query path treats it as "no vector" and falls
+    // back to its own embed for just that variant.
+    out = std::move(*vs);
+    for (auto& v : out)
+        if (v.size() != embed_dim_) v.clear();
+    return out;
+}
+
 std::vector<Hit> Corpus::search_fused(const std::vector<std::string>& queries,
                                       const EmbedConfig& embed,
                                       std::size_t k) const {
     if (chunks_.empty() || k == 0 || queries.empty()) return {};
     const std::size_t pool = std::max<std::size_t>(k * 8, 32);
+
+    // BATCHED DENSE EMBED: collapse what used to be one blocking /api/embed
+    // round-trip PER query variant (carryover + multi-hop + expansion + HyDE
+    // can push that to 5-8 serial round-trips) into a SINGLE batched call.
+    // The BM25/PRF lexical lists need no vector, so a failed/empty batch just
+    // degrades this search to lexical — no per-query re-embed storm.
+    const std::vector<std::vector<float>> qvecs = embed_queries_(queries, embed);
+
     std::vector<std::vector<std::uint32_t>> lists;
     std::vector<double> weights;
-    for (const auto& q : queries)
-        ranked_lists_for_query_(q, embed, pool, lists, &weights);  // BM25(+dense) each
+    for (std::size_t i = 0; i < queries.size(); ++i) {
+        const std::vector<float>* qv =
+            (i < qvecs.size() && !qvecs[i].empty()) ? &qvecs[i] : nullptr;
+        ranked_lists_for_query_(queries[i], embed, pool, lists, &weights, qv);
+    }
     auto fused = reciprocal_rank_fusion_weighted(lists, weights, 60.0, k);
     std::vector<Hit> hits;
     hits.reserve(fused.size());
