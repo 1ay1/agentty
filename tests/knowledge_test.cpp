@@ -328,6 +328,64 @@ void test_router_multi_query_degrades() {
         CHECK(a.front().chunk->path == b.front().chunk->path);
 }
 
+// (k) THE batching proof: a multi-query retrieval through the ROUTER over a
+// CorpusSource with embeddings must trigger exactly ONE /api/embed round-trip
+// (all variants batched by search_fused), not one per variant. This is the
+// end-to-end lock that the router→source→Corpus batched path is wired up —
+// without it the funnel silently fell back to N serial single-query embeds.
+void test_router_multi_query_batches_embed() {
+    static int calls = 0;
+    static std::vector<std::size_t> batch_sizes;
+    calls = 0; batch_sizes.clear();
+    rag::set_embed_backend([](const rag::EmbedConfig&,
+                              const std::vector<std::string>& texts)
+            -> std::optional<std::vector<std::vector<float>>> {
+        ++calls;
+        batch_sizes.push_back(texts.size());
+        std::vector<std::vector<float>> out;
+        for (const auto& t : texts) {
+            std::vector<float> v(8, 0.0f);
+            std::size_t h = std::hash<std::string>{}(t);
+            for (int d = 0; d < 8; ++d) v[d] = float((h >> (d * 4)) & 0xF) + 1.0f;
+            out.push_back(std::move(v));
+        }
+        return out;
+    });
+
+    // Corpus WITH embeddings (dim 8) so the dense path is live.
+    std::vector<rag::Chunk> chunks;
+    for (int i = 0; i < 5; ++i) {
+        rag::Chunk c;
+        c.path = "e" + std::to_string(i) + ".md";
+        c.line_start = 1; c.line_end = 4;
+        c.text = "kubernetes deployment replicas pods cluster " + std::to_string(i);
+        c.embedding.assign(8, float(i % 3) + 0.5f);
+        chunks.push_back(std::move(c));
+    }
+    rag::Corpus corpus;
+    corpus.set_chunks_for_test(std::move(chunks));
+    CHECK(corpus.has_embeddings());
+
+    rag::EmbedConfig embed;
+    embed.model = "test-embed";      // non-empty → dense path active
+    auto src = std::make_shared<rag::CorpusSource>("docs", corpus, embed);
+    rag::KnowledgeRouter router;
+    router.add(src);
+
+    std::vector<std::string> queries{
+        "kubernetes deployment", "how many replicas", "pod scheduling",
+        "cluster control plane"};
+    auto hits = router.retrieve_multi(queries, 5);
+
+    // ONE batched embed of all 4 variants, not 4 separate calls.
+    CHECK(calls == 1);
+    CHECK(batch_sizes.size() == 1);
+    if (!batch_sizes.empty()) CHECK(batch_sizes[0] == queries.size());
+    CHECK(!hits.empty());
+
+    rag::set_embed_backend(nullptr);
+}
+
 } // namespace
 
 int main() {
@@ -341,6 +399,7 @@ int main() {
     test_router_multi_query_single_source();
     test_router_multi_query_multi_source();
     test_router_multi_query_degrades();
+    test_router_multi_query_batches_embed();
 
     if (g_failures == 0) {
         std::printf("knowledge_test: all checks passed\n");
