@@ -147,6 +147,79 @@ void Context::compute_confidence() noexcept {
 
 // ── CorpusSource ──────────────────────────────────────────────────────────
 
+// Chunk identity for cross-list dedup: path + line span. A chunk surfaced by
+// two query variants OR two sources must collapse to ONE fused entry so its
+// per-list rank contributions REINFORCE instead of appearing as duplicates.
+static std::string hit_key_(const Hit& h) {
+    const Chunk* c = h.chunk;
+    if (!c) return std::string{};
+    std::string kk = c->path;
+    kk.push_back('\0');
+    kk += std::to_string(c->line_start);
+    kk.push_back(':');
+    kk += std::to_string(c->line_end);
+    return kk;
+}
+
+// Fuse several ranked hit-lists into ONE via RRF (k=60 canonical), deduping
+// identical chunks by hit_key_ so shared hits reinforce. The FUSED score is
+// written onto each surviving hit; provenance is taken from the first
+// occurrence. Shared by the KnowledgeSource multi-query default and the
+// KnowledgeRouter cross-source fuse — one fusion implementation, two callers.
+static std::vector<Hit>
+fuse_hit_lists_(const std::vector<std::vector<Hit>>& hitlists, std::size_t k) {
+    std::vector<Hit>                                pool;
+    std::vector<std::vector<std::uint32_t>>         lists;
+    std::unordered_map<std::string, std::uint32_t>  id_of;
+    lists.reserve(hitlists.size());
+    for (const auto& hits : hitlists) {
+        std::vector<std::uint32_t> ids;
+        ids.reserve(hits.size());
+        std::unordered_set<std::uint32_t> seen;   // de-dup within one list
+        for (const auto& h : hits) {
+            std::string key = hit_key_(h);
+            std::uint32_t id;
+            auto it = key.empty() ? id_of.end() : id_of.find(key);
+            if (it != id_of.end()) {
+                id = it->second;
+            } else {
+                id = static_cast<std::uint32_t>(pool.size());
+                pool.push_back(h);
+                if (!key.empty()) id_of.emplace(std::move(key), id);
+            }
+            if (seen.insert(id).second) ids.push_back(id);
+        }
+        if (!ids.empty()) lists.push_back(std::move(ids));
+    }
+    if (pool.empty()) return {};
+    auto fused = reciprocal_rank_fusion(lists, /*k=*/60.0, k);
+    std::vector<Hit> out;
+    out.reserve(fused.size());
+    for (auto& [id, score] : fused) {
+        if (id >= pool.size()) continue;
+        Hit h = pool[id];
+        h.score = score;
+        out.push_back(h);
+    }
+    return out;
+}
+
+// Base KnowledgeSource::retrieve_multi: fuse per-variant retrieve() calls.
+// This is the fallback for any source WITHOUT a batched embedding path; a
+// source that can embed all variants in one round-trip (CorpusSource) should
+// override. Never throws (each retrieve() already degrades to {}).
+std::vector<Hit>
+KnowledgeSource::retrieve_multi(const std::vector<std::string>& queries,
+                                std::size_t k) const {
+    if (queries.empty()) return {};
+    if (queries.size() == 1) return retrieve(queries.front(), k);
+    std::vector<std::vector<Hit>> lists;
+    lists.reserve(queries.size());
+    for (const auto& q : queries)
+        if (!q.empty()) lists.push_back(retrieve(q, k));
+    return fuse_hit_lists_(lists, k);
+}
+
 std::vector<Hit>
 CorpusSource::retrieve(std::string_view query, std::size_t k) const {
     auto hits = corpus_->search(query, embed_, k);
@@ -155,8 +228,16 @@ CorpusSource::retrieve(std::string_view query, std::size_t k) const {
 }
 
 std::vector<Hit>
-CorpusSource::retrieve_fused(const std::vector<std::string>& queries,
+CorpusSource::retrieve_multi(const std::vector<std::string>& queries,
                              std::size_t k) const {
+    // ONE batched /api/embed round-trip for ALL variants (Corpus::search_fused
+    // embeds them together), then RRF over each variant's BM25/PRF/dense
+    // sub-lists internally. This is the seam that makes the batched dense path
+    // actually reach the funnel: the router now calls retrieve_multi, so a
+    // multi-variant search no longer fans out into N serial single-query
+    // embeds.
+    if (queries.empty()) return {};
+    if (queries.size() == 1) return retrieve(queries.front(), k);
     auto hits = corpus_->search_fused(queries, embed_, k);
     for (auto& h : hits) h.source = this;
     return hits;
@@ -196,6 +277,18 @@ McpResourceSource::retrieve(std::string_view query, std::size_t k) const {
     return hits;
 }
 
+std::vector<Hit>
+McpResourceSource::retrieve_multi(const std::vector<std::string>& queries,
+                                  std::size_t k) const {
+    if (queries.empty()) return {};
+    if (queries.size() == 1) return retrieve(queries.front(), k);
+    if (!built_) build_index_();
+    if (corpus_.chunk_count() == 0) return {};
+    auto hits = corpus_.search_fused(queries, embed_, k);   // batched embed
+    for (auto& h : hits) h.source = this;
+    return hits;
+}
+
 // ── KnowledgeRouter ─────────────────────────────────────────────────────────
 
 void KnowledgeRouter::add(std::shared_ptr<KnowledgeSource> src) {
@@ -231,70 +324,32 @@ KnowledgeRouter::retrieve_multi(const std::vector<std::string>& queries,
 
     if (per_source_k == 0) per_source_k = k;
 
-    // Gather EACH (query, source) ranked list into ONE fused pool. RRF
-    // operates on per-list rank position, so we feed it integer ids that
-    // index a flat pool of (source-stamped) hits.
-    //
-    // CRUCIAL: the SAME chunk surfaced by two sources OR under two query
-    // phrasings must collapse to ONE pool id. Otherwise RRF sees distinct
-    // documents and (a) can't reinforce a chunk that appears in multiple
-    // lists — the entire point of fusion — and (b) the output carries visible
-    // duplicate chunks. Key on (path, line span) so identical chunks share an
-    // id and their per-list rank contributions sum. A chunk that both a
-    // paraphrase AND HyDE surface therefore rises, exactly as intended.
-    std::vector<Hit>                       pool;     // id -> hit
-    std::vector<std::vector<std::uint32_t>> lists;   // per (query,source) ranked ids
-    std::unordered_map<std::string, std::uint32_t> id_of;  // chunk key -> id
-    lists.reserve(sources_.size() * qs.size());
+    // Ask EACH source for ONE internally-fused list over ALL variants. This
+    // is the load-bearing change: a source's retrieve_multi collapses the N
+    // variant embeds into ONE batched /api/embed round-trip (CorpusSource /
+    // McpResourceSource override), so the funnel's expansion + HyDE + multi-
+    // hop probes no longer fan out into N serial single-query embeds PER
+    // source. Sources are independent (own corpus, own embed) but retrieved
+    // sequentially here — concurrent fan-out is a separate, thread-safety-
+    // gated change (the HTTP embed client is shared).
+    std::vector<std::vector<Hit>> per_source;
+    per_source.reserve(sources_.size());
+    for (const auto& src : sources_)
+        per_source.push_back(src->retrieve_multi(qs, per_source_k));
 
-    auto key_of = [](const Hit& h) {
-        const Chunk* c = h.chunk;
-        if (!c) return std::string{};
-        std::string kk = c->path;
-        kk.push_back('\0');
-        kk += std::to_string(c->line_start);
-        kk.push_back(':');
-        kk += std::to_string(c->line_end);
-        return kk;
-    };
-
-    for (const auto& qq : qs) {
-        for (const auto& src : sources_) {
-            auto hits = src->retrieve(qq, per_source_k);
-            std::vector<std::uint32_t> ids;
-            ids.reserve(hits.size());
-            std::unordered_set<std::uint32_t> seen_this_list;  // de-dup within a list
-            for (auto& h : hits) {
-                std::string key = key_of(h);
-                std::uint32_t id;
-                auto it = key.empty() ? id_of.end() : id_of.find(key);
-                if (it != id_of.end()) {
-                    id = it->second;
-                } else {
-                    id = static_cast<std::uint32_t>(pool.size());
-                    pool.push_back(h);   // already source-stamped by the source
-                    if (!key.empty()) id_of.emplace(std::move(key), id);
-                }
-                if (seen_this_list.insert(id).second) ids.push_back(id);
-            }
-            if (!ids.empty()) lists.push_back(std::move(ids));
-        }
+    // One source: its list is already the fused answer (across all variants);
+    // no cross-source step, just trim to k.
+    if (per_source.size() == 1) {
+        auto out = std::move(per_source.front());
+        if (out.size() > k) out.resize(k);
+        return out;
     }
-    if (pool.empty()) return {};
 
-    // Fuse with the SAME RRF used inside Corpus (k=60 canonical). Returns
-    // (pool-id, fused-score) sorted desc, truncated to k.
-    auto fused = reciprocal_rank_fusion(lists, /*k=*/60.0, k);
-
-    std::vector<Hit> out;
-    out.reserve(fused.size());
-    for (auto& [id, score] : fused) {
-        if (id >= pool.size()) continue;
-        Hit h = pool[id];
-        h.score = score;         // carry the FUSED score forward
-        out.push_back(h);
-    }
-    return out;
+    // Multiple sources: fuse their (already variant-fused) lists together,
+    // deduping shared chunks by identity so a hit both a docs page and an MCP
+    // resource surface reinforces. Hierarchical RRF (within-source, then
+    // across-source) — each source contributes its full signal.
+    return fuse_hit_lists_(per_source, k);
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────────────

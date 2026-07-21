@@ -146,6 +146,16 @@ public:
     [[nodiscard]] virtual std::vector<Hit>
     retrieve(std::string_view query, std::size_t k) const = 0;
 
+    // MULTI-QUERY retrieval: retrieve for EVERY variant in `queries` (the
+    // original + RAG-Fusion paraphrases + HyDE probe) and return ONE fused,
+    // provenance-stamped ranked list. The DEFAULT fuses per-variant
+    // retrieve() calls with RRF. A source with a batched embedding path
+    // OVERRIDES this to collapse the N query embeds into a SINGLE /api/embed
+    // round-trip (CorpusSource / McpResourceSource do). `queries` leads with
+    // the original query; empty/single defers to retrieve(). Must not throw.
+    [[nodiscard]] virtual std::vector<Hit>
+    retrieve_multi(const std::vector<std::string>& queries, std::size_t k) const;
+
     // PARENT-DOCUMENT (small-to-big) expansion hook. Given a hit chunk from
     // THIS source, return the adjacent sibling chunks (same document, within
     // `radius` chunks) so a stage can stitch surrounding context back around
@@ -176,10 +186,14 @@ public:
     [[nodiscard]] std::vector<Hit>
     retrieve(std::string_view query, std::size_t k) const override;
 
-    // Multi-query (RAG-Fusion) retrieval — used when query expansion is on.
-    // Routed through Corpus::search_fused, then provenance-stamped.
+    // Multi-query (RAG-Fusion) retrieval — routed through Corpus::search_fused
+    // so ALL variants embed in ONE batched round-trip, then provenance-
+    // stamped. This is the override that makes the batched dense path reach
+    // the real funnel (the router calls retrieve_multi, not per-variant
+    // retrieve).
     [[nodiscard]] std::vector<Hit>
-    retrieve_fused(const std::vector<std::string>& queries, std::size_t k) const;
+    retrieve_multi(const std::vector<std::string>& queries,
+                   std::size_t k) const override;
 
     // Parent-document expansion: delegate to the wrapped Corpus.
     [[nodiscard]] std::vector<const Chunk*>
@@ -240,6 +254,13 @@ public:
     // Stamps provenance. Never throws.
     [[nodiscard]] std::vector<Hit>
     retrieve(std::string_view query, std::size_t k) const override;
+
+    // Multi-query retrieval over the private in-memory Corpus, batched through
+    // search_fused (one embed round-trip for all variants). Lazily builds the
+    // index on first call, same as retrieve().
+    [[nodiscard]] std::vector<Hit>
+    retrieve_multi(const std::vector<std::string>& queries,
+                   std::size_t k) const override;
 
     // Drop the cached index so the next retrieve() re-reads every resource.
     // Call when the server emits resources/list_changed.
