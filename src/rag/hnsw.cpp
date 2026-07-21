@@ -5,6 +5,7 @@
 #include "agentty/rag/simd.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <span>
@@ -13,6 +14,27 @@
 #include <unordered_set>
 
 namespace agentty::rag {
+
+std::vector<std::uint64_t> HnswIndex::pack_bits_(const std::vector<float>& v) {
+    // 1 bit per dim: set when the component is strictly positive (the sign
+    // threshold binary quantization uses). ceil(n/64) little-endian words.
+    const std::size_t words = (v.size() + 63) / 64;
+    std::vector<std::uint64_t> bits(words, 0);
+    for (std::size_t i = 0; i < v.size(); ++i)
+        if (v[i] > 0.0f) bits[i >> 6] |= (std::uint64_t{1} << (i & 63));
+    return bits;
+}
+
+float HnswIndex::bin_sim_(const std::vector<std::uint64_t>& a,
+                          const std::vector<std::uint64_t>& b) const noexcept {
+    // agreements - disagreements = dim_ - 2*Hamming. std::popcount is one
+    // POPCNT instruction per word on x86/ARM — the whole point of binary mode.
+    const std::size_t n = std::min(a.size(), b.size());
+    std::uint32_t ham = 0;
+    for (std::size_t i = 0; i < n; ++i)
+        ham += static_cast<std::uint32_t>(std::popcount(a[i] ^ b[i]));
+    return static_cast<float>(dim_) - 2.0f * static_cast<float>(ham);
+}
 
 std::vector<float> HnswIndex::conform_(const std::vector<float>& v) const {
     // Truncate to the working dim_ (Matryoshka prefix) then unit-normalize.
@@ -87,6 +109,7 @@ void HnswIndex::add(std::uint32_t id, const std::vector<float>& vec) {
     HnswNode node;
     node.id  = id;
     node.vec = std::move(cv);
+    if (cfg_.binary) node.bits = pack_bits_(node.vec);
     int level = random_level_();
     node.links.resize(level + 1);
 
@@ -104,6 +127,7 @@ void HnswIndex::add(std::uint32_t id, const std::vector<float>& vec) {
     nodes_.push_back(std::move(node));
     id_of_.push_back(id);
     const std::vector<float>& q = nodes_[cur_idx].vec;
+    if (cfg_.binary) probe_bits_ = nodes_[cur_idx].bits;   // walk probe = new node
 
     // Phase 1: from the top layer down to level+1, greedy-descend to get a
     // good entry point for the layers we'll actually link into.
@@ -142,13 +166,15 @@ void HnswIndex::add(std::uint32_t id, const std::vector<float>& vec) {
 std::uint32_t HnswIndex::greedy_closest_(const std::vector<float>& q,
                                          std::uint32_t entry, int layer) const {
     std::uint32_t cur = entry;
-    float cur_sim = dot_(q, nodes_[cur].vec);
+    float cur_sim = cfg_.binary ? bin_sim_(probe_bits_, nodes_[cur].bits)
+                                : dot_(q, nodes_[cur].vec);
     bool improved = true;
     while (improved) {
         improved = false;
         if (layer >= static_cast<int>(nodes_[cur].links.size())) break;
         for (std::uint32_t nb : nodes_[cur].links[layer]) {
-            float s = dot_(q, nodes_[nb].vec);
+            float s = cfg_.binary ? bin_sim_(probe_bits_, nodes_[nb].bits)
+                                  : dot_(q, nodes_[nb].vec);
             if (s > cur_sim) { cur_sim = s; cur = nb; improved = true; }
         }
     }
@@ -171,7 +197,8 @@ HnswIndex::search_layer_(const std::vector<float>& q, std::uint32_t entry,
     std::priority_queue<SimNode, std::vector<SimNode>,
                         std::greater<SimNode>> results;
 
-    float es = dot_(q, nodes_[entry].vec);
+    float es = cfg_.binary ? bin_sim_(probe_bits_, nodes_[entry].bits)
+                           : dot_(q, nodes_[entry].vec);
     frontier.push({es, entry});
     results.push({es, entry});
     visited.insert(entry);
@@ -187,7 +214,8 @@ HnswIndex::search_layer_(const std::vector<float>& q, std::uint32_t entry,
         for (std::uint32_t nb : nodes_[c].links[layer]) {
             if (visited.count(nb)) continue;
             visited.insert(nb);
-            float s = dot_(q, nodes_[nb].vec);
+            float s = cfg_.binary ? bin_sim_(probe_bits_, nodes_[nb].bits)
+                                  : dot_(q, nodes_[nb].vec);
             if (results.size() < ef || s > results.top().first) {
                 frontier.push({s, nb});
                 results.push({s, nb});
@@ -216,10 +244,15 @@ HnswIndex::select_neighbors_(const std::vector<float>& base,
     // only if it is closer to `base` than to any already-kept neighbour. This
     // produces a diverse, navigable neighbourhood instead of a tight cluster
     // (which would strand whole regions of the graph).
+    // In binary mode all distances are Hamming over the sign codes; pack base
+    // once (it's node-vs-node here, so `base` is a stored vector).
+    const std::vector<std::uint64_t> base_bits =
+        cfg_.binary ? pack_bits_(base) : std::vector<std::uint64_t>{};
     std::vector<std::pair<float, std::uint32_t>> ranked;
     ranked.reserve(candidates.size());
     for (std::uint32_t c : candidates)
-        ranked.push_back({dot_(base, nodes_[c].vec), c});
+        ranked.push_back({cfg_.binary ? bin_sim_(base_bits, nodes_[c].bits)
+                                       : dot_(base, nodes_[c].vec), c});
     std::sort(ranked.begin(), ranked.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
 
@@ -231,7 +264,10 @@ HnswIndex::select_neighbors_(const std::vector<float>& base,
         for (std::uint32_t k : kept) {
             // sim(c, kept) > sim(c, base)  →  c is closer to an existing
             // neighbour than to base; drop it to preserve diversity.
-            if (dot_(nodes_[c].vec, nodes_[k].vec) > sim_to_base) {
+            const float s_ck = cfg_.binary
+                ? bin_sim_(nodes_[c].bits, nodes_[k].bits)
+                : dot_(nodes_[c].vec, nodes_[k].vec);
+            if (s_ck > sim_to_base) {
                 good = false;
                 break;
             }
@@ -256,6 +292,7 @@ HnswIndex::search(const std::vector<float>& query, std::size_t k,
     if (nodes_.empty() || k == 0) return {};
     std::vector<float> q = conform_(query);
     if (q.empty()) return {};   // empty / shorter-than-dim_ query
+    if (cfg_.binary) probe_bits_ = pack_bits_(q);   // walk probe = query code
 
     std::size_t efs = std::max<std::size_t>(ef ? ef : cfg_.ef_search, k);
 
@@ -267,12 +304,22 @@ HnswIndex::search(const std::vector<float>& query, std::size_t k,
     // Beam-search the dense base layer.
     auto cand = search_layer_(q, entry, efs, 0);
 
+    // Rescore the returned pool with the EXACT float cosine, then take top-k.
+    // In binary mode this recovers the precision the Hamming walk approximated
+    // (binary recall → float rerank, the HuggingFace pattern). In float mode
+    // it reproduces the beam's own order (recomputing the same dot_); efs is
+    // small (~64) so the extra dots are negligible.
+    std::vector<std::pair<std::uint32_t, float>> scored;
+    scored.reserve(cand.size());
+    for (std::uint32_t idx : cand)
+        scored.push_back({idx, dot_(q, nodes_[idx].vec)});
+    std::sort(scored.begin(), scored.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
     std::vector<std::pair<std::uint32_t, float>> out;
-    out.reserve(std::min(k, cand.size()));
-    for (std::size_t i = 0; i < cand.size() && i < k; ++i) {
-        std::uint32_t idx = cand[i];
-        out.push_back({nodes_[idx].id, dot_(q, nodes_[idx].vec)});
-    }
+    out.reserve(std::min(k, scored.size()));
+    for (std::size_t i = 0; i < scored.size() && i < k; ++i)
+        out.push_back({nodes_[scored[i].first].id, scored[i].second});
     return out;
 }
 
@@ -358,6 +405,11 @@ bool HnswIndex::deserialize(std::string_view& in) {
             nd.vec.resize(vlen);
             std::memcpy(nd.vec.data(), in.data(), vlen * sizeof(float));
             in.remove_prefix(vlen * sizeof(float));
+            // Sign codes are DERIVED (never serialized) so the on-disk format
+            // is binary-mode-agnostic: recompute them here when this index is
+            // configured for the Hamming walk. Toggling AGENTTY_RAG_BINARY
+            // across sessions therefore needs no cache rebuild.
+            if (cfg_.binary) nd.bits = pack_bits_(nd.vec);
         }
         if (!get(in, nlayers)) return reset_fail();
         nd.links.resize(nlayers);

@@ -445,8 +445,16 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
             // positional ids no longer match this session's chunk order is
             // detected and rebuilt below rather than returning wrong chunks).
             if (is_v2 && model_match && !b.empty()) {
-                if (get(b, cached_sig))
+                if (get(b, cached_sig)) {
+                    // Deserialize INTO a config-carrying index so the loaded
+                    // graph honours AGENTTY_RAG_ANN_DIM / AGENTTY_RAG_BINARY
+                    // (the default-constructed member would search float/full
+                    // even when the user asked for the truncated/Hamming walk,
+                    // and wouldn't recompute the derived sign codes). dim_ is
+                    // overwritten from disk; only cfg_ is what we're seeding.
+                    hnsw_ = make_hnsw_();
                     hnsw_loaded = hnsw_.deserialize(b);
+                }
                 if (hnsw_loaded) embed_dim_ = dim;
             }
         }
@@ -571,8 +579,18 @@ std::size_t Corpus::effective_ann_dim_() const noexcept {
 }
 
 HnswIndex Corpus::make_hnsw_() const {
+    // Read AGENTTY_RAG_BINARY once (1/true/on = enable the popcount-Hamming
+    // walk + float rescore). Composes with ann_dim (quantize the Matryoshka
+    // prefix). Off by default — byte-identical float behaviour.
+    static const bool binary = [] {
+        const char* v = std::getenv("AGENTTY_RAG_BINARY");
+        if (!v || !v[0]) return false;
+        std::string_view s{v};
+        return s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON";
+    }();
     HnswConfig cfg;
     cfg.ann_dim = ann_dim_env_();
+    cfg.binary  = binary;
     return HnswIndex{cfg};
 }
 

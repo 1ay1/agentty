@@ -50,15 +50,30 @@ struct HnswConfig {
     // Set once at build time and baked into the graph's working dim_; the
     // corpus rebuilds the graph if this changes across sessions.
     std::size_t ann_dim         = 0;
+
+    // BINARY QUANTIZATION (0/false = off). When on, the graph WALK compares
+    // 1-bit-per-dim sign codes with popcount Hamming instead of a float dot
+    // — for a 256-dim vector that's 4 x 64-bit popcounts vs a 256-wide SIMD
+    // dot, several times cheaper per hop (HuggingFace "binary embedding
+    // quantization": faster + far less memory, ~92-96% quality WITH a float
+    // rescore). The float vectors are RETAINED, so search() rescores its
+    // returned pool with the exact cosine — binary recall, float precision.
+    // Composes with ann_dim (quantize the Matryoshka prefix). Derived bits
+    // are recomputed from the float vecs on load, so the on-disk cache format
+    // is unchanged. Default off (byte-identical float behaviour).
+    bool        binary          = false;
 };
 
 // One graph node: its per-layer neighbour lists. `vec` is a UNIT-NORMALIZED
 // copy of the chunk embedding (so search is a dot product). Storing the
 // normalized vector inline keeps the hot search loop cache-friendly and lets
-// the index be self-contained for serialization.
+// the index be self-contained for serialization. `bits` is the derived
+// 1-bit-per-dim sign code (populated only in binary mode) the graph walk
+// Hamming-compares; it is NOT serialized (recomputed from `vec` on load).
 struct HnswNode {
     std::uint32_t              id = 0;        // chunk id in the Corpus
     std::vector<float>         vec;           // unit-normalized embedding
+    std::vector<std::uint64_t> bits;          // sign code (binary mode only)
     std::vector<std::vector<std::uint32_t>> links;  // links[layer] = neighbours
 };
 
@@ -126,6 +141,19 @@ private:
     // through, so the whole index is dimension-coherent by construction.
     [[nodiscard]] std::vector<float> conform_(const std::vector<float>& v) const;
 
+    // Pack a conform_'d vector into a 1-bit-per-dim sign code (bit set when
+    // the component is > 0). ceil(dim_/64) words. The binary-mode graph walk
+    // Hamming-compares these instead of float-dotting `vec`.
+    [[nodiscard]] static std::vector<std::uint64_t>
+    pack_bits_(const std::vector<float>& v);
+
+    // Binary similarity of two sign codes: dim_ - 2*popcount(a XOR b), i.e.
+    // (agreements - disagreements). Higher = closer, monotonic with cosine
+    // for the sign approximation, so it slots into the same "bigger is better"
+    // heaps/greedy the float dot uses.
+    [[nodiscard]] float bin_sim_(const std::vector<std::uint64_t>& a,
+                                 const std::vector<std::uint64_t>& b) const noexcept;
+
     float dot_(const std::vector<float>& a, const std::vector<float>& b) const noexcept;
 
     HnswConfig                cfg_{};
@@ -134,6 +162,11 @@ private:
     std::size_t               dim_       = 0;
     int                       max_layer_ = -1;
     std::uint32_t             entry_     = 0;   // entry point (top layer node)
+    // Binary-mode walk probe: the packed sign code of the current query /
+    // inserting node, set right before a graph walk and read by the query-vs-
+    // node comparisons. Single-threaded search, so a scratch member is safe
+    // and avoids threading the code through every internal walk signature.
+    mutable std::vector<std::uint64_t> probe_bits_;
     mutable std::mt19937_64   rng_{0x9E3779B97F4A7C15ull};
 };
 
