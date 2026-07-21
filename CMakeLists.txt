@@ -1755,6 +1755,16 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(toolset_e2e_test)
     set_tests_properties(toolset_e2e_test PROPERTIES TIMEOUT 120)
 
+    # proactive_deferred_test — the DEFERRED same-turn grounding reducer path.
+    # Drives the REAL stream_update reducer with the ProactiveContextReady Msg
+    # and asserts: the held-back stream launch injects the <retrieved-context>
+    # block SAME-TURN (before the live assistant placeholder, which stays
+    # unfrozen), clears the "retrieving context…" status, returns a launch
+    # Cmd, and DROPS a stale arrival after a cancel-to-Idle. Proves the
+    # retrieve-then-launch UX end to end without provider I/O.
+    agentty_add_full_test(proactive_deferred_test)
+    set_tests_properties(proactive_deferred_test PROPERTIES TIMEOUT 30)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
@@ -1932,6 +1942,7 @@ if(AGENTTY_BUILD_TESTS)
         visual_hash_coverage_test
         tool_result_budget_test
         toolset_e2e_test
+        proactive_deferred_test
         salvage_dedup_test
         doom_loop_test
         acp_integration_test

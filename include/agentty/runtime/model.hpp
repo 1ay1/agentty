@@ -172,21 +172,6 @@ struct Model {
         // run, mirroring Zed's per-session allow-list. Cleared on
         // profile change so tightening the profile re-arms prompts.
         std::set<std::string>            session_grants;
-
-        // Forward-carried proactive retrieval. Proactive pre-turn RAG runs
-        // on the submit path under a small wall-clock hedge so Enter never
-        // freezes (see proactive_retrieve). On a large/slow corpus where the
-        // funnel — including the synchronous dense query-embed round-trip —
-        // overruns the hedge, the worker keeps running detached and
-        // dispatches ProactiveContextReady when it lands. Rather than DROP
-        // that result (the cold path's old behaviour: grounding silently
-        // missing on the first, often most important, turn), we stage the
-        // ready block here. It is flushed into the transcript at the next
-        // safe boundary — the following user submit — so a slow first turn's
-        // grounding is never wasted, only deferred by one turn. Empty = none
-        // pending. Carries the already-committed dedup keys so the flush
-        // doesn't re-commit them.
-        std::optional<Message>           staged_proactive_context;
     };
 
     struct UI {

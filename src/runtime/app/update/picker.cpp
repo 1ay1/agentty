@@ -556,9 +556,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             m.d.current = Thread{};
             m.d.current.id = deps().new_thread_id();
             m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
-            // A late proactive-retrieval block staged for the OLD thread's
-            // next turn must not leak into the fresh thread's first submit.
-            m.d.staged_proactive_context.reset();
             clear_frozen(m);
             m.ui.thread_list = pick::Closed{};
             m.ui.command_palette = palette::Closed{};
@@ -634,9 +631,6 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 std::fflush(prof_out);
             };
             m.d.current = std::move(e.thread);
-            // A late proactive-retrieval block staged for the thread being
-            // left must not leak into the loaded thread's first submit.
-            m.d.staged_proactive_context.reset();
             // Drop the whole render cache — same rationale as NewThread:
             // the entries belong to the thread being left, which won't
             // freeze again. The loaded thread rebuilds its frozen prefix

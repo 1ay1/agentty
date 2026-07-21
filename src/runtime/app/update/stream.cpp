@@ -1652,23 +1652,57 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
         },
         [&](ProactiveContextReady pcr) -> Step {
-            // A late (over-hedge) proactive retrieval landed off-thread.
-            // STAGE it — the next user submit flushes it into the transcript
-            // at a safe message boundary (submit_message), so we never splice
-            // a User message into a mid-stream Assistant run and never touch
-            // the freeze/ledger accounting from here. An empty block means
-            // the late retrieval cleared no confidence bar; clear the slot so
-            // a stale block from an earlier turn can't leak in later.
-            if (pcr.block.empty()) {
-                m.d.staged_proactive_context.reset();
-                return done(std::move(m));
+            // The deferred pre-turn retrieval (submit_message held this turn's
+            // stream launch behind it) has landed. Inject the grounding into
+            // THIS turn — right before the trailing assistant placeholder, so
+            // it reads as retrieved context for the question just asked — and
+            // launch the stream now. Same-turn grounding, no stale-context or
+            // wrong-question cost.
+            //
+            // Guard against a stale arrival: if the user cancelled (Esc →
+            // Idle) or otherwise moved on while retrieval was in flight,
+            // there's no in-flight turn to ground; drop it.
+            if (m.s.is_idle()) return done(std::move(m));
+
+            // The trailing message is the empty assistant placeholder pushed
+            // by submit_message. Insert the proactive User message just
+            // before it so wire order stays User(question) → User(context) →
+            // Assistant(reply). If the shape isn't what we expect (defensive),
+            // fall back to appending before launch.
+            if (!pcr.block.empty()) {
+                Message ctx_msg;
+                ctx_msg.role              = Role::User;
+                ctx_msg.text              = std::move(pcr.block);
+                ctx_msg.proactive_context = true;
+                auto& msgs = m.d.current.messages;
+                if (!msgs.empty() && msgs.back().role == Role::Assistant
+                        && msgs.back().text.empty()
+                        && msgs.back().tool_calls.empty()) {
+                    msgs.insert(msgs.end() - 1, std::move(ctx_msg));
+                } else {
+                    msgs.push_back(std::move(ctx_msg));
+                }
+                // submit_message froze through the user turn (the placeholder
+                // it pushed afterward is the LIVE assistant tail and was left
+                // unfrozen). Extend the frozen prefix over the just-inserted
+                // context message too — but NOT through the trailing
+                // placeholder, which must stay live so its stream reveal
+                // isn't sealed. So freeze through size()-1 when the tail is
+                // the placeholder, else through the full count.
+                const auto& mm = m.d.current.messages;
+                const bool tail_is_placeholder =
+                    !mm.empty() && mm.back().role == Role::Assistant
+                    && mm.back().text.empty() && mm.back().tool_calls.empty();
+                freeze_through(m, tail_is_placeholder ? mm.size() - 1
+                                                      : mm.size());
             }
-            Message ctx_msg;
-            ctx_msg.role              = Role::User;
-            ctx_msg.text              = std::move(pcr.block);
-            ctx_msg.proactive_context = true;
-            m.d.staged_proactive_context = std::move(ctx_msg);
-            return done(std::move(m));
+            // Clear the "retrieving context…" status and fire the request the
+            // model has been waiting on. launch_stream requires the active
+            // phase already set — submit_message left us in Streaming{ctx},
+            // untouched, so active_ctx is live here.
+            m.s.status.clear();
+            m.s.status_until = {};
+            return {std::move(m), cmd::launch_stream(m)};
         },
     }, sm);
 }
