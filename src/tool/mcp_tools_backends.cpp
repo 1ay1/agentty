@@ -1779,11 +1779,10 @@ void proactive_mark_injected_(const std::string& key) {
 // band — before the model sees the turn — and only surfaces its result when
 // confidence clears a HIGH bar (higher than the tool's LOW floor: we're
 // spending the user's context-window tokens unprompted, so the hit must be
-// worth it). Parses the confidence out of the retriever's mode string so
-// there's a single source of truth for the score.
-std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) {
-    // Confidence bar for UNPROMPTED injection. The tool's LOW floor is 0.25;
-    // we inject only well above it. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
+// Read the confidence bar for UNPROMPTED injection. The tool's LOW floor is
+// 0.25; we inject only well above it. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
+namespace {
+double proactive_min_conf_() {
     double min_conf = 0.45;
     if (const char* mc = std::getenv("AGENTTY_RAG_PROACTIVE_MIN"); mc && mc[0]) {
         // Any non-negative value is honoured; a bar above 1.0 is a
@@ -1791,125 +1790,125 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
         try { double v = std::stod(mc); if (v >= 0) min_conf = v; }
         catch (...) { /* keep default */ }
     }
+    return min_conf;
+}
 
-    // ── LATENCY GUARD ─────────────────────────────────────────────
+// The proactive retrieval funnel body: run the retriever, gate on confidence,
+// build the fenced <retrieved-context> block, PEEK the cross-turn dedup and
+// collect surviving keys on the hit. Does NOT commit the dedup keys — the
+// caller commits them only when it actually returns/injects the block, so an
+// abandoned or discarded run never suppresses a passage that was never shown.
+// Never throws (best-effort).
+std::optional<ProactiveHit>
+run_proactive_funnel_(const std::string& query, int k, double min_conf) {
+  try {
+    AgenttyDocRetriever r;
+    mt::DocQuery q;
+    q.query = query;
+    q.k     = k > 0 ? k : 3;
+    std::string mode, err;
+    std::vector<mt::DocPassage> passages;
+    if (!AgenttyDocRetriever::index_warm()) {
+        AgenttyDocRetriever::warm_async();
+        passages = r.retrieve_warm_only(q, mode, err);
+    } else {
+        passages = r.retrieve(q, mode, err);
+    }
+    if (!err.empty() || passages.empty()) return std::nullopt;
+
+    // Recover the confidence the pipeline computed (mode carries
+    // ", confidence 0.NN"). If we can't parse it, be conservative and
+    // don't inject.
+    double conf = -1.0;
+    if (auto p = mode.find("confidence "); p != std::string::npos) {
+        try { conf = std::stod(mode.substr(p + 11)); } catch (...) {}
+    }
+    if (conf < min_conf) return std::nullopt;
+
+    // Build the wire block. Fenced + provenance-labelled so the model
+    // treats it as retrieved reference, not the user's words. Bounded.
+    std::string block =
+        "<retrieved-context>\n"
+        "The following passages were auto-retrieved from the user's "
+        "knowledge base (docs/skills/memory) because they look relevant "
+        "to the request. Ground your answer in them where they apply; "
+        "ignore any that don't. Cite the source path when you use one.\n\n";
+    int n = 0;
+    std::vector<std::string> keys;
+    for (const auto& p : passages) {
+        // CONTEXT-ECONOMY: memory facts already rendered in the system
+        // prompt's <learned-memory> block would be pure double-spend —
+        // the model can see them. select_for_prompt() decides that
+        // rendering; mirror it here and drop any memory passage whose
+        // record made the prompt cut. (Docs/skills/MCP passages are
+        // never in the system prompt — always kept.)
+        if (p.source == "memory" && memory_fact_in_prompt_(p.path))
+            continue;
+
+        // CROSS-TURN DEDUP: don't re-inject a passage the model was
+        // already shown earlier this session — that's context spend for
+        // zero new signal. Key on source:path:line so distinct chunks of
+        // the same file are treated separately. PEEK only here — the caller
+        // commits the surviving keys once it actually injects the block.
+        std::string key = (p.source.empty() ? std::string{"docs"} : p.source)
+                        + ":" + p.path + ":" + std::to_string(p.line_start);
+        if (proactive_seen_(key))
+            continue;
+        keys.push_back(key);
+
+        block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
+               + ":" + p.path;
+        if (p.line_start > 0)
+            block += ":" + std::to_string(p.line_start);
+        block += "]\n";
+        block += p.text;
+        if (!p.text.empty() && p.text.back() != '\n') block += '\n';
+        block += '\n';
+        ++n;
+    }
+    block += "</retrieved-context>";
+
+    if (n == 0) return std::nullopt;   // everything deduped away
+    return ProactiveHit{std::move(block), conf, n, std::move(keys)};
+  } catch (...) {
+    return std::nullopt;   // proactive retrieval is best-effort, never fatal
+  }
+}
+} // namespace
+
+// worth it). Parses the confidence out of the retriever's mode string so
+// there's a single source of truth for the score.
+std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) {
+    const double min_conf = proactive_min_conf_();
+
+    // ── LATENCY GUARD ───────────────────────────────────────
     // proactive_retrieve runs on the SUBMIT path (TUI update thread), so
     // ANY blocking here freezes the UI between the user pressing Enter and
-    // their turn appearing. Two independent stalls hide in the funnel:
-    //
-    //   (1) COLD docs corpus → corpus.build(): chunk the whole tree +
-    //       batch-embed every chunk through Ollama (seconds to minutes on a
-    //       large tree). Handled below by the index_warm() gate: if the docs
-    //       index isn't warm we kick a detached background build for NEXT
-    //       turn and run only the always-warm skills+memory BM25 pass.
-    //
-    //   (2) WARM docs corpus but SLOW query: r.retrieve() still makes a
-    //       synchronous Ollama query-EMBED round-trip (up to 10s if the
-    //       backend is cold-loading a model) plus BM25/HNSW/RRF/rerank/MMR
-    //       over a huge index. On a large codebase this is the freeze users
-    //       hit — the cold gate above does nothing for it.
-    //
-    // So the whole funnel runs on a detached worker under a HARD wall-clock
-    // budget. If it can't finish in time we abandon it (the worker keeps
-    // running to warm the per-turn cache, and detaches so it never blocks
-    // shutdown) and return nullopt: the context simply folds in on a LATER
-    // turn from the now-warm cache — exactly the graceful degradation the
-    // cold path already relies on. Unprompted grounding is never worth a
-    // frozen keystroke. Budget tunable via AGENTTY_RAG_PROACTIVE_BUDGET_MS.
-    long budget_ms = 350;
+    // their turn appearing. This is the SYNCHRONOUS HEDGE: run the funnel on
+    // a worker but wait only a small wall-clock budget. If it lands in time
+    // (the common case — BM25-only is sub-ms; a warm dense query is tens of
+    // ms) the grounding rides THIS turn's first request. If it overruns (a
+    // large/slow corpus whose dense query-embed round-trip can take up to
+    // 10s), we return nullopt so submit never freezes — the app's async path
+    // (proactive_retrieve_blocking on an isolated task) then lands the block
+    // a moment later via ProactiveContextReady. Kept SMALL (250ms) precisely
+    // because that async fallback exists: a miss is no longer a dropped
+    // result, just a one-turn deferral, so we bias toward a snappy Enter.
+    // Budget tunable via AGENTTY_RAG_PROACTIVE_BUDGET_MS.
+    long budget_ms = 250;
     if (const char* bm = std::getenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS");
         bm && bm[0]) {
         try { long v = std::stol(bm); if (v >= 0) budget_ms = v; }
         catch (...) { /* keep default */ }
     }
 
-    // The funnel body. Returns the built block + confidence, or nullopt.
-    // Runs on a worker so the caller can bound it with wait_for.
-    auto funnel = [query, k, min_conf]() -> std::optional<ProactiveHit> {
-      try {
-        AgenttyDocRetriever r;
-        mt::DocQuery q;
-        q.query = query;
-        q.k     = k > 0 ? k : 3;
-        std::string mode, err;
-        std::vector<mt::DocPassage> passages;
-        if (!AgenttyDocRetriever::index_warm()) {
-            AgenttyDocRetriever::warm_async();
-            passages = r.retrieve_warm_only(q, mode, err);
-        } else {
-            passages = r.retrieve(q, mode, err);
-        }
-        if (!err.empty() || passages.empty()) return std::nullopt;
-
-        // Recover the confidence the pipeline computed (mode carries
-        // ", confidence 0.NN"). If we can't parse it, be conservative and
-        // don't inject.
-        double conf = -1.0;
-        if (auto p = mode.find("confidence "); p != std::string::npos) {
-            try { conf = std::stod(mode.substr(p + 11)); } catch (...) {}
-        }
-        if (conf < min_conf) return std::nullopt;
-
-        // Build the wire block. Fenced + provenance-labelled so the model
-        // treats it as retrieved reference, not the user's words. Bounded.
-        std::string block =
-            "<retrieved-context>\n"
-            "The following passages were auto-retrieved from the user's "
-            "knowledge base (docs/skills/memory) because they look relevant "
-            "to the request. Ground your answer in them where they apply; "
-            "ignore any that don't. Cite the source path when you use one.\n\n";
-        int n = 0;
-        std::vector<std::string> keys;
-        for (const auto& p : passages) {
-            // CONTEXT-ECONOMY: memory facts already rendered in the system
-            // prompt's <learned-memory> block would be pure double-spend —
-            // the model can see them. select_for_prompt() decides that
-            // rendering; mirror it here and drop any memory passage whose
-            // record made the prompt cut. (Docs/skills/MCP passages are
-            // never in the system prompt — always kept.)
-            if (p.source == "memory" && memory_fact_in_prompt_(p.path))
-                continue;
-
-            // CROSS-TURN DEDUP: don't re-inject a passage the model was
-            // already shown earlier this session — that's context spend for
-            // zero new signal. Key on source:path:line so distinct chunks of
-            // the same file are treated separately. PEEK only here — we
-            // record the key in the returned hit and let the CALLER commit
-            // it, so an abandoned over-budget worker can't suppress a passage
-            // that was never actually shown.
-            std::string key = (p.source.empty() ? std::string{"docs"} : p.source)
-                            + ":" + p.path + ":" + std::to_string(p.line_start);
-            if (proactive_seen_(key))
-                continue;
-            keys.push_back(key);
-
-            block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
-                   + ":" + p.path;
-            if (p.line_start > 0)
-                block += ":" + std::to_string(p.line_start);
-            block += "]\n";
-            block += p.text;
-            if (!p.text.empty() && p.text.back() != '\n') block += '\n';
-            block += '\n';
-            ++n;
-        }
-        block += "</retrieved-context>";
-
-        if (n == 0) return std::nullopt;   // everything deduped away
-        return ProactiveHit{std::move(block), conf, n, std::move(keys)};
-      } catch (...) {
-        return std::nullopt;   // proactive retrieval is best-effort, never fatal
-      }
+    auto funnel = [query, k, min_conf] {
+        return run_proactive_funnel_(query, k, min_conf);
     };
 
     // A budget of 0 means "never block the submit thread at all" — skip the
-    // synchronous attempt entirely but still kick the funnel detached so the
-    // per-turn cache warms for the next turn. Nothing is injected (and so the
-    // funnel's PEEK-only dedup is never committed), which is correct.
-    if (budget_ms == 0) {
-        std::thread([funnel] { (void)funnel(); }).detach();
-        return std::nullopt;
-    }
+    // synchronous hedge entirely. The app's async path handles injection.
+    if (budget_ms == 0) return std::nullopt;
 
     try {
         // std::async(launch::async) guarantees a fresh worker thread (not a
@@ -1918,31 +1917,44 @@ std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) 
         // state so its destructor doesn't block (a plain std::future from
         // std::async blocks in ~future until the task finishes — that would
         // reintroduce the very freeze we're removing). Move it to the heap
-        // and hand it to a reaper: the worker finishes on its own, warms
-        // the cache, and the process is long-lived so this is bounded by the
-        // number of over-budget turns, not unbounded.
+        // and hand it to a reaper: the worker finishes on its own (warming
+        // the per-turn cache so the async retry is cheap), and the process
+        // is long-lived so this is bounded by over-budget turns.
         auto fut = std::make_shared<std::future<std::optional<ProactiveHit>>>(
             std::async(std::launch::async, funnel));
         if (fut->wait_for(std::chrono::milliseconds(budget_ms))
                 == std::future_status::ready) {
             auto hit = fut->get();
             // COMMIT the dedup keys only now that we're actually returning
-            // the block to the wire — so these passages aren't re-injected
-            // next turn, while an abandoned over-budget worker (below) never
-            // suppresses passages it didn't show.
+            // the block to the wire.
             if (hit)
                 for (const auto& key : hit->dedup_keys)
                     proactive_mark_injected_(key);
             return hit;
         }
         // Over budget: hand ownership to a detached reaper so ~future never
-        // blocks the caller, and give up on injecting THIS turn. The worker's
-        // result (and its PEEK-only dedup keys) is discarded uncommitted.
+        // blocks the caller, and give up on the HEDGE. The async path picks
+        // it up (and its dedup keys stay uncommitted here).
         std::thread([fut] { (void)fut->get(); }).detach();
         return std::nullopt;
     } catch (...) {
         return std::nullopt;   // best-effort, never fatal
     }
+}
+
+// Full funnel with NO wall-clock budget — for running INSIDE an isolated
+// worker task the app owns (Cmd::task_isolated), off the UI thread. Blocks as
+// long as retrieval takes (bounded internally by the 10s query-embed cap).
+// Commits the dedup keys before returning, because the app ALWAYS injects
+// this result (stages it for the next turn) — unlike the hedge, there's no
+// "discarded" path here. Never throws.
+std::optional<ProactiveHit>
+proactive_retrieve_blocking(const std::string& query, int k) {
+    auto hit = run_proactive_funnel_(query, k, proactive_min_conf_());
+    if (hit)
+        for (const auto& key : hit->dedup_keys)
+            proactive_mark_injected_(key);
+    return hit;
 }
 
 } // namespace agentty::tools

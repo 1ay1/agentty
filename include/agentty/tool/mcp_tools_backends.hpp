@@ -44,4 +44,12 @@ struct ProactiveHit {
 [[nodiscard]] std::optional<ProactiveHit>
 proactive_retrieve(const std::string& query, int k = 3);
 
+// Same funnel as proactive_retrieve but with NO wall-clock hedge — blocks
+// until retrieval completes (bounded internally by the query-embed timeout).
+// Intended to run INSIDE an isolated worker task the caller owns (never on
+// the UI thread). Commits the cross-turn dedup keys before returning, because
+// the caller always injects/stages this result. Never throws.
+[[nodiscard]] std::optional<ProactiveHit>
+proactive_retrieve_blocking(const std::string& query, int k = 3);
+
 } // namespace agentty::tools

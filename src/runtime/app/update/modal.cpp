@@ -253,6 +253,7 @@ Step submit_message(Model m) {
     // AGENTTY_RAG_PROACTIVE=0. Cheap: BM25 is sub-ms and shares the
     // search_docs corpus + per-turn cache; best-effort, never blocks submit.
     std::optional<tools::ProactiveHit> proactive;
+    std::string proactive_probe;   // set when we need the async fallback
     {
         auto proactive_on = [] {
             const char* v = std::getenv("AGENTTY_RAG_PROACTIVE");
@@ -305,7 +306,15 @@ Step submit_message(Model m) {
         const bool slash = !user.text.empty() && user.text.front() == '/';
         if (proactive_on() && !slash && !probe.empty()
             && word_count(probe) >= 3 && !looks_imperative(probe)) {
+            // SYNCHRONOUS HEDGE: bounded wall-clock attempt so Enter never
+            // freezes. If it lands in time the grounding rides THIS turn.
             proactive = tools::proactive_retrieve(probe, /*k=*/3);
+            // Hedge missed (slow/large corpus): remember the probe so we can
+            // kick the un-hedged funnel on an isolated worker below. When it
+            // lands it dispatches ProactiveContextReady, which stages the
+            // block for the NEXT turn's transcript — grounding is deferred by
+            // one turn instead of dropped, and the UI never blocked.
+            if (!proactive) proactive_probe = probe;
         }
     }
 
@@ -327,6 +336,17 @@ Step submit_message(Model m) {
     // It's a normal User message on the wire (like the compaction summary)
     // but flagged proactive_context so the view renders it as a compact
     // "retrieved context" affordance, not the user's own words.
+    //
+    // FIRST flush any context STAGED by a prior turn's late (over-hedge)
+    // retrieval: a large/slow corpus can't ground the turn it was asked on,
+    // so the async worker's block was parked in m.d.staged_proactive_context
+    // and lands here, one turn later, rather than being dropped. Placed
+    // before the fresh hedge hit so provenance order is oldest-first.
+    if (m.d.staged_proactive_context) {
+        m.d.current.messages.push_back(
+            std::move(*m.d.staged_proactive_context));
+        m.d.staged_proactive_context.reset();
+    }
     if (proactive) {
         Message ctx_msg;
         ctx_msg.role              = Role::User;
@@ -408,6 +428,26 @@ Step submit_message(Model m) {
             [id = std::move(*checkpoint_to_create)]
             (std::function<void(Msg)>) {
                 (void)workspace::create_checkpoint(id);
+            }));
+    }
+    // ASYNC PROACTIVE FALLBACK: the synchronous hedge missed (a large/slow
+    // corpus whose dense query-embed round-trip can't clear the budget), so
+    // run the un-hedged funnel on an isolated worker — fully off the UI
+    // thread — and dispatch its block back via ProactiveContextReady. The
+    // reducer stages it for the NEXT turn. This is what makes grounding
+    // "best-effort but never lost": fast corpora ground same-turn via the
+    // hedge; slow corpora ground one turn later via this path; the UI is
+    // never blocked in either case.
+    if (!proactive_probe.empty()) {
+        parts.push_back(Cmd<Msg>::task_isolated(
+            [probe = std::move(proactive_probe)]
+            (std::function<void(Msg)> dispatch) {
+                auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
+                // Always dispatch (even on a miss the reducer just clears
+                // any prior staged block): keeps the handler's contract
+                // simple and the staged slot from going stale.
+                dispatch(Msg{ProactiveContextReady{
+                    hit ? std::move(hit->block) : std::string{}}});
             }));
     }
     parts.push_back(std::move(launch));

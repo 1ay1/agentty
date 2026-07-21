@@ -1651,6 +1651,25 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 return {std::move(m), std::move(status_cmd)};
             }
         },
+        [&](ProactiveContextReady pcr) -> Step {
+            // A late (over-hedge) proactive retrieval landed off-thread.
+            // STAGE it — the next user submit flushes it into the transcript
+            // at a safe message boundary (submit_message), so we never splice
+            // a User message into a mid-stream Assistant run and never touch
+            // the freeze/ledger accounting from here. An empty block means
+            // the late retrieval cleared no confidence bar; clear the slot so
+            // a stale block from an earlier turn can't leak in later.
+            if (pcr.block.empty()) {
+                m.d.staged_proactive_context.reset();
+                return done(std::move(m));
+            }
+            Message ctx_msg;
+            ctx_msg.role              = Role::User;
+            ctx_msg.text              = std::move(pcr.block);
+            ctx_msg.proactive_context = true;
+            m.d.staged_proactive_context = std::move(ctx_msg);
+            return done(std::move(m));
+        },
     }, sm);
 }
 

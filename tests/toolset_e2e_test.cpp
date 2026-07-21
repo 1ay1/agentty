@@ -331,11 +331,13 @@ int main() {
         ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
     }
 
-    // ── latency-budget guard: proactive retrieval must NEVER freeze the ──
-    // submit thread. A tiny wall-clock budget abandons the funnel this turn
-    // (skip → nullopt) instead of blocking; critically, abandoning must NOT
-    // poison the cross-turn dedup FIFO — so once the budget is restored a
-    // NEW query (never before injected) must still yield its passage.
+    // ── latency-budget hedge + async fallback: proactive retrieval must ──
+    // NEVER freeze the submit thread. A 0ms hedge returns nothing on the
+    // submit path (the app then grounds via the async proactive_retrieve_
+    // blocking task); crucially the hedge is PEEK-only, so a 0ms skip must
+    // not commit dedup keys — the blocking variant must still yield the
+    // passage afterward. Then the blocking variant, having injected, must
+    // dedup a second call.
     {
         ::setenv("AGENTTY_RAG_PROACTIVE_MIN", "0.0", 1);
         // A dedicated doc so this passage has NEVER been injected before —
@@ -353,22 +355,29 @@ int main() {
             check(has(seed, "okapi"),
                   "proactive_retrieve: okapi seed doc is indexed");
         }
-        // 0 ms budget: skip synchronously, kick the funnel detached.
+
+        // 0 ms hedge: the submit-path call returns nothing and blocks for 0ms.
         ::setenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS", "0", 1);
         auto skipped = tools::proactive_retrieve("okapi bongo rainforest", 3);
         check(!skipped.has_value(),
-              "proactive_retrieve: a 0ms budget skips this turn (no freeze)");
-
-        // Restore a generous budget — the query must now succeed, proving
-        // the abandoned worker didn't mark its passage injected. Give the
-        // detached 0ms worker a moment to finish so the two don't race on
-        // the per-turn query cache.
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        ::setenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS", "5000", 1);
-        auto after = tools::proactive_retrieve("okapi bongo rainforest", 3);
-        check(after.has_value(),
-              "proactive_retrieve: budgeted-skip did not poison dedup");
+              "proactive_retrieve: a 0ms hedge never blocks the submit path");
         ::unsetenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS");
+
+        // The async fallback (blocking variant, runs off-thread in the app)
+        // must now yield the passage — the 0ms hedge PEEK didn't poison
+        // dedup — and COMMIT it.
+        auto landed = tools::proactive_retrieve_blocking("okapi bongo rainforest", 3);
+        check(landed.has_value(),
+              "proactive_retrieve_blocking: async fallback yields the passage");
+        if (landed)
+            check(landed->block.find("okapi") != std::string::npos,
+                  "proactive_retrieve_blocking: block carries the passage");
+
+        // Having injected, a repeat blocking call must dedup it away (the
+        // model already saw it this session) — proving commit happened.
+        auto again = tools::proactive_retrieve_blocking("okapi bongo rainforest", 3);
+        check(!again.has_value(),
+              "proactive_retrieve_blocking: commits dedup after injecting");
         ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
     }
 

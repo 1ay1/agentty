@@ -460,6 +460,17 @@ struct LoginExchanged   { agentty::auth::TokenResult result; };
 // login modal.
 struct TokenRefreshed   { agentty::auth::TokenResult result; };
 
+// Proactive pre-turn retrieval landed off-thread. Proactive RAG runs on the
+// submit path under a small wall-clock hedge so Enter never freezes (see
+// proactive_retrieve). When the funnel overruns the hedge on a large/slow
+// corpus, the worker keeps running detached and dispatches THIS when the
+// grounding is ready. `block` is the fenced <retrieved-context> text; empty
+// means the late retrieval cleared no confidence bar (nothing to inject).
+// The reducer STAGES it (m.d.staged_proactive_context) so the next user
+// submit flushes it into the transcript at a safe boundary — a slow first
+// turn's grounding is deferred by one turn instead of being dropped.
+struct ProactiveContextReady { std::string block; };
+
 // ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
 struct CloseDiffReview {};
@@ -562,7 +573,7 @@ using StreamMsg = std::variant<
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
     StreamThinkingDelta,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
-    CancelStream, RetryStream>;
+    CancelStream, RetryStream, ProactiveContextReady>;
 
 using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
