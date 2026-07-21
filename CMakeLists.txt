@@ -1765,6 +1765,15 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(proactive_deferred_test)
     set_tests_properties(proactive_deferred_test PROPERTIES TIMEOUT 30)
 
+    # persistence_proactive_test — the proactive-context marker + retrieval
+    # confidence survive a real save→disk→load round-trip (public
+    # save_thread + flush_pending_saves + load_thread_file against an
+    # isolated $HOME). Regression lock: proactive_context was previously not
+    # serialized, so a reloaded thread leaked the raw <retrieved-context>
+    # block as a plain user turn.
+    agentty_add_full_test(persistence_proactive_test)
+    set_tests_properties(persistence_proactive_test PROPERTIES TIMEOUT 30)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
@@ -1943,6 +1952,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_result_budget_test
         toolset_e2e_test
         proactive_deferred_test
+        persistence_proactive_test
         salvage_dedup_test
         doom_loop_test
         acp_integration_test
