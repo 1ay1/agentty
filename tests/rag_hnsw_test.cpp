@@ -226,12 +226,72 @@ static void test_hnsw_corrupt_cache_rejected() {
     }
 }
 
+// ── 6. Matryoshka truncation: graph indexes only the leading ann_dim ────────
+// With cfg.ann_dim set, the graph's working dim collapses to the prefix, and
+// queries are truncated to match. For MRL-style vectors (discriminative
+// signal in the leading dims, noise in the tail) recall@1 is preserved even
+// though the graph stores a THIRD of each vector. Also proves the query is
+// conformed (a full-width query searches a truncated graph fine).
+static void test_hnsw_matryoshka_truncation() {
+    constexpr std::size_t kN = 400, kLead = 24, kTail = 72, kDim = kLead + kTail;
+    constexpr std::size_t kAnn = kLead;   // truncate to the leading block
+    std::mt19937 rng(20240521u);
+
+    // Each vector: a strong signal in the leading kLead dims, small noise in
+    // the trailing kTail (the "low-fidelity tail" MRL is trained to shed).
+    std::vector<std::vector<float>> db;
+    db.reserve(kN);
+    for (std::size_t i = 0; i < kN; ++i) {
+        std::vector<float> v(kDim, 0.0f);
+        std::normal_distribution<float> lead(0.0f, 1.0f), tail(0.0f, 0.05f);
+        for (std::size_t d = 0; d < kLead; ++d) v[d] = lead(rng);
+        for (std::size_t d = kLead; d < kDim; ++d) v[d] = tail(rng);
+        db.push_back(std::move(v));
+    }
+
+    rag::HnswConfig cfg;
+    cfg.ann_dim = kAnn;
+    rag::HnswIndex idx(cfg);
+    std::vector<std::uint32_t> ids(kN);
+    std::vector<const std::vector<float>*> embs(kN);
+    for (std::uint32_t i = 0; i < kN; ++i) { ids[i] = i; embs[i] = &db[i]; }
+    idx.build(ids, embs);
+
+    // The graph works in the truncated space.
+    CHECK(idx.dim() == kAnn);
+    CHECK(idx.size() == kN);
+
+    // Ground truth uses the FULL-dim cosine; the truncated graph should still
+    // recover it because the tail carries almost no signal (the MRL premise).
+    int hits = 0; constexpr int kQ = 40;
+    for (int qn = 0; qn < kQ; ++qn) {
+        auto q = db[static_cast<std::size_t>(rng() % kN)];
+        // Perturb the query slightly so it isn't a trivial exact match.
+        std::normal_distribution<float> jit(0.0f, 0.02f);
+        for (auto& x : q) x += jit(rng);
+        std::uint32_t want = true_nn(db, q);      // full-dim truth
+        auto res = idx.search(q, 1, /*ef=*/100);  // full-width query, truncated graph
+        if (!res.empty() && res.front().first == want) ++hits;
+    }
+    double recall = double(hits) / double(kQ);
+    std::printf("rag_hnsw_test: matryoshka recall@1 = %.3f (dim %zu->%zu)\n",
+                recall, kDim, kAnn);
+    CHECK(recall >= 0.8);
+
+    // ann_dim >= width is a no-op (never truncates up): full dim retained.
+    rag::HnswConfig big; big.ann_dim = kDim + 100;
+    rag::HnswIndex idx2(big);
+    idx2.build(ids, embs);
+    CHECK(idx2.dim() == kDim);
+}
+
 int main() {
     test_hnsw_recall_small();
     test_hnsw_search_basic();
     test_hnsw_serialize_roundtrip();
     test_hnsw_empty();
     test_hnsw_corrupt_cache_rejected();
+    test_hnsw_matryoshka_truncation();
 
     if (g_failures == 0) {
         std::printf("rag_hnsw_test: all checks passed\n");

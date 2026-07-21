@@ -37,6 +37,19 @@ struct HnswConfig {
     std::size_t ef_search       = 64;   // beam width while querying (≥ k)
     double      level_mult      = 1.0 / 0.69314718;  // 1/ln(2): layer sampler
     std::uint64_t seed          = 0x9E3779B97F4A7C15ull;
+
+    // MATRYOSHKA truncation dim (0 = off / full dimension). When > 0 and
+    // smaller than the embedding width, the graph indexes only the first
+    // `ann_dim` components of each vector. MRL-trained embedders
+    // (nomic-embed-text-v1.5, the e5/BGE Matryoshka variants) place the most
+    // information in the leading dims, so a dim PREFIX is itself a valid,
+    // slightly-lower-fidelity embedding. Truncating to 256 of 768 cuts every
+    // graph-walk dot product (the hot loop — thousands per query) to a THIRD
+    // of the FLOPs and the graph's memory likewise, for a small, research-
+    // documented recall cost that the full-dimension rerank stages recover.
+    // Set once at build time and baked into the graph's working dim_; the
+    // corpus rebuilds the graph if this changes across sessions.
+    std::size_t ann_dim         = 0;
 };
 
 // One graph node: its per-layer neighbour lists. `vec` is a UNIT-NORMALIZED
@@ -104,6 +117,14 @@ private:
     select_neighbors_(const std::vector<float>& base,
                       const std::vector<std::uint32_t>& candidates,
                       std::size_t m) const;
+
+    // Truncate `v` to the graph's working dim_ (the Matryoshka prefix) and
+    // unit-normalize the result, so cosine reduces to a dot. A vector SHORTER
+    // than dim_ can't be conformed and returns empty (caller skips it). When
+    // ann_dim truncation is off, dim_ == the full width and this is a plain
+    // normalize. The single choke point every stored vector + query passes
+    // through, so the whole index is dimension-coherent by construction.
+    [[nodiscard]] std::vector<float> conform_(const std::vector<float>& v) const;
 
     float dot_(const std::vector<float>& a, const std::vector<float>& b) const noexcept;
 
