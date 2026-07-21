@@ -1774,6 +1774,16 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(persistence_proactive_test)
     set_tests_properties(persistence_proactive_test PROPERTIES TIMEOUT 30)
 
+    # settings_default_test — pins the SHIPPED default permission profile: a
+    # fresh install (no settings.json) and a legacy config missing the
+    # "profile" key both resolve to Write (the Profile enum's zero value).
+    # Intentional product decision (autonomous-by-default, contained by the
+    # sandbox); documented at /docs/profiles. Regression lock against a
+    # silent flip from an enum reorder or a Settings-struct-default change.
+    # Drives public load_settings/save_settings against an isolated $HOME.
+    agentty_add_full_test(settings_default_test)
+    set_tests_properties(settings_default_test PROPERTIES TIMEOUT 30)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
@@ -1953,6 +1963,7 @@ if(AGENTTY_BUILD_TESTS)
         toolset_e2e_test
         proactive_deferred_test
         persistence_proactive_test
+        settings_default_test
         salvage_dedup_test
         doom_loop_test
         acp_integration_test
