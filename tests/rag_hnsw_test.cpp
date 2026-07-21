@@ -6,8 +6,11 @@
 // + CHECK macro, a main() that runs each test fn and prints "all checks
 // passed" / returns nonzero on any failure.
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <random>
 #include <string>
 #include <string_view>
@@ -338,7 +341,49 @@ static void test_hnsw_binary_quantization() {
     CHECK(!rr.empty());
 }
 
-int main() {
+// Optional timing microbench (NOT run by ctest — gated on `argv[1]=="bench"`
+// so CI stays deterministic). Builds one graph per mode and times the walk.
+static void run_walk_bench() {
+    constexpr std::size_t kN = 6000, kDim = 768, kQ = 1000;
+    std::mt19937 rng(12345u);
+    std::vector<std::vector<float>> db;
+    db.reserve(kN);
+    for (std::size_t i = 0; i < kN; ++i) db.push_back(random_vec(rng, kDim));
+    std::vector<std::vector<float>> queries;
+    queries.reserve(kQ);
+    for (std::size_t i = 0; i < kQ; ++i) queries.push_back(random_vec(rng, kDim));
+
+    std::vector<std::uint32_t> ids(kN);
+    std::vector<const std::vector<float>*> embs(kN);
+    for (std::uint32_t i = 0; i < kN; ++i) { ids[i] = i; embs[i] = &db[i]; }
+
+    struct Mode { const char* name; rag::HnswConfig cfg; };
+    std::vector<Mode> modes;
+    { rag::HnswConfig c;                              modes.push_back({"float-768      ", c}); }
+    { rag::HnswConfig c; c.ann_dim = 256;             modes.push_back({"matryoshka-256 ", c}); }
+    { rag::HnswConfig c; c.binary = true;             modes.push_back({"binary-768     ", c}); }
+    { rag::HnswConfig c; c.ann_dim = 256; c.binary=true; modes.push_back({"binary-256     ", c}); }
+
+    std::printf("\nHNSW walk bench: %zu nodes x %zu dim, %zu queries\n", kN, kDim, kQ);
+    std::printf("  %-16s %12s %12s\n", "mode", "build ms", "us/query");
+    for (auto& m : modes) {
+        rag::HnswIndex idx(m.cfg);
+        auto tb = std::chrono::steady_clock::now();
+        idx.build(ids, embs);
+        double build_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - tb).count();
+        volatile std::uint32_t sink = 0;
+        auto tq = std::chrono::steady_clock::now();
+        for (auto& q : queries) { auto r = idx.search(q, 10, 64); if (!r.empty()) sink += r[0].first; }
+        double us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - tq).count() / double(kQ);
+        (void)sink;
+        std::printf("  %-16s %12.0f %12.2f\n", m.name, build_ms, us);
+    }
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "bench") == 0) { run_walk_bench(); return 0; }
     test_hnsw_recall_small();
     test_hnsw_search_basic();
     test_hnsw_serialize_roundtrip();

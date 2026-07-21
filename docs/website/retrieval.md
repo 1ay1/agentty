@@ -41,6 +41,12 @@ Two independent retrievers score every chunk, and their ranked lists are fused w
 
 Dense is weighted slightly above lexical (`1.3×`) because semantic matching usually wins on natural-language docs — both weights are tunable (`AGENTTY_RAG_W_DENSE` / `AGENTTY_RAG_W_LEXICAL`).
 
+**Fusion strategy.** RRF fuses on *rank position* — robust and scale-free, the right default. When your score distributions are calibrated, `AGENTTY_RAG_FUSION=rsf` switches to **Relative Score Fusion** (min-max-normalize each list, then weighted-sum), which keeps the score *magnitude* RRF throws away. A/B it on your corpus.
+
+**One embed round-trip, not N.** A single search fans into several probes — the query itself, conversation-carryover and multi-hop facets, RAG-Fusion paraphrases, a HyDE passage. All of their dense embeddings are computed in **one batched `/api/embed` call** per source (the endpoint takes an array), so expansion and HyDE don't multiply the network latency of a search the way N serial round-trips would.
+
+**Cheaper vectors (opt-in).** Two research-backed levers shrink the ANN cost with the full-precision rerank recovering quality: `AGENTTY_RAG_ANN_DIM=256` truncates the graph to the leading **Matryoshka** dims (nomic-v1.5 & the e5/BGE MRL models pack the signal there) for a ~2.3× faster walk at ⅓ the memory; `AGENTTY_RAG_BINARY=1` walks the graph on 1-bit **sign codes** (popcount Hamming) then rescores the pool with the exact float cosine — binary recall, float precision, ~2.5× faster (and ~3.4× stacked with truncation).
+
 ### 2. Pseudo-relevance feedback — recover the words you didn't type *(default-on)*
 
 A bare query rarely uses the exact vocabulary the docs use. agentty runs an initial BM25 pass, treats the top hits as *pseudo-relevant*, harvests their most **discriminative** terms (feedback frequency × rarity), and fuses in a second, down-weighted BM25 probe over `{query + those terms}`. A chunk that matches both the literal query *and* the expanded vocabulary is reinforced.
