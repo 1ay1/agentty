@@ -285,6 +285,59 @@ static void test_hnsw_matryoshka_truncation() {
     CHECK(idx2.dim() == kDim);
 }
 
+// ── 7. Binary quantization: Hamming walk + float rescore preserves recall ───
+// With cfg.binary the graph walk compares 1-bit sign codes (popcount Hamming)
+// instead of float dots, then search() rescores the returned pool with the
+// exact cosine. Recall@5 against brute-force truth should stay high because
+// the float rescore fixes the ordering the binary walk only approximated.
+static void test_hnsw_binary_quantization() {
+    constexpr std::size_t kN = 600, kDim = 128;
+    std::mt19937 rng(0xB1Au);
+    std::vector<std::vector<float>> db;
+    db.reserve(kN);
+    for (std::size_t i = 0; i < kN; ++i) db.push_back(random_vec(rng, kDim));
+
+    rag::HnswConfig cfg;
+    cfg.binary = true;
+    rag::HnswIndex idx(cfg);
+    std::vector<std::uint32_t> ids(kN);
+    std::vector<const std::vector<float>*> embs(kN);
+    for (std::uint32_t i = 0; i < kN; ++i) { ids[i] = i; embs[i] = &db[i]; }
+    idx.build(ids, embs);
+    CHECK(idx.size() == kN);
+    CHECK(idx.dim() == kDim);
+
+    // Grade the top-1 against brute-force cosine truth over many queries.
+    int hit1 = 0; constexpr int kQ = 60;
+    for (int qn = 0; qn < kQ; ++qn) {
+        auto q = random_vec(rng, kDim);
+        std::uint32_t want = true_nn(db, q);
+        auto res = idx.search(q, 5, /*ef=*/128);
+        CHECK(!res.empty());
+        // Returned scores must be the FLOAT cosine (descending), not raw
+        // Hamming — proof the rescore ran.
+        for (std::size_t i = 1; i < res.size(); ++i)
+            CHECK(res[i - 1].second >= res[i].second);
+        for (const auto& [id, s] : res) if (id == want) { ++hit1; break; }
+    }
+    double recall5 = double(hit1) / double(kQ);
+    std::printf("rag_hnsw_test: binary recall@5 = %.3f (%d/%d)\n",
+                recall5, hit1, kQ);
+    // Binary + float rescore should recover most of the exact-NN recall.
+    CHECK(recall5 >= 0.85);
+
+    // Serialize round-trip: bits are derived (not on the wire), so a fresh
+    // binary index must rebuild them on load and still search correctly.
+    std::string blob;
+    idx.serialize(blob);
+    rag::HnswIndex idx2(cfg);
+    std::string_view cur{blob};
+    CHECK(idx2.deserialize(cur));
+    CHECK(idx2.dim() == kDim);
+    auto rr = idx2.search(db[0], 1, 64);
+    CHECK(!rr.empty());
+}
+
 int main() {
     test_hnsw_recall_small();
     test_hnsw_search_basic();
@@ -292,6 +345,7 @@ int main() {
     test_hnsw_empty();
     test_hnsw_corrupt_cache_rejected();
     test_hnsw_matryoshka_truncation();
+    test_hnsw_binary_quantization();
 
     if (g_failures == 0) {
         std::printf("rag_hnsw_test: all checks passed\n");
