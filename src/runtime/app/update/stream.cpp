@@ -1671,9 +1671,10 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             // fall back to appending before launch.
             if (!pcr.block.empty()) {
                 Message ctx_msg;
-                ctx_msg.role              = Role::User;
-                ctx_msg.text              = std::move(pcr.block);
-                ctx_msg.proactive_context = true;
+                ctx_msg.role                = Role::User;
+                ctx_msg.proactive_confidence = pcr.confidence;
+                ctx_msg.text                = std::move(pcr.block);
+                ctx_msg.proactive_context   = true;
                 auto& msgs = m.d.current.messages;
                 if (!msgs.empty() && msgs.back().role == Role::Assistant
                         && msgs.back().text.empty()

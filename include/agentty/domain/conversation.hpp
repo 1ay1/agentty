@@ -364,6 +364,12 @@ struct Message {
     // (it's not a real human turn boundary — see agent_loop_should_break).
     bool proactive_context = false;
 
+    // Retrieval confidence [0,1] that gated the proactive injection, carried
+    // from the RAG funnel (ProactiveHit.confidence) so the transcript card
+    // can render a real confidence bar. -1 means "unknown / not a proactive
+    // message"; only meaningful when proactive_context is true. Wire-inert.
+    double proactive_confidence = -1.0;
+
     // FNV-1a over the fields that turn_element / turn_config consume
     // when building the rendered Element. The view cache stamps the
     // built Element with this key at insert time and re-checks it on
@@ -407,6 +413,11 @@ struct Message {
         mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent
         mix(is_compact_summary ? 1ULL : 0ULL);
         mix(proactive_context ? 2ULL : 0ULL);
+        // Quantize confidence to a bar-relevant bucket so a card whose
+        // confidence changed (re-injection) invalidates the cache, without
+        // churning on float noise. Only proactive messages carry it.
+        if (proactive_confidence >= 0.0)
+            mix(static_cast<std::uint64_t>(proactive_confidence * 100.0) + 1ULL);
         return k;
     }
 };

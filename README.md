@@ -138,8 +138,11 @@ natural-language report per topic cluster, generated once per corpus shape).
 
 Beyond the explicit tool, a **proactive path** runs the funnel *before you ask*
 when your message looks knowledge-shaped, injecting a source-tagged
-`<retrieved-context>` block above a confidence bar — grounding without a tool
-round-trip.
+`<retrieved-context>` block into the very same turn — grounding without a tool
+round-trip. The transcript renders it as one quiet 📚 card that shows a
+confidence bar plus exactly *which* sources grounded the answer (`docs · path`,
+`skill · name`, `memory`…) and a passage count, so you can always see — and
+weigh — what the model was standing on.
 
 BM25, RRF, HNSW, the reranker, MMR, compression, PRF, the chunker, and the
 GraphRAG document graph (PageRank, entity extraction, community detection) are

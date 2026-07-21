@@ -96,7 +96,7 @@ int main() {
         const std::size_t before = m.d.current.messages.size();
 
         auto [m2, cmd] = agentty::app::detail::stream_update(
-            std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block}});
+            std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.82}});
 
         auto& msgs = m2.d.current.messages;
         check(msgs.size() == before + 1,
@@ -110,6 +110,8 @@ int main() {
               "deferred: context msg is a proactive User message");
         check(ctx.text.find("retrieved-context") != std::string::npos,
               "deferred: context msg carries the retrieved block");
+        check(ctx.proactive_confidence > 0.81 && ctx.proactive_confidence < 0.83,
+              "deferred: retrieval confidence threaded onto the message");
         check(tail.role == Role::Assistant && tail.text.empty(),
               "deferred: trailing placeholder preserved (live tail)");
 

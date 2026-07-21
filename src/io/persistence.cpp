@@ -163,6 +163,15 @@ static json message_to_json(const Message& m) {
     // turn died and why. UTF-8 scrubbed for the same reason as `text`.
     if (m.error) j["error"] = tools::util::to_valid_utf8(*m.error);
     if (m.is_compact_summary) j["is_compact_summary"] = true;
+    // Proactive-retrieval marker + the confidence that gated it. Persisted
+    // so a reloaded thread still renders the quiet "Retrieved context" card
+    // (with its source list + confidence bar) instead of surfacing the raw
+    // <retrieved-context> block as if the user had typed it.
+    if (m.proactive_context) {
+        j["proactive_context"] = true;
+        if (m.proactive_confidence >= 0.0)
+            j["proactive_confidence"] = m.proactive_confidence;
+    }
     // Adaptive-thinking block (Assistant turns under an effort setting).
     // Persisted so a reloaded thread can replay it on a follow-up turn —
     // Anthropic 400s a tool_use turn whose thinking block was dropped.
@@ -330,6 +339,12 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
         const auto& v = j["is_compact_summary"];
         if (v.is_boolean()) m.is_compact_summary = v.get<bool>();
     }
+    if (auto it = j.find("proactive_context");
+        it != j.end() && it->is_boolean())
+        m.proactive_context = it->get<bool>();
+    if (auto it = j.find("proactive_confidence");
+        it != j.end() && it->is_number())
+        m.proactive_confidence = it->get<double>();
     if (j.contains("images")) {
         const auto& arr = j["images"];
         if (!arr.is_array())
