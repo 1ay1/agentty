@@ -14,7 +14,7 @@ Everything you can do without leaving the home row.
 | [[Alt+Enter]] | Insert a newline in the composer |
 | [[Ctrl+E]] | Expand the composer |
 | [[Esc]] | Cancel the current turn / reject a permission / close a modal (does NOT quit) |
-| [[S-Tab]] | Cycle permission profile (Ask → Minimal → Write) |
+| [[S-Tab]] | Cycle permission profile (Write → Ask → Minimal) |
 | [[↑]] | On empty composer: recall queued messages for editing |
 | [[Ctrl+K]] | Command palette |
 | [[Ctrl+J]] | Thread list (opens at the current thread) |
