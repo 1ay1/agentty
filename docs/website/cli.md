@@ -47,7 +47,7 @@ Inside a thread there are no typed `/command` literals — press `^K` (or `/` on
 | Review changes | Open the diff review pane (also `^R`). |
 | Accept all / Reject all changes | Apply or discard every pending hunk. |
 | Rewind to checkpoint | Jump to an earlier turn's worktree snapshot via a diff-preview picker (git repo + idle session; see [Checkpoints](/docs/threads#checkpoints)). |
-| Cycle profile | Ask → Minimal → Write (also `S-Tab`). |
+| Cycle profile | Write → Ask → Minimal (also `S-Tab`). |
 | Open model picker / Switch provider | Change the active model (`^/`) or backend (`^P`). |
 | Open threads / Open plan | Browse saved conversations (`^J`) or view the todo plan (`^T`). |
 | Run code block | Run a fenced block from the last reply (`^G`). |
@@ -62,7 +62,7 @@ These mirror `agentty --help` exactly.
 | `-k`, `--key <key>` | API-key override for this session; never written to disk. |
 | `-m`, `--model <id>` | Model id for the session (e.g. `claude-opus-4-5`). |
 | `--provider <p>` | LLM backend: `anthropic` (default) or an OpenAI-compatible one — `openai` · `groq` · `openrouter` · `together` · `cerebras` · `ollama`, or a raw `host:port`. Persisted like `-m`; switch live with `^P`. See [Providers & Models](/docs/providers). |
-| `-p`, `--profile <mode>` | ACP permission tier (Zed shows the prompts): `ask` (default) · `minimal` (also prompt reads) · `write` (never prompt reads). |
+| `-p`, `--profile <mode>` | ACP permission tier (Zed shows the prompts): `ask` (default) · `minimal` (also prompt reads) · `write` (never prompts — fully autonomous). |
 | `-w`, `--workspace <dir>` | Sandbox filesystem tools to this directory (default: cwd). Tools refuse paths outside it. Pass `--workspace /` to disable the gate. |
 | `--sandbox <mode>` | Wrap `bash`/`diagnostics` in an OS-native sandbox. `auto` (default) · `on` (require a backend) · `off` (disable). |
 | `-V`, `--version` | Print the agentty version and exit. |

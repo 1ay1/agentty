@@ -42,7 +42,7 @@ Type a request, hit [[Enter]]. agentty streams the reply and lands tool calls in
 
 ## 4. Pick a permission profile
 
-You start in **Ask** — writes, shell calls, and network calls each prompt before running. Press [[S-Tab]] to cycle to **Write** (autonomous) or **Minimal** (prompts for everything but pure reads). Your choice persists.
+You start in **Write** (autonomous) — every tool runs without a prompt, kept in-bounds by the sandbox and workspace boundary. Press [[S-Tab]] to cycle to **Ask** (writes, shell, and network prompt first) or **Minimal** (prompts for everything, reads included). Your choice persists.
 
 ## Where to go next
 

@@ -6,21 +6,21 @@ nav_order: 30
 slug: profiles
 ---
 
-A profile decides which tool effects run automatically and which prompt you first. Cycle them anytime with [[S-Tab]]; your choice persists across sessions.
+A profile decides which tool effects run automatically and which prompt you first. New installs start in **Write** (the [ACP bridge](/docs/acp) starts in **Ask**); cycle anytime with [[S-Tab]], and your choice persists across sessions.
 
 | Profile | Pure reads | Writes / edits | Shell / build | Network |
 |---|---|---|---|---|
-| **Write** | auto | auto | auto | auto |
-| **Ask** (default) | auto | prompt | prompt | prompt |
+| **Write** (default) | auto | auto | auto | auto |
+| **Ask** | auto | prompt | prompt | prompt |
 | **Minimal** | prompt | prompt | prompt | prompt |
 
-## Ask (default)
+## Write (autonomous, default)
 
-Read-only tools run automatically; writes, shell calls, and network calls each prompt before running. The safe default for an unfamiliar repo.
+The default tier. Every tool runs without prompting so agentty can move fast — and because each shell call is sandboxed (`bwrap` / `sandbox-exec`) and the file tools refuse paths outside your workspace, even an autonomous run can't escape your project directory or read your secrets.
 
-## Write (autonomous)
+## Ask
 
-Everything runs without prompting. Use this when you trust the task and want agentty to move fast — paired with the sandbox and workspace boundary, an autonomous run still can't escape your project directory or read your secrets.
+Read-only tools still run automatically, but writes, shell calls, and network calls each prompt before running. Cycle here with [[S-Tab]] when you want to eyeball each change before it lands — handy in an unfamiliar repo.
 
 ## Minimal
 
