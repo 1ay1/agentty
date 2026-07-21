@@ -15,6 +15,7 @@
 #include <future>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -92,48 +93,203 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
     return a::ToolKind::Other;   // unreachable
 }
 
-// One-line human title for a tool call card.
-std::string tool_title(const ToolUse& tc) {
+// Present `path` relative to the session's workspace root when it lives
+// under it — Zed shows project-relative paths in tool cards, and absolute
+// paths are noise. Mirrors claude-code-acp's toDisplayPath, but we key off
+// the session cwd the client actually opened rather than process().cwd.
+std::string display_path(std::string_view path, std::string_view cwd) {
+    if (path.empty() || cwd.empty()) return std::string{path};
+    std::string_view c = cwd;
+    while (!c.empty() && c.back() == '/') c.remove_suffix(1);
+    if (path.size() > c.size() + 1 && path.substr(0, c.size()) == c
+        && path[c.size()] == '/')
+        return std::string{path.substr(c.size() + 1)};
+    return std::string{path};
+}
+
+// Reconstruct a shell-ish command line from a ripgrep-style grep call so the
+// card reads like what a human would type, e.g. `grep -i "foo" *.cpp src/`.
+std::string grep_command(const json& args) {
+    auto s = [&](const char* k) -> std::string {
+        return (args.contains(k) && args[k].is_string()) ? args[k].get<std::string>() : std::string{};
+    };
+    auto b = [&](const char* k) -> bool {
+        return args.contains(k) && args[k].is_boolean() && args[k].get<bool>();
+    };
+    std::string cmd = "grep";
+    if (b("case_sensitive")) cmd += " -s"; else cmd += " -i";
+    const std::string pat = s("pattern");
+    if (!pat.empty()) cmd += " \"" + pat + "\"";
+    const std::string glob = s("glob");
+    if (!glob.empty()) cmd += " " + glob;
+    const std::string path = s("path");
+    if (!path.empty()) cmd += " " + path;
+    return cmd;
+}
+
+// One-line human title for a tool call card. `cwd` (may be empty) lets file
+// paths render project-relative. Dispatch on the typed spec::Kind so a new
+// tool arm forces a decision here rather than silently falling to bare name.
+std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
+    namespace sp = tools::spec;
     const auto& args = tc.args;
+    const std::string& n = tc.name.value;
     auto str = [&](const char* k) -> std::string {
         if (args.contains(k) && args[k].is_string()) return args[k].get<std::string>();
         return {};
     };
-    if (tc.name.value == "read" || tc.name.value == "edit" || tc.name.value == "write") {
-        std::string p = str("path");
-        if (!p.empty()) return tc.name.value + " " + p;
+    auto num = [&](const char* k) -> std::optional<std::int64_t> {
+        if (args.contains(k) && args[k].is_number_integer())
+            return args[k].get<std::int64_t>();
+        return std::nullopt;
+    };
+    auto path_arg = [&]() {
+        for (const char* k : {"path", "file_path", "filepath", "filename"}) {
+            std::string p = str(k);
+            if (!p.empty()) return display_path(p, cwd);
+        }
+        return std::string{};
+    };
+    auto clip = [](std::string s, std::size_t n) {
+        if (auto nl = s.find('\n'); nl != std::string::npos) s.resize(nl);
+        if (s.size() > n) { s.resize(n); s += "\xe2\x80\xa6"; }
+        return s;
+    };
+
+    const auto* spec = sp::lookup(n);
+    const sp::Kind kind = spec ? spec->kind : sp::Kind::Read;
+    if (!spec) return n;
+
+    switch (kind) {
+        case sp::Kind::Read: {
+            std::string p = path_arg();
+            if (p.empty()) return n;
+            auto off = num("offset"); if (!off) off = num("start_line");
+            auto lim = num("limit");
+            auto end = num("end_line");
+            if (off && end) return p + " (" + std::to_string(*off) + "-" + std::to_string(*end) + ")";
+            if (off && lim) return p + " (" + std::to_string(*off) + "-" + std::to_string(*off + *lim - 1) + ")";
+            if (off)        return p + " (from " + std::to_string(*off) + ")";
+            return p;
+        }
+        case sp::Kind::Edit:
+        case sp::Kind::Write: {
+            std::string p = path_arg();
+            return p.empty() ? n : n + " " + p;
+        }
+        case sp::Kind::Bash:
+        case sp::Kind::Diagnostics: {
+            std::string c = str("command");
+            if (c.empty()) c = str("display_description");
+            return c.empty() ? n : n + ": " + clip(c, 72);
+        }
+        case sp::Kind::GitCommit: {
+            std::string m = str("message");
+            return m.empty() ? n : "git commit: " + clip(m, 60);
+        }
+        case sp::Kind::Grep:
+            return grep_command(args);
+        case sp::Kind::Glob: {
+            std::string p = str("pattern");
+            std::string root = display_path(str("path"), cwd);
+            if (p.empty()) return n;
+            return root.empty() ? "glob " + p : "glob " + p + " in " + root;
+        }
+        case sp::Kind::FindDefinition: {
+            std::string s = str("symbol");
+            return s.empty() ? n : "find definition: " + s;
+        }
+        case sp::Kind::SearchDocs:
+        case sp::Kind::SearchCode: {
+            std::string q = str("query");
+            return q.empty() ? n : n + ": " + clip(q, 60);
+        }
+        case sp::Kind::RepoMap: {
+            std::string f = str("focus");
+            return f.empty() ? "repo map" : "repo map: " + clip(f, 50);
+        }
+        case sp::Kind::ListDir: {
+            std::string p = display_path(str("path"), cwd);
+            return p.empty() ? "list_dir" : "list_dir " + p;
+        }
+        case sp::Kind::GitStatus: return "git status";
+        case sp::Kind::GitDiff:   return "git diff";
+        case sp::Kind::GitLog:    return "git log";
+        case sp::Kind::WebFetch: {
+            std::string u = str("url");
+            return u.empty() ? n : "fetch " + u;
+        }
+        case sp::Kind::WebSearch: {
+            std::string q = str("query");
+            return q.empty() ? n : "search: " + clip(q, 60);
+        }
+        case sp::Kind::Todo: {
+            if (args.contains("todos") && args["todos"].is_array()) {
+                std::string d = str("display_description");
+                if (!d.empty()) return d;
+                return "update plan (" + std::to_string(args["todos"].size()) + " items)";
+            }
+            return "update plan";
+        }
+        case sp::Kind::Task: {
+            std::string d = str("display_description");
+            if (d.empty()) d = clip(str("prompt"), 60);
+            std::string type = str("agent_type");
+            std::string label = type.empty() ? "subagent" : type + " subagent";
+            return d.empty() ? label : label + ": " + d;
+        }
+        case sp::Kind::Skill: {
+            std::string s = str("name");
+            return s.empty() ? "skill" : "skill: " + s;
+        }
+        case sp::Kind::Remember: return "remember";
+        case sp::Kind::Forget:   return "forget";
+        case sp::Kind::Wipe:     return "wipe memory";
     }
-    if (tc.name.value == "bash") {
-        std::string c = str("command");
-        if (!c.empty()) return "bash: " + c.substr(0, 80);
-    }
-    if (tc.name.value == "grep" || tc.name.value == "glob") {
-        std::string p = str("pattern");
-        if (!p.empty()) return tc.name.value + " " + p;
-    }
-    return tc.name.value;
+    return n;   // unreachable; switch is exhaustive over Kind
 }
 
-// File locations a tool call touches, for Zed's follow-along.
-a::List<a::ToolCallLocation> tool_locations(const ToolUse& tc) {
+// File locations a tool call touches, for Zed's follow-along. Emits the
+// primary path with a line anchor when the call names one (Read offset,
+// grep/find line hints), so Zed can jump the editor to the right spot.
+a::List<a::ToolCallLocation> tool_locations(const ToolUse& tc, std::string_view cwd = {}) {
     a::List<a::ToolCallLocation> locs;
     const auto& args = tc.args;
-    auto add = [&](const char* key) {
-        if (args.contains(key) && args[key].is_string()) {
-            const std::string p = args[key].get<std::string>();
-            if (!p.empty()) {
+    auto num = [&](const char* k) -> std::optional<std::int64_t> {
+        if (args.contains(k) && args[k].is_number_integer())
+            return args[k].get<std::int64_t>();
+        return std::nullopt;
+    };
+    auto add = [&](std::initializer_list<const char*> keys) {
+        for (const char* key : keys) {
+            if (args.contains(key) && args[key].is_string()) {
+                std::string p = args[key].get<std::string>();
+                if (p.empty()) continue;
                 a::ToolCallLocation loc;
-                loc.path = p;
-                if (args.contains("line") && args["line"].is_number_integer())
-                    loc.line = a::Just<std::int64_t>(args["line"].get<std::int64_t>());
+                loc.path = display_path(p, cwd);
+                auto ln = num("line"); if (!ln) ln = num("offset"); if (!ln) ln = num("start_line");
+                if (ln) loc.line = a::Just<std::int64_t>(*ln);
                 locs.push_back(std::move(loc));
+                return;
             }
         }
     };
-    const std::string& n = tc.name.value;
-    if (n == "read" || n == "edit" || n == "write"
-     || n == "list_dir" || n == "git_diff" || n == "diagnostics")
-        add("path");
+    namespace sp = tools::spec;
+    const auto* spec = sp::lookup(tc.name.value);
+    if (!spec) return locs;
+    switch (spec->kind) {
+        case sp::Kind::Read:
+        case sp::Kind::Edit:
+        case sp::Kind::Write:
+        case sp::Kind::ListDir:
+        case sp::Kind::Diagnostics:
+        case sp::Kind::Grep:
+        case sp::Kind::Glob:
+        case sp::Kind::FindDefinition:
+            add({"path", "file_path", "filepath", "filename"});
+            break;
+        default: break;
+    }
     return locs;
 }
 
@@ -172,15 +328,52 @@ a::StopReason acp_stop_reason(StopReason r, bool cancelled, bool errored) {
     return a::StopReason::EndTurn;
 }
 
+// A speculative diff-content block from an edit/write call's own args, shown
+// the moment the call is announced so Zed renders the diff card before the
+// tool runs (claude-code-acp does the same for FileEdit/FileWrite). The
+// authoritative diff — computed from the real on-disk before/after — replaces
+// this in the completion update.
+std::optional<a::ToolCallContent> announce_diff(const ToolUse& tc, std::string_view cwd) {
+    namespace sp = tools::spec;
+    const auto* spec = sp::lookup(tc.name.value);
+    if (!spec) return std::nullopt;
+    const auto& args = tc.args;
+    auto s = [&](const char* k) -> std::string {
+        return (args.contains(k) && args[k].is_string()) ? args[k].get<std::string>() : std::string{};
+    };
+    std::string path = s("path"); if (path.empty()) path = s("file_path");
+    if (path.empty()) return std::nullopt;
+    a::TCC_Diff diff;
+    diff.path = display_path(path, cwd);
+    if (spec->kind == sp::Kind::Write) {
+        diff.newText = s("content");
+        return a::ToolCallContent{std::move(diff)};
+    }
+    if (spec->kind == sp::Kind::Edit) {
+        std::string oldt = s("old_text"), newt = s("new_text");
+        if (oldt.empty() && newt.empty()) return std::nullopt;
+        diff.oldText = a::Just<std::string>(oldt);
+        diff.newText = newt;
+        return a::ToolCallContent{std::move(diff)};
+    }
+    return std::nullopt;
+}
+
 // Helper: a ToolCall (announcement) from a pending ToolUse.
-a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status) {
+a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
+                           std::string_view cwd = {}) {
     a::ToolCall out;
     out.toolCallId = a::ToolCallId{tc.id.value};
-    out.title      = tool_title(tc);
+    out.title      = tool_title(tc, cwd);
     out.kind       = acp_tool_kind(tc.name.value);
     out.status     = status;
     if (!tc.args.is_null()) out.rawInput = a::Just<json>(tc.args);
-    out.locations  = tool_locations(tc);
+    out.locations  = tool_locations(tc, cwd);
+    if (auto d = announce_diff(tc, cwd)) {
+        a::List<a::ToolCallContent> content;
+        content.push_back(std::move(*d));
+        out.content = std::move(content);
+    }
     return out;
 }
 
@@ -310,6 +503,11 @@ void AgentServer::send_update(const std::string& session_id, a::SessionUpdate up
 }
 
 void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
+    // Project-relative display paths in replayed tool cards, matching a live
+    // turn. The session cwd is already set by the time replay runs.
+    std::string scwd;
+    if (auto s = find_session(session_id)) scwd = s->cwd;
+
     // Coalesce the whole replay fan-out into ONE writev + one flush: replay
     // emits many session/update notifications back-to-back, and flushing each
     // separately is pure syscall overhead. The batch guard buffers every frame
@@ -343,7 +541,7 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
             for (const auto& tc : m.tool_calls) {
                 if (emitted++ >= kReplayToolsPerMsg) break;
                 send_update(session_id, a::SU_ToolCall{
-                    make_tool_call(tc, a::ToolCallStatus::Pending)});
+                    make_tool_call(tc, a::ToolCallStatus::Pending, scwd)});
 
                 const auto status = (tc.is_failed() || tc.is_rejected())
                                   ? a::ToolCallStatus::Failed : a::ToolCallStatus::Completed;
@@ -924,6 +1122,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     StreamUsage last_usage;
     bool have_usage = false;
     const std::string sid = sess.id;
+    const std::string scwd = sess.cwd;
     const std::string msg_id = assistant.id.value;
 
     auto sink = [&](agentty::Msg m) {
@@ -964,9 +1163,17 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                             }
                             a::ToolCallUpdate upd;
                             upd.toolCallId = a::ToolCallId{tc.id.value};
-                            upd.title      = a::Just(tool_title(tc));
+                            upd.title      = a::Just(tool_title(tc, scwd));
                             upd.rawInput   = a::Just<json>(tc.args);
-                            upd.locations  = a::Just(tool_locations(tc));
+                            upd.locations  = a::Just(tool_locations(tc, scwd));
+                            // Now that args have fully streamed in, an
+                            // edit/write can show a speculative diff card
+                            // immediately (before permission/execution).
+                            if (auto d = announce_diff(tc, scwd)) {
+                                a::List<a::ToolCallContent> c;
+                                c.push_back(std::move(*d));
+                                upd.content = a::Just(std::move(c));
+                            }
                             send_update(sid, a::SU_ToolCallUpdate{std::move(upd)});
                         }
                     } else if constexpr (std::is_same_v<E, StreamFinished>) {
@@ -1231,14 +1438,21 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
 
 AgentServer::PermissionOutcome
 AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
+    std::string cwd;
+    if (auto s = find_session(session_id)) cwd = s->cwd;
     a::RequestPermissionParams req;
     req.sessionId = a::SessionId{session_id};
     // ToolCallUpdate carries the tool card for the permission dialog.
     req.toolCall.toolCallId = a::ToolCallId{tc.id.value};
-    req.toolCall.title      = a::Just(tool_title(tc));
+    req.toolCall.title      = a::Just(tool_title(tc, cwd));
     req.toolCall.kind       = a::Just(acp_tool_kind(tc.name.value));
     if (!tc.args.is_null()) req.toolCall.rawInput = a::Just<json>(tc.args);
-    req.toolCall.locations  = a::Just(tool_locations(tc));
+    req.toolCall.locations  = a::Just(tool_locations(tc, cwd));
+    if (auto d = announce_diff(tc, cwd)) {
+        a::List<a::ToolCallContent> c;
+        c.push_back(std::move(*d));
+        req.toolCall.content = a::Just(std::move(c));
+    }
     req.options = {
         a::PermissionOption{"allow_once",   "Allow",        a::PermissionOptionKind::AllowOnce,   json::object()},
         a::PermissionOption{"allow_always", "Always allow", a::PermissionOptionKind::AllowAlways, json::object()},

@@ -18,19 +18,19 @@
 #include <acp/acp.hpp>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
-#include <istream>
 #include <mutex>
-#include <condition_variable>
-#include <ostream>
-#include <streambuf>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include "agentty/acp/server.hpp"
 #include "agentty/auth/auth.hpp"
@@ -43,61 +43,6 @@ namespace ag = agentty;
 #define CHECK(cond) do { if (!(cond)) { \
     std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
     std::exit(1); } } while (0)
-
-namespace {
-
-// A blocking byte channel: writers push bytes, the istream side blocks in
-// underflow() until bytes arrive or the channel is closed (EOF).
-class Pipe {
-public:
-    void write_line(const std::string& s) {
-        std::lock_guard lk(mu_); buf_ += s; buf_ += '\n'; cv_.notify_all();
-    }
-    // Blocking single-byte read; returns -1 on EOF (closed + drained).
-    int getc() {
-        std::unique_lock lk(mu_);
-        cv_.wait(lk, [&]{ return pos_ < buf_.size() || closed_; });
-        if (pos_ >= buf_.size()) return -1;
-        return static_cast<unsigned char>(buf_[pos_++]);
-    }
-    void close() { { std::lock_guard lk(mu_); closed_ = true; } cv_.notify_all(); }
-private:
-    std::mutex mu_; std::condition_variable cv_;
-    std::string buf_; std::size_t pos_ = 0; bool closed_ = false;
-};
-
-// istream over a Pipe (blocking).
-class PipeInBuf : public std::streambuf {
-public:
-    explicit PipeInBuf(Pipe& p) : pipe_(p) {}
-protected:
-    int underflow() override {
-        int c = pipe_.getc();
-        if (c < 0) return traits_type::eof();
-        ch_ = static_cast<char>(c);
-        setg(&ch_, &ch_, &ch_ + 1);
-        return traits_type::to_int_type(ch_);
-    }
-private:
-    Pipe& pipe_; char ch_ = 0;
-};
-
-// ostream that forwards completed lines to a Pipe (the other direction).
-class PipeOutBuf : public std::streambuf {
-public:
-    explicit PipeOutBuf(Pipe& p) : pipe_(p) {}
-protected:
-    int overflow(int c) override {
-        if (c == traits_type::eof()) return c;
-        if (c == '\n') { pipe_.write_line(acc_); acc_.clear(); }
-        else acc_.push_back(static_cast<char>(c));
-        return c;
-    }
-private:
-    Pipe& pipe_; std::string acc_;
-};
-
-} // namespace
 
 int main() {
     namespace fs = std::filesystem;
@@ -150,11 +95,14 @@ int main() {
         }
     };
 
-    // ── Wire two live pipes between agent and client ───────────────────────
-    Pipe c2a, a2c;
-    PipeInBuf  a_in_buf(c2a);  std::istream agent_in(&a_in_buf);
-    PipeOutBuf a_out_buf(a2c); std::ostream agent_out(&a_out_buf);
-    StdioTransport agent_tx(agent_in, agent_out);
+    // ── Wire two real OS pipes between agent and client ────────────────────
+    // AgentServer now speaks FdTransport (raw fds), so the loopback uses two
+    // pipe(2) pairs instead of iostream streambufs: c2a = client→agent,
+    // a2c = agent→client.
+    int c2a[2], a2c[2];
+    CHECK(::pipe(c2a) == 0);
+    CHECK(::pipe(a2c) == 0);
+    FdTransport agent_tx(c2a[0], a2c[1]);   // read client→agent, write agent→client
 
     ag::auth::AuthHeader cred = ag::auth::ApiKeyHeader{"sk-test-not-empty"};
     CHECK(!ag::auth::is_empty(cred));
@@ -163,10 +111,17 @@ int main() {
     std::thread agent_thread([&]{ server.serve(); });   // start()+join() on agent_tx
 
     // ── Client side (AgentConnection) ──────────────────────────────────────
-    PipeOutBuf c_out_buf(c2a); std::ostream client_out(&c_out_buf);
+    std::mutex client_write_mu;
     auto client_sink = [&](std::string_view line) {
-        client_out.write(line.data(), static_cast<std::streamsize>(line.size()));
-        client_out.put('\n'); client_out.flush();
+        std::lock_guard lk(client_write_mu);
+        std::string frame(line);
+        frame.push_back('\n');
+        std::size_t off = 0;
+        while (off < frame.size()) {
+            ssize_t w = ::write(c2a[1], frame.data() + off, frame.size() - off);
+            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
+            off += static_cast<std::size_t>(w);
+        }
     };
 
     std::atomic<int> agent_text_chunks{0};
@@ -174,6 +129,11 @@ int main() {
     std::atomic<int> tool_completed{0};
     std::atomic<int> tool_failed{0};
     std::string last_tool_text;
+    std::string tc_title;
+    std::string perm_title;
+    std::atomic<bool> tc_is_edit_kind{false};
+    std::atomic<bool> tc_announce_diff{false};
+    std::atomic<bool> perm_announce_diff{false};
     std::atomic<int> usage_updates{0};
     std::atomic<int> perm_requests{0};
     std::string transcript;
@@ -190,15 +150,29 @@ int main() {
                     },
                     [&](const auto&) {});
             },
-            [&](const SU_ToolCall&) { ++tool_calls; },
+            [&](const SU_ToolCall& t) {
+                ++tool_calls;
+                std::lock_guard lk(transcript_mu);
+                tc_title = t.toolCall.title;
+                if (t.toolCall.kind == ToolKind::Edit) tc_is_edit_kind.store(true);
+                for (const auto& cc : t.toolCall.content)
+                    match(cc, [&](const TCC_Diff&) { tc_announce_diff.store(true); },
+                              [&](const auto&) {});
+            },
             [&](const SU_ToolCallUpdate& u) {
                 if (u.update.status && *u.update.status == ToolCallStatus::Completed)
                     ++tool_completed;
                 if (u.update.status && *u.update.status == ToolCallStatus::Failed)
                     ++tool_failed;
+                if (u.update.title) {
+                    std::lock_guard lk(transcript_mu); tc_title = *u.update.title;
+                }
+                if (u.update.kind && *u.update.kind == ToolKind::Edit)
+                    tc_is_edit_kind.store(true);
                 if (u.update.content)
                     for (const auto& cc : *u.update.content)
                         match(cc,
+                            [&](const TCC_Diff&) { tc_announce_diff.store(true); },
                             [&](const TCC_Content& c) {
                                 match(c.content,
                                     [&](const TextContent& t) {
@@ -214,6 +188,14 @@ int main() {
     // Approve the write when asked (or reject when reject_mode is set).
     ch.on_request_permission = [&](const RequestPermissionParams& p) {
         ++perm_requests;
+        {
+            std::lock_guard lk(transcript_mu);
+            if (p.toolCall.title) perm_title = *p.toolCall.title;
+            if (p.toolCall.content)
+                for (const auto& cc : *p.toolCall.content)
+                    match(cc, [&](const TCC_Diff&) { perm_announce_diff.store(true); },
+                              [&](const auto&) {});
+        }
         auto want = reject_mode.load() ? PermissionOptionKind::RejectOnce
                                        : PermissionOptionKind::AllowOnce;
         std::string chosen;
@@ -224,12 +206,24 @@ int main() {
     };
 
     AgentConnection agent(client_sink, std::move(ch));
-    // The client reads a2c; pump it into the agent connection's engine.
+    // The client reads a2c[0]; pump raw bytes into the agent connection's
+    // engine, splitting on '\n' like a real fd transport would.
     std::thread client_pump([&]{
-        PipeInBuf cin_buf(a2c); std::istream cin_stream(&cin_buf);
-        std::string l;
-        while (std::getline(cin_stream, l)) {
-            if (!l.empty()) agent.engine().feed_line(l);
+        std::string partial;
+        char buf[8192];
+        for (;;) {
+            ssize_t n = ::read(a2c[0], buf, sizeof(buf));
+            if (n < 0) { if (errno == EINTR) continue; break; }
+            if (n == 0) break;   // EOF
+            const char* p = buf; const char* end = buf + n;
+            while (p < end) {
+                const char* nl = static_cast<const char*>(std::memchr(p, '\n', end - p));
+                if (!nl) { partial.append(p, end - p); break; }
+                partial.append(p, nl - p);
+                if (!partial.empty()) agent.engine().feed_line(partial);
+                partial.clear();
+                p = nl + 1;
+            }
         }
     });
 
@@ -273,6 +267,18 @@ int main() {
     CHECK(usage_updates.load() == 2);
     CHECK(agent_text_chunks.load() >= 2);
 
+    // The tool card is first-class: title is project-relative ("write out.txt",
+    // not the absolute tmp path), kind maps write→Edit, and an announce-time
+    // diff card is shown before the tool runs — on both the tool_call update
+    // and the permission request. This is the claude-code-acp parity work.
+    { std::lock_guard lk(transcript_mu);
+      CHECK(tc_title.rfind("write ", 0) == 0);
+      CHECK(tc_title.find('/') == std::string::npos);   // relative, no dir sep
+      CHECK(perm_title.rfind("write ", 0) == 0); }
+    CHECK(tc_is_edit_kind.load());
+    CHECK(tc_announce_diff.load());
+    CHECK(perm_announce_diff.load());
+
     { std::lock_guard lk(transcript_mu);
       CHECK(transcript.find("Writing the file.") != std::string::npos);
       CHECK(transcript.find("Done.") != std::string::npos); }
@@ -304,10 +310,12 @@ int main() {
     agent.session_close(CloseSessionParams{ns.sessionId, Json::object()}).get();
 
     // ── Tear down ──────────────────────────────────────────────────────────
-    c2a.close();   // EOF on the agent's reader → serve() returns
+    ::close(c2a[1]);   // EOF on the agent's reader → serve() returns
     agent_thread.join();
-    a2c.close();   // EOF on the client pump
+    ::close(a2c[1]);   // EOF on the client pump
     client_pump.join();
+    ::close(c2a[0]);
+    ::close(a2c[0]);
 
     fs::remove(target);
     std::fprintf(stderr, "acp_integration: OK (turn=%d perms=%d toolcalls=%d "
