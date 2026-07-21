@@ -1,6 +1,7 @@
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -1160,22 +1161,96 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
     // own muted identity (a book glyph, "Retrieved context" label) marks
     // it as auto-injected reference, not the user's words.
     if (msg.proactive_context) {
-        // Count passages by the [source:path] headers in the block — cheap,
-        // and lets the one-liner say how much was pulled in.
+        // Parse the [source:path:line] headers out of the block so the
+        // card can show the user WHAT grounded the answer — not just how
+        // many passages. Each header is a line of the form
+        //   [docs:path/to/file.md:12]  /  [skill:git:0]  /  [memory:...]
+        // We collect the DISTINCT "source path" pairs (dropping the line
+        // number and any duplicate chunks of the same file) so a file
+        // that contributed three passages shows once. Cheap: one linear
+        // scan of a bounded block.
         int n = 0;
+        std::vector<std::string> sources;   // distinct "source path", in order
         for (std::size_t p = msg.text.find("\n["); p != std::string::npos;
-             p = msg.text.find("\n[", p + 1))
+             p = msg.text.find("\n[", p + 1)) {
             ++n;
+            std::size_t open = p + 2;                       // past "\n["
+            std::size_t close = msg.text.find(']', open);
+            if (close == std::string::npos) continue;
+            std::string tag = msg.text.substr(open, close - open);
+            // Split "source:path:line" → "source" + "path" (drop trailing
+            // ":line" if the last colon-field is all digits).
+            std::size_t colon = tag.find(':');
+            std::string src  = colon == std::string::npos
+                                 ? std::string{"docs"} : tag.substr(0, colon);
+            std::string path = colon == std::string::npos
+                                 ? tag : tag.substr(colon + 1);
+            if (std::size_t lc = path.rfind(':'); lc != std::string::npos) {
+                std::string_view tail{path.data() + lc + 1,
+                                      path.size() - lc - 1};
+                if (!tail.empty()
+                    && std::all_of(tail.begin(), tail.end(),
+                                   [](unsigned char c){ return std::isdigit(c); }))
+                    path.resize(lc);
+            }
+            std::string label = path.empty() ? src : (src + " · " + path);
+            if (std::find(sources.begin(), sources.end(), label)
+                    == sources.end())
+                sources.push_back(std::move(label));
+        }
+
         cfg.glyph      = "\xf0\x9f\x93\x9a";          // 📚
         cfg.label      = "Retrieved context";
         cfg.rail_color = muted;
-        cfg.meta       = timestamp_hh_mm(msg.timestamp);
-        std::string line = "Auto-retrieved "
-            + std::to_string(n > 0 ? n : 1)
-            + (n == 1 ? " passage" : " passages")
-            + " from your knowledge base to ground the answer.";
+        // Passage count rides the meta line (right-aligned, like elapsed
+        // time on assistant turns) so the body is free for the sources.
+        const int shown_n = n > 0 ? n : 1;
+        cfg.meta = timestamp_hh_mm(msg.timestamp) + "  \xc2\xb7  "
+            + std::to_string(shown_n)
+            + (shown_n == 1 ? " passage" : " passages");
+
         cfg.body.emplace_back(maya::Turn::PlainText{
-            .content = std::move(line), .color = muted});
+            .content = "Grounded the answer in your knowledge base:",
+            .color   = muted});
+
+        // Confidence bar — a compact 10-cell gauge of the retrieval
+        // confidence that cleared the injection floor, so the user can
+        // weigh how much to trust the grounding at a glance. Only drawn
+        // when a real value was threaded through (>= 0); older/cached
+        // proactive messages without it just skip the bar.
+        if (msg.proactive_confidence >= 0.0) {
+            const double c = msg.proactive_confidence > 1.0
+                                 ? 1.0 : msg.proactive_confidence;
+            constexpr int kCells = 10;
+            const int filled = static_cast<int>(c * kCells + 0.5);
+            std::string bar;
+            for (int i = 0; i < kCells; ++i)
+                bar += (i < filled) ? "\xe2\x96\xb0"    // ▰ filled
+                                    : "\xe2\x96\xb1";   // ▱ empty
+            const int pct = static_cast<int>(c * 100.0 + 0.5);
+            cfg.body.emplace_back(maya::Turn::PlainText{
+                .content = "  confidence " + bar + " "
+                    + std::to_string(pct) + "%",
+                .color   = muted});
+        }
+
+        // One dim line per distinct source — a tree-ish "└ " bullet so it
+        // reads as provenance, not prose. Capped so a wide multi-file hit
+        // can't dominate the transcript; the overflow collapses to a
+        // "…and N more" tail.
+        constexpr std::size_t kMaxSources = 6;
+        const std::size_t total = sources.size();
+        for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
+            cfg.body.emplace_back(maya::Turn::PlainText{
+                .content = "  \xe2\x94\x94 " + sources[i],   // └
+                .color   = muted});
+        }
+        if (total > kMaxSources) {
+            cfg.body.emplace_back(maya::Turn::PlainText{
+                .content = "  \xe2\x80\xa6 and "                // …
+                    + std::to_string(total - kMaxSources) + " more",
+                .color   = muted});
+        }
         return cfg;
     }
 

@@ -344,9 +344,10 @@ Step submit_message(Model m) {
     // ProactiveContextReady (see the deferred-launch section below).
     if (proactive) {
         Message ctx_msg;
-        ctx_msg.role              = Role::User;
-        ctx_msg.text              = std::move(proactive->block);
-        ctx_msg.proactive_context = true;
+        ctx_msg.role                = Role::User;
+        ctx_msg.proactive_confidence = proactive->confidence;
+        ctx_msg.text                = std::move(proactive->block);
+        ctx_msg.proactive_context   = true;
         m.d.current.messages.push_back(std::move(ctx_msg));
     }
     // Force the prior turn's reveal to settle BEFORE the freeze snapshot.
@@ -427,7 +428,8 @@ Step submit_message(Model m) {
             (std::function<void(Msg)> dispatch) {
                 auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
                 dispatch(Msg{ProactiveContextReady{
-                    hit ? std::move(hit->block) : std::string{}}});
+                    hit ? std::move(hit->block) : std::string{},
+                    hit ? hit->confidence : -1.0}});
             });
     } else {
         launch = cmd::launch_stream(m);

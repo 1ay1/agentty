@@ -469,7 +469,7 @@ struct TokenRefreshed   { agentty::auth::TokenResult result; };
 // The reducer STAGES it (m.d.staged_proactive_context) so the next user
 // submit flushes it into the transcript at a safe boundary — a slow first
 // turn's grounding is deferred by one turn instead of being dropped.
-struct ProactiveContextReady { std::string block; };
+struct ProactiveContextReady { std::string block; double confidence = -1.0; };
 
 // ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
