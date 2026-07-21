@@ -1,6 +1,6 @@
 ---
 title: Why modern C++ (not Rust)
-description: agentty stays modern C++ and gets the guarantees people move to Rust for — at compile time, in the header. 151+ static_assert proofs, an enforced lock hierarchy, and structurally-isolated worker panics. The code is the argument.
+description: agentty stays modern C++ and gets the guarantees people move to Rust for — at compile time, in the header. 155+ static_assert proofs, an enforced lock hierarchy, and structurally-isolated worker panics. The code is the argument.
 nav_section: Advanced
 nav_order: 80
 slug: why-not-rust
@@ -17,7 +17,7 @@ approach is sharper.
 
 ## The receipts, up front
 
-- **151+ `static_assert` / `consteval` proofs** across the headers in
+- **155+ `static_assert` / `consteval` proofs** across the headers in
   `include/agentty/`, all evaluated every build. The build is the test
   runner: a green `cmake --build` means every invariant below holds. There is
   no separate CI step that can be skipped, no fixture that can drift, no

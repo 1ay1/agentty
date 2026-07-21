@@ -44,7 +44,7 @@ Set the model per-subprocess in the `args`. In ACP mode `-m` is an *ephemeral* o
 
 - **`ask`** (default) — prompt for `write` / `edit` / `bash` / network; read-only inspection (`read` / `grep` / `glob` / `list_dir`) runs without a dialog so the loop stays fluid.
 - **`minimal`** — prompt for *everything* that touches the outside world, reads included. Tightest leash.
-- **`write`** — same write/exec/net prompts as `ask`, but never prompts for reads.
+- **`write`** — fully autonomous: *every* tool (`write` / `edit` / `bash` / network included) runs without a prompt. Loosest leash — the same auto-approve-everything tier as the TUI's Write mode.
 
 ## What works over ACP
 
