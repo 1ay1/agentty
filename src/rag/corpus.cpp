@@ -538,7 +538,7 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
     // keep it; otherwise rebuild_hnsw_() builds fresh from the embeddings.
     constexpr std::size_t kHnswThreshold = 2000;
     if (embed_dim_ > 0 && chunks_.size() >= kHnswThreshold &&
-        hnsw_loaded && !hnsw_.empty() && hnsw_.dim() == embed_dim_ &&
+        hnsw_loaded && !hnsw_.empty() && hnsw_.dim() == effective_ann_dim_() &&
         cached_sig != 0 && corpus_signature(chunks_) == cached_sig) {
         hnsw_built_ = true;          // reuse the cache-loaded graph
     } else {
@@ -551,9 +551,34 @@ void Corpus::build(const fs::path& root, const EmbedConfig& embed) {
 // (Re)build (or drop) the HNSW graph from the current chunks_. Single source
 // of truth for the ANN index lifecycle — every structural mutation routes
 // here so node ids stay aligned with chunk positions.
+std::size_t Corpus::ann_dim_env_() {
+    // Read once for the process. AGENTTY_RAG_ANN_DIM=256 (say) truncates the
+    // ANN graph to the leading 256 dims; 0 / unset / invalid = full width.
+    static const std::size_t v = [] {
+        const char* s = std::getenv("AGENTTY_RAG_ANN_DIM");
+        if (s && s[0]) {
+            try { long d = std::stol(s); if (d > 0) return static_cast<std::size_t>(d); }
+            catch (...) {}
+        }
+        return static_cast<std::size_t>(0);
+    }();
+    return v;
+}
+
+std::size_t Corpus::effective_ann_dim_() const noexcept {
+    const std::size_t a = ann_dim_env_();
+    return (a > 0 && a < embed_dim_) ? a : embed_dim_;
+}
+
+HnswIndex Corpus::make_hnsw_() const {
+    HnswConfig cfg;
+    cfg.ann_dim = ann_dim_env_();
+    return HnswIndex{cfg};
+}
+
 void Corpus::rebuild_hnsw_() {
     constexpr std::size_t kHnswThreshold = 2000;
-    hnsw_ = HnswIndex{};
+    hnsw_ = make_hnsw_();
     hnsw_built_ = false;
     if (embed_dim_ == 0 || chunks_.size() < kHnswThreshold) return;
 
@@ -575,7 +600,7 @@ void Corpus::rebuild_hnsw_() {
 // never move existing positions, so node id == chunk position stays true.
 bool Corpus::append_to_hnsw_(std::size_t first_new) {
     constexpr std::size_t kHnswThreshold = 2000;
-    if (embed_dim_ == 0) { hnsw_ = HnswIndex{}; hnsw_built_ = false; return false; }
+    if (embed_dim_ == 0) { hnsw_ = make_hnsw_(); hnsw_built_ = false; return false; }
 
     // If we don't yet have a live graph but the corpus has now grown past the
     // threshold, cross over to a one-time full build (which also indexes the
@@ -584,8 +609,11 @@ bool Corpus::append_to_hnsw_(std::size_t first_new) {
         if (chunks_.size() >= kHnswThreshold) rebuild_hnsw_();
         return hnsw_built_;
     }
-    // Dim drift (e.g. model switch mid-session) invalidates the graph.
-    if (hnsw_.dim() != embed_dim_) { rebuild_hnsw_(); return hnsw_built_; }
+    // Dim drift invalidates the graph: a model switch mid-session (embed_dim_
+    // changed) OR a cross-session change to AGENTTY_RAG_ANN_DIM (the graph on
+    // disk was built at a different truncation). Compare against the graph's
+    // EFFECTIVE working dim, which encodes the Matryoshka prefix.
+    if (hnsw_.dim() != effective_ann_dim_()) { rebuild_hnsw_(); return hnsw_built_; }
 
     for (std::uint32_t i = static_cast<std::uint32_t>(first_new);
          i < chunks_.size(); ++i) {
@@ -832,7 +860,7 @@ std::size_t Corpus::build_from_memory(
     dead_.clear();
     embed_dim_ = 0;
     embed_model_ = embed.model;   // keep identity coherent on this path too
-    hnsw_ = HnswIndex{};
+    hnsw_ = make_hnsw_();
     hnsw_built_ = false;
 
     for (const auto& [path, body] : docs) {

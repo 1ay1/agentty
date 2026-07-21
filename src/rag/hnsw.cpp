@@ -14,19 +14,23 @@
 
 namespace agentty::rag {
 
-namespace {
-// Normalize a copy to unit length so cosine == dot. Zero vectors pass through
-// (their dot with anything is 0, i.e. "maximally dissimilar").
-std::vector<float> normalize(const std::vector<float>& v) {
+std::vector<float> HnswIndex::conform_(const std::vector<float>& v) const {
+    // Truncate to the working dim_ (Matryoshka prefix) then unit-normalize.
+    // A vector shorter than dim_ can't be conformed — signal with empty so the
+    // caller skips it (same contract the old ragged-dim guard had). dim_ must
+    // already be established (add() sets it on the first insert before the
+    // first conform_ call); a query against an empty graph never reaches here.
+    if (dim_ == 0 || v.size() < dim_) return {};
+    std::vector<float> out(v.begin(),
+                           v.begin() + static_cast<std::ptrdiff_t>(dim_));
     double n = 0.0;
-    for (float x : v) n += static_cast<double>(x) * x;
-    if (n <= 0.0) return v;
-    float inv = static_cast<float>(1.0 / std::sqrt(n));
-    std::vector<float> out(v.size());
-    for (std::size_t i = 0; i < v.size(); ++i) out[i] = v[i] * inv;
-    return out;
+    for (float x : out) n += static_cast<double>(x) * x;
+    if (n > 0.0) {
+        float inv = static_cast<float>(1.0 / std::sqrt(n));
+        for (float& x : out) x *= inv;
+    }
+    return out;   // a zero prefix stays zero (dot 0 — maximally dissimilar)
 }
-} // namespace
 
 float HnswIndex::dot_(const std::vector<float>& a,
                       const std::vector<float>& b) const noexcept {
@@ -68,12 +72,21 @@ void HnswIndex::build(const std::vector<std::uint32_t>& ids,
 
 void HnswIndex::add(std::uint32_t id, const std::vector<float>& vec) {
     if (vec.empty()) return;
-    if (dim_ == 0) dim_ = vec.size();
-    else if (vec.size() != dim_) return;   // ragged — skip
+    // Establish the working dimension on the FIRST insert. With Matryoshka
+    // truncation (cfg_.ann_dim > 0 and smaller than the vector) the graph
+    // works in the leading-dim prefix; otherwise it's the full width. Every
+    // later insert + query is conform_'d to this same dim_, so the graph is
+    // dimension-coherent no matter what width the raw embeddings are.
+    if (dim_ == 0)
+        dim_ = (cfg_.ann_dim > 0 && cfg_.ann_dim < vec.size())
+                   ? cfg_.ann_dim : vec.size();
+
+    std::vector<float> cv = conform_(vec);
+    if (cv.empty()) return;   // shorter than dim_ — ragged, skip
 
     HnswNode node;
     node.id  = id;
-    node.vec = normalize(vec);
+    node.vec = std::move(cv);
     int level = random_level_();
     node.links.resize(level + 1);
 
@@ -241,8 +254,8 @@ std::vector<std::pair<std::uint32_t, float>>
 HnswIndex::search(const std::vector<float>& query, std::size_t k,
                   std::size_t ef) const {
     if (nodes_.empty() || k == 0) return {};
-    std::vector<float> q = normalize(query);
-    if (q.size() != dim_) return {};
+    std::vector<float> q = conform_(query);
+    if (q.empty()) return {};   // empty / shorter-than-dim_ query
 
     std::size_t efs = std::max<std::size_t>(ef ? ef : cfg_.ef_search, k);
 

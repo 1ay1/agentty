@@ -381,6 +381,19 @@ private:
     embed_queries_(const std::vector<std::string>& queries,
                    const EmbedConfig& embed) const;
 
+    // MATRYOSHKA ANN. `ann_dim_env_()` reads AGENTTY_RAG_ANN_DIM once (0 =
+    // off). `effective_ann_dim_()` is the dim the graph is actually built /
+    // searched at: the truncation dim when set and smaller than the full
+    // embedding width, else the full width. `make_hnsw_()` mints an HNSW
+    // index carrying that truncation dim in its config, so every FRESH build
+    // routes through one place. The corpus compares hnsw_.dim() against
+    // effective_ann_dim_() at cache-reuse + append time, so a cross-session
+    // change to AGENTTY_RAG_ANN_DIM triggers a clean rebuild with no cache-
+    // magic bump (the graph's own working dim encodes the truncation).
+    [[nodiscard]] static std::size_t ann_dim_env_();
+    [[nodiscard]] std::size_t effective_ann_dim_() const noexcept;
+    [[nodiscard]] HnswIndex   make_hnsw_() const;
+
     std::filesystem::path  root_;
     std::vector<Chunk>     chunks_;
     Bm25Index              bm25_;
