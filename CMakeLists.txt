@@ -1755,6 +1755,16 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(toolset_e2e_test)
     set_tests_properties(toolset_e2e_test PROPERTIES TIMEOUT 120)
 
+    # subagent_report_test — locks the `task` tool's report-extraction
+    # contract. Drives the REAL AgenttySubagentRunner (registry `task` tool)
+    # with a SCRIPTED stream seam: proves a tool-only-to-the-cap subagent
+    # returns the "hit its turn budget" banner (NOT its turn-1 narration —
+    # the regression that made four parallel explorers all report their
+    # opening sentence), that a clean final-prose turn is returned verbatim,
+    # and that the wrap-up nudge is delivered before the cap. No network.
+    agentty_add_full_test(subagent_report_test)
+    set_tests_properties(subagent_report_test PROPERTIES TIMEOUT 60)
+
     # proactive_deferred_test — the DEFERRED same-turn grounding reducer path.
     # Drives the REAL stream_update reducer with the ProactiveContextReady Msg
     # and asserts: the held-back stream launch injects the <retrieved-context>
@@ -1961,6 +1971,7 @@ if(AGENTTY_BUILD_TESTS)
         visual_hash_coverage_test
         tool_result_budget_test
         toolset_e2e_test
+        subagent_report_test
         proactive_deferred_test
         persistence_proactive_test
         settings_default_test
