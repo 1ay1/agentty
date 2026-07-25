@@ -50,12 +50,22 @@ struct ToolUse {
     // reads it via started_at()).
     struct Pending  { std::chrono::steady_clock::time_point started_at{}; };
     struct Approved { std::chrono::steady_clock::time_point started_at{}; };
-    struct Running  {
+    struct Running {
         std::chrono::steady_clock::time_point started_at{};
         // Live stdout+stderr snapshot for a running tool. Shown in the card
         // while status is Running so the user sees progress immediately
         // instead of waiting until the whole command finishes.
         std::string progress_text;
+        // Wall-clock of the most recent progress snapshot. The hung-syscall
+        // wedge net (update/meta.cpp Tick) measures liveness from
+        // max(started_at, last_progress_at) instead of started_at alone, so a
+        // long-but-HEALTHY tool that keeps emitting progress (a subagent
+        // churning through tool calls, a multi-minute build streaming output)
+        // is never guillotined by the flat wedge cap — only a tool that has
+        // gone genuinely silent past the cap trips it. Zero until the first
+        // ToolExecProgress lands; the wedge net treats zero as "no progress
+        // yet" and falls back to started_at.
+        std::chrono::steady_clock::time_point last_progress_at{};
     };
     struct Done {
         std::chrono::steady_clock::time_point started_at{};

@@ -276,6 +276,11 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                         e.snapshot.erase(0, cut);
                     }
                     r->progress_text = std::move(e.snapshot);
+                    // Reset the liveness clock: this tool is demonstrably
+                    // making progress, so the wedge net's cap restarts from
+                    // here rather than from the (possibly many-minutes-ago)
+                    // launch time.
+                    r->last_progress_at = std::chrono::steady_clock::now();
                 }
             });
             return done(std::move(m));
