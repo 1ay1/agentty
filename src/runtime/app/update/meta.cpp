@@ -490,13 +490,29 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     if (!tc.is_running()) continue;
                     any_running = true;
                     auto started = tc.started_at();
+                    // Liveness reference: the LATER of launch and the most
+                    // recent progress snapshot. A healthy long-runner (a
+                    // subagent working through tool calls, a streaming build)
+                    // keeps bumping last_progress_at, so the wedge cap resets
+                    // with every sign of life and never guillotines it at a
+                    // flat 330 s from launch. A tool truly hung on a blocking
+                    // syscall emits no progress, so last_progress_at stays put
+                    // (or zero) and the net trips exactly as before.
+                    auto liveness = started;
+                    if (const auto* r = std::get_if<ToolUse::Running>(&tc.status);
+                        r && r->last_progress_at.time_since_epoch().count() != 0
+                        && r->last_progress_at > liveness)
+                        liveness = r->last_progress_at;
                     if (started.time_since_epoch().count() != 0
-                        && now - started >= kToolWedge) {
+                        && now - liveness >= kToolWedge) {
                         auto secs = std::chrono::duration_cast<std::chrono::seconds>(
                                         now - started).count();
+                        auto quiet = std::chrono::duration_cast<std::chrono::seconds>(
+                                        now - liveness).count();
                         tc.status = ToolUse::Failed{started, now,
-                            "tool ran " + std::to_string(secs) + "s with no "
-                            "result — worker likely hung on a blocking "
+                            "tool ran " + std::to_string(secs) + "s ("
+                            + std::to_string(quiet) + "s with no progress) "
+                            "\xe2\x80\x94 worker likely hung on a blocking "
                             "syscall; failing it so the turn can recover. "
                             "The worker thread may continue in the "
                             "background; its result is discarded if it "

@@ -1765,6 +1765,18 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(subagent_report_test)
     set_tests_properties(subagent_report_test PROPERTIES TIMEOUT 60)
 
+    # tool_wedge_liveness_test — the hung-syscall wedge net (update/meta.cpp
+    # Tick) measures liveness from the LAST PROGRESS event, not from launch.
+    # Regression lock: a healthy long-runner (a `task` subagent stepping
+    # through tool after tool over several minutes, emitting a progress
+    # snapshot each step) used to be force-failed at a flat 330 s from launch
+    # and its whole report discarded. Drives the REAL meta_update with a Tick
+    # and proves: fresh progress keeps it Running; silence-since-launch past
+    # the cap fails it; stale progress past the cap fails it; below the cap a
+    # silent tool is left alone. No maya / no I/O (no-op Deps installed).
+    agentty_add_full_test(tool_wedge_liveness_test)
+    set_tests_properties(tool_wedge_liveness_test PROPERTIES TIMEOUT 30)
+
     # proactive_deferred_test — the DEFERRED same-turn grounding reducer path.
     # Drives the REAL stream_update reducer with the ProactiveContextReady Msg
     # and asserts: the held-back stream launch injects the <retrieved-context>
@@ -1972,6 +1984,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_result_budget_test
         toolset_e2e_test
         subagent_report_test
+        tool_wedge_liveness_test
         proactive_deferred_test
         persistence_proactive_test
         settings_default_test
