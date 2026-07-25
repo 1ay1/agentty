@@ -1555,9 +1555,34 @@ public:
         // stuck — stop burning turns and report what we have.
         std::unordered_map<std::string, int> failed_calls;
         bool doomed = false;
+        // Set once we've told the model it's out of budget and must write its
+        // final report NOW. Prevents a thorough agent from exploring straight
+        // into the turn cap and never emitting a report (the loop below then
+        // salvages a stale early narration line instead of a real answer).
+        bool wrapup_nudged = false;
 
         while (turns < subagent::kMaxTurns && !doomed) {
             ++turns;
+
+            // FINAL-TURN NUDGE: when only a couple of turns of budget remain,
+            // inject a synthetic user message ordering the model to stop
+            // running tools and write its report. Without this the agent
+            // spends its last completion on yet another tool call, hits the
+            // cap mid-investigation, and returns no final text at all.
+            if (!wrapup_nudged && turns >= subagent::kMaxTurns - 1
+                && !thread.messages.empty()
+                && thread.messages.back().role != Role::User) {
+                Message nudge;
+                nudge.role = Role::User;
+                nudge.text =
+                    "You are almost out of turn budget. Do NOT run any more "
+                    "tools. Write your FINAL report now as a plain text "
+                    "message: a complete, self-contained answer to the task "
+                    "using everything you have gathered so far.";
+                thread.messages.push_back(std::move(nudge));
+                wrapup_nudged = true;
+            }
+
             std::string err;
             StopReason stop = run_one_completion(thread, cfg, type, log, err);
             (void)stop;   // loop advance is decided by ran_a_tool below
@@ -1634,14 +1659,36 @@ public:
             if (!ran_a_tool) break;   // final text answer (or nothing left to do)
         }
 
+        // Extract the report. The AUTHORITATIVE report is the text of the
+        // FINAL assistant turn — the message the model wrote last, after all
+        // its tool work. We do NOT walk backward to the first non-empty text:
+        // an agent that explored straight into the turn cap has its last few
+        // turns as pure tool calls (empty .text), and a naive reverse-walk
+        // would resurrect its turn-1 narration ("I'll start by mapping...")
+        // and pass it off as a finished report. That was the real bug: a
+        // 24-turn run returning its opening sentence instead of an answer.
         std::string report;
-        for (auto it = thread.messages.rbegin(); it != thread.messages.rend(); ++it) {
-            if (it->role == Role::Assistant && !it->text.empty()) {
-                report = it->text;
-                break;
+        bool salvaged_stale = false;
+        if (!thread.messages.empty()
+            && thread.messages.back().role == Role::Assistant
+            && !thread.messages.back().text.empty()) {
+            // Clean finish: the model's last act was to write prose.
+            report = thread.messages.back().text;
+        } else {
+            // No final text (ran out of budget mid-tool, or last turn was
+            // tool-only). Salvage the most recent EARLIER assistant text as a
+            // partial, but mark it stale so the banner below tells the caller
+            // this is not a proper final report.
+            for (auto it = thread.messages.rbegin(); it != thread.messages.rend(); ++it) {
+                if (it->role == Role::Assistant && !it->text.empty()) {
+                    report = it->text;
+                    salvaged_stale = true;
+                    break;
+                }
             }
         }
-        if (report.empty()) {
+
+        if (report.empty() || salvaged_stale) {
             std::string why;
             if (!last_error.empty())
                 why = "[subagent failed: " + last_error + "]";
@@ -1649,10 +1696,20 @@ public:
                 why = "[subagent stopped: the same tool call failed 3\xc3\x97 "
                       "in a row without converging]";
             else if (turns >= subagent::kMaxTurns)
-                why = "[subagent hit its turn budget without producing a final report]";
+                why = "[subagent hit its turn budget without producing a final "
+                      "report \xe2\x80\x94 the summary below is incomplete]";
             else
-                why = "[subagent finished without a text report]";
-            report = log.empty() ? why : (why + "\n\nActivity:\n" + log);
+                why = "[subagent finished without a final text report]";
+            if (salvaged_stale) {
+                // We have partial prose from an earlier turn: surface the
+                // banner, then the salvaged text, then the activity log.
+                report = why + "\n\nLast text the subagent produced (may be an "
+                             "early, incomplete note):\n" + report
+                       + (log.empty() ? std::string{}
+                                      : "\n\nActivity:\n" + log);
+            } else {
+                report = log.empty() ? why : (why + "\n\nActivity:\n" + log);
+            }
             // A bare error (no salvageable report) propagates as an error so
             // the shell tags the tool_result is_error.
             if (!last_error.empty()) is_error = true;

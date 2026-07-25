@@ -1,0 +1,202 @@
+// subagent_report_test — locks the `task` tool's report-extraction contract.
+//
+// Regression target: a subagent that explores straight into its turn budget
+// (every completion is a tool call, none ever writes prose) used to have its
+// report SALVAGED by a naive reverse-walk that returned the FIRST non-empty
+// assistant text — i.e. its turn-1 narration ("I'll start by mapping...").
+// The parent then saw a plausible-looking one-liner, concluded the subagent
+// "hit its turn cap without a report", and did the work itself. Four parallel
+// explorers all came back with their opening sentence instead of an answer.
+//
+// This test drives the REAL AgenttySubagentRunner (via the registry `task`
+// tool) with a SCRIPTED stream seam and asserts:
+//
+//   A. tool-only-to-the-cap  → report is the "hit its turn budget" banner,
+//      NOT the turn-1 narration, and the tool_result is flagged is_error.
+//   B. writes prose at the end → report is exactly that final prose, clean.
+//   C. the wrap-up nudge fires before the cap so a model that DOES respond to
+//      it gets to emit a real report on its last turn.
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
+
+#include "agentty/provider/selection.hpp"
+#include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/tool/registry.hpp"
+#include "agentty/tool/subagent.hpp"
+#include "agentty/runtime/msg.hpp"
+
+using nlohmann::json;
+using namespace agentty;
+
+namespace {
+
+int g_checks = 0;
+int g_fails  = 0;
+
+void check(bool ok, const std::string& what) {
+    ++g_checks;
+    if (ok) std::printf("ok:   %s\n", what.c_str());
+    else  { std::printf("FAIL: %s\n", what.c_str()); ++g_fails; }
+}
+
+bool has(const std::string& hay, std::string_view needle) {
+    return hay.find(needle) != std::string::npos;
+}
+
+// Drive the `task` tool through the production registry, exactly as the
+// reducer does. `is_error` is set when the dispatch surfaced a ToolError (the
+// runner's is_error path re-wraps as an unexpected through the bridge).
+struct TaskOut { std::string text; bool is_error = false; };
+
+TaskOut run_task(const std::string& prompt) {
+    const auto* td = tools::find("task");
+    if (!td) return {"[task tool missing from registry]", true};
+    json args; args["prompt"] = prompt;
+    auto r = td->execute(args);         // production dispatch, as cmd_factory does
+    if (!r) return {r.error().detail, true};
+    return {r->text, false};
+}
+
+// A scripted stream seam. `script(turn, req)` decides what THIS completion
+// emits; it drives the loop deterministically without any network.
+using Script = std::function<void(int turn, const provider::Request&,
+                                  const provider::EventSink&)>;
+
+void install_scripted_stream(Script script) {
+    auto counter = std::make_shared<std::atomic<int>>(0);
+    tools::subagent::Config cfg;
+    // Non-empty API key so available()/run() don't bail on empty auth. Any
+    // provider whose active().kind != Anthropic skips fresh_auth_header (which
+    // would touch disk); the scripted stream ignores req.auth entirely anyway.
+    cfg.auth  = auth::ApiKeyHeader{"sk-test-not-real"};
+    cfg.model = "test-model";
+    cfg.stream = [counter, script](provider::Request req,
+                                   provider::EventSink sink) {
+        int turn = counter->fetch_add(1);
+        script(turn, req, sink);
+    };
+    tools::subagent::install(std::move(cfg));
+}
+
+// Convenience emitters mirroring the transport → Msg mapping the runner reads.
+void emit_text(const provider::EventSink& sink, const std::string& t) {
+    sink(Msg{msg::StreamMsg{StreamTextDelta{t}}});
+}
+void emit_tool_call(const provider::EventSink& sink, const std::string& id,
+                    const std::string& name, const json& jargs) {
+    sink(Msg{msg::StreamMsg{StreamToolUseStart{ToolCallId{id}, ToolName{name}}}});
+    sink(Msg{msg::StreamMsg{StreamToolUseDelta{jargs.dump()}}});
+    sink(Msg{msg::StreamMsg{StreamToolUseEnd{}}});
+}
+void emit_finish(const provider::EventSink& sink,
+                 StopReason r = StopReason::EndTurn) {
+    sink(Msg{msg::StreamMsg{StreamFinished{r}}});
+}
+
+// Did the runner ever hand this completion a wrap-up nudge? The nudge is the
+// last user message; detect it by its distinctive text.
+bool req_has_nudge(const provider::Request& req) {
+    for (const auto& m : req.messages)
+        if (m.role == Role::User && has(m.text, "almost out of turn budget"))
+            return true;
+    return false;
+}
+
+} // namespace
+
+int main() {
+    tools::wire_mcp_runtime("off");   // no bwrap wrapping — CI portability
+    // Select a non-Anthropic provider: the runner only calls the disk-reading
+    // fresh_auth_header() when active().kind == Anthropic. The OpenAI-family
+    // kind (covers Ollama/OpenAI-compat) uses cfg.auth verbatim, and our
+    // scripted stream ignores it entirely.
+    {
+        provider::Selection sel;
+        sel.kind = provider::Kind::OpenAI;
+        provider::select(sel);
+    }
+
+    // ── A. Tool-only to the cap: never write prose. ─────────────────────
+    // Every completion emits ONE grep call (harmless, read-only) with empty
+    // text, so ran_a_tool stays true and the loop runs to kMaxTurns. The
+    // turn-1 completion additionally emits a narration line — the exact bait
+    // the old reverse-walk would have returned.
+    {
+        install_scripted_stream([](int turn, const provider::Request&,
+                                   const provider::EventSink& sink) {
+            if (turn == 0)
+                emit_text(sink, "I'll start by mapping the codebase structure.");
+            emit_tool_call(sink, "t" + std::to_string(turn), "grep",
+                           json{{"pattern", "zzz_no_match_expected"}});
+            emit_finish(sink, StopReason::ToolUse);
+        });
+        auto out = run_task("explore everything in exhaustive detail");
+        check(has(out.text, "turn budget"),
+              "A: report is the turn-budget banner");
+        // The regression: turn-1 narration must NOT stand alone as the report.
+        // If it appears at all it MUST be under the stale-salvage label, after
+        // the incompleteness banner — never as the whole answer.
+        if (has(out.text, "I'll start by mapping")) {
+            check(has(out.text, "early, incomplete")
+                  && out.text.find("turn budget")
+                       < out.text.find("I'll start by mapping"),
+                  "A: narration only appears labeled as a stale partial, after the banner");
+        } else {
+            check(true, "A: turn-1 narration is not surfaced at all");
+        }
+        // The banner must clearly signal incompleteness so the parent trusts
+        // it instead of the stale one-liner.
+        check(has(out.text, "incomplete") || has(out.text, "without producing"),
+              "A: banner marks the report incomplete");
+    }
+
+    // ── B. Writes prose at the end: clean final report. ─────────────────
+    // Explore for a couple of turns, then on turn 3 stop calling tools and
+    // write the real answer. The runner must return exactly that prose.
+    {
+        install_scripted_stream([](int turn, const provider::Request&,
+                                   const provider::EventSink& sink) {
+            if (turn < 3) {
+                emit_tool_call(sink, "t" + std::to_string(turn), "grep",
+                               json{{"pattern", "zzz_no_match_expected"}});
+                emit_finish(sink, StopReason::ToolUse);
+            } else {
+                emit_text(sink, "FINAL_ANSWER: the corpus has three modules.");
+                emit_finish(sink, StopReason::EndTurn);
+            }
+        });
+        auto out = run_task("summarize the corpus");
+        check(has(out.text, "FINAL_ANSWER: the corpus has three modules."),
+              "B: clean final prose is returned verbatim");
+        check(!has(out.text, "turn budget"),
+              "B: no budget banner when the agent finished properly");
+        check(!out.is_error, "B: a clean finish is not an error");
+    }
+
+    // ── C. The wrap-up nudge fires before the cap. ──────────────────────
+    // Stay tool-only, but record whether any completion was handed the nudge.
+    // A model that respected it would emit its report; we prove the nudge is
+    // delivered at all (the mechanism that makes the report possible).
+    {
+        auto saw_nudge = std::make_shared<std::atomic<bool>>(false);
+        install_scripted_stream([saw_nudge](int turn, const provider::Request& req,
+                                            const provider::EventSink& sink) {
+            if (req_has_nudge(req)) saw_nudge->store(true);
+            emit_tool_call(sink, "t" + std::to_string(turn), "grep",
+                           json{{"pattern", "zzz_no_match_expected"}});
+            emit_finish(sink, StopReason::ToolUse);
+        });
+        (void)run_task("keep exploring forever");
+        check(saw_nudge->load(),
+              "C: a wrap-up nudge is delivered before the turn cap");
+    }
+
+    std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
+    return g_fails == 0 ? 0 : 1;
+}
