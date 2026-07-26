@@ -7,13 +7,13 @@
 //   4. install the Deps so update/cmd_factory can reach them
 //   5. hand AgenttyApp to maya's runtime
 
-// Route global operator new/delete through mimalloc. Must live in exactly
-// one TU of the final executable — main.cpp is the natural home. Enabled
-// by -DAGENTTY_USE_MIMALLOC=ON at configure time (default ON, silently off if
-// the package isn't available).
-#if defined(AGENTTY_USE_MIMALLOC)
-#  include <mimalloc-new-delete.h>
-#endif
+// Global operator new/delete are routed through jetalloc by LINKING the
+// vendored static `jetalloc` archive (it bundles jet_override.cpp, which
+// defines the full replaceable new/delete set). No header include is needed
+// in any TU — unlike mimalloc, there is nothing to #include here. Enabled by
+// -DAGENTTY_USE_JETALLOC=ON at configure time (default ON; silently off if the
+// jetalloc/ submodule isn't checked out, in which case the system allocator is
+// used).
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN

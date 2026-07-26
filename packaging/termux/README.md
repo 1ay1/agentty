@@ -32,7 +32,6 @@ Two source-layout facts shape the recipe:
 | Flag | Why |
 |------|-----|
 | `-DAGENTTY_AUTO_PULL_MAYA=OFF` | The default runs `git reset --hard origin/master` on the maya submodule — a network op that must not happen in a package build. |
-| `-DAGENTTY_USE_MIMALLOC=OFF`   | mimalloc isn't packaged for Termux. agentty falls back to the system allocator. |
 | `-DAGENTTY_STANDALONE=OFF`     | Produce a normal dynamically-linked Termux (PIE) binary that links Termux's shared OpenSSL/nghttp2 — the fully-static release layout doesn't apply here. |
 | `-DAGENTTY_BUILD_TESTS=OFF`    | Ship the binary only. |
 
@@ -42,7 +41,8 @@ Two source-layout facts shape the recipe:
 - **Build:** `nlohmann-json`, `simdjson` (plus `cmake`, `ninja`, `clang` from the base build image)
 
 All are present in the Termux repositories (verified: OpenSSL 3.6, nghttp2 1.69,
-nlohmann-json 3.12, simdjson 4.6). mimalloc is intentionally omitted.
+nlohmann-json 3.12, simdjson 4.6). The allocator (jetalloc) is vendored as a
+submodule and built from source, so it needs no package.
 
 ## Submitting to the Termux repos
 
@@ -68,7 +68,7 @@ pkg install git cmake ninja clang openssl libnghttp2 nlohmann-json simdjson
 git clone --recursive https://github.com/1ay1/agentty
 cd agentty
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-      -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
+      -DAGENTTY_AUTO_PULL_MAYA=OFF \
       -DAGENTTY_STANDALONE=OFF -DAGENTTY_BUILD_TESTS=OFF
 cmake --build build -j4
 install -Dm755 build/agentty "$PREFIX/bin/agentty"

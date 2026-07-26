@@ -301,8 +301,13 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
 - `-DAGENTTY_STANDALONE=ON` statically links OpenSSL + nghttp2 + libstdc++ +
   libgcc when their `.a` archives are present; libc stays dynamic. A musl
   toolchain with `-DAGENTTY_FULLY_STATIC=ON` yields a 100% static binary.
-- `-DAGENTTY_USE_MIMALLOC=ON` (default) routes global `new`/`delete` through
-  mimalloc; the override lives in exactly one TU (`main.cpp`).
+- `-DAGENTTY_USE_JETALLOC=ON` (default) routes global `new`/`delete` through
+  the vendored **jetalloc** allocator (submodule `jetalloc/`, built from
+  source). Nothing to `#include` — the override ships inside the static archive
+  (`jet_override.cpp`); linking the `jetalloc` target is the whole integration.
+  `release_to_kernel()` (mem.hpp) calls `jet_trim()` to hand freed pages back
+  to the OS at conversation boundaries. Portable everywhere (rseq per-CPU fast
+  path on Linux/x86-64, portable C11 core elsewhere).
 - **Gotcha:** `AGENTTY_AUTO_PULL_MAYA=ON` is the default and runs
   `git reset --hard origin/master` on the `maya/` submodule during build. Its
   only guard checks for *uncommitted* changes, so committed local maya work
