@@ -488,6 +488,7 @@ jobs:
           CC="$GCC" CXX="$GXX" cmake -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
+            -DRAGCPP_WITH_METAL=OFF \
             -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
             -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc $QUADMATH"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
