@@ -569,6 +569,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     set(RAGCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(RAGCPP_BUILD_CLI      OFF CACHE BOOL "" FORCE)
     set(RAGCPP_WITH_RCP       OFF CACHE BOOL "" FORCE)
+    # No GPU backends. agentty's retrieval is CPU HNSW + BM25; it never issues
+    # the batch-score call the GPU paths accelerate. Leaving them at rag-cpp's
+    # defaults is a liability, not a feature:
+    #   * METAL defaults ON on Apple and enable_language(OBJCXX) drags Apple
+    #     clang into the build via a try_compile probe. That probe inherits our
+    #     CMAKE_EXE_LINKER_FLAGS (the GCC-static release passes -static-libgcc /
+    #     -static-libstdc++), and Apple clang rejects -static-libgcc — so the
+    #     whole macOS standalone configure died at rag-cpp/CMakeLists.txt.
+    #   * OPENCL auto-detects any system libOpenCL and would silently add a
+    #     dynamic dependency to a binary that's meant to be standalone.
+    set(RAGCPP_WITH_METAL     OFF CACHE BOOL "" FORCE)
+    set(RAGCPP_WITH_OPENCL    OFF CACHE BOOL "" FORCE)
     add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
     set(AGENTTY_HAS_RAGCPP TRUE)
     # Opt-in upstream tracking, off by default so local rag-cpp edits always
