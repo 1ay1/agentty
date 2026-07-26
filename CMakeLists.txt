@@ -511,6 +511,11 @@ if(AGENTTY_USE_JETALLOC)
         set(JET_BUILD_PRELOAD OFF CACHE BOOL "" FORCE)
         add_subdirectory(jetalloc EXCLUDE_FROM_ALL)
         set(AGENTTY_HAS_JETALLOC TRUE)
+        # Track the newest allocator on every build (like maya/acp/mcp): resets
+        # jetalloc/ to origin/master before it compiles. Safe — skips the pull
+        # if you have local uncommitted changes in the submodule. Turn the
+        # whole behaviour off with -DAGENTTY_AUTO_PULL_SUBMODULES=OFF.
+        agentty_pull_submodule_latest(jetalloc master jetalloc)
     else()
         # The submodule wasn't checked out. Don't fail — fall back to the
         # system allocator — but make the miss loud at configure time, because
