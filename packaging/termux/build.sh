@@ -12,9 +12,10 @@ TERMUX_PKG_SRCURL=git+https://github.com/1ay1/agentty
 TERMUX_PKG_GIT_BRANCH=v${TERMUX_PKG_VERSION}
 TERMUX_PKG_AUTO_UPDATE=true
 
-# Runtime + build dependencies available in the Termux repos. mimalloc is
-# NOT packaged for Termux — agentty's CMake silently disables it when absent,
-# and we pass -DAGENTTY_USE_MIMALLOC=OFF below to be explicit.
+# Runtime + build dependencies available in the Termux repos. The allocator
+# (jetalloc) is vendored as a submodule and built from source, so there is no
+# allocator package to depend on — it just compiles as part of the tree (on
+# aarch64 it uses jetalloc's portable C11 core).
 TERMUX_PKG_DEPENDS="openssl, libnghttp2, libc++"
 TERMUX_PKG_BUILD_DEPENDS="nlohmann-json, simdjson"
 
@@ -25,7 +26,6 @@ TERMUX_PKG_BUILD_DEPENDS="nlohmann-json, simdjson"
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -DCMAKE_BUILD_TYPE=Release
 -DAGENTTY_AUTO_PULL_MAYA=OFF
--DAGENTTY_USE_MIMALLOC=OFF
 -DAGENTTY_STANDALONE=OFF
 -DAGENTTY_BUILD_TESTS=OFF
 "

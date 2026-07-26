@@ -105,14 +105,16 @@ option(AGENTTY_FULLY_STATIC   "Fully static link (Linux only, requires musl tool
 # v0.2.7 crasher, which the build-time guard then rejects).
 option(AGENTTY_STATIC_PIE      "Emit a static-PIE (ET_DYN) instead of ET_EXEC for the fully-static build — Termux/Android only" OFF)
 
-# mimalloc override — Microsoft's fast allocator. MSVCRT's malloc is notably
-# slow on the small-string churn pattern (std::string everywhere in RenderOp,
-# SSE parsing, JSON). Linking mimalloc-static and including mimalloc-new-delete
-# in main.cpp routes global operator new/delete through mimalloc; measured
-# 15–25% wins on allocator-heavy Windows workloads. Default ON when the
-# package is installed; harmless on POSIX (mimalloc works there too but the
-# delta vs. glibc/jemalloc is smaller).
-option(AGENTTY_USE_MIMALLOC   "Route operator new/delete through mimalloc (big Win32 win)" ON)
+# jetalloc override — our own fast, modern allocator, vendored as a submodule
+# (jetalloc/). agentty churns std::string everywhere (RenderOp, SSE parsing,
+# JSON, the Element view tree) — the small-alloc pattern jetalloc's per-thread
+# slabs win on. Linking the static jetalloc archive routes global operator
+# new/delete through it (the archive bundles jet_override.cpp) and gives us
+# jet_trim() to return freed pages to the kernel at conversation boundaries.
+# No external package, no distro dependency: builds from source, compiles
+# ANYWHERE (rseq fast path on Linux/x86-64, portable C11 core elsewhere).
+# Default ON; turn OFF to build against the plain system allocator.
+option(AGENTTY_USE_JETALLOC   "Route operator new/delete through the vendored jetalloc allocator" ON)
 
 # CPU ISA baseline. Default avx2 (Haswell+/Zen1+, ~2013), which covers ~every
 # desktop/laptop in use. Drop to "avx" for Sandy/Ivy Bridge (2011–2012) or
@@ -485,31 +487,42 @@ if(NOT TARGET nghttp2::nghttp2 AND NOT AGENTTY_FULLY_STATIC)
         endif()
     endif()
 endif()
-# mimalloc — optional, but default-on when available. find_package(mimalloc)
-# comes from the upstream CMake export (vcpkg / brew / apt). If missing, we
-# silently continue without it rather than failing — it's a perf knob, not a
-# correctness requirement.
-set(AGENTTY_HAS_MIMALLOC FALSE)
-if(AGENTTY_USE_MIMALLOC)
-    find_package(mimalloc CONFIG QUIET)
-    if(TARGET mimalloc-static OR TARGET mimalloc)
-        set(AGENTTY_HAS_MIMALLOC TRUE)
+# jetalloc — our own fast, modern allocator, vendored as a submodule
+# (jetalloc/). No external package, no find_package, no distro dependency:
+# it builds from source right here, so agentty carries its allocator with it
+# and compiles ANYWHERE. Linking the static `jetalloc` target routes ALL C++
+# operator new/delete through it (jet_override.cpp is bundled in the archive) —
+# no header include needed in any TU. On Linux/x86-64 it uses its rseq per-CPU
+# fast path; on every other platform it falls back to its portable C11 core
+# (per-thread heaps + slabs) — same drop-in, still fast, always available.
+#
+# Why we ship our own instead of glibc/mimalloc: on a long interactive session
+# agentty frees hundreds of MiB (compacted conversations, dropped view caches).
+# glibc malloc hoards those freed arenas until exit -> bloated RSS. jetalloc
+# returns empty pages to the kernel on demand via jet_trim() (see mem.hpp), and
+# the small-string / JSON / Element-tree churn that dominates agentty is
+# exactly jetalloc's fast path.
+set(AGENTTY_HAS_JETALLOC FALSE)
+if(AGENTTY_USE_JETALLOC)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jetalloc/CMakeLists.txt")
+        # Build only the static library — no tests, benches, or LD_PRELOAD lib.
+        set(JET_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+        set(JET_BUILD_BENCH   OFF CACHE BOOL "" FORCE)
+        set(JET_BUILD_PRELOAD OFF CACHE BOOL "" FORCE)
+        add_subdirectory(jetalloc EXCLUDE_FROM_ALL)
+        set(AGENTTY_HAS_JETALLOC TRUE)
     else()
-        # WARNING (not STATUS) on purpose: this is the difference between
-        # a process that returns memory to the kernel promptly (mimalloc)
-        # and one that hoards a long session's freed arenas in glibc's
-        # free-list until exit (system allocator). On a long-running
-        # interactive session that's hundreds of MiB of unreclaimed RSS.
-        # The user should see the message during configure, not have it
-        # buried in a quiet STATUS line.
-        message(WARNING "agentty: AGENTTY_USE_MIMALLOC=ON but mimalloc not found "
-                       "— building against the system allocator. On "
-                       "Linux/glibc this means freed memory is not returned "
-                       "to the kernel until process exit; long sessions will "
-                       "look bloated in RSS. Install via `apt install "
-                       "libmimalloc-dev` / `pacman -S mimalloc` / `brew "
-                       "install mimalloc` / vcpkg `mimalloc` and "
-                       "reconfigure to enable it.")
+        # The submodule wasn't checked out. Don't fail — fall back to the
+        # system allocator — but make the miss loud at configure time, because
+        # it's the difference between prompt RSS release and glibc hoarding a
+        # long session's freed arenas until exit.
+        message(WARNING "agentty: AGENTTY_USE_JETALLOC=ON but jetalloc/ is empty "
+                       "— building against the system allocator. Run "
+                       "`git submodule update --init --recursive` to vendor the "
+                       "allocator and reconfigure. On Linux/glibc the system "
+                       "allocator does NOT return freed memory to the kernel "
+                       "until process exit; long sessions will look bloated "
+                       "in RSS.")
     endif()
 endif()
 
@@ -855,6 +868,13 @@ function(agentty_objlib name)
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
     endif()
     agentty_apply_compile_flags(${name})
+    # mem.hpp includes <jetalloc.h> when the allocator is vendored in. OBJECT
+    # libs don't link, but they DO need the header on the include path and the
+    # AGENTTY_USE_JETALLOC macro to select the jet_trim() branch.
+    if(AGENTTY_HAS_JETALLOC)
+        target_link_libraries(${name} PRIVATE jetalloc)
+        target_compile_definitions(${name} PRIVATE AGENTTY_USE_JETALLOC=1)
+    endif()
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
         maya::maya
@@ -946,42 +966,16 @@ endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
     target_link_libraries(agentty PRIVATE mcp::tools)
 endif()
-if(AGENTTY_HAS_MIMALLOC)
-    # Prefer the static target so operator new/delete routing is linked
-    # into the exe without an accompanying DLL / dylib. BUT: some distros
-    # (Arch's `mimalloc` package as of 2024) ship a stub libmimalloc.a
-    # that exports no symbols — the real allocator lives in the shared
-    # object. Linking against the stub produces hundreds of `undefined
-    # reference to mi_*` errors at LTO link time. Probe the archive size
-    # and fall back to the shared target when it's clearly a stub.
-    set(_agentty_mimalloc_target "")
-    if(TARGET mimalloc-static)
-        get_target_property(_mi_static_loc mimalloc-static IMPORTED_LOCATION_RELEASE)
-        if(NOT _mi_static_loc)
-            get_target_property(_mi_static_loc mimalloc-static IMPORTED_LOCATION)
-        endif()
-        if(_mi_static_loc AND EXISTS "${_mi_static_loc}")
-            file(SIZE "${_mi_static_loc}" _mi_static_size)
-            # A real mimalloc static archive is ~300 KB+; Arch's stub is
-            # under 32 KB. Use 64 KB as the cutoff.
-            if(_mi_static_size GREATER 65536)
-                set(_agentty_mimalloc_target mimalloc-static)
-            else()
-                message(STATUS "agentty: mimalloc-static archive at ${_mi_static_loc} "
-                              "is a stub (${_mi_static_size} bytes) — using shared mimalloc instead.")
-            endif()
-        endif()
-    endif()
-    if(NOT _agentty_mimalloc_target AND TARGET mimalloc)
-        set(_agentty_mimalloc_target mimalloc)
-    endif()
-    if(_agentty_mimalloc_target)
-        target_link_libraries(agentty PRIVATE ${_agentty_mimalloc_target})
-        target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
-        message(STATUS "agentty: mimalloc allocator override enabled (${_agentty_mimalloc_target}).")
-    else()
-        message(WARNING "agentty: mimalloc package found but no usable target — skipping.")
-    endif()
+if(AGENTTY_HAS_JETALLOC)
+    # One clean line: the static archive carries the allocator AND the C++
+    # operator new/delete override (jet_override.cpp), so linking it routes
+    # every heap allocation in the exe through jetalloc. No DLL, no dylib, no
+    # header include in any TU. --whole-archive-free: the override symbols are
+    # strong global operator new/delete definitions, so the linker always pulls
+    # them in over libstdc++'s weak ones.
+    target_link_libraries(agentty PRIVATE jetalloc)
+    target_compile_definitions(agentty PRIVATE AGENTTY_USE_JETALLOC=1)
+    message(STATUS "agentty: jetalloc allocator override enabled (vendored static).")
 endif()
 if(WIN32)
     # ws2_32   — Winsock2 (sockets, WSAPoll)

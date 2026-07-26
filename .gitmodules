@@ -8,3 +8,6 @@
 [submodule "mcp-cpp"]
 	path = mcp-cpp
 	url = https://github.com/1ay1/mcp-cpp.git
+[submodule "jetalloc"]
+	path = jetalloc
+	url = git@github.com:1ay1/jetalloc.git
