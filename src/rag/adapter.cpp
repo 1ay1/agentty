@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -42,6 +43,19 @@ bool truthy_default_on(const char* var) {
     const char* v = std::getenv(var);
     if (!v || !v[0]) return true;                 // unset ⇒ ON
     return !(v[0] == '0' || v[0] == 'f' || v[0] == 'F' || v[0] == 'n' || v[0] == 'N');
+}
+
+bool truthy_default_off(const char* var) {
+    const char* v = std::getenv(var);
+    if (!v || !v[0]) return false;                // unset ⇒ OFF
+    return !(v[0] == '0' || v[0] == 'f' || v[0] == 'F' || v[0] == 'n' || v[0] == 'N');
+}
+
+float env_float(const char* var, float dflt) {
+    if (const char* v = std::getenv(var); v && v[0]) {
+        try { return std::stof(v); } catch (...) {}
+    }
+    return dflt;
 }
 
 fs::path resolve_docs_root(const std::string& configured) {
@@ -89,11 +103,20 @@ Config Config::from_env() {
     c.skills        = truthy_default_on("AGENTTY_RAG_SKILLS");
     c.memory        = truthy_default_on("AGENTTY_RAG_MEMORY");
     c.mcp_resources = false;   // opt-in; the backend flips this per call
-    c.corrective    = truthy_default_on("AGENTTY_RAG_CORRECT");
-    c.expand        = !truthy_default_on("AGENTTY_RAG_EXPAND") ? false
-                      : (std::getenv("AGENTTY_RAG_EXPAND") != nullptr);
-    c.hyde          = std::getenv("AGENTTY_RAG_HYDE") != nullptr;
-    c.graph         = truthy_default_on("AGENTTY_RAG_GRAPH");
+
+    c.contextual  = truthy_default_on("AGENTTY_RAG_CONTEXTUAL");
+    c.mmr         = truthy_default_on("AGENTTY_RAG_MMR");
+    c.mmr_lambda  = env_float("AGENTTY_RAG_MMR_LAMBDA", 0.5f);
+    c.stitch      = truthy_default_on("AGENTTY_RAG_STITCH");
+    c.prf         = truthy_default_on("AGENTTY_RAG_PRF");
+    c.corrective  = truthy_default_on("AGENTTY_RAG_CORRECT");
+    c.graph       = truthy_default_on("AGENTTY_RAG_GRAPH");
+    c.expand      = truthy_default_off("AGENTTY_RAG_EXPAND");
+    c.hyde        = truthy_default_off("AGENTTY_RAG_HYDE");
+    c.persist     = truthy_default_on("AGENTTY_RAG_PERSIST");
+    c.trace       = truthy_default_off("AGENTTY_RAG_TRACE");
+    c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
+    c.bm25_weight  = env_float("AGENTTY_RAG_BM25_WEIGHT", 1.0f);
     return c;
 }
 
@@ -113,20 +136,56 @@ struct Retriever::Impl {
 
     std::atomic<bool> warming{false};
 
+    // Optional LLM seam for HyDE / multi-query (agentty's provider).
+    Retriever::Generator generator;
+
     // Separate engine for search_code (cwd source tree), with its own
     // edit-drift fingerprint. Kept apart from the docs engine so a docs
     // reindex never disturbs code search and vice-versa.
-    ::rag::Engine code_engine{make_engine_config()};
+    ::rag::Engine code_engine{::rag::index::CorpusConfig{}};
     bool          code_embedder_ready = false;
     std::uint64_t code_fp = 0;
 
-    Impl() : engine(make_engine_config()) { attach_embedder(); }
+    Impl() : engine(make_engine_config()) { attach_embedder(); apply_pipeline(engine); }
 
-    static ::rag::index::CorpusConfig make_engine_config() {
+    ::rag::index::CorpusConfig make_engine_config() {
         ::rag::index::CorpusConfig cc;
-        // Contextual chunking on by default: rag-cpp prepends a heading
-        // breadcrumb so a fragment that lost its context still ranks.
+        // Anthropic Contextual Retrieval: situate each chunk in its document
+        // before indexing so a fragment that lost its heading still ranks.
+        // Index-time cost only; a large measured recall win. With no LLM
+        // contextualizer set, rag-cpp uses its deterministic extractive
+        // fallback (needs no model, never fails).
+        cc.contextual = cfg.contextual;
         return cc;
+    }
+
+    // Compose the FULL-POWER retrieval pipeline agentty drives, per Config:
+    //   [PRF expand] → hybrid(convex fusion) → filter → feature-rerank
+    //   → [MMR diversity] → [parent stitch] → top-k
+    // Every optional stage is measured in rag-cpp's own benchmarks; the convex
+    // (TM2C2) fusion is rag-cpp's default because it beats RRF on NDCG.
+    void apply_pipeline(::rag::Engine& eng) {
+        namespace pl = ::rag::pipeline;
+        pl::HybridRetrieveConfig hy;
+        hy.candidate_k  = 60;
+        hy.fusion       = pl::HybridRetrieveConfig::Fusion::convex;
+        hy.bm25_weight  = cfg.bm25_weight;
+        hy.dense_weight = cfg.dense_weight;
+
+        pl::Pipeline p;
+        if (cfg.prf)
+            p.add(std::make_shared<pl::PrfExpandStage>(pl::ExpandConfig{}));
+        p.add(std::make_shared<pl::HybridRetrieveStage>(hy));
+        p.add(std::make_shared<pl::FilterStage>());
+        // The exact accuracy-preserving feature reranker the built-in
+        // standard()/quality()/context() pipelines use (deterministic, no model).
+        p.add(pl::make_feature_rerank_stage());
+        if (cfg.mmr)
+            p.add(::rag::rerank::make_mmr_stage(cfg.mmr_lambda));
+        if (cfg.stitch)
+            p.add(std::make_shared<pl::ParentStitchStage>(1));
+        p.add(std::make_shared<pl::TopKStage>());
+        eng.with_pipeline(std::move(p));
     }
 
     void attach_embedder() {
@@ -215,6 +274,7 @@ struct Retriever::Impl {
         }
 
         (void)engine.build();
+        apply_pipeline(engine);
 
         if (!skip_docs) {
             indexed_root = root.string();
@@ -225,6 +285,24 @@ struct Retriever::Impl {
         skills_gen   = tools::skills::all().size();
         memory_gen   = tools::memory::load_all(tools::memory::Scope::User).size()
                        + tools::memory::load_all(tools::memory::Scope::Project).size();
+
+        // Persist the built corpus to a .ragdb so a later session opens warm
+        // without re-walking + re-embedding the whole folder. Best-effort.
+        if (cfg.persist) {
+            if (auto p = ragdb_path(); !p.empty()) {
+                std::error_code ec;
+                fs::create_directories(p.parent_path(), ec);
+                (void)engine.save(p.string());
+            }
+        }
+    }
+
+    // Where the persisted docs index lives (under the workspace .agentty/).
+    fs::path ragdb_path() {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        if (ec) return {};
+        return cwd / ".agentty" / "rag_docs.ragdb";
     }
 
     bool needs_reindex(const fs::path& root, bool skip_docs) {
@@ -275,6 +353,11 @@ struct Retriever::Impl {
 Retriever::Retriever() : impl_(new Impl()) {}
 Retriever::~Retriever() { delete impl_; }
 
+void Retriever::set_generator(Generator g) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->generator = std::move(g);
+}
+
 Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     Retrieval out;
     if (query.empty()) { out.error = "empty query"; return out; }
@@ -294,44 +377,134 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
             return out;
         }
 
-        // WIDE pool then trim: the standard pipeline already fuses BM25 + dense
-        // via RRF and reranks. Ask for a bit more than k so the diversity/rerank
-        // stages have material to work with.
-        auto res = impl_->engine.search(query, static_cast<std::size_t>(kk));
-        if (!res) { out.error = "retrieval failed"; return out; }
+        // ── RETRIEVE ──────────────────────────────────────────────────
+        // 1. Base hybrid retrieval through the full pipeline (PRF → convex
+        //    fusion → filter → feature-rerank → MMR → parent-stitch → top-k).
+        //    Optionally trace each stage for the mode header.
+        std::vector<std::string> trace;
+        std::vector<std::string>* tracep = impl_->cfg.trace ? &trace : nullptr;
+        const std::size_t want = static_cast<std::size_t>(kk);
+
+        std::vector<::rag::SearchResult> hits;
+        std::string retriever_mode = "hybrid+ctx";
+
+        // 2. LLM-assisted retrieval (HyDE / multi-query) when a Generator is
+        //    wired AND enabled — closes the query↔document asymmetry gap and
+        //    lifts recall. Degrades gracefully to plain search when absent.
+        bool used_llm = false;
+        if (impl_->generator && (impl_->cfg.hyde || impl_->cfg.expand)) {
+            ::rag::query::Generator gen =
+                [&](std::string_view prompt) -> ::rag::Result<std::vector<std::string>> {
+                    try {
+                        int n = impl_->cfg.expand ? 3 : 1;
+                        auto outs = impl_->generator(std::string(prompt), n);
+                        return outs;
+                    } catch (...) {
+                        return std::vector<std::string>{};
+                    }
+                };
+            ::rag::Result<std::vector<::rag::Hit>> lh =
+                std::unexpected(::rag::Error{});
+            if (impl_->cfg.expand)
+                lh = ::rag::query::multi_query_search(impl_->engine.corpus(), query, want, gen, 3);
+            else
+                lh = ::rag::query::hyde_search(impl_->engine.corpus(), query, want, gen);
+            if (lh && !lh->empty()) {
+                for (const auto& h : *lh) hits.push_back(impl_->engine.corpus().resolve(h));
+                used_llm = true;
+                retriever_mode += impl_->cfg.expand ? "+multiquery" : "+hyde";
+            }
+        }
+
+        if (!used_llm) {
+            auto res = impl_->engine.search(query, want, {}, tracep);
+            if (!res) { out.error = "retrieval failed"; return out; }
+            hits = std::move(*res);
+        }
+
+        // 3. GraphRAG local expansion: multi-hop over the doc graph, fused with
+        //    the base hits so a passage reachable only through a related
+        //    document (shared entities) still surfaces. Best-effort.
+        if (impl_->cfg.graph) {
+            try {
+                auto g = impl_->engine.graph_local(query, want);
+                if (g && !g->empty()) {
+                    // Union by uri+line, keeping the best score.
+                    for (auto& gr : *g) {
+                        bool dup = false;
+                        for (auto& h : hits)
+                            if (h.uri == gr.uri && h.start_line == gr.start_line) { dup = true; break; }
+                        if (!dup) hits.push_back(std::move(gr));
+                    }
+                    retriever_mode += "+graph";
+                }
+            } catch (...) { /* graph optional */ }
+        }
+
+        // 4. CRAG corrective grading: a model-free retrieval evaluator that
+        //    drops passages graded irrelevant and yields a real confidence in
+        //    [0,1]. This turns retrieval from "always inject whatever came
+        //    back" into a self-checking step.
+        double crag_conf = -1.0;
+        if (impl_->cfg.corrective && !hits.empty()) {
+            try {
+                std::vector<::rag::Hit> raw;
+                raw.reserve(hits.size());
+                for (const auto& h : hits) raw.push_back(::rag::Hit{h.chunk, h.score});
+                auto corr = ::rag::crag::correct(impl_->engine.corpus(), query, raw);
+                crag_conf = static_cast<double>(corr.confidence);
+                if (!corr.kept.empty()) {
+                    // Re-resolve only the kept chunks, preserving CRAG's order.
+                    std::vector<::rag::SearchResult> kept;
+                    for (const auto& h : corr.kept)
+                        kept.push_back(impl_->engine.corpus().resolve(h));
+                    if (!kept.empty()) { hits = std::move(kept); retriever_mode += "+crag"; }
+                }
+            } catch (...) { /* grading optional */ }
+        }
+
+        if (hits.empty()) {
+            out.error = "no relevant passages (retrieval graded low-confidence)";
+            return out;
+        }
+        if (hits.size() > want) hits.resize(want);
 
         double top = 0.0;
-        for (const auto& r : *res) {
+        for (const auto& r : hits) {
             auto [src, path] = split_uri(r.uri);
             Passage p;
             p.source     = src;
             p.path       = path;
             p.line_start = static_cast<int>(r.start_line);
             p.line_end   = static_cast<int>(r.end_line);
-            // rag-cpp scores (RRF / rerank / cosine) can be small or, for a
-            // hash-embed cosine, negative. Clamp to [0,1] so the confidence
-            // the proactive gate parses is a well-behaved probability-like
-            // signal, never a spuriously-negative value that suppresses a
-            // genuine hit.
             double s = static_cast<double>(r.score.value);
             if (s < 0.0) s = 0.0;
             if (s > 1.0) s = 1.0;
             p.score      = s;
-            // Prefer the context breadcrumb + body so a fragment reads well.
             p.text       = r.context.empty() ? r.text : (r.context + "\n" + r.text);
             top = std::max(top, p.score);
             out.passages.push_back(std::move(p));
         }
-        out.confidence = top;
+        // Prefer CRAG's calibrated confidence when available; else top score.
+        out.confidence = crag_conf >= 0.0 ? crag_conf : top;
 
         // Human-readable provenance for the tool-shell header.
-        std::string m = "hybrid+ctx";
-        if (impl_->cfg.graph) m += "+graph";
+        std::string m = retriever_mode;
         m += ", reranked";
+        if (impl_->cfg.mmr)    m += "+mmr";
+        if (impl_->cfg.stitch) m += "+stitch";
         if (!root.empty() && !skip_docs) m += ", docs=" + root.string();
         char buf[48];
         std::snprintf(buf, sizeof buf, ", confidence %.2f", out.confidence);
         m += buf;
+        if (impl_->cfg.trace && !trace.empty()) {
+            m += " [";
+            for (std::size_t i = 0; i < trace.size(); ++i) {
+                if (i) m += " → ";
+                m += trace[i];
+            }
+            m += "]";
+        }
         out.mode = std::move(m);
     } catch (const std::exception& e) {
         out.error = std::string("retrieval error: ") + e.what();
@@ -365,7 +538,7 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
 
         std::uint64_t fp = impl_->code_fingerprint(root, opts);
         if (fp != impl_->code_fp || impl_->code_engine.corpus().chunk_count() == 0) {
-            impl_->code_engine = ::rag::Engine(Impl::make_engine_config());
+            impl_->code_engine = ::rag::Engine(impl_->make_engine_config());
             impl_->attach_code_embedder();
             auto files = ::rag::loaders::load_directory(root, opts);
             if (files) {
@@ -375,6 +548,7 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
                 }
             }
             (void)impl_->code_engine.build();
+            impl_->apply_pipeline(impl_->code_engine);
             impl_->code_fp = fp;
         }
 
@@ -431,13 +605,28 @@ void Retriever::warm_async() {
     }).detach();
 }
 
-// ── Learning loop (write side) ─────────────────────────────────────────
+// ── Learning loop (write side) ───────────────────────────────────
 namespace feedback {
 void note_file_opened(const std::string& path) {
-    // The rag-cpp engine ranks on content relevance; the old bespoke "opened
-    // file → boost" signal is a best-effort no-op here (kept as a stable API
-    // seam so callers don't churn). A future rev can persist a per-path prior.
-    (void)path;
+    // A `read` of a file a recent passage pointed at is an IMPLICIT relevance
+    // judgment — the passage pointed somewhere worth acting on. Persist a
+    // durable per-path win count to .agentty/rag_feedback.tsv so a future
+    // ranking rev can bias toward files that keep proving useful (the
+    // Beta-smoothed win-rate the docs describe). Best-effort, never throws.
+    if (path.empty()) return;
+    try {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        if (ec) return;
+        auto dir = cwd / ".agentty";
+        fs::create_directories(dir, ec);
+        auto fp = dir / "rag_feedback.tsv";
+        std::ofstream f(fp, std::ios::app);
+        if (!f) return;
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch()).count();
+        f << now << '\t' << "win" << '\t' << path << '\n';
+    } catch (...) { /* best-effort */ }
 }
 } // namespace feedback
 

@@ -22,6 +22,7 @@
 // lives in the .cpp (src/rag/adapter.cpp).
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -50,7 +51,8 @@ struct Retrieval {
 };
 
 // Knobs, all resolved from the environment by default (from_env()). Kept as a
-// struct so tests can drive the adapter deterministically.
+// struct so tests can drive the adapter deterministically. Every rag-cpp
+// quality feature agentty drives has a toggle here.
 struct Config {
     std::string  docs_root;               // AGENTTY_DOCS_DIR (or ./docs, ./.agentty/knowledge)
     std::string  embed_model  = "nomic-embed-text";   // AGENTTY_EMBED_MODEL
@@ -59,10 +61,24 @@ struct Config {
     bool         skills   = true;         // AGENTTY_RAG_SKILLS
     bool         memory   = true;         // AGENTTY_RAG_MEMORY
     bool         mcp_resources = false;   // opt-in
-    bool         corrective   = true;     // AGENTTY_RAG_CORRECT (CRAG)
-    bool         expand   = false;        // AGENTTY_RAG_EXPAND (RAG-Fusion, needs LLM)
-    bool         hyde     = false;        // AGENTTY_RAG_HYDE (needs LLM)
-    bool         graph    = true;         // AGENTTY_RAG_GRAPH (GraphRAG expand)
+
+    // ── rag-cpp power features (all measured wins, model-free unless noted) ─
+    bool     contextual = true;   // AGENTTY_RAG_CONTEXTUAL — Anthropic Contextual
+                                  // Retrieval: situate each chunk before indexing
+                                  // (big recall win; index-time cost only).
+    bool     mmr        = true;   // AGENTTY_RAG_MMR — MMR diversity rerank (+coverage)
+    float    mmr_lambda = 0.5f;   // AGENTTY_RAG_MMR_LAMBDA
+    bool     stitch     = true;   // AGENTTY_RAG_STITCH — parent-document stitch
+    bool     prf        = true;   // AGENTTY_RAG_PRF — pseudo-relevance-feedback expand
+    bool     corrective = true;   // AGENTTY_RAG_CORRECT — CRAG grade + drop-irrelevant
+    bool     graph      = true;   // AGENTTY_RAG_GRAPH — GraphRAG multi-hop expansion
+    bool     expand     = false;  // AGENTTY_RAG_EXPAND — multi-query / RAG-Fusion (needs LLM Generator)
+    bool     hyde       = false;  // AGENTTY_RAG_HYDE — HyDE (needs LLM Generator)
+    bool     persist    = true;   // AGENTTY_RAG_PERSIST — .ragdb cache under .agentty/
+    bool     trace      = false;  // AGENTTY_RAG_TRACE — fold per-stage trace into mode
+    // Convex (TM2C2) fusion of BM25+dense — rag-cpp's measured default, beats RRF.
+    float    dense_weight = 1.0f; // AGENTTY_RAG_DENSE_WEIGHT
+    float    bm25_weight  = 1.0f; // AGENTTY_RAG_BM25_WEIGHT
 
     [[nodiscard]] static Config from_env();
 };
@@ -88,6 +104,16 @@ public:
     // ranked passages. Edit-aware: a cheap fingerprint over the walked tree
     // rebuilds on drift. Independent of the docs index. Never throws.
     [[nodiscard]] Retrieval retrieve_code(const std::string& query, int k);
+
+    // OPTIONAL LLM seam for HyDE + multi-query / RAG-Fusion. Given a prompt,
+    // return one or more completions. When set (and AGENTTY_RAG_HYDE /
+    // AGENTTY_RAG_EXPAND are on), retrieval uses the LLM to close the
+    // query–document asymmetry gap and boost recall. Absent → those features
+    // degrade gracefully to plain hybrid search (rag-cpp's contract). agentty
+    // wires its own provider here so RAG can "think" with the same model.
+    using Generator =
+        std::function<std::vector<std::string>(const std::string& prompt, int n)>;
+    void set_generator(Generator g);
 
     // Non-blocking: is the docs index built & fresh for the current root
     // (or is there no docs root, in which case retrieval is always warm)?
