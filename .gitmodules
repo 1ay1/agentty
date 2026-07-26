@@ -11,3 +11,6 @@
 [submodule "jetalloc"]
 	path = jetalloc
 	url = git@github.com:1ay1/jetalloc.git
+[submodule "rag-cpp"]
+	path = rag-cpp
+	url = git@github.com:1ay1/rag-cpp.git

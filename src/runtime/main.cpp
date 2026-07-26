@@ -48,7 +48,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/mcp/serve.hpp"
-#include "agentty/rag/bench.hpp"
+#include "agentty/rag/rag_adapter.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
