@@ -300,6 +300,12 @@ option(AGENTTY_AUTO_PULL_SUBMODULES
        "Sync every in-tree submodule to its tracking branch on every build" ON)
 # Back-compat: the old maya-only switch still disables maya's pull when OFF.
 option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" ON)
+# jetalloc is the allocator you are most likely to hack on locally, so its
+# auto-pull is OPT-IN (default OFF): your working copy of jetalloc/ — edits,
+# staged changes, or local commits — ALWAYS compiles as-is. Flip this ON (or
+# just run `git submodule update --remote jetalloc` yourself) when you want to
+# fast-forward to the newest upstream allocator.
+option(AGENTTY_AUTO_PULL_JETALLOC "Fast-forward jetalloc/ to origin/master on every build" OFF)
 
 function(agentty_pull_submodule_latest sub branch lib)
     if(NOT AGENTTY_AUTO_PULL_SUBMODULES)
@@ -313,14 +319,26 @@ function(agentty_pull_submodule_latest sub branch lib)
         return()
     endif()
     set(_sd "${CMAKE_CURRENT_SOURCE_DIR}/${sub}")
+    # The guard is deliberately paranoid so a developer's LOCAL work in the
+    # submodule is never clobbered by the reset --hard. We refuse to pull if
+    # ANY of these hold:
+    #   • unstaged changes            (git diff --quiet)
+    #   • staged-but-uncommitted work (git diff --cached --quiet)
+    #   • local commits not on origin (HEAD != origin/<branch> after fetch,
+    #     with local commits reachable only from HEAD)
+    # Only a perfectly clean tree sitting on (or behind) origin gets fast-
+    # forwarded. `git pull --ff-only` after the clean-tree check does exactly
+    # that: it advances to the newest commit but ERRORS OUT (harmlessly, the
+    # || branch swallows it) rather than discarding your local history.
     add_custom_target(${sub}_pull_latest ALL
         COMMAND ${CMAKE_COMMAND} -E echo "[${sub}] checking origin/${branch}…"
-        COMMAND ${GIT_EXECUTABLE} -C ${_sd} diff --quiet HEAD
+        COMMAND ${GIT_EXECUTABLE} -C ${_sd} diff --quiet
+            && ${GIT_EXECUTABLE} -C ${_sd} diff --cached --quiet
             && ${GIT_EXECUTABLE} -C ${_sd} fetch --quiet origin ${branch}
-            && ${GIT_EXECUTABLE} -C ${_sd} reset --hard --quiet origin/${branch}
+            && ${GIT_EXECUTABLE} -C ${_sd} merge --ff-only --quiet origin/${branch}
             || ${CMAKE_COMMAND} -E echo
-               "[${sub}] local changes present — skipping auto-pull"
-        COMMENT "Syncing ${sub}/ to origin/${branch} (safe: skips if local changes)"
+               "[${sub}] local changes/commits present — keeping your tree, skipping auto-pull"
+        COMMENT "Syncing ${sub}/ to origin/${branch} (safe: never discards local work)"
         VERBATIM
         USES_TERMINAL
     )
@@ -511,11 +529,14 @@ if(AGENTTY_USE_JETALLOC)
         set(JET_BUILD_PRELOAD OFF CACHE BOOL "" FORCE)
         add_subdirectory(jetalloc EXCLUDE_FROM_ALL)
         set(AGENTTY_HAS_JETALLOC TRUE)
-        # Track the newest allocator on every build (like maya/acp/mcp): resets
-        # jetalloc/ to origin/master before it compiles. Safe — skips the pull
-        # if you have local uncommitted changes in the submodule. Turn the
-        # whole behaviour off with -DAGENTTY_AUTO_PULL_SUBMODULES=OFF.
-        agentty_pull_submodule_latest(jetalloc master jetalloc)
+        # By DEFAULT we do NOT touch jetalloc/ — whatever is checked out there
+        # (your local edits / commits) is exactly what compiles. Opt into
+        # tracking upstream with -DAGENTTY_AUTO_PULL_JETALLOC=ON, and even then
+        # the guard fast-forwards only a clean tree and never discards your
+        # local work.
+        if(AGENTTY_AUTO_PULL_JETALLOC)
+            agentty_pull_submodule_latest(jetalloc master jetalloc)
+        endif()
     else()
         # The submodule wasn't checked out. Don't fail — fall back to the
         # system allocator — but make the miss loud at configure time, because
