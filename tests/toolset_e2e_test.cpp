@@ -267,15 +267,16 @@ int main() {
     {
         auto r = run("search_docs", {{"query", "zebra quagga migration"}});
         check(has(r, "zebra"), "search_docs: BM25 retrieval hits the passage");
-        check(has(r, "BM25"), "search_docs: reports BM25-only mode (no embed host)");
+        check(has(r, "hybrid") || has(r, "BM25"),
+              "search_docs: reports a retrieval mode (hybrid via rag-cpp)");
     }
 
-    // ── #5 per-turn query cache: an identical query is served from cache ──
-    // The result must be identical AND the mode string must gain ", cached".
+    // ── repeat query: the engine idempotently serves the SAME passage ──
+    // rag-cpp keeps the index warm across calls; an identical query must
+    // return the same top passage (deterministic ranking).
     {
         auto r = run("search_docs", {{"query", "zebra quagga migration"}});
-        check(has(r, "zebra"), "search_docs: cached hit returns same passage");
-        check(has(r, "cached"), "search_docs: repeat query reports cached mode");
+        check(has(r, "zebra"), "search_docs: repeat query returns same passage");
     }
 
     // ── #2 corrective retrieval (CRAG): a conversationally-phrased query
@@ -398,7 +399,8 @@ int main() {
         fs::current_path(prev_cwd);
         check(has(r, "backoff"), "search_code: BM25 retrieval hits the function");
         check(has(r, "throttler.cpp"), "search_code: result cites the source path");
-        check(has(r, "BM25"), "search_code: reports BM25-only mode (no embed host)");
+        check(has(r, "hybrid") || has(r, "BM25"),
+              "search_code: reports a retrieval mode (hybrid via rag-cpp)");
     }
 
     // ── task: no subagent runner installed → graceful refusal ────────────

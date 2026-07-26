@@ -552,6 +552,37 @@ if(AGENTTY_USE_JETALLOC)
     endif()
 endif()
 
+# ── rag-cpp: the retrieval (RAG) engine ────────────────────────────────────
+# agentty's retrieval is powered by the external rag-cpp library (submodule
+# rag-cpp/, target ragcpp::ragcpp) — a production-grade hybrid engine
+# (contextual chunking, BM25 + dense/HNSW, RRF fusion, CRAG, HyDE, MMR /
+# dartboard rerank, GraphRAG, .ragdb persistence). The thin adapter in
+# src/rag/adapter.cpp maps agentty's retrieval boundary onto rag::Engine, so
+# the rest of the app never sees a rag:: type. Built from source in-tree so
+# agentty carries its RAG engine with it and compiles ANYWHERE.
+set(AGENTTY_HAS_RAGCPP FALSE)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
+    # Library only — no tests / bench / examples / CLI, and no RCP front-end
+    # (that would FetchContent the RCP SDK; agentty drives the Engine in-proc).
+    set(RAGCPP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(RAGCPP_BUILD_BENCH    OFF CACHE BOOL "" FORCE)
+    set(RAGCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(RAGCPP_BUILD_CLI      OFF CACHE BOOL "" FORCE)
+    set(RAGCPP_WITH_RCP       OFF CACHE BOOL "" FORCE)
+    add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
+    set(AGENTTY_HAS_RAGCPP TRUE)
+    # Opt-in upstream tracking, off by default so local rag-cpp edits always
+    # compile (mirrors the jetalloc policy).
+    option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward rag-cpp/ to origin/master on every build" OFF)
+    if(AGENTTY_AUTO_PULL_RAGCPP)
+        agentty_pull_submodule_latest(rag-cpp master ragcpp)
+    endif()
+else()
+    message(FATAL_ERROR "agentty: rag-cpp/ submodule is empty. Run "
+                        "`git submodule update --init --recursive` to vendor "
+                        "the RAG engine, then reconfigure.")
+endif()
+
 if(NOT TARGET nghttp2::nghttp2)
     find_path(NGHTTP2_INCLUDE_DIR nghttp2/nghttp2.h)
     # Standalone builds prefer the static archive (libnghttp2.a /
@@ -647,17 +678,11 @@ set(AGENTTY_DIFF_SOURCES
     src/diff/diff.cpp
 )
 
+# The RAG engine is now the external rag-cpp library (submodule rag-cpp/,
+# target ragcpp::ragcpp). Only the thin agentty adapter that maps the app's
+# retrieval boundary onto rag::Engine remains in-tree.
 set(AGENTTY_RAG_SOURCES
-    src/rag/bm25.cpp
-    src/rag/corpus.cpp
-    src/rag/hnsw.cpp
-    src/rag/rerank.cpp
-    src/rag/expand.cpp
-    src/rag/knowledge.cpp
-    src/rag/advanced.cpp
-    src/rag/bench.cpp
-    src/rag/stemmer.cpp
-    src/rag/simd.cpp
+    src/rag/adapter.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES
@@ -901,6 +926,12 @@ function(agentty_objlib name)
         target_link_libraries(${name} PRIVATE jetalloc)
         target_compile_definitions(${name} PRIVATE AGENTTY_USE_JETALLOC=1)
     endif()
+    # The RAG adapter (agentty_rag_obj) includes <rag/rag.hpp>; other objlibs
+    # only need the header path resolvable for transitive includes. Linking
+    # the target as an INTERFACE dep gives every objlib ragcpp's include dir.
+    if(AGENTTY_HAS_RAGCPP)
+        target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
+    endif()
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
         maya::maya
@@ -1002,6 +1033,12 @@ if(AGENTTY_HAS_JETALLOC)
     target_link_libraries(agentty PRIVATE jetalloc)
     target_compile_definitions(agentty PRIVATE AGENTTY_USE_JETALLOC=1)
     message(STATUS "agentty: jetalloc allocator override enabled (vendored static).")
+endif()
+if(AGENTTY_HAS_RAGCPP)
+    # The RAG engine. The adapter TU (in agentty_rag_obj) is already in the
+    # shared object set; the exe links the library so its symbols resolve.
+    target_link_libraries(agentty PRIVATE ragcpp::ragcpp)
+    message(STATUS "agentty: rag-cpp retrieval engine enabled (vendored).")
 endif()
 if(WIN32)
     # ws2_32   — Winsock2 (sockets, WSAPoll)
@@ -1369,6 +1406,16 @@ if(AGENTTY_BUILD_TESTS)
         if(TARGET mcp::tools)
             target_link_libraries(${name} PRIVATE mcp::tools)
         endif()
+        # The shared object set includes agentty_rag_obj (the rag-cpp adapter),
+        # whose symbols resolve out of the ragcpp static lib.
+        if(AGENTTY_HAS_RAGCPP)
+            target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
+        endif()
+        # runtime_obj (mem.cpp) calls jet_trim() under AGENTTY_USE_JETALLOC, so
+        # a test linking the shared object set must also link the allocator.
+        if(AGENTTY_HAS_JETALLOC)
+            target_link_libraries(${name} PRIVATE jetalloc)
+        endif()
         if(WIN32)
             target_link_libraries(${name} PRIVATE
                 ws2_32 crypt32 shell32 winmm
@@ -1732,16 +1779,14 @@ if(AGENTTY_BUILD_TESTS)
     # sibling openai_transport_test.
     agentty_add_full_test(ollama_transport_test)
 
-    # rag_test — document/knowledge RAG unit tests (chunker, BM25 ranking,
-    # RRF fusion, cosine, Corpus BM25-only search). No network: the embed
-    # path is exercised only with an empty model so no Ollama server is
-    # needed. Links the full shared stack (rag + io objs included).
-    agentty_add_full_test(rag_test)
-    agentty_add_full_test(rag_hnsw_test)
-    agentty_add_full_test(rag_rerank_test)
-    agentty_add_full_test(rag_expand_test)
-    agentty_add_full_test(rag_advanced_test)
-    agentty_add_full_test(knowledge_test)
+    # rag_adapter_test — locks the agentty↔rag-cpp adapter contract: the
+    # engine (rag::Engine, submodule rag-cpp) is driven through the compact
+    # agentty::rag::Retriever boundary and must return ranked, source-tagged
+    # passages for docs / skills / memory, gracefully report "no knowledge"
+    # when empty, and stay warm across repeat calls. No network: the Ollama
+    # embedder spec falls back to the local hash embedder, so hybrid BM25 +
+    # hash-dense retrieval runs fully offline.
+    agentty_add_full_test(rag_adapter_test)
 
     # reveal_freeze_gate_probe — PROVES symptom-2 ("reveal freezes, then
     # everything appears at once") was a visual_hash gate hole, and that
@@ -1993,12 +2038,7 @@ if(AGENTTY_BUILD_TESTS)
         table_render_test
         openai_transport_test
         ollama_transport_test
-        rag_test
-        rag_hnsw_test
-        rag_rerank_test
-        rag_expand_test
-        rag_advanced_test
-        knowledge_test
+        rag_adapter_test
         reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test

@@ -11,7 +11,7 @@
 
 #include "agentty/diff/diff.hpp"
 #include "agentty/io/http.hpp"
-#include "agentty/rag/advanced.hpp"   // feedback::note_file_opened (learning loop)
+#include "agentty/rag/rag_adapter.hpp"   // rag::feedback::note_file_opened (learning loop)
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
 #include "agentty/tool/util/fs_helpers.hpp"   // agentty workspace_root()
