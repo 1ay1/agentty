@@ -30,6 +30,7 @@
 
 #include <rag/rag.hpp>
 
+#include "agentty/io/http.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -111,8 +112,9 @@ Config Config::from_env() {
     c.prf         = truthy_default_on("AGENTTY_RAG_PRF");
     c.corrective  = truthy_default_on("AGENTTY_RAG_CORRECT");
     c.graph       = truthy_default_on("AGENTTY_RAG_GRAPH");
-    c.expand      = truthy_default_off("AGENTTY_RAG_EXPAND");
-    c.hyde        = truthy_default_off("AGENTTY_RAG_HYDE");
+    c.expand      = truthy_default_on("AGENTTY_RAG_EXPAND");
+    c.hyde        = truthy_default_on("AGENTTY_RAG_HYDE");
+    if (const char* g = std::getenv("AGENTTY_RAG_GEN_MODEL"); g && g[0]) c.gen_model = g;
     c.persist     = truthy_default_on("AGENTTY_RAG_PERSIST");
     c.trace       = truthy_default_off("AGENTTY_RAG_TRACE");
     c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
@@ -146,7 +148,58 @@ struct Retriever::Impl {
     bool          code_embedder_ready = false;
     std::uint64_t code_fp = 0;
 
-    Impl() : engine(make_engine_config()) { attach_embedder(); apply_pipeline(engine); }
+    Impl() : engine(make_engine_config()) {
+        attach_embedder();
+        apply_pipeline(engine);
+        install_default_generator();
+    }
+
+    // Install a ZERO-COST local generator for HyDE / multi-query: a tiny model
+    // on the SAME Ollama we embed with. No cloud tokens, no auth, no provider
+    // plumbing. If Ollama isn't up, the call fails fast and HyDE/expand no-op
+    // (plain hybrid still runs) — so this is free when unavailable and a recall
+    // win when present. An explicit set_generator() overrides it.
+    void install_default_generator() {
+        std::string host = cfg.embed_host;
+        std::uint16_t port = cfg.embed_port;
+        std::string model = cfg.gen_model;
+        generator = [host, port, model](const std::string& prompt, int n)
+                        -> std::vector<std::string> {
+            std::vector<std::string> outs;
+            const int want = n > 0 ? n : 1;
+            try {
+                for (int i = 0; i < want; ++i) {
+                    ::rag::plugin::Json body = {
+                        {"model", model},
+                        {"prompt", prompt},
+                        {"stream", false},
+                        {"options", {{"temperature", i == 0 ? 0.0 : 0.7},
+                                      {"num_predict", 160}}},
+                    };
+                    ::agentty::http::Request req;
+                    req.method    = ::agentty::http::HttpMethod::Post;
+                    req.host      = host;
+                    req.port      = port;
+                    req.path      = "/api/generate";
+                    req.plaintext = true;   // local Ollama speaks plain HTTP/1.1
+                    req.headers.push_back({"content-type", "application/json"});
+                    req.body      = body.dump();
+                    req.max_body_bytes = 512 * 1024;
+
+                    ::agentty::http::Timeouts to;
+                    to.connect = std::chrono::milliseconds(600);   // Ollama absent → fail fast
+                    to.total   = std::chrono::milliseconds(4000);  // hard cap per hypothetical
+                    auto res = ::agentty::http::default_client().send(req, to);
+                    if (!res || res->status != 200) break;   // Ollama down → give up
+                    auto j = ::rag::plugin::Json::parse(res->body, nullptr, false);
+                    if (j.is_discarded() || !j.contains("response")) continue;
+                    std::string text = j["response"].get<std::string>();
+                    if (!text.empty()) outs.push_back(std::move(text));
+                }
+            } catch (...) { /* best-effort; empty → plain hybrid */ }
+            return outs;
+        };
+    }
 
     ::rag::index::CorpusConfig make_engine_config() {
         ::rag::index::CorpusConfig cc;
@@ -391,8 +444,10 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         // 2. LLM-assisted retrieval (HyDE / multi-query) when a Generator is
         //    wired AND enabled — closes the query↔document asymmetry gap and
         //    lifts recall. Degrades gracefully to plain search when absent.
+        //    SKIPPED on the warm/proactive path (skip_docs): that path is
+        //    latency-budgeted (pre-turn hedge) and must not wait on generation.
         bool used_llm = false;
-        if (impl_->generator && (impl_->cfg.hyde || impl_->cfg.expand)) {
+        if (!skip_docs && impl_->generator && (impl_->cfg.hyde || impl_->cfg.expand)) {
             ::rag::query::Generator gen =
                 [&](std::string_view prompt) -> ::rag::Result<std::vector<std::string>> {
                     try {
