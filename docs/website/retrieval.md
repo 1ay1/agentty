@@ -15,7 +15,7 @@ The whole engine is **local, dependency-free, and degrades gracefully**. With no
 
 ## The one-paragraph version
 
-You ask a question. agentty retrieves a wide candidate pool with **hybrid search** (keyword BM25 + dense embeddings, fused), re-ranks it for precision, diversifies away near-duplicates, compresses each hit to its most relevant span, stitches small chunks back into their surrounding context, and expands along the corpus's **document graph** (author-drawn links + inferred entity relationships) to pull in the connecting context a flat index misses — then hands the model a short, high-signal, source-tagged set of passages. Every stage that costs nothing runs by default; anything that costs a model call is opt-in.
+You ask a question. agentty retrieves a wide candidate pool with **hybrid search** (keyword BM25 + dense embeddings, fused), re-ranks it for precision, diversifies away near-duplicates, stitches small chunks back into their surrounding context, expands along the corpus's **document graph** (author-drawn links + inferred entity relationships) to pull in the connecting context a flat index misses, and grades the result set with a corrective evaluator that produces a calibrated confidence — then hands the model a short, high-signal, source-tagged set of passages. Every stage runs by default; the query-rewriting boosters (HyDE, multi-query) are powered by a small **local** Ollama model, so even they cost nothing beyond the localhost round-trip and silently no-op when Ollama is absent.
 
 ## What gets indexed
 
@@ -30,58 +30,46 @@ Even with **no docs folder at all**, `search_docs` still searches your skills an
 
 ## The retrieval funnel
 
-Every `search_docs` call runs this pipeline. The **default path uses no LLM calls** — it's fast and predictable.
+Every `search_docs` call runs this pipeline. The **default path uses no cloud calls** — it's fast, predictable, and fully local.
 
 ### 1. Hybrid retrieval — cast a wide net
 
-Two independent retrievers score every chunk, and their ranked lists are fused with **Reciprocal Rank Fusion (RRF)**:
+Two independent retrievers score every chunk, and their ranked lists are fused with **convex (TM2C2) fusion**:
 
 - **BM25** (keyword) — catches exact terms, proper nouns, code symbols. Porter-stemmed by default so `run` / `runs` / `running` match.
 - **Dense** (embeddings) — catches paraphrase and semantic near-matches. Uses a localhost Ollama embedding model (`nomic-embed-text` by default); at scale, an in-memory **HNSW** index makes the nearest-neighbour search sub-linear.
 
-Dense is weighted slightly above lexical (`1.3×`) because semantic matching usually wins on natural-language docs — both weights are tunable (`AGENTTY_RAG_W_DENSE` / `AGENTTY_RAG_W_LEXICAL`).
+Both retrievers carry equal weight by default (`1.0×` each), and both are tunable via `AGENTTY_RAG_BM25_WEIGHT` / `AGENTTY_RAG_DENSE_WEIGHT`.
 
-**Fusion strategy.** RRF fuses on *rank position* — robust and scale-free, the right default. When your score distributions are calibrated, `AGENTTY_RAG_FUSION=rsf` switches to **Relative Score Fusion** (min-max-normalize each list, then weighted-sum), which keeps the score *magnitude* RRF throws away. A/B it on your corpus.
+**Fusion strategy.** The default is **convex (TM2C2) fusion** — it normalizes each retriever's scores and combines them by weighted sum, keeping the score *magnitude* that pure rank fusion throws away. It's rag-cpp's measured default because it beats Reciprocal Rank Fusion (RRF) on NDCG.
 
-**One embed round-trip, not N.** A single search fans into several probes — the query itself, conversation-carryover and multi-hop facets, RAG-Fusion paraphrases, a HyDE passage. All of their dense embeddings are computed in **one batched `/api/embed` call** per source (the endpoint takes an array), so expansion and HyDE don't multiply the network latency of a search the way N serial round-trips would.
-
-**Cheaper vectors (opt-in).** Two research-backed levers shrink the ANN cost with the full-precision rerank recovering quality: `AGENTTY_RAG_ANN_DIM=256` truncates the graph to the leading **Matryoshka** dims (nomic-v1.5 & the e5/BGE MRL models pack the signal there) for a ~2.3× faster walk at ⅓ the memory; `AGENTTY_RAG_BINARY=1` walks the graph on 1-bit **sign codes** (popcount Hamming) then rescores the pool with the exact float cosine — binary recall, float precision, ~2.5× faster (and ~3.4× stacked with truncation).
+**One embed round-trip, not N.** A single search fans into several probes — the query itself, RAG-Fusion paraphrases, a HyDE passage. Their dense embeddings are batched so expansion and HyDE don't multiply the network latency of a search the way N serial round-trips would.
 
 ### 2. Pseudo-relevance feedback — recover the words you didn't type *(default-on)*
 
 A bare query rarely uses the exact vocabulary the docs use. agentty runs an initial BM25 pass, treats the top hits as *pseudo-relevant*, harvests their most **discriminative** terms (feedback frequency × rarity), and fuses in a second, down-weighted BM25 probe over `{query + those terms}`. A chunk that matches both the literal query *and* the expanded vocabulary is reinforced.
 
-This is the classic **RM3** technique — deterministic, sub-millisecond, no model, no network — which is why it's **on by default**. Disable with `AGENTTY_RAG_PRF=0`; tune its weight with `AGENTTY_RAG_W_PRF`.
+This is the classic **RM3** technique — deterministic, sub-millisecond, no model, no network — which is why it's **on by default**. Disable with `AGENTTY_RAG_PRF=0`.
 
 ### 3. Contextual retrieval — a chunk knows where it lives *(default-on)*
 
-Each chunk carries a *breadcrumb* of its document title and markdown heading path (`guide.md › Installation › Linux`). That breadcrumb is indexed on both the keyword and embedding sides, so a chunk that says "run the installer" is findable by "linux install" even though neither word appears in its body. (This is Anthropic's 2024 "contextual retrieval", built for free during chunking — no per-chunk model call.)
+Before indexing, each chunk is **situated in its document** — Anthropic's 2024 "contextual retrieval" — so a fragment that lost its heading still ranks. With no LLM contextualizer wired, the engine uses a deterministic **extractive** fallback (document title + heading breadcrumb, e.g. `guide.md › Installation › Linux`) that needs no model and never fails. Either way the context is indexed on both the keyword and embedding sides, so a chunk that says "run the installer" is findable by "linux install" even though neither word appears in its body. This is an index-time cost only; it's a measured recall win and is **on by default** (`AGENTTY_RAG_CONTEXTUAL=0` disables).
 
 ### 4. Re-ranking — precision at the top
 
-First-pass fusion is recall-oriented and noisy at the very top, so the pool is re-scored:
-
-- **Feature-fusion reranker** *(default-on)* — cheap, deterministic signals the first pass ignores: exact query-term coverage, phrase proximity, title/path match, and (when embeddings are present) calibrated cosine similarity. Pure C++, zero network.
-- **Late-interaction rerank (sentence MaxSim)** *(default-on when embeddings are available)* — a chunk-level vector blurs a multi-topic chunk; ColBERT-style late interaction re-scores each candidate by its **best sentence** against the query (blended with the runner-up, so one lucky sentence in a sea of noise doesn't win). Costs the same single batched `/api/embed` round-trip as chunk-level cosine. `AGENTTY_RAG_LATE=0` falls back to the chunk-level rerank below.
-- **Embedding cross-encoder rerank** *(fallback tier)* — one batched `/api/embed` round-trip re-scores the candidate pool by fresh whole-chunk cosine. Degrades to the input order if the backend is unreachable, so it's safe to leave on.
-- **Generative cross-encoder rerank** *(opt-in — `AGENTTY_RAG_NEURAL=1`)* — a graded 0–10 relevance judgment per candidate from a local generative model. The strongest reranker, but one LLM call per candidate, so it's off by default.
-- **Learned prior** *(default-on)* — the learning loop's read side (see below): each chunk's score gets a bounded nudge (×0.85–×1.15) from its historical usefulness. Neutral with no history — a fresh workspace ranks exactly as before.
+First-pass fusion is recall-oriented and noisy at the very top, so the candidate pool is re-scored by a **feature-fusion reranker** *(default-on)* — the same deterministic, model-free reranker rag-cpp's built-in pipelines use. It combines cheap signals the first pass ignores: exact query-term coverage, phrase proximity, title/path match, and (when embeddings are present) calibrated cosine similarity. Pure C++, zero network, fully reproducible.
 
 ### 5. MMR diversification — no near-duplicates *(default-on)*
 
 Maximal Marginal Relevance greedily keeps hits that are both relevant *and* different from what's already selected, so three overlapping windows of the same paragraph don't crowd out three distinct answers.
 
-### 6. Compression — signal, not noise *(default-on)*
+### 6. Parent-document stitch — read it in context *(default-on)*
 
-Rather than dump a whole 1600-char chunk into the model's window, each surviving hit is split into sentences, scored by query relevance, and trimmed to its best contiguous span. "20k noisy tokens" becomes "2k useful tokens."
+Small chunks retrieve *precisely* but read out of context. After ranking, each surviving chunk is stitched back into its **adjacent sibling chunks** from the same document, so the model sees the precise hit *inside* its surrounding prose — without widening the retrieval probe. Pure in-memory, no network. Disable with `AGENTTY_RAG_STITCH=0`.
 
-### 7. Parent-document expansion — read it in context *(default-on)*
+### 7. GraphRAG expansion — retrieval over the document graph *(default-on)*
 
-Small chunks retrieve *precisely* but read out of context. After ranking, each surviving chunk is stitched back into its **adjacent sibling chunks** from the same document, so the model sees the precise hit *inside* its surrounding prose — without widening the retrieval probe. Pure in-memory, no network. Tune the window with `AGENTTY_RAG_PARENT_RADIUS`; disable with `AGENTTY_RAG_PARENT=0`.
-
-### 8. GraphRAG expansion — retrieval over the document graph *(default-on)*
-
-A flat chunk index treats every passage as an island. Real knowledge bases aren't flat: documents **link** to each other, and documents about the same thing **share vocabulary**. agentty builds that structure into an explicit **document graph** and retrieves over it — the full [GraphRAG](https://microsoft.github.io/graphrag/) recipe (entity graph → communities → community summaries → graph-aware retrieval), but with the expensive LLM ingredients made **deterministic and free** by default.
+A flat chunk index treats every passage as an island. Real knowledge bases aren't flat: documents **link** to each other, and documents about the same thing **share vocabulary**. agentty builds that structure into an explicit **document graph** and does [GraphRAG](https://microsoft.github.io/graphrag/)-style **local multi-hop expansion** over it — entity graph → communities → graph-aware retrieval — with every ingredient made **deterministic and free** (no LLM).
 
 **The graph** (nodes = documents) is built once per corpus and memo-cached — invalidated only when the corpus itself changes. It has two kinds of edge:
 
@@ -103,22 +91,13 @@ A flat chunk index treats every passage as an island. Real knowledge bases aren'
 
 All of it is deterministic, in-memory, and needs no model. Disable with `AGENTTY_RAG_GRAPH=0`.
 
-#### Community summaries — the full GraphRAG global search *(opt-in)*
+### 8. Corrective grading (CRAG) — know how good the answer is *(default-on)*
 
-The one ingredient that genuinely needs a model is the **community report**: a short natural-language summary of what a whole cluster is *about*, which lets a corpus-level question ("how does the retrieval engine fit together?") be answered by a digest instead of one lead chunk. Enable it with `AGENTTY_RAG_GRAPH_SUMMARY=1` (needs a local Ollama). When the community hub is selected, its passage carries a **2-3 sentence LLM overview** of the cluster in place of its raw lead chunk.
-
-The cost is paid **once per community per corpus shape**, not per query: summaries are keyed on the corpus signature plus the community's member paths and persisted to `.agentty/rag_graph_summaries.tsv` (override with `AGENTTY_RAG_GRAPH_SUMMARIES_PATH`), so every later session — and every later query touching that community — reads a cached line with zero network. Editing any document invalidates exactly the affected communities. Any failure (backend down, parse error) degrades to the plain hub chunk and is **not** cached, so a later session with the model up fills it in. Pick the model with `AGENTTY_RAG_GRAPH_SUMMARY_MODEL` (default `llama3.2`).
-
-### 9. Corrective retry — a second chance on a weak result *(default-on)*
-
-agentty computes a **confidence** signal for the result set. If the first pass looks weak, it strips stopwords, widens the pool, and retries — recovering hits when the original query was buried in conversational phrasing. Disable with `AGENTTY_RAG_CORRECT=0`.
+After the pipeline runs, a **corrective evaluator** ([CRAG](https://arxiv.org/abs/2401.15884)) grades the result set and produces a single **calibrated confidence**. When the first pass looks weak, it can strip stopwords, widen the pool, and retry — recovering hits when the query was buried in conversational phrasing. That confidence is the signal agentty uses everywhere downstream — most importantly it's the gate for **unprompted proactive injection** (see the proactive path below). Disable with `AGENTTY_RAG_CORRECT=0`.
 
 ## Conversation-aware retrieval *(default-on)*
 
-The query you type is not always the query you mean — especially mid-conversation. Two deterministic rewrites widen the probe set (never replacing your original query, so recall can only rise):
-
-- **Carryover** — a recency-decayed salience pool tracks the content terms of your recent queries. A vague follow-up ("how does **it** handle errors?") gets the top carried-over terms appended as an *extra* probe, resolving the pronoun to the entities under discussion. `AGENTTY_RAG_CARRYOVER=0` disables.
-- **Multi-hop decomposition** — a compositional question ("how the auth flow works **and** how the sandbox blocks paths") has no single covering chunk. It's split on clause connectives into per-facet probes that ride the same RRF fusion, so each facet retrieves on its own strength. Gated conservatively (≥2 clauses, ≥2 content terms each) so ordinary queries pass through untouched. `AGENTTY_RAG_MULTIHOP=0` disables.
+The query you type is not always the query you mean — especially mid-conversation. The default-on **query-rewriting boosters** below (multi-query and HyDE) widen the probe set without ever replacing your original query, so recall can only rise: a vague follow-up ("how does **it** handle errors?") or a compositional question ("how the auth flow works **and** how the sandbox blocks paths") is rephrased into several probes that each retrieve on their own strength and fuse back into one ranked set. Because they lean on a small local generator, they cost nothing beyond a localhost round-trip and silently no-op when Ollama is absent.
 
 ## The learning loop *(default-on)*
 
@@ -132,17 +111,16 @@ Gold matching is **coverage-based**, not exact-identity: a returned chunk counts
 
 Known-item synthesis exercises the funnel's *mechanics*; run it with a local embedder up to also exercise the dense (embedding) rungs, which is where semantic paraphrase wins show.
 
-## Opt-in recall boosters (they cost a model call)
+## Query-rewriting boosters *(default-on, local)*
 
-Three of the strongest techniques need a generative model, so they add latency and are **off by default**. When enabled they help **every** knowledge configuration — docs, skills-only, memory-only, MCP, or any mix — because they feed extra probes into the same source-agnostic fusion.
+Two of the strongest recall techniques need a *generative* model — but agentty runs them on a **small local Ollama model** (`AGENTTY_RAG_GEN_MODEL`, default `qwen2.5:0.5b`) on the very same Ollama that serves embeddings, so they add **zero cloud cost**. If that model isn't reachable they silently no-op and plain hybrid still runs; they're also **skipped on the latency-sensitive proactive pre-turn path** so unprompted retrieval stays fast. Both help **every** knowledge configuration — docs, skills-only, memory-only, MCP, or any mix — because they feed extra probes into the same source-agnostic fusion.
 
-- **RAG-Fusion query expansion** (`AGENTTY_RAG_EXPAND=1`) — the LLM rewrites your query into several alternative phrasings; each is retrieved and all results are fused. Vocabulary mismatch on any one phrasing stops being fatal. Variant count via `AGENTTY_RAG_EXPAND_N` (default 4).
-- **HyDE — Hypothetical Document Embeddings** (`AGENTTY_RAG_HYDE=1`) — a question and its answer can sit far apart in embedding space. The LLM hallucinates a short *answer-passage* for your query; embedding that fake answer lands the probe near the real passages. The answer needn't be correct — only look like one. Composes with, and is independent of, query expansion.
-- **GraphRAG community summaries** (`AGENTTY_RAG_GRAPH_SUMMARY=1`) — a cached natural-language report per topic cluster, so corpus-level questions are answered by a digest rather than one chunk (see [§8](#8-graphrag-expansion-retrieval-over-the-document-graph-default-on)). Unlike the two above, the model cost here is paid **once per community per corpus shape**, not per query — the rest of the graph is free and on by default.
+- **Multi-query / RAG-Fusion expansion** (`AGENTTY_RAG_EXPAND`, default on) — the local model rewrites your query into several alternative phrasings; each is retrieved and all results are fused. Vocabulary mismatch on any one phrasing stops being fatal. Disable with `AGENTTY_RAG_EXPAND=0`.
+- **HyDE — Hypothetical Document Embeddings** (`AGENTTY_RAG_HYDE`, default on) — a question and its answer can sit far apart in embedding space. The local model drafts a short *answer-passage* for your query; embedding that draft lands the probe near the real passages. The answer needn't be correct — only look like one. Composes with, and is independent of, query expansion. Disable with `AGENTTY_RAG_HYDE=0`.
 
 ## The proactive path
 
-Beyond the explicit `search_docs` tool, agentty can retrieve **before you even ask**. When your message looks knowledge-shaped, it runs the funnel pre-turn and injects a `<retrieved-context>` block (source-tagged, deduplicated across turns) into the prompt — grounding the answer in your docs/skills/memory without a tool round-trip. This is on by default (`AGENTTY_RAG_PROACTIVE=1`) and only injects above a confidence bar (`AGENTTY_RAG_PROACTIVE_MIN`, default `0.45`).
+Beyond the explicit `search_docs` tool, agentty can retrieve **before you even ask**. When your message looks knowledge-shaped, it runs the funnel pre-turn and injects a `<retrieved-context>` block (source-tagged, deduplicated across turns) into the prompt — grounding the answer in your docs/skills/memory without a tool round-trip. This is on by default (`AGENTTY_RAG_PROACTIVE=1`) and only injects above a **CRAG-calibrated** confidence bar (`AGENTTY_RAG_PROACTIVE_MIN`, default `0.35`).
 
 Because this runs on the submit thread, it is bounded by a small fast-path **hedge** (`AGENTTY_RAG_PROACTIVE_BUDGET_MS`, default `250`). On a fast corpus the funnel finishes within the hedge and the grounding is injected inline — same turn, no perceptible delay. On a large or slow corpus — where the synchronous dense query-embed round-trip would overrun — the submit thread never blocks: the turn enters its normal streaming state (the status bar shows *retrieving context…* and the activity spinner animates, so the UI stays alive and never feels hung), and the stream launch is *held* behind a background retrieval that injects the `<retrieved-context>` block **the same turn**, the moment it lands. Grounding is always for the question just asked — never dropped, never deferred to a later, possibly-unrelated turn. If the user cancels (Esc) while retrieval is in flight, the late block is discarded. Set the hedge to `0` to always take the deferred (spinner-visible) path.
 
@@ -171,10 +149,10 @@ Every environment variable — defaults, ranges, and effects — is documented i
 
 ## Design notes
 
-- **No dependencies.** BM25, RRF (and Relative Score Fusion), HNSW — with optional Matryoshka truncation and binary (sign-code) quantization — the reranker, MMR, compression, PRF, the chunker, and the GraphRAG document graph (PageRank, entity extraction, community detection) are all in-house C++/STL. The only optional network hop is localhost Ollama.
-- **One embed round-trip per source.** However many probes a search fans into — the query, carryover/multi-hop facets, RAG-Fusion paraphrases, a HyDE passage — their dense embeddings batch into a single `/api/embed` call per source, so expansion never multiplies network latency. Sources fan out through one `retrieve_multi` seam, so the batching reaches every knowledge configuration (docs, skills, memory, MCP).
-- **Graceful degradation everywhere.** No embeddings → BM25-only. Ollama unreachable mid-search → the affected stage no-ops and retrieval continues. Community-summary backend down → the plain hub chunk. Empty corpus, blank query, zero-k → empty result, never an error.
-- **Deterministic by default.** Every default-on stage — including the whole GraphRAG graph, its PageRank, and its communities — is deterministic given the corpus, so results are reproducible and `rag-bench` numbers are stable. Only the opt-in LLM stages introduce a model.
-- **Cached, not recomputed.** The document graph is memo-cached per corpus shape; community summaries and the learning-loop feedback are persisted to disk (`.agentty/rag_graph_summaries.tsv`, `.agentty/rag_feedback.tsv`) so expensive work is paid once and survives across sessions.
-- **Sensible defaults.** Everything that's free and safe runs by default; anything that costs a model call is opt-in, so the default `search_docs` is fast and predictable.
-- **One seam for RAG and MCP.** From the model's view a docs folder and an MCP server are the same thing — a `KnowledgeSource` behind one interface — so they fuse identically.
+- **A production hybrid engine.** BM25, dense/HNSW, convex (TM2C2) fusion, the feature reranker, MMR, parent-stitch, PRF, the code-aware chunker, GraphRAG's document graph (PageRank, entity extraction, community detection), and CRAG grading all live in the **rag-cpp** library behind one adapter (`src/rag/adapter.cpp`). The only optional network hop is localhost Ollama.
+- **One embed round-trip.** However many probes a search fans into — the query, RAG-Fusion paraphrases, a HyDE passage — their dense embeddings batch into a single `/api/embed` call, so expansion and HyDE never multiply network latency. Sources fan out through one `retrieve_multi` seam, so the batching reaches every knowledge configuration (docs, skills, memory, MCP).
+- **Graceful degradation everywhere.** No embeddings → BM25-only. Ollama unreachable mid-search → the affected stage no-ops and retrieval continues. Generator down → HyDE/multi-query silently skip and plain hybrid still runs. Empty corpus, blank query, zero-k → empty result, never an error.
+- **Deterministic where it counts.** Every non-generative stage — hybrid, fusion, feature-rerank, MMR, parent-stitch, PRF, the whole GraphRAG graph, its PageRank and communities, and CRAG grading — is deterministic given the corpus, so results are reproducible and `rag-bench` numbers are stable. Only the local-generator boosters (HyDE, multi-query) introduce a model.
+- **Warm across sessions.** The built index is persisted to `.agentty/rag_docs.ragdb` (`AGENTTY_RAG_PERSIST`, on by default), so a later session opens warm instead of re-embedding the corpus. The document graph is memo-cached per corpus shape, and the learning-loop feedback persists to `.agentty/rag_feedback.tsv` — so expensive work is paid once and survives restarts.
+- **Sensible defaults.** Every stage runs by default and every model call is local, so the default `search_docs` is fast, predictable, and cloud-free.
+- **One seam for RAG and MCP.** From the model's view a docs folder and an MCP server are the same thing — a knowledge source behind one interface — so they fuse identically.

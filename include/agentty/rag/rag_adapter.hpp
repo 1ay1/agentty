@@ -72,8 +72,14 @@ struct Config {
     bool     prf        = true;   // AGENTTY_RAG_PRF — pseudo-relevance-feedback expand
     bool     corrective = true;   // AGENTTY_RAG_CORRECT — CRAG grade + drop-irrelevant
     bool     graph      = true;   // AGENTTY_RAG_GRAPH — GraphRAG multi-hop expansion
-    bool     expand     = false;  // AGENTTY_RAG_EXPAND — multi-query / RAG-Fusion (needs LLM Generator)
-    bool     hyde       = false;  // AGENTTY_RAG_HYDE — HyDE (needs LLM Generator)
+    bool     expand     = true;   // AGENTTY_RAG_EXPAND — multi-query / RAG-Fusion
+    bool     hyde       = true;   // AGENTTY_RAG_HYDE — HyDE
+    // HyDE/multi-query need an LLM. By default agentty uses a SMALL LOCAL model
+    // on the SAME Ollama it embeds with (zero cloud cost / tokens). If that
+    // Ollama isn't reachable, HyDE/expand silently no-op (plain hybrid still
+    // runs) — so these being on by default is free when unavailable and a
+    // recall win when present. Override the model via AGENTTY_RAG_GEN_MODEL.
+    std::string gen_model = "qwen2.5:0.5b";   // tiny, fast, ubiquitous on Ollama
     bool     persist    = true;   // AGENTTY_RAG_PERSIST — .ragdb cache under .agentty/
     bool     trace      = false;  // AGENTTY_RAG_TRACE — fold per-stage trace into mode
     // Convex (TM2C2) fusion of BM25+dense — rag-cpp's measured default, beats RRF.

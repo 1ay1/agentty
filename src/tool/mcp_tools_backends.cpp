@@ -858,7 +858,12 @@ void proactive_mark_injected_(const std::string& key) {
 // 0.25; we inject only well above it. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
 namespace {
 double proactive_min_conf_() {
-    double min_conf = 0.45;
+    // The confidence is now CRAG's CALIBRATED relevance grade (a real
+    // model-free evaluator), not the old raw fusion score. CRAG grades a
+    // genuinely-relevant retrieval in the ~0.3–0.6 band, so the unprompted
+    // injection bar is 0.35 — high enough to skip noise, low enough that a
+    // solidly-relevant hit reaches the model. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
+    double min_conf = 0.35;
     if (const char* mc = std::getenv("AGENTTY_RAG_PROACTIVE_MIN"); mc && mc[0]) {
         // Any non-negative value is honoured; a bar above 1.0 is a
         // legitimate "never inject" switch (confidence is clamped to [0,1]).
