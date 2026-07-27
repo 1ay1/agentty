@@ -299,13 +299,14 @@ std::vector<CatalogModel> fetch_models() {
     hr.method = http::HttpMethod::Get;
     hr.host   = "chatgpt.com";
     hr.port   = 443;
-    hr.path   = "/backend-api/codex/models?client_version=" AGENTTY_VERSION;
+    hr.path   = std::string("/backend-api/codex/models?client_version=")
+              + OAuthConfig::codex_client_version;
     hr.headers = {
         {"authorization", "Bearer " + creds->access_token},
         {"accept",        "application/json"},
         {"openai-beta",   "responses=experimental"},
         {"originator",    OAuthConfig::originator},
-        {"user-agent",    "codex_cli_rs/" AGENTTY_VERSION},
+        {"user-agent",    std::string("codex_cli_rs/") + OAuthConfig::codex_client_version},
     };
     if (!creds->account_id.empty())
         hr.headers.push_back({"chatgpt-account-id", creds->account_id});
@@ -323,6 +324,12 @@ std::vector<CatalogModel> fetch_models() {
         const auto& arr = j.contains("models") ? j["models"] : j;
         if (!arr.is_array()) return {};
         for (const auto& m : arr) {
+            // The catalog carries internal models the picker must not show
+            // (e.g. `codex-auto-review`, visibility="hide"). Mirror codex-rs:
+            // only surface models the account is meant to select. Anything not
+            // explicitly listed as visible is dropped.
+            const std::string vis = m.value("visibility", std::string{"list"});
+            if (vis == "hide" || vis == "hidden") continue;
             CatalogModel cm;
             cm.slug = m.value("slug", m.value("id", std::string{}));
             if (cm.slug.empty()) continue;
@@ -359,7 +366,7 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
         {"openai-beta",       "responses=experimental"},
         {"originator",        OAuthConfig::originator},
         {"session_id",        new_uuid_v4()},
-        {"user-agent",        "codex_cli_rs/" AGENTTY_VERSION},
+        {"user-agent",        std::string("codex_cli_rs/") + OAuthConfig::codex_client_version},
     };
     if (!creds->account_id.empty())
         hr.headers.push_back({"chatgpt-account-id", creds->account_id});

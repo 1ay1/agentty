@@ -1834,6 +1834,15 @@ if(AGENTTY_BUILD_TESTS)
     # frames). Reuses the shared OBJECT libs like the sibling transport tests.
     agentty_add_full_test(codex_responses_test)
 
+    # chatgpt_bundled_models_test — regression guard for the retired
+    # `gpt-5.1-codex` slug. When unsigned (the CI state) the ChatGPT provider's
+    # OFFLINE bundled fallback drives list_models()/default_model(); it must
+    # never surface `gpt-5.1-codex` (the server now rejects it: "model is not
+    # supported when using Codex with a ChatGPT account") and must default to
+    # the stable `gpt-5`. No network.
+    agentty_add_full_test(chatgpt_bundled_models_test)
+    set_tests_properties(chatgpt_bundled_models_test PROPERTIES TIMEOUT 30)
+
     # ollama_transport_test — verifies the DEDICATED Ollama /api/chat
     # transport: native build_messages (object-form tool args + role:tool
     # results + images), NDJSON parse (structured tool_calls, plain text,
@@ -2109,6 +2118,7 @@ if(AGENTTY_BUILD_TESTS)
         table_render_test
         openai_transport_test
         codex_responses_test
+        chatgpt_bundled_models_test
         ollama_transport_test
         rag_adapter_test
         reveal_freeze_gate_probe
