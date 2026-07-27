@@ -685,9 +685,9 @@ set(AGENTTY_AIRGAP_SOURCES
 
 set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
-    src/provider/codex_cli/provider.cpp
-    src/provider/codex_cli/codex_oauth.cpp
-    src/provider/codex_cli/responses.cpp
+    src/provider/chatgpt/provider.cpp
+    src/provider/chatgpt/codex_oauth.cpp
+    src/provider/chatgpt/responses.cpp
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
@@ -766,6 +766,16 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/helpers.cpp
     src/runtime/view/thread/turn/agent_timeline/tool_args.cpp
     src/runtime/view/thread/turn/agent_timeline/tool_helpers.cpp
+    src/runtime/view/thread/turn/agent_timeline/tool_body_common.cpp
+    src/runtime/view/thread/turn/agent_timeline/edit_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/bash_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/write_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/git_diff_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/read_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/web_fetch_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/list_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/task_body.cpp
+    src/runtime/view/thread/turn/agent_timeline/todo_body.cpp
     src/runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp
     src/runtime/view/thread/turn/agent_timeline/agent_timeline.cpp
     src/runtime/view/thread/turn/permission.cpp
