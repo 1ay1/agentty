@@ -1,29 +1,20 @@
 #pragma once
 
-// ChatGPT-authenticated Codex provider — a drop-in bridge to your locally
-// installed `codex` CLI's **app-server** (the same JSON-RPC process that
-// powers Codex in VS Code, the desktop app, and chatgpt.com/codex).
+// ChatGPT-authenticated Codex provider — a native, in-process bridge to the
+// OpenAI Responses backend (the same endpoint that powers Codex in the desktop
+// app and chatgpt.com/codex). There is NO `codex` binary at runtime.
 //
 // Design goals (parity with the Anthropic / OpenAI / Ollama transports):
 //
-//   • Full conversation fidelity. A Codex thread is a durable, server-side
-//     conversation; we start it once per agentty conversation (keyed on
-//     Request::session_key) and replay the whole agentty transcript into it
-//     the first time so the model has real context — not just the last line.
-//   • Rich, legible turn rendering. Codex runs its OWN tools server-side
-//     (shell, file edits, MCP, web search) behind the app-server sandbox.
-//     agentty's tool cards are host-executor-bound, so we surface Codex's
-//     item stream as structured markdown blocks — reasoning, commands + their
-//     output, unified diffs for file changes, MCP tool calls, web searches —
-//     so the transcript reads like a first-class Codex session, not a status
-//     log. Agent-message text streams as normal assistant text.
-//   • Cross-platform + native speed. The bidirectional child is spawned via
-//     posix_spawn on POSIX and CreateProcess on Windows; the reader is a
-//     bounded, cancellable, newline-delimited JSON-RPC loop. No fork/exec is
-//     hand-rolled inline, no platform is degraded to a shim.
-//
-// It never reads ~/.codex secrets: authentication is entirely delegated to
-// the CLI's own ChatGPT login (`codex login`).
+//   • Reverse-engineered OAuth, works like Claude. Authentication is the
+//     ChatGPT Auth-Code + PKCE flow (`agentty login` → ChatGPT); tokens are
+//     stored encrypted and auto-refreshed in-process. No delegation to an
+//     external CLI, no ~/.codex secrets.
+//   • Direct Responses-API streaming. One turn maps to one SSE request against
+//     chatgpt.com/backend-api/codex/responses; tool calls, reasoning, and text
+//     are surfaced as first-class agentty stream events.
+//   • Cross-platform + native speed. Pure HTTPS transport, no subprocess on any
+//     platform.
 
 #include <memory>
 #include <vector>
@@ -45,9 +36,7 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Enumerates the models the installed Codex CLI exposes via the app-server's
-// `model/list`. Falls back to a single sane default when the probe fails or an
-// older CLI predates the method, so selection always has at least one entry.
+// The Codex model line-up exposed when signed in with ChatGPT OAuth.
 [[nodiscard]] std::vector<ModelInfo> list_models();
 
 static_assert(provider::Provider<CodexCliProvider>);
