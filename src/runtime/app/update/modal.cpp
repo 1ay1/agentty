@@ -486,11 +486,9 @@ std::string model_for_provider(std::string_view spec) {
     if (spec == "anthropic" || spec.empty()) return "claude-opus-4-5";
     if (spec == "openai")                    return "gpt-4o";
     if (spec == "codex") return "gpt-5.1-codex";
-    // This is a sentinel only until `codex debug models` lands. The provider
-    // deliberately omits it from `codex exec --model`, letting the logged-in
-    // CLI choose its account's default rather than sending a stale hardcoded
-    // model id.
-    if (spec == "codex-cli") return "codex-cli-default";
+    // Native ChatGPT (Responses API) path — pick a real Codex model id so the
+    // request carries a concrete model, not a sentinel.
+    if (spec == "codex-cli") return "gpt-5.1-codex";
     return {};
 }
 

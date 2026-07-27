@@ -318,7 +318,7 @@ Element provider_picker(const Model& m) {
         std::string note;
         maya::Color note_color = muted;
         if (p.id == "codex-cli") {
-            note = "ChatGPT via codex login";
+            note = "ChatGPT (native OAuth)";
             note_color = success;
         } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
