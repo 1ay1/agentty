@@ -1170,7 +1170,11 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         // that contributed three passages shows once. Cheap: one linear
         // scan of a bounded block.
         int n = 0;
-        std::vector<std::string> sources;   // distinct "source path", in order
+        // Distinct sources, in order, each paired with a one-line snippet of
+        // the passage text so the card shows WHAT was retrieved, not just a
+        // path. Snippet is taken from the first source that introduced the
+        // label; later duplicate chunks of the same file don't overwrite it.
+        std::vector<std::pair<std::string, std::string>> sources;  // label, snippet
         for (std::size_t p = msg.text.find("\n["); p != std::string::npos;
              p = msg.text.find("\n[", p + 1)) {
             ++n;
@@ -1194,9 +1198,34 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                     path.resize(lc);
             }
             std::string label = path.empty() ? src : (src + " · " + path);
-            if (std::find(sources.begin(), sources.end(), label)
-                    == sources.end())
-                sources.push_back(std::move(label));
+
+            // Pull the first non-empty line of THIS passage's body as a
+            // preview. The body starts just after the header's closing
+            // "]\n" and runs to the next blank line / next "[" header.
+            std::string snippet;
+            std::size_t body = msg.text.find('\n', close);
+            if (body != std::string::npos) {
+                ++body;                                     // past the newline
+                std::size_t eol = msg.text.find('\n', body);
+                std::string line = eol == std::string::npos
+                    ? msg.text.substr(body)
+                    : msg.text.substr(body, eol - body);
+                // Trim + collapse to a compact single-line preview.
+                std::size_t a = line.find_first_not_of(" \t");
+                if (a != std::string::npos) {
+                    line.erase(0, a);
+                    constexpr std::size_t kSnip = 72;
+                    if (line.size() > kSnip) {
+                        line.resize(kSnip);
+                        line += "\xe2\x80\xa6";             // …
+                    }
+                    snippet = std::move(line);
+                }
+            }
+
+            if (std::none_of(sources.begin(), sources.end(),
+                    [&](const auto& s){ return s.first == label; }))
+                sources.emplace_back(std::move(label), std::move(snippet));
         }
 
         cfg.glyph      = "\xf0\x9f\x93\x9a";          // 📚
@@ -1230,31 +1259,38 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             const maya::Color lvl = c >= 0.60 ? status_ok
                                   : c >= 0.35 ? status_warn
                                               : muted;
+            // Plain-language strength word so the % isn't the only signal
+            // the reader has to interpret.
+            const char* word = c >= 0.60 ? "strong match"
+                             : c >= 0.35 ? "moderate match"
+                                         : "weak match";
             std::string on, off;
             for (int i = 0; i < filled; ++i)          on  += "\xe2\x96\xb0";
             for (int i = filled; i < kCells; ++i)     off += "\xe2\x96\xb1";
             const int pct = static_cast<int>(c * 100.0 + 0.5);
             cfg.body.emplace_back(maya::Turn::BodySlot{
-                h(text("  confidence ", fg_of(muted)),
+                h(text("  relevance ", fg_of(muted)),
                   text(on,  fg_of(lvl)),
                   text(off, fg_of(muted)),
-                  text(" " + std::to_string(pct) + "%", fg_bold(lvl)))
+                  text(" " + std::to_string(pct) + "%  ·  ", fg_bold(lvl)),
+                  text(word, fg_of(lvl)))
                     .build()});
         }
 
         // One row per distinct source — a tree-ish "└ " bullet + a muted
         // "source ·" prefix, with the PATH in code-reference cyan so it
-        // pops as the actionable provenance. Capped so a wide multi-file
-        // hit can't dominate the transcript; overflow collapses to a
-        // "…and N more" tail.
+        // pops as the actionable provenance. When a passage preview was
+        // captured, a second indented muted line shows WHAT was retrieved.
+        // Capped so a wide multi-file hit can't dominate the transcript;
+        // overflow collapses to a "…and N more" tail.
         {
             using namespace maya::dsl;
             constexpr std::size_t kMaxSources = 6;
             const std::size_t total = sources.size();
             for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
-                // sources[i] is "src · path" (or just "src"); split on the
-                // first " · " so the path can take the cyan.
-                const std::string& s = sources[i];
+                // sources[i].first is "src · path" (or just "src"); split on
+                // the first " · " so the path can take the cyan.
+                const std::string& s = sources[i].first;
                 std::string pre = s, path;
                 if (auto d = s.find(" \xc2\xb7 "); d != std::string::npos) {
                     pre  = s.substr(0, d + 4);   // include " · " separator
@@ -1265,6 +1301,15 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                       text(pre,  fg_of(muted)),
                       text(path, fg_of(code_path)))
                         .build()});
+                // Passage preview — dim, quote-marked, indented under the
+                // source so it reads as "here's the line we matched."
+                if (!sources[i].second.empty()) {
+                    cfg.body.emplace_back(maya::Turn::BodySlot{
+                        h(text("      \xe2\x80\x9c", fg_of(muted)),  // “
+                          text(sources[i].second, fg_of(muted)),
+                          text("\xe2\x80\x9d", fg_of(muted)))       // ”
+                            .build()});
+                }
             }
             if (total > kMaxSources) {
                 cfg.body.emplace_back(maya::Turn::PlainText{
