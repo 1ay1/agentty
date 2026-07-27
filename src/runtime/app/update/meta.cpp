@@ -216,6 +216,25 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             });
             return done(std::move(m));
         },
+        [&](ToggleRetrievedExpanded& e) -> Step {
+            // Flip the addressed retrieved-context card between its compact
+            // snippet form and full-passage expansion. Frozen-prefix gate,
+            // same reasoning as ToggleToolExpanded: a card already settled
+            // into m.ui.frozen has its expanded state baked into the
+            // snapshotted Element (hash_id stamped at freeze, never
+            // recomputed), so mutating proactive_expanded there would change
+            // model state without reaching the canvas. Only toggle a LIVE
+            // (not-yet-frozen) card; on scrollback it no-ops, matching
+            // "scrollback is archaeology".
+            auto& msgs = m.d.current.messages;
+            for (std::size_t i = m.ui.frozen_through; i < msgs.size(); ++i) {
+                if (msgs[i].id == e.id && msgs[i].proactive_context) {
+                    msgs[i].proactive_expanded = !msgs[i].proactive_expanded;
+                    break;
+                }
+            }
+            return done(std::move(m));
+        },
         [&](Tick) -> Step {
             auto now = std::chrono::steady_clock::now();
             // Wall-clock gap since the previous Tick. This is the ONE true dt

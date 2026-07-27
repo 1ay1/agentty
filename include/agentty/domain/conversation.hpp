@@ -380,6 +380,14 @@ struct Message {
     // message"; only meaningful when proactive_context is true. Wire-inert.
     double proactive_confidence = -1.0;
 
+    // View-only: when true, the transcript's retrieved-context card shows
+    // each source's FULL passage text instead of the one-line snippet.
+    // Toggled by Ctrl+U (ToggleRetrievedExpanded) on the newest such card.
+    // Wire-inert and not persisted — a pure display preference that resets
+    // to collapsed on reload. Folded into compute_render_key so flipping
+    // it invalidates the cached Element.
+    bool proactive_expanded = false;
+
     // FNV-1a over the fields that turn_element / turn_config consume
     // when building the rendered Element. The view cache stamps the
     // built Element with this key at insert time and re-checks it on
@@ -423,6 +431,7 @@ struct Message {
         mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent
         mix(is_compact_summary ? 1ULL : 0ULL);
         mix(proactive_context ? 2ULL : 0ULL);
+        mix(proactive_expanded ? 4ULL : 0ULL);
         // Quantize confidence to a bar-relevant bucket so a card whose
         // confidence changed (re-injection) invalidates the cache, without
         // churning on float noise. Only proactive messages carry it.

@@ -699,6 +699,17 @@ Sub<Msg> subscribe(const Model& m) {
     bool has_history = false;
     for (const auto& msg : m.d.current.messages)
         if (msg.role == Role::User && !msg.text.empty()) { has_history = true; break; }
+    // Newest LIVE (not-yet-frozen) retrieved-context card, if any — the
+    // target for the Ctrl+U expand toggle. Empty when the most recent
+    // proactive card has already settled into the frozen prefix (its
+    // Element is baked; the reducer would no-op) or none exists.
+    std::optional<MessageId> live_retrieved_id;
+    for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
+        if (m.d.current.messages[i].proactive_context) {
+            live_retrieved_id = m.d.current.messages[i].id;
+            break;
+        }
+    }
     const ComposerKeyState composer_state{
         m.ui.composer.text.empty(),
         !m.ui.composer.queued.empty(),
@@ -747,6 +758,21 @@ Sub<Msg> subscribe(const Model& m) {
                     case SpecialKey::Left:  return ThreadCycle{-1};
                     case SpecialKey::Right: return ThreadCycle{+1};
                     default: break;
+                }
+            }
+            // Ctrl+U on an EMPTY composer — expand / collapse the newest
+            // retrieved-context card (full passage text ↔ one-line snippet).
+            // Guarded on empty composer so it never steals Ctrl+U's
+            // readline "kill-to-start-of-line" meaning while typing; with
+            // no live card it simply falls through. Handled here (not
+            // on_global) because it needs the pre-computed target id.
+            if (composer_state.text_empty && live_retrieved_id
+                && ev.mods.ctrl && !ev.mods.alt) {
+                if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+                    char32_t c = ck->codepoint;
+                    if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+                    if (c == U'u')
+                        return ToggleRetrievedExpanded{*live_retrieved_id};
                 }
             }
             if (auto msg = on_global(ev)) return msg;
