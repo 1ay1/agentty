@@ -1914,6 +1914,14 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(persistence_proactive_test)
     set_tests_properties(persistence_proactive_test PROPERTIES TIMEOUT 30)
 
+    # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
+    # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
+    # a failed CodexLoginDone lands in Failed, and a late result after Esc is
+    # dropped. Pure branches only (the success path runs commit_provider_
+    # switch, covered by the live provider-switch tests).
+    agentty_add_full_test(codex_login_flow_test)
+    set_tests_properties(codex_login_flow_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2101,6 +2109,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_wedge_liveness_test
         proactive_deferred_test
         persistence_proactive_test
+        codex_login_flow_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test

@@ -17,6 +17,7 @@
 //     platform.
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "agentty/provider/provider.hpp"
@@ -36,8 +37,15 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// The Codex model line-up exposed when signed in with ChatGPT OAuth.
+// The Codex model line-up exposed when signed in with ChatGPT OAuth. Fetched
+// live from the account's `/models` catalog (mirrors codex-rs); cached for the
+// process. Falls back to a small bundled list when offline / not signed in.
 [[nodiscard]] std::vector<ModelInfo> list_models();
+
+// The account's default model slug (first catalog entry). Callers that need a
+// concrete model id — e.g. provider-switch defaulting — should use this instead
+// of hardcoding a slug the account may not offer.
+[[nodiscard]] std::string default_model();
 
 static_assert(provider::Provider<CodexCliProvider>);
 

@@ -16,6 +16,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/provider/codex_cli/provider.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
@@ -485,10 +486,16 @@ std::string model_for_provider(std::string_view spec) {
     //    model-list refetch auto-selects the first available model.
     if (spec == "anthropic" || spec.empty()) return "claude-opus-4-5";
     if (spec == "openai")                    return "gpt-4o";
-    if (spec == "codex") return "gpt-5.1-codex";
-    // Native ChatGPT (Responses API) path — pick a real Codex model id so the
-    // request carries a concrete model, not a sentinel.
-    if (spec == "codex-cli") return "gpt-5.1-codex";
+    // Native ChatGPT (Codex Responses API) path — the account's model line-up
+    // is server-driven and changes over time (e.g. gpt-5.4, not the stale
+    // gpt-5.1-codex we used to hardcode), so resolve it from the LIVE catalog
+    // instead of baking in a slug the account may not offer. If the catalog
+    // can't be reached yet, return empty and let the ModelsLoaded refetch
+    // auto-select the first available model (same as the Ollama path).
+    if (spec == "codex" || spec == "codex-cli") {
+        auto def = provider::codex_cli::default_model();
+        return def;   // may be a real slug (catalog) or a safe "gpt-5" fallback
+    }
     return {};
 }
 

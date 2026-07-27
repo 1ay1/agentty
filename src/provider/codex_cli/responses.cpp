@@ -286,6 +286,57 @@ bool responses_available() {
     return c && !c->access_token.empty();
 }
 
+// ── Live model catalog ─────────────────────────────────────────────────────
+// GET /backend-api/codex/models?client_version=… — the exact request codex-rs
+// makes to populate its model picker. The ChatGPT account is authoritative
+// about which slugs it will accept on /responses, so we ask it rather than
+// hardcode (which is what broke: gpt-5.1-codex is no longer offered).
+std::vector<CatalogModel> fetch_models() {
+    auto creds = codex_fresh_credentials();
+    if (!creds || creds->access_token.empty()) return {};
+
+    http::Request hr;
+    hr.method = http::HttpMethod::Get;
+    hr.host   = "chatgpt.com";
+    hr.port   = 443;
+    hr.path   = "/backend-api/codex/models?client_version=" AGENTTY_VERSION;
+    hr.headers = {
+        {"authorization", "Bearer " + creds->access_token},
+        {"accept",        "application/json"},
+        {"openai-beta",   "responses=experimental"},
+        {"originator",    OAuthConfig::originator},
+        {"user-agent",    "codex_cli_rs/" AGENTTY_VERSION},
+    };
+    if (!creds->account_id.empty())
+        hr.headers.push_back({"chatgpt-account-id", creds->account_id});
+
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(8'000);
+    tos.total   = std::chrono::milliseconds(15'000);
+
+    auto result = http::default_client().send(hr, tos);
+    if (!result || result->status < 200 || result->status >= 300) return {};
+
+    std::vector<CatalogModel> out;
+    try {
+        auto j = nlohmann::json::parse(result->body);
+        const auto& arr = j.contains("models") ? j["models"] : j;
+        if (!arr.is_array()) return {};
+        for (const auto& m : arr) {
+            CatalogModel cm;
+            cm.slug = m.value("slug", m.value("id", std::string{}));
+            if (cm.slug.empty()) continue;
+            cm.display_name   = m.value("display_name", cm.slug);
+            cm.context_window = m.value("context_window", 272000);
+            cm.is_default     = m.value("is_default", false);
+            out.push_back(std::move(cm));
+        }
+    } catch (...) {
+        return {};
+    }
+    return out;
+}
+
 void stream_responses(provider::Request req, provider::EventSink sink) {
     sink(StreamStarted{});
 
