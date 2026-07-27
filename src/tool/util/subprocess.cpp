@@ -311,8 +311,13 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     std::size_t last_total_seen = 0;
 
     bool timed_out = false;
+    bool cancelled = false;
     for (;;) {
         auto now = now_ms();
+        if (opts.stop_requested && opts.stop_requested()) {
+            cancelled = true;
+            break;
+        }
         // Reset the idle window if the reader thread has appended bytes
         // since our last check.  Snapshot is cheap (one mutex acquire +
         // size_t copy) and we only do it once per outer iteration.
@@ -349,10 +354,10 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     }
 
     DWORD exit_code = 0;
-    if (timed_out) {
+    if (timed_out || cancelled) {
         ::TerminateProcess(pi.hProcess, 1);
         ::WaitForSingleObject(pi.hProcess, 2000);
-        r.timed_out = true;
+        r.timed_out = timed_out;
     } else {
         ::GetExitCodeProcess(pi.hProcess, &exit_code);
         r.exit_code = (int)exit_code;
@@ -673,6 +678,14 @@ SubprocessResult run_posix(const std::vector<std::string>& argv_in,
     bool reaped = false;
     while (!eof || !reaped) {
         auto now = clock::now();
+
+        // Cancellation has the same bounded SIGTERM → SIGKILL path as the
+        // idle watchdog, but is not reported as a timeout to the caller.
+        if (!sent_term && opts.stop_requested && opts.stop_requested()) {
+            ::kill(cpid, SIGTERM);
+            sent_term = true;
+            kill_at   = now + kKillGrace;
+        }
 
         // Idle-deadline state machine. SIGTERM first (cooperative
         // shutdown), SIGKILL after a 2 s grace if still alive.

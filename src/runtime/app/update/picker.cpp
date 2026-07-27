@@ -8,6 +8,7 @@
 #include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,28 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
             out.push_back(i);
     return out;
 }
+
+[[nodiscard]] bool is_codex_cli_active() {
+    const auto sel = provider::active();
+    return sel.kind == provider::Kind::OpenAI
+        && sel.openai_endpoint.label == "codex-cli";
+}
+
+// Codex exposes a reasoning ladder through its live model catalogue. Agentty
+// currently has no `Ultra` enum value, so `max` is the highest selectable
+// level; all other CLI-supported levels map one-for-one.
+[[nodiscard]] Effort cycle_codex_effort(Effort current, int delta) {
+    static constexpr std::array<Effort, 6> levels{
+        Effort::None, Effort::Low, Effort::Medium,
+        Effort::High, Effort::Xhigh, Effort::Max,
+    };
+    int index = 0;
+    for (int i = 0; i < static_cast<int>(levels.size()); ++i)
+        if (levels[static_cast<std::size_t>(i)] == current) { index = i; break; }
+    const int n = static_cast<int>(levels.size());
+    index = ((index + delta) % n + n) % n;
+    return levels[static_cast<std::size_t>(index)];
+}
 } // namespace
 using maya::Cmd;
 
@@ -91,10 +114,22 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 // rode over from the previous provider — clamp it so the picker
                 // chip and the wire agree (commit_provider_switch couldn't do
                 // this yet: the model id was empty until this refetch landed).
-                m.d.effort = clamp_effort(
-                    m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+                if (!is_codex_cli_active()) {
+                    m.d.effort = clamp_effort(
+                        m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+                }
                 tools::subagent::set_model(m.d.model_id.value);
                 persist_settings(m);
+            }
+            // The active model may have remained valid, in which case the
+            // old branch did not refresh its context cap. Codex publishes a
+            // 272K window (rather than Agentty's generic 200K fallback), and
+            // the status-bar gauge must reflect that immediately.
+            for (const auto& mi : m.d.available_models) {
+                if (mi.id == m.d.model_id && mi.context_window > 0) {
+                    m.s.context_max = mi.context_window;
+                    break;
+                }
             }
             if (auto* p = pick::opened(m.ui.model_picker)) {
                 // Cursor indexes the FILTERED list; a fetch can land while a
@@ -195,8 +230,10 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // supports — picking a non-reasoning (or lower-ceiling)
                     // model while effort=Xhigh must not leave a stale chip that
                     // the wire silently drops.
-                    m.d.effort = clamp_effort(
-                        m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+                    if (!is_codex_cli_active()) {
+                        m.d.effort = clamp_effort(
+                            m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+                    }
                     // Keep subagents on the live model: the startup config
                     // captured whatever was saved at launch, which can be a
                     // stale/invalid id (every subagent request 400s and the
@@ -231,11 +268,15 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 const auto vis = model_filtered(m.d.available_models, p->query);
                 if (!vis.empty() && p->index >= 0
                     && p->index < static_cast<int>(vis.size())) {
-                    const auto caps = ModelCapabilities::from_id(
-                        m.d.available_models[
-                            static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
-                            .id.value);
-                    m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
+                    if (is_codex_cli_active()) {
+                        m.d.effort = cycle_codex_effort(m.d.effort, e.delta);
+                    } else {
+                        const auto caps = ModelCapabilities::from_id(
+                            m.d.available_models[
+                                static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])]
+                                .id.value);
+                        m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
+                    }
                     persist_settings(m);
                 }
             }

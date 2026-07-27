@@ -485,6 +485,12 @@ std::string model_for_provider(std::string_view spec) {
     //    model-list refetch auto-selects the first available model.
     if (spec == "anthropic" || spec.empty()) return "claude-opus-4-5";
     if (spec == "openai")                    return "gpt-4o";
+    if (spec == "codex") return "gpt-5.1-codex";
+    // This is a sentinel only until `codex debug models` lands. The provider
+    // deliberately omits it from `codex exec --model`, letting the logged-in
+    // CLI choose its account's default rather than sending a stale hardcoded
+    // model id.
+    if (spec == "codex-cli") return "codex-cli-default";
     return {};
 }
 
@@ -557,8 +563,12 @@ commit_provider_switch(Model m, std::string_view spec,
     //     bogus chip and get silently dropped only at request time. When the
     //     new model isn't known yet (local, empty id) this is a no-op until
     //     ModelsLoaded, which is fine — the wire path re-clamps regardless.
-    m.d.effort = clamp_effort(
-        m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+    const bool codex_cli = provider::active().kind == provider::Kind::OpenAI
+        && provider::active().openai_endpoint.label == "codex-cli";
+    if (!codex_cli) {
+        m.d.effort = clamp_effort(
+            m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
+    }
 
     // (5) Persist the FULL settings shape (provider + per-provider model +
     //     effort + favorites) through the one owner so effort is never

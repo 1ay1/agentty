@@ -15,6 +15,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/codex_cli/provider.hpp"
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/ollama/transport.hpp"
 #include "agentty/provider/selection.hpp"
@@ -508,15 +509,24 @@ Cmd<Msg> launch_stream(Model& m) {
     // Capture the snapshot the worker needs. The Thread copy is the
     // one unavoidable cost; everything else is small.
     Thread thread_snapshot = m.d.current;
+    std::string session_key = thread_snapshot.id.value;
     const bool compacting  = m.s.compacting;
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
+    const bool codex_cli_provider =
+        provider::active().kind == provider::Kind::OpenAI
+        && provider::active().openai_endpoint.label == "codex-cli";
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
-    std::string effort     = std::string{
-        effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
+    // Codex's model catalogue advertises its own reasoning levels. Its model
+    // ids are `gpt-*`, which deliberately don't use the Claude-only
+    // ModelCapabilities decoder, so preserve the picker value here instead
+    // of collapsing every Codex effort choice to "off".
+    std::string effort = std::string{codex_cli_provider
+        ? effort_wire(m.d.effort)
+        : effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
@@ -536,6 +546,7 @@ Cmd<Msg> launch_stream(Model& m) {
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, context_max, retry_count,
+         session_key = std::move(session_key),
          model_id = std::move(model_id),
          effort = std::move(effort),
          model_supports_tools,
@@ -587,6 +598,7 @@ Cmd<Msg> launch_stream(Model& m) {
         // Reasoning effort (already clamped above). Empty = no thinking; the
         // Anthropic transport turns a non-empty value into adaptive thinking.
         req.effort        = std::move(effort);
+        req.session_key   = std::move(session_key);
 
         // Ollama capability gate: if /api/show reported the model does NOT
         // support tools (supports_tools == false), skip advertising ANY
@@ -1132,7 +1144,10 @@ Cmd<Msg> fetch_models() {
         try {
             std::vector<ModelInfo> models;
             const auto& sel = provider::active();
-            if (sel.kind == provider::Kind::OpenAI) {
+            if (sel.kind == provider::Kind::OpenAI
+                && sel.openai_endpoint.label == "codex-cli") {
+                models = provider::codex_cli::list_models();
+            } else if (sel.kind == provider::Kind::OpenAI) {
                 models = provider::openai::list_models(deps().auth,
                                                        sel.openai_endpoint);
             } else {

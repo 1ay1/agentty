@@ -685,6 +685,9 @@ set(AGENTTY_AIRGAP_SOURCES
 
 set(AGENTTY_PROVIDER_SOURCES
     src/provider/anthropic/transport.cpp
+    src/provider/codex_cli/provider.cpp
+    src/provider/codex_cli/codex_oauth.cpp
+    src/provider/codex_cli/responses.cpp
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
@@ -1812,6 +1815,15 @@ if(AGENTTY_BUILD_TESTS)
     # endpoint presets).
     agentty_add_full_test(openai_transport_test)
 
+    # codex_responses_test — verifies the ChatGPT (Codex) Responses-API
+    # transport's pure translation layer with NO network: build_body JSON
+    # shaping (flat function tools, input[] items, function_call +
+    # function_call_output pairing, reasoning/effort), and a scripted-SSE →
+    # agentty-Msg parse (text deltas, reasoning, streamed tool-call assembly
+    # with call_id correlation, response.completed → StopReason + usage, error
+    # frames). Reuses the shared OBJECT libs like the sibling transport tests.
+    agentty_add_full_test(codex_responses_test)
+
     # ollama_transport_test — verifies the DEDICATED Ollama /api/chat
     # transport: native build_messages (object-form tool args + role:tool
     # results + images), NDJSON parse (structured tool_calls, plain text,
@@ -2078,6 +2090,7 @@ if(AGENTTY_BUILD_TESTS)
         scheduler_path_test
         table_render_test
         openai_transport_test
+        codex_responses_test
         ollama_transport_test
         rag_adapter_test
         reveal_freeze_gate_probe

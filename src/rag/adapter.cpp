@@ -123,8 +123,10 @@ Config Config::from_env() {
     c.prf         = truthy_default_on("AGENTTY_RAG_PRF");
     c.corrective  = truthy_default_on("AGENTTY_RAG_CORRECT");
     c.graph       = truthy_default_on("AGENTTY_RAG_GRAPH");
-    c.expand      = truthy_default_on("AGENTTY_RAG_EXPAND");
-    c.hyde        = truthy_default_on("AGENTTY_RAG_HYDE");
+    // Generative query expansion has a measurable latency cost even when its
+    // model is local. It is an explicit power-mode, not a tax on every turn.
+    c.expand      = truthy_default_off("AGENTTY_RAG_EXPAND");
+    c.hyde        = truthy_default_off("AGENTTY_RAG_HYDE");
     if (const char* g = std::getenv("AGENTTY_RAG_GEN_MODEL"); g && g[0]) c.gen_model = g;
     c.persist     = truthy_default_on("AGENTTY_RAG_PERSIST");
     c.trace       = truthy_default_off("AGENTTY_RAG_TRACE");

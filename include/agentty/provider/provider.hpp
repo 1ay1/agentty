@@ -9,6 +9,7 @@
 
 #include <concepts>
 #include <functional>
+#include <string_view>
 #include <string>
 #include <utility>
 #include <vector>
@@ -89,6 +90,12 @@ struct Request {
     // effort_wire_for). The Anthropic transport, when this is non-empty,
     // additionally enables adaptive thinking. Other transports ignore it.
     std::string effort;
+
+    // Stable host-conversation identity. Providers with native server-side
+    // threads (notably Codex app-server) use this to retain the provider
+    // thread instead of serialising the entire transcript into every prompt.
+    // Empty means the caller has no durable conversation identity.
+    std::string session_key;
 };
 
 using EventSink = std::function<void(Msg)>;

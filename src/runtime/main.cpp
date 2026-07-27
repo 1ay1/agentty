@@ -52,6 +52,7 @@
 #include "agentty/mcp/serve.hpp"
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
+#include "agentty/provider/codex_cli/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/selection.hpp"
@@ -114,7 +115,7 @@ void print_usage() {
         "                             minimal (also prompt reads),\n"
         "                             write   (never prompt reads).\n"
         "      --provider P    LLM backend. anthropic (default, OAuth/Pro/Max)\n"
-        "                      or an OpenAI-compatible one: openai | groq |\n"
+        "                      or an OpenAI-compatible one: openai | codex | groq |\n"
         "                      openrouter | together | cerebras | ollama |\n"
         "                      llama.cpp, or a raw host[:port] for any other\n"
         "                      OpenAI-compatible server. Reads OPENAI_API_KEY\n"
@@ -122,6 +123,9 @@ void print_usage() {
         "                      the key; local backends need no key. Persisted\n"
         "                      like -m. (Switch live in-app with Ctrl-P \xe2\x80\x94 the\n"
         "                      picker has a \"Custom host\xe2\x80\xa6\" entry too.)\n"
+        "                      codex-cli uses your installed Codex CLI and its\n"
+        "                      ChatGPT login (`codex login`) and runs Codex\n"
+        "                      with your normal CLI permissions.\n"
         "  -V, --version       Print the agentty version and exit.\n"
         "      --auth-header N Auth header NAME for OpenAI-compatible backends\n"
         "                      whose gateway doesn't accept `Authorization:\n"
@@ -381,6 +385,7 @@ int main(int argc, char** argv) {
     // Both providers live on main's stack so whichever the install lambda
     // captures by reference outlives maya::run / the ACP serve loop.
     provider::anthropic::AnthropicProvider anthropic_provider;
+    provider::codex_cli::CodexCliProvider codex_cli_provider;
     io::FsStore                            store;
 
     // The seam: a single std::function the runtime calls. It dispatches on
@@ -391,15 +396,17 @@ int main(int argc, char** argv) {
     // OpenAI-family switch we rebuild the per-call endpoint from the active
     // selection so a host/path/tls change takes effect immediately.
     std::function<void(provider::Request, provider::EventSink)> stream_fn =
-        [&anthropic_provider]
+        [&anthropic_provider, &codex_cli_provider]
         (provider::Request req, provider::EventSink sink) {
             const auto& sel = provider::active();
             if (sel.kind == provider::Kind::OpenAI) {
+                if (sel.openai_endpoint.label == "codex-cli") {
+                    codex_cli_provider.stream(std::move(req), std::move(sink));
                 // Ollama speaks its own native /api/chat dialect — route it to
                 // the dedicated provider (structured tool_calls, keep_alive,
                 // num_predict). Every other OpenAI-family backend uses the
                 // compat /v1/chat/completions transport.
-                if (sel.openai_endpoint.native_api) {
+                } else if (sel.openai_endpoint.native_api) {
                     provider::ollama::OllamaProvider p{sel.openai_endpoint};
                     p.stream(std::move(req), std::move(sink));
                 } else {
