@@ -19,6 +19,7 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/provider/codex_cli/responses.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/auth.hpp"
@@ -395,6 +396,18 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                     .provider_label = std::string{preset.label},
                 };
                 return done(std::move(m));
+            }
+
+            // codex-cli authenticates via native ChatGPT OAuth, not an API
+            // key. If no ChatGPT credential is saved yet, launch the same
+            // loopback login the modal's option 3 runs instead of switching
+            // to a provider that would 401 on the first turn — first-class
+            // parity with the Anthropic OAuth prompt. codex_login_done then
+            // commits the switch to codex-cli on success.
+            if (spec == "codex-cli"
+                && !provider::codex_cli::responses_available()) {
+                m.ui.login = ui::login::ChatGptWaiting{};
+                return {std::move(m), cmd::codex_login_async()};
             }
 
             // Every entry point funnels the actual switch through the ONE

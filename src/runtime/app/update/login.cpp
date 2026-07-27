@@ -90,6 +90,16 @@ Step login_pick_method(Model m, char32_t key) {
         m.ui.login = login::ApiKeyInput{};
         return done(std::move(m));
     }
+    if (key == U'3') {
+        // Native ChatGPT (Codex) login — the loopback-callback flow. Open
+        // the browser and run the whole handshake off-thread; the modal
+        // sits in ChatGptWaiting until CodexLoginDone lands. No PKCE/state
+        // wiring here: codex_login() owns the full flow (mints its own
+        // verifier, runs the port-1455 server, exchanges, mints the api
+        // key, persists) so this reducer stays a thin launcher.
+        m.ui.login = login::ChatGptWaiting{};
+        return {std::move(m), cmd::codex_login_async()};
+    }
     return done(std::move(m));
 }
 
@@ -325,6 +335,30 @@ Step login_exchanged(Model m, auth::TokenResult result) {
     return done(std::move(m));
 }
 
+Step login_codex_done(
+    Model m,
+    std::expected<provider::codex_cli::CodexCredentials, auth::OAuthError> result)
+{
+    // Only act while the ChatGPT flow is actually in flight — a stray late
+    // arrival after the user Esc'd out (modal closed / moved on) is dropped.
+    if (!std::holds_alternative<login::ChatGptWaiting>(m.ui.login))
+        return done(std::move(m));
+    if (!result) {
+        m.ui.login = login::Failed{result.error().render()};
+        return done(std::move(m));
+    }
+    // codex_login() already persisted the credential to its own encrypted
+    // store; the codex provider reads that store directly, so no auth header
+    // needs installing here. Just live-switch the active backend to codex-cli
+    // (through the ONE shared switch path: provider::select + per-provider
+    // model recall + settings persist + model refetch) and close the modal.
+    m.ui.login = login::Closed{};
+    m.s.status = "signed in to ChatGPT";
+    m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    return commit_provider_switch(std::move(m), "codex-cli",
+                                  auth::AuthHeader{}, "ChatGPT (Codex)");
+}
+
 Step token_refreshed(Model m, auth::TokenResult result) {
     // Background-refresh result. Distinct from login_exchanged: this
     // path was kicked off either by `init()` (stale-but-refreshable
@@ -455,6 +489,7 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](LoginCopyAuthUrl)       -> Step { return login_copy_auth_url(std::move(m)); },
         [&](LoginOpenBrowserAgain)  -> Step { return login_open_browser_again(std::move(m)); },
         [&](LoginExchanged& e)      -> Step { return login_exchanged(std::move(m), std::move(e.result)); },
+        [&](CodexLoginDone& e)      -> Step { return login_codex_done(std::move(m), std::move(e.result)); },
         [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
     }, lm);
 }

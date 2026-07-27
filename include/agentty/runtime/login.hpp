@@ -41,6 +41,15 @@ struct OAuthCode {
 
 struct OAuthExchanging {};
 
+// Native ChatGPT (Codex) login is in flight. The browser is open and the
+// loopback callback server (port 1455) is waiting for the redirect; this
+// state shows a "waiting for the browser…" panel. No user input is needed
+// — codex_login() drives the whole handshake and lands CodexLoginDone. Esc
+// aborts (the task is best-effort abandoned; the timeout bounds it).
+struct ChatGptWaiting {
+    std::string authorize_url;   // shown as a copy/open-again fallback
+};
+
 struct ApiKeyInput {
     std::string key_input;
     int         cursor = 0;
@@ -68,7 +77,8 @@ struct Failed {
 };
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
-                           ApiKeyInput, CustomHostInput, Failed>;
+                           ChatGptWaiting, ApiKeyInput, CustomHostInput,
+                           Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {
     return !std::holds_alternative<Closed>(s);

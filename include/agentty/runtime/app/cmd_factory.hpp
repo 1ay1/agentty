@@ -131,6 +131,12 @@ struct LoopBreak {
 // gated on the network round trip.
 [[nodiscard]] maya::Cmd<Msg> refresh_oauth(std::string refresh_token);
 
+// Kick the native ChatGPT (Codex) OAuth login off the UI thread. Runs the
+// full loopback-callback handshake (open browser → wait on port 1455 →
+// exchange → mint api key → persist) and dispatches CodexLoginDone with the
+// minted credential or a typed OAuthError.
+[[nodiscard]] maya::Cmd<Msg> codex_login_async();
+
 // Walk ~/.agentty/threads/ and parse every thread JSON off the UI thread.
 // Dispatches `ThreadsLoaded{vec}` on completion. The directory walk +
 // parse can take seconds with hundreds of multi-MB files in real-world

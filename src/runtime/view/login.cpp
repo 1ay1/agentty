@@ -188,6 +188,12 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
                      body_text("use your Claude Pro / Max subscription",
                                fg_dim(muted))).build());
     rows.push_back(text(""));
+    rows.push_back(h(text("3) ", fg_bold(highlight)),
+                     text("Sign in with ChatGPT", fg_bold(fg))).build());
+    rows.push_back(h(text("   ", fg_of(fg)),
+                     body_text("use your ChatGPT Plus / Pro (GPT-5 Codex)",
+                               fg_dim(muted))).build());
+    rows.push_back(text(""));
     // Other backends (OpenAI, Groq, OpenRouter, Ollama, …) authenticate via
     // an env var, not this modal. Point first-run users who don't have a
     // Claude account at the provider picker so they're never stuck here.
@@ -196,7 +202,7 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
         "Press Esc, then Ctrl-P to pick it — you can paste its key right there.",
         fg_dim(muted)));
     rows.push_back(text(""));
-    rows.push_back(key_hints({{"1/2", "choose"}, {"Esc", "close"}}));
+    rows.push_back(key_hints({{"1/2/3", "choose"}, {"Esc", "close"}}));
     return v(std::move(rows)).build();
 }
 
@@ -242,6 +248,27 @@ Element panel_oauth_exchanging() {
         "Talking to platform.claude.com — this should take a second.",
         fg_dim(muted)));
     rows.push_back(text(""));
+    rows.push_back(key_hints({{"Esc", "cancel"}}));
+    return v(std::move(rows)).build();
+}
+
+Element panel_chatgpt_waiting(const login::ChatGptWaiting& s) {
+    std::vector<Element> rows;
+    rows.push_back(text("Waiting for ChatGPT\xE2\x80\xA6", fg_bold(fg)));   // …
+    rows.push_back(text(""));
+    rows.push_back(body_text(
+        "A browser tab has opened at chatgpt.com \xE2\x80\x94 authorize agentty "
+        "there. The sign-in completes automatically over a local callback "
+        "(http://localhost:1455); you don't need to paste anything.",
+        fg_dim(muted)));
+    rows.push_back(text(""));
+    if (!s.authorize_url.empty()) {
+        rows.push_back(body_text(
+            "Browser didn't open? Visit this URL manually:", fg_dim(muted)));
+        rows.push_back(text(""));
+        rows.push_back(url_panel(s.authorize_url));
+        rows.push_back(text(""));
+    }
     rows.push_back(key_hints({{"Esc", "cancel"}}));
     return v(std::move(rows)).build();
 }
@@ -311,6 +338,8 @@ Element login_modal(const Model& m) {
             return panel_oauth_code(s);
         } else if constexpr (std::same_as<T, login::OAuthExchanging>) {
             return panel_oauth_exchanging();
+        } else if constexpr (std::same_as<T, login::ChatGptWaiting>) {
+            return panel_chatgpt_waiting(s);
         } else if constexpr (std::same_as<T, login::ApiKeyInput>) {
             return panel_api_key(s);
         } else if constexpr (std::same_as<T, login::CustomHostInput>) {

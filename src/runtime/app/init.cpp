@@ -4,6 +4,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/codex_cli/responses.hpp"
 
 #include <vector>
 
@@ -115,6 +116,18 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     if (auth::is_empty(deps().auth)
         && provider::active().kind == provider::Kind::Anthropic)
         m.ui.login = ui::login::Picking{};
+
+    // Codex (ChatGPT) is a first-class provider too: if it's the active
+    // backend and no ChatGPT credential is saved, land the user directly on
+    // the sign-in modal — exactly like Anthropic — rather than failing on the
+    // first send. The modal's option 3 runs the native loopback OAuth.
+    {
+        const auto& sel = provider::active();
+        const bool codex_active = sel.kind == provider::Kind::OpenAI
+            && sel.openai_endpoint.label == "codex-cli";
+        if (codex_active && !provider::codex_cli::responses_available())
+            m.ui.login = ui::login::Picking{};
+    }
 
     std::vector<maya::Cmd<Msg>> cmds;
     cmds.push_back(cmd::load_threads_async());
