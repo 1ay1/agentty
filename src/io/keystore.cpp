@@ -57,7 +57,9 @@ bool env_enabled() {
 // Can we invoke `<exe> <probe-arg>` at all? Used to detect secret-tool /
 // security presence without a PATH walk. Exit status is irrelevant — a
 // clean spawn (started==true) means the binary exists.
-bool can_invoke(const std::vector<std::string>& argv) {
+// [[maybe_unused]]: the Windows backend is WinCred unconditionally and never
+// probes an external binary, so this is dead there.
+[[maybe_unused]] bool can_invoke(const std::vector<std::string>& argv) {
     auto r = run_argv_s(argv, 4096, std::chrono::seconds{5});
     return r.started;
 }

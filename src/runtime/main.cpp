@@ -24,6 +24,8 @@
 #  endif
 #  include <windows.h>
 #  include <mmsystem.h>          // timeBeginPeriod / timeEndPeriod
+#  include <io.h>               // _setmode
+#  include <fcntl.h>            // _O_BINARY
 #  if defined(_MSC_VER)
 //   MSVC consumes the pragma and links winmm.lib automatically. GCC
 //   ignores it with a warning — we link winmm via target_link_libraries
@@ -489,6 +491,13 @@ int main(int argc, char** argv) {
         // would impose. Ensure any buffered C++ stream output is flushed first
         // so it can't interleave with the raw fd writes.
         std::cout.flush();
+#if defined(_WIN32)
+        // On Windows fds 0/1 default to TEXT mode, which would translate every
+        // '\n' the JSON-RPC framing emits into "\r\n" and mangle the wire.
+        // Force BINARY so FdTransport's read(2)/write(2) see exact bytes.
+        _setmode(_fileno(stdin),  _O_BINARY);
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
         ::acp::FdTransport transport = ::acp::FdTransport::process();
         agentty::acp::AgentServer server(
             transport,

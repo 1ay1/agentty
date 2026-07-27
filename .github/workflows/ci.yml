@@ -184,3 +184,47 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static
           cmake --build build --config Release -j
 
+  # MinGW / MSYS2 ucrt64 gate. This is the toolchain real Windows users build
+  # under, and CRUCIALLY it is the ONLY Windows path that actually COMPILES the
+  # rag-cpp retrieval engine and the acp-cpp FdTransport (both are gated OFF on
+  # MSVC). A POSIX-ism leaking into those — e.g. rag-cpp's store fsync/kill, or
+  # acp-cpp's stdio writev — is invisible to the MSVC gate above and only shows
+  # up here. Compile-only; the CPU retrieval path is exercised, no GPU backend.
+  windows-mingw:
+    name: windows compile (msys2 ucrt64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-nghttp2
+            git
+      - name: Configure + build (compile only)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF
+          cmake --build build -j
+
