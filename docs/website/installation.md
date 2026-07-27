@@ -84,7 +84,7 @@ The one-line installer above ships prebuilt binaries for both Apple Silicon (`ar
 {{installOneLiner}}
 ```
 
-Homebrew (once the tap lands):
+Homebrew (macOS & Linux):
 
 ```bash
 brew tap 1ay1/tap
@@ -100,7 +100,7 @@ The fastest way — one line in PowerShell:
 {{installOneLinerWindows}}
 ```
 
-Downloads `agentty.exe`, verifies its SHA256, installs to `%LOCALAPPDATA%\agentty`, and adds it to your user `PATH`. Or use a package manager (no SmartScreen prompt):
+Downloads `agentty.exe`, verifies its SHA256, installs to `%LOCALAPPDATA%\agentty`, and adds it to your user `PATH`. Or use a package manager (no SmartScreen prompt) — both install **per-user, with no admin/UAC prompt**:
 
 ```bash
 winget install agentty
@@ -108,6 +108,8 @@ winget install agentty
 scoop bucket add 1ay1 https://github.com/1ay1/scoop-bucket
 scoop install agentty
 ```
+
+Prefer the MSI? Download `agentty-windows-x86_64.msi` from the [latest release](https://github.com/1ay1/agentty/releases/latest) and double-click it — it installs **just for you** (`%LOCALAPPDATA%\Programs\agentty`), edits only your user `PATH`, and needs **no administrator rights**.
 
 Portable single `.exe` (no installer): `curl -L https://github.com/1ay1/agentty/releases/latest/download/agentty-windows-x86_64.exe -o agentty.exe`
 

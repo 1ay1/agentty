@@ -2,12 +2,17 @@
 <!--
   agentty Windows installer (WiX v4 / .NET wix tool).
 
-  Produces a per-machine MSI that:
-    • installs agentty.exe to "%ProgramFiles%\agentty\"
-    • adds that folder to the SYSTEM PATH (so `agentty` works in any shell)
-    • registers a proper Add/Remove Programs entry (icon, publisher, version,
+  Produces a PER-USER MSI that installs WITHOUT admin rights / UAC elevation:
+    • installs agentty.exe to "%LocalAppData%\Programs\agentty\"
+    • adds that folder to the USER PATH (HKCU) so `agentty` works in any shell
+    • registers a per-user Add/Remove Programs entry (icon, publisher, version,
       help/about links) with a working uninstall
     • carries an UpgradeCode so installing a newer MSI cleanly replaces the old
+
+  Per-user (Scope="perUser") is deliberate: a developer tool should install for
+  the current user with a double-click and no admin prompt. There is nothing
+  here that needs machine-wide privileges — the binary is self-contained and the
+  PATH edit is the user's own.
 
   Build:
     wix build packaging\windows\agentty.wxs ^
@@ -23,7 +28,7 @@
       Manufacturer="agentty"
       Version="$(var.Version)"
       UpgradeCode="6F3A2C18-9E4B-4D27-8A1E-7C5B2D0F9A41"
-      Scope="perMachine"
+      Scope="perUser"
       Compressed="yes">
 
     <SummaryInformation
@@ -55,8 +60,13 @@
       <ComponentGroupRef Id="agenttyComponents" />
     </Feature>
 
-    <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="agentty" />
+    <!-- Per-user install root: %LocalAppData%\Programs\agentty. This is the
+         standard location for per-user apps (same as VS Code, etc.) and needs
+         no elevation to write. -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="agentty" />
+      </Directory>
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder" />
@@ -70,7 +80,7 @@
               KeyPath="yes" />
       </Component>
 
-      <!-- Add the install dir to the SYSTEM PATH (per-machine). -->
+      <!-- Add the install dir to the USER PATH (HKCU) — no admin needed. -->
       <Component Id="agenttyPath" Guid="8C1F4A6E-5D2B-49C7-9F03-6B7E2A8D4C15">
         <Environment Id="UpdatePath"
                      Name="PATH"
@@ -78,8 +88,8 @@
                      Permanent="no"
                      Part="last"
                      Action="set"
-                     System="yes" />
-        <RegistryValue Root="HKLM"
+                     System="no" />
+        <RegistryValue Root="HKCU"
                        Key="Software\agentty"
                        Name="installed"
                        Type="integer"
