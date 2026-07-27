@@ -571,17 +571,19 @@ endif()
 # agentty carries its RAG engine with it and compiles ANYWHERE.
 set(AGENTTY_HAS_RAGCPP FALSE)
 if(MSVC)
-    # rag-cpp is not yet MSVC-portable: several TUs use POSIX headers
-    # (<unistd.h>, <sys/wait.h>) and GCC/Clang-only SIMD attributes
-    # (__attribute__((target("avx2")))). Rather than block every Windows
-    # package (scoop, winget) on a full Windows port, agentty degrades
-    # gracefully on MSVC: the retrieval adapter compiles to a no-op
-    # (AGENTTY_HAS_RAGCPP=0), search_docs/search_code return "retrieval
-    # unavailable on this platform", and every other feature works. The
-    # Linux/macOS release binaries carry the full engine. Track the Windows
-    # port upstream in rag-cpp; flip this on once it builds under MSVC.
+    # rag-cpp builds under MSYS2/mingw (its store layer's POSIX file-durability
+    # calls are shimmed by rag-cpp's include/rag/store/posix_compat.hpp), so the
+    # elseif branch below compiles it for the ucrt64/mingw Windows toolchain.
+    # MSVC is still gated OFF: several TUs rely on GCC/Clang-only SIMD
+    # attributes (__attribute__((target("avx2")))) that MSVC's frontend rejects
+    # outright. Rather than block the MSVC package builds (scoop, winget) on a
+    # full clang-cl port, agentty degrades gracefully there: the retrieval
+    # adapter compiles to a no-op (AGENTTY_HAS_RAGCPP=0), search_docs/
+    # search_code return "retrieval unavailable on this platform", and every
+    # other feature works. Linux/macOS/mingw binaries carry the full engine.
     message(STATUS "agentty: rag-cpp retrieval engine DISABLED on MSVC "
-                   "(not yet Windows-portable) — retrieval degrades to no-op.")
+                   "(GCC/Clang-only SIMD attrs) — retrieval degrades to no-op. "
+                   "mingw/ucrt64 builds it fine.")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     # Library only — no tests / bench / examples / CLI, and no RCP front-end
     # (that would FetchContent the RCP SDK; agentty drives the Engine in-proc).
