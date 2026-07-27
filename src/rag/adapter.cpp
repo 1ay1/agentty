@@ -15,6 +15,17 @@
 
 #include "agentty/rag/rag_adapter.hpp"
 
+// agentty's retrieval engine is rag-cpp. On platforms where rag-cpp isn't
+// buildable yet (MSVC — see CMakeLists.txt), AGENTTY_HAS_RAGCPP is 0 and this
+// TU compiles to a tiny no-op implementation of the public boundary so the
+// rest of agentty links and every non-retrieval feature works. The full engine
+// ships in the Linux/macOS binaries.
+#ifndef AGENTTY_HAS_RAGCPP
+#  define AGENTTY_HAS_RAGCPP 1
+#endif
+
+#if AGENTTY_HAS_RAGCPP
+
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -731,3 +742,66 @@ int run(const std::string& root) {
 } // namespace bench
 
 } // namespace agentty::rag
+
+#else  // !AGENTTY_HAS_RAGCPP  ─────────────────────────────────────────────
+
+// Retrieval unavailable on this platform (e.g. MSVC, until rag-cpp is
+// Windows-portable). Every public symbol from rag_adapter.hpp is defined here
+// as a no-op so agentty links and runs; search_docs/search_code surface a
+// clear "unavailable" message instead of crashing or returning stale data.
+
+#include <cstdio>
+#include <cstdlib>
+
+namespace agentty::rag {
+
+Config Config::from_env() {
+    // A default-constructed Config is fine; nothing reads it in the no-op build,
+    // but tests and callers may still construct one.
+    return Config{};
+}
+
+// Impl is empty — the header stores an opaque pointer we simply leave null.
+struct Retriever::Impl {};
+
+Retriever::Retriever() : impl_(nullptr) {}
+Retriever::~Retriever() { delete impl_; }
+
+void Retriever::set_generator(Generator /*g*/) {}
+
+static Retrieval unavailable_() {
+    Retrieval r;
+    r.mode  = "retrieval unavailable on this platform";
+    r.error = "retrieval engine (rag-cpp) is not built on this platform";
+    r.confidence = 0.0;
+    return r;
+}
+
+Retrieval Retriever::retrieve(const std::string& /*query*/, int /*k*/,
+                              bool /*skip_docs*/) {
+    return unavailable_();
+}
+
+Retrieval Retriever::retrieve_code(const std::string& /*query*/, int /*k*/) {
+    return unavailable_();
+}
+
+bool Retriever::warm() const { return true; }  // nothing to build → always warm
+void Retriever::warm_async() {}
+
+namespace feedback {
+void note_file_opened(const std::string& /*path*/) {}
+}  // namespace feedback
+
+namespace bench {
+int run(const std::string& /*root*/) {
+    std::fprintf(stderr,
+                 "rag-bench: the retrieval engine is not built on this "
+                 "platform (rag-cpp is not yet Windows-portable).\n");
+    return 2;
+}
+}  // namespace bench
+
+}  // namespace agentty::rag
+
+#endif  // AGENTTY_HAS_RAGCPP

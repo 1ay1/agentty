@@ -561,7 +561,19 @@ endif()
 # the rest of the app never sees a rag:: type. Built from source in-tree so
 # agentty carries its RAG engine with it and compiles ANYWHERE.
 set(AGENTTY_HAS_RAGCPP FALSE)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
+if(MSVC)
+    # rag-cpp is not yet MSVC-portable: several TUs use POSIX headers
+    # (<unistd.h>, <sys/wait.h>) and GCC/Clang-only SIMD attributes
+    # (__attribute__((target("avx2")))). Rather than block every Windows
+    # package (scoop, winget) on a full Windows port, agentty degrades
+    # gracefully on MSVC: the retrieval adapter compiles to a no-op
+    # (AGENTTY_HAS_RAGCPP=0), search_docs/search_code return "retrieval
+    # unavailable on this platform", and every other feature works. The
+    # Linux/macOS release binaries carry the full engine. Track the Windows
+    # port upstream in rag-cpp; flip this on once it builds under MSVC.
+    message(STATUS "agentty: rag-cpp retrieval engine DISABLED on MSVC "
+                   "(not yet Windows-portable) — retrieval degrades to no-op.")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     # Library only — no tests / bench / examples / CLI, and no RCP front-end
     # (that would FetchContent the RCP SDK; agentty drives the Engine in-proc).
     set(RAGCPP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
@@ -943,6 +955,9 @@ function(agentty_objlib name)
     # the target as an INTERFACE dep gives every objlib ragcpp's include dir.
     if(AGENTTY_HAS_RAGCPP)
         target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
+        target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=1)
+    else()
+        target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
     endif()
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
@@ -1422,6 +1437,9 @@ if(AGENTTY_BUILD_TESTS)
         # whose symbols resolve out of the ragcpp static lib.
         if(AGENTTY_HAS_RAGCPP)
             target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
+            target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=1)
+        else()
+            target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
         endif()
         # runtime_obj (mem.cpp) calls jet_trim() under AGENTTY_USE_JETALLOC, so
         # a test linking the shared object set must also link the allocator.
