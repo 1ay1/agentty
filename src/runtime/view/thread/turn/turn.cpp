@@ -1170,11 +1170,19 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         // that contributed three passages shows once. Cheap: one linear
         // scan of a bounded block.
         int n = 0;
-        // Distinct sources, in order, each paired with a one-line snippet of
-        // the passage text so the card shows WHAT was retrieved, not just a
-        // path. Snippet is taken from the first source that introduced the
-        // label; later duplicate chunks of the same file don't overwrite it.
-        std::vector<std::pair<std::string, std::string>> sources;  // label, snippet
+        // Per-distinct-source provenance, in first-seen order. We capture
+        // everything the block can tell us so the card reads like a real
+        // citation, not just a filename: the kind, the path, the FIRST line
+        // number it cited, how many passages (chunks) that same source
+        // contributed, and a preview of the first passage's text.
+        struct Src {
+            std::string kind;      // docs / skill / memory / mcp
+            std::string path;      // file path or record id (no :line)
+            std::string line;      // first cited line number ("" if none)
+            std::string snippet;   // preview of the first passage body
+            int         chunks{0}; // # passages from this same source
+        };
+        std::vector<Src> sources;
         // Per-kind passage tallies (docs/skill/memory/mcp/…) for a compact
         // "2 memory · 1 doc" breakdown on the meta line — in first-seen order.
         std::vector<std::pair<std::string, int>> kinds;
@@ -1189,7 +1197,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             std::size_t close = msg.text.find(']', open);
             if (close == std::string::npos) continue;
             std::string tag = msg.text.substr(open, close - open);
-            // Split "source:path:line" → "source" + "path" (drop trailing
+            // Split "source:path:line" → "source" + "path" (peel a trailing
             // ":line" if the last colon-field is all digits).
             std::size_t colon = tag.find(':');
             std::string src  = colon == std::string::npos
@@ -1197,19 +1205,20 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             std::string path = colon == std::string::npos
                                  ? tag : tag.substr(colon + 1);
             bump_kind(src);
+            std::string lineno;
             if (std::size_t lc = path.rfind(':'); lc != std::string::npos) {
                 std::string_view tail{path.data() + lc + 1,
                                       path.size() - lc - 1};
                 if (!tail.empty()
                     && std::all_of(tail.begin(), tail.end(),
-                                   [](unsigned char c){ return std::isdigit(c); }))
+                                   [](unsigned char c){ return std::isdigit(c); })) {
+                    lineno = std::string{tail};
                     path.resize(lc);
+                }
             }
-            std::string label = path.empty() ? src : (src + " · " + path);
 
             // Pull the first non-empty line of THIS passage's body as a
-            // preview. The body starts just after the header's closing
-            // "]\n" and runs to the next blank line / next "[" header.
+            // preview. Body starts just after the header's closing "]\n".
             std::string snippet;
             std::size_t body = msg.text.find('\n', close);
             if (body != std::string::npos) {
@@ -1218,11 +1227,10 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 std::string line = eol == std::string::npos
                     ? msg.text.substr(body)
                     : msg.text.substr(body, eol - body);
-                // Trim + collapse to a compact single-line preview.
                 std::size_t a = line.find_first_not_of(" \t");
                 if (a != std::string::npos) {
                     line.erase(0, a);
-                    constexpr std::size_t kSnip = 56;
+                    constexpr std::size_t kSnip = 60;
                     if (line.size() > kSnip) {
                         line.resize(kSnip);
                         line += "\xe2\x80\xa6";             // …
@@ -1231,9 +1239,17 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 }
             }
 
-            if (std::none_of(sources.begin(), sources.end(),
-                    [&](const auto& s){ return s.first == label; }))
-                sources.emplace_back(std::move(label), std::move(snippet));
+            // Merge into the distinct-source list: a file that contributed
+            // three chunks shows once, with chunks==3 and the first cited
+            // line / snippet retained.
+            auto it = std::find_if(sources.begin(), sources.end(),
+                [&](const Src& s){ return s.kind == src && s.path == path; });
+            if (it != sources.end()) {
+                ++it->chunks;
+            } else {
+                sources.push_back(Src{std::move(src), std::move(path),
+                                      std::move(lineno), std::move(snippet), 1});
+            }
         }
 
         cfg.glyph      = "\xf0\x9f\x93\x9a";          // 📚
@@ -1262,13 +1278,18 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             meta += " " + std::to_string(static_cast<int>(c * 100.0 + 0.5))
                   + "% " + word + "  \xc2\xb7  ";
         }
-        // By-kind breakdown ("2 memory · 1 doc"); falls back to a plain
-        // passage count if parsing found no headers.
+        // By-kind breakdown ("2 memory · 1 doc") answers what & how much;
+        // a trailing total ties it off. Falls back to a plain passage count
+        // if parsing found no headers.
         if (!kinds.empty()) {
             for (std::size_t i = 0; i < kinds.size(); ++i) {
                 if (i) meta += " \xc2\xb7 ";
                 meta += std::to_string(kinds[i].second) + " " + kinds[i].first;
             }
+            // If more than one kind contributed, spell out the grand total
+            // so the eye doesn't have to add columns.
+            if (kinds.size() > 1 && n > 0)
+                meta += "  (" + std::to_string(n) + " total)";
         } else {
             const int shown_n = n > 0 ? n : 1;
             meta += std::to_string(shown_n)
@@ -1277,45 +1298,51 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         cfg.meta = std::move(meta);
 
         // Body = pure provenance, one dense line per distinct source:
-        //   └ memory · 0357a6d8   “agentty now has a native ChatGPT path…”
-        // The kind+path is muted (path in code-reference cyan so it pops as
-        // actionable), the snippet trails in quotes so you see the CONTENT
-        // that grounded the answer without a second row. Capped so a wide
-        // multi-file hit can't dominate; overflow collapses to "… N more".
+        //   └ memory · 0357a6d8            “agentty now has a native…”
+        //   └ docs · RUST-CRITIQUE.md:42 ×3  “Where a Rust advocate…”
+        // kind is muted, path in code-reference cyan (the actionable
+        // anchor), ":line" appended when the citation carried one, and a
+        // "×N" chunk badge when one source contributed several passages.
+        // The snippet trails in quotes so you see the CONTENT that grounded
+        // the answer, all on ONE row. Capped; overflow → "… N more".
         {
             using namespace maya::dsl;
             constexpr std::size_t kMaxSources = 5;
             const std::size_t total = sources.size();
             for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
-                // sources[i].first is "src · path" (or just "src"); split on
-                // the first " · " so the path can take the cyan.
-                const std::string& s = sources[i].first;
-                std::string pre = s, path;
-                if (auto d = s.find(" \xc2\xb7 "); d != std::string::npos) {
-                    pre  = s.substr(0, d + 4);   // include " · " separator
-                    path = s.substr(d + 4);
-                }
-                if (!sources[i].second.empty()) {
+                const Src& s = sources[i];
+                std::string kindpart = s.kind + " \xc2\xb7 ";     // "docs · "
+                std::string pathpart = s.path.empty() ? s.kind : s.path;
+                if (!s.line.empty()) pathpart += ":" + s.line;
+                // "×N" badge only when this source contributed >1 passage.
+                std::string badge = s.chunks > 1
+                    ? "  \xc3\x97" + std::to_string(s.chunks) : std::string{};
+
+                if (!s.snippet.empty()) {
                     cfg.body.emplace_back(maya::Turn::BodySlot{
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
-                          text(pre,  fg_of(muted)),
-                          text(path, fg_of(code_path)),
+                          text(kindpart, fg_of(muted)),
+                          text(pathpart, fg_of(code_path)),
+                          text(badge,    fg_of(status_warn)),          // ×N
                           text("  \xe2\x80\x9c", fg_of(muted)),        // “
-                          text(sources[i].second, fg_of(muted)),
+                          text(s.snippet, fg_of(muted)),
                           text("\xe2\x80\x9d", fg_of(muted)))         // ”
                             .build()});
                 } else {
                     cfg.body.emplace_back(maya::Turn::BodySlot{
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
-                          text(pre,  fg_of(muted)),
-                          text(path, fg_of(code_path)))
+                          text(kindpart, fg_of(muted)),
+                          text(pathpart, fg_of(code_path)),
+                          text(badge,    fg_of(status_warn)))          // ×N
                             .build()});
                 }
             }
             if (total > kMaxSources) {
                 cfg.body.emplace_back(maya::Turn::PlainText{
                     .content = "  \xe2\x80\xa6 "                       // …
-                        + std::to_string(total - kMaxSources) + " more",
+                        + std::to_string(total - kMaxSources)
+                        + " more source"
+                        + (total - kMaxSources == 1 ? "" : "s"),
                     .color   = muted});
             }
         }
