@@ -475,11 +475,23 @@ std::string active_provider_id() {
 }
 
 std::string model_for_provider(std::string_view spec) {
+    const bool is_chatgpt =
+        spec == "codex" || spec == "chatgpt" || spec == "codex-cli";
+
     // 1) Recall the model the user last used on this provider.
     auto s = deps().load_settings();
     if (auto it = s.provider_models.find(std::string{spec});
-        it != s.provider_models.end() && !it->second.empty())
-        return it->second;
+        it != s.provider_models.end() && !it->second.empty()) {
+        // ChatGPT's line-up is server-driven and changes over time: a slug the
+        // account no longer offers (e.g. the retired `gpt-5.1-codex`) is
+        // rejected on the very first turn. Only honour a recalled ChatGPT slug
+        // if the LIVE catalog still lists it; otherwise fall through to the
+        // account's current default so we never restore a dead model.
+        if (!is_chatgpt) return it->second;
+        for (const auto& mi : provider::chatgpt::list_models())
+            if (mi.id.value == it->second) return it->second;
+        // recalled slug is stale — drop through to default_model() below.
+    }
 
     // 2) No recall — fall back to a sane built-in default per provider.
     //    Local backends (Ollama) have no fixed default; return empty so the
@@ -492,7 +504,7 @@ std::string model_for_provider(std::string_view spec) {
     // instead of baking in a slug the account may not offer. If the catalog
     // can't be reached yet, return empty and let the ModelsLoaded refetch
     // auto-select the first available model (same as the Ollama path).
-    if (spec == "codex" || spec == "chatgpt" || spec == "codex-cli") {
+    if (is_chatgpt) {
         auto def = provider::chatgpt::default_model();
         return def;   // may be a real slug (catalog) or a safe "gpt-5" fallback
     }
