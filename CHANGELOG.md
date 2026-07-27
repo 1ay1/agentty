@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-07-27
+
 ### Fixed
 - **Windows: the MSI now installs per-user with no admin / UAC prompt.** The installer was `perMachine` — it wrote to `%ProgramFiles%` and the *system* `PATH`, so a plain double-click hit a UAC elevation wall. It's now `perUser`: agentty installs to `%LocalAppData%\Programs\agentty`, edits only *your* `PATH`, and registers a per-user Add/Remove-Programs entry — nothing needs administrator rights (the binary is self-contained; the PATH edit is yours). The winget manifest declares `Scope: user` to match, so `winget install agentty` never tries to elevate either.
 - **Windows builds again (and the whole release is green on all six targets).** The rag-cpp retrieval engine and the jetalloc allocator aren't yet MSVC-portable (POSIX headers, GCC-only SIMD attributes, C11 `<stdatomic.h>`); rather than block every Windows package, agentty degrades gracefully on MSVC — CMake skips both and the retrieval adapter compiles a no-op fallback, so the Windows binary ships with every non-retrieval feature working. The musl/Alpine build was also fixed (jetalloc's rseq layer now gates on `__GLIBC__`), and the macOS standalone build no longer dies configuring rag-cpp's Metal backend (forced off — agentty's retrieval is CPU-only).
