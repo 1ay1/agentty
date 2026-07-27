@@ -16,6 +16,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/codex_cli/provider.hpp"
+#include "agentty/provider/codex_cli/codex_oauth.hpp"
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/ollama/transport.hpp"
 #include "agentty/provider/selection.hpp"
@@ -1249,6 +1250,30 @@ Cmd<Msg> load_thread_async(ThreadId id) {
                 dispatch(ThreadLoaded{Thread{}});
             }
         });
+}
+
+Cmd<Msg> codex_login_async() {
+    // task_isolated: codex_login() BLOCKS for up to its timeout on the
+    // loopback callback server (accept() on port 1455 waiting for the
+    // browser redirect) and opens the browser via posix_spawn/ShellExecute
+    // — both must be off the shared worker pool so a slow sign-in can't
+    // starve stream/tool tasks. It runs the whole handshake (build URL →
+    // open browser → wait → exchange → mint api key → persist) and returns
+    // the credential or a typed OAuthError; the reducer takes it from there.
+    return Cmd<Msg>::task_isolated([](std::function<void(Msg)> dispatch) {
+        try {
+            auto r = provider::codex_cli::codex_login();
+            dispatch(CodexLoginDone{std::move(r)});
+        } catch (const std::exception& e) {
+            dispatch(CodexLoginDone{std::unexpected(auth::OAuthError{
+                auth::OAuthErrorKind::Network,
+                std::string{"ChatGPT login threw: "} + e.what()})});
+        } catch (...) {
+            dispatch(CodexLoginDone{std::unexpected(auth::OAuthError{
+                auth::OAuthErrorKind::Network,
+                "ChatGPT login threw: unknown exception"})});
+        }
+    });
 }
 
 Cmd<Msg> refresh_oauth(std::string refresh_token) {

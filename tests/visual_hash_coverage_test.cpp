@@ -249,6 +249,9 @@ const std::vector<Axis>& visual_axes() {
         {"login modal opens", [](Model& m) {
             m.ui.login = agentty::ui::login::Picking{};
         }},
+        {"login chatgpt waiting", [](Model& m) {
+            m.ui.login = agentty::ui::login::ChatGptWaiting{};
+        }},
     };
     return axes;
 }

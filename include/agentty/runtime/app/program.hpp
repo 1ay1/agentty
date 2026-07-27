@@ -137,7 +137,7 @@ struct AgenttyApp {
         // (caret-blink parity, status text) happens to flip ~265 ms later.
         // Symptom: "press 4-5 times, registers once."
         //
-        // variant::index() captures Closed-vs-Open (and login's six
+        // variant::index() captures Closed-vs-Open (and login's
         // sub-states); the OpenAt index / palette query+index capture the
         // cursor movement within an open picker.
         mix(static_cast<std::uint64_t>(m.ui.model_picker.index()));
