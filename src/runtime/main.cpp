@@ -52,7 +52,7 @@
 #include "agentty/mcp/serve.hpp"
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
-#include "agentty/provider/codex_cli/provider.hpp"
+#include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/selection.hpp"
@@ -123,7 +123,7 @@ void print_usage() {
         "                      the key; local backends need no key. Persisted\n"
         "                      like -m. (Switch live in-app with Ctrl-P \xe2\x80\x94 the\n"
         "                      picker has a \"Custom host\xe2\x80\xa6\" entry too.)\n"
-        "                      codex-cli talks to ChatGPT natively via the\n"
+        "                      chatgpt talks to ChatGPT natively via the\n"
         "                      reverse-engineered OAuth login (`agentty login`\n"
         "                      \xe2\x86\x92 ChatGPT); no Codex binary is needed.\n"
         "  -V, --version       Print the agentty version and exit.\n"
@@ -385,7 +385,7 @@ int main(int argc, char** argv) {
     // Both providers live on main's stack so whichever the install lambda
     // captures by reference outlives maya::run / the ACP serve loop.
     provider::anthropic::AnthropicProvider anthropic_provider;
-    provider::codex_cli::CodexCliProvider codex_cli_provider;
+    provider::chatgpt::ChatGptProvider chatgpt_provider;
     io::FsStore                            store;
 
     // The seam: a single std::function the runtime calls. It dispatches on
@@ -396,12 +396,12 @@ int main(int argc, char** argv) {
     // OpenAI-family switch we rebuild the per-call endpoint from the active
     // selection so a host/path/tls change takes effect immediately.
     std::function<void(provider::Request, provider::EventSink)> stream_fn =
-        [&anthropic_provider, &codex_cli_provider]
+        [&anthropic_provider, &chatgpt_provider]
         (provider::Request req, provider::EventSink sink) {
             const auto& sel = provider::active();
             if (sel.kind == provider::Kind::OpenAI) {
-                if (sel.openai_endpoint.label == "codex-cli") {
-                    codex_cli_provider.stream(std::move(req), std::move(sink));
+                if (sel.openai_endpoint.label == "chatgpt") {
+                    chatgpt_provider.stream(std::move(req), std::move(sink));
                 // Ollama speaks its own native /api/chat dialect — route it to
                 // the dedicated provider (structured tool_calls, keep_alive,
                 // num_predict). Every other OpenAI-family backend uses the

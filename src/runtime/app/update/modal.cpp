@@ -16,7 +16,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/helpers.hpp"
-#include "agentty/provider/codex_cli/provider.hpp"
+#include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
@@ -492,8 +492,8 @@ std::string model_for_provider(std::string_view spec) {
     // instead of baking in a slug the account may not offer. If the catalog
     // can't be reached yet, return empty and let the ModelsLoaded refetch
     // auto-select the first available model (same as the Ollama path).
-    if (spec == "codex" || spec == "codex-cli") {
-        auto def = provider::codex_cli::default_model();
+    if (spec == "codex" || spec == "chatgpt" || spec == "codex-cli") {
+        auto def = provider::chatgpt::default_model();
         return def;   // may be a real slug (catalog) or a safe "gpt-5" fallback
     }
     return {};
@@ -568,9 +568,9 @@ commit_provider_switch(Model m, std::string_view spec,
     //     bogus chip and get silently dropped only at request time. When the
     //     new model isn't known yet (local, empty id) this is a no-op until
     //     ModelsLoaded, which is fine — the wire path re-clamps regardless.
-    const bool codex_cli = provider::active().kind == provider::Kind::OpenAI
-        && provider::active().openai_endpoint.label == "codex-cli";
-    if (!codex_cli) {
+    const bool chatgpt = provider::active().kind == provider::Kind::OpenAI
+        && provider::active().openai_endpoint.label == "chatgpt";
+    if (!chatgpt) {
         m.d.effort = clamp_effort(
             m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
     }

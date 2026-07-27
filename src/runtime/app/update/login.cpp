@@ -337,7 +337,7 @@ Step login_exchanged(Model m, auth::TokenResult result) {
 
 Step login_codex_done(
     Model m,
-    std::expected<provider::codex_cli::CodexCredentials, auth::OAuthError> result)
+    std::expected<provider::chatgpt::CodexCredentials, auth::OAuthError> result)
 {
     // Only act while the ChatGPT flow is actually in flight — a stray late
     // arrival after the user Esc'd out (modal closed / moved on) is dropped.
@@ -348,15 +348,16 @@ Step login_codex_done(
         return done(std::move(m));
     }
     // codex_login() already persisted the credential to its own encrypted
-    // store; the codex provider reads that store directly, so no auth header
-    // needs installing here. Just live-switch the active backend to codex-cli
-    // (through the ONE shared switch path: provider::select + per-provider
-    // model recall + settings persist + model refetch) and close the modal.
+    // store; the ChatGPT provider reads that store directly, so no auth header
+    // needs installing here. Just live-switch the active backend to the
+    // "chatgpt" provider (through the ONE shared switch path: provider::select
+    // + per-provider model recall + settings persist + model refetch) and
+    // close the modal.
     m.ui.login = login::Closed{};
     m.s.status = "signed in to ChatGPT";
     m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
-    return commit_provider_switch(std::move(m), "codex-cli",
-                                  auth::AuthHeader{}, "ChatGPT (Codex)");
+    return commit_provider_switch(std::move(m), "chatgpt",
+                                  auth::AuthHeader{}, "ChatGPT");
 }
 
 Step token_refreshed(Model m, auth::TokenResult result) {

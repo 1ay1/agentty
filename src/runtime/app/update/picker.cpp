@@ -19,7 +19,7 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
-#include "agentty/provider/codex_cli/responses.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/auth.hpp"
@@ -53,10 +53,10 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
     return out;
 }
 
-[[nodiscard]] bool is_codex_cli_active() {
+[[nodiscard]] bool is_chatgpt_active() {
     const auto sel = provider::active();
     return sel.kind == provider::Kind::OpenAI
-        && sel.openai_endpoint.label == "codex-cli";
+        && sel.openai_endpoint.label == "chatgpt";
 }
 
 // Codex exposes a reasoning ladder through its live model catalogue. Agentty
@@ -115,7 +115,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 // rode over from the previous provider — clamp it so the picker
                 // chip and the wire agree (commit_provider_switch couldn't do
                 // this yet: the model id was empty until this refetch landed).
-                if (!is_codex_cli_active()) {
+                if (!is_chatgpt_active()) {
                     m.d.effort = clamp_effort(
                         m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
                 }
@@ -231,7 +231,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // supports — picking a non-reasoning (or lower-ceiling)
                     // model while effort=Xhigh must not leave a stale chip that
                     // the wire silently drops.
-                    if (!is_codex_cli_active()) {
+                    if (!is_chatgpt_active()) {
                         m.d.effort = clamp_effort(
                             m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
                     }
@@ -269,7 +269,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 const auto vis = model_filtered(m.d.available_models, p->query);
                 if (!vis.empty() && p->index >= 0
                     && p->index < static_cast<int>(vis.size())) {
-                    if (is_codex_cli_active()) {
+                    if (is_chatgpt_active()) {
                         m.d.effort = cycle_codex_effort(m.d.effort, e.delta);
                     } else {
                         const auto caps = ModelCapabilities::from_id(
@@ -404,8 +404,8 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // to a provider that would 401 on the first turn — first-class
             // parity with the Anthropic OAuth prompt. codex_login_done then
             // commits the switch to codex-cli on success.
-            if (spec == "codex-cli"
-                && !provider::codex_cli::responses_available()) {
+            if ((spec == "chatgpt" || spec == "codex-cli")
+                && !provider::chatgpt::responses_available()) {
                 m.ui.login = ui::login::ChatGptWaiting{};
                 return {std::move(m), cmd::codex_login_async()};
             }

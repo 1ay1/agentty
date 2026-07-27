@@ -3,7 +3,7 @@
 // OAuth config lives with the provider it belongs to; `using` lets the
 // existing OAuthConfig:: references below stay short.
 #include "agentty/provider/anthropic/oauth.hpp"
-#include "agentty/provider/codex_cli/codex_oauth.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -874,7 +874,7 @@ int cmd_login() {
     // obvious — pick a different option to add/replace, `agentty logout`
     // to drop one.
     {
-        namespace codex = provider::codex_cli;
+        namespace codex = provider::chatgpt;
         bool any = false;
         std::error_code ec;
         if (fs::exists(credentials_path(), ec)) {
@@ -903,14 +903,14 @@ int cmd_login() {
         std::cout << "\nOpening browser to sign in to ChatGPT…\n"
                   << "(a local page on http://localhost:1455 will confirm)\n\n"
                   << std::flush;
-        auto r = provider::codex_cli::codex_login();
+        auto r = provider::chatgpt::codex_login();
         if (!r) {
             std::cerr << "ChatGPT sign-in failed: " << r.error().render() << "\n";
             return 1;
         }
         std::cout << "\n\xE2\x9C\x93 Signed in to ChatGPT. Saved to "
-                  << provider::codex_cli::codex_credentials_path().string() << "\n"
-                  << "  Run agentty with `--provider codex-cli` to use it.\n";
+                  << provider::chatgpt::codex_credentials_path().string() << "\n"
+                  << "  Run agentty with `--provider chatgpt` to use it.\n";
         return 0;
     }
 
@@ -969,7 +969,7 @@ int cmd_login() {
 }
 
 int cmd_logout() {
-    namespace codex = provider::codex_cli;
+    namespace codex = provider::chatgpt;
     auto p = credentials_path();
     std::error_code ec;
     const bool have_anthropic = fs::exists(p, ec);
@@ -1078,7 +1078,7 @@ int cmd_status() {
 
     // ── ChatGPT / Codex OAuth (separate store) ──────────────────────────
     {
-        namespace codex = provider::codex_cli;
+        namespace codex = provider::chatgpt;
         std::cout << "\nChatGPT (Codex) file: "
                   << codex::codex_credentials_path().string() << "\n";
         if (auto cc = codex::load_codex_credentials()) {

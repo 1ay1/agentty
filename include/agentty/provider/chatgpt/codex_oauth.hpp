@@ -1,5 +1,5 @@
 #pragma once
-// agentty::provider::codex_cli — native ChatGPT (Codex) OAuth.
+// agentty::provider::chatgpt — native ChatGPT (Codex) OAuth.
 //
 // This is the "log in with ChatGPT, just like Claude" path: agentty runs the
 // Authorization-Code + PKCE (S256) flow against auth.openai.com itself, mints
@@ -17,9 +17,9 @@
 #include <string>
 
 #include "agentty/auth/auth.hpp"
-#include "agentty/provider/codex_cli/oauth.hpp"
+#include "agentty/provider/chatgpt/oauth.hpp"
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 
 // The persisted ChatGPT credential. `api_key` is the OpenAI key minted from
 // the id_token — preferred for API calls; `access_token` is the raw OAuth
@@ -71,4 +71,4 @@ codex_refresh(const CodexCredentials& current);
 // ChatGPT credential is saved.
 [[nodiscard]] std::optional<CodexCredentials> codex_fresh_credentials();
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt

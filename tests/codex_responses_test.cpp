@@ -18,10 +18,10 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agentty/provider/codex_cli/responses.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
 
 using namespace agentty;
-namespace cc = agentty::provider::codex_cli;
+namespace cc = agentty::provider::chatgpt;
 using json = nlohmann::json;
 
 static int g_failures = 0;

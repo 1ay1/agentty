@@ -4,7 +4,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/selection.hpp"
-#include "agentty/provider/codex_cli/responses.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
 
 #include <vector>
 
@@ -124,8 +124,8 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     {
         const auto& sel = provider::active();
         const bool codex_active = sel.kind == provider::Kind::OpenAI
-            && sel.openai_endpoint.label == "codex-cli";
-        if (codex_active && !provider::codex_cli::responses_available())
+            && sel.openai_endpoint.label == "chatgpt";
+        if (codex_active && !provider::chatgpt::responses_available())
             m.ui.login = ui::login::Picking{};
     }
 

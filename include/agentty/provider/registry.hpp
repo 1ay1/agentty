@@ -71,7 +71,7 @@ inline constexpr std::array<ProviderPreset, 10> kProviders{{
      Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "", ""}},
     {"codex",      "Codex API",  "Codex models via your OpenAI API key",
      Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CODEX_API_KEY", "OPENAI_API_KEY", ""}},
-    {"codex-cli",  "Codex CLI",  "ChatGPT login through the installed Codex CLI",
+    {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
      Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
      Kind::OpenAI,    AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}},

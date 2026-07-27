@@ -22,14 +22,14 @@
 
 #include "agentty/provider/provider.hpp"
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 
-class CodexCliProvider {
+class ChatGptProvider {
 public:
-    CodexCliProvider();
-    ~CodexCliProvider();
-    CodexCliProvider(const CodexCliProvider&) = delete;
-    CodexCliProvider& operator=(const CodexCliProvider&) = delete;
+    ChatGptProvider();
+    ~ChatGptProvider();
+    ChatGptProvider(const ChatGptProvider&) = delete;
+    ChatGptProvider& operator=(const ChatGptProvider&) = delete;
     void stream(provider::Request req, provider::EventSink sink);
 
 private:
@@ -47,6 +47,6 @@ private:
 // of hardcoding a slug the account may not offer.
 [[nodiscard]] std::string default_model();
 
-static_assert(provider::Provider<CodexCliProvider>);
+static_assert(provider::Provider<ChatGptProvider>);
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt
