@@ -941,7 +941,7 @@ jobs:
   # Requires WINGET_TOKEN (classic PAT, public_repo scope); skipped if absent.
   publish-winget:
     name: publish to winget
-    needs: [prepare, build-windows]
+    needs: [prepare, checksums-final, build-windows]
     if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     env:
@@ -998,10 +998,22 @@ jobs:
           set -eu
           sudo apt-get update && sudo apt-get install -y --no-install-recommends msitools >/dev/null
 
-          # 1. Fetch the built .msi; compute SHA256 + ProductCode from it.
+          # 1. Fetch the built .msi; compute SHA256 + ProductCode from it, and
+          #    verify the hash against the release's SHA256SUMS (source of
+          #    truth) so we can NEVER open a PR whose hash drifted from the
+          #    asset actually on the release (that's what microsoft's
+          #    validation bot rejects as a hash mismatch).
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'agentty-windows-x86_64.msi' --output a.msi
+            --pattern 'agentty-windows-x86_64.msi' --output a.msi --clobber
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'SHA256SUMS' --output SHA256SUMS --clobber 2>/dev/null || true
           MSI_SHA=$(sha256sum a.msi | awk '{print toupper($1)}')
+          if [ -f SHA256SUMS ]; then
+            want=$(awk '$2=="agentty-windows-x86_64.msi"{print toupper($1)}' SHA256SUMS)
+            if [ -n "$want" ] && [ "$want" != "$MSI_SHA" ]; then
+              echo "::error::MSI hash drift: SHA256SUMS=$want bytes=$MSI_SHA — refusing to submit a stale hash"; exit 1
+            fi
+          fi
           # msiinfo dumps the Property table; ProductCode is a GUID in braces.
           PC=$(msiinfo export a.msi Property 2>/dev/null \
                  | awk -F'\t' '$1=="ProductCode"{print $2}')
