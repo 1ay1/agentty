@@ -521,7 +521,16 @@ endif()
 # the small-string / JSON / Element-tree churn that dominates agentty is
 # exactly jetalloc's fast path.
 set(AGENTTY_HAS_JETALLOC FALSE)
-if(AGENTTY_USE_JETALLOC)
+if(AGENTTY_USE_JETALLOC AND MSVC)
+    # jetalloc's C11 core (<stdatomic.h>) needs MSVC's opt-in C11-atomics mode,
+    # which is still marked /experimental and doesn't reliably enable through
+    # this build. jetalloc is a pure PERFORMANCE optimization (per-thread slabs
+    # + jet_trim), never a correctness dependency — so on MSVC agentty simply
+    # uses the system allocator. The Linux/macOS release binaries keep jetalloc.
+    # Flip this on once jetalloc builds cleanly under MSVC.
+    message(STATUS "agentty: jetalloc DISABLED on MSVC "
+                   "(C11 <stdatomic.h> core not yet MSVC-clean) — using system allocator.")
+elseif(AGENTTY_USE_JETALLOC)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jetalloc/CMakeLists.txt")
         # Build only the static library — no tests, benches, or LD_PRELOAD lib.
         set(JET_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
