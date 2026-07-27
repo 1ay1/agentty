@@ -1250,9 +1250,14 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 std::size_t a = line.find_first_not_of(" \t");
                 if (a != std::string::npos) {
                     line.erase(0, a);
-                    constexpr std::size_t kSnip = 60;
-                    if (line.size() > kSnip) {
-                        line.resize(kSnip);
+                    // Keep the WHOLE first line (bounded only so the render
+                    // key / cache stays stable on pathological input) — the
+                    // view clips it to the ACTUAL card width at paint time via
+                    // `| clip`, so a wide terminal shows far more than a narrow
+                    // one instead of a fixed 60-char stub with dead space.
+                    constexpr std::size_t kSnipCap = 512;
+                    if (line.size() > kSnipCap) {
+                        line.resize(kSnipCap);
                         line += "\xe2\x80\xa6";             // …
                     }
                     snippet = std::move(line);
@@ -1357,14 +1362,22 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                                 .build()});
                     }
                 } else if (!s.snippet.empty()) {
+                    // Wrap the snippet in typographic quotes as ONE string and
+                    // clip the whole thing (TruncateEnd) so it consumes all
+                    // remaining width and ellipsizes exactly at the card edge.
+                    // Folding the quotes in (vs. separate trailing text) means
+                    // truncation can never strand a dangling close-quote past
+                    // the viewport. Fully responsive: wide terminals show far
+                    // more, narrow ones clip cleanly — no blank gutter either.
+                    std::string quoted =
+                        "\xe2\x80\x9c" + s.snippet + "\xe2\x80\x9d";  // “…”
                     cfg.body.emplace_back(maya::Turn::BodySlot{
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
                           text(kindpart, fg_of(muted)),
                           text(pathpart, fg_of(code_path)),
                           text(badge,    fg_of(status_warn)),          // ×N
-                          text("  \xe2\x80\x9c", fg_of(muted)),        // “
-                          text(s.snippet, fg_of(muted)),
-                          text("\xe2\x80\x9d", fg_of(muted)))         // ”
+                          text("  ", fg_of(muted)),
+                          (text(std::move(quoted), fg_of(muted)) | clip))
                             .build()});
                 } else {
                     cfg.body.emplace_back(maya::Turn::BodySlot{
