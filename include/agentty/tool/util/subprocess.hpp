@@ -52,6 +52,12 @@ struct SubprocessOptions {
     // sequences that span pipe reads still render correctly on the next
     // flush — no need for delta-aware splitting on the caller side.
     std::function<void(std::string_view snapshot)> on_progress;
+
+    // Optional cooperative stop probe.  The runner checks it at most once per
+    // supervise-loop iteration and terminates the child process when true.
+    // This keeps callers such as a provider bridge responsive to UI cancel
+    // without coupling this low-level utility to a particular token type.
+    std::function<bool()> stop_requested;
 };
 
 struct SubprocessResult {

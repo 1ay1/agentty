@@ -3,6 +3,7 @@
 // OAuth config lives with the provider it belongs to; `using` lets the
 // existing OAuthConfig:: references below stay short.
 #include "agentty/provider/anthropic/oauth.hpp"
+#include "agentty/provider/codex_cli/codex_oauth.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -869,13 +870,49 @@ void open_browser(const std::string& url) {
 // ---------------------------------------------------------------------------
 
 int cmd_login() {
+    // Surface what you're already signed into so switching accounts is
+    // obvious — pick a different option to add/replace, `agentty logout`
+    // to drop one.
+    {
+        namespace codex = provider::codex_cli;
+        bool any = false;
+        std::error_code ec;
+        if (fs::exists(credentials_path(), ec)) {
+            std::cout << "Currently signed in: claude.ai / Anthropic\n";
+            any = true;
+        }
+        if (codex::load_codex_credentials()) {
+            std::cout << "Currently signed in: ChatGPT / Codex\n";
+            any = true;
+        }
+        if (any) std::cout << "\n";
+    }
     std::cout << "agentty — sign in (bring your own model)\n\n"
               << "  1) Paste an API key (Anthropic sk-ant-..., or any provider)\n"
               << "  2) OAuth via claude.ai (Pro/Max subscription)\n"
-              << "\nChoice [1/2]: " << std::flush;
+              << "  3) OAuth via ChatGPT (Codex / Plus / Pro)\n"
+              << "\nChoice [1/2/3]: " << std::flush;
     std::string choice;
     std::getline(std::cin, choice);
     for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
+
+    // ChatGPT (Codex) OAuth — native loopback flow, mirrors the Claude path
+    // but talks to auth.openai.com and stores under codex_credentials.json.
+    if (choice == "3" || choice == "chatgpt" || choice == "codex"
+        || choice == "openai") {
+        std::cout << "\nOpening browser to sign in to ChatGPT…\n"
+                  << "(a local page on http://localhost:1455 will confirm)\n\n"
+                  << std::flush;
+        auto r = provider::codex_cli::codex_login();
+        if (!r) {
+            std::cerr << "ChatGPT sign-in failed: " << r.error().render() << "\n";
+            return 1;
+        }
+        std::cout << "\n\xE2\x9C\x93 Signed in to ChatGPT. Saved to "
+                  << provider::codex_cli::codex_credentials_path().string() << "\n"
+                  << "  Run agentty with `--provider codex-cli` to use it.\n";
+        return 0;
+    }
 
     // Default (empty / "1" / "api" / "key") is the API-key path; OAuth is
     // the explicit "2"/"oauth" opt-in. Dispatch is on the string, not on
@@ -932,10 +969,64 @@ int cmd_login() {
 }
 
 int cmd_logout() {
+    namespace codex = provider::codex_cli;
     auto p = credentials_path();
     std::error_code ec;
-    if (!fs::exists(p, ec)) {
+    const bool have_anthropic = fs::exists(p, ec);
+    const bool have_chatgpt   = codex::load_codex_credentials().has_value();
+
+    if (!have_anthropic && !have_chatgpt) {
         std::cout << "No saved credentials.\n"; return 0;
+    }
+
+    // Both providers signed in → let the user pick which account to drop
+    // (or all of them). This is the "switch account" escape hatch: sign
+    // out of one, `agentty login` back into the other.
+    if (have_anthropic && have_chatgpt) {
+        std::cout << "Signed in to more than one account:\n"
+                  << "  1) claude.ai / Anthropic  (" << p.string() << ")\n"
+                  << "  2) ChatGPT / Codex        ("
+                  << codex::codex_credentials_path().string() << ")\n"
+                  << "  3) both\n"
+                  << "\nSign out of [1/2/3]: " << std::flush;
+        std::string choice;
+        std::getline(std::cin, choice);
+        for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
+
+        bool drop_anthropic = (choice == "1" || choice == "3"
+                               || choice == "claude" || choice == "anthropic"
+                               || choice == "both");
+        bool drop_chatgpt   = (choice == "2" || choice == "3"
+                               || choice == "chatgpt" || choice == "codex"
+                               || choice == "openai" || choice == "both");
+        if (!drop_anthropic && !drop_chatgpt) {
+            std::cout << "Nothing removed.\n"; return 0;
+        }
+        int rc = 0;
+        if (drop_anthropic) {
+            if (clear_credentials())
+                std::cout << "Removed " << p.string() << "\n";
+            else { std::cerr << "Failed to remove " << p.string() << "\n"; rc = 1; }
+        }
+        if (drop_chatgpt) {
+            if (codex::clear_codex_credentials())
+                std::cout << "Removed "
+                          << codex::codex_credentials_path().string() << "\n";
+            else { std::cerr << "Failed to remove ChatGPT credentials\n"; rc = 1; }
+        }
+        return rc;
+    }
+
+    // Exactly one signed in → drop it, no prompt.
+    if (have_chatgpt) {
+        if (!codex::clear_codex_credentials()) {
+            std::cerr << "Failed to remove "
+                      << codex::codex_credentials_path().string() << "\n";
+            return 1;
+        }
+        std::cout << "Removed "
+                  << codex::codex_credentials_path().string() << "\n";
+        return 0;
     }
     if (!clear_credentials()) {
         std::cerr << "Failed to remove " << p.string() << "\n"; return 1;
@@ -956,31 +1047,58 @@ int cmd_status() {
                   << ": set (OAuth via env)\n";
     }
     auto loaded = load_credentials();
-    if (!loaded) { std::cout << "Saved credentials: (none)\n"; return 0; }
-    std::cout << "Saved method: " << persist_tag(*loaded) << "\n";
-    if (auto* o = std::get_if<cred::OAuth>(&*loaded)) {
-        if (o->expires_at_ms) {
-            auto remaining_s = (o->expires_at_ms - now_ms()) / 1000;
-            if (remaining_s <= 0) std::cout << "Token: expired\n";
-            else std::cout << "Token expires in " << remaining_s << "s\n";
-        } else {
-            std::cout << "Token: no expiration info\n";
+    if (!loaded) {
+        std::cout << "Saved credentials: (none)\n";
+    } else {
+        std::cout << "Saved method: " << persist_tag(*loaded) << "\n";
+        if (auto* o = std::get_if<cred::OAuth>(&*loaded)) {
+            if (o->expires_at_ms) {
+                auto remaining_s = (o->expires_at_ms - now_ms()) / 1000;
+                if (remaining_s <= 0) std::cout << "Token: expired\n";
+                else std::cout << "Token expires in " << remaining_s << "s\n";
+            } else {
+                std::cout << "Token: no expiration info\n";
+            }
+            std::cout << "Refresh token: "
+                      << (o->refresh_token.empty() ? "(none)" : "present") << "\n";
         }
-        std::cout << "Refresh token: "
-                  << (o->refresh_token.empty() ? "(none)" : "present") << "\n";
+        // At-rest encryption mode for the credentials file.
+        std::cout << "At-rest encryption: aes-256-gcm ("
+                  << (crypt::passphrase_active()
+                        ? "machine + passphrase"
+                        : "machine-bound; set AGENTTY_PASSPHRASE or "
+                          "AGENTTY_ENCRYPT_PASSPHRASE=1 to add a passphrase")
+                  << ")\n";
+        // OS keystore backing (opt-in via AGENTTY_USE_KEYSTORE).
+        std::cout << "OS keystore: " << keystore::backend_name();
+        if (!keystore::available())
+            std::cout << " (set AGENTTY_USE_KEYSTORE=1 to enable)";
+        std::cout << "\n";
     }
-    // At-rest encryption mode for the credentials file.
-    std::cout << "At-rest encryption: aes-256-gcm ("
-              << (crypt::passphrase_active()
-                    ? "machine + passphrase"
-                    : "machine-bound; set AGENTTY_PASSPHRASE or "
-                      "AGENTTY_ENCRYPT_PASSPHRASE=1 to add a passphrase")
-              << ")\n";
-    // OS keystore backing (opt-in via AGENTTY_USE_KEYSTORE).
-    std::cout << "OS keystore: " << keystore::backend_name();
-    if (!keystore::available())
-        std::cout << " (set AGENTTY_USE_KEYSTORE=1 to enable)";
-    std::cout << "\n";
+
+    // ── ChatGPT / Codex OAuth (separate store) ──────────────────────────
+    {
+        namespace codex = provider::codex_cli;
+        std::cout << "\nChatGPT (Codex) file: "
+                  << codex::codex_credentials_path().string() << "\n";
+        if (auto cc = codex::load_codex_credentials()) {
+            std::cout << "Signed in via ChatGPT OAuth\n";
+            if (!cc->account_id.empty())
+                std::cout << "Account id: " << cc->account_id << "\n";
+            if (cc->expires_at_ms) {
+                auto remaining_s = (cc->expires_at_ms - now_ms()) / 1000;
+                if (remaining_s <= 0)
+                    std::cout << "Token: expired (auto-refreshes on next use)\n";
+                else
+                    std::cout << "Token expires in " << remaining_s << "s\n";
+            }
+            std::cout << "Refresh token: "
+                      << (cc->refresh_token.empty() ? "(none)" : "present")
+                      << "\n";
+        } else {
+            std::cout << "ChatGPT: (not signed in — `agentty login` → 3)\n";
+        }
+    }
     return 0;
 }
 

@@ -317,7 +317,10 @@ Element provider_picker(const Model& m) {
         // Auth status for the trailing column.
         std::string note;
         maya::Color note_color = muted;
-        if (p.is_local || p.auth == provider::AuthStyle::None) {
+        if (p.id == "codex-cli") {
+            note = "ChatGPT via codex login";
+            note_color = success;
+        } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
             note_color = info;
         } else if (p.kind == provider::Kind::Anthropic) {

@@ -97,7 +97,7 @@ After the pipeline runs, a **corrective evaluator** ([CRAG](https://arxiv.org/ab
 
 ## Conversation-aware retrieval *(default-on)*
 
-The query you type is not always the query you mean — especially mid-conversation. The default-on **query-rewriting boosters** below (multi-query and HyDE) widen the probe set without ever replacing your original query, so recall can only rise: a vague follow-up ("how does **it** handle errors?") or a compositional question ("how the auth flow works **and** how the sandbox blocks paths") is rephrased into several probes that each retrieve on their own strength and fuse back into one ranked set. Because they lean on a small local generator, they cost nothing beyond a localhost round-trip and silently no-op when Ollama is absent.
+The query you type is not always the query you mean — especially mid-conversation. The optional **query-rewriting boosters** below (multi-query and HyDE) widen the probe set without ever replacing your original query, so recall can only rise: a vague follow-up ("how does **it** handle errors?") or a compositional question ("how the auth flow works **and** how the sandbox blocks paths") is rephrased into several probes that each retrieve on their own strength and fuse back into one ranked set. Enable them for research-heavy work; normal coding turns stay on the faster deterministic path.
 
 ## The learning loop *(default-on)*
 
@@ -115,8 +115,8 @@ Known-item synthesis exercises the funnel's *mechanics*; run it with a local emb
 
 Two of the strongest recall techniques need a *generative* model — but agentty runs them on a **small local Ollama model** (`AGENTTY_RAG_GEN_MODEL`, default `qwen2.5:0.5b`) on the very same Ollama that serves embeddings, so they add **zero cloud cost**. If that model isn't reachable they silently no-op and plain hybrid still runs; they're also **skipped on the latency-sensitive proactive pre-turn path** so unprompted retrieval stays fast. Both help **every** knowledge configuration — docs, skills-only, memory-only, MCP, or any mix — because they feed extra probes into the same source-agnostic fusion.
 
-- **Multi-query / RAG-Fusion expansion** (`AGENTTY_RAG_EXPAND`, default on) — the local model rewrites your query into several alternative phrasings; each is retrieved and all results are fused. Vocabulary mismatch on any one phrasing stops being fatal. Disable with `AGENTTY_RAG_EXPAND=0`.
-- **HyDE — Hypothetical Document Embeddings** (`AGENTTY_RAG_HYDE`, default on) — a question and its answer can sit far apart in embedding space. The local model drafts a short *answer-passage* for your query; embedding that draft lands the probe near the real passages. The answer needn't be correct — only look like one. Composes with, and is independent of, query expansion. Disable with `AGENTTY_RAG_HYDE=0`.
+- **Multi-query / RAG-Fusion expansion** (`AGENTTY_RAG_EXPAND=1`) — the local model rewrites your query into several alternative phrasings; each is retrieved and all results are fused. Vocabulary mismatch on any one phrasing stops being fatal.
+- **HyDE — Hypothetical Document Embeddings** (`AGENTTY_RAG_HYDE=1`) — a question and its answer can sit far apart in embedding space. The local model drafts a short *answer-passage* for your query; embedding that draft lands the probe near the real passages. The answer needn't be correct — only look like one. Composes with, and is independent of, query expansion.
 
 ## The proactive path
 
