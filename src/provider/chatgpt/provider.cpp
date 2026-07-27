@@ -1,5 +1,5 @@
-#include "agentty/provider/codex_cli/provider.hpp"
-#include "agentty/provider/codex_cli/responses.hpp"
+#include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -9,7 +9,7 @@
 
 #include "agentty/provider/wire.hpp"
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 
 // The Codex provider is a thin, native ChatGPT path: it talks directly to the
 // OpenAI Responses backend using the reverse-engineered OAuth login (run
@@ -17,12 +17,12 @@ namespace agentty::provider::codex_cli {
 // app-server subprocess — authentication, token refresh, and streaming all
 // happen in-process, exactly like the Anthropic OAuth path.
 
-struct CodexCliProvider::Impl {};
+struct ChatGptProvider::Impl {};
 
-CodexCliProvider::CodexCliProvider() : impl_(nullptr) {}
-CodexCliProvider::~CodexCliProvider() = default;
+ChatGptProvider::ChatGptProvider() : impl_(nullptr) {}
+ChatGptProvider::~ChatGptProvider() = default;
 
-void CodexCliProvider::stream(provider::Request req, provider::EventSink sink) {
+void ChatGptProvider::stream(provider::Request req, provider::EventSink sink) {
     if (!responses_available()) {
         sink(StreamStarted{});
         sink(StreamError{
@@ -49,8 +49,8 @@ std::vector<ModelInfo> bundled_models() {
     // Conservative fallback only — used when the live catalog is unavailable.
     // Kept intentionally short; the live catalog is the real source of truth.
     return {
-        {ModelId{"gpt-5.1-codex"}, "GPT-5.1 Codex", "codex-cli", 272000, false, true},
-        {ModelId{"gpt-5"},         "GPT-5",         "codex-cli", 272000, false, true},
+        {ModelId{"gpt-5.1-codex"}, "GPT-5.1 Codex", "chatgpt", 272000, false, true},
+        {ModelId{"gpt-5"},         "GPT-5",         "chatgpt", 272000, false, true},
     };
 }
 
@@ -78,7 +78,7 @@ std::vector<ModelInfo> list_models() {
             });
         for (const auto& cm : catalog) {
             resolved.push_back(ModelInfo{
-                ModelId{cm.slug}, cm.display_name, "codex-cli",
+                ModelId{cm.slug}, cm.display_name, "chatgpt",
                 cm.context_window, false, true});
         }
     }
@@ -99,4 +99,4 @@ std::string default_model() {
     return ms.empty() ? std::string{"gpt-5"} : ms.front().id.value;
 }
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt

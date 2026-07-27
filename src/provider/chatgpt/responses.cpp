@@ -1,4 +1,4 @@
-#include "agentty/provider/codex_cli/responses.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
 
 #include <array>
 #include <atomic>
@@ -13,12 +13,12 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agentty/provider/codex_cli/codex_oauth.hpp"
-#include "agentty/provider/codex_cli/oauth.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/chatgpt/oauth.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 namespace {
 using json = nlohmann::json;
 
@@ -134,7 +134,7 @@ json build_tools(const provider::Request& req) {
 
 json build_body(const provider::Request& req) {
     json body{
-        {"model", req.model.empty() || req.model == "codex-cli-default"
+        {"model", req.model.empty() || req.model == "chatgpt-default"
                       ? "gpt-5-codex" : req.model},
         {"instructions", scrub_utf8(req.system_prompt)},
         {"input", build_input(req)},
@@ -434,4 +434,4 @@ std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lin
     return out;
 }
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt

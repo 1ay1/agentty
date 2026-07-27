@@ -1,4 +1,4 @@
-#include "agentty/provider/codex_cli/codex_oauth.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -32,7 +32,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/util/base64.hpp"
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 namespace {
 using json = nlohmann::json;
 using auth::OAuthError;
@@ -538,4 +538,4 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     return *refreshed;
 }
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt

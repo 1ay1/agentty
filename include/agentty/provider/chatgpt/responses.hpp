@@ -1,5 +1,5 @@
 #pragma once
-// agentty::provider::codex_cli — direct ChatGPT (Codex) Responses-API transport.
+// agentty::provider::chatgpt — direct ChatGPT (Codex) Responses-API transport.
 //
 // This is the "works like Claude" path: given a native ChatGPT OAuth
 // credential (from `agentty login` → ChatGPT), it POSTs the agentty
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 
 // One entry from the ChatGPT account's live `/models` catalog. This is the
 // SAME shape codex-rs derives its model picker from: the server tells us which
@@ -51,4 +51,4 @@ void stream_responses(provider::Request req, provider::EventSink sink);
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
     const std::vector<std::string>& sse_data_lines);
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt

@@ -15,8 +15,8 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
-#include "agentty/provider/codex_cli/provider.hpp"
-#include "agentty/provider/codex_cli/codex_oauth.hpp"
+#include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/ollama/transport.hpp"
 #include "agentty/provider/selection.hpp"
@@ -515,9 +515,9 @@ Cmd<Msg> launch_stream(Model& m) {
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
-    const bool codex_cli_provider =
+    const bool chatgpt_provider =
         provider::active().kind == provider::Kind::OpenAI
-        && provider::active().openai_endpoint.label == "codex-cli";
+        && provider::active().openai_endpoint.label == "chatgpt";
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
@@ -525,7 +525,7 @@ Cmd<Msg> launch_stream(Model& m) {
     // ids are `gpt-*`, which deliberately don't use the Claude-only
     // ModelCapabilities decoder, so preserve the picker value here instead
     // of collapsing every Codex effort choice to "off".
-    std::string effort = std::string{codex_cli_provider
+    std::string effort = std::string{chatgpt_provider
         ? effort_wire(m.d.effort)
         : effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
 
@@ -1146,8 +1146,8 @@ Cmd<Msg> fetch_models() {
             std::vector<ModelInfo> models;
             const auto& sel = provider::active();
             if (sel.kind == provider::Kind::OpenAI
-                && sel.openai_endpoint.label == "codex-cli") {
-                models = provider::codex_cli::list_models();
+                && sel.openai_endpoint.label == "chatgpt") {
+                models = provider::chatgpt::list_models();
             } else if (sel.kind == provider::Kind::OpenAI) {
                 models = provider::openai::list_models(deps().auth,
                                                        sel.openai_endpoint);
@@ -1262,7 +1262,7 @@ Cmd<Msg> codex_login_async() {
     // the credential or a typed OAuthError; the reducer takes it from there.
     return Cmd<Msg>::task_isolated([](std::function<void(Msg)> dispatch) {
         try {
-            auto r = provider::codex_cli::codex_login();
+            auto r = provider::chatgpt::codex_login();
             dispatch(CodexLoginDone{std::move(r)});
         } catch (const std::exception& e) {
             dispatch(CodexLoginDone{std::unexpected(auth::OAuthError{

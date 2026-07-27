@@ -1143,11 +1143,14 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         return Endpoint{"api.openai.com", 443, "/v1/chat/completions",
                         "/v1/models", true, std::string{spec.empty() ? "openai" : spec}};
     }
-    if (eq(spec, "codex-cli")) {
-        // The Codex CLI bridge never dials this endpoint: main.cpp dispatches
-        // this label to codex_cli::CodexCliProvider. Keep a local-shaped
-        // sentinel so generic OpenAI-family selection invariants stay true.
-        return Endpoint{"localhost", 0, "/", "/", false, "codex-cli"};
+    if (eq(spec, "chatgpt") || eq(spec, "codex-cli")) {
+        // The native ChatGPT path never dials this endpoint: main.cpp
+        // dispatches this label to chatgpt::ChatGptProvider. Keep a
+        // local-shaped sentinel so generic OpenAI-family selection
+        // invariants stay true. The label is canonicalised to "chatgpt";
+        // "codex-cli" is still accepted as a legacy spec (persisted configs,
+        // `--provider codex-cli`) but normalises to the same endpoint.
+        return Endpoint{"localhost", 0, "/", "/", false, "chatgpt"};
     }
     if (eq(spec, "groq")) {
         return Endpoint{"api.groq.com", 443, "/openai/v1/chat/completions",

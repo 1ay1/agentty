@@ -10,7 +10,7 @@
 // Code's OAuth, but OpenAI requires the code to come back to a local HTTP
 // listener rather than a hosted paste-the-code page.
 
-namespace agentty::provider::codex_cli {
+namespace agentty::provider::chatgpt {
 
 struct OAuthConfig {
     // Codex CLI's public OAuth client id. Using it is what lets agentty ride a
@@ -45,4 +45,4 @@ struct OAuthConfig {
         "urn:ietf:params:oauth:token-type:id_token";
 };
 
-} // namespace agentty::provider::codex_cli
+} // namespace agentty::provider::chatgpt

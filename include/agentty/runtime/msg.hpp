@@ -34,7 +34,7 @@
 #include <vector>
 
 #include "agentty/auth/auth.hpp"
-#include "agentty/provider/codex_cli/codex_oauth.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/registry.hpp"
 
@@ -456,10 +456,10 @@ struct LoginExchanged   { agentty::auth::TokenResult result; };
 // port 1455: agentty opens the browser, the redirect comes straight back to
 // the local server, and codex_login() returns the fully-minted credential
 // (or a typed OAuthError). This lands when that blocking task completes; the
-// reducer installs the codex creds, live-switches the provider to codex-cli,
+// reducer installs the codex creds, live-switches the provider to chatgpt,
 // and closes the modal — or transitions to Failed.
 struct CodexLoginDone {
-    std::expected<agentty::provider::codex_cli::CodexCredentials,
+    std::expected<agentty::provider::chatgpt::CodexCredentials,
                   agentty::auth::OAuthError> result;
 };
 // Result of the background OAuth refresh kicked off from init() when
