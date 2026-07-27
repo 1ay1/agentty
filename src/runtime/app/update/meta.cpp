@@ -225,7 +225,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // recomputed), so mutating proactive_expanded there would change
             // model state without reaching the canvas. Only toggle a LIVE
             // (not-yet-frozen) card; on scrollback it no-ops, matching
-            // "scrollback is archaeology".
+            // "scrollback is archaeology". The full-passage viewer for a
+            // frozen card is the Ctrl+O overlay, which never touches the
+            // canvas.
             auto& msgs = m.d.current.messages;
             for (std::size_t i = m.ui.frozen_through; i < msgs.size(); ++i) {
                 if (msgs[i].id == e.id && msgs[i].proactive_context) {

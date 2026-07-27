@@ -702,7 +702,8 @@ Sub<Msg> subscribe(const Model& m) {
     // Newest LIVE (not-yet-frozen) retrieved-context card, if any — the
     // target for the Ctrl+U expand toggle. Empty when the most recent
     // proactive card has already settled into the frozen prefix (its
-    // Element is baked; the reducer would no-op) or none exists.
+    // Element is baked; the reducer would no-op) or none exists. Frozen
+    // cards' full passages are viewed via the Ctrl+O overlay instead.
     std::optional<MessageId> live_retrieved_id;
     for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
         if (m.d.current.messages[i].proactive_context) {

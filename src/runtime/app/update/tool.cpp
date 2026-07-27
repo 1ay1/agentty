@@ -102,6 +102,50 @@ void arm_reconcile_cooldown(Model& m) {
     std::size_t budget = tool_viewer::kSnapshotBudget;
     for (auto mit = m.d.current.messages.rbegin();
          mit != m.d.current.messages.rend(); ++mit) {
+        // Retrieved-context cards surface here too, so the FULL passages the
+        // model was grounded on are readable in the Ctrl+O overlay — including
+        // after the card has scrolled into the (immutable) frozen prefix,
+        // where the in-place Ctrl+U expand can't reach. Rendered through the
+        // viewer's plain-text (line-numbered) body path: the default-
+        // constructed ToolUse `call` has no structured kind, so the body
+        // stage falls through to the raw-text branch automatically.
+        if (mit->proactive_context && !mit->text.empty()) {
+            // Strip the <retrieved-context> … </retrieved-context> fence and
+            // the lead-in preamble so the body is just the passages.
+            std::string body = mit->text;
+            if (auto open = body.find('>'); open != std::string::npos
+                && body.compare(0, 18, "<retrieved-context") == 0) {
+                std::size_t start = body.find('\n', open);
+                start = (start == std::string::npos) ? open + 1 : start + 1;
+                std::size_t end = body.rfind("</retrieved-context>");
+                if (end == std::string::npos || end < start) end = body.size();
+                body = body.substr(start, end - start);
+            }
+            while (!body.empty() && (body.back() == '\n' || body.back() == ' '
+                                  || body.back() == '\t' || body.back() == '\r'))
+                body.pop_back();
+            if (!body.empty() && out.size() < tool_viewer::kMaxEntries
+                && body.size() <= budget) {
+                budget -= body.size();
+                tool_viewer::Entry e;
+                e.name   = "retrieved_context";
+                e.title  = "Retrieved context";
+                e.output = std::move(body);
+                e.failed = false;
+                // Detail: passage count (each source block starts with "[").
+                std::size_t passages = 0;
+                for (std::size_t p = 0; (p = e.output.find("[", p)) != std::string::npos; ++p)
+                    if (p == 0 || e.output[p - 1] == '\n') ++passages;
+                e.detail = passages == 0 ? std::string{}
+                    : std::to_string(passages)
+                        + (passages == 1 ? " passage" : " passages");
+                e.trailing = (e.output.size() >= 1024)
+                    ? std::to_string(e.output.size() / 1024) + " KB"
+                    : std::to_string(e.output.size()) + " B";
+                out.push_back(std::move(e));
+            }
+            continue;
+        }
         for (auto tit = mit->tool_calls.rbegin();
              tit != mit->tool_calls.rend(); ++tit) {
             const auto& tc = *tit;
@@ -417,7 +461,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         [&](OpenToolOutputViewer) -> Step {
             auto entries = collect_viewer_entries(m);
             if (entries.empty()) {
-                auto cmd = set_status_toast(m, "no tool outputs to inspect yet");
+                auto cmd = set_status_toast(m, "nothing to inspect yet");
                 return {std::move(m), std::move(cmd)};
             }
             m.ui.tool_viewer = tool_viewer::Open{std::move(entries), 0, false};
