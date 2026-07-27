@@ -81,8 +81,21 @@ static_assert(sizeof(memory::AppendResult) == sizeof(mt::MemoryAppendResult),
 
 class AgenttyMemoryStore final : public mt::MemoryStore {
 public:
+    // scopes()[0] is the DEFAULT scope the shell uses when the model omits
+    // `scope`. We only advertise "project" (and only make it the default)
+    // when project storage is actually WRITABLE here. In a workspace whose
+    // root is "/" or otherwise unwritable, path_for(Project) is empty and a
+    // project append would fail — so offering "project" as the default made
+    // the model's very first remember() call fail every time, forcing a
+    // retry with scope="user". Dropping the unavailable scope from the
+    // vocabulary makes the default "user", which always succeeds, WITHOUT
+    // silently promoting an explicit project fact to user scope (append()
+    // still refuses an explicit unavailable-project write — no cross-
+    // workspace memory bleed).
     std::vector<std::string> scopes() const override {
-        return {"project", "user"};   // scopes()[0] == default
+        if (!memory::path_for(memory::Scope::Project).empty())
+            return {"project", "user"};   // project writable → normal order
+        return {"user"};                   // project unavailable → user is default
     }
 
     mt::MemoryAppendResult append(const mt::MemoryAppendRequest& req) override {
