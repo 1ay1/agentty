@@ -12,9 +12,28 @@
 #include "agentty/provider/provider.hpp"
 
 #include <nlohmann/json.hpp>
+#include <string>
 #include <vector>
 
 namespace agentty::provider::codex_cli {
+
+// One entry from the ChatGPT account's live `/models` catalog. This is the
+// SAME shape codex-rs derives its model picker from: the server tells us which
+// slugs the signed-in account may actually use (they change over time — e.g.
+// gpt-5.4, not the stale gpt-5.1-codex we used to hardcode), so we never guess.
+struct CatalogModel {
+    std::string slug;             // wire id sent as body.model
+    std::string display_name;     // human label for the picker
+    int         context_window = 272000;
+    bool        is_default      = false;
+};
+
+// GET https://chatgpt.com/backend-api/codex/models?client_version=… with the
+// ChatGPT OAuth credential, mirroring codex-rs's ModelsClient. Returns the
+// account's live catalog, or an empty vector on any failure (offline, 401,
+// parse error) so the caller can fall back to a bundled list. Blocking; short
+// timeout — safe to call from the model-picker refresh path.
+[[nodiscard]] std::vector<CatalogModel> fetch_models();
 
 // True iff a saved ChatGPT credential exists (so the provider can pick the
 // direct transport over the app-server subprocess fallback).

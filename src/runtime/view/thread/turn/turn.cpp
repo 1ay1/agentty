@@ -1250,6 +1250,29 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 std::size_t a = line.find_first_not_of(" \t");
                 if (a != std::string::npos) {
                     line.erase(0, a);
+                    // Collapse internal whitespace runs to a single space so
+                    // a citation lifted from an ALIGNED markdown table row
+                    // ("col a          | col b") renders as one compact line
+                    // instead of a snippet split by a dead gutter of padding
+                    // spaces. Tabs/CR normalized too.
+                    std::string compact;
+                    compact.reserve(line.size());
+                    bool in_ws = false;
+                    for (char ch : line) {
+                        const bool is_ws = ch == ' ' || ch == '\t'
+                                        || ch == '\r' || ch == '\n';
+                        if (is_ws) {
+                            if (!in_ws) compact.push_back(' ');
+                            in_ws = true;
+                        } else {
+                            compact.push_back(ch);
+                            in_ws = false;
+                        }
+                    }
+                    // Drop any trailing single space the collapse left.
+                    if (!compact.empty() && compact.back() == ' ')
+                        compact.pop_back();
+                    line = std::move(compact);
                     // Keep the WHOLE first line (bounded only so the render
                     // key / cache stays stable on pathological input) — the
                     // view clips it to the ACTUAL card width at paint time via
@@ -1286,42 +1309,91 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
         // Meta line (right-aligned, like elapsed time on assistant turns)
         // carries the whole "how good / how much" summary so the body is
-        // free for pure provenance. Format:
-        //   ▰▰▰▰▱▱▱▱▱▱ 38% moderate  ·  2 memory · 1 doc
-        // The gauge + strength word answer "how relevant"; the by-kind
-        // tally answers "what & how much" — both in a single dense line.
-        std::string meta;
-        if (msg.proactive_confidence >= 0.0) {
-            const double c = msg.proactive_confidence > 1.0
-                                 ? 1.0 : msg.proactive_confidence;
-            constexpr int kCells = 10;
-            const int filled = static_cast<int>(c * kCells + 0.5);
-            const char* word = c >= 0.60 ? "strong"
-                             : c >= 0.35 ? "moderate"
-                                         : "weak";
-            for (int i = 0; i < filled; ++i)      meta += "\xe2\x96\xb0";
-            for (int i = filled; i < kCells; ++i) meta += "\xe2\x96\xb1";
-            meta += " " + std::to_string(static_cast<int>(c * 100.0 + 0.5))
-                  + "% " + word + "  \xc2\xb7  ";
-        }
-        // By-kind breakdown ("2 memory · 1 doc") answers what & how much;
-        // a trailing total ties it off. Falls back to a plain passage count
-        // if parsing found no headers.
-        if (!kinds.empty()) {
-            for (std::size_t i = 0; i < kinds.size(); ++i) {
-                if (i) meta += " \xc2\xb7 ";
-                meta += std::to_string(kinds[i].second) + " " + kinds[i].first;
+        // free for pure provenance. Rendered as a COLOR-SEGMENTED strip
+        // (cfg.meta_element) — a single dim string can't tint the gauge by
+        // confidence, and this reads at a glance:
+        //   ▰▰▰▰▱▱▱▱ 46%·moderate · 2 doc · 1 mem
+        //   └─ filled cells + %+word tinted green/yellow/red by strength;
+        //      empty cells muted; kind counts in code-cyan, labels dim.
+        // Kept compact (8-cell gauge, abbreviated kind labels, no " total"
+        // padding) and clipped so it can NEVER wrap onto a second row —
+        // fully responsive: narrow terminals ellipsize the tally tail,
+        // wide ones show it whole, and the gauge+percent always survive.
+        {
+            using namespace maya::dsl;
+            std::vector<maya::Element> segs;
+
+            if (msg.proactive_confidence >= 0.0) {
+                const double c = msg.proactive_confidence > 1.0
+                                     ? 1.0 : msg.proactive_confidence;
+                constexpr int kCells = 8;
+                const int filled = static_cast<int>(c * kCells + 0.5);
+                // One hue = one meaning: strength maps to the status axis
+                // (green ok / yellow warn / red weak) so the gauge color
+                // itself answers "trust this grounding?" pre-attentively.
+                const char* word = c >= 0.60 ? "strong"
+                                 : c >= 0.35 ? "moderate"
+                                             : "weak";
+                const maya::Color tint = c >= 0.60 ? status_ok
+                                       : c >= 0.35 ? status_warn
+                                                   : status_error;
+                std::string filled_cells, empty_cells;
+                for (int i = 0; i < filled; ++i)      filled_cells += "\xe2\x96\xb0";
+                for (int i = filled; i < kCells; ++i) empty_cells  += "\xe2\x96\xb1";
+                const int pct = static_cast<int>(c * 100.0 + 0.5);
+                // Filled portion in the strength hue, empty in muted so the
+                // gauge reads as a true fill bar, then bold percent + dim
+                // word both tinted so the whole cluster coheres as one signal.
+                segs.push_back(text(filled_cells, fg_of(tint)).build());
+                if (!empty_cells.empty())
+                    segs.push_back(text(empty_cells, fg_of(muted)).build());
+                segs.push_back(text(" " + std::to_string(pct) + "%",
+                                    fg_of(tint).with_bold()).build());
+                segs.push_back(text(std::string("\xc2\xb7") + word,
+                                    fg_dim(tint)).build());
             }
-            // If more than one kind contributed, spell out the grand total
-            // so the eye doesn't have to add columns.
-            if (kinds.size() > 1 && n > 0)
-                meta += "  (" + std::to_string(n) + " total)";
-        } else {
-            const int shown_n = n > 0 ? n : 1;
-            meta += std::to_string(shown_n)
-                  + (shown_n == 1 ? " passage" : " passages");
+
+            // By-kind breakdown ("2 doc · 1 mem") answers what & how much.
+            // Counts in code-reference cyan (the quantities you scan),
+            // labels + dots dim. Abbreviate to keep the strip short; a
+            // trailing dim total ties multi-kind rows off.
+            auto short_kind = [](std::string k) -> std::string {
+                // singularize/abbrev: "memory"->"mem", "docs"->"doc", etc.
+                if (k == "memory")  return "mem";
+                if (k == "docs" || k == "doc") return "doc";
+                if (k == "skill" || k == "skills") return "skill";
+                if (k.size() > 5) k.resize(5);
+                return k;
+            };
+            if (!segs.empty())
+                segs.push_back(text(" \xc2\xb7 ", fg_of(muted)).build());
+            if (!kinds.empty()) {
+                for (std::size_t i = 0; i < kinds.size(); ++i) {
+                    if (i) segs.push_back(text(" \xc2\xb7 ", fg_of(muted)).build());
+                    segs.push_back(text(std::to_string(kinds[i].second) + " ",
+                                        fg_of(code_path)).build());
+                    segs.push_back(text(short_kind(kinds[i].first),
+                                        fg_of(muted)).build());
+                }
+                if (kinds.size() > 1 && n > 0)
+                    segs.push_back(text("  (" + std::to_string(n) + ")",
+                                        fg_of(muted)).build());
+            } else {
+                const int shown_n = n > 0 ? n : 1;
+                segs.push_back(text(std::to_string(shown_n) + " ",
+                                    fg_of(code_path)).build());
+                segs.push_back(text(shown_n == 1 ? "passage" : "passages",
+                                    fg_of(muted)).build());
+            }
+
+            // Each segment is single-line text; assembled as one header-row
+            // hstack it never wraps (the parent forces a fixed row width and
+            // the canvas clips any overflow at the card edge rather than
+            // spilling onto a second row). Fully responsive: on a narrow
+            // terminal the trailing tally clips first while the gauge and
+            // percent — emitted leftmost — always render.
+            cfg.meta_element = maya::detail::hstack()(std::move(segs)).build();
         }
-        cfg.meta = std::move(meta);
 
         // Body = pure provenance, one dense line per distinct source:
         //   └ memory · 0357a6d8            “agentty now has a native…”
@@ -1336,6 +1408,14 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             constexpr std::size_t kMaxSources = 5;
             const std::size_t total = sources.size();
             const bool expanded = msg.proactive_expanded;
+            // Collect every provenance row into ONE gap-0 vstack pushed as a
+            // single BodySlot. maya::Turn inserts a blank gap between adjacent
+            // non-blank body slots, so emitting each source as its own slot
+            // stranded an empty line between rows. Bundling them into one slot
+            // makes maya see a single block → the rows sit flush against each
+            // other, and the one inter-slot gap only separates this whole
+            // provenance block from the meta/affordance around it.
+            std::vector<maya::Element> rows;
             for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
                 const Src& s = sources[i];
                 std::string kindpart = s.kind + " \xc2\xb7 ";     // "docs · "
@@ -1349,17 +1429,17 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                     // Header row (no inline snippet — the full body follows),
                     // then the full passage wrapped, quote-dimmed, indented
                     // so it reads as the cited block under its source.
-                    cfg.body.emplace_back(maya::Turn::BodySlot{
+                    rows.push_back(
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
                           text(kindpart, fg_of(muted)),
                           text(pathpart, fg_of(code_path)),
                           text(badge,    fg_of(status_warn)))          // ×N
-                            .build()});
+                            .build());
                     if (!s.full.empty()) {
-                        cfg.body.emplace_back(maya::Turn::BodySlot{
+                        rows.push_back(
                             h(text("      ", fg_of(muted)),
                               text(s.full, fg_of(muted)))
-                                .build()});
+                                .build());
                     }
                 } else if (!s.snippet.empty()) {
                     // Wrap the snippet in typographic quotes as ONE string and
@@ -1371,34 +1451,40 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                     // more, narrow ones clip cleanly — no blank gutter either.
                     std::string quoted =
                         "\xe2\x80\x9c" + s.snippet + "\xe2\x80\x9d";  // “…”
-                    cfg.body.emplace_back(maya::Turn::BodySlot{
+                    rows.push_back(
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
                           text(kindpart, fg_of(muted)),
                           text(pathpart, fg_of(code_path)),
                           text(badge,    fg_of(status_warn)),          // ×N
                           text("  ", fg_of(muted)),
                           (text(std::move(quoted), fg_of(muted)) | clip))
-                            .build()});
+                            .build());
                 } else {
-                    cfg.body.emplace_back(maya::Turn::BodySlot{
+                    rows.push_back(
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
                           text(kindpart, fg_of(muted)),
                           text(pathpart, fg_of(code_path)),
                           text(badge,    fg_of(status_warn)))          // ×N
-                            .build()});
+                            .build());
                 }
             }
             if (total > kMaxSources) {
-                cfg.body.emplace_back(maya::Turn::PlainText{
-                    .content = "  \xe2\x80\xa6 "                       // …
+                rows.push_back(
+                    text("  \xe2\x80\xa6 "                            // …
                         + std::to_string(total - kMaxSources)
                         + " more source"
                         + (total - kMaxSources == 1 ? "" : "s"),
-                    .color   = muted});
+                        fg_of(muted)).build());
+            }
+            if (!rows.empty()) {
+                cfg.body.emplace_back(maya::Turn::BodySlot{
+                    maya::detail::vstack().gap(0)(std::move(rows)).build()});
             }
             // Affordance footer — only when there's a full body worth
             // expanding to. Tells the user the toggle exists and what it
             // does; dim so it never competes with the citation content.
+            // Kept as its own slot so the single inter-slot gap sets it
+            // apart from the flush provenance block above.
             const bool any_full = std::any_of(sources.begin(), sources.end(),
                 [](const Src& s){ return !s.full.empty(); });
             if (any_full) {
