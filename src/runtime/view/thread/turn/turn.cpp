@@ -1180,6 +1180,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             std::string path;      // file path or record id (no :line)
             std::string line;      // first cited line number ("" if none)
             std::string snippet;   // preview of the first passage body
+            std::string full;      // full passage body (bounded) for expand
             int         chunks{0}; // # passages from this same source
         };
         std::vector<Src> sources;
@@ -1218,11 +1219,30 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             }
 
             // Pull the first non-empty line of THIS passage's body as a
-            // preview. Body starts just after the header's closing "]\n".
-            std::string snippet;
+            // preview, and the FULL body (to the next "\n[" header or the
+            // end) for the expanded view. Body starts just after the
+            // header's closing "]\n".
+            std::string snippet, full;
             std::size_t body = msg.text.find('\n', close);
             if (body != std::string::npos) {
                 ++body;                                     // past the newline
+                // Full passage runs to the next header ("\n[") or block end.
+                std::size_t next = msg.text.find("\n[", body);
+                std::size_t stop = next == std::string::npos
+                                     ? msg.text.size() : next;
+                full = msg.text.substr(body, stop - body);
+                // Trim trailing blank lines / whitespace.
+                while (!full.empty()
+                       && (full.back() == '\n' || full.back() == ' '
+                        || full.back() == '\t' || full.back() == '\r'))
+                    full.pop_back();
+                // Bound the expansion so a huge passage can't blow the card.
+                constexpr std::size_t kFullCap = 800;
+                if (full.size() > kFullCap) {
+                    full.resize(kFullCap);
+                    full += "\xe2\x80\xa6";                 // …
+                }
+
                 std::size_t eol = msg.text.find('\n', body);
                 std::string line = eol == std::string::npos
                     ? msg.text.substr(body)
@@ -1241,14 +1261,15 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
 
             // Merge into the distinct-source list: a file that contributed
             // three chunks shows once, with chunks==3 and the first cited
-            // line / snippet retained.
+            // line / snippet / full body retained.
             auto it = std::find_if(sources.begin(), sources.end(),
                 [&](const Src& s){ return s.kind == src && s.path == path; });
             if (it != sources.end()) {
                 ++it->chunks;
             } else {
                 sources.push_back(Src{std::move(src), std::move(path),
-                                      std::move(lineno), std::move(snippet), 1});
+                                      std::move(lineno), std::move(snippet),
+                                      std::move(full), 1});
             }
         }
 
@@ -1309,6 +1330,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             using namespace maya::dsl;
             constexpr std::size_t kMaxSources = 5;
             const std::size_t total = sources.size();
+            const bool expanded = msg.proactive_expanded;
             for (std::size_t i = 0; i < sources.size() && i < kMaxSources; ++i) {
                 const Src& s = sources[i];
                 std::string kindpart = s.kind + " \xc2\xb7 ";     // "docs · "
@@ -1318,7 +1340,23 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 std::string badge = s.chunks > 1
                     ? "  \xc3\x97" + std::to_string(s.chunks) : std::string{};
 
-                if (!s.snippet.empty()) {
+                if (expanded) {
+                    // Header row (no inline snippet — the full body follows),
+                    // then the full passage wrapped, quote-dimmed, indented
+                    // so it reads as the cited block under its source.
+                    cfg.body.emplace_back(maya::Turn::BodySlot{
+                        h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
+                          text(kindpart, fg_of(muted)),
+                          text(pathpart, fg_of(code_path)),
+                          text(badge,    fg_of(status_warn)))          // ×N
+                            .build()});
+                    if (!s.full.empty()) {
+                        cfg.body.emplace_back(maya::Turn::BodySlot{
+                            h(text("      ", fg_of(muted)),
+                              text(s.full, fg_of(muted)))
+                                .build()});
+                    }
+                } else if (!s.snippet.empty()) {
                     cfg.body.emplace_back(maya::Turn::BodySlot{
                         h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
                           text(kindpart, fg_of(muted)),
@@ -1344,6 +1382,20 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                         + " more source"
                         + (total - kMaxSources == 1 ? "" : "s"),
                     .color   = muted});
+            }
+            // Affordance footer — only when there's a full body worth
+            // expanding to. Tells the user the toggle exists and what it
+            // does; dim so it never competes with the citation content.
+            const bool any_full = std::any_of(sources.begin(), sources.end(),
+                [](const Src& s){ return !s.full.empty(); });
+            if (any_full) {
+                cfg.body.emplace_back(maya::Turn::BodySlot{
+                    h(text("  ", fg_of(muted)),
+                      text(expanded
+                             ? "^U collapse"
+                             : "^U expand full passages",
+                           fg_of(status_info)))
+                        .build()});
             }
         }
         return cfg;

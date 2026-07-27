@@ -532,6 +532,11 @@ struct CheckpointDiffLoaded {
 };
 struct ScrollThread { int delta; };
 struct ToggleToolExpanded { ToolCallId id; };
+// Ctrl+U on the transcript — flip the newest retrieved-context card between
+// its compact one-line-per-source form and a full-passage-text expansion.
+// Carries the target message id so the reducer mutates exactly that card
+// (mirrors ToggleToolExpanded's id-addressed mutation + render-key bump).
+struct ToggleRetrievedExpanded { MessageId id; };
 
 struct Tick {};
 struct Quit {};
@@ -633,7 +638,7 @@ using DiffReviewMsg = std::variant<
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
-    ScrollThread, ToggleToolExpanded,
+    ScrollThread, ToggleToolExpanded, ToggleRetrievedExpanded,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen>;
 
 } // namespace msg
