@@ -1203,3 +1203,108 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ── FINAL GATE: verify every channel actually shipped this version ──────────
+  # The publish-* jobs use always() + per-secret guards, so the run can go green
+  # while a channel silently did nothing (missing token, a skipped build leg
+  # upstream, winget's continue-on-error update path, a transient push failure).
+  # That's exactly how a package ends up stale and a user files an out-of-date
+  # flag. This job runs DEAD LAST, needs every publisher, fetches each channel's
+  # LIVE state, and FAILS THE RUN if a channel whose secret IS configured did
+  # not reach this version. Result: a green release means every channel is
+  # genuinely up to date; a red one names exactly which channel to look at.
+  #
+  # A channel with no secret configured is reported as "skipped (no secret)" and
+  # never fails the gate — you opt a channel in by setting its secret, and from
+  # then on it's verified on every release.
+  verify-release:
+    name: verify all channels shipped
+    needs:
+      - prepare
+      - build-linux-x86_64
+      - build-linux-aarch64
+      - build-linux-i686
+      - build-windows
+      - build-macos
+      - checksums-final
+      - publish-manifests
+      - publish-homebrew
+      - publish-scoop
+      - publish-aur
+      - publish-winget
+      - publish-copr
+      - publish-apt-repo
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+      SCOOP_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+      AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - name: Audit every published channel
+        run: |
+          set -u
+          fail=0
+          ok()   { echo "✓ $1"; }
+          skip() { echo "– $1 (no secret configured — not verified)"; }
+          bad()  { echo "::error::$1"; fail=1; }
+
+          # ---- 1. The GitHub release itself: every expected binary present ----
+          echo "::group::release assets"
+          assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' 2>/dev/null || true)
+          echo "$assets"
+          for a in agentty-linux-x86_64 agentty-linux-aarch64 agentty-linux-i686 \
+                   agentty-macos-arm64 agentty-macos-x86_64 \
+                   agentty-windows-x86_64.exe agentty-windows-x86_64.msi \
+                   SHA256SUMS; do
+            if echo "$assets" | grep -qx "$a"; then ok "release asset $a"; else bad "release missing asset: $a"; fi
+          done
+          echo "::endgroup::"
+
+          # ---- 2. Homebrew tap: formula pins this version ----
+          echo "::group::homebrew"
+          if [ -n "$TAP_TOKEN" ]; then
+            f=$(curl -fsSL "https://raw.githubusercontent.com/1ay1/homebrew-tap/master/Formula/agentty.rb" 2>/dev/null || true)
+            if printf '%s\n' "$f" | grep -qE "version \"${V}\""; then ok "homebrew formula @ $V"; else bad "homebrew formula not at $V"; fi
+          else skip "homebrew"; fi
+          echo "::endgroup::"
+
+          # ---- 3. Scoop bucket: manifest pins this version ----
+          echo "::group::scoop"
+          if [ -n "$SCOOP_TOKEN" ]; then
+            j=$(curl -fsSL "https://raw.githubusercontent.com/1ay1/scoop-bucket/master/bucket/agentty.json" 2>/dev/null || true)
+            if printf '%s\n' "$j" | grep -qE "\"version\": *\"${V}\""; then ok "scoop manifest @ $V"; else bad "scoop manifest not at $V"; fi
+          else skip "scoop"; fi
+          echo "::endgroup::"
+
+          # ---- 4. AUR: PKGBUILD pkgver is this version ----
+          echo "::group::aur"
+          if [ -n "$AUR_SSH_KEY" ]; then
+            pk=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=agentty-bin" 2>/dev/null || true)
+            if printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$"; then ok "AUR agentty-bin @ $V"; else bad "AUR agentty-bin not at $V"; fi
+          else skip "aur"; fi
+          echo "::endgroup::"
+
+          # ---- 5. winget: a PR for this version exists (merge is async, by MS) ----
+          echo "::group::winget"
+          if [ -n "$WINGET_TOKEN" ]; then
+            # Already merged upstream?
+            if gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentty/agentty/$V" >/dev/null 2>&1; then
+              ok "winget manifest merged @ $V"
+            else
+              me=$(GH_TOKEN=$WINGET_TOKEN gh api user -q .login 2>/dev/null || echo 1ay1)
+              prs=$(GH_TOKEN=$WINGET_TOKEN gh pr list --repo microsoft/winget-pkgs --author "$me" --state all --search "agentty.agentty version $V in:title" --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
+              if [ -n "$prs" ]; then ok "winget PR open/merged for $V ($prs)"; else bad "winget: no PR found for version $V"; fi
+            fi
+          else skip "winget"; fi
+          echo "::endgroup::"
+
+          echo ""
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more configured channels did NOT ship $V. The reconcile-manifests workflow (auto-triggered on this run's completion) will re-pin AUR/Homebrew/scoop from SHA256SUMS; re-dispatch release.yml for anything still red."
+            exit 1
+          fi
+          echo "All configured channels shipped $V ✓"
+
