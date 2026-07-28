@@ -113,6 +113,13 @@ int serve_stdio() {
         "diagnostics, and git. Filesystem tools are sandboxed to the workspace "
         "the agentty process was launched in.");
 
+    // MCP 2026-07-28 stateless core: advertise `server/discover` cacheability.
+    // Our tool catalog is static for the process lifetime (built once from
+    // tools::registry()), so a modern client may cache the discover result for
+    // an hour and skip re-enumerating on reconnect. The discover handler and
+    // per-request `_meta` reading are provided by mcp::Server out of the box.
+    server.set_discover_cache(::mcp::CacheHint{3'600'000, "public"});
+
     // Register every native tool. The handler routes through the very same
     // DynamicDispatch the agent loop uses, so behaviour is identical.
     std::size_t n = 0;
