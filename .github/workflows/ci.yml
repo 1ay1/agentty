@@ -243,6 +243,9 @@ jobs:
           ls -l build/agentty* || true
           BIN=build/agentty.exe
           test -x "$BIN" || BIN=build/agentty
+          # Resolve to an absolute path so the launch below and the log line
+          # are unambiguous regardless of cwd.
+          BIN="$(realpath "$BIN")"
           echo "binary: $BIN"
           file "$BIN" || true
           # --version must always work (short-circuits before the TUI).
@@ -252,12 +255,26 @@ jobs:
           # /dev/null gives an immediately-EOF stdin that is NOT a console
           # handle -- the same class of fd mintty hands agentty -- without
           # nesting a second shell. COLUMNS/LINES stand in for a size query
-          # with no console buffer. A 30s watchdog turns any hang (busy-spin
-          # on a dead pipe, or a blocking read) into a hard CI failure.
+          # with no console buffer.
+          #
+          # NOTE: we deliberately do NOT wrap the run in coreutils `timeout`.
+          # Under MSYS2, `timeout` fork()s then exec()s the child under its
+          # own supervision, and that path cannot reliably launch a *native
+          # Win32 PE* (agentty.exe) -- it fails to invoke and returns 127,
+          # which looks like a bogus launch failure. Instead we background
+          # the binary directly (the shell launches it natively, exactly like
+          # the working --version call above) and run our own kill-watchdog.
           set +e
-          COLUMNS=80 LINES=24 timeout --signal=KILL 30 "$BIN" </dev/null \
-            >smoke.out 2>smoke.err
+          COLUMNS=80 LINES=24 "$BIN" </dev/null >smoke.out 2>smoke.err &
+          app_pid=$!
+          # Watchdog: after 30s, if the app is still alive, kill it and mark
+          # a hang. Runs in the background; we cancel it if the app exits.
+          ( sleep 30; kill -9 "$app_pid" 2>/dev/null && echo HUNG >smoke.hung ) &
+          watchdog_pid=$!
+          wait "$app_pid"
           rc=$?
+          kill "$watchdog_pid" 2>/dev/null
+          wait "$watchdog_pid" 2>/dev/null
           set -e
           echo "exit=$rc"
           echo "----- stdout (head) -----"; head -c 2000 smoke.out || true; echo
@@ -266,9 +283,8 @@ jobs:
             echo "::error::agentty could not initialize the terminal under a pipe (MSYS2/mintty regression)"
             exit 1
           fi
-          # 137 = SIGKILL from the watchdog => it hung. Anything else that is
-          # non-zero is also a launch failure. Clean EOF exit is 0.
-          if [ "$rc" -eq 137 ]; then
+          # smoke.hung exists (or rc reflects a SIGKILL: 137 / 9) => it hung.
+          if [ -f smoke.hung ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 9 ]; then
             echo "::error::agentty hung on a pipe stdin (did not exit on EOF)"
             exit 1
           fi
