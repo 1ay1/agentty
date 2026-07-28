@@ -45,14 +45,14 @@ Selection parse_selection(std::string_view spec) {
     // OpenAI-compatible transport with the matching Endpoint.
     const ProviderPreset* p = spec.empty() ? preset_for(default_provider_id())
                                             : preset_for(spec);
-    if (p && p->kind == Kind::Anthropic) {
+    if (p && p->kind() == Kind::Anthropic) {
         s.kind = Kind::Anthropic;
         return s;
     }
     // External ACP agent: a registry row with Kind::ExternalAcp, OR any spec id
     // that names a launchable agent (built-in default / config entry) even
     // without a registry row. The runtime spawns/drives the subprocess.
-    if ((p && p->kind == Kind::ExternalAcp)
+    if ((p && p->kind() == Kind::ExternalAcp)
         || (!p && !spec.empty() && is_acp_agent_id(spec))) {
         s.kind         = Kind::ExternalAcp;
         s.acp_agent_id = std::string{spec};
@@ -77,7 +77,7 @@ auth::AuthHeader resolve_auth_for(std::string_view spec,
 
     // Anthropic (or an unknown spec that parsed to Anthropic): use the creds
     // resolved from `agentty login`.
-    if ((p && p->kind == Kind::Anthropic)
+    if ((p && p->kind() == Kind::Anthropic)
         || (!p && parse_selection(spec).kind == Kind::Anthropic)) {
         return anthropic_creds;
     }

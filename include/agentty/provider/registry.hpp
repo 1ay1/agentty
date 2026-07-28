@@ -28,9 +28,55 @@
 
 namespace agentty::provider {
 
-// Which wire dialect a provider speaks. The runtime branches on this exactly
-// once (when building the concrete Provider); everything else is data.
+// ── The two orthogonal axes of a provider ────────────────────────────────
+//
+// `Kind` used to conflate them into one enum, which is why "is this ChatGPT?"
+// had to be re-derived as `kind == OpenAI && label == "chatgpt"` at six sites.
+// They are separated here:
+//
+//   Wire     — the on-the-wire DIALECT (which serializer/parser a turn uses).
+//              This is the ONLY thing the transport layer branches on.
+//   Lifetime — whether the concrete Provider is built once and reused for the
+//              whole process (it holds connection / OAuth-token state) or is a
+//              cheap value rebuilt per call from the active Endpoint.
+//
+// Provider IDENTITY ("chatgpt" vs "groq") is never an enum — it is the row's
+// `id`. Anything that used to switch on identity now reads a capability field
+// off the row (see ProviderDescriptor), so adding a provider is adding a row.
+
+// Which wire dialect a turn is serialized/parsed as. Multiple providers share
+// one dialect (every hosted OpenAI-compat clone speaks OpenAIChat); a provider
+// is special only if it needs a NEW dialect.
+enum class Wire : std::uint8_t {
+    AnthropicMessages,  // Anthropic /v1/messages SSE.
+    OpenAIResponses,    // OpenAI /responses SSE (Codex/ChatGPT + api.openai.com).
+    OpenAIChat,         // OpenAI /chat/completions SSE + Ollama /api/chat NDJSON.
+    Acp,                // external ACP agent subprocess (no HTTP dialect).
+};
+
+// Is the concrete Provider long-lived (owns refreshed tokens / a warm pool, so
+// it is constructed once in main() and reused) or built per call?
+enum class Lifetime : std::uint8_t {
+    PerCall,    // cheap value transport, rebuilt from the active Endpoint.
+    LongLived,  // holds cross-turn state; one instance owned by main().
+};
+
+// `Kind` is retained as a COARSE, derived view of `Wire` for the handful of
+// call sites that only care "Anthropic vs OpenAI-family vs ACP subprocess".
+// It is no longer stored on a row — it is a pure function of Wire — so it can
+// never drift from the dialect. New code should prefer `Wire` + capability
+// fields; `Kind` stays only to keep the migration mechanical.
 enum class Kind : std::uint8_t { Anthropic, OpenAI, ExternalAcp };
+
+[[nodiscard]] constexpr Kind kind_of(Wire w) noexcept {
+    switch (w) {
+        case Wire::AnthropicMessages: return Kind::Anthropic;
+        case Wire::Acp:               return Kind::ExternalAcp;
+        case Wire::OpenAIResponses:
+        case Wire::OpenAIChat:        return Kind::OpenAI;
+    }
+    return Kind::OpenAI;
+}
 
 // How a provider authenticates — drives both the UI hint and which env vars
 // the auth resolver consults.
@@ -40,13 +86,19 @@ enum class AuthStyle : std::uint8_t {
     None,        // local server (Ollama / llama.cpp): no auth needed.
 };
 
-// One backend agentty knows how to reach. POD + string_view so the whole
-// table is a constant-initialised `constexpr` array with zero heap.
-struct ProviderPreset {
+// One backend agentty knows how to reach: its identity, how it authenticates,
+// which wire dialect it speaks, and its lifetime. POD + string_view so the
+// whole table is a constant-initialised `constexpr` array with zero heap.
+//
+// This is THE source of truth. Every subsystem that used to switch on a
+// provider (dispatch, model-list, prewarm, login gate, picker) reads a field
+// here instead. "Add a provider" == "append a row".
+struct ProviderDescriptor {
     std::string_view id;        // canonical spec token ("anthropic", "groq").
     std::string_view label;     // display name for the picker / badge.
     std::string_view blurb;     // one-line description (picker trailing text).
-    Kind             kind;
+    Wire             wire;       // on-the-wire dialect (transport branches here).
+    Lifetime         lifetime;   // long-lived (owns state) vs rebuilt per call.
     AuthStyle        auth;
     bool             is_local;  // localhost backend — no network key needed.
 
@@ -69,13 +121,21 @@ struct ProviderPreset {
     // OAuth-native: the backend authenticates by "sign in with <provider>"
     // (its own OAuth flow, tokens auto-refreshed in-process) rather than a
     // bearer API key, AND it rides a DEDICATED long-lived transport instead of
-    // the generic OpenAI-compat one. Today only ChatGPT/Codex under Kind::OpenAI
-    // sets this (Anthropic OAuth is Kind::Anthropic, so it never needs the
-    // flag to be routed). Selection::is_oauth_native() reads this so "this
-    // endpoint is special" is a DATUM on the row, not a label compared at the
+    // the generic OpenAI-compat one. Today only ChatGPT/Codex sets this
+    // (Anthropic OAuth speaks AnthropicMessages, so it never needs the flag to
+    // be routed). "This endpoint is special" is a DATUM on the row, read at the
     // routing/prewarm/login sites — a second such provider just sets the flag.
     bool oauth_native = false;
+
+    // Coarse Kind view, derived from `wire` so it can never drift. Kept for
+    // the call sites that only need Anthropic-vs-OpenAI-family-vs-ACP.
+    [[nodiscard]] constexpr Kind kind() const noexcept { return kind_of(wire); }
 };
+
+// Legacy name. `ProviderPreset` was the row type before it grew wire/lifetime
+// and became the behaviour source of truth; kept as an alias so the ~dozen
+// call sites naming it keep compiling during and after the migration.
+using ProviderPreset = ProviderDescriptor;
 
 // ── The table ────────────────────────────────────────────────────────────
 // Order = display order in the picker. Anthropic first (the default), then
@@ -84,25 +144,25 @@ struct ProviderPreset {
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderPreset, 9> kProviders{{
+inline constexpr std::array<ProviderDescriptor, 9> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
-     Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
+     Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, ""},
+     Wire::OpenAIResponses,   Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, ""},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true},
+     Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"openrouter", "OpenRouter", "Any model via openrouter.ai",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"together",   "Together",   "Open models on together.ai",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"ollama",     "Ollama",     "Local models at localhost:11434",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, ""},
     {"llama.cpp",  "llama.cpp",  "Local llama.cpp server at localhost:8080",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, ""},
+     Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::None,       true,  {"", "", ""}, ""},
 }};
 
 // All presets, for the picker / iteration.
