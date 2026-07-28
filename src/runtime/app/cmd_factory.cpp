@@ -1139,21 +1139,11 @@ Cmd<Msg> kick_pending_tools(Model& m) {
 Cmd<Msg> fetch_models() {
     return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
         try {
-            std::vector<ModelInfo> models;
-            const auto& sel = provider::active();
-            if (sel.kind == provider::Kind::ExternalAcp) {
-                // An external ACP agent chooses its own model internally; it
-                // exposes no list_models endpoint. Return empty so the picker
-                // shows a clean "no models" state instead of dialing Anthropic.
-                models = {};
-            } else if (sel.is_chatgpt()) {
-                models = provider::chatgpt::list_models();
-            } else if (sel.kind == provider::Kind::OpenAI) {
-                models = provider::openai::list_models(deps().auth,
-                                                       sel.openai_endpoint);
-            } else {
-                models = provider::anthropic::list_models(deps().auth);
-            }
+            // ONE model-list router (provider/selection.cpp), dispatched on the
+            // same axes as the stream path. No is_chatgpt/OpenAI/Anthropic
+            // ladder here — a new provider inherits its catalog from its row.
+            auto models = provider::list_models_for(provider::active(),
+                                                    deps().auth);
             dispatch(ModelsLoaded{std::move(models)});
         } catch (const std::exception& e) {
             // Dispatch an EMPTY ModelsLoaded (not StreamError) so the

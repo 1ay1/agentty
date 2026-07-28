@@ -12,8 +12,10 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"   // ModelInfo
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/registry.hpp"
 
@@ -136,5 +138,16 @@ void prewarm_active_provider();
     const auth::AuthHeader& anthropic_creds,
     std::string_view cli_key = {},
     std::string_view saved_key = {});
+
+// Fetch the model catalog for a selection — the ONE model-list router.
+// Replaces the `is_chatgpt → OpenAI → Anthropic` ladder that fetch_models()
+// hand-wrote: it dispatches on the same axes as the stream path (the Wire
+// dialect + the oauth_native flag), so the picker and the transport can never
+// disagree about which backend a selection names. ExternalAcp returns empty
+// (an ACP agent picks its own model and exposes no catalog). `auth` is the
+// active credential (used by the Anthropic / OpenAI-compat catalog endpoints;
+// ChatGPT reads its own in-process OAuth creds and ignores it).
+[[nodiscard]] std::vector<ModelInfo> list_models_for(
+    const Selection& sel, const auth::AuthHeader& auth);
 
 } // namespace agentty::provider
