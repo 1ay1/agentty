@@ -699,6 +699,7 @@ set(AGENTTY_PROVIDER_SOURCES
 # as acp::acp); server.cpp is the agentty-specific glue (turn loop + tools).
 set(AGENTTY_ACP_SOURCES
     src/acp/server.cpp
+    src/provider/external_acp_backend.cpp
 )
 
 # MCP (Model Context Protocol) client glue — spawns external MCP servers and
@@ -1972,6 +1973,22 @@ if(AGENTTY_BUILD_TESTS)
         LIBS acp::acp)
     set_tests_properties(acp_integration_test PROPERTIES TIMEOUT 60)
 
+    # external_acp_backend_test — the INBOUND ACP boundary. Drives
+    # ExternalAcpBackend against an in-memory FAKE agent (acp::ClientConnection
+    # wired to an acp::AgentConnection via mailbox pumps): asserts session/update
+    # → TurnSink translation, the exactly-once terminal-event discipline, and
+    # the stop-reason → TurnResult mapping (end_turn / max_turn_requests /
+    # refusal / cancelled) plus user-Esc cancellation. Also spawns a REAL
+    # self-spawn subprocess (--acp-agent) and the fs/terminal sandbox delegate.
+    # ROBUSTNESS: two hostile-lifecycle tests guard the teardown/cancel
+    # watchdogs — a WEDGED child that ignores stdin-EOF (must be force-killed,
+    # not deadlock the reader-join) and a NON-SETTLING agent on cancel (prompt()
+    # must still return bounded via the engine escape hatch, not wedge).
+    agentty_add_full_test(external_acp_backend_test
+        $<TARGET_OBJECTS:agentty_acp_obj>
+        LIBS acp::acp)
+    set_tests_properties(external_acp_backend_test PROPERTIES TIMEOUT 60)
+
     # mcp_bridge_test — e2e for the agentty↔mcp-cpp capability bridge. Spawns
     # the mcp-cpp example server and drives mcp::mcp_tools() end to end. The
     # test SKIPS (exit 0) when the example server isn't built. Only registered
@@ -2134,6 +2151,7 @@ if(AGENTTY_BUILD_TESTS)
         salvage_dedup_test
         doom_loop_test
         acp_integration_test
+        external_acp_backend_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz
         reveal_scrollback_test
