@@ -80,10 +80,79 @@ static void test_is_chatgpt_predicate() {
     CHECK(c.is_chatgpt());
 }
 
+// The prewarm ROUTING table, locked as a pure function (no socket opened).
+// prewarm_target(sel) is registry-driven, so these assertions prove the
+// warm-host derivation for every backend shape.
+static void test_prewarm_target_table() {
+    // Anthropic → the transport's fixed host from the registry row.
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::Anthropic;
+        auto t = provider::prewarm_target(s);
+        CHECK(t.should_warm());
+        CHECK(t.host == "api.anthropic.com");
+        CHECK(t.port == 443);
+    }
+    // ChatGPT → chatgpt.com (its Endpoint carries the port-0 sentinel, so the
+    // registry prewarm_host wins).
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::OpenAI;
+        s.openai_endpoint.label = "chatgpt";
+        auto t = provider::prewarm_target(s);
+        CHECK(t.should_warm());
+        CHECK(t.host == "chatgpt.com");
+        CHECK(t.port == 443);
+    }
+    // Hosted OpenAI-compat (groq) → warm its own Endpoint host.
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::OpenAI;
+        s.openai_endpoint.label = "groq";
+        s.openai_endpoint.host  = "api.groq.com";
+        s.openai_endpoint.port  = 443;
+        s.openai_endpoint.use_tls = true;
+        auto t = provider::prewarm_target(s);
+        CHECK(t.should_warm());
+        CHECK(t.host == "api.groq.com");
+    }
+    // Local Ollama → nothing to warm.
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::OpenAI;
+        s.openai_endpoint.label = "ollama";
+        s.openai_endpoint.host  = "localhost";
+        s.openai_endpoint.port  = 11434;
+        s.openai_endpoint.use_tls = false;
+        auto t = provider::prewarm_target(s);
+        CHECK(!t.should_warm());
+    }
+    // ACP subprocess → no HTTP layer.
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::ExternalAcp;
+        s.acp_agent_id = "claude-agent-acp";
+        auto t = provider::prewarm_target(s);
+        CHECK(!t.should_warm());
+    }
+    // Port-0 sentinel on a non-registry endpoint → skip (don't dial :0).
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::OpenAI;
+        s.openai_endpoint.label = "custom";
+        s.openai_endpoint.host  = "example.com";
+        s.openai_endpoint.port  = 0;
+        s.openai_endpoint.use_tls = true;
+        auto t = provider::prewarm_target(s);
+        CHECK(!t.should_warm());
+    }
+}
+
 int main() {
     test_anthropic_selection_hits_anthropic_route();
     test_chatgpt_selection_hits_chatgpt_route();
     test_is_chatgpt_predicate();
+    test_prewarm_target_table();
 
     if (g_failures == 0) {
         std::printf("dispatch_route_test: all checks passed\n");

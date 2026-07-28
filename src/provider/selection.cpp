@@ -125,47 +125,58 @@ std::string provider_display_name(const Selection& s) {
     return lbl.empty() ? std::string{"OpenAI"} : lbl;
 }
 
+PrewarmTarget prewarm_target(const Selection& s) {
+    // ACP subprocess: no HTTP layer to warm.
+    if (s.kind == Kind::ExternalAcp) return {};
+
+    // Registry-driven fixed host. The two backends that don't dial their
+    // Endpoint carry a `prewarm_host` on their preset row: Anthropic
+    // (transport hardcodes api.anthropic.com) and ChatGPT (talks to
+    // chatgpt.com while its Endpoint port is the 0 sentinel). We look the row
+    // up by the id the Selection resolves to — "anthropic" for the Anthropic
+    // kind, else the OpenAI endpoint label ("chatgpt", "groq", …).
+    const std::string_view id =
+        s.kind == Kind::Anthropic ? std::string_view{"anthropic"}
+                                  : std::string_view{s.openai_endpoint.label};
+    if (const ProviderPreset* p = preset_for(id); p && !p->prewarm_host.empty()) {
+        PrewarmTarget t;
+        t.host = std::string{p->prewarm_host};
+        t.port = 443;
+        // Anthropic honours the AGENTTY_API_HOST dial so the warm socket
+        // targets the real upstream (kept out of the registry: it's a
+        // per-run env override, not a static provider fact).
+        if (s.kind == Kind::Anthropic) {
+            const auto& ov = http::agentty_api_host_override();
+            if (ov.active()) {
+                t.override_host = ov.host;
+                t.override_port = ov.port;
+            }
+        }
+        return t;
+    }
+
+    // Every other OpenAI-compat backend: warm its own Endpoint host. Skip
+    // locals — no TLS handshake to amortise, and the port may be 0 (a
+    // sentinel) or a local dev server that isn't up yet.
+    const auto& ep = s.openai_endpoint;
+    if (!ep.use_tls || ep.host.empty() || ep.host == "localhost"
+        || ep.host == "127.0.0.1" || ep.port == 0)
+        return {};
+    PrewarmTarget t;
+    t.host = ep.host;
+    t.port = ep.port;
+    return t;
+}
+
 void prewarm_active_provider() {
-    // Open TCP+TLS(+h2) to the ACTIVE provider's host on a detached thread so
-    // the first real request skips the ~150–300 ms cold handshake. Uniform
-    // across native backends: Anthropic AND ChatGPT/Codex (and any hosted
-    // OpenAI-family endpoint) all get the same head start — no provider is
-    // privileged. Idempotent per (host,port) via the client's pool; a local
-    // backend (Ollama / llama.cpp on localhost) is skipped since there's no
-    // handshake worth hiding. Safe to call from the UI thread (fire-and-forget).
-    const Selection s = active();
-    auto& client = http::default_client();
-
-    // The native ChatGPT path never dials the endpoint in the Selection — it
-    // talks to chatgpt.com/backend-api/codex — so prewarm that host. Checked
-    // FIRST (before the Kind switch) via the single is_chatgpt() predicate.
-    if (s.is_chatgpt()) {
-        client.prewarm("chatgpt.com", 443, {}, 0);
-        return;
-    }
-
-    switch (s.kind) {
-    case Kind::Anthropic: {
-        const auto& ov = http::agentty_api_host_override();
-        client.prewarm("api.anthropic.com", 443,
-                       ov.active() ? ov.host : std::string{},
-                       ov.active() ? ov.port : std::uint16_t{0});
-        return;
-    }
-    case Kind::OpenAI: {
-        const auto& ep = s.openai_endpoint;
-        // Skip locals: no TLS handshake to amortise, and the port may be 0
-        // (the chatgpt sentinel) or a local dev server that isn't up yet.
-        if (!ep.use_tls || ep.host.empty() || ep.host == "localhost"
-            || ep.host == "127.0.0.1" || ep.port == 0)
-            return;
-        client.prewarm(ep.host, ep.port, {}, 0);
-        return;
-    }
-    case Kind::ExternalAcp:
-        // A subprocess agent — nothing to prewarm at the HTTP layer.
-        return;
-    }
+    // Uniform across native backends: resolve the warm target from the active
+    // selection (pure, registry-driven — see prewarm_target) and open the
+    // socket. No provider is privileged; the routing table lives in one
+    // testable function, not this side-effecting wrapper.
+    const PrewarmTarget t = prewarm_target(active());
+    if (!t.should_warm()) return;
+    http::default_client().prewarm(t.host, t.port, t.override_host,
+                                   t.override_port);
 }
 
 } // namespace agentty::provider
