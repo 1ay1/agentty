@@ -325,7 +325,7 @@ Element provider_picker(const Model& m) {
         } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
             note_color = info;
-        } else if (p.kind == provider::Kind::Anthropic) {
+        } else if (p.kind() == provider::Kind::Anthropic) {
             note = "✓ login";
             note_color = success;
         } else {

@@ -411,7 +411,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // commits the switch (see login.cpp). The selection isn't
             // installed until the key lands.
             const bool needs_key =
-                preset.kind == provider::Kind::OpenAI && !preset.is_local
+                preset.kind() == provider::Kind::OpenAI && !preset.is_local
                 && preset.auth != provider::AuthStyle::None;
             if (needs_key && auth::is_empty(new_auth)) {
                 m.ui.login = ui::login::ApiKeyInput{

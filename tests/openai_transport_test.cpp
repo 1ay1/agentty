@@ -530,7 +530,7 @@ static void test_endpoint_presets() {
     // class of bug: the fallback would treat the id as a raw hostname and
     // silently dial the wrong place.
     for (const auto& p : agentty::provider::providers()) {
-        if (p.kind != agentty::provider::Kind::OpenAI) continue;
+        if (p.kind() != agentty::provider::Kind::OpenAI) continue;
         auto ep = oai::Endpoint::from_spec(p.id);
         CHECK(!ep.host.empty());
         CHECK(!ep.path.empty());
@@ -621,7 +621,7 @@ static void test_resolve_auth_per_preset() {
 
     for (const auto& p : providers()) {
         auto a = resolve_auth_for(p.id, anthropic, /*cli_key=*/{}, /*saved_key=*/{});
-        if (p.kind == Kind::Anthropic) {
+        if (p.kind() == Kind::Anthropic) {
             // Echoes the login creds unchanged.
             CHECK(!auth::is_empty(a));
             auto* b = std::get_if<auth::BearerHeader>(&a);
