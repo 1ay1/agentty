@@ -52,6 +52,30 @@ The reverse also works: drop a `.agentty/mcp.json` in your project and agentty c
 MCP consumption is lazy and opt-in — with no `.agentty/mcp.json` present, startup is a single `stat()` that returns nothing, so there is zero overhead when you aren't using it.
 :::
 
+## Authorizing an OAuth-gated server
+
+Some hosted MCP servers require OAuth (MCP spec **2026-07-28** authorization). When you run agentty against one, an unauthorized call returns an actionable error instead of hanging. Authorize once with:
+
+```bash
+agentty mcp-login <server>
+```
+
+This runs the full OAuth 2.1 + PKCE flow: agentty discovers the authorization server from the endpoint's protected-resource metadata (RFC 9728), dynamically registers itself (`application_type=native`, so the loopback redirect is accepted), opens your browser to authorize, catches the redirect on a local loopback port, and validates the response — including the **RFC 9207 `iss` check** that blocks authorization-server mix-up attacks *before* the code is exchanged.
+
+The resulting token is **issuer-bound** (it will never be replayed to a different authorization server), stored encrypted at rest (`~/.agentty/mcp_tokens/<server>.json`, `chmod 600`), attached automatically to every request to that server, and **refreshed transparently** when it expires. Manage tokens with:
+
+```bash
+agentty mcp-status          # list servers and which are authorized
+agentty mcp-logout <server> # forget a stored token
+```
+
+A statically-configured `Authorization` header in `mcp.json` still wins, so you can also just paste a bearer token if you have one:
+
+```json
+{ "mcpServers": { "acme": { "url": "https://mcp.acme.dev/mcp",
+    "headers": { "Authorization": "Bearer sk-..." } } } }
+```
+
 ## Searching an MCP server's resources
 
 Beyond tools, an MCP server can expose **resources** (`resources/*`) — documents, wiki pages, reference material. agentty can fold those into its [retrieval engine](/docs/retrieval) so `search_docs` searches them alongside your local docs, skills, and memory, all fused into one ranked, source-tagged result set. It's off by default; enable with `AGENTTY_RAG_MCP=1` (requires an MCP config to be present). From the model's view a docs folder and an MCP server are the same thing — a knowledge source behind one interface.

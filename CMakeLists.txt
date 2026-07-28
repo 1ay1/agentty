@@ -719,6 +719,7 @@ set(AGENTTY_MCP_SOURCES
     src/mcp/bridge.cpp
     src/mcp/http_server.cpp
     src/mcp/serve.cpp
+    src/mcp/oauth.cpp
     src/tool/mcp_tools_bridge.cpp
     src/tool/mcp_tools_backends.cpp
 )
