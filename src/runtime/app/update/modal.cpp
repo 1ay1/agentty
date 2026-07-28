@@ -471,6 +471,8 @@ std::string active_provider_id() {
     const auto& sel = provider::active();
     if (sel.kind == provider::Kind::OpenAI)
         return sel.openai_endpoint.label;
+    if (sel.kind == provider::Kind::ExternalAcp)
+        return sel.acp_agent_id;
     return std::string{provider::default_provider_id()};
 }
 

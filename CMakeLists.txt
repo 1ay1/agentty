@@ -691,6 +691,10 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
+    # ACP agent launch registry (config loader). Pure nlohmann/json, no acp-cpp
+    # dep, and referenced by selection.cpp (is_acp_agent_id) — so it lives in
+    # the provider objlib every test links, NOT in agentty_acp_obj.
+    src/provider/acp_agents.cpp
 )
 
 # ACP (Agent Client Protocol) — lets agentty run as a headless agent
@@ -700,6 +704,7 @@ set(AGENTTY_PROVIDER_SOURCES
 set(AGENTTY_ACP_SOURCES
     src/acp/server.cpp
     src/provider/external_acp_backend.cpp
+    src/provider/acp_provider_adapter.cpp
 )
 
 # MCP (Model Context Protocol) client glue — spawns external MCP servers and
@@ -1989,6 +1994,14 @@ if(AGENTTY_BUILD_TESTS)
         LIBS acp::acp)
     set_tests_properties(external_acp_backend_test PROPERTIES TIMEOUT 60)
 
+    # acp_agents_test — the external-ACP CONFIG surface + provider-selection
+    # routing (pure, subprocess-free): resolve_acp_agent() built-in defaults,
+    # JSON config override via a temp $AGENTTY_ACP_AGENTS file, and that
+    # parse_selection() routes an agent id → Kind::ExternalAcp with the id
+    # stamped. Reuses the shared object set (selection.cpp + acp_agents.cpp).
+    agentty_add_full_test(acp_agents_test)
+    set_tests_properties(acp_agents_test PROPERTIES TIMEOUT 30)
+
     # mcp_bridge_test — e2e for the agentty↔mcp-cpp capability bridge. Spawns
     # the mcp-cpp example server and drives mcp::mcp_tools() end to end. The
     # test SKIPS (exit 0) when the example server isn't built. Only registered
@@ -2152,6 +2165,7 @@ if(AGENTTY_BUILD_TESTS)
         doom_loop_test
         acp_integration_test
         external_acp_backend_test
+        acp_agents_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz
         reveal_scrollback_test

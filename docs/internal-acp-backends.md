@@ -268,4 +268,48 @@ adapter that needs it*.
 - **Plan / AvailableCommands / Mode arms.** Inbound today only needs message
   / thought / tool_call / tool_call_update / usage. The rest are outbound-only
   until a backend emits them.
+
+## 11. Shipped: selecting an external ACP agent
+
+External ACP agents are now first-class SELECTABLE providers, wired through
+the same one dispatch seam (`main.cpp` `stream_fn`) as the native backends —
+no `Kind` fan-out. The pieces:
+
+- **Registry** (`provider/registry.hpp`): `Kind::ExternalAcp` + rows
+  `claude-agent-acp` ("Claude Agent (ACP)") and `codex-acp` ("Codex (ACP)").
+  They show up in the provider picker like any other row; `AuthStyle::None`
+  (the agent handles its own auth), so selecting one never prompts for a key.
+- **Adapter** (`provider/acp_provider_adapter.cpp`): presents
+  `ExternalAcpBackend` as a plain `stream(Request, EventSink)` Provider —
+  spawns + caches the subprocess per agent id, translates each round's
+  `session/update` into the same `Stream*` Msgs the native providers emit,
+  settles from the `TurnResult`. Cached processes are torn down at exit via
+  `release_acp_agents()` (bounded even for a wedged agent).
+- **Launch config** (`provider/acp_agents.{hpp,cpp}`): resolves a spec id to
+  its argv. Built-in defaults mean a user with the binary on `$PATH` selects
+  it with ZERO config. To override the argv / pin a path / add another agent,
+  drop an `acp-agents.json` (resolution mirrors `mcp.json`):
+
+  1. `$AGENTTY_ACP_AGENTS` — explicit path (trusted).
+  2. `~/.agentty/acp-agents.json` — user-global (trusted).
+  3. `./.agentty/acp-agents.json` — workspace-local (gated behind
+     `AGENTTY_ACP_ALLOW_PROJECT=1`, since it spawns arbitrary commands).
+
+  ```json
+  {
+    "acpAgents": {
+      "claude-agent-acp": {
+        "command": "claude-agent-acp",
+        "args": ["--stdio"],
+        "env": { "FOO": "bar" },
+        "cwd": "/optional/working/dir"
+      },
+      "my-agent": { "command": "my-acp", "args": ["serve"] }
+    }
+  }
+  ```
+
+  A config-only id (no built-in row) is still selectable via a raw `--provider
+  my-agent` spec. Tests: `acp_agents_test` (config + selection routing) and
+  `external_acp_backend_test` (the backend itself + hardened lifecycle).
 ```

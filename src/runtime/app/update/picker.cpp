@@ -301,10 +301,11 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
         [&](OpenProviderPicker) -> Step {
             // Open at the row matching the currently-active provider.
             int idx = 0;
-            const auto& active_label = provider::active().kind
-                                       == provider::Kind::OpenAI
-                ? provider::active().openai_endpoint.label
-                : std::string{provider::default_provider_id()};
+            const auto& sel = provider::active();
+            const std::string active_label =
+                sel.kind == provider::Kind::OpenAI      ? sel.openai_endpoint.label
+              : sel.kind == provider::Kind::ExternalAcp ? sel.acp_agent_id
+              : std::string{provider::default_provider_id()};
             for (int i = 0; i < n; ++i)
                 if (presets[static_cast<std::size_t>(i)].id == active_label) idx = i;
             m.ui.provider_picker = pick::OpenAt{idx};

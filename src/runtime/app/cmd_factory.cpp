@@ -515,19 +515,15 @@ Cmd<Msg> launch_stream(Model& m) {
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
-    const bool chatgpt_provider =
-        provider::active().kind == provider::Kind::OpenAI
-        && provider::active().openai_endpoint.label == "chatgpt";
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
-    // Codex's model catalogue advertises its own reasoning levels. Its model
-    // ids are `gpt-*`, which deliberately don't use the Claude-only
-    // ModelCapabilities decoder, so preserve the picker value here instead
-    // of collapsing every Codex effort choice to "off".
-    std::string effort = std::string{chatgpt_provider
-        ? effort_wire(m.d.effort)
-        : effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
+    // gpt-5.x (ChatGPT/Codex) now decodes through ModelCapabilities (Family::
+    // Gpt), so the SAME clamp path applies: gpt-5.6 takes the full low..max
+    // ladder, gpt-5.4/5.5 top out at xhigh, and a stale `max` pick on a model
+    // that only reaches xhigh degrades instead of being sent verbatim.
+    std::string effort = std::string{
+        effort_wire_for(m.d.effort, ModelCapabilities::from_id(model_id))};
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
@@ -1145,7 +1141,12 @@ Cmd<Msg> fetch_models() {
         try {
             std::vector<ModelInfo> models;
             const auto& sel = provider::active();
-            if (sel.kind == provider::Kind::OpenAI
+            if (sel.kind == provider::Kind::ExternalAcp) {
+                // An external ACP agent chooses its own model internally; it
+                // exposes no list_models endpoint. Return empty so the picker
+                // shows a clean "no models" state instead of dialing Anthropic.
+                models = {};
+            } else if (sel.kind == provider::Kind::OpenAI
                 && sel.openai_endpoint.label == "chatgpt") {
                 models = provider::chatgpt::list_models();
             } else if (sel.kind == provider::Kind::OpenAI) {
