@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"  // StreamResult (complete type for the concept check)
 
 namespace agentty::provider::chatgpt {
 
@@ -30,7 +31,7 @@ public:
     ~ChatGptProvider();
     ChatGptProvider(const ChatGptProvider&) = delete;
     ChatGptProvider& operator=(const ChatGptProvider&) = delete;
-    void stream(provider::Request req, provider::EventSink sink);
+    provider::StreamResult stream(provider::Request req, provider::EventSink sink);
 
 private:
     struct Impl;

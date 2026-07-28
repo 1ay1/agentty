@@ -15,6 +15,7 @@
 #include "agentty/provider/acp_agents.hpp"           // resolve_acp_agent
 #include "agentty/provider/acp_backend.hpp"          // TurnSink, TurnResult
 #include "agentty/provider/external_acp_backend.hpp" // ExternalAcpBackend, spawn_acp_agent
+#include "agentty/provider/stream_epilogue.hpp"        // StreamResult
 #include "agentty/runtime/msg.hpp"                   // Stream* Msgs
 #include "agentty/tool/util/fs_helpers.hpp"          // workspace_root (for cwd)
 
@@ -107,7 +108,7 @@ std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err
 
 } // namespace
 
-void stream_external_acp(const std::string& agent_id, Request req, EventSink sink) {
+StreamResult stream_external_acp(const std::string& agent_id, Request req, EventSink sink) {
     sink(StreamStarted{});
 
     std::string err;
@@ -115,7 +116,7 @@ void stream_external_acp(const std::string& agent_id, Request req, EventSink sin
     if (!live) {
         StreamError e; e.message = err;
         sink(std::move(e));
-        return;
+        return StreamResult::failed(err.empty() ? "ACP agent spawn failed" : err);
     }
 
     // Translate the round's SessionUpdates into agentty Stream* Msgs. The tool
@@ -155,21 +156,37 @@ void stream_external_acp(const std::string& agent_id, Request req, EventSink sin
     auto cancel = std::make_shared<http::CancelToken>();
     req.cancel  = cancel;   // the runtime trips this on Esc (see below)
 
+    // ACP's per-round TurnResult (acp_backend.hpp) is the ADJACENT layer's
+    // outcome; fold it onto the shared provider StreamResult so the ACP arm
+    // reports through the same value type as the native transports.
     TurnResult res = live->backend->prompt(req, tsink, cancel);
 
     if (!res.ok()) {
         if (res.error && res.error->user_cancel) {
             // A user cancel is a clean stop, not an error surface.
             sink(StreamFinished{StopReason::EndTurn});
-            return;
+            StreamResult sr;
+            sr.end  = StreamEnd::UserCancelled;
+            sr.stop = StopReason::EndTurn;
+            sr.error = std::string{"cancelled"};
+            return sr;
         }
         StreamError e;
         e.message = res.error ? res.error->message : "ACP agent error";
         if (res.error) e.retry_after = res.error->retry_after;
+        StreamResult sr;
+        sr.end         = StreamEnd::TransportError;
+        sr.stop        = res.stop;
+        sr.error       = e.message;
+        sr.retry_after = e.retry_after;
         sink(std::move(e));
-        return;
+        return sr;
     }
     sink(StreamFinished{res.stop});
+    StreamResult sr;
+    sr.end  = StreamEnd::CleanClose;
+    sr.stop = res.stop;
+    return sr;
 }
 
 void release_acp_agents() noexcept {

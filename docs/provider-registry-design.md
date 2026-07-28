@@ -65,15 +65,46 @@ transport hand-rolling the `if (!result) … if (!is_success) … else finish`
 ladder around those two primitives, the epilogue exposes the **whole post-loop
 as one call**:
 
-- **`finish_stream(terminated, sink, StreamOutcome)`** is the entire tail of a
-  streaming transport. It classifies the exit and emits exactly one terminal
-  event with the right message and precedence. `StreamOutcome` bundles the
-  facts (`terminated`, `result_ok`, `http_status`, `cancel`, `stop`) and the
+- **`finish_stream(terminated, sink, StreamOutcome) -> StreamResult`** is the
+  entire tail of a streaming transport. It classifies the exit and emits
+  exactly one terminal event with the right message and precedence, **and
+  returns a `StreamResult`** naming how the turn ended. `StreamOutcome` bundles
+  the facts (`terminated`, `result_ok`, `http_status`, `cancel`, `stop`) and the
   hooks: `http_error_message()` / `transport_error_message()` build the user
   message from the buffered error body; `before_finish` runs success-only
   (salvage / flush); `on_any_end` runs on success *and* error (close an open
-  tool block). All four transports now end a turn through this one call — no
-  transport re-implements the classify-and-emit ladder.
+  tool block). All four transports now end a turn through this one call and
+  `return` its result — no transport re-implements the classify-and-emit ladder.
+
+### The outcome is a value, not just a side effect — `StreamResult`
+
+A turn's terminal state used to be observable *only* as a `StreamFinished` /
+`StreamError` Msg pushed into the sink; a caller that wanted to know "did this
+error? was it a user cancel? what was the retry hint?" had to intercept and
+re-decode events. That is now a first-class **return value**:
+
+- The `Provider` concept is `stream(Request, EventSink) -> StreamResult` — the
+  outcome is part of the *type*. `run_stream_sync` (native transports),
+  `stream_responses` (ChatGPT), the four `Provider` adapters, `dispatch_stream`,
+  and the erased `StreamFn` / `Routes` all thread it through, so the value
+  survives the type-erased routing boundary instead of being silently dropped.
+- `StreamResult{end, stop, error?, retry_after?, http_status}` with
+  `ok()` / `cancelled()` / `already_terminated()` accessors. The emitted
+  terminal Msg is **derived from the same classification** as the returned
+  value, so the two can never disagree — Msg-reactive callers (the runtime
+  reducer) keep seeing `StreamFinished` / `StreamError`; value-reactive callers
+  read a field.
+- Pre-flight bail-outs a transport handles itself (not authenticated / body
+  encode failure) return `StreamResult::failed(msg)` after emitting their own
+  `StreamError`, so the value still reflects reality.
+- The ACP arm (`stream_external_acp`) folds the ACP backend's own per-round
+  `provider::TurnResult` (a richer, adjacent-layer type in `acp_backend.hpp`,
+  carrying `TurnError{auth_expired, user_cancel, …}`) onto a `StreamResult` at
+  the boundary — the two describe adjacent layers and stay distinct types.
+- Locked by `tests/dispatch_route_test.cpp`
+  (`test_dispatch_propagates_stream_result`): dispatch hands back the transport's
+  `StreamResult` (clean-close `ok()` vs. a transport error with its message)
+  through the real erased seam, no network.
 
 All four native transports use it, differing only in their hooks:
 
@@ -81,12 +112,6 @@ All four native transports use it, differing only in their hooks:
 - `src/provider/openai/transport.cpp` — `before_finish` salvages leaked tool JSON.
 - `src/provider/ollama/transport.cpp` — `before_finish` drains/rescues held text.
 - `src/provider/chatgpt/responses.cpp` — no hooks; the plain success/error split.
-
-> Forward note: the remaining end-state is to fold this into a `TurnResult`
-> return value + single send chokepoint so `stream_epilogue.hpp` dissolves into
-> the `Provider` interface itself. `finish_stream` is the intermediate form:
-> one call, one source of truth, and a new transport gets termination right for
-> free by filling in a `StreamOutcome`.
 
 ---
 
@@ -112,9 +137,9 @@ if/else chain to hunt down.
 
 A new native provider is built by satisfying the `Provider` concept
 (`include/agentty/provider/provider.hpp`) — a single method
-`stream(Request, EventSink)` — and nothing else in the codebase gets to know
-its concrete type. The uniform, fast behaviour then comes for free from the
-shared layers:
+`stream(Request, EventSink) -> StreamResult` — and nothing else in the codebase
+gets to know its concrete type. The uniform, fast behaviour then comes for free
+from the shared layers:
 
 - **Requests are uniform**: the transport reads one `provider::Request`
   (model, system prompt, messages, tools, effort, context window, cancel
@@ -122,9 +147,10 @@ shared layers:
   catalog. Effort is already clamped to the model's capability upstream in
   `cmd_factory.cpp` via `effort_wire_for`, so the transport just forwards
   `req.effort` onto its wire field.
-- **Termination is uniform**: fill in a `StreamOutcome` and call
-  `finish_stream` (§2). One terminal event, correct cancel/HTTP/clean-close
-  precedence, the whole post-loop in one call.
+- **Termination is uniform**: fill in a `StreamOutcome` and `return
+  finish_stream(…)` (§2). One terminal event, correct cancel/HTTP/clean-close
+  precedence, the whole post-loop in one call — and the `StreamResult` it hands
+  back is the transport's return value.
 - **Native + fast is uniform**: SSE/NDJSON straight through the in-house
   `nghttp2` + OpenSSL client with `req.cancel` honoured; no per-provider shim,
   no emulation path, same speed on Linux/macOS/Windows.
@@ -134,10 +160,10 @@ shared layers:
 1. **Catalog row** (§1) if the provider brings models with distinct caps
    (context, output, effort). Otherwise existing families cover it.
 2. **Registry row** in `kProviders` — id, label, `Kind`, `AuthStyle`, env vars.
-3. **Transport** implementing `stream(Request, EventSink)`, ending the turn by
-   filling a `StreamOutcome` and calling `finish_stream`. If it is
-   OpenAI-compatible with a non-default path/port, add the matching arm in
-   `openai::Endpoint::from_spec` keyed on the same id and you're done — no new
+3. **Transport** implementing `stream(Request, EventSink) -> StreamResult`,
+   ending the turn by filling a `StreamOutcome` and `return`ing `finish_stream`.
+   If it is OpenAI-compatible with a non-default path/port, add the matching arm
+   in `openai::Endpoint::from_spec` keyed on the same id and you're done — no new
    transport at all.
 4. **A `*_transport_test`** asserting the pure parse/emit behaviour with no
    network, mirroring `openai_transport_test` / `ollama_transport_test`.
@@ -181,8 +207,10 @@ The registry deliberately does not own the concrete `Provider` type (kept
 behind the type-erased `Deps::stream` seam), which is why *routing* is a
 function over erased callables rather than a table of constructors — but every
 static *fact* about a backend (auth, env vars, warm host) now lives on its row.
-The last conceptual sibling is the epilogue's own end-state (folding into a
-`TurnResult` return value), tracked as a follow-up.
+The epilogue's end-state — folding the turn outcome into a `StreamResult` return
+value on the `Provider` concept itself — is now shipped (§2), so the terminal
+outcome is a value threaded through every layer rather than a sink-only side
+effect.
 
 Adding a native provider is now: one catalog row + one registry row (id, label,
 auth, env, warm host) + one transport + one `dispatch_stream` arm (+ a `Routes`
@@ -196,6 +224,7 @@ data-driven, and tested.
 DRY across providers is not cosmetic here — every duplicated "how a turn ends"
 or "what can this model do" was a place two providers drifted and one grew a
 bug the other didn't. Collapsing each onto one declaration means a new provider
-or a new model is a *data* change (one catalog row, one registry row, two
-epilogue calls), runs at full native speed on every platform, and inherits
-correct behaviour instead of re-implementing it.
+or a new model is a *data* change (one catalog row, one registry row, one
+`finish_stream` return), runs at full native speed on every platform, and
+inherits correct behaviour — including a typed `StreamResult` outcome — instead
+of re-implementing it.

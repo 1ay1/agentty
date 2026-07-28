@@ -24,7 +24,7 @@
 
 #include <string>
 
-#include "agentty/provider/provider.hpp"   // Request, EventSink
+#include "agentty/provider/provider.hpp"   // Request, EventSink, StreamResult
 
 namespace agentty::provider {
 
@@ -32,10 +32,12 @@ namespace agentty::provider {
 // "claude-agent-acp" / "codex-acp", or a config-defined id) for one request,
 // streaming normalized Msgs into `sink`. Spawns + caches the subprocess on
 // first use. On spawn/launch failure emits StreamStarted + StreamError so the
-// UI shows a clean error instead of a silent hang.
-void stream_external_acp(const std::string&   agent_id,
-                         Request               req,
-                         EventSink             sink);
+// UI shows a clean error instead of a silent hang. Returns a StreamResult
+// naming how the round ended (mapped from the ACP backend's own TurnResult) so
+// the ACP arm reports its outcome through the same value as the native ones.
+StreamResult stream_external_acp(const std::string&   agent_id,
+                                 Request               req,
+                                 EventSink             sink);
 
 // Tear down every cached agent subprocess (idempotent). Called at shutdown; the
 // per-agent teardown uses ExternalAcpBackend's hardened watchdog so a wedged

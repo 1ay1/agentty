@@ -97,6 +97,57 @@ enum class StreamEnd {
     CleanClose,
 };
 
+// ── StreamResult: how a streamed turn ended, as a VALUE ────────────────────
+//
+// The terminal outcome of a turn used to be observable only as a side effect —
+// a StreamFinished / StreamError Msg pushed into the sink, which a caller had
+// to intercept and re-decode to learn "did this turn error? was it cancelled?
+// what was the retry hint?". StreamResult makes that outcome a first-class
+// return value: `stream()` (and finish_stream) hand it back, the emitted
+// terminal Msg is DERIVED from it, and callers read a field instead of sniffing
+// events.
+//
+// (Distinct from provider::TurnResult in acp_backend.hpp, which is the ACP
+// backend abstraction's per-ROUND result carrying a richer TurnError. This is
+// the in-process SSE/NDJSON epilogue's outcome, keyed on StreamEnd + the raw
+// HTTP status — the two describe adjacent layers and are intentionally not the
+// same type.)
+//
+// `end` is the classified precedence winner (see classify_stream_end). The
+// derived accessors below fold the StreamEnd + payload into the two questions
+// callers actually ask.
+struct StreamResult {
+    StreamEnd                             end = StreamEnd::CleanClose;
+    StopReason                            stop = StopReason::EndTurn;
+    std::optional<std::string>            error;        // set iff the turn failed
+    std::optional<std::chrono::seconds>   retry_after;  // server hint on 429/529
+    int                                   http_status = 0;
+
+    // Did the turn end successfully (clean close, or the body already finished
+    // with a terminal we respect)? False for cancel / HTTP / transport error.
+    [[nodiscard]] bool ok() const noexcept { return !error.has_value(); }
+    // Was this a user-initiated cancel (vs. a genuine failure)?
+    [[nodiscard]] bool cancelled() const noexcept {
+        return end == StreamEnd::UserCancelled;
+    }
+    // Did the body already fire its own terminal, so the epilogue emitted
+    // nothing? (A clean early-abort / `[DONE]` before the post-loop.)
+    [[nodiscard]] bool already_terminated() const noexcept {
+        return end == StreamEnd::AlreadyTerminated;
+    }
+
+    // For the handful of pre-flight bail-outs a transport handles itself
+    // (not authenticated / request-build failure) before the stream loop even
+    // starts — it emits its own StreamError and returns this so the value still
+    // reflects reality.
+    static StreamResult failed(std::string msg) {
+        StreamResult r;
+        r.end   = StreamEnd::TransportError;
+        r.error = std::move(msg);
+        return r;
+    }
+};
+
 // Classify the loop exit. `result_ok` is `bool(result)` for the transport's
 // std::expected return; `http_status` is the observed response status (0 if
 // headers never arrived — treated as not-an-HTTP-error so a transport error or
@@ -157,38 +208,50 @@ struct StreamOutcome {
 // `terminated` is the same latch finish_turn_once uses (so a partial body that
 // already finished is respected). On UserCancelled we emit StreamError
 // {"cancelled"}; on AlreadyTerminated we emit nothing.
-inline void finish_stream(bool& terminated, const EventSink& sink,
-                          StreamOutcome o) {
+//
+// Returns a StreamResult describing the outcome. The emitted terminal Msg is
+// derived from the SAME classification, so the return value and the sink event
+// never disagree — callers that want the outcome read the value, callers that
+// react to Msgs still see StreamFinished / StreamError.
+inline StreamResult finish_stream(bool& terminated, const EventSink& sink,
+                                 StreamOutcome o) {
     const StreamEnd end = classify_stream_end(o.terminated, o.result_ok,
                                               o.http_status, o.cancel);
-    if (end == StreamEnd::AlreadyTerminated) return;
+    StreamResult tr;
+    tr.end         = end;
+    tr.stop        = o.stop;
+    tr.http_status = o.http_status;
+    tr.retry_after = o.retry_after;
+
+    if (end == StreamEnd::AlreadyTerminated) return tr;
     // All-paths cleanup (e.g. close an open tool block) before the terminal
     // event, on both success and error. Runs exactly once.
     if (o.on_any_end) o.on_any_end();
     switch (end) {
         case StreamEnd::AlreadyTerminated:
-            return;
+            return tr;
         case StreamEnd::UserCancelled:
-            finish_turn_once(terminated, sink, o.stop, std::string{"cancelled"});
-            return;
+            tr.error = std::string{"cancelled"};
+            finish_turn_once(terminated, sink, o.stop, tr.error);
+            return tr;
         case StreamEnd::HttpError:
-            finish_turn_once(
-                terminated, sink, o.stop,
-                o.http_error_message ? o.http_error_message()
-                                     : std::string{"HTTP "} + std::to_string(o.http_status),
-                o.retry_after);
-            return;
+            tr.error = o.http_error_message
+                           ? o.http_error_message()
+                           : std::string{"HTTP "} + std::to_string(o.http_status);
+            finish_turn_once(terminated, sink, o.stop, tr.error, o.retry_after);
+            return tr;
         case StreamEnd::TransportError:
-            finish_turn_once(
-                terminated, sink, o.stop,
-                o.transport_error_message ? o.transport_error_message()
-                                          : std::string{"transport error"});
-            return;
+            tr.error = o.transport_error_message
+                           ? o.transport_error_message()
+                           : std::string{"transport error"};
+            finish_turn_once(terminated, sink, o.stop, tr.error);
+            return tr;
         case StreamEnd::CleanClose:
             finish_turn_once(terminated, sink, o.stop, std::nullopt,
                              std::nullopt, o.before_finish);
-            return;
+            return tr;
     }
+    return tr;
 }
 
 } // namespace agentty::provider

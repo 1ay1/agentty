@@ -28,16 +28,26 @@ static int g_failures = 0;
         }                                                                   \
     } while (0)
 
-// A Routes whose two arms just record which one fired.
+// A Routes whose two arms just record which one fired. Each arm returns a
+// DISTINCT StreamResult so the test can prove dispatch propagates the outcome
+// value back through the erased seam (not just which arm fired).
 struct Probe {
     std::string hit;
     provider::Routes routes() {
         return provider::Routes{
             .anthropic = [this](provider::Request, provider::EventSink) {
                 hit = "anthropic";
+                provider::StreamResult r;
+                r.end  = provider::StreamEnd::CleanClose;
+                r.stop = StopReason::EndTurn;
+                return r;
             },
             .chatgpt = [this](provider::Request, provider::EventSink) {
                 hit = "chatgpt";
+                provider::StreamResult r;
+                r.end   = provider::StreamEnd::TransportError;
+                r.error = "chatgpt-boom";
+                return r;
             },
         };
     }
@@ -48,6 +58,13 @@ static std::string route_for(const provider::Selection& sel) {
     provider::dispatch_stream(p.routes(), sel, provider::Request{},
                               provider::EventSink{});
     return p.hit;
+}
+
+// Same, but return the StreamResult dispatch handed back (the outcome value).
+static provider::StreamResult result_for(const provider::Selection& sel) {
+    Probe p;
+    return provider::dispatch_stream(p.routes(), sel, provider::Request{},
+                                     provider::EventSink{});
 }
 
 static void test_anthropic_selection_hits_anthropic_route() {
@@ -148,11 +165,32 @@ static void test_prewarm_target_table() {
     }
 }
 
+// The seam propagates the transport's StreamResult back to the caller — the
+// outcome is a VALUE that survives the type-erased boundary, not just a side
+// effect on the sink.
+static void test_dispatch_propagates_stream_result() {
+    provider::Selection anth;
+    anth.kind = provider::Kind::Anthropic;
+    auto ra = result_for(anth);
+    CHECK(ra.end == provider::StreamEnd::CleanClose);
+    CHECK(ra.ok());
+    CHECK(!ra.cancelled());
+
+    provider::Selection cg;
+    cg.kind = provider::Kind::OpenAI;
+    cg.openai_endpoint.label = "chatgpt";
+    auto rc = result_for(cg);
+    CHECK(rc.end == provider::StreamEnd::TransportError);
+    CHECK(!rc.ok());
+    CHECK(rc.error.has_value() && *rc.error == "chatgpt-boom");
+}
+
 int main() {
     test_anthropic_selection_hits_anthropic_route();
     test_chatgpt_selection_hits_chatgpt_route();
     test_is_chatgpt_predicate();
     test_prewarm_target_table();
+    test_dispatch_propagates_stream_result();
 
     if (g_failures == 0) {
         std::printf("dispatch_route_test: all checks passed\n");

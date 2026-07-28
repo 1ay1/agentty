@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/ollama/transport.hpp"
 
 namespace agentty::provider::ollama {
@@ -16,7 +17,7 @@ public:
     OllamaProvider() = default;
     explicit OllamaProvider(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
 
-    void stream(provider::Request req, provider::EventSink sink) {
+    provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
         Request oreq;
         oreq.model         = std::move(req.model);
         oreq.system_prompt = std::move(req.system_prompt);
@@ -28,7 +29,7 @@ public:
         oreq.retry_count   = req.retry_count;
         oreq.json_protocol = req.json_protocol;
         oreq.endpoint      = endpoint_;
-        ollama::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
+        return ollama::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
     }
 
     [[nodiscard]] const Endpoint& endpoint() const noexcept { return endpoint_; }
