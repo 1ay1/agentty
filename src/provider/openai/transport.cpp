@@ -1524,8 +1524,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // precedence, identical to every other provider. on_any_end closes an open
     // tool block on both paths; before_finish (success only) salvages a
     // leaked-JSON tool call / flushes held text / guarantees a non-empty turn.
-    return provider::finish_stream(ctx.terminated, ctx.sink, {
+    return provider::finish_stream({
         .terminated  = ctx.terminated,
+        .sink        = ctx.sink,
         .result_ok   = bool(result),
         .http_status = http_status,
         .cancel      = cancel_for_end,

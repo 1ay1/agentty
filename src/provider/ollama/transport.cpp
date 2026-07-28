@@ -1609,8 +1609,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // precedence, identical to every other provider. before_finish (success
     // only) does Ollama's terminal salvage/flush — the stream may end without a
     // `done` frame (wire cut) while content is still held, so drain/rescue it.
-    return provider::finish_stream(ctx.terminated, ctx.sink, {
+    return provider::finish_stream({
         .terminated  = ctx.terminated,
+        .sink        = ctx.sink,
         .result_ok   = bool(result),
         .http_status = http_status,
         .cancel      = cancel_for_end,
