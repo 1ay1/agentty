@@ -65,6 +65,16 @@ struct ProviderPreset {
     // local / ACP backends have nothing worth warming. This makes
     // prewarm_active_provider a data lookup instead of a hand-written switch.
     std::string_view prewarm_host;
+
+    // OAuth-native: the backend authenticates by "sign in with <provider>"
+    // (its own OAuth flow, tokens auto-refreshed in-process) rather than a
+    // bearer API key, AND it rides a DEDICATED long-lived transport instead of
+    // the generic OpenAI-compat one. Today only ChatGPT/Codex under Kind::OpenAI
+    // sets this (Anthropic OAuth is Kind::Anthropic, so it never needs the
+    // flag to be routed). Selection::is_oauth_native() reads this so "this
+    // endpoint is special" is a DATUM on the row, not a label compared at the
+    // routing/prewarm/login sites — a second such provider just sets the flag.
+    bool oauth_native = false;
 };
 
 // ── The table ────────────────────────────────────────────────────────────
@@ -80,7 +90,7 @@ inline constexpr std::array<ProviderPreset, 9> kProviders{{
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
      Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, ""},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com"},
+     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
      Kind::OpenAI,    AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"openrouter", "OpenRouter", "Any model via openrouter.ai",

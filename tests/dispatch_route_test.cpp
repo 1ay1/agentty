@@ -85,16 +85,23 @@ static void test_is_chatgpt_predicate() {
     provider::Selection a;
     a.kind = provider::Kind::Anthropic;
     CHECK(!a.is_chatgpt());
+    CHECK(!a.is_oauth_native());
 
     provider::Selection o;
     o.kind = provider::Kind::OpenAI;
     o.openai_endpoint.label = "openai";
     CHECK(!o.is_chatgpt());       // OpenAI-Kind but not the chatgpt label
+    CHECK(!o.is_oauth_native());  // openai row is ApiKey, not oauth_native
 
     provider::Selection c;
     c.kind = provider::Kind::OpenAI;
     c.openai_endpoint.label = "chatgpt";
     CHECK(c.is_chatgpt());
+    // is_oauth_native() is DATA-DRIVEN: it reads ProviderPreset::oauth_native
+    // from the registry row, not a label compare. The chatgpt row is the only
+    // one that sets the flag, so a second OAuth-native provider would just set
+    // its flag and this predicate would light up with no code change here.
+    CHECK(c.is_oauth_native());
 }
 
 // The prewarm ROUTING table, locked as a pure function (no socket opened).

@@ -188,7 +188,13 @@ edit can't silently misroute a backend.
 "This is the native OAuth Codex backend" is likewise **one predicate**,
 `Selection::is_chatgpt()`, not a `label == "chatgpt"` literal re-derived at the
 ~6 sites (dispatch, prewarm, model-list, effort clamp, login gate, picker) that
-used to compare the string themselves.
+used to compare the string themselves. And that predicate is now itself
+**data-driven**: `Selection::is_oauth_native()` reads an `oauth_native` bool off
+the `ProviderPreset` row ("signs in with the provider's own OAuth + rides a
+dedicated long-lived transport", set only on the ChatGPT row today), so a second
+OAuth-native provider becomes special by setting one flag — no new label
+predicate. `dispatch_route_test` asserts the flag lights up `is_oauth_native()`
+for chatgpt and stays false for a bearer-key OpenAI row.
 
 One hand-written spot remains for a genuinely new `Kind` (a new wire dialect,
 not an OpenAI-compat endpoint): its arm in `dispatch_stream` (plus a `Routes`
@@ -213,9 +219,9 @@ outcome is a value threaded through every layer rather than a sink-only side
 effect.
 
 Adding a native provider is now: one catalog row + one registry row (id, label,
-auth, env, warm host) + one transport + one `dispatch_stream` arm (+ a `Routes`
-field if long-lived) + one routing-test row — fully uniform, type-erased,
-data-driven, and tested.
+auth, env, warm host, oauth_native) + one transport + one `dispatch_stream` arm
+(+ a `Routes` field if long-lived) + one routing-test row — fully uniform,
+type-erased, data-driven, and tested.
 
 ---
 
