@@ -93,6 +93,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                     return agentty::app::update(std::move(m),
                         Msg{OpenCheckpointPicker{}});
                 case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});
+                case Command::SignOut:       return agentty::app::update(std::move(m), Msg{SignOut{}});
                 case Command::Quit:          return agentty::app::update(std::move(m), Msg{Quit{}});
             }
             return done(std::move(m));

@@ -16,6 +16,8 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
+#include "agentty/auth/auth.hpp"          // auth::is_empty
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 
@@ -186,7 +188,27 @@ Element model_picker(const Model& m) {
     if (!picker) return nothing();
 
     Picker::Config cfg;
-    cfg.title      = " Models ";
+    // Title names the ACTIVE provider so the list is never context-free: after
+    // a provider switch the user immediately sees WHOSE models these are
+    // (" Anthropic models ", " Groq models ", …) instead of a bare " Models ".
+    {
+        const auto& sel = provider::active();
+        std::string prov;
+        if (sel.kind == provider::Kind::OpenAI) {
+            const provider::ProviderPreset* p =
+                provider::preset_for(sel.openai_endpoint.label);
+            prov = p ? std::string{p->label}
+                     : std::string{sel.openai_endpoint.label};
+        } else if (sel.kind == provider::Kind::ExternalAcp) {
+            prov = sel.acp_agent_id;
+        } else {
+            const provider::ProviderPreset* p =
+                provider::preset_for(provider::default_provider_id());
+            prov = p ? std::string{p->label} : "Anthropic";
+        }
+        cfg.title = prov.empty() ? std::string{" Models "}
+                                 : " " + prov + " models ";
+    }
     cfg.accent     = accent;
     cfg.min_width  = 40;
     cfg.viewport_h = picker_viewport_h();
@@ -326,8 +348,17 @@ Element provider_picker(const Model& m) {
             note = "● local";
             note_color = info;
         } else if (p.kind() == provider::Kind::Anthropic) {
-            note = "✓ login";
-            note_color = success;
+            // Reflect REAL auth state, not a hardcoded checkmark: creds come
+            // from `agentty login` (OAuth) or a pasted/​env x-api-key, resolved
+            // into deps().auth at startup + on every login. An empty header
+            // means the user hasn't signed in — say so instead of lying "✓".
+            if (!auth::is_empty(app::deps().auth)) {
+                note = "✓ signed in";
+                note_color = success;
+            } else {
+                note = "⚠ sign in";
+                note_color = warn;
+            }
         } else {
             bool have = false;
             std::string_view via;
