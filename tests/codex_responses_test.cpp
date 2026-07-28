@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/chatgpt/responses.hpp"
+#include "agentty/provider/error_class.hpp"
 
 using namespace agentty;
 namespace cc = agentty::provider::chatgpt;
@@ -250,6 +251,43 @@ static void test_sse_error() {
     CHECK(saw);
 }
 
+// An in-band error that carries a `type`/`code` must surface it in the message
+// text so the runtime's classify() can route it to auto-retry (native Codex
+// parity with Anthropic/OpenAI). Without the type, "Rate limited" alone would
+// be classified Terminal and the turn would fail instead of backing off.
+static void test_sse_error_type_is_retryable() {
+    {
+        std::vector<std::string> sse = {
+            R"({"type":"response.failed","response":{"error":)"
+            R"({"type":"rate_limit_exceeded","message":"Rate limited"}}})",
+        };
+        auto msgs = cc::parse_sse_for_test(sse);
+        const StreamError* err = nullptr;
+        for (const auto& m : msgs)
+            if (auto* e = leaf<StreamError>(m)) err = e;
+        CHECK(err != nullptr);
+        if (err) {
+            CHECK(err->message.find("rate_limit_exceeded") != std::string::npos);
+            CHECK(provider::classify(err->message) == provider::ErrorClass::RateLimit);
+        }
+    }
+    {
+        // Top-level `error` event with a transient server_error type.
+        std::vector<std::string> sse = {
+            R"({"type":"error","code":"server_error","message":"upstream 503"})",
+        };
+        auto msgs = cc::parse_sse_for_test(sse);
+        const StreamError* err = nullptr;
+        for (const auto& m : msgs)
+            if (auto* e = leaf<StreamError>(m)) err = e;
+        CHECK(err != nullptr);
+        if (err) {
+            CHECK(err->message.find("server_error") != std::string::npos);
+            CHECK(provider::classify(err->message) == provider::ErrorClass::Transient);
+        }
+    }
+}
+
 int main() {
     test_build_body();
     test_sse_text_and_usage();
@@ -259,6 +297,7 @@ int main() {
     test_build_body_requests_encrypted_reasoning();
     test_build_input_replays_reasoning();
     test_sse_error();
+    test_sse_error_type_is_retryable();
     if (g_failures) { std::fprintf(stderr, "\n%d check(s) failed\n", g_failures); return 1; }
     std::puts("codex_responses_test: all checks passed");
     return 0;
