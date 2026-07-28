@@ -123,8 +123,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // first send. The modal's option 3 runs the native loopback OAuth.
     {
         const auto& sel = provider::active();
-        const bool codex_active = sel.kind == provider::Kind::OpenAI
-            && sel.openai_endpoint.label == "chatgpt";
+        const bool codex_active = sel.is_chatgpt();
         if (codex_active && !provider::chatgpt::responses_available())
             m.ui.login = ui::login::Picking{};
     }

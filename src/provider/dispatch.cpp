@@ -31,7 +31,7 @@ void dispatch_stream(NativeProviders natives, Request req, EventSink sink) {
     if (sel.kind == Kind::OpenAI) {
         // ChatGPT/Codex: OAuth Responses backend, long-lived (holds refreshed
         // tokens), owned by main() — route to the shared instance.
-        if (sel.openai_endpoint.label == "chatgpt") {
+        if (sel.is_chatgpt()) {
             natives.chatgpt.stream(std::move(req), std::move(sink));
             return;
         }
