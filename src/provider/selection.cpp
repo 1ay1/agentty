@@ -113,7 +113,8 @@ Selection active() {
 std::string provider_display_name(const Selection& s) {
     if (s.kind == Kind::Anthropic) return "Anthropic";
     if (s.kind == Kind::ExternalAcp) {
-        if (const auto* p = preset_for(s.acp_agent_id)) return std::string{p->label};
+        // No hardcoded registry rows for ACP agents (Zed-style: config-driven),
+        // so the display name is just the agent id the user selected.
         return s.acp_agent_id.empty() ? std::string{"ACP agent"} : s.acp_agent_id;
     }
     // OpenAI-family: map the endpoint label ("groq", "ollama", …) to its

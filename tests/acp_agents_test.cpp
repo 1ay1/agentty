@@ -25,13 +25,18 @@ static int failures = 0;
     std::cerr << "CHECK failed: " #cond " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
     ++failures; } } while (0)
 
-// Built-in defaults resolve with zero config: the binary name on $PATH.
+// Built-in defaults resolve with zero config: the binary name on $PATH. There
+// is exactly one built-in reference agent (claude-agent-acp); everything else
+// (incl. codex-acp) is config-driven, Zed-style.
 static void test_builtin_defaults() {
     // Ensure no config file interferes.
     ::unsetenv("AGENTTY_ACP_AGENTS");
 
     CHECK(P::is_acp_agent_id("claude-agent-acp"));
-    CHECK(P::is_acp_agent_id("codex-acp"));
+    // codex-acp is NOT a built-in — Codex is a native provider; a second
+    // "Codex (ACP)" default would be redundant. It only resolves if the user
+    // adds it to acp-agents.json by name.
+    CHECK(!P::is_acp_agent_id("codex-acp"));
     CHECK(!P::is_acp_agent_id("anthropic"));
     CHECK(!P::is_acp_agent_id("definitely-not-an-agent"));
 
@@ -45,7 +50,14 @@ static void test_builtin_defaults() {
         CHECK(argv[0] == "claude-agent-acp");
     }
 
+    // codex-acp has no built-in default now.
+    CHECK(!P::resolve_acp_agent("codex-acp").has_value());
     CHECK(!P::resolve_acp_agent("nope").has_value());
+
+    // enumerate lists exactly the one built-in reference agent with no config.
+    auto agents = P::enumerate_acp_agents();
+    CHECK(agents.size() == 1);
+    if (!agents.empty()) CHECK(agents[0].id == "claude-agent-acp");
 }
 
 // A config entry overrides the built-in default and adds a custom agent.
@@ -62,7 +74,8 @@ static void test_config_override() {
               "env": { "CLAUDE_LOG": "1" },
               "cwd": "/work"
             },
-            "my-agent": { "command": "my-acp", "args": ["serve"] }
+            "my-agent": { "command": "my-acp", "args": ["serve"] },
+            "codex-acp": { "command": "codex-acp", "args": ["acp"] }
           }
         })";
     }
@@ -88,10 +101,33 @@ static void test_config_override() {
     CHECK(mine.has_value());
     if (mine) { CHECK(mine->command == "my-acp"); CHECK(mine->args.size() == 1); }
 
-    // codex-acp had no config entry → still the built-in default.
+    // codex-acp is now selectable BECAUSE the config defines it (not a
+    // built-in): Zed-style, the user named the binary.
+    CHECK(P::is_acp_agent_id("codex-acp"));
     auto codex = P::resolve_acp_agent("codex-acp");
     CHECK(codex.has_value());
     if (codex) CHECK(codex->command == "codex-acp");
+
+    // enumerate now lists the built-in reference agent + both config agents
+    // (my-agent, codex-acp). claude-agent-acp appears once (config overrode
+    // the built-in in place), so 3 rows total.
+    auto agents = P::enumerate_acp_agents();
+    CHECK(agents.size() == 3);
+    {
+        bool has_claude = false, has_mine = false, has_codex = false;
+        for (const auto& a : agents) {
+            if (a.id == "claude-agent-acp") {
+                has_claude = true;
+                // overridden in place: the config path, not the bare name.
+                CHECK(a.command == "/opt/claude/bin/claude-agent-acp");
+            }
+            if (a.id == "my-agent")  has_mine = true;
+            if (a.id == "codex-acp") has_codex = true;
+        }
+        CHECK(has_claude);
+        CHECK(has_mine);
+        CHECK(has_codex);
+    }
 
     ::unsetenv("AGENTTY_ACP_AGENTS");
     std::error_code ec; fs::remove(tmp, ec);
@@ -105,17 +141,18 @@ static void test_selection_routing() {
     CHECK(s.kind == P::Kind::ExternalAcp);
     CHECK(s.acp_agent_id == "claude-agent-acp");
 
+    // codex-acp is NOT a built-in, so with no config it does NOT route to an
+    // ACP agent — it falls through to a custom/OpenAI-style spec.
     auto s2 = P::parse_selection("codex-acp");
-    CHECK(s2.kind == P::Kind::ExternalAcp);
-    CHECK(s2.acp_agent_id == "codex-acp");
+    CHECK(s2.kind != P::Kind::ExternalAcp);
 
     // Non-ACP specs still route to their native kinds.
     CHECK(P::parse_selection("anthropic").kind == P::Kind::Anthropic);
     CHECK(P::parse_selection("").kind == P::Kind::Anthropic);
     CHECK(P::parse_selection("openai").kind == P::Kind::OpenAI);
 
-    // Display name uses the registry label for a known agent.
-    CHECK(P::provider_display_name(s) == "Claude Agent (ACP)");
+    // Display name is the agent id (no hardcoded registry label anymore).
+    CHECK(P::provider_display_name(s) == "claude-agent-acp");
 }
 
 int main() {

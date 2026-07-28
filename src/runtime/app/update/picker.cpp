@@ -21,6 +21,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/registry.hpp"
+#include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/runtime/login.hpp"
@@ -293,21 +294,38 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
 // model fetch so the model list reflects the new backend. No restart.
 Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
     const auto presets = provider::providers();
-    // One extra virtual row after the presets: "Custom host…", which opens
-    // a free-text endpoint entry (llama.cpp / vLLM / remote host:port).
-    const int n = static_cast<int>(presets.size()) + 1;
+    // Config-driven ACP agents (Zed's `agent_servers` model): the built-in
+    // reference agent + any acp-agents.json entries, listed as their own rows
+    // AFTER the presets. There are no hardcoded per-agent registry rows.
+    const auto acp_agents = provider::enumerate_acp_agents();
+    const int n_presets = static_cast<int>(presets.size());
+    const int n_acp     = static_cast<int>(acp_agents.size());
+    // Virtual rows after presets: [ACP agents…] then "Custom host…".
+    const int n = n_presets + n_acp + 1;
     const int custom_row = n - 1;   // index of the sentinel row
+    // ACP rows occupy [n_presets, n_presets + n_acp).
+    auto acp_row_at = [&](int idx) -> const provider::AcpAgentSpec* {
+        if (idx >= n_presets && idx < n_presets + n_acp)
+            return &acp_agents[static_cast<std::size_t>(idx - n_presets)];
+        return nullptr;
+    };
     return std::visit(overload{
         [&](OpenProviderPicker) -> Step {
             // Open at the row matching the currently-active provider.
             int idx = 0;
             const auto& sel = provider::active();
-            const std::string active_label =
-                sel.kind == provider::Kind::OpenAI      ? sel.openai_endpoint.label
-              : sel.kind == provider::Kind::ExternalAcp ? sel.acp_agent_id
-              : std::string{provider::default_provider_id()};
-            for (int i = 0; i < n; ++i)
-                if (presets[static_cast<std::size_t>(i)].id == active_label) idx = i;
+            if (sel.kind == provider::Kind::ExternalAcp) {
+                for (int i = 0; i < n_acp; ++i)
+                    if (acp_agents[static_cast<std::size_t>(i)].id == sel.acp_agent_id)
+                        idx = n_presets + i;
+            } else {
+                const std::string active_label =
+                    sel.kind == provider::Kind::OpenAI
+                        ? sel.openai_endpoint.label
+                        : std::string{provider::default_provider_id()};
+                for (int i = 0; i < n_presets; ++i)
+                    if (presets[static_cast<std::size_t>(i)].id == active_label) idx = i;
+            }
             m.ui.provider_picker = pick::OpenAt{idx};
             return done(std::move(m));
         },
@@ -344,6 +362,14 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             if (p->index == custom_row) {
                 m.ui.login = ui::login::CustomHostInput{};
                 return done(std::move(m));
+            }
+
+            // An external ACP agent row: agentty drives the agent subprocess,
+            // which does its OWN auth — no key resolution here. commit routes
+            // the id through parse_selection → Kind::ExternalAcp.
+            if (const provider::AcpAgentSpec* agent = acp_row_at(p->index)) {
+                return commit_provider_switch(std::move(m), agent->id,
+                                              auth::AuthHeader{}, agent->id);
             }
 
             const auto& preset = presets[static_cast<std::size_t>(p->index)];

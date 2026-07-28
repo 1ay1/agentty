@@ -4,6 +4,7 @@
 #include "agentty/provider/acp_agents.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -27,13 +28,17 @@ namespace {
     return {};
 }
 
-// Built-in defaults for the well-known agents. A config entry with the same id
-// overrides these. Keeping them here means a user with the binary on $PATH can
-// select the agent with zero config.
+// The single well-known reference agent. Everything else is config-driven
+// (Zed's `agent_servers` model): the user names the binary in acp-agents.json.
+// We ship exactly one built-in default so a user with `claude-agent-acp` on
+// $PATH gets a working ACP path with zero config; a config entry with the same
+// id overrides it. Note there is deliberately NO `codex-acp` default — Codex is
+// a first-class native provider here, so a second "Codex (ACP)" row would be
+// redundant and confusing. To drive codex-acp (or any other agent), add it to
+// acp-agents.json by name, exactly as you would in Zed.
 struct BuiltIn { std::string_view id, command; std::string_view arg0; };
-constexpr std::array<BuiltIn, 2> kBuiltIns{{
+constexpr std::array<BuiltIn, 1> kBuiltIns{{
     {"claude-agent-acp", "claude-agent-acp", ""},
-    {"codex-acp",        "codex-acp",        ""},
 }};
 
 [[nodiscard]] const BuiltIn* builtin_for(std::string_view id) noexcept {
@@ -153,6 +158,32 @@ bool is_acp_agent_id(std::string_view id) noexcept {
     for (const auto& a : cfg)
         if (a.id == id) return true;
     return false;
+}
+
+std::vector<AcpAgentSpec> enumerate_acp_agents() {
+    // The built-in reference agent first, then every config-defined agent.
+    // A config entry that shares the built-in's id overrides it in place
+    // (no duplicate row); config-only ids append after.
+    std::vector<AcpAgentSpec> out;
+    for (const auto& b : kBuiltIns) {
+        AcpAgentSpec a;
+        a.id      = std::string{b.id};
+        a.command = std::string{b.command};
+        if (!b.arg0.empty()) a.args.emplace_back(b.arg0);
+        out.push_back(std::move(a));
+    }
+
+    std::vector<AcpAgentSpec> cfg;
+    load_config(cfg);
+    for (auto& a : cfg) {
+        auto it = std::find_if(out.begin(), out.end(),
+                               [&](const AcpAgentSpec& e) { return e.id == a.id; });
+        if (it != out.end())
+            *it = std::move(a);          // config overrides the built-in row
+        else
+            out.push_back(std::move(a)); // config-only agent
+    }
+    return out;
 }
 
 } // namespace agentty::provider
