@@ -62,6 +62,24 @@ agentty mcp-login <server>
 
 This runs the full OAuth 2.1 + PKCE flow: agentty discovers the authorization server from the endpoint's protected-resource metadata (RFC 9728), dynamically registers itself (`application_type=native`, so the loopback redirect is accepted), opens your browser to authorize, catches the redirect on a local loopback port, and validates the response — including the **RFC 9207 `iss` check** that blocks authorization-server mix-up attacks *before* the code is exchanged.
 
+### When the server doesn't support Dynamic Client Registration
+
+Some authorization servers don't offer a registration endpoint. Give agentty a `client_id` instead — an `https://` value is used as a **CIMD** (Client ID Metadata Document) URL, the 2026-07-28 preferred path where the URL *is* the client identity; anything else is treated as a pre-registered public client. In precedence order:
+
+```bash
+agentty mcp-login acme --client-id https://agentty.example/client.json   # CIMD URL
+agentty mcp-login acme --client-id my-registered-client-id               # pre-registered id
+```
+
+…or set it per-server in `mcp.json` (`"client_id"`) or globally via `AGENTTY_MCP_CLIENT_ID`:
+
+```json
+{ "mcpServers": { "acme": { "url": "https://mcp.acme.dev/mcp",
+    "client_id": "https://agentty.example/client.json" } } }
+```
+
+If the discovery probe can't find the metadata URL from the 401 challenge, pass it explicitly with `--metadata <url>`.
+
 The resulting token is **issuer-bound** (it will never be replayed to a different authorization server), stored encrypted at rest (`~/.agentty/mcp_tokens/<server>.json`, `chmod 600`), attached automatically to every request to that server, and **refreshed transparently** when it expires. Manage tokens with:
 
 ```bash
