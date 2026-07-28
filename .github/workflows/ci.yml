@@ -258,6 +258,13 @@ jobs:
           BIN="$(realpath "$BIN")"
           echo "binary: $BIN"
           file "$BIN" || true
+          # Diagnostic: list the DLLs the loader needs and flag any that are
+          # missing. A native PE that exits 127 with zero output is almost
+          # always a load-time DLL resolution failure; cygcheck makes that
+          # visible (missing deps print "cygcheck: track_down ... not found").
+          echo "----- cygcheck (dll deps) -----"
+          cygcheck "$BIN" 2>&1 | sed 's/^/  /' || echo "  (cygcheck unavailable)"
+          echo "-------------------------------"
           # --version must always work (short-circuits before the TUI).
           "$BIN" --version
           echo "--version ok"
@@ -283,6 +290,18 @@ jobs:
             exit 1
           fi
           if [ "$rc" -ne 0 ]; then
+            echo "::group::extra diagnostics (rc=$rc)"
+            # Distinguish "crashes on ANY launch" from "crashes only on this
+            # stdin". Try a real empty file and a closed fd. If all three
+            # exit non-zero, the fault is not stdin-specific.
+            echo "[probe] empty regular file as stdin:"
+            : >empty.in
+            COLUMNS=80 LINES=24 "$BIN" <empty.in >p1.out 2>p1.err; echo "  rc=$?"; echo "  err: $(head -c 300 p1.err)"
+            echo "[probe] closed stdin (0<&-):"
+            COLUMNS=80 LINES=24 "$BIN" 0<&- >p2.out 2>p2.err; echo "  rc=$?"; echo "  err: $(head -c 300 p2.err)"
+            echo "[probe] --help (no TUI):"
+            "$BIN" --help >p3.out 2>p3.err; echo "  rc=$?"
+            echo "::endgroup::"
             echo "::error::agentty exited non-zero ($rc) on launch under a pipe"
             exit 1
           fi
