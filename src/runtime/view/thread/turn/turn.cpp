@@ -1431,56 +1431,61 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 std::string badge = s.chunks > 1
                     ? "  \xc3\x97" + std::to_string(s.chunks) : std::string{};
 
-                if (expanded) {
-                    // Header row (no inline snippet — the full body follows),
-                    // then the full passage wrapped, quote-dimmed, indented
-                    // so it reads as the cited block under its source.
-                    rows.push_back(
-                        h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
-                          text(kindpart, fg_of(muted)),
-                          text(pathpart, fg_of(code_path)),
-                          text(badge,    fg_of(status_warn)))          // ×N
-                            .build());
-                    if (!s.full.empty()) {
-                        rows.push_back(
-                            h(text("      ", fg_of(muted)),
-                              text(s.full, fg_of(muted)))
-                                .build());
+                // Each provenance entry must be ONE truncating text node.
+                // A horizontal stack of individually styled fragments still
+                // asks Yoga to lay out every fragment; once the fixed prefix
+                // consumes the row, later fragments can wrap even if the
+                // final snippet has `| clip`. Combining the runs makes the
+                // width constraint structural rather than best-effort.
+                auto source_row = [&](std::string_view preview) {
+                    std::string content;
+                    std::vector<maya::StyledRun> runs;
+                    auto push = [&](std::string_view part, maya::Style style) {
+                        if (part.empty()) return;
+                        runs.push_back(maya::StyledRun{content.size(), part.size(), style});
+                        content.append(part);
+                    };
+                    push("  \xe2\x94\x94 ", maya::Style{}.with_fg(muted));
+                    push(kindpart, maya::Style{}.with_fg(muted));
+                    push(pathpart, maya::Style{}.with_fg(code_path));
+                    push(badge, maya::Style{}.with_fg(status_warn));
+                    if (!preview.empty()) {
+                        push("  ", maya::Style{}.with_fg(muted));
+                        push(preview, maya::Style{}.with_fg(muted));
                     }
+                    return maya::Element{maya::TextElement{
+                        .content = std::move(content),
+                        .style = {},
+                        .wrap = maya::TextWrap::TruncateEnd,
+                        .runs = std::move(runs),
+                    }};
+                };
+
+                if (expanded) {
+                    // Expanded content remains a single row too. The full
+                    // passage is available to the renderer, but is clipped
+                    // at the current terminal width rather than pushing the
+                    // retrieval card (and following turns) onto extra rows.
+                    std::string quoted = s.full.empty() ? std::string{}
+                        : " \xe2\x80\x9c" + s.full + "\xe2\x80\x9d";
+                    rows.push_back(source_row(quoted));
                 } else if (!s.snippet.empty()) {
-                    // Wrap the snippet in typographic quotes as ONE string and
-                    // clip the whole thing (TruncateEnd) so it consumes all
-                    // remaining width and ellipsizes exactly at the card edge.
-                    // Folding the quotes in (vs. separate trailing text) means
-                    // truncation can never strand a dangling close-quote past
-                    // the viewport. Fully responsive: wide terminals show far
-                    // more, narrow ones clip cleanly — no blank gutter either.
-                    std::string quoted =
-                        "\xe2\x80\x9c" + s.snippet + "\xe2\x80\x9d";  // “…”
-                    rows.push_back(
-                        h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
-                          text(kindpart, fg_of(muted)),
-                          text(pathpart, fg_of(code_path)),
-                          text(badge,    fg_of(status_warn)),          // ×N
-                          text("  ", fg_of(muted)),
-                          (text(std::move(quoted), fg_of(muted)) | clip))
-                            .build());
+                    // Keep quotation marks in the same truncating node: no
+                    // dangling close quote and, critically, no second line.
+                    rows.push_back(source_row(
+                        "\xe2\x80\x9c" + s.snippet + "\xe2\x80\x9d"));
                 } else {
-                    rows.push_back(
-                        h(text("  \xe2\x94\x94 ", fg_of(muted)),      // └
-                          text(kindpart, fg_of(muted)),
-                          text(pathpart, fg_of(code_path)),
-                          text(badge,    fg_of(status_warn)))          // ×N
-                            .build());
+                    rows.push_back(source_row({}));
                 }
             }
             if (total > kMaxSources) {
-                rows.push_back(
-                    text("  \xe2\x80\xa6 "                            // …
-                        + std::to_string(total - kMaxSources)
-                        + " more source"
-                        + (total - kMaxSources == 1 ? "" : "s"),
-                        fg_of(muted)).build());
+                rows.push_back(maya::Element{maya::TextElement{
+                    .content = "  \xe2\x80\xa6 " + std::to_string(total - kMaxSources)
+                             + " more source"
+                             + (total - kMaxSources == 1 ? "" : "s"),
+                    .style = maya::Style{}.with_fg(muted),
+                    .wrap = maya::TextWrap::TruncateEnd,
+                }});
             }
             if (!rows.empty()) {
                 cfg.body.emplace_back(maya::Turn::BodySlot{
@@ -1494,13 +1499,15 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             const bool any_full = std::any_of(sources.begin(), sources.end(),
                 [](const Src& s){ return !s.full.empty(); });
             if (any_full) {
+                const std::string affordance = expanded
+                    ? "  ^U collapse"
+                    : "  ^U expand full passages";
                 cfg.body.emplace_back(maya::Turn::BodySlot{
-                    h(text("  ", fg_of(muted)),
-                      text(expanded
-                             ? "^U collapse"
-                             : "^U expand full passages",
-                           fg_of(status_info)))
-                        .build()});
+                    maya::Element{maya::TextElement{
+                        .content = affordance,
+                        .style = maya::Style{}.with_fg(status_info),
+                        .wrap = maya::TextWrap::TruncateEnd,
+                    }}});
             }
         }
         return cfg;
