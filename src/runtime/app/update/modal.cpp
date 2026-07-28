@@ -560,6 +560,12 @@ commit_provider_switch(Model m, std::string_view spec,
     //     active() at call time).
     provider::select(provider::parse_selection(spec_s));
 
+    // (2b) Prewarm TLS/DNS to the NEWLY-active provider's host on a detached
+    //      thread, so the first turn after a live switch is as fast as a cold
+    //      start's prewarmed first turn. Uniform for Claude and ChatGPT/Codex;
+    //      a no-op for locals / ACP. Fire-and-forget.
+    provider::prewarm_active_provider();
+
     {
         auto settings = deps().load_settings();
         if (!m.d.model_id.empty())
