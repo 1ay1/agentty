@@ -25,6 +25,7 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/registry.hpp"
@@ -1551,16 +1552,19 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         // If the stream is dying mid-tool-use (peer closed before the SSE
         // event sequence reached `content_block_stop`), synthesize a
         // StreamToolUseEnd so the reducer's salvage path runs on whatever
-        // partial JSON we've buffered.
+        // partial JSON we've buffered. Anthropic closes the tool block on BOTH
+        // the error and success paths, so it stays outside finish_turn_once's
+        // success-only hook.
         if (ctx.in_tool_use) {
             ctx.sink(StreamToolUseEnd{});
             ctx.in_tool_use = false;
             ctx.current_tool_id.clear();
             ctx.current_tool_name.clear();
         }
-        if (err) ctx.sink(StreamError{*err, retry_after});
-        else     ctx.sink(StreamFinished{ctx.stop_reason});
-        ctx.terminated = true;
+        // Shared terminal-event rule (see provider/stream_epilogue.hpp): emit
+        // exactly one StreamFinished/StreamError and latch `terminated`.
+        provider::finish_turn_once(ctx.terminated, ctx.sink, ctx.stop_reason,
+                                   std::move(err), retry_after);
     };
 
     const bool is_oauth = std::holds_alternative<BearerHeader>(req.auth);

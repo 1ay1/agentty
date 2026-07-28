@@ -1321,7 +1321,22 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         // wide ones show it whole, and the gauge+percent always survive.
         {
             using namespace maya::dsl;
-            std::vector<maya::Element> segs;
+            // The meta strip is built as a SINGLE TextElement with per-segment
+            // color runs, rendered TextWrap::TruncateEnd. A single truncating
+            // text node is GUARANTEED to occupy exactly one row at any width:
+            // an hstack of separate colored nodes can (and on a ~30-col mobile
+            // SSH terminal did) overflow the header row and WRAP onto a second
+            // line ("67%·str" / "ong"). Folding every segment into one node +
+            // TruncateEnd makes wrapping structurally impossible — narrow
+            // terminals ellipsize the tally tail while the gauge+percent
+            // (emitted leftmost) always survive.
+            std::string meta;
+            std::vector<maya::StyledRun> mruns;
+            auto push = [&](std::string_view s, maya::Style st) {
+                if (s.empty()) return;
+                mruns.push_back(maya::StyledRun{meta.size(), s.size(), st});
+                meta.append(s);
+            };
 
             if (msg.proactive_confidence >= 0.0) {
                 const double c = msg.proactive_confidence > 1.0
@@ -1344,13 +1359,10 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 // Filled portion in the strength hue, empty in muted so the
                 // gauge reads as a true fill bar, then bold percent + dim
                 // word both tinted so the whole cluster coheres as one signal.
-                segs.push_back(text(filled_cells, fg_of(tint)).build());
-                if (!empty_cells.empty())
-                    segs.push_back(text(empty_cells, fg_of(muted)).build());
-                segs.push_back(text(" " + std::to_string(pct) + "%",
-                                    fg_of(tint).with_bold()).build());
-                segs.push_back(text(std::string("\xc2\xb7") + word,
-                                    fg_dim(tint)).build());
+                push(filled_cells, maya::Style{}.with_fg(tint));
+                push(empty_cells,  maya::Style{}.with_fg(muted));
+                push(" " + std::to_string(pct) + "%", maya::Style{}.with_fg(tint).with_bold());
+                push(std::string("\xc2\xb7") + word, maya::Style{}.with_fg(tint).with_dim());
             }
 
             // By-kind breakdown ("2 doc · 1 mem") answers what & how much.
@@ -1365,34 +1377,28 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                 if (k.size() > 5) k.resize(5);
                 return k;
             };
-            if (!segs.empty())
-                segs.push_back(text(" \xc2\xb7 ", fg_of(muted)).build());
+            if (!meta.empty())
+                push(" \xc2\xb7 ", maya::Style{}.with_fg(muted));
             if (!kinds.empty()) {
                 for (std::size_t i = 0; i < kinds.size(); ++i) {
-                    if (i) segs.push_back(text(" \xc2\xb7 ", fg_of(muted)).build());
-                    segs.push_back(text(std::to_string(kinds[i].second) + " ",
-                                        fg_of(code_path)).build());
-                    segs.push_back(text(short_kind(kinds[i].first),
-                                        fg_of(muted)).build());
+                    if (i) push(" \xc2\xb7 ", maya::Style{}.with_fg(muted));
+                    push(std::to_string(kinds[i].second) + " ", maya::Style{}.with_fg(code_path));
+                    push(short_kind(kinds[i].first), maya::Style{}.with_fg(muted));
                 }
                 if (kinds.size() > 1 && n > 0)
-                    segs.push_back(text("  (" + std::to_string(n) + ")",
-                                        fg_of(muted)).build());
+                    push("  (" + std::to_string(n) + ")", maya::Style{}.with_fg(muted));
             } else {
                 const int shown_n = n > 0 ? n : 1;
-                segs.push_back(text(std::to_string(shown_n) + " ",
-                                    fg_of(code_path)).build());
-                segs.push_back(text(shown_n == 1 ? "passage" : "passages",
-                                    fg_of(muted)).build());
+                push(std::to_string(shown_n) + " ", maya::Style{}.with_fg(code_path));
+                push(shown_n == 1 ? "passage" : "passages", maya::Style{}.with_fg(muted));
             }
 
-            // Each segment is single-line text; assembled as one header-row
-            // hstack it never wraps (the parent forces a fixed row width and
-            // the canvas clips any overflow at the card edge rather than
-            // spilling onto a second row). Fully responsive: on a narrow
-            // terminal the trailing tally clips first while the gauge and
-            // percent — emitted leftmost — always render.
-            cfg.meta_element = maya::detail::hstack()(std::move(segs)).build();
+            cfg.meta_element = maya::Element{maya::TextElement{
+                .content = std::move(meta),
+                .style   = {},
+                .wrap    = maya::TextWrap::TruncateEnd,
+                .runs    = std::move(mruns),
+            }};
         }
 
         // Body = pure provenance, one dense line per distinct source:

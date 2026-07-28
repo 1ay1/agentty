@@ -57,7 +57,7 @@ struct ModelCapabilities {
     // Fable / Mythos are the 2026 flagship lane (Fable 5 = general-access,
     // Mythos 5 = restricted; same underlying model). They sit ABOVE Opus in
     // the hierarchy and share Opus-class specs (1M ctx, 128k output, effort).
-    enum class Family : std::uint8_t { Unknown, Haiku, Sonnet, Opus, Fable, Mythos };
+    enum class Family : std::uint8_t { Unknown, Haiku, Sonnet, Opus, Fable, Mythos, Gpt };
 
     Family family = Family::Unknown;
     // Generation extracted as an int. 0 = unknown / pre-4. Use the
@@ -90,6 +90,8 @@ struct ModelCapabilities {
     [[nodiscard]] constexpr bool is_opus()   const noexcept { return family == Family::Opus; }
     [[nodiscard]] constexpr bool is_fable()  const noexcept { return family == Family::Fable; }
     [[nodiscard]] constexpr bool is_mythos() const noexcept { return family == Family::Mythos; }
+    // OpenAI gpt-5.x (ChatGPT/Codex Responses line: gpt-5.6-sol, gpt-5.4, …).
+    [[nodiscard]] constexpr bool is_gpt()    const noexcept { return family == Family::Gpt; }
     // Fable/Mythos share Opus-class capabilities; group them for the gates
     // below so a single check covers the whole flagship lane.
     [[nodiscard]] constexpr bool is_flagship() const noexcept {
@@ -119,6 +121,11 @@ struct ModelCapabilities {
             return generation > 4 || (generation == 4 && revision >= 5);
         if (family == Family::Sonnet)
             return generation > 4 || (generation == 4 && revision >= 6);
+        // OpenAI gpt-5.x (ChatGPT/Codex): the whole line is effort-driven
+        // (reasoning.effort low..ultra; medium is the account default). The
+        // Responses backend expects an effort on every turn, so expose it.
+        if (family == Family::Gpt)
+            return generation >= 5;
         return false;
     }
     [[nodiscard]] constexpr bool supports_effort_max() const noexcept {
@@ -127,12 +134,18 @@ struct ModelCapabilities {
             return true;  // flagship lane takes every level incl. max
         if (family == Family::Opus)
             return generation > 4 || (generation == 4 && revision >= 6);
+        // gpt-5.6 flagship line (sol/terra/luna) accepts `max`; earlier
+        // gpt-5.x (5.5/5.4) top out at xhigh.
+        if (family == Family::Gpt)
+            return generation > 5 || (generation == 5 && revision >= 6);
         return true;  // any effort-capable Sonnet (4.6+) also takes `max`
     }
     [[nodiscard]] constexpr bool supports_effort_xhigh() const noexcept {
         if (!supports_effort()) return false;
         if (family == Family::Fable || family == Family::Mythos)
             return true;  // flagship lane exposes the full ladder
+        // Every current gpt-5.x model supports xhigh.
+        if (family == Family::Gpt) return true;
         return family == Family::Opus
             && (generation > 4 || (generation == 4 && revision >= 7));
     }
@@ -171,6 +184,10 @@ struct ModelCapabilities {
                 else if (tok == "opus")   caps.family = Family::Opus;
                 else if (tok == "fable")  caps.family = Family::Fable;
                 else if (tok == "mythos") caps.family = Family::Mythos;
+                // NOTE: `gpt` is NOT matched here. gpt-4o / gpt-4.1 / gpt-3.5
+                // must stay Family::Unknown (generic OpenAI-compat: 16k cap,
+                // no effort). Only the gpt-5.x Responses line gets Family::Gpt,
+                // set below once the version token confirms generation >= 5.
                 else if (was_expecting_revision) {
                     // Revision token — same 1-/2-digit plausibility check as
                     // the generation parse so a date can't slip through.
@@ -181,6 +198,29 @@ struct ModelCapabilities {
                         r = r * 10 + (c - '0');
                     }
                     if (ok) caps.revision = r;
+                }
+                else if (prev == "gpt") {
+                    // OpenAI schema packs the version into ONE dotted token
+                    // after `gpt` (`gpt-5.6-sol` → "5.6"; `gpt-5` → "5").
+                    // Parse the integer part as the generation and the
+                    // fractional part as the revision so the effort gates can
+                    // tell gpt-5.6 (accepts `max`) from gpt-5.4 (xhigh top).
+                    // Only the gpt-5+ Responses line becomes Family::Gpt;
+                    // gpt-4o / gpt-4.1 / gpt-3.5 stay Unknown (generic compat).
+                    int g = 0, r = 0;
+                    bool ok = !tok.empty(), frac = false, any_frac = false;
+                    for (char c : tok) {
+                        if (c == '.') { if (frac) { ok = false; break; } frac = true; continue; }
+                        if (c < '0' || c > '9') { ok = false; break; }
+                        if (frac) { r = r * 10 + (c - '0'); any_frac = true; }
+                        else        g = g * 10 + (c - '0');
+                    }
+                    if (ok && g >= 5 && g <= 99) {
+                        caps.family = Family::Gpt;
+                        caps.generation = g;
+                        caps.generation_4_or_later = true;
+                        if (any_frac) caps.revision = r;
+                    }
                 }
                 else if (prev == "haiku" || prev == "sonnet" || prev == "opus"
                          || prev == "fable" || prev == "mythos") {
@@ -465,6 +505,11 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
         //   <= 3.x           -> 8192  (older models 400 above this)
         //   unknown gen      -> 16384 (roomy but universally accepted)
         if (caps.is_haiku()) return 8192;
+        // OpenAI gpt-5.x (ChatGPT/Codex Responses): large-output capable
+        // (272k context); 64k is a safe, universally-accepted ceiling that
+        // matches the flagship Claude lane. Explicit so intent is clear and a
+        // future gpt generation doesn't silently fall through.
+        if (caps.is_gpt()) return 64000;
         // Flagship lane (Fable/Mythos) and any Claude 4-or-later Sonnet/Opus.
         if (caps.is_fable() || caps.is_mythos()) return 64000;
         if (caps.generation >= 4) return 64000;
