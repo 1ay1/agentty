@@ -179,6 +179,19 @@ private:
         req.body      = frame;
         req.headers.push_back({"content-type", "application/json"});
         req.headers.push_back({"accept", "application/json, text/event-stream"});
+        // MCP 2026-07-28 header-based routing (SEP-2243): surface the JSON-RPC
+        // method (and, for tools/call, the tool name) as headers so an edge
+        // gateway can route/authorize without parsing the body. Harmless to a
+        // server that ignores them. Only meaningful on a request frame.
+        if (parsed.is_object() && parsed.contains("method") && parsed["method"].is_string()) {
+            const std::string m = parsed["method"].get<std::string>();
+            req.headers.push_back({"mcp-method", m});
+            if (m == "tools/call" && parsed.contains("params") &&
+                parsed["params"].is_object() && parsed["params"].contains("name") &&
+                parsed["params"]["name"].is_string()) {
+                req.headers.push_back({"mcp-name", parsed["params"]["name"].get<std::string>()});
+            }
+        }
         {
             std::lock_guard<std::mutex> lk(mu_);
             if (!session_id_.empty())      req.headers.push_back({"mcp-session-id", session_id_});
