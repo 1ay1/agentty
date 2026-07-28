@@ -156,6 +156,7 @@ struct Args {
     std::string cli_bench_root;  // rag-bench: docs root override (positional)
     std::string cli_mcp_server;  // mcp-login/logout: server name (positional)
     std::string cli_mcp_metadata; // mcp-login: explicit resource-metadata URL
+    std::string cli_mcp_client_id; // mcp-login: pre-registered / CIMD client_id
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
@@ -169,12 +170,16 @@ Args parse_args(int argc, char** argv) {
          || a == "acp" || a == "skills" || a == "mcp-serve") {
             out.subcommand = std::move(a);
         } else if (a == "mcp-login" || a == "mcp-logout" || a == "mcp-status") {
-            // `agentty mcp-login <server> [--metadata <url>]`
+            // `agentty mcp-login <server> [--metadata <url>] [--client-id <id>]`
             out.subcommand = std::move(a);
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 out.cli_mcp_server = argv[++i];
-            if (i + 1 < argc && std::string(argv[i + 1]) == "--metadata" && i + 2 < argc)
-                out.cli_mcp_metadata = argv[i += 2];
+            while (i + 1 < argc) {
+                std::string opt = argv[i + 1];
+                if (opt == "--metadata" && i + 2 < argc)       out.cli_mcp_metadata  = argv[i += 2];
+                else if (opt == "--client-id" && i + 2 < argc) out.cli_mcp_client_id = argv[i += 2];
+                else break;
+            }
         } else if (a == "rag-bench") {
             // Optional positional docs root: `agentty rag-bench [dir]`.
             out.subcommand = std::move(a);
@@ -262,7 +267,8 @@ int main(int argc, char** argv) {
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
     if (args.subcommand == "mcp-login")
-        return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata);
+        return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata,
+                                         args.cli_mcp_client_id);
     if (args.subcommand == "mcp-logout")
         return mcp::oauth::cmd_mcp_logout(args.cli_mcp_server);
     if (args.subcommand == "mcp-status")

@@ -58,11 +58,16 @@ struct LoginResult {
 
 // Run the interactive login for `server_name` (must exist in mcp.json as an
 // http/url server). If `metadata_url` is non-empty it's used directly instead
-// of probing for a 401 challenge. Blocks on the browser round-trip up to
-// `timeout_s`. Persists the token on success. Never throws.
+// of probing for a 401 challenge. `client_id`, if set, is used when the
+// authorization server offers no Dynamic Client Registration endpoint: an
+// https:// value is treated as a CIMD (Client ID Metadata Document) URL
+// — the 2026-07-28 preferred path — anything else as a pre-registered public
+// client_id. Blocks on the browser round-trip up to `timeout_s`. Persists the
+// token on success. Never throws.
 [[nodiscard]] LoginResult login(const std::string& server_name,
                                 const std::string& endpoint_url,
                                 const std::string& metadata_url,
+                                const std::string& client_id = {},
                                 int timeout_s = 300);
 
 // Return a fresh "Bearer <token>" header for `server_name`, refreshing a token
@@ -79,7 +84,8 @@ bool logout(const std::string& server_name);
 // CLI entry points (agentty mcp-login <server> / mcp-logout <server>). They
 // resolve the server's endpoint URL from .agentty/mcp.json themselves and
 // print human-readable progress. Return a process exit code (0 = success).
-int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url = {});
+int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url = {},
+                  const std::string& client_id = {});
 int cmd_mcp_logout(const std::string& server_name);
 int cmd_mcp_status();   // list servers + which have a stored token
 

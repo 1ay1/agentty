@@ -102,25 +102,21 @@ HttpOut do_http(http::HttpMethod method, const std::string& url,
 
     http::Timeouts tos; tos.total = std::chrono::milliseconds(20'000);
     auto res = http::default_client().send(req, tos);
+    // agentty's send() delivers ANY HTTP status — including a 401 — as a
+    // successful Response with headers + body intact (only transport failures
+    // become an unexpected HttpError). So a 401's WWW-Authenticate challenge is
+    // read directly off res->headers here; no well-known fallback is needed
+    // unless the challenge is missing/unparseable or the server never 401s.
     if (!res) {
-        // A Status error (>=400) carries the code + detail but NOT the response
-        // headers/body through this seam, so a 401's WWW-Authenticate isn't
-        // available here — login falls back to the conventional well-known URL.
-        if (res.error().kind == http::HttpErrorKind::Status) {
-            out.status = res.error().http_status;
-            out.body   = res.error().detail;
-        } else {
-            out.body = res.error().render();
-            return out;
-        }
-    } else {
-        out.status = res->status;
-        out.body   = res->body;
-        for (const auto& h : res->headers) {
-            std::string n = h.name;
-            for (auto& c : n) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
-            if (n == "www-authenticate") out.www_authenticate = h.value;
-        }
+        out.body = res.error().render();
+        return out;
+    }
+    out.status = res->status;
+    out.body   = res->body;
+    for (const auto& h : res->headers) {
+        std::string n = h.name;
+        for (auto& c : n) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        if (n == "www-authenticate") out.www_authenticate = h.value;
     }
     return out;
 }
@@ -385,7 +381,8 @@ std::optional<StoredToken> refresh(const StoredToken& tok) {
 std::int64_t StoredToken::now_ms() noexcept { return now_ms_impl(); }
 
 LoginResult login(const std::string& server_name, const std::string& endpoint_url,
-                  const std::string& metadata_url_in, int timeout_s) {
+                  const std::string& metadata_url_in, const std::string& client_id,
+                  int timeout_s) {
     LoginResult r;
     // 1. Locate the protected-resource-metadata URL.
     std::string metadata_url = metadata_url_in;
@@ -440,10 +437,20 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
 #endif
     const std::string redirect_uri = "http://127.0.0.1:" + std::to_string(port) + "/callback";
 
-    // 5. Register the client (DCR, application_type=native). CIMD not used here
-    //    since agentty has no hosted metadata document.
+    // 5. Register the client. Preferred order per 2026-07-28: a caller-supplied
+    //    CIMD https URL (no AS round-trip — the URL IS the client_id), else a
+    //    caller-supplied pre-registered public client_id, else Dynamic Client
+    //    Registration (application_type=native). If none apply, we can't proceed.
     ::mcp::auth::ClientRegistration client;
-    if (as.registration_endpoint) {
+    if (!client_id.empty() && client_id.rfind("https://", 0) == 0) {
+        // CIMD: the client_id is a stable metadata-document URL bound to `issuer`.
+        try { client = ::mcp::auth::cimd_client(client_id, issuer); }
+        catch (const std::exception& e) { r.message = std::string("invalid CIMD client_id: ") + e.what(); return r; }
+    } else if (!client_id.empty()) {
+        // Pre-registered public client (PKCE, token_endpoint_auth_method=none).
+        client.client_id = client_id;
+        client.issuer    = issuer;
+    } else if (as.registration_endpoint) {
         json body = ::mcp::auth::registration_request("agentty", redirect_uri);
         HttpOut rr = do_http(http::HttpMethod::Post, *as.registration_endpoint, body.dump());
         if (rr.status != 200 && rr.status != 201) {
@@ -453,8 +460,10 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
         try { client = ::mcp::auth::parse_registration(json::parse(rr.body), issuer); }
         catch (const std::exception& e) { r.message = std::string("bad registration: ") + e.what(); return r; }
     } else {
-        r.message = "authorization server offers no registration endpoint and agentty "
-                    "has no pre-registered client_id for it";
+        r.message = "authorization server offers no registration endpoint and no "
+                    "client_id is configured for '" + server_name + "'. Set a \"client_id\" "
+                    "on the server in mcp.json (an https:// value is used as a CIMD URL), "
+                    "or pass --client-id <id|https-url>.";
         return r;
     }
 
@@ -572,11 +581,23 @@ std::string endpoint_of(const json& servers, const std::string& name) {
     if (!s.is_object()) return {};
     return s.value("url", std::string{});
 }
+
+// Resolve a pre-registered / CIMD client_id for the server, if any: the
+// server's "client_id" field in mcp.json, else $AGENTTY_MCP_CLIENT_ID.
+std::string client_id_of(const json& servers, const std::string& name) {
+    if (servers.contains(name) && servers[name].is_object()) {
+        std::string cid = servers[name].value("client_id", std::string{});
+        if (!cid.empty()) return cid;
+    }
+    if (const char* env = std::getenv("AGENTTY_MCP_CLIENT_ID"); env && env[0]) return env;
+    return {};
+}
 } // namespace
 
-int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url) {
+int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url,
+                  const std::string& client_id) {
     if (server_name.empty()) {
-        std::fprintf(stderr, "usage: agentty mcp-login <server> [--metadata <url>]\n");
+        std::fprintf(stderr, "usage: agentty mcp-login <server> [--metadata <url>] [--client-id <id|https-url>]\n");
         return 2;
     }
     json servers = load_mcp_servers();
@@ -589,7 +610,9 @@ int cmd_mcp_login(const std::string& server_name, const std::string& metadata_ur
     }
     std::fprintf(stderr, "Authorizing agentty for MCP server '%s' (%s)...\n",
                  server_name.c_str(), endpoint.c_str());
-    LoginResult res = login(server_name, endpoint, metadata_url);
+    // --client-id wins; else the server's mcp.json "client_id"; else the env var.
+    std::string cid = client_id.empty() ? client_id_of(servers, server_name) : client_id;
+    LoginResult res = login(server_name, endpoint, metadata_url, cid);
     if (res.ok) {
         std::fprintf(stderr, "\n\xE2\x9C\x93 %s\n", res.message.c_str());
         return 0;
