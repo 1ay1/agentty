@@ -64,7 +64,7 @@ struct ProviderPreset {
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderPreset, 12> kProviders{{
+inline constexpr std::array<ProviderPreset, 10> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}},
     {"openai",     "OpenAI",     "GPT — api.openai.com",
@@ -85,15 +85,6 @@ inline constexpr std::array<ProviderPreset, 12> kProviders{{
      Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
     {"llama.cpp",  "llama.cpp",  "Local llama.cpp server at localhost:8080",
      Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
-    // External ACP agents: agentty drives a real agent subprocess (it handles
-    // its OWN auth, so AuthStyle::None here). The launch argv comes from
-    // acp_agents.hpp (built-in default = the binary on $PATH, overridable via
-    // .agentty/acp-agents.json). Any additional config-only agent id is still
-    // selectable via a raw spec even without a row here.
-    {"claude-agent-acp", "Claude Agent (ACP)", "Anthropic's claude-agent-acp subprocess",
-     Kind::ExternalAcp, AuthStyle::None,     false, {"", "", ""}},
-    {"codex-acp",        "Codex (ACP)",       "OpenAI's codex-acp subprocess",
-     Kind::ExternalAcp, AuthStyle::None,     false, {"", "", ""}},
 }};
 
 // All presets, for the picker / iteration.

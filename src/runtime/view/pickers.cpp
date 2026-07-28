@@ -14,6 +14,7 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/provider/registry.hpp"
+#include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
@@ -349,6 +350,25 @@ Element provider_picker(const Model& m) {
         row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
         row.trailing       = note;
         row.trailing_style = fg_of(note_color);
+        row.selected = sel;
+        row.active   = active;
+        cfg.rows.push_back(std::move(row));
+        ++i;
+    }
+
+    // Config-driven external ACP agents (Zed's `agent_servers` model): the
+    // built-in reference agent + any acp-agents.json entries. Listed as their
+    // own rows after the presets — there are no hardcoded per-agent registry
+    // rows. Each drives an external agent subprocess that does its own auth.
+    for (const auto& agent : provider::enumerate_acp_agents()) {
+        const bool active = (agent.id == active_id);
+        const bool sel    = (i == picker->index);
+        Picker::Config::Row row;
+        row.leading        = agent.id + "  external ACP agent ("
+                           + agent.command + ")";
+        row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+        row.trailing       = "\xe2\x97\x8f agent";   // ● agent
+        row.trailing_style = fg_of(info);
         row.selected = sel;
         row.active   = active;
         cfg.rows.push_back(std::move(row));

@@ -401,8 +401,9 @@ int main(int argc, char** argv) {
         (provider::Request req, provider::EventSink sink) {
             const auto& sel = provider::active();
             if (sel.kind == provider::Kind::ExternalAcp) {
-                // Drive an external ACP agent subprocess (claude-agent-acp /
-                // codex-acp / any config-defined agent). The adapter spawns +
+                // Drive an external ACP agent subprocess (the built-in
+                // claude-agent-acp reference agent, or any config-defined
+                // agent from acp-agents.json — Zed-style). The adapter spawns +
                 // caches the subprocess and translates its session/update
                 // stream into the same Msgs the native providers emit — so
                 // this is a single branch, not a Kind fan-out.
