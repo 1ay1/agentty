@@ -60,19 +60,33 @@ the single source of truth:
 
 Transport-specific work (close an open tool block, salvage leaked-JSON tool
 args, flush held text) is injected as a callback, so the shared rule holds
-without the shared code knowing any transport's internals. All four native
-transports use it:
+without the shared code knowing any transport's internals. And rather than each
+transport hand-rolling the `if (!result) … if (!is_success) … else finish`
+ladder around those two primitives, the epilogue exposes the **whole post-loop
+as one call**:
 
-- `src/provider/anthropic/transport.cpp` — closes the tool block on both paths.
-- `src/provider/openai/transport.cpp` — success-only salvage of leaked tool JSON.
-- `src/provider/ollama/transport.cpp` — success-only drain/rescue.
-- `src/provider/chatgpt/responses.cpp` — `classify_stream_end` on the Codex path.
+- **`finish_stream(terminated, sink, StreamOutcome)`** is the entire tail of a
+  streaming transport. It classifies the exit and emits exactly one terminal
+  event with the right message and precedence. `StreamOutcome` bundles the
+  facts (`terminated`, `result_ok`, `http_status`, `cancel`, `stop`) and the
+  hooks: `http_error_message()` / `transport_error_message()` build the user
+  message from the buffered error body; `before_finish` runs success-only
+  (salvage / flush); `on_any_end` runs on success *and* error (close an open
+  tool block). All four transports now end a turn through this one call — no
+  transport re-implements the classify-and-emit ladder.
 
-> Forward note: `docs/internal-acp-backends.md` proposes folding this into a
-> `TurnResult` return value + single send chokepoint, at which point
-> `stream_epilogue.hpp` dissolves into the interface. Until that lands, this
-> header is the source of truth and new transports get termination right for
-> free by calling these two functions.
+All four native transports use it, differing only in their hooks:
+
+- `src/provider/anthropic/transport.cpp` — `on_any_end` closes the tool block.
+- `src/provider/openai/transport.cpp` — `before_finish` salvages leaked tool JSON.
+- `src/provider/ollama/transport.cpp` — `before_finish` drains/rescues held text.
+- `src/provider/chatgpt/responses.cpp` — no hooks; the plain success/error split.
+
+> Forward note: the remaining end-state is to fold this into a `TurnResult`
+> return value + single send chokepoint so `stream_epilogue.hpp` dissolves into
+> the `Provider` interface itself. `finish_stream` is the intermediate form:
+> one call, one source of truth, and a new transport gets termination right for
+> free by filling in a `StreamOutcome`.
 
 ---
 
@@ -108,8 +122,9 @@ shared layers:
   catalog. Effort is already clamped to the model's capability upstream in
   `cmd_factory.cpp` via `effort_wire_for`, so the transport just forwards
   `req.effort` onto its wire field.
-- **Termination is uniform**: call `classify_stream_end` + `finish_turn_once`
-  (§2). One terminal event, correct cancel/HTTP/clean-close precedence.
+- **Termination is uniform**: fill in a `StreamOutcome` and call
+  `finish_stream` (§2). One terminal event, correct cancel/HTTP/clean-close
+  precedence, the whole post-loop in one call.
 - **Native + fast is uniform**: SSE/NDJSON straight through the in-house
   `nghttp2` + OpenSSL client with `req.cancel` honoured; no per-provider shim,
   no emulation path, same speed on Linux/macOS/Windows.
@@ -119,10 +134,11 @@ shared layers:
 1. **Catalog row** (§1) if the provider brings models with distinct caps
    (context, output, effort). Otherwise existing families cover it.
 2. **Registry row** in `kProviders` — id, label, `Kind`, `AuthStyle`, env vars.
-3. **Transport** implementing `stream(Request, EventSink)`, terminating via the
-   epilogue. If it is OpenAI-compatible with a non-default path/port, add the
-   matching arm in `openai::Endpoint::from_spec` keyed on the same id and
-   you're done — no new transport at all.
+3. **Transport** implementing `stream(Request, EventSink)`, ending the turn by
+   filling a `StreamOutcome` and calling `finish_stream`. If it is
+   OpenAI-compatible with a non-default path/port, add the matching arm in
+   `openai::Endpoint::from_spec` keyed on the same id and you're done — no new
+   transport at all.
 4. **A `*_transport_test`** asserting the pure parse/emit behaviour with no
    network, mirroring `openai_transport_test` / `ollama_transport_test`.
 

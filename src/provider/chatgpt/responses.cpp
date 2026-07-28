@@ -527,22 +527,20 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
 
     auto result = http::default_client().stream(hr, cbs, tos, req.cancel);
 
-    // Interpret the loop exit through the SHARED provider epilogue so the
-    // ChatGPT path ends a turn identically to Anthropic/OpenAI. The critical
-    // case is AlreadyTerminated: when a `response.completed` frame fired
-    // StreamFinished inside dispatch(), on_chunk returned false to stop reading
-    // (a deliberate latency win), which the HTTP layer reports as an aborted /
-    // "cancelled" transfer. That is EXPECTED, not a user cancel — returning
-    // here avoids the spurious StreamError{"cancelled"} that used to show after
-    // every clean Codex turn.
-    switch (provider::classify_stream_end(
-                ctx.terminated, bool(result), http_status, req.cancel)) {
-        case provider::StreamEnd::AlreadyTerminated:
-            return;
-        case provider::StreamEnd::UserCancelled:
-            sink(StreamError{"cancelled"});
-            return;
-        case provider::StreamEnd::HttpError: {
+    // End the turn through the SHARED epilogue so the ChatGPT path finishes
+    // identically to Anthropic/OpenAI/Ollama. The critical case is
+    // AlreadyTerminated: when a `response.completed` frame fired StreamFinished
+    // inside dispatch(), on_chunk returned false to stop reading (a deliberate
+    // latency win), which the HTTP layer reports as an aborted / "cancelled"
+    // transfer. finish_stream treats that as EXPECTED (emits nothing), avoiding
+    // the spurious StreamError{"cancelled"} that used to show after clean turns.
+    provider::finish_stream(ctx.terminated, sink, {
+        .terminated  = ctx.terminated,
+        .result_ok   = bool(result),
+        .http_status = http_status,
+        .cancel      = req.cancel,
+        .stop        = ctx.stop,
+        .http_error_message = [&]() -> std::string {
             std::string msg = "Codex backend returned HTTP " + std::to_string(http_status);
             try {
                 auto j = json::parse(error_body);
@@ -561,17 +559,13 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
             } catch (...) {}
             if (http_status == 401)
                 msg += " — session expired; run `agentty login` and sign in to ChatGPT again";
-            sink(StreamError{msg, retry_after_hint});
-            return;
-        }
-        case provider::StreamEnd::TransportError:
-            sink(StreamError{result.error().render()});
-            return;
-        case provider::StreamEnd::CleanClose:
-            // 2xx closed cleanly without response.completed (proxy cutoff).
-            sink(StreamFinished{ctx.stop});
-            return;
-    }
+            return msg;
+        },
+        .retry_after = retry_after_hint,
+        .transport_error_message = [&]() -> std::string {
+            return result.error().render();
+        },
+    });
 }
 
 // ── Test seams ────────────────────────────────────────────────────
