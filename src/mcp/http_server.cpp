@@ -26,6 +26,7 @@
 //   HTTP dependency into the SDK.
 
 #include "agentty/mcp/http_server.hpp"
+#include "agentty/mcp/oauth.hpp"
 
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -114,8 +115,9 @@ std::string header_value(const http::Headers& hh, std::string_view name) {
 class HttpTransport {
 public:
     HttpTransport(ParsedUrl url, std::vector<http::Header> extra_headers,
-                  std::chrono::milliseconds timeout)
-        : url_(std::move(url)), extra_headers_(std::move(extra_headers)), timeout_(timeout) {}
+                  std::chrono::milliseconds timeout, std::string server_name = {})
+        : url_(std::move(url)), extra_headers_(std::move(extra_headers)),
+          timeout_(timeout), server_name_(std::move(server_name)) {}
 
     void bind(::mcp::RpcEngine* engine) { engine_ = engine; }
 
@@ -199,6 +201,21 @@ private:
             if (!protocol_version_.empty()) req.headers.push_back({"mcp-protocol-version", protocol_version_});
         }
         for (const auto& h : extra_headers_) req.headers.push_back(h);
+        // MCP 2026-07-28 authorization: if the user ran `agentty mcp-login` for
+        // this server, attach a fresh bearer token (auto-refreshed on expiry).
+        // A statically-configured Authorization header in extra_headers_ wins
+        // (we only add ours if none is present).
+        if (!server_name_.empty()) {
+            bool has_auth = false;
+            for (const auto& h : req.headers) {
+                std::string n = h.name;
+                for (auto& c : n) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+                if (n == "authorization") { has_auth = true; break; }
+            }
+            if (!has_auth)
+                if (auto bearer = oauth::bearer_for(server_name_))
+                    req.headers.push_back({"authorization", *bearer});
+        }
 
         auto cancel = std::make_shared<http::CancelToken>();
         { std::lock_guard<std::mutex> lk(mu_); cancel_ = cancel; }
@@ -378,6 +395,7 @@ private:
     ParsedUrl                 url_;
     std::vector<http::Header> extra_headers_;
     std::chrono::milliseconds timeout_;
+    std::string               server_name_;   // for oauth::bearer_for lookup
     ::mcp::RpcEngine*         engine_ = nullptr;
     std::mutex                mu_;
     std::string               session_id_;
@@ -403,7 +421,7 @@ public:
                            ::mcp::Implementation client_info,
                            std::chrono::milliseconds handshake_timeout,
                            std::chrono::milliseconds call_timeout) {
-        transport_ = std::make_unique<HttpTransport>(std::move(url), std::move(headers), call_timeout);
+        transport_ = std::make_unique<HttpTransport>(std::move(url), std::move(headers), call_timeout, name);
         auto client = std::make_unique<::mcp::Client>(transport_->sink());
         transport_->bind(&client->engine());
         // After initialize the engine resolves; set the negotiated protocol

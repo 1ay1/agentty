@@ -50,6 +50,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/mcp/serve.hpp"
+#include "agentty/mcp/oauth.hpp"
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
@@ -94,6 +95,10 @@ void print_usage() {
         "  acp               Run as an ACP agent over stdio (for Zed et al.)\n"
         "  mcp-serve         Serve agentty's native tools over MCP (stdio).\n"
         "                    Point any MCP client at `agentty mcp-serve`.\n"
+        "  mcp-login <srv>   Authorize an OAuth-gated MCP server from mcp.json\n"
+        "                    (2026-07-28 OAuth 2.1 + PKCE via your browser).\n"
+        "  mcp-logout <srv>  Remove a stored MCP server token.\n"
+        "  mcp-status        List MCP servers and their authorization state.\n"
         "  skills            List discovered skills with spec-lint diagnostics\n"
         "                    (exit 1 on warnings — CI-friendly validate)\n"
         "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
@@ -149,6 +154,8 @@ struct Args {
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
     std::string cli_auth_header; // custom auth header NAME (e.g. "X-API-Key")
     std::string cli_bench_root;  // rag-bench: docs root override (positional)
+    std::string cli_mcp_server;  // mcp-login/logout: server name (positional)
+    std::string cli_mcp_metadata; // mcp-login: explicit resource-metadata URL
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
@@ -161,6 +168,13 @@ Args parse_args(int argc, char** argv) {
         if (a == "login" || a == "logout" || a == "status" || a == "help"
          || a == "acp" || a == "skills" || a == "mcp-serve") {
             out.subcommand = std::move(a);
+        } else if (a == "mcp-login" || a == "mcp-logout" || a == "mcp-status") {
+            // `agentty mcp-login <server> [--metadata <url>]`
+            out.subcommand = std::move(a);
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                out.cli_mcp_server = argv[++i];
+            if (i + 1 < argc && std::string(argv[i + 1]) == "--metadata" && i + 2 < argc)
+                out.cli_mcp_metadata = argv[i += 2];
         } else if (a == "rag-bench") {
             // Optional positional docs root: `agentty rag-bench [dir]`.
             out.subcommand = std::move(a);
@@ -247,6 +261,12 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "mcp-login")
+        return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata);
+    if (args.subcommand == "mcp-logout")
+        return mcp::oauth::cmd_mcp_logout(args.cli_mcp_server);
+    if (args.subcommand == "mcp-status")
+        return mcp::oauth::cmd_mcp_status();
     if (args.subcommand == "rag-bench")
         return rag::bench::run(args.cli_bench_root);
     if (args.subcommand == "airgap")
