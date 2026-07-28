@@ -32,6 +32,7 @@
 
 #include <mcp/cap/client_provider.hpp>
 #include <mcp/client.hpp>
+#include <mcp/auth.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -213,6 +214,8 @@ private:
         std::string sse_buf;       // accumulates SSE bytes across chunks
         std::string json_buf;      // accumulates a non-SSE body
         bool is_sse = false;
+        http_status_401_ = false;
+        resource_metadata_url_.clear();
 
         http::StreamHandler handler;
         handler.on_headers = [&](int status, const http::Headers& hh) {
@@ -228,6 +231,17 @@ private:
                 // Session expired/unknown — drop it so the next call re-inits.
                 std::lock_guard<std::mutex> lk(mu_);
                 session_id_.clear();
+            }
+            if (status == 401) {
+                // MCP 2026-07-28 authorization (RFC 9728): the server is
+                // gated behind OAuth. Parse the WWW-Authenticate challenge so
+                // we can surface an actionable error instead of a bare
+                // transport failure. mcp::auth::parse_challenge locates the
+                // protected-resource-metadata URL.
+                http_status_401_ = true;
+                const std::string wa = header_value(hh, "www-authenticate");
+                if (auto url = ::mcp::auth::parse_challenge(wa))
+                    resource_metadata_url_ = *url;
             }
         };
         // Cap total buffered response bytes. The streaming path in
@@ -289,10 +303,24 @@ private:
         } else if (expects_response && engine_) {
             // 202 Accepted with empty body for a request is a protocol error,
             // but be defensive: resolve the future with an error.
+            std::string msg;
+            if (http_status_401_) {
+                // MCP 2026-07-28 authorization: the server requires OAuth. Give
+                // the user something actionable rather than a generic 202.
+                msg = "MCP server requires authorization (HTTP 401).";
+                if (!resource_metadata_url_.empty())
+                    msg += " Protected-resource metadata: " + resource_metadata_url_ +
+                           ". Configure a bearer token in the server's headers, or use an"
+                           " OAuth-authenticated endpoint.";
+                else
+                    msg += " Configure a bearer token in the server's headers.";
+            } else {
+                msg = "empty HTTP response to request";
+            }
             json err = {
                 {"jsonrpc", "2.0"},
                 {"id", parsed.value("id", json(nullptr))},
-                {"error", {{"code", -32603}, {"message", "empty HTTP response to request"}}},
+                {"error", {{"code", http_status_401_ ? -32020 : -32603}, {"message", msg}}},
             };
             feed(err.dump());
         }
@@ -355,6 +383,11 @@ private:
     std::string               session_id_;
     std::string               protocol_version_;
     std::atomic<bool>         alive_{true};
+    // MCP 2026-07-28 authorization: set when the last response was a 401, with
+    // the parsed protected-resource-metadata URL from the WWW-Authenticate
+    // challenge (empty if none). Read on the same worker after the stream ends.
+    bool                      http_status_401_ = false;
+    std::string               resource_metadata_url_;
     http::CancelTokenPtr      cancel_;
     // In-flight POST worker accounting so stop() can join before teardown.
     std::mutex                worker_mu_;
