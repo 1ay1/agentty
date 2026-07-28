@@ -9,6 +9,9 @@
 
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
+#include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/io/http.hpp"
 
 namespace agentty::provider {
@@ -177,6 +180,25 @@ void prewarm_active_provider() {
     if (!t.should_warm()) return;
     http::default_client().prewarm(t.host, t.port, t.override_host,
                                    t.override_port);
+}
+
+std::vector<ModelInfo> list_models_for(const Selection& sel,
+                                       const auth::AuthHeader& auth) {
+    // Dispatch on the SAME axes as the stream path so the picker and the
+    // transport can never disagree about which backend a selection names:
+    //   • ACP subprocess  — no catalog endpoint; the agent picks its own model.
+    //   • oauth_native     — ChatGPT/Codex: fetch from the account's /models via
+    //                        its in-process OAuth creds (ignores `auth`).
+    //   • OpenAI dialect   — the Endpoint's /v1/models with the bearer `auth`.
+    //   • Anthropic        — the Messages backend's model list with `auth`.
+    // Adding a provider does NOT touch this function unless it introduces a
+    // brand-new catalog mechanism — it inherits one of these by its Wire /
+    // oauth_native row fields.
+    if (sel.kind == Kind::ExternalAcp) return {};
+    if (sel.is_oauth_native())         return chatgpt::list_models();
+    if (sel.kind == Kind::OpenAI)
+        return openai::list_models(auth, sel.openai_endpoint);
+    return anthropic::list_models(auth);
 }
 
 } // namespace agentty::provider
