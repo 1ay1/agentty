@@ -242,6 +242,11 @@ jobs:
           set -o pipefail
           BIN=build/agentty.exe
           test -x "$BIN" || BIN=build/agentty
+          # Resolve to an absolute path: the TUI run below invokes the binary
+          # from inside `sh -c`, where a bare relative path (no leading ./)
+          # is looked up on PATH and fails with 127. --version happens to run
+          # directly, but be consistent and robust for both.
+          BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
           echo "binary: $BIN"
           # --version must always work (short-circuits before the TUI).
           "$BIN" --version
