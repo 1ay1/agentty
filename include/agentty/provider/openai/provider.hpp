@@ -19,15 +19,9 @@ public:
 
     provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
         Request oreq;
-        oreq.model         = std::move(req.model);
-        oreq.system_prompt = std::move(req.system_prompt);
-        oreq.messages      = std::move(req.messages);
-        oreq.tools         = std::move(req.tools);
-        oreq.max_tokens    = req.max_tokens;
-        oreq.context_window = req.context_window;
-        oreq.auth          = std::move(req.auth);
-        oreq.retry_count   = req.retry_count;
-        oreq.endpoint      = endpoint_;
+        provider::lower_shared(oreq, req);          // shared core
+        oreq.context_window = req.context_window;   // OpenAI-family: Ollama num_ctx
+        oreq.endpoint       = endpoint_;
         return openai::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
     }
 

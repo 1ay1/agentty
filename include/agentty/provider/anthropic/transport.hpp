@@ -14,6 +14,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/provider/provider.hpp"   // provider::ToolSpec, provider::Request, lower_shared
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::provider {
@@ -32,12 +33,12 @@ using auth::BearerHeader;
 using auth::make_auth_header;
 using auth::is_empty;
 
-struct ToolSpec {
-    std::string name;
-    std::string description;
-    nlohmann::json input_schema;
-    bool eager_input_streaming = false;
-};
+// The tool spec is provider-agnostic: same shape on every wire (name,
+// description, JSON schema, eager-streaming flag). Aliased to the shared
+// provider::ToolSpec rather than re-declared, so the abstract request's tools
+// move straight into an anthropic::Request with no per-field conversion (see
+// provider::lower_shared). One type, one source of truth.
+using ToolSpec = provider::ToolSpec;
 
 struct Request {
     std::string model;

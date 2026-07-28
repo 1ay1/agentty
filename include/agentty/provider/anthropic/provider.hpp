@@ -15,19 +15,8 @@ class AnthropicProvider {
 public:
     provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
         Request areq;
-        areq.model         = std::move(req.model);
-        areq.system_prompt = std::move(req.system_prompt);
-        areq.messages      = std::move(req.messages);
-        areq.max_tokens    = req.max_tokens;
-        areq.auth          = std::move(req.auth);
-        areq.retry_count   = req.retry_count;
-        areq.effort        = std::move(req.effort);
-        areq.tools.reserve(req.tools.size());
-        for (auto& t : req.tools)
-            areq.tools.push_back({std::move(t.name),
-                                  std::move(t.description),
-                                  std::move(t.input_schema),
-                                  t.eager_input_streaming});
+        provider::lower_shared(areq, req);   // model/system/messages/tools/max_tokens/auth/retry
+        areq.effort = std::move(req.effort); // Anthropic-only: adaptive thinking
         return run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));
     }
 };
