@@ -55,9 +55,7 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
 }
 
 [[nodiscard]] bool is_chatgpt_active() {
-    const auto sel = provider::active();
-    return sel.kind == provider::Kind::OpenAI
-        && sel.openai_endpoint.label == "chatgpt";
+    return provider::active().is_chatgpt();
 }
 
 // Codex exposes a reasoning ladder through its live model catalogue. Agentty

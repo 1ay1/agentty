@@ -32,6 +32,16 @@ struct Selection {
     // config-defined id). Meaningful only when kind == ExternalAcp; the runtime
     // hands it to stream_external_acp() to spawn/drive the right subprocess.
     std::string      acp_agent_id;
+
+    // The native ChatGPT/Codex OAuth backend: an OpenAI-Kind selection whose
+    // endpoint label is "chatgpt". This ONE predicate replaces the
+    // `kind == Kind::OpenAI && openai_endpoint.label == "chatgpt"` idiom that
+    // used to be re-derived at ~6 call sites (dispatch, prewarm, model list,
+    // effort ladder, login gate, picker). "chatgpt is special" is now a
+    // capability read from one place, not a string compared everywhere.
+    [[nodiscard]] bool is_chatgpt() const noexcept {
+        return kind == Kind::OpenAI && openai_endpoint.label == "chatgpt";
+    }
 };
 
 // Parse a provider spec into a Selection. Accepts:

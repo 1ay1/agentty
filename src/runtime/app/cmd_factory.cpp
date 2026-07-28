@@ -1146,8 +1146,7 @@ Cmd<Msg> fetch_models() {
                 // exposes no list_models endpoint. Return empty so the picker
                 // shows a clean "no models" state instead of dialing Anthropic.
                 models = {};
-            } else if (sel.kind == provider::Kind::OpenAI
-                && sel.openai_endpoint.label == "chatgpt") {
+            } else if (sel.is_chatgpt()) {
                 models = provider::chatgpt::list_models();
             } else if (sel.kind == provider::Kind::OpenAI) {
                 models = provider::openai::list_models(deps().auth,

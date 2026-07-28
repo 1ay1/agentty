@@ -136,6 +136,14 @@ void prewarm_active_provider() {
     const Selection s = active();
     auto& client = http::default_client();
 
+    // The native ChatGPT path never dials the endpoint in the Selection — it
+    // talks to chatgpt.com/backend-api/codex — so prewarm that host. Checked
+    // FIRST (before the Kind switch) via the single is_chatgpt() predicate.
+    if (s.is_chatgpt()) {
+        client.prewarm("chatgpt.com", 443, {}, 0);
+        return;
+    }
+
     switch (s.kind) {
     case Kind::Anthropic: {
         const auto& ov = http::agentty_api_host_override();
@@ -145,14 +153,6 @@ void prewarm_active_provider() {
         return;
     }
     case Kind::OpenAI: {
-        // The native ChatGPT path (label "chatgpt") never dials the endpoint
-        // in the Selection — it talks to chatgpt.com/backend-api/codex — so
-        // prewarm that host explicitly. Every other OpenAI-family backend
-        // prewarms its real endpoint host.
-        if (s.openai_endpoint.label == "chatgpt") {
-            client.prewarm("chatgpt.com", 443, {}, 0);
-            return;
-        }
         const auto& ep = s.openai_endpoint;
         // Skip locals: no TLS handshake to amortise, and the port may be 0
         // (the chatgpt sentinel) or a local dev server that isn't up yet.

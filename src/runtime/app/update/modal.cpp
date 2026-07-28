@@ -588,8 +588,7 @@ commit_provider_switch(Model m, std::string_view spec,
     //     bogus chip and get silently dropped only at request time. When the
     //     new model isn't known yet (local, empty id) this is a no-op until
     //     ModelsLoaded, which is fine — the wire path re-clamps regardless.
-    const bool chatgpt = provider::active().kind == provider::Kind::OpenAI
-        && provider::active().openai_endpoint.label == "chatgpt";
+    const bool chatgpt = provider::active().is_chatgpt();
     if (!chatgpt) {
         m.d.effort = clamp_effort(
             m.d.effort, ModelCapabilities::from_id(m.d.model_id.value));
