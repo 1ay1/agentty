@@ -218,6 +218,16 @@ struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
 struct StreamError {
     std::string message;
     std::optional<std::chrono::seconds> retry_after;
+    // The observed HTTP response status when the failure was an HTTP-status
+    // error (0 when it wasn't one — a transport/socket failure, a synthetic
+    // stall, or an SSE `event: error` body where no status is available). The
+    // transport already KNOWS this precisely; carrying it lets the retry
+    // reducer classify via the typed, compile-time-proven
+    // provider::classify(HttpError) path instead of substring-sniffing the
+    // human `message`. Non-zero ⇒ classify by status; zero ⇒ fall back to the
+    // string sniff. This is how the StreamResult's precision reaches the
+    // reducer without changing the Msg-driven runtime seam.
+    int http_status = 0;
     // True only for the SYNTHETIC StreamError the stall watchdog dispatches
     // after it trips the cancel token (see meta.cpp Tick). The handler must
     // treat a `from_stall` error as a recoverable upstream stall (reclassify

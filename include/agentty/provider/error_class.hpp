@@ -143,6 +143,29 @@ enum class ErrorClass {
     return ErrorClass::Terminal;
 }
 
+// The dispatcher the retry reducer calls on a StreamError Msg. Prefers the
+// TYPED, compile-time-proven classify(HttpError) path when the transport
+// stamped a real HTTP status on the Msg (StreamError::http_status != 0), and
+// only falls back to the substring sniff for the wire shapes that genuinely
+// have no status: SSE `event: error` bodies, transport/socket failures, user
+// cancels, and the synthetic stall-watchdog error (all http_status == 0).
+//
+// This is how the transport's KNOWN status reaches classification without the
+// lossy int→English→substring round-trip: the transport already had the exact
+// 429/401/503, so a proxy that phrases "429" as "Too Many Requests" (no digits
+// in the body) still classifies as RateLimit, and a terminal 400 whose message
+// happens to contain the word "connection" is no longer mis-retried as
+// Transient. When status == 0, behaviour is byte-identical to the old
+// classify(message) call.
+[[nodiscard]] inline ErrorClass classify_stream_error(
+        std::string_view message, int http_status) noexcept {
+    if (http_status != 0) {
+        return classify(agentty::http::HttpError{
+            agentty::http::HttpErrorKind::Status, http_status, std::string{}});
+    }
+    return classify(message);
+}
+
 // Backoff duration for the Nth retry attempt (0-indexed). Caps at 6
 // attempts; longer schedules for RateLimit since Anthropic's per-minute
 // window doesn't reset on demand. Returning `std::chrono::milliseconds`

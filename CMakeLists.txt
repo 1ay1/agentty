@@ -1588,6 +1588,20 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json)
     add_test(NAME model_caps_test COMMAND model_caps_test)
 
+    # error_class_test — the retry classifier's status-preferring dispatch.
+    # provider::classify_stream_error(message, http_status) prefers the typed,
+    # compile-time-proven classify(HttpError) path when the transport stamped a
+    # real status on the StreamError Msg, and only string-sniffs when there is
+    # none (SSE event:error / socket failure / cancel / stall). Header-only
+    # (error_class.hpp + http.hpp structs); no link, sanitizer-clean.
+    add_executable(error_class_test EXCLUDE_FROM_ALL
+        tests/error_class_test.cpp
+    )
+    target_include_directories(error_class_test PRIVATE include)
+    target_link_libraries(error_class_test PRIVATE
+        nlohmann_json::nlohmann_json)
+    add_test(NAME error_class_test COMMAND error_class_test)
+
     # fsm_test — generic typestate machinery (include/agentty/io/fsm.hpp):
     # compile-time edge legality from in-class `fsm_to` successor lists,
     # the assert_legal_edge guard, and move-only RAII cleanup-exactly-once.
@@ -2115,6 +2129,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        error_class_test
         fsm_test
         concurrency_primitives_test
         skills_engine_test
@@ -2130,6 +2145,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        error_class_test
         fsm_test
         concurrency_primitives_test
         skills_engine_test
@@ -2141,6 +2157,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        error_class_test
         fsm_test
         concurrency_primitives_test
         model_label_test

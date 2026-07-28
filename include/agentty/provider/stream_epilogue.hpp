@@ -63,11 +63,13 @@ inline void finish_turn_once(
         StopReason stop,
         std::optional<std::string> err = std::nullopt,
         std::optional<std::chrono::seconds> retry_after = std::nullopt,
-        const std::function<void()>& before_finish = {}) {
+        const std::function<void()>& before_finish = {},
+        int http_status = 0) {
     if (terminated) return;
     terminated = true;
     if (err) {
         StreamError e{std::move(*err), retry_after};
+        e.http_status = http_status;
         sink(std::move(e));
     } else {
         if (before_finish) before_finish();
@@ -238,7 +240,10 @@ inline StreamResult finish_stream(bool& terminated, const EventSink& sink,
             tr.error = o.http_error_message
                            ? o.http_error_message()
                            : std::string{"HTTP "} + std::to_string(o.http_status);
-            finish_turn_once(terminated, sink, o.stop, tr.error, o.retry_after);
+            // Stamp the precise status on the Msg so the retry reducer can
+            // classify via the typed provider::classify(HttpError) path.
+            finish_turn_once(terminated, sink, o.stop, tr.error, o.retry_after,
+                             {}, o.http_status);
             return tr;
         case StreamEnd::TransportError:
             tr.error = o.transport_error_message
