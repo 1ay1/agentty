@@ -309,10 +309,36 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     if (type == "response.failed" || type == "error") {
         close_open_tool(ctx);
         std::string msg;
-        if (type == "error") msg = j.value("message", std::string{"stream error"});
-        else msg = j.value("response", json::object())
-                       .value("error", json::object())
-                       .value("message", std::string{"Codex request failed"});
+        // Surface the error TYPE/CODE alongside the message. The runtime's
+        // classify(string_view) sniffs this text to decide retryability
+        // (e.g. "rate_limit", "429", "overloaded", "server_error") — dropping
+        // the type would misclassify a transient overload as terminal and
+        // skip the auto-retry that Anthropic/OpenAI get. Mirror the wire's
+        // in-band error shape: `{type|code}: {message}`.
+        auto compose = [](const json& err) {
+            std::string m = err.value("message", std::string{});
+            std::string tag = err.value("type", err.value("code", std::string{}));
+            if (!tag.empty()) return m.empty() ? tag : tag + ": " + m;
+            return m;
+        };
+        if (type == "error") {
+            // A top-level `error` event: its own `type` field is the SSE event
+            // discriminator ("error"), so the meaningful classifier token is
+            // `code` (e.g. "rate_limit_exceeded", "server_error"). Some
+            // variants nest the detail under `error`; handle both.
+            const json& err = j.contains("error") && j["error"].is_object()
+                                  ? j["error"] : j;
+            std::string m   = err.value("message", j.value("message", std::string{}));
+            std::string tag = err.value("code", err.value("type", std::string{}));
+            if (tag == "error") tag.clear();   // never the event discriminator
+            msg = tag.empty() ? m : (m.empty() ? tag : tag + ": " + m);
+            if (msg.empty()) msg = "stream error";
+        } else {
+            const auto& err = j.value("response", json::object())
+                                  .value("error", json::object());
+            msg = compose(err);
+            if (msg.empty()) msg = "Codex request failed";
+        }
         ctx.sink(StreamError{msg, std::nullopt});
         ctx.terminated = true;
         return;
@@ -426,9 +452,43 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
     ctx.sink = sink;
     int http_status = 0;
     std::string error_body;
+    // Server-provided backoff hint (429 rate-limit / 5xx overload). The
+    // Responses backend emits standard `Retry-After` (integer seconds) just
+    // like Anthropic/OpenAI; capturing it lets the runtime honor the server's
+    // schedule instead of falling back to its blind ladder — native Codex
+    // parity with the other transports.
+    std::optional<std::chrono::seconds> retry_after_hint;
 
     http::StreamHandler cbs;
-    cbs.on_headers = [&](int status, const http::Headers&) { http_status = status; };
+    cbs.on_headers = [&](int status, const http::Headers& hh) {
+        http_status = status;
+        if (status < 400) return;   // only care about the error path
+        auto eq_ci = [](std::string_view a, std::string_view b) noexcept {
+            if (a.size() != b.size()) return false;
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                char x = a[i], y = b[i];
+                if (x >= 'A' && x <= 'Z') x = static_cast<char>(x + 32);
+                if (y >= 'A' && y <= 'Z') y = static_cast<char>(y + 32);
+                if (x != y) return false;
+            }
+            return true;
+        };
+        for (const auto& h : hh) {
+            if (!eq_ci(h.name, "retry-after")) continue;
+            try {
+                size_t consumed = 0;
+                auto v = std::stoul(h.value, &consumed);
+                if (consumed == h.value.size() && v > 0)
+                    retry_after_hint = std::chrono::seconds(v);
+            } catch (...) {
+                // Leave the hint unset — the runtime falls back to its own
+                // backoff schedule. (Responses emits whole seconds; an
+                // HTTP-date Retry-After is not parsed, same as the other
+                // transports.)
+            }
+            break;
+        }
+    };
     cbs.on_chunk = [&](std::string_view chunk) -> bool {
         if (http_status >= 400) { error_body.append(chunk); return true; }
         ctx.sse.feed(chunk.data(), chunk.size(),
@@ -470,7 +530,7 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
             } catch (...) {}
             if (http_status == 401)
                 msg += " — session expired; run `agentty login` and sign in to ChatGPT again";
-            sink(StreamError{msg, std::nullopt});
+            sink(StreamError{msg, retry_after_hint});
             return;
         }
         case provider::StreamEnd::TransportError:

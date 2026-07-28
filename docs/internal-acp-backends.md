@@ -275,10 +275,14 @@ External ACP agents are now first-class SELECTABLE providers, wired through
 the same one dispatch seam (`main.cpp` `stream_fn`) as the native backends —
 no `Kind` fan-out. The pieces:
 
-- **Registry** (`provider/registry.hpp`): `Kind::ExternalAcp` + rows
-  `claude-agent-acp` ("Claude Agent (ACP)") and `codex-acp` ("Codex (ACP)").
-  They show up in the provider picker like any other row; `AuthStyle::None`
-  (the agent handles its own auth), so selecting one never prompts for a key.
+- **Registry** (`provider/registry.hpp`): `Kind::ExternalAcp` — but NO
+  hardcoded per-agent rows. ACP is generic, like Zed's `agent_servers`: the
+  provider picker lists agents from `enumerate_acp_agents()` (one built-in
+  reference agent + every `acp-agents.json` entry) as dynamic virtual rows.
+  `AuthStyle::None` (the agent handles its own auth), so selecting one never
+  prompts for a key. There is deliberately no `codex-acp` row — Codex is a
+  first-class NATIVE provider here, so a second "Codex (ACP)" row would be
+  redundant; drive codex-acp by naming it in `acp-agents.json`.
 - **Adapter** (`provider/acp_provider_adapter.cpp`): presents
   `ExternalAcpBackend` as a plain `stream(Request, EventSink)` Provider —
   spawns + caches the subprocess per agent id, translates each round's
@@ -304,12 +308,14 @@ no `Kind` fan-out. The pieces:
         "env": { "FOO": "bar" },
         "cwd": "/optional/working/dir"
       },
-      "my-agent": { "command": "my-acp", "args": ["serve"] }
+      "my-agent": { "command": "my-acp", "args": ["serve"] },
+      "codex-acp":  { "command": "codex-acp", "args": ["acp"] }
     }
   }
   ```
 
-  A config-only id (no built-in row) is still selectable via a raw `--provider
-  my-agent` spec. Tests: `acp_agents_test` (config + selection routing) and
+  Every config id (and the one built-in reference agent) is selectable
+  straight from the provider picker, or via a raw `--provider <id>` spec.
+  Tests: `acp_agents_test` (config + enumerate + selection routing) and
   `external_acp_backend_test` (the backend itself + hardened lifecycle).
 ```
