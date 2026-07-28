@@ -1,5 +1,6 @@
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -22,15 +23,15 @@ struct ChatGptProvider::Impl {};
 ChatGptProvider::ChatGptProvider() : impl_(nullptr) {}
 ChatGptProvider::~ChatGptProvider() = default;
 
-void ChatGptProvider::stream(provider::Request req, provider::EventSink sink) {
+provider::StreamResult ChatGptProvider::stream(provider::Request req, provider::EventSink sink) {
     if (!responses_available()) {
         sink(StreamStarted{});
         sink(StreamError{
             "Not signed in to ChatGPT. Run `agentty login` and choose "
             "ChatGPT to authenticate, then retry."});
-        return;
+        return provider::StreamResult::failed("not signed in to ChatGPT");
     }
-    stream_responses(std::move(req), std::move(sink));
+    return stream_responses(std::move(req), std::move(sink));
 }
 
 // ── Model discovery ───────────────────────────────────────────────

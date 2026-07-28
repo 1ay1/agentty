@@ -419,14 +419,14 @@ std::vector<CatalogModel> fetch_models() {
     return out;
 }
 
-void stream_responses(provider::Request req, provider::EventSink sink) {
+provider::StreamResult stream_responses(provider::Request req, provider::EventSink sink) {
     sink(StreamStarted{});
 
     auto creds = codex_fresh_credentials();   // auto-refreshes if stale
     if (!creds || creds->access_token.empty()) {
         sink(StreamError{"not signed in to ChatGPT — run `agentty login` and "
                          "choose ChatGPT, or use --provider with an API key"});
-        return;
+        return provider::StreamResult::failed("not signed in to ChatGPT");
     }
 
     http::Request hr;
@@ -450,7 +450,7 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
         hr.body = build_body(req).dump();
     } catch (const std::exception& e) {
         sink(StreamError{std::string{"could not encode request: "} + e.what()});
-        return;
+        return provider::StreamResult::failed("could not encode request");
     }
 
     StreamCtx ctx;
@@ -534,7 +534,7 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
     // latency win), which the HTTP layer reports as an aborted / "cancelled"
     // transfer. finish_stream treats that as EXPECTED (emits nothing), avoiding
     // the spurious StreamError{"cancelled"} that used to show after clean turns.
-    provider::finish_stream(ctx.terminated, sink, {
+    return provider::finish_stream(ctx.terminated, sink, {
         .terminated  = ctx.terminated,
         .result_ok   = bool(result),
         .http_status = http_status,

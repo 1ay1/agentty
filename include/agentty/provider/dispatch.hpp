@@ -21,6 +21,7 @@
 // (tests) to route a specific selection deterministically.
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 
 #include <functional>
 #include <string>
@@ -30,9 +31,11 @@ namespace agentty::provider {
 struct Selection;  // selection.hpp
 
 // The type-erased Provider seam: exactly the `Provider` concept's `stream`,
-// as a callable. Binding a concrete provider is `[&p](Request r, EventSink s){
+// as a callable — including its StreamResult return, so the outcome flows
+// through the erased boundary instead of being silently dropped. Binding a
+// concrete provider is `[&p](Request r, EventSink s){ return
 // p.stream(std::move(r), std::move(s)); }`.
-using StreamFn = std::function<void(Request, EventSink)>;
+using StreamFn = std::function<StreamResult(Request, EventSink)>;
 
 // The two long-lived native providers, as erased routes. Owned by main() so a
 // captured reference outlives maya::run / the ACP serve loop. Dispatch never
@@ -45,18 +48,19 @@ struct Routes {
     // main() to stream_external_acp(agent_id, …); erased here so dispatch has
     // ZERO dependency on the acp translation unit and lives in the provider
     // objlib every test links. The agent id comes from the Selection.
-    std::function<void(const std::string&, Request, EventSink)> external_acp;
+    std::function<StreamResult(const std::string&, Request, EventSink)> external_acp;
 };
 
 // Route ONE turn to the right transport for `sel`. The short-lived
 // OpenAI-compat / Ollama / ACP transports are constructed inside; the two
 // long-lived ones come from `routes`. Adding a native provider adds one arm
-// here (and, if long-lived, one field to Routes).
-void dispatch_stream(const Routes& routes, const Selection& sel,
-                     Request req, EventSink sink);
+// here (and, if long-lived, one field to Routes). Returns the turn's
+// StreamResult from whichever transport ran it.
+StreamResult dispatch_stream(const Routes& routes, const Selection& sel,
+                             Request req, EventSink sink);
 
 // Convenience overload: route the process-global `active()` selection. This
 // is the whole body of main.cpp's `stream_fn`.
-void dispatch_stream(const Routes& routes, Request req, EventSink sink);
+StreamResult dispatch_stream(const Routes& routes, Request req, EventSink sink);
 
 } // namespace agentty::provider

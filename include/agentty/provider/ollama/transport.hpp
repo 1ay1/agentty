@@ -44,9 +44,11 @@ using openai::Request;
 using EventSink = std::function<void(Msg)>;
 
 // Run a streaming /api/chat request synchronously on the calling thread.
-// Each NDJSON frame is translated into an agentty Msg via `sink`. Returns when
-// the stream closes. `cancel` is polled at frame boundaries.
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = {});
+// Each NDJSON frame is translated into an agentty Msg via `sink`. Returns a
+// StreamResult naming how the turn ended. `cancel` is polled at frame
+// boundaries.
+provider::StreamResult run_stream_sync(Request req, EventSink sink,
+                                       http::CancelTokenPtr cancel = {});
 
 // System prompt tuned for local models served by Ollama. Plain, firm, with an
 // explicit "use earlier messages" recall reminder and an environment block;

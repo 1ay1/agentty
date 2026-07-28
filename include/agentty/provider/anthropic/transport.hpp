@@ -16,6 +16,11 @@
 #include "agentty/io/http.hpp"
 #include "agentty/runtime/msg.hpp"
 
+namespace agentty::provider {
+// Forward-decl: the shared stream-epilogue outcome (stream_epilogue.hpp).
+struct StreamResult;
+}
+
 namespace agentty::provider::anthropic {
 
 // Re-export the typed credential from the auth domain. Keeping it in
@@ -64,11 +69,13 @@ struct Request {
 using EventSink = std::function<void(Msg)>;
 
 // Runs a streaming request synchronously on the calling thread. Each SSE event
-// is dispatched through `sink` as a Msg. Returns when the stream closes.
+// is dispatched through `sink` as a Msg. Returns a StreamResult naming how the
+// turn ended (the terminal Msg is derived from the same classification).
 // `cancel` is polled at frame boundaries; tripping it sends RST_STREAM and
 // returns within ~200 ms with a StreamError("cancelled") if no cleaner
 // terminal event has arrived first.
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = {});
+provider::StreamResult run_stream_sync(Request req, EventSink sink,
+                                       http::CancelTokenPtr cancel = {});
 
 // Build the Anthropic-shaped messages array from our Thread.
 [[nodiscard]] nlohmann::json build_messages(const Thread& t);

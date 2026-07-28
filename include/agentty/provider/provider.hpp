@@ -100,10 +100,18 @@ struct Request {
 
 using EventSink = std::function<void(Msg)>;
 
-// ── The contract every provider satisfies ──────────────────────────────────
+// How a streamed turn ended, as a value (defined in stream_epilogue.hpp, which
+// every transport already includes to end its turn). Forward-declared here so
+// the concept can name it without this header pulling the epilogue in.
+struct StreamResult;
+
+// ── The contract every provider satisfies ────────────────────────────
+// `stream` drives one turn: it pushes streamed Msgs through `sink` AND returns
+// a StreamResult naming how the turn ended. The two never disagree — the
+// terminal Msg is derived from the same classification as the return value.
 template <class P>
 concept Provider = requires(P& p, Request req, EventSink sink) {
-    { p.stream(std::move(req), std::move(sink)) } -> std::same_as<void>;
+    { p.stream(std::move(req), std::move(sink)) } -> std::same_as<StreamResult>;
 };
 
 } // namespace agentty::provider

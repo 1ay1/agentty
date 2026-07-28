@@ -6,13 +6,14 @@
 #include <utility>
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 
 namespace agentty::provider::anthropic {
 
 class AnthropicProvider {
 public:
-    void stream(provider::Request req, provider::EventSink sink) {
+    provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
         Request areq;
         areq.model         = std::move(req.model);
         areq.system_prompt = std::move(req.system_prompt);
@@ -27,7 +28,7 @@ public:
                                   std::move(t.description),
                                   std::move(t.input_schema),
                                   t.eager_input_streaming});
-        run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));
+        return run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));
     }
 };
 

@@ -410,18 +410,22 @@ int main(int argc, char** argv) {
             provider::Routes routes{
                 .anthropic = [&anthropic_provider](provider::Request r,
                                                    provider::EventSink s) {
-                    anthropic_provider.stream(std::move(r), std::move(s));
+                    return anthropic_provider.stream(std::move(r), std::move(s));
                 },
                 .chatgpt = [&chatgpt_provider](provider::Request r,
                                                provider::EventSink s) {
-                    chatgpt_provider.stream(std::move(r), std::move(s));
+                    return chatgpt_provider.stream(std::move(r), std::move(s));
                 },
                 .external_acp = [](const std::string& agent_id,
                                    provider::Request r, provider::EventSink s) {
-                    provider::stream_external_acp(agent_id, std::move(r),
-                                                  std::move(s));
+                    return provider::stream_external_acp(agent_id, std::move(r),
+                                                         std::move(s));
                 },
             };
+            // The runtime seam is Msg-driven, so the StreamResult return is
+            // consumed at the transport boundary (terminal Msg already emitted)
+            // and dropped here; dispatch still returns it for callers that want
+            // the outcome as a value.
             provider::dispatch_stream(routes, std::move(req), std::move(sink));
         };
     app::install_deps(app::Deps{

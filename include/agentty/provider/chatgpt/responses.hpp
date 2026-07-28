@@ -41,8 +41,9 @@ struct CatalogModel {
 
 // Stream one turn against the ChatGPT Responses backend. Emits StreamStarted →
 // text/thinking/tool deltas → StreamFinished (or StreamError). Blocking; runs
-// on the turn's worker thread and honours req.cancel.
-void stream_responses(provider::Request req, provider::EventSink sink);
+// on the turn's worker thread and honours req.cancel. Returns a StreamResult
+// naming how the turn ended.
+provider::StreamResult stream_responses(provider::Request req, provider::EventSink sink);
 
 // ── Test seams (pure, no network) ──────────────────────────────────────────
 // The Request → Responses-API JSON body the transport would POST.

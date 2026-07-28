@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/openai/transport.hpp"
 
 namespace agentty::provider::openai {
@@ -16,7 +17,7 @@ public:
     OpenAIProvider() = default;
     explicit OpenAIProvider(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
 
-    void stream(provider::Request req, provider::EventSink sink) {
+    provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
         Request oreq;
         oreq.model         = std::move(req.model);
         oreq.system_prompt = std::move(req.system_prompt);
@@ -27,7 +28,7 @@ public:
         oreq.auth          = std::move(req.auth);
         oreq.retry_count   = req.retry_count;
         oreq.endpoint      = endpoint_;
-        openai::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
+        return openai::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
     }
 
     [[nodiscard]] const Endpoint& endpoint() const noexcept { return endpoint_; }

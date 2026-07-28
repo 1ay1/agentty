@@ -109,8 +109,10 @@ using EventSink = std::function<void(Msg)>;
 
 // Runs a streaming chat-completions request synchronously on the calling
 // thread. Each SSE delta is translated into an agentty Msg via `sink`.
-// Returns when the stream closes. `cancel` is polled at frame boundaries.
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = {});
+// Returns a StreamResult naming how the turn ended. `cancel` is polled at
+// frame boundaries.
+provider::StreamResult run_stream_sync(Request req, EventSink sink,
+                                       http::CancelTokenPtr cancel = {});
 
 // Build the OpenAI-shaped `messages` array from our Thread. Exposed for tests.
 [[nodiscard]] nlohmann::json build_messages(const Thread& t);

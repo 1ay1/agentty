@@ -1501,7 +1501,7 @@ std::string system_prompt() {
 }
 
 // ── Streaming entry point ────────────────────────────────────────────────────
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
+provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     StreamCtx ctx;
     ctx.sink = std::move(sink);
     // Salvage may only synthesise calls to tools we actually advertised.
@@ -1556,7 +1556,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         ctx.sink(StreamError{std::string{"request build failed (invalid UTF-8): "}
                              + e.what()});
         ctx.sink(StreamFinished{StopReason::Unspecified});
-        return;
+        return provider::StreamResult::failed("request build failed: invalid UTF-8");
     }
 
     // ── HTTP request ─────────────────────────────────────────────────────────
@@ -1609,7 +1609,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // precedence, identical to every other provider. before_finish (success
     // only) does Ollama's terminal salvage/flush — the stream may end without a
     // `done` frame (wire cut) while content is still held, so drain/rescue it.
-    provider::finish_stream(ctx.terminated, ctx.sink, {
+    return provider::finish_stream(ctx.terminated, ctx.sink, {
         .terminated  = ctx.terminated,
         .result_ok   = bool(result),
         .http_status = http_status,

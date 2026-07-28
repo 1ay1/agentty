@@ -1535,10 +1535,10 @@ std::vector<ToolSpec> default_tools() {
 
 // ----------------------------------------------------------------------------
 
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
+provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     if (is_empty(req.auth)) {
         sink(StreamError{"not authenticated — run 'agentty login' or set ANTHROPIC_API_KEY"});
-        return;
+        return provider::StreamResult::failed("not authenticated");
     }
 
     // emit_terminal runs on error paths after `sink` has been moved into
@@ -1651,7 +1651,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     } catch (const nlohmann::json::exception& e) {
         sink(StreamError{std::string{"request build failed (invalid UTF-8 in conversation): "} + e.what()});
         sink(StreamFinished{StopReason::Unspecified});
-        return;
+        return provider::StreamResult::failed("request build failed: invalid UTF-8");
     }
     // Replace the dumped placeholder string with the raw messages JSON.
     // nlohmann emits std::string values as JSON strings (quoted +
@@ -1665,7 +1665,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         if (pos == std::string::npos) {
             sink(StreamError{"request build failed: messages placeholder not found in dumped body"});
             sink(StreamFinished{StopReason::Unspecified});
-            return;
+            return provider::StreamResult::failed("request build failed: placeholder");
         }
         body_str.replace(pos, kDumpedPlaceholder.size(), messages_str);
     }
@@ -1808,7 +1808,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // exactly one terminal event with correct precedence. on_any_end closes an
     // open tool block on BOTH success and error (peer may cut off mid-tool-use
     // before content_block_stop) so the reducer's salvage path always runs.
-    provider::finish_stream(ctx.terminated, ctx.sink, {
+    return provider::finish_stream(ctx.terminated, ctx.sink, {
         .terminated  = ctx.terminated,
         .result_ok   = bool(result),
         .http_status = http_status,

@@ -1376,13 +1376,13 @@ http::Headers build_request_headers(const AuthHeader& auth,
 }
 
 // ── Streaming entry point ────────────────────────────────────────────────────
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
+provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // Ollama and other local servers accept an empty key. Only error out when
     // the endpoint is a TLS/hosted one that needs auth.
     if (req.endpoint.use_tls && is_empty(req.auth)) {
         sink(StreamError{"not authenticated — set the provider's API key "
                          "(e.g. OPENAI_API_KEY) or run 'agentty login'"});
-        return;
+        return provider::StreamResult::failed("not authenticated");
     }
 
     StreamCtx ctx;
@@ -1443,7 +1443,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         ctx.sink(StreamError{std::string{"request build failed (invalid UTF-8): "}
                              + e.what()});
         ctx.sink(StreamFinished{StopReason::Unspecified});
-        return;
+        return provider::StreamResult::failed("request build failed: invalid UTF-8");
     }
 
     // ── HTTP request ────────────────────────────────────────────────────────
@@ -1524,7 +1524,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // precedence, identical to every other provider. on_any_end closes an open
     // tool block on both paths; before_finish (success only) salvages a
     // leaked-JSON tool call / flushes held text / guarantees a non-empty turn.
-    provider::finish_stream(ctx.terminated, ctx.sink, {
+    return provider::finish_stream(ctx.terminated, ctx.sink, {
         .terminated  = ctx.terminated,
         .result_ok   = bool(result),
         .http_status = http_status,
