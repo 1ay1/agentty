@@ -87,11 +87,79 @@ Lives in `src/runtime/view/thread/turn/turn.cpp`.
 
 ---
 
+## 4. The seams a new native provider touches — `include/agentty/provider/registry.hpp`
+
+Everything above exists so that a *whole new backend* is mostly a data change.
+The registry (`kProviders`) is the single ordered table of every backend: id,
+label, blurb, `Kind` (wire dialect), `AuthStyle`, `is_local`, and the ordered
+env vars its key comes from. One appended row and the picker lists it, the
+badge names it, and `resolve_auth_for` knows how to authenticate it — no
+if/else chain to hunt down.
+
+A new native provider is built by satisfying the `Provider` concept
+(`include/agentty/provider/provider.hpp`) — a single method
+`stream(Request, EventSink)` — and nothing else in the codebase gets to know
+its concrete type. The uniform, fast behaviour then comes for free from the
+shared layers:
+
+- **Requests are uniform**: the transport reads one `provider::Request`
+  (model, system prompt, messages, tools, effort, context window, cancel
+  token, typed `AuthHeader`). It never re-parses model strings — it asks the
+  catalog. Effort is already clamped to the model's capability upstream in
+  `cmd_factory.cpp` via `effort_wire_for`, so the transport just forwards
+  `req.effort` onto its wire field.
+- **Termination is uniform**: call `classify_stream_end` + `finish_turn_once`
+  (§2). One terminal event, correct cancel/HTTP/clean-close precedence.
+- **Native + fast is uniform**: SSE/NDJSON straight through the in-house
+  `nghttp2` + OpenSSL client with `req.cancel` honoured; no per-provider shim,
+  no emulation path, same speed on Linux/macOS/Windows.
+
+### The recipe
+
+1. **Catalog row** (§1) if the provider brings models with distinct caps
+   (context, output, effort). Otherwise existing families cover it.
+2. **Registry row** in `kProviders` — id, label, `Kind`, `AuthStyle`, env vars.
+3. **Transport** implementing `stream(Request, EventSink)`, terminating via the
+   epilogue. If it is OpenAI-compatible with a non-default path/port, add the
+   matching arm in `openai::Endpoint::from_spec` keyed on the same id and
+   you're done — no new transport at all.
+4. **A `*_transport_test`** asserting the pure parse/emit behaviour with no
+   network, mirroring `openai_transport_test` / `ollama_transport_test`.
+
+### The two seams still imperative (and the target)
+
+Routing — which concrete transport streams a turn — is now a **single function**,
+`provider::dispatch_stream` (`src/provider/dispatch.cpp`), not a ladder inlined
+in the runtime bootstrap. `main.cpp`'s `stream_fn` is a one-line delegation to
+it; the routing reads `provider::active()` at call time (so a picker switch
+retargets the next turn) and lives next to the registry where a new native
+provider's arm belongs. Being a free function, it is unit-testable without
+standing up the whole runtime.
+
+Two hand-written spots remain for a genuinely new `Kind` (a new wire dialect,
+not an OpenAI-compat endpoint):
+
+- one arm in `dispatch_stream` (construct/route the new transport), and
+- `prewarm_active_provider`, which derives the TLS-warmup host from the active
+  selection.
+
+The registry deliberately does **not** own the concrete `Provider` type (that
+stays behind the type-erased `Deps::stream` seam), which is why routing is a
+function rather than a table of constructors. **Remaining target:** give each
+`Kind` (or registry row) a `prewarm_host(sel)` accessor so prewarm reads the
+host off the row instead of re-deriving it, closing the last uncorrelated seam.
+At that point adding a native provider is: one catalog row + one registry row +
+one transport + one `dispatch_stream` arm + one test — fully uniform. This is
+the natural sibling of the epilogue's own end-state (folding into a
+`TurnResult` return value); both are tracked as follow-ups.
+
+---
+
 ## Why this shape
 
 DRY across providers is not cosmetic here — every duplicated "how a turn ends"
 or "what can this model do" was a place two providers drifted and one grew a
 bug the other didn't. Collapsing each onto one declaration means a new provider
-or a new model is a *data* change (one catalog row, two epilogue calls), runs
-at full native speed on every platform, and inherits correct behaviour instead
-of re-implementing it.
+or a new model is a *data* change (one catalog row, one registry row, two
+epilogue calls), runs at full native speed on every platform, and inherits
+correct behaviour instead of re-implementing it.

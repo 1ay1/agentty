@@ -705,6 +705,11 @@ set(AGENTTY_ACP_SOURCES
     src/acp/server.cpp
     src/provider/external_acp_backend.cpp
     src/provider/acp_provider_adapter.cpp
+    # The ONE provider-routing seam — dispatch_stream(). Lives with the ACP
+    # glue because it routes to stream_external_acp; main.cpp's stream_fn
+    # delegates here so a new native provider's routing is one testable place
+    # next to the registry, not scattered in the runtime bootstrap.
+    src/provider/dispatch.cpp
 )
 
 # MCP (Model Context Protocol) client glue — spawns external MCP servers and
