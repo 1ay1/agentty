@@ -240,26 +240,27 @@ jobs:
       - name: Runtime smoke test (pipe stdin, mintty-like)
         run: |
           set -o pipefail
+          ls -l build/agentty* || true
           BIN=build/agentty.exe
           test -x "$BIN" || BIN=build/agentty
-          # Resolve to an absolute path: the TUI run below invokes the binary
-          # from inside `sh -c`, where a bare relative path (no leading ./)
-          # is looked up on PATH and fails with 127. --version happens to run
-          # directly, but be consistent and robust for both.
-          BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
           echo "binary: $BIN"
+          file "$BIN" || true
           # --version must always work (short-circuits before the TUI).
           "$BIN" --version
-          # Drive the actual TUI with a pipe stdin that EOFs immediately.
-          # COLUMNS/LINES stand in for a size query with no console buffer.
-          # A 30s watchdog turns any hang (e.g. a busy-spin on a dead pipe,
-          # or a blocking read) into a hard CI failure instead of a stall.
+          echo "--version ok"
+          # Drive the actual TUI with a non-console stdin. Redirecting from
+          # /dev/null gives an immediately-EOF stdin that is NOT a console
+          # handle -- the same class of fd mintty hands agentty -- without
+          # nesting a second shell. COLUMNS/LINES stand in for a size query
+          # with no console buffer. A 30s watchdog turns any hang (busy-spin
+          # on a dead pipe, or a blocking read) into a hard CI failure.
           set +e
-          COLUMNS=80 LINES=24 timeout --signal=KILL 30 sh -c ": | '$BIN'" \
+          COLUMNS=80 LINES=24 timeout --signal=KILL 30 "$BIN" </dev/null \
             >smoke.out 2>smoke.err
           rc=$?
           set -e
           echo "exit=$rc"
+          echo "----- stdout (head) -----"; head -c 2000 smoke.out || true; echo
           echo "----- stderr -----"; cat smoke.err || true
           if grep -qi "failed to initialize terminal" smoke.err; then
             echo "::error::agentty could not initialize the terminal under a pipe (MSYS2/mintty regression)"
