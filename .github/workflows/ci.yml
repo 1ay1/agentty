@@ -228,82 +228,45 @@ jobs:
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF
           cmake --build build -j
 
-      # Runtime smoke test. The compile above cannot catch the class of bug
-      # that made agentty abort on launch under MSYS2's default terminal
-      # (mintty): there, stdin/stdout are MSYS2 PTY *named pipes*, not Win32
-      # console handles, so the console-only init path aborted. Under this
-      # CI shell (bash, output redirected) stdin is likewise NOT a console,
-      # so it exercises the very same pipe-terminal code path. We feed a
-      # piped stdin that closes immediately (EOF); a correct build starts,
-      # hits hangup, and exits cleanly. A regression to the old behavior
-      # aborts with a non-zero exit and "failed to initialize terminal".
-      - name: Runtime smoke test (pipe stdin, mintty-like)
-        # Step-level watchdog: if agentty genuinely HANGS on a dead pipe
-        # (busy-spin on read()=0, blocking read that never sees EOF) the
-        # Actions runner kills the step after 2 minutes and fails the job.
-        # This replaces an in-shell `timeout`/background+`wait` watchdog,
-        # both of which returned a SPURIOUS 127 here: under MSYS2, `wait`
-        # on a fast-exiting *native Win32 PE* that the shell already reaped
-        # returns 127, and coreutils `timeout` can't supervise-exec a PE at
-        # all. Running the binary in the FOREGROUND and reading $? directly
-        # is the only way to get agentty's true exit code on this platform.
+      # Runtime smoke test. Compile-only cannot catch MSYS2/mintty's runtime
+      # path: mintty gives a native executable PIPE-backed stdio handles, not
+      # Win32 console handles. Exercise that exact HANDLE type with cmd.exe's
+      # `type NUL | agentty.exe`: unlike MSYS bash's /dev/null (a NUL character
+      # device, NOT a pipe) and its unreliable PE exit-status bookkeeping, cmd
+      # creates an anonymous pipe and reports the native process exit code.
+      - name: Runtime smoke test (native pipe, mintty-like)
         timeout-minutes: 2
+        shell: pwsh
+        env:
+          # setup-msys2 installs the UCRT runtime below RUNNER_TEMP. A pwsh
+          # step needs it explicitly for libstdc++/libgcc/nghttp2 DLL lookup.
+          UCRT64_BIN: ${{ runner.temp }}\msys64\ucrt64\bin
         run: |
-          set -o pipefail
-          ls -l build/agentty* || true
-          BIN=build/agentty.exe
-          test -x "$BIN" || BIN=build/agentty
-          # Resolve to an absolute path so the launch below and the log line
-          # are unambiguous regardless of cwd.
-          BIN="$(realpath "$BIN")"
-          echo "binary: $BIN"
-          file "$BIN" || true
-          # Diagnostic: list the DLLs the loader needs and flag any that are
-          # missing. A native PE that exits 127 with zero output is almost
-          # always a load-time DLL resolution failure; cygcheck makes that
-          # visible (missing deps print "cygcheck: track_down ... not found").
-          echo "----- cygcheck (dll deps) -----"
-          cygcheck "$BIN" 2>&1 | sed 's/^/  /' || echo "  (cygcheck unavailable)"
-          echo "-------------------------------"
-          # --version must always work (short-circuits before the TUI).
-          "$BIN" --version
-          echo "--version ok"
-          # Drive the actual TUI with a non-console stdin. Redirecting from
-          # /dev/null gives an immediately-EOF stdin that is NOT a console
-          # handle -- the same class of fd mintty hands agentty. A correct
-          # build initializes the terminal in pipe mode, hits hangup on the
-          # closed stdin, and exits 0; the old MSYS2 regression aborted
-          # non-zero with "failed to initialize terminal". We run in the
-          # FOREGROUND and capture $? directly -- NOT via `timeout` or a
-          # background+`wait` watchdog, both of which return a bogus 127 for
-          # a fast-exiting native PE under MSYS2 (see step comment above).
-          # The step-level `timeout-minutes` above is the real hang guard.
-          set +e
-          COLUMNS=80 LINES=24 "$BIN" </dev/null >smoke.out 2>smoke.err
-          rc=$?
-          set -e
-          echo "exit=$rc"
-          echo "----- stdout (head) -----"; head -c 2000 smoke.out || true; echo
-          echo "----- stderr -----"; cat smoke.err || true
-          if grep -qi "failed to initialize terminal" smoke.err; then
-            echo "::error::agentty could not initialize the terminal under a pipe (MSYS2/mintty regression)"
+          $ErrorActionPreference = 'Stop'
+          $env:Path = "$env:UCRT64_BIN;$env:Path"
+          $env:COLUMNS = '80'
+          $env:LINES = '24'
+          $bin = (Resolve-Path 'build/agentty.exe').Path
+          Write-Host "binary: $bin"
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "--version failed with exit $LASTEXITCODE"
+          }
+
+          # `type NUL` writes zero bytes then closes its pipe end. agentty must
+          # select its pipe-terminal implementation, observe EOF/hangup, and
+          # exit normally — no hidden console, MSYS shell shim, or NUL device.
+          $cmd = 'type NUL | "' + $bin + '"'
+          & cmd.exe /d /s /c $cmd 1>smoke.out 2>smoke.err
+          $rc = $LASTEXITCODE
+          Write-Host "exit=$rc"
+          Write-Host '----- stdout (head) -----'
+          if (Test-Path smoke.out) { Get-Content smoke.out -TotalCount 50 }
+          Write-Host '----- stderr -----'
+          if (Test-Path smoke.err) { Get-Content smoke.err }
+          if ($rc -ne 0) {
+            Write-Error "agentty exited non-zero ($rc) on a native pipe stdin"
             exit 1
-          fi
-          if [ "$rc" -ne 0 ]; then
-            echo "::group::extra diagnostics (rc=$rc)"
-            # Distinguish "crashes on ANY launch" from "crashes only on this
-            # stdin". Try a real empty file and a closed fd. If all three
-            # exit non-zero, the fault is not stdin-specific.
-            echo "[probe] empty regular file as stdin:"
-            : >empty.in
-            COLUMNS=80 LINES=24 "$BIN" <empty.in >p1.out 2>p1.err; echo "  rc=$?"; echo "  err: $(head -c 300 p1.err)"
-            echo "[probe] closed stdin (0<&-):"
-            COLUMNS=80 LINES=24 "$BIN" 0<&- >p2.out 2>p2.err; echo "  rc=$?"; echo "  err: $(head -c 300 p2.err)"
-            echo "[probe] --help (no TUI):"
-            "$BIN" --help >p3.out 2>p3.err; echo "  rc=$?"
-            echo "::endgroup::"
-            echo "::error::agentty exited non-zero ($rc) on launch under a pipe"
-            exit 1
-          fi
-          echo "smoke test passed: launched and exited cleanly under a pipe"
+          }
+          Write-Host 'smoke test passed: launched and exited cleanly under a native pipe'
 
