@@ -288,6 +288,7 @@ Element model_picker(const Model& m) {
         {"type", "filter", 2},
         {"Enter", "select", 5},
         {"F", "favorite", 1},
+        {"^P", "providers", 3},                    // cross-hint: provider picker
         {"Esc", "close", 4},
     }));
 
@@ -305,9 +306,9 @@ namespace {
     return std::string{provider::default_provider_id()};
 }
 
-// Per-row auth status: does this provider have credentials available?
-// Local backends need none; Anthropic is assumed authed (creds resolved at
-// startup / via login); OpenAI-family checks its env-var chain.
+// Per-row auth status for the trailing column. Local backends need none;
+// Anthropic reflects the LIVE deps().auth (✓ signed in / ⚠ sign in);
+// OpenAI-family checks its env-var chain; ChatGPT is native OAuth.
 
 } // namespace
 
@@ -429,6 +430,7 @@ Element provider_picker(const Model& m) {
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"Enter", "switch", 5},
+        {"^/", "models", 3},                       // cross-hint: model picker
         {"Esc", "close", 4},
     }));
 
