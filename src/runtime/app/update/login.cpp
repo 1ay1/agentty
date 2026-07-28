@@ -18,6 +18,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -53,6 +54,39 @@ Step open_login(Model m) {
 
 Step close_login(Model m) {
     m.ui.login = login::Closed{};
+    return done(std::move(m));
+}
+
+Step sign_out(Model m) {
+    // Clear the ACTIVE provider's credentials, so "Sign out" targets whatever
+    // the user is currently signed in to. ChatGPT/Codex keeps its token in a
+    // separate store; Anthropic uses credentials.json. OpenAI-family API keys
+    // come from env / in-app paste (saved in settings.provider_keys) — we drop
+    // the pasted key so a re-auth is required.
+    const auto& sel = provider::active();
+    std::string what = "credentials";
+    if (sel.is_oauth_native()) {
+        provider::chatgpt::clear_codex_credentials();
+        what = "ChatGPT";
+    } else if (sel.kind == provider::Kind::Anthropic) {
+        auth::clear_credentials();
+        what = "Anthropic";
+    } else if (sel.kind == provider::Kind::OpenAI) {
+        // Drop the in-app-pasted key for this endpoint; env keys are the
+        // process env and can't be unset from here.
+        auto settings = deps().load_settings();
+        settings.provider_keys.erase(sel.openai_endpoint.label);
+        deps().save_settings(settings);
+        what = std::string{sel.openai_endpoint.label};
+    }
+
+    // Zero the live auth header so the very next turn can't reuse a
+    // now-revoked credential, then drop the user straight into sign-in.
+    agentty::app::update_auth(auth::AuthHeader{});
+    m.ui.login = login::Picking{};
+    m.s.status = "signed out of " + what + " — sign in to continue";
+    m.s.status_until = std::chrono::steady_clock::now()
+                     + std::chrono::seconds{5};
     return done(std::move(m));
 }
 
@@ -480,6 +514,7 @@ Step login_update(Model m, msg::LoginMsg lm) {
     return std::visit(overload{
         [&](OpenLogin)              -> Step { return open_login(std::move(m)); },
         [&](CloseLogin)             -> Step { return close_login(std::move(m)); },
+        [&](SignOut)                -> Step { return sign_out(std::move(m)); },
         [&](LoginPickMethod& e)     -> Step { return login_pick_method(std::move(m), e.key); },
         [&](LoginCharInput& e)      -> Step { return login_char_input(std::move(m), e.ch); },
         [&](LoginBackspace)         -> Step { return login_backspace(std::move(m)); },

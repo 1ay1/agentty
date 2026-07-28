@@ -446,6 +446,13 @@ struct UpdateTodos { std::vector<TodoItem> items; };
 // on a worker thread (Cmd::task) and reports back via LoginExchanged.
 struct OpenLogin {};
 struct CloseLogin {};
+// Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
+// credentials.json, or the Codex/ChatGPT token store), zero the live auth
+// header via update_auth, and re-open the sign-in modal so the user lands
+// exactly where they'd start a fresh login. Triggered from the command
+// palette ("Sign out"). Lets a user switch OAuth ↔ API key / accounts without
+// dropping to the CLI `agentty logout`.
+struct SignOut {};
 struct LoginPickMethod  { char32_t key; };          // '1' = ApiKey, '2' = OAuth, '3' = ChatGPT
 struct LoginCharInput   { char32_t ch; };
 struct LoginBackspace   {};
@@ -656,7 +663,7 @@ using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
 
 using LoginMsg = std::variant<
-    OpenLogin, CloseLogin, LoginPickMethod, LoginCharInput, LoginBackspace,
+    OpenLogin, CloseLogin, SignOut, LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginOpenBrowserAgain,
     LoginExchanged, CodexLoginDone, TokenRefreshed>;
