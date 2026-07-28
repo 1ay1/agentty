@@ -28,6 +28,10 @@ namespace agentty::provider {
 struct Selection {
     Kind             kind = Kind::Anthropic;
     openai::Endpoint openai_endpoint;   // meaningful only when kind == OpenAI
+    // The external ACP agent's spec id ("claude-agent-acp", "codex-acp", or a
+    // config-defined id). Meaningful only when kind == ExternalAcp; the runtime
+    // hands it to stream_external_acp() to spawn/drive the right subprocess.
+    std::string      acp_agent_id;
 };
 
 // Parse a provider spec into a Selection. Accepts:

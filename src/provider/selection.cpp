@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "agentty/provider/registry.hpp"
+#include "agentty/provider/acp_agents.hpp"
 
 namespace agentty::provider {
 
@@ -45,6 +46,15 @@ Selection parse_selection(std::string_view spec) {
                                             : preset_for(spec);
     if (p && p->kind == Kind::Anthropic) {
         s.kind = Kind::Anthropic;
+        return s;
+    }
+    // External ACP agent: a registry row with Kind::ExternalAcp, OR any spec id
+    // that names a launchable agent (built-in default / config entry) even
+    // without a registry row. The runtime spawns/drives the subprocess.
+    if ((p && p->kind == Kind::ExternalAcp)
+        || (!p && !spec.empty() && is_acp_agent_id(spec))) {
+        s.kind         = Kind::ExternalAcp;
+        s.acp_agent_id = std::string{spec};
         return s;
     }
     s.kind = Kind::OpenAI;
@@ -102,6 +112,10 @@ Selection active() {
 
 std::string provider_display_name(const Selection& s) {
     if (s.kind == Kind::Anthropic) return "Anthropic";
+    if (s.kind == Kind::ExternalAcp) {
+        if (const auto* p = preset_for(s.acp_agent_id)) return std::string{p->label};
+        return s.acp_agent_id.empty() ? std::string{"ACP agent"} : s.acp_agent_id;
+    }
     // OpenAI-family: map the endpoint label ("groq", "ollama", …) to its
     // registry display name; fall back to the raw label for a custom host.
     const std::string& lbl = s.openai_endpoint.label;

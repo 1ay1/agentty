@@ -55,6 +55,7 @@
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
+#include "agentty/provider/acp_provider_adapter.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -399,7 +400,15 @@ int main(int argc, char** argv) {
         [&anthropic_provider, &chatgpt_provider]
         (provider::Request req, provider::EventSink sink) {
             const auto& sel = provider::active();
-            if (sel.kind == provider::Kind::OpenAI) {
+            if (sel.kind == provider::Kind::ExternalAcp) {
+                // Drive an external ACP agent subprocess (claude-agent-acp /
+                // codex-acp / any config-defined agent). The adapter spawns +
+                // caches the subprocess and translates its session/update
+                // stream into the same Msgs the native providers emit — so
+                // this is a single branch, not a Kind fan-out.
+                provider::stream_external_acp(sel.acp_agent_id,
+                                              std::move(req), std::move(sink));
+            } else if (sel.kind == provider::Kind::OpenAI) {
                 if (sel.openai_endpoint.label == "chatgpt") {
                     chatgpt_provider.stream(std::move(req), std::move(sink));
                 // Ollama speaks its own native /api/chat dialect — route it to
@@ -533,5 +542,8 @@ int main(int argc, char** argv) {
     // a final save_thread() right before maya returns; this blocks
     // until that (and any earlier-still-queued) write lands on disk.
     persistence::flush_pending_saves();
+    // Tear down any cached external ACP agent subprocesses (bounded even for a
+    // wedged agent via ExternalAcpBackend's teardown watchdog).
+    provider::release_acp_agents();
     return 0;
 }
