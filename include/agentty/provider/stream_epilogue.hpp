@@ -167,9 +167,14 @@ struct StreamResult {
 }
 
 // Everything a transport's post-loop needs to end a turn, in one bundle. All
-// hooks are optional; sensible defaults keep the common case terse.
+// hooks are optional; sensible defaults keep the common case terse. Every fact
+// is stated ONCE: `terminated` is a reference to the transport's own latch (not
+// a copy passed twice), and `sink` is the transport's EventSink — so
+// finish_stream takes exactly this one argument and nothing is duplicated at
+// the call site.
 struct StreamOutcome {
-    bool               terminated;    // did the body already fire a terminal?
+    bool&              terminated;    // the transport's terminal latch (in/out)
+    const EventSink&   sink;          // where the terminal Msg is emitted
     bool               result_ok;     // bool(result) of the http stream call
     int                http_status;   // observed status (0 = headers never came)
     http::CancelTokenPtr cancel;      // caller's cancel token
@@ -199,24 +204,27 @@ struct StreamOutcome {
 // `emit_terminal` lambda + hand-rolled `if (!result) … if (!is_success) …`
 // ladder with a single call, so a new transport ends a turn correctly for free:
 //
-//   finish_stream(ctx.terminated, ctx.sink, {
-//       .terminated = ctx.terminated, .result_ok = bool(result),
-//       .http_status = http_status, .cancel = cancel, .stop = ctx.stop,
+//   return finish_stream({
+//       .terminated = ctx.terminated, .sink = ctx.sink,
+//       .result_ok = bool(result), .http_status = http_status,
+//       .cancel = cancel, .stop = ctx.stop,
 //       .http_error_message = [&]{ return build_http_error(); },
 //       .transport_error_message = [&]{ return result.error().render(); },
 //       .before_finish = [&]{ flush_and_salvage(ctx); },
 //   });
 //
-// `terminated` is the same latch finish_turn_once uses (so a partial body that
-// already finished is respected). On UserCancelled we emit StreamError
-// {"cancelled"}; on AlreadyTerminated we emit nothing.
+// `o.terminated` is the transport's own latch (a reference), so a partial body
+// that already finished is respected and a later call can't double-finish. On
+// UserCancelled we emit StreamError{"cancelled"}; on AlreadyTerminated we emit
+// nothing.
 //
 // Returns a StreamResult describing the outcome. The emitted terminal Msg is
 // derived from the SAME classification, so the return value and the sink event
 // never disagree — callers that want the outcome read the value, callers that
 // react to Msgs still see StreamFinished / StreamError.
-inline StreamResult finish_stream(bool& terminated, const EventSink& sink,
-                                 StreamOutcome o) {
+inline StreamResult finish_stream(StreamOutcome o) {
+    bool& terminated = o.terminated;
+    const EventSink& sink = o.sink;
     const StreamEnd end = classify_stream_end(o.terminated, o.result_ok,
                                               o.http_status, o.cancel);
     StreamResult tr;

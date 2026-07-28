@@ -1808,8 +1808,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // exactly one terminal event with correct precedence. on_any_end closes an
     // open tool block on BOTH success and error (peer may cut off mid-tool-use
     // before content_block_stop) so the reducer's salvage path always runs.
-    return provider::finish_stream(ctx.terminated, ctx.sink, {
+    return provider::finish_stream({
         .terminated  = ctx.terminated,
+        .sink        = ctx.sink,
         .result_ok   = bool(result),
         .http_status = http_status,
         .cancel      = cancel_for_end,

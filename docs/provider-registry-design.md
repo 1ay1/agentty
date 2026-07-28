@@ -65,16 +65,27 @@ transport hand-rolling the `if (!result) … if (!is_success) … else finish`
 ladder around those two primitives, the epilogue exposes the **whole post-loop
 as one call**:
 
-- **`finish_stream(terminated, sink, StreamOutcome) -> StreamResult`** is the
-  entire tail of a streaming transport. It classifies the exit and emits
+- **`finish_stream(StreamOutcome) -> StreamResult`** is the entire tail of a
+  streaming transport, taken as ONE argument. It classifies the exit and emits
   exactly one terminal event with the right message and precedence, **and
   returns a `StreamResult`** naming how the turn ended. `StreamOutcome` bundles
-  the facts (`terminated`, `result_ok`, `http_status`, `cancel`, `stop`) and the
-  hooks: `http_error_message()` / `transport_error_message()` build the user
-  message from the buffered error body; `before_finish` runs success-only
-  (salvage / flush); `on_any_end` runs on success *and* error (close an open
-  tool block). All four transports now end a turn through this one call and
-  `return` its result — no transport re-implements the classify-and-emit ladder.
+  everything and states each fact ONCE — `terminated` is a *reference* to the
+  transport's own latch (not a bool copied in twice) and `sink` is the
+  transport's `EventSink`, both carried in the struct so there is nothing to
+  duplicate or mismatch at the call site. The rest: `result_ok`, `http_status`,
+  `cancel`, `stop`, and the hooks — `http_error_message()` /
+  `transport_error_message()` build the user message from the buffered error
+  body; `before_finish` runs success-only (salvage / flush); `on_any_end` runs
+  on success *and* error (close an open tool block). All four transports end a
+  turn through this one call and `return` its result — no transport
+  re-implements the classify-and-emit ladder.
+
+- **`classify_stream_end(terminated, result_ok, http_status, cancel)`** is the
+  precedence heart underneath it: `already-terminated > user-cancel > http-error
+  > transport-error > clean-close`, fixed and identical for every provider.
+  That ordering is load-bearing — reversing cancel and http would turn a user's
+  Esc during a 500 into a spurious "HTTP 500" — so it is locked in isolation by
+  `test_classify_stream_end_precedence` in `tests/dispatch_route_test.cpp`.
 
 ### The outcome is a value, not just a side effect — `StreamResult`
 

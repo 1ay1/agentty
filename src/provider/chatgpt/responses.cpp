@@ -534,8 +534,9 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
     // latency win), which the HTTP layer reports as an aborted / "cancelled"
     // transfer. finish_stream treats that as EXPECTED (emits nothing), avoiding
     // the spurious StreamError{"cancelled"} that used to show after clean turns.
-    return provider::finish_stream(ctx.terminated, sink, {
+    return provider::finish_stream({
         .terminated  = ctx.terminated,
+        .sink        = sink,
         .result_ok   = bool(result),
         .http_status = http_status,
         .cancel      = req.cancel,

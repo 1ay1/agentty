@@ -12,6 +12,7 @@
 // selects between them within Kind::OpenAI.
 
 #include <cstdio>
+#include <memory>
 #include <string>
 
 #include "agentty/provider/dispatch.hpp"
@@ -192,12 +193,50 @@ static void test_dispatch_propagates_stream_result() {
     CHECK(rc.error.has_value() && *rc.error == "chatgpt-boom");
 }
 
+// The PRECEDENCE heart of the termination layer, locked in isolation. A future
+// edit that reordered these checks (e.g. moved the HTTP check above the cancel
+// check) would silently turn a user's Esc during a 500 into a spurious
+// "HTTP 500" error instead of a clean cancel. The fixed order is:
+//   already-terminated > user-cancel > http-error > transport-error > clean.
+static void test_classify_stream_end_precedence() {
+    auto tok   = std::make_shared<agentty::http::CancelToken>();
+    auto fresh = std::make_shared<agentty::http::CancelToken>();
+
+    // A body that already fired its terminal wins over EVERYTHING else — even a
+    // set cancel token and a 500 — so a clean early-abort is never a false error.
+    tok->cancel();
+    CHECK(provider::classify_stream_end(/*terminated=*/true, false, 500, tok)
+          == provider::StreamEnd::AlreadyTerminated);
+
+    // A set cancel token beats an HTTP status and a transport failure: a user
+    // Esc mid-500 is a cancel, not an error surface.
+    CHECK(provider::classify_stream_end(false, false, 500, tok)
+          == provider::StreamEnd::UserCancelled);
+
+    // No cancel → an HTTP >= 400 status beats a transport error.
+    CHECK(provider::classify_stream_end(false, true, 503, fresh)
+          == provider::StreamEnd::HttpError);
+
+    // No cancel, no HTTP error, but the client returned !ok → transport error.
+    CHECK(provider::classify_stream_end(false, false, 0, fresh)
+          == provider::StreamEnd::TransportError);
+
+    // Everything nominal → clean close (finish with the last-seen stop reason).
+    CHECK(provider::classify_stream_end(false, true, 0, fresh)
+          == provider::StreamEnd::CleanClose);
+    // A 2xx status is not an error → still a clean close. A null cancel token is
+    // treated as "not cancelled" (no crash on the nullptr).
+    CHECK(provider::classify_stream_end(false, true, 200, nullptr)
+          == provider::StreamEnd::CleanClose);
+}
+
 int main() {
     test_anthropic_selection_hits_anthropic_route();
     test_chatgpt_selection_hits_chatgpt_route();
     test_is_chatgpt_predicate();
     test_prewarm_target_table();
     test_dispatch_propagates_stream_result();
+    test_classify_stream_end_precedence();
 
     if (g_failures == 0) {
         std::printf("dispatch_route_test: all checks passed\n");
