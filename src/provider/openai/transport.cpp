@@ -1391,26 +1391,6 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // leaked-JSON "tool call" into a real one when it names one of these.
     ctx.known_tools.reserve(req.tools.size());
     for (const auto& t : req.tools) ctx.known_tools.push_back(t.name);
-    auto emit_terminal = [](StreamCtx& c, std::optional<std::string> err,
-                            std::optional<std::chrono::seconds> retry_after = {}) {
-        if (c.terminated) return;
-        // Close an open tool block on BOTH paths (peer may have cut off before
-        // the tool call's arguments finished) so it stays outside
-        // finish_turn_once's success-only hook.
-        if (c.in_tool_use) {
-            c.sink(StreamToolUseEnd{});
-            c.in_tool_use = false;
-        }
-        // Shared terminal-event rule (see provider/stream_epilogue.hpp). On the
-        // SUCCESS path only, salvage a leaked-JSON tool call (or flush held
-        // text) and guarantee a non-empty turn before finishing.
-        provider::finish_turn_once(
-            c.terminated, c.sink, c.stop_reason, std::move(err), retry_after,
-            [&c] {
-                if (!try_salvage_tool_call(c)) flush_text_hold(c);
-                ensure_nonempty_turn(c);
-            });
-    };
 
     // ── Build the request body ──────────────────────────────────────────────
     const bool native = req.endpoint.native_api;
@@ -1533,50 +1513,67 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     tos.ping    = std::chrono::milliseconds(15'000);
     tos.idle    = std::chrono::milliseconds(90'000);
 
+    // Keep a copy of the cancel token: moved into the stream call, but
+    // finish_stream needs it to distinguish a user cancel from a transport
+    // error at the post-loop.
+    http::CancelTokenPtr cancel_for_end = cancel;
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
-    if (!result) {
-        std::string msg = std::string{"http: "} + result.error().render();
-        // Local backend unreachable — the daemon almost certainly isn't
-        // running. Name the concrete fix; a bare connection-refused is
-        // opaque to someone who just expected agentty to "work with ollama".
-        if (!req.endpoint.use_tls)
-            msg += "  (is the server running? start it with 'ollama serve', "
-                   "or check the --provider host:port)";
-        emit_terminal(ctx, std::move(msg));
-        return;
-    }
-
-    if (!is_success) {
-        std::string msg = "HTTP " + std::to_string(http_status);
-        try {
-            auto j = json::parse(error_body);
-            if (j.contains("error") && j["error"].is_object()
-                && j["error"].contains("message"))
-                msg += ": " + j["error"]["message"].get<std::string>();
-            else if (j.contains("message"))
-                msg += ": " + j["message"].get<std::string>();
-            else if (!error_body.empty())
-                msg += ": " + error_body.substr(0, 300);
-        } catch (...) {
-            if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
-        }
-        if (http_status == 401 || http_status == 403)
-            msg += "  (check the provider API key)";
-        // A 404 on a local OpenAI-compatible server (Ollama/llama.cpp)
-        // almost always means the model id isn't loaded — the daemon is
-        // up, it just never pulled this model. Point the user at the
-        // fix instead of a bare "HTTP 404: model: <id>".
-        if (http_status == 404 && !req.endpoint.use_tls)
-            msg += "  (model not loaded — run 'ollama pull " + req.model
-                 + "', or pick an available one with Ctrl-P)";
-        emit_terminal(ctx, std::move(msg), retry_after_hint);
-        return;
-    }
-
-    // 2xx — guarantee a terminal event even if [DONE] never arrived.
-    emit_terminal(ctx, std::nullopt);
+    // Whole post-loop through the SHARED epilogue: one terminal event, correct
+    // precedence, identical to every other provider. on_any_end closes an open
+    // tool block on both paths; before_finish (success only) salvages a
+    // leaked-JSON tool call / flushes held text / guarantees a non-empty turn.
+    provider::finish_stream(ctx.terminated, ctx.sink, {
+        .terminated  = ctx.terminated,
+        .result_ok   = bool(result),
+        .http_status = http_status,
+        .cancel      = cancel_for_end,
+        .stop        = ctx.stop_reason,
+        .http_error_message = [&]() -> std::string {
+            std::string msg = "HTTP " + std::to_string(http_status);
+            try {
+                auto j = json::parse(error_body);
+                if (j.contains("error") && j["error"].is_object()
+                    && j["error"].contains("message"))
+                    msg += ": " + j["error"]["message"].get<std::string>();
+                else if (j.contains("message"))
+                    msg += ": " + j["message"].get<std::string>();
+                else if (!error_body.empty())
+                    msg += ": " + error_body.substr(0, 300);
+            } catch (...) {
+                if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
+            }
+            if (http_status == 401 || http_status == 403)
+                msg += "  (check the provider API key)";
+            // A 404 on a local OpenAI-compatible server (Ollama/llama.cpp)
+            // almost always means the model id isn't loaded.
+            if (http_status == 404 && !req.endpoint.use_tls)
+                msg += "  (model not loaded — run 'ollama pull " + req.model
+                     + "', or pick an available one with Ctrl-P)";
+            return msg;
+        },
+        .retry_after = retry_after_hint,
+        .transport_error_message = [&]() -> std::string {
+            std::string msg = std::string{"http: "} + result.error().render();
+            // Local backend unreachable — the daemon almost certainly isn't
+            // running. Name the concrete fix.
+            if (!req.endpoint.use_tls)
+                msg += "  (is the server running? start it with 'ollama serve', "
+                       "or check the --provider host:port)";
+            return msg;
+        },
+        .before_finish = [&ctx]() {
+            if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);
+            ensure_nonempty_turn(ctx);
+        },
+        .on_any_end = [&ctx]() {
+            if (ctx.in_tool_use) {
+                ctx.sink(StreamToolUseEnd{});
+                ctx.in_tool_use = false;
+            }
+        },
+    });
 }
 
 namespace {

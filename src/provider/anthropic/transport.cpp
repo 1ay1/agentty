@@ -1545,27 +1545,8 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // `ctx.sink` below — dispatching via `ctx.sink` is the only live handle.
     // The previous version captured `sink` by reference and invoked a
     // moved-from std::function on every non-happy-path termination, which
-    // surfaced in the UI as "stream backend: bad_function_call".
-    auto emit_terminal = [](StreamCtx& ctx, std::optional<std::string> err,
-                             std::optional<std::chrono::seconds> retry_after = {}) {
-        if (ctx.terminated) return;
-        // If the stream is dying mid-tool-use (peer closed before the SSE
-        // event sequence reached `content_block_stop`), synthesize a
-        // StreamToolUseEnd so the reducer's salvage path runs on whatever
-        // partial JSON we've buffered. Anthropic closes the tool block on BOTH
-        // the error and success paths, so it stays outside finish_turn_once's
-        // success-only hook.
-        if (ctx.in_tool_use) {
-            ctx.sink(StreamToolUseEnd{});
-            ctx.in_tool_use = false;
-            ctx.current_tool_id.clear();
-            ctx.current_tool_name.clear();
-        }
-        // Shared terminal-event rule (see provider/stream_epilogue.hpp): emit
-        // exactly one StreamFinished/StreamError and latch `terminated`.
-        provider::finish_turn_once(ctx.terminated, ctx.sink, ctx.stop_reason,
-                                   std::move(err), retry_after);
-    };
+    // surfaced in the UI as "stream backend: bad_function_call". The whole
+    // post-loop now runs through provider::finish_stream at the tail.
 
     const bool is_oauth = std::holds_alternative<BearerHeader>(req.auth);
 
@@ -1806,6 +1787,10 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     tos.ping    = std::chrono::milliseconds(15'000);
     tos.idle    = std::chrono::milliseconds(90'000);
 
+    // Keep a copy of the cancel token: it is moved into the stream call below,
+    // but finish_stream needs it to distinguish a user cancel from a transport
+    // error at the post-loop.
+    http::CancelTokenPtr cancel_for_end = cancel;
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
@@ -1814,38 +1799,54 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         ctx.thinking_deltas);
 
     if (!result) {
-        // Network / TLS / nghttp2-level error — never produced a complete SSE
-        // stream. The typed HttpError carries a `kind` that the downstream
-        // classifier reads structurally; we ALSO embed `render()` in the
-        // detail string so the error_class fallback path (substring sniff)
-        // still works for messages that haven't been routed yet.
-        emit_terminal(ctx, std::string{"http: "} + result.error().render());
-        return;
-    }
-
-    if (!is_success) {
         dbg("error body: %s\n", error_body.c_str());
-        std::string msg = "HTTP " + std::to_string(http_status);
-        try {
-            auto j = json::parse(error_body);
-            if (j.contains("error") && j["error"].contains("message"))
-                msg += ": " + j["error"]["message"].get<std::string>();
-            else if (j.contains("message"))
-                msg += ": " + j["message"].get<std::string>();
-            else
-                msg += ": " + error_body.substr(0, 300);
-        } catch (...) {
-            if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
-        }
-        if (http_status == 401 || http_status == 403)
-            msg += "  (run 'agentty login' to re-authenticate)";
-        emit_terminal(ctx, std::move(msg), retry_after_hint);
-        return;
+    } else if (!is_success) {
+        dbg("error body: %s\n", error_body.c_str());
     }
 
-    // 2xx — the SSE parser may or may not have produced message_stop.
-    // Guarantee one terminal event so the UI can finalize the turn.
-    emit_terminal(ctx, std::nullopt);
+    // Whole post-loop through the SHARED epilogue: classify the exit and emit
+    // exactly one terminal event with correct precedence. on_any_end closes an
+    // open tool block on BOTH success and error (peer may cut off mid-tool-use
+    // before content_block_stop) so the reducer's salvage path always runs.
+    provider::finish_stream(ctx.terminated, ctx.sink, {
+        .terminated  = ctx.terminated,
+        .result_ok   = bool(result),
+        .http_status = http_status,
+        .cancel      = cancel_for_end,
+        .stop        = ctx.stop_reason,
+        .http_error_message = [&]() -> std::string {
+            std::string msg = "HTTP " + std::to_string(http_status);
+            try {
+                auto j = json::parse(error_body);
+                if (j.contains("error") && j["error"].contains("message"))
+                    msg += ": " + j["error"]["message"].get<std::string>();
+                else if (j.contains("message"))
+                    msg += ": " + j["message"].get<std::string>();
+                else
+                    msg += ": " + error_body.substr(0, 300);
+            } catch (...) {
+                if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
+            }
+            if (http_status == 401 || http_status == 403)
+                msg += "  (run 'agentty login' to re-authenticate)";
+            return msg;
+        },
+        .retry_after = retry_after_hint,
+        // Network / TLS / nghttp2-level error — never produced a complete SSE
+        // stream. The typed HttpError's render() is embedded so the
+        // downstream error_class substring sniff still routes it.
+        .transport_error_message = [&]() -> std::string {
+            return std::string{"http: "} + result.error().render();
+        },
+        .on_any_end = [&ctx]() {
+            if (ctx.in_tool_use) {
+                ctx.sink(StreamToolUseEnd{});
+                ctx.in_tool_use = false;
+                ctx.current_tool_id.clear();
+                ctx.current_tool_name.clear();
+            }
+        },
+    });
 }
 
 std::vector<ModelInfo> list_models(const AuthHeader& auth) {

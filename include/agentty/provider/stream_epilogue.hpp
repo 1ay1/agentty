@@ -113,4 +113,82 @@ enum class StreamEnd {
     return StreamEnd::CleanClose;
 }
 
+// Everything a transport's post-loop needs to end a turn, in one bundle. All
+// hooks are optional; sensible defaults keep the common case terse.
+struct StreamOutcome {
+    bool               terminated;    // did the body already fire a terminal?
+    bool               result_ok;     // bool(result) of the http stream call
+    int                http_status;   // observed status (0 = headers never came)
+    http::CancelTokenPtr cancel;      // caller's cancel token
+    StopReason         stop = StopReason::EndTurn;   // stop for CleanClose
+
+    // Build the user-facing error message for an HTTP >= 400 status from the
+    // buffered error body. Required when a 4xx/5xx is possible.
+    std::function<std::string()>                 http_error_message;
+    // Optional Retry-After hint to attach to an HTTP error (429/529).
+    std::optional<std::chrono::seconds>          retry_after;
+    // Render the transport-level error (connection/TLS/reset). Required.
+    std::function<std::string()>                 transport_error_message;
+    // Success-only hook: flush held text / close a tool block / salvage a
+    // truncated tool call, just before StreamFinished. Runs for CleanClose.
+    std::function<void()>                        before_finish;
+    // ALL-paths hook, run once before the terminal event on every non-
+    // AlreadyTerminated exit (success AND error). The place for cleanup that
+    // must happen whether or not the turn succeeded — e.g. Anthropic
+    // synthesises a StreamToolUseEnd here so the reducer's salvage path runs
+    // on partial tool JSON even when the peer died mid-tool-use.
+    std::function<void()>                        on_any_end;
+};
+
+// The WHOLE post-loop of a streaming transport, unified. Classify the loop
+// exit, then emit exactly one terminal event with the right message/precedence
+// — identical for every provider. Replaces each transport's bespoke
+// `emit_terminal` lambda + hand-rolled `if (!result) … if (!is_success) …`
+// ladder with a single call, so a new transport ends a turn correctly for free:
+//
+//   finish_stream(ctx.terminated, ctx.sink, {
+//       .terminated = ctx.terminated, .result_ok = bool(result),
+//       .http_status = http_status, .cancel = cancel, .stop = ctx.stop,
+//       .http_error_message = [&]{ return build_http_error(); },
+//       .transport_error_message = [&]{ return result.error().render(); },
+//       .before_finish = [&]{ flush_and_salvage(ctx); },
+//   });
+//
+// `terminated` is the same latch finish_turn_once uses (so a partial body that
+// already finished is respected). On UserCancelled we emit StreamError
+// {"cancelled"}; on AlreadyTerminated we emit nothing.
+inline void finish_stream(bool& terminated, const EventSink& sink,
+                          StreamOutcome o) {
+    const StreamEnd end = classify_stream_end(o.terminated, o.result_ok,
+                                              o.http_status, o.cancel);
+    if (end == StreamEnd::AlreadyTerminated) return;
+    // All-paths cleanup (e.g. close an open tool block) before the terminal
+    // event, on both success and error. Runs exactly once.
+    if (o.on_any_end) o.on_any_end();
+    switch (end) {
+        case StreamEnd::AlreadyTerminated:
+            return;
+        case StreamEnd::UserCancelled:
+            finish_turn_once(terminated, sink, o.stop, std::string{"cancelled"});
+            return;
+        case StreamEnd::HttpError:
+            finish_turn_once(
+                terminated, sink, o.stop,
+                o.http_error_message ? o.http_error_message()
+                                     : std::string{"HTTP "} + std::to_string(o.http_status),
+                o.retry_after);
+            return;
+        case StreamEnd::TransportError:
+            finish_turn_once(
+                terminated, sink, o.stop,
+                o.transport_error_message ? o.transport_error_message()
+                                          : std::string{"transport error"});
+            return;
+        case StreamEnd::CleanClose:
+            finish_turn_once(terminated, sink, o.stop, std::nullopt,
+                             std::nullopt, o.before_finish);
+            return;
+    }
+}
+
 } // namespace agentty::provider

@@ -1514,43 +1514,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // hold + stay salvage-eligible (no native channel will arrive).
     if (ctx.json_protocol) { ctx.holding = true; ctx.salvage_eligible = true; }
 
-    auto emit_terminal = [](StreamCtx& c, std::optional<std::string> err,
-                            std::optional<std::chrono::seconds> retry_after = {}) {
-        // Shared terminal-event rule (see provider/stream_epilogue.hpp): emit
-        // exactly one StreamFinished/StreamError and latch `terminated`. The
-        // SUCCESS-only hook does Ollama's terminal salvage/flush — the stream
-        // may end without a `done` frame (wire cut) while content is still
-        // held, so drain/rescue it before finishing. Never runs on the error
-        // path (would duplicate) nor when already terminated.
-        provider::finish_turn_once(
-            c.terminated, c.sink, c.stop_reason, std::move(err), retry_after,
-            [&c] {
-                // Progressive-response already owned the turn — just drain any
-                // pending decoded bytes; never re-run rescue (would duplicate).
-                if (c.resp_active) {
-                    if (!c.resp_done) {
-                        try_progressive_response(c);
-                        c.resp_done = true; c.holding = false; c.text_hold.clear();
-                        if (c.stop_reason != StopReason::ToolUse)
-                            c.stop_reason = StopReason::EndTurn;
-                    }
-                } else {
-                    bool jp_fired = false;
-                    if (c.json_protocol) {
-                        jp_fired = rescue_json_protocol(c);
-                        if (jp_fired) { c.text_hold.clear(); c.holding = false; }
-                    }
-                    if (!jp_fired && c.holding && !c.text_hold.empty()) {
-                        if (!try_salvage_hold(c)) flush_text_hold(c);
-                        else { c.text_hold.clear(); c.holding = false; }
-                    }
-                    rescue_tool_from_prose(c);
-                }
-                flush_unhandled_content(c);
-            });
-    };
-
-    // ── Build /api/chat body ─────────────────────────────────────────────────
+    // ── Build /api/chat body ────────────────────────────────────────────────
     json body;
     body["model"]  = req.model;
     body["stream"] = true;
@@ -1634,36 +1598,69 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     tos.ping    = std::chrono::milliseconds(15'000);
     tos.idle    = std::chrono::milliseconds(120'000);  // local gen can be slow
 
+    // Keep a copy of the cancel token: moved into the stream call, but
+    // finish_stream needs it to distinguish a user cancel from a transport
+    // error at the post-loop.
+    http::CancelTokenPtr cancel_for_end = cancel;
     auto result = http::default_client().stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
-    if (!result) {
-        std::string msg = std::string{"http: "} + result.error().render();
-        msg += "  (is Ollama running? start it with 'ollama serve', or check "
-               "--provider host:port)";
-        emit_terminal(ctx, std::move(msg));
-        return;
-    }
-
-    if (!is_success) {
-        std::string msg = "HTTP " + std::to_string(http_status);
-        try {
-            auto j = json::parse(error_body);
-            if (j.contains("error") && j["error"].is_string())
-                msg += ": " + j["error"].get<std::string>();
-            else if (!error_body.empty())
-                msg += ": " + error_body.substr(0, 300);
-        } catch (...) {
-            if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
-        }
-        if (http_status == 404)
-            msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
-        emit_terminal(ctx, std::move(msg));
-        return;
-    }
-
-    // 2xx — guarantee a terminal event even if `done` never arrived.
-    emit_terminal(ctx, std::nullopt);
+    // Whole post-loop through the SHARED epilogue: one terminal event, correct
+    // precedence, identical to every other provider. before_finish (success
+    // only) does Ollama's terminal salvage/flush — the stream may end without a
+    // `done` frame (wire cut) while content is still held, so drain/rescue it.
+    provider::finish_stream(ctx.terminated, ctx.sink, {
+        .terminated  = ctx.terminated,
+        .result_ok   = bool(result),
+        .http_status = http_status,
+        .cancel      = cancel_for_end,
+        .stop        = ctx.stop_reason,
+        .http_error_message = [&]() -> std::string {
+            std::string msg = "HTTP " + std::to_string(http_status);
+            try {
+                auto j = json::parse(error_body);
+                if (j.contains("error") && j["error"].is_string())
+                    msg += ": " + j["error"].get<std::string>();
+                else if (!error_body.empty())
+                    msg += ": " + error_body.substr(0, 300);
+            } catch (...) {
+                if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
+            }
+            if (http_status == 404)
+                msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
+            return msg;
+        },
+        .transport_error_message = [&]() -> std::string {
+            std::string msg = std::string{"http: "} + result.error().render();
+            msg += "  (is Ollama running? start it with 'ollama serve', or check "
+                   "--provider host:port)";
+            return msg;
+        },
+        .before_finish = [&ctx]() {
+            // Progressive-response already owned the turn — just drain any
+            // pending decoded bytes; never re-run rescue (would duplicate).
+            if (ctx.resp_active) {
+                if (!ctx.resp_done) {
+                    try_progressive_response(ctx);
+                    ctx.resp_done = true; ctx.holding = false; ctx.text_hold.clear();
+                    if (ctx.stop_reason != StopReason::ToolUse)
+                        ctx.stop_reason = StopReason::EndTurn;
+                }
+            } else {
+                bool jp_fired = false;
+                if (ctx.json_protocol) {
+                    jp_fired = rescue_json_protocol(ctx);
+                    if (jp_fired) { ctx.text_hold.clear(); ctx.holding = false; }
+                }
+                if (!jp_fired && ctx.holding && !ctx.text_hold.empty()) {
+                    if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
+                    else { ctx.text_hold.clear(); ctx.holding = false; }
+                }
+                rescue_tool_from_prose(ctx);
+            }
+            flush_unhandled_content(ctx);
+        },
+    });
 }
 
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
