@@ -64,13 +64,11 @@ struct ProviderPreset {
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderPreset, 10> kProviders{{
+inline constexpr std::array<ProviderPreset, 9> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}},
-    {"openai",     "OpenAI",     "GPT — api.openai.com",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "", ""}},
-    {"codex",      "Codex API",  "Codex models via your OpenAI API key",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CODEX_API_KEY", "OPENAI_API_KEY", ""}},
+    {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
+     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
      Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",

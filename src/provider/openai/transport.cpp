@@ -36,6 +36,7 @@
 #include <nlohmann/json.hpp>
 #include <simdjson.h>
 
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
@@ -1140,8 +1141,15 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         return a == std::string_view{b};
     };
     if (spec.empty() || eq(spec, "openai") || eq(spec, "codex")) {
+        // "codex" is a LEGACY ALIAS: it used to be its own "Codex API" picker
+        // row, but that was byte-identical to `openai` (same host, same
+        // /v1/chat/completions, same bearer auth — only the key env var
+        // differed). The row was dropped and CODEX_API_KEY folded into the
+        // `openai` preset's auth_env; the spec still resolves here so
+        // `--provider codex` and persisted configs keep working. The genuinely
+        // distinct Codex path is `chatgpt` (Responses API over ChatGPT OAuth).
         return Endpoint{"api.openai.com", 443, "/v1/chat/completions",
-                        "/v1/models", true, std::string{spec.empty() ? "openai" : spec}};
+                        "/v1/models", true, "openai"};
     }
     if (eq(spec, "chatgpt") || eq(spec, "codex-cli")) {
         // The native ChatGPT path never dials this endpoint: main.cpp
@@ -1386,20 +1394,22 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     auto emit_terminal = [](StreamCtx& c, std::optional<std::string> err,
                             std::optional<std::chrono::seconds> retry_after = {}) {
         if (c.terminated) return;
+        // Close an open tool block on BOTH paths (peer may have cut off before
+        // the tool call's arguments finished) so it stays outside
+        // finish_turn_once's success-only hook.
         if (c.in_tool_use) {
             c.sink(StreamToolUseEnd{});
             c.in_tool_use = false;
         }
-        if (err) {
-            c.sink(StreamError{*err, retry_after});
-        } else {
-            // Successful close without a [DONE] sentinel: still salvage a
-            // leaked tool call (or flush held text) before finishing.
-            if (!try_salvage_tool_call(c)) flush_text_hold(c);
-            ensure_nonempty_turn(c);
-            c.sink(StreamFinished{c.stop_reason});
-        }
-        c.terminated = true;
+        // Shared terminal-event rule (see provider/stream_epilogue.hpp). On the
+        // SUCCESS path only, salvage a leaked-JSON tool call (or flush held
+        // text) and guarantee a non-empty turn before finishing.
+        provider::finish_turn_once(
+            c.terminated, c.sink, c.stop_reason, std::move(err), retry_after,
+            [&c] {
+                if (!try_salvage_tool_call(c)) flush_text_hold(c);
+                ensure_nonempty_turn(c);
+            });
     };
 
     // ── Build the request body ──────────────────────────────────────────────
