@@ -56,6 +56,7 @@
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/acp_provider_adapter.hpp"
+#include "agentty/provider/dispatch.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -396,36 +397,19 @@ int main(int argc, char** argv) {
     // request targets the new provider — no seam rebuild, no restart. For an
     // OpenAI-family switch we rebuild the per-call endpoint from the active
     // selection so a host/path/tls change takes effect immediately.
+    // The seam: a single std::function the runtime calls. `dispatch_stream`
+    // (provider/dispatch.cpp) is the ONE routing point — it reads
+    // provider::active() AT CALL TIME so the picker can live-switch the
+    // backend mid-session and the next request targets it, with no seam
+    // rebuild. The two long-lived native providers are captured by ref;
+    // short-lived OpenAI-compat / Ollama transports are built per call inside
+    // dispatch from the active endpoint.
     std::function<void(provider::Request, provider::EventSink)> stream_fn =
         [&anthropic_provider, &chatgpt_provider]
         (provider::Request req, provider::EventSink sink) {
-            const auto& sel = provider::active();
-            if (sel.kind == provider::Kind::ExternalAcp) {
-                // Drive an external ACP agent subprocess (the built-in
-                // claude-agent-acp reference agent, or any config-defined
-                // agent from acp-agents.json — Zed-style). The adapter spawns +
-                // caches the subprocess and translates its session/update
-                // stream into the same Msgs the native providers emit — so
-                // this is a single branch, not a Kind fan-out.
-                provider::stream_external_acp(sel.acp_agent_id,
-                                              std::move(req), std::move(sink));
-            } else if (sel.kind == provider::Kind::OpenAI) {
-                if (sel.openai_endpoint.label == "chatgpt") {
-                    chatgpt_provider.stream(std::move(req), std::move(sink));
-                // Ollama speaks its own native /api/chat dialect — route it to
-                // the dedicated provider (structured tool_calls, keep_alive,
-                // num_predict). Every other OpenAI-family backend uses the
-                // compat /v1/chat/completions transport.
-                } else if (sel.openai_endpoint.native_api) {
-                    provider::ollama::OllamaProvider p{sel.openai_endpoint};
-                    p.stream(std::move(req), std::move(sink));
-                } else {
-                    provider::openai::OpenAIProvider p{sel.openai_endpoint};
-                    p.stream(std::move(req), std::move(sink));
-                }
-            } else {
-                anthropic_provider.stream(std::move(req), std::move(sink));
-            }
+            provider::dispatch_stream(
+                provider::NativeProviders{anthropic_provider, chatgpt_provider},
+                std::move(req), std::move(sink));
         };
     app::install_deps(app::Deps{
         .stream        = stream_fn,
