@@ -228,3 +228,47 @@ jobs:
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF
           cmake --build build -j
 
+      # Runtime smoke test. The compile above cannot catch the class of bug
+      # that made agentty abort on launch under MSYS2's default terminal
+      # (mintty): there, stdin/stdout are MSYS2 PTY *named pipes*, not Win32
+      # console handles, so the console-only init path aborted. Under this
+      # CI shell (bash, output redirected) stdin is likewise NOT a console,
+      # so it exercises the very same pipe-terminal code path. We feed a
+      # piped stdin that closes immediately (EOF); a correct build starts,
+      # hits hangup, and exits cleanly. A regression to the old behavior
+      # aborts with a non-zero exit and "failed to initialize terminal".
+      - name: Runtime smoke test (pipe stdin, mintty-like)
+        run: |
+          set -o pipefail
+          BIN=build/agentty.exe
+          test -x "$BIN" || BIN=build/agentty
+          echo "binary: $BIN"
+          # --version must always work (short-circuits before the TUI).
+          "$BIN" --version
+          # Drive the actual TUI with a pipe stdin that EOFs immediately.
+          # COLUMNS/LINES stand in for a size query with no console buffer.
+          # A 30s watchdog turns any hang (e.g. a busy-spin on a dead pipe,
+          # or a blocking read) into a hard CI failure instead of a stall.
+          set +e
+          COLUMNS=80 LINES=24 timeout --signal=KILL 30 sh -c ": | '$BIN'" \
+            >smoke.out 2>smoke.err
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          echo "----- stderr -----"; cat smoke.err || true
+          if grep -qi "failed to initialize terminal" smoke.err; then
+            echo "::error::agentty could not initialize the terminal under a pipe (MSYS2/mintty regression)"
+            exit 1
+          fi
+          # 137 = SIGKILL from the watchdog => it hung. Anything else that is
+          # non-zero is also a launch failure. Clean EOF exit is 0.
+          if [ "$rc" -eq 137 ]; then
+            echo "::error::agentty hung on a pipe stdin (did not exit on EOF)"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::agentty exited non-zero ($rc) on launch under a pipe"
+            exit 1
+          fi
+          echo "smoke test passed: launched and exited cleanly under a pipe"
+
