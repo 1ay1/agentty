@@ -33,14 +33,26 @@ struct Selection {
     // hands it to stream_external_acp() to spawn/drive the right subprocess.
     std::string      acp_agent_id;
 
-    // The native ChatGPT/Codex OAuth backend: an OpenAI-Kind selection whose
-    // endpoint label is "chatgpt". This ONE predicate replaces the
+    // Data-driven "this OpenAI-Kind endpoint is an OAuth-native backend riding
+    // a dedicated long-lived transport" — read from the provider registry
+    // (ProviderPreset::oauth_native) keyed on the endpoint label, NOT a literal
+    // label compare. A second such provider becomes true by setting one flag on
+    // its row; no predicate here changes.
+    [[nodiscard]] bool is_oauth_native() const noexcept {
+        if (kind != Kind::OpenAI) return false;
+        const ProviderPreset* p = preset_for(openai_endpoint.label);
+        return p && p->oauth_native;
+    }
+
+    // The native ChatGPT/Codex OAuth backend. This ONE predicate replaces the
     // `kind == Kind::OpenAI && openai_endpoint.label == "chatgpt"` idiom that
     // used to be re-derived at ~6 call sites (dispatch, prewarm, model list,
-    // effort ladder, login gate, picker). "chatgpt is special" is now a
-    // capability read from one place, not a string compared everywhere.
+    // effort ladder, login gate, picker). It now reads the registry's
+    // oauth_native flag (see is_oauth_native) rather than comparing the label,
+    // so "chatgpt is special" is a capability on one registry row — today the
+    // only oauth_native OpenAI provider, so the two predicates coincide.
     [[nodiscard]] bool is_chatgpt() const noexcept {
-        return kind == Kind::OpenAI && openai_endpoint.label == "chatgpt";
+        return is_oauth_native() && openai_endpoint.label == "chatgpt";
     }
 };
 
