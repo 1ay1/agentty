@@ -179,6 +179,11 @@ static json message_to_json(const Message& m) {
         j["thinking"] = tools::util::to_valid_utf8(m.thinking);
     if (!m.thinking_signature.empty())
         j["thinking_signature"] = m.thinking_signature;
+    // Codex/Responses encrypted reasoning blob(s). Persisted so a reloaded
+    // thread can still replay chain-of-thought across tool rounds. Opaque
+    // base64-ish ciphertext (ASCII), so no UTF-8 scrub needed.
+    if (!m.reasoning_encrypted.empty())
+        j["reasoning_encrypted"] = m.reasoning_encrypted;
     // Non-image attachments (Paste / FileRef / Symbol). Persisted so a
     // reloaded thread can rebuild its wire payload — the user's `text`
     // carries chip placeholders, and the model only sees real content
@@ -282,6 +287,7 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
     m.text = j.value("text", "");
     m.thinking = j.value("thinking", "");
     m.thinking_signature = j.value("thinking_signature", "");
+    m.reasoning_encrypted = j.value("reasoning_encrypted", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
         && !it->get<std::string>().empty())
         m.error = it->get<std::string>();

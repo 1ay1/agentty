@@ -313,6 +313,22 @@ struct Message {
     // User turns and for Assistant turns produced without thinking.
     std::string thinking;
     std::string thinking_signature;
+    // ── Codex/Responses reasoning replay (Assistant turns only) ─────────
+    // The Responses API is the OpenAI analogue of Anthropic's thinking
+    // block. When we request `include:["reasoning.encrypted_content"]`, each
+    // reasoning output item carries an OPAQUE `encrypted_content` blob. To
+    // keep chain-of-thought across tool rounds under `store:false` (the
+    // stateless Codex mode), that blob MUST be replayed as a `reasoning`
+    // item in the next request's `input[]` — WITHOUT its server id (echoing
+    // the id triggers a failing server-side lookup). We capture it here
+    // during streaming, replay it ahead of this turn's function_call items,
+    // and persist it so a reloaded thread stays continuable. `reasoning_summary`
+    // is the human-visible summary text (shown as the thinking block); it is
+    // NOT sent back (only encrypted_content is). Empty for User turns and for
+    // Assistant turns produced without reasoning. Multiple reasoning items in
+    // one turn are joined newline-separated in order.
+    std::string reasoning_encrypted;
+    std::string reasoning_summary;
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,
     // and several can arrive in one TCP read. If we appended each

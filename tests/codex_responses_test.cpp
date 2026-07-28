@@ -177,6 +177,68 @@ static void test_sse_reasoning() {
     CHECK(think == "thinking…");
 }
 
+// A completed reasoning output item yields StreamReasoning carrying its opaque
+// encrypted_content — the blob the reducer stashes for cross-round replay.
+static void test_sse_reasoning_encrypted_capture() {
+    std::vector<std::string> sse = {
+        R"({"type":"response.reasoning_summary_text.delta","delta":"planning"})",
+        R"({"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":"ENC_BLOB_123"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+    auto msgs = cc::parse_sse_for_test(sse);
+    std::string enc;
+    for (const auto& m : msgs)
+        if (auto* r = leaf<StreamReasoning>(m)) enc = r->encrypted;
+    CHECK(enc == "ENC_BLOB_123");
+}
+
+// build_body must OPT IN to encrypted reasoning so the backend returns it.
+static void test_build_body_requests_encrypted_reasoning() {
+    provider::Request req;
+    req.model = "gpt-5-codex";
+    Message u; u.role = Role::User; u.text = "hi";
+    req.messages.push_back(u);
+    json body = cc::build_body_for_test(req);
+    CHECK(body.contains("include"));
+    CHECK(body["include"].is_array());
+    bool has = false;
+    for (const auto& x : body["include"])
+        if (x == "reasoning.encrypted_content") has = true;
+    CHECK(has);
+}
+
+// An assistant turn carrying reasoning_encrypted replays a `reasoning` item
+// AHEAD of its function_call — with encrypted_content and NO server id.
+static void test_build_input_replays_reasoning() {
+    provider::Request req;
+    req.model = "gpt-5-codex";
+
+    Message u; u.role = Role::User; u.text = "do it";
+    req.messages.push_back(u);
+
+    Message a; a.role = Role::Assistant; a.text = "";
+    a.reasoning_encrypted = "BLOB_A\nBLOB_B";   // two items in one turn
+    ToolUse tc;
+    tc.id = ToolCallId{"call_1"}; tc.name = ToolName{"bash"};
+    tc.args = json{{"command", "ls"}};
+    tc.status = ToolUse::Done{.output = "ok"};
+    a.tool_calls.push_back(tc);
+    req.messages.push_back(a);
+
+    json body = cc::build_body_for_test(req);
+    const auto& in = body["input"];
+    // user, reasoning(BLOB_A), reasoning(BLOB_B), function_call, output
+    CHECK(in.size() == 5);
+    CHECK(in[0]["type"] == "message");
+    CHECK(in[1]["type"] == "reasoning");
+    CHECK(in[1]["encrypted_content"] == "BLOB_A");
+    CHECK(!in[1].contains("id"));                 // no server id under store:false
+    CHECK(in[2]["type"] == "reasoning");
+    CHECK(in[2]["encrypted_content"] == "BLOB_B");
+    CHECK(in[3]["type"] == "function_call");      // reasoning precedes the call
+    CHECK(in[4]["type"] == "function_call_output");
+}
+
 static void test_sse_error() {
     std::vector<std::string> sse = {
         R"({"type":"response.failed","response":{"error":{"message":"boom"}}})",
@@ -193,6 +255,9 @@ int main() {
     test_sse_text_and_usage();
     test_sse_tool_call();
     test_sse_reasoning();
+    test_sse_reasoning_encrypted_capture();
+    test_build_body_requests_encrypted_reasoning();
+    test_build_input_replays_reasoning();
     test_sse_error();
     if (g_failures) { std::fprintf(stderr, "\n%d check(s) failed\n", g_failures); return 1; }
     std::puts("codex_responses_test: all checks passed");

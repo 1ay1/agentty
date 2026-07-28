@@ -15,6 +15,7 @@
 
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/chatgpt/oauth.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 
@@ -86,6 +87,29 @@ json build_input(const provider::Request& req) {
 
         // Assistant turn: emit its prose (if any) as an output_text message,
         // then each tool call as function_call + function_call_output.
+        //
+        // FIRST replay any captured reasoning items. Responses requires the
+        // reasoning item to precede the message / function_call items it
+        // produced (item-pairing invariant). Under store:false we send only
+        // `encrypted_content` — NOT the server `id` (echoing a rs_… id makes
+        // the backend do a lookup that 404s on a non-persisted response).
+        if (!m.reasoning_encrypted.empty()) {
+            std::size_t start = 0;
+            while (start <= m.reasoning_encrypted.size()) {
+                std::size_t nl = m.reasoning_encrypted.find('\n', start);
+                std::string blob = m.reasoning_encrypted.substr(
+                    start, nl == std::string::npos ? std::string::npos : nl - start);
+                if (!blob.empty())
+                    input.push_back({
+                        {"type", "reasoning"},
+                        {"summary", json::array()},
+                        {"encrypted_content", std::move(blob)},
+                    });
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
+        }
+
         if (!text.empty()) {
             input.push_back({
                 {"type", "message"}, {"role", "assistant"},
@@ -142,7 +166,12 @@ json build_body(const provider::Request& req) {
         {"parallel_tool_calls", true},
         {"store", false},
         {"stream", true},
-        {"include", json::array()},
+        // Ask the backend to return each reasoning item's encrypted_content so
+        // we can replay it in input[] next turn. Under store:false this is the
+        // ONLY way to carry chain-of-thought across tool rounds — without it a
+        // reasoning model re-derives its plan from scratch each round (worse
+        // answers, wasted tokens). Mirrors codex-rs.
+        {"include", json::array({"reasoning.encrypted_content"})},
     };
     if (auto tools = build_tools(req); !tools.empty()) body["tools"] = tools;
     if (!req.effort.empty())
@@ -231,8 +260,23 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     }
     if (type == "response.output_item.done") {
         const auto& item = j.value("item", json::object());
-        if (item.value("type", std::string{}) == "function_call")
+        const auto itype = item.value("type", std::string{});
+        if (itype == "function_call")
             close_open_tool(ctx);
+        else if (itype == "reasoning") {
+            // A reasoning item completed. Capture its opaque encrypted_content
+            // so the reducer can stash it on the assistant message and replay
+            // it next turn (chain-of-thought continuity across tool rounds
+            // under store:false). The visible summary already streamed via
+            // reasoning_summary_text.delta → StreamThinkingDelta.
+            if (auto enc = item.value("encrypted_content", std::string{});
+                !enc.empty())
+                ctx.sink(StreamReasoning{std::move(enc)});
+            if (ctx.text_block_open) {
+                ctx.text_block_open = false;
+                ctx.sink(StreamTextBlockClosed{});
+            }
+        }
         else if (ctx.text_block_open) {
             ctx.text_block_open = false;
             ctx.sink(StreamTextBlockClosed{});
@@ -400,31 +444,42 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
 
     auto result = http::default_client().stream(hr, cbs, tos, req.cancel);
 
-    if (req.cancel && req.cancel->is_cancelled()) {
-        sink(StreamError{"cancelled"});
-        return;
-    }
-    if (http_status >= 400) {
-        std::string msg = "Codex backend returned HTTP " + std::to_string(http_status);
-        try {
-            auto j = json::parse(error_body);
-            if (j.contains("error"))
-                msg = j["error"].value("message", msg);
-            else if (j.contains("detail"))
-                msg = j.value("detail", msg);
-        } catch (...) {}
-        if (http_status == 401)
-            msg += " — session expired; run `agentty login` and sign in to ChatGPT again";
-        sink(StreamError{msg, std::nullopt});
-        return;
-    }
-    if (!result) {
-        sink(StreamError{result.error().render()});
-        return;
-    }
-    if (!ctx.terminated) {
-        // Stream closed cleanly without response.completed (proxy cutoff).
-        sink(StreamFinished{ctx.stop});
+    // Interpret the loop exit through the SHARED provider epilogue so the
+    // ChatGPT path ends a turn identically to Anthropic/OpenAI. The critical
+    // case is AlreadyTerminated: when a `response.completed` frame fired
+    // StreamFinished inside dispatch(), on_chunk returned false to stop reading
+    // (a deliberate latency win), which the HTTP layer reports as an aborted /
+    // "cancelled" transfer. That is EXPECTED, not a user cancel — returning
+    // here avoids the spurious StreamError{"cancelled"} that used to show after
+    // every clean Codex turn.
+    switch (provider::classify_stream_end(
+                ctx.terminated, bool(result), http_status, req.cancel)) {
+        case provider::StreamEnd::AlreadyTerminated:
+            return;
+        case provider::StreamEnd::UserCancelled:
+            sink(StreamError{"cancelled"});
+            return;
+        case provider::StreamEnd::HttpError: {
+            std::string msg = "Codex backend returned HTTP " + std::to_string(http_status);
+            try {
+                auto j = json::parse(error_body);
+                if (j.contains("error"))
+                    msg = j["error"].value("message", msg);
+                else if (j.contains("detail"))
+                    msg = j.value("detail", msg);
+            } catch (...) {}
+            if (http_status == 401)
+                msg += " — session expired; run `agentty login` and sign in to ChatGPT again";
+            sink(StreamError{msg, std::nullopt});
+            return;
+        }
+        case provider::StreamEnd::TransportError:
+            sink(StreamError{result.error().render()});
+            return;
+        case provider::StreamEnd::CleanClose:
+            // 2xx closed cleanly without response.completed (proxy cutoff).
+            sink(StreamFinished{ctx.stop});
+            return;
     }
 }
 

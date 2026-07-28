@@ -151,6 +151,13 @@ struct StreamToolUseEnd {};
 // when the turn also carries tool_use). Doubles as a liveness heartbeat —
 // the handler bumps last_event_at like StreamHeartbeat does.
 struct StreamThinkingDelta { std::string text; std::string signature; };
+// Codex/Responses reasoning-item capture. Unlike StreamThinkingDelta (which
+// carries visible summary text for the thinking block), this carries the
+// OPAQUE `encrypted_content` blob from a completed reasoning output item.
+// The reducer stashes it on the in-flight assistant Message so the follow-up
+// turn can replay it in `input[]` and preserve chain-of-thought across tool
+// rounds under store:false. Never rendered; wire-only.
+struct StreamReasoning { std::string encrypted; };
 // Mirrors Anthropic's message.usage shape. cache_* fields are non-zero only
 // when the request hit a cache_control breakpoint. Fields default to 0 so
 // callers that only care about input/output keep working.
@@ -589,6 +596,7 @@ using StreamMsg = std::variant<
     StreamStarted, StreamTextDelta, StreamTextBlockClosed,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
     StreamThinkingDelta,
+    StreamReasoning,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
     CancelStream, RetryStream, ProactiveContextReady>;
 

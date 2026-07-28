@@ -1035,6 +1035,29 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
             return done(std::move(m));
         },
+        [&](StreamReasoning& e) -> Step {
+            // Codex/Responses reasoning item completed: stash its opaque
+            // encrypted_content on the in-flight assistant message so the
+            // next request replays it in input[] (preserves chain-of-thought
+            // across tool rounds under store:false). Wire-only, never shown.
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
+            if (m.s.compacting) return done(std::move(m));
+            if (e.encrypted.empty()) return done(std::move(m));
+            if (!m.d.current.messages.empty()
+                && m.d.current.messages.back().role == Role::Assistant) {
+                auto& msg = m.d.current.messages.back();
+                // A turn can emit multiple reasoning items; keep them all in
+                // order, newline-joined, so every blob is replayed.
+                if (msg.reasoning_encrypted.empty())
+                    msg.reasoning_encrypted = std::move(e.encrypted);
+                else {
+                    msg.reasoning_encrypted.push_back('\n');
+                    msg.reasoning_encrypted += e.encrypted;
+                }
+            }
+            return done(std::move(m));
+        },
         [&](StreamUsage& e) -> Step {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
