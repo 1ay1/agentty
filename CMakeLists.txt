@@ -978,9 +978,9 @@ function(agentty_objlib name)
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
     endif()
     agentty_apply_compile_flags(${name})
-    # mem.hpp includes <jetalloc.h> when the allocator is vendored in. OBJECT
+    # mem.hpp includes <jetalloc.hpp> when the allocator is vendored in. OBJECT
     # libs don't link, but they DO need the header on the include path and the
-    # AGENTTY_USE_JETALLOC macro to select the jet_trim() branch.
+    # AGENTTY_USE_JETALLOC macro to select the jet::trim() branch.
     if(AGENTTY_HAS_JETALLOC)
         target_link_libraries(${name} PRIVATE jetalloc)
         target_compile_definitions(${name} PRIVATE AGENTTY_USE_JETALLOC=1)
@@ -1476,7 +1476,7 @@ if(AGENTTY_BUILD_TESTS)
         else()
             target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
         endif()
-        # runtime_obj (mem.cpp) calls jet_trim() under AGENTTY_USE_JETALLOC, so
+        # runtime_obj (mem.cpp) calls jet::trim() under AGENTTY_USE_JETALLOC, so
         # a test linking the shared object set must also link the allocator.
         if(AGENTTY_HAS_JETALLOC)
             target_link_libraries(${name} PRIVATE jetalloc)
