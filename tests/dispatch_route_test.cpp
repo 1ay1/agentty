@@ -107,6 +107,34 @@ static void test_is_chatgpt_predicate() {
     CHECK(c.is_oauth_native());
 }
 
+// The redesign's core: which LONG-LIVED slot a selection routes to is derived
+// purely from registry data (oauth_native flag + Anthropic dialect), never a
+// label ladder. This locks that derivation so a future edit can't route a
+// ChatGPT turn to the Anthropic transport or vice versa.
+static void test_long_lived_slot_derivation() {
+    provider::Selection anth;
+    anth.kind = provider::Kind::Anthropic;
+    CHECK(provider::long_lived_slot(anth) == provider::LongLived::Anthropic);
+
+    provider::Selection chatgpt;
+    chatgpt.kind = provider::Kind::OpenAI;
+    chatgpt.openai_endpoint.label = "chatgpt";     // oauth_native row
+    CHECK(provider::long_lived_slot(chatgpt) == provider::LongLived::ChatGpt);
+
+    // A hosted OpenAI-compat backend has NO long-lived slot — it is built per
+    // call from the Endpoint, so dispatch falls through to the transport path.
+    provider::Selection groq;
+    groq.kind = provider::Kind::OpenAI;
+    groq.openai_endpoint.label = "groq";
+    CHECK(provider::long_lived_slot(groq) == provider::LongLived::None);
+
+    // An ACP subprocess is neither long-lived slot — it takes the ACP arm.
+    provider::Selection acp;
+    acp.kind = provider::Kind::ExternalAcp;
+    acp.acp_agent_id = "claude-agent-acp";
+    CHECK(provider::long_lived_slot(acp) == provider::LongLived::None);
+}
+
 // The prewarm ROUTING table, locked as a pure function (no socket opened).
 // prewarm_target(sel) is registry-driven, so these assertions prove the
 // warm-host derivation for every backend shape.
@@ -236,6 +264,7 @@ int main() {
     test_anthropic_selection_hits_anthropic_route();
     test_chatgpt_selection_hits_chatgpt_route();
     test_is_chatgpt_predicate();
+    test_long_lived_slot_derivation();
     test_prewarm_target_table();
     test_dispatch_propagates_stream_result();
     test_classify_stream_end_precedence();
