@@ -13,45 +13,53 @@
 
 namespace agentty::provider {
 
-StreamResult dispatch_stream(const Routes& routes, const Selection& sel,
-                             Request req, EventSink sink) {
-    if (sel.kind == Kind::ExternalAcp) {
-        // Drive an external ACP agent subprocess (the built-in
-        // claude-agent-acp reference agent, codex-acp, or a config-defined
-        // id). Routed through an erased Routes fn (bound in main() to
-        // stream_external_acp) so dispatch has no dependency on the acp TU.
-        return routes.external_acp(sel.acp_agent_id, std::move(req), std::move(sink));
-    }
-
-    if (sel.kind == Kind::OpenAI) {
-        // ChatGPT/Codex: OAuth Responses backend, long-lived (holds refreshed
-        // tokens), owned by main() — route to its erased StreamFn.
-        if (sel.is_chatgpt()) {
-            return routes.chatgpt(std::move(req), std::move(sink));
-        }
-        // Ollama native /api/chat (NDJSON) — cheap value transport built from
-        // the active endpoint so a host/tls change takes effect immediately.
-        if (sel.openai_endpoint.native_api) {
-            ollama::OllamaProvider p{sel.openai_endpoint};
-            return p.stream(std::move(req), std::move(sink));
-        }
-        // Every other OpenAI-compatible endpoint (openai/groq/openrouter/
-        // together/cerebras/llama.cpp/custom host).
-        openai::OpenAIProvider p{sel.openai_endpoint};
-        return p.stream(std::move(req), std::move(sink));
-    }
-
-    // Anthropic (default) — long-lived, owned by main().
-    return routes.anthropic(std::move(req), std::move(sink));
+LongLived long_lived_slot(const Selection& sel) {
+    // Purely registry-driven. oauth_native (a row flag) picks the ChatGPT/Codex
+    // long-lived transport; the Anthropic dialect picks the Anthropic one.
+    // Everything else (per-call OpenAI-compat / Ollama, or the ACP arm) has no
+    // long-lived slot. No label compares, no is_chatgpt idiom.
+    if (sel.is_oauth_native())        return LongLived::ChatGpt;
+    if (sel.kind == Kind::Anthropic)  return LongLived::Anthropic;
+    return LongLived::None;
 }
 
-StreamResult dispatch_stream(const Routes& routes, Request req, EventSink sink) {
+StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
+                             Request req, EventSink sink) {
+    // 1) External ACP agent subprocess. Routed through an erased fn (bound in
+    //    main() to stream_external_acp) so dispatch has no dependency on the
+    //    acp TU. The agent id travels on the Selection.
+    if (sel.kind == Kind::ExternalAcp) {
+        return router.external_acp(sel.acp_agent_id, std::move(req), std::move(sink));
+    }
+
+    // 2) Long-lived native provider (Anthropic, ChatGPT/Codex): holds
+    //    cross-turn OAuth/connection state, constructed once in main(). The
+    //    slot is derived from registry data, NOT from a label ladder.
+    if (const LongLived slot = long_lived_slot(sel); slot != LongLived::None) {
+        return router.long_lived[static_cast<std::size_t>(slot)](
+            std::move(req), std::move(sink));
+    }
+
+    // 3) Per-call transport, built fresh from the active Endpoint so a
+    //    host/path/tls change takes effect on the very next turn. Ollama speaks
+    //    its native /api/chat NDJSON dialect; every other OpenAI-compatible
+    //    endpoint (openai/groq/openrouter/together/cerebras/llama.cpp/custom)
+    //    goes through the shared OpenAI transport.
+    if (sel.openai_endpoint.native_api) {
+        ollama::OllamaProvider p{sel.openai_endpoint};
+        return p.stream(std::move(req), std::move(sink));
+    }
+    openai::OpenAIProvider p{sel.openai_endpoint};
+    return p.stream(std::move(req), std::move(sink));
+}
+
+StreamResult dispatch_stream(const ProviderRouter& router, Request req, EventSink sink) {
     // Dispatch on the LIVE selection so a picker switch retargets the next
     // request with no seam rebuild. active() hands back a by-value snapshot
     // taken under the selection mutex, so the stream worker can't observe a
     // torn mid-select() endpoint.
     const Selection sel = active();
-    return dispatch_stream(routes, sel, std::move(req), std::move(sink));
+    return dispatch_stream(router, sel, std::move(req), std::move(sink));
 }
 
 } // namespace agentty::provider

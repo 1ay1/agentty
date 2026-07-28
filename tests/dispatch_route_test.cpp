@@ -29,34 +29,36 @@ static int g_failures = 0;
         }                                                                   \
     } while (0)
 
-// A Routes whose two arms just record which one fired. Each arm returns a
-// DISTINCT StreamResult so the test can prove dispatch propagates the outcome
-// value back through the erased seam (not just which arm fired).
+// A router whose two long-lived arms just record which one fired. Each arm
+// returns a DISTINCT StreamResult so the test can prove dispatch propagates the
+// outcome value back through the erased seam (not just which arm fired).
 struct Probe {
     std::string hit;
-    provider::Routes routes() {
-        return provider::Routes{
-            .anthropic = [this](provider::Request, provider::EventSink) {
-                hit = "anthropic";
-                provider::StreamResult r;
-                r.end  = provider::StreamEnd::CleanClose;
-                r.stop = StopReason::EndTurn;
-                return r;
-            },
-            .chatgpt = [this](provider::Request, provider::EventSink) {
-                hit = "chatgpt";
-                provider::StreamResult r;
-                r.end   = provider::StreamEnd::TransportError;
-                r.error = "chatgpt-boom";
-                return r;
-            },
-        };
+    provider::ProviderRouter router() {
+        provider::ProviderRouter r;
+        r.set(provider::LongLived::Anthropic,
+              [this](provider::Request, provider::EventSink) {
+                  hit = "anthropic";
+                  provider::StreamResult sr;
+                  sr.end  = provider::StreamEnd::CleanClose;
+                  sr.stop = StopReason::EndTurn;
+                  return sr;
+              })
+         .set(provider::LongLived::ChatGpt,
+              [this](provider::Request, provider::EventSink) {
+                  hit = "chatgpt";
+                  provider::StreamResult sr;
+                  sr.end   = provider::StreamEnd::TransportError;
+                  sr.error = "chatgpt-boom";
+                  return sr;
+              });
+        return r;
     }
 };
 
 static std::string route_for(const provider::Selection& sel) {
     Probe p;
-    provider::dispatch_stream(p.routes(), sel, provider::Request{},
+    provider::dispatch_stream(p.router(), sel, provider::Request{},
                               provider::EventSink{});
     return p.hit;
 }
@@ -64,7 +66,7 @@ static std::string route_for(const provider::Selection& sel) {
 // Same, but return the StreamResult dispatch handed back (the outcome value).
 static provider::StreamResult result_for(const provider::Selection& sel) {
     Probe p;
-    return provider::dispatch_stream(p.routes(), sel, provider::Request{},
+    return provider::dispatch_stream(p.router(), sel, provider::Request{},
                                      provider::EventSink{});
 }
 
