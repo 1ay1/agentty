@@ -9,6 +9,7 @@
 
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
+#include "agentty/io/http.hpp"
 
 namespace agentty::provider {
 
@@ -122,6 +123,49 @@ std::string provider_display_name(const Selection& s) {
     const std::string& lbl = s.openai_endpoint.label;
     if (const auto* p = preset_for(lbl)) return std::string{p->label};
     return lbl.empty() ? std::string{"OpenAI"} : lbl;
+}
+
+void prewarm_active_provider() {
+    // Open TCP+TLS(+h2) to the ACTIVE provider's host on a detached thread so
+    // the first real request skips the ~150–300 ms cold handshake. Uniform
+    // across native backends: Anthropic AND ChatGPT/Codex (and any hosted
+    // OpenAI-family endpoint) all get the same head start — no provider is
+    // privileged. Idempotent per (host,port) via the client's pool; a local
+    // backend (Ollama / llama.cpp on localhost) is skipped since there's no
+    // handshake worth hiding. Safe to call from the UI thread (fire-and-forget).
+    const Selection s = active();
+    auto& client = http::default_client();
+
+    switch (s.kind) {
+    case Kind::Anthropic: {
+        const auto& ov = http::agentty_api_host_override();
+        client.prewarm("api.anthropic.com", 443,
+                       ov.active() ? ov.host : std::string{},
+                       ov.active() ? ov.port : std::uint16_t{0});
+        return;
+    }
+    case Kind::OpenAI: {
+        // The native ChatGPT path (label "chatgpt") never dials the endpoint
+        // in the Selection — it talks to chatgpt.com/backend-api/codex — so
+        // prewarm that host explicitly. Every other OpenAI-family backend
+        // prewarms its real endpoint host.
+        if (s.openai_endpoint.label == "chatgpt") {
+            client.prewarm("chatgpt.com", 443, {}, 0);
+            return;
+        }
+        const auto& ep = s.openai_endpoint;
+        // Skip locals: no TLS handshake to amortise, and the port may be 0
+        // (the chatgpt sentinel) or a local dev server that isn't up yet.
+        if (!ep.use_tls || ep.host.empty() || ep.host == "localhost"
+            || ep.host == "127.0.0.1" || ep.port == 0)
+            return;
+        client.prewarm(ep.host, ep.port, {}, 0);
+        return;
+    }
+    case Kind::ExternalAcp:
+        // A subprocess agent — nothing to prewarm at the HTTP layer.
+        return;
+    }
 }
 
 } // namespace agentty::provider

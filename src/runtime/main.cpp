@@ -463,7 +463,7 @@ int main(int argc, char** argv) {
     // wired above, so `bash`, `task`, the git_* family, etc. behave exactly
     // as they do in the TUI (filesystem tools stay sandboxed to --workspace).
     if (args.subcommand == "mcp-serve") {
-        auth::prewarm_anthropic();   // `task`/web tools reuse the warm session
+        provider::prewarm_active_provider();   // `task`/web tools reuse the warm session
         int rc = mcp::serve_stdio();
         persistence::flush_pending_saves();
         return rc;
@@ -483,10 +483,11 @@ int main(int argc, char** argv) {
           : !settings.model_id.empty() ? settings.model_id.value
           :                              std::string{"claude-opus-4-5"};
 
-        // Prewarm TLS/DNS to api.anthropic.com so the first prompt reuses the
-        // SSL session + connection cache instead of paying the ~150–300 ms
-        // handshake. The TUI does the same before launching maya.
-        auth::prewarm_anthropic();
+        // Prewarm TLS/DNS to the ACTIVE provider's host so the first prompt
+        // reuses the SSL session + connection cache instead of paying the
+        // ~150–300 ms handshake. Uniform for Anthropic and ChatGPT/Codex
+        // alike. The TUI does the same before launching maya.
+        provider::prewarm_active_provider();
 
         // Permission profile gates which tools trigger a Zed approval prompt.
         // Default Ask: prompt for write/exec/net, auto-run reads. `minimal`
@@ -529,10 +530,12 @@ int main(int argc, char** argv) {
         return rc;
     }
 
-    // Pre-warm TLS to api.anthropic.com on a detached background thread.
-    // The first prompt the user types will reuse the SSL session + DNS +
-    // connection cache, skipping ~150–300 ms of first-byte handshake.
-    auth::prewarm_anthropic();
+    // Pre-warm TLS to the ACTIVE provider's host on a detached background
+    // thread. The first prompt the user types will reuse the SSL session + DNS
+    // + connection cache, skipping ~150–300 ms of first-byte handshake.
+    // Uniform: whether the user launched on Claude or ChatGPT/Codex, the
+    // active backend gets the head start — no provider is privileged.
+    provider::prewarm_active_provider();
 
     // fps = 0 → pure event-driven: maya only renders on Msg / input / timer.
     // The spinner-tick subscription (gated on stream.active) supplies frames

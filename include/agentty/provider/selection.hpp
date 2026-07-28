@@ -68,6 +68,14 @@ void select(Selection s);
 // no preset row. Used by the status bar provider badge.
 [[nodiscard]] std::string provider_display_name(const Selection& s);
 
+// Open a TCP+TLS connection to the ACTIVE provider's host on a detached
+// background thread, parking it in the http client's pool so the first real
+// request skips the cold handshake. Uniform across native backends — Anthropic
+// and ChatGPT/Codex (and any hosted OpenAI-family endpoint) get the same head
+// start. Locals (Ollama / llama.cpp) and ACP subprocesses are no-ops.
+// Idempotent per (host,port); safe to call fire-and-forget from any thread.
+void prewarm_active_provider();
+
 // Resolve the AuthHeader for a provider spec, registry-driven.
 //   • Anthropic   → derived from `anthropic_creds` (OAuth / x-api-key from
 //                   `agentty login`), passed in by the caller.
