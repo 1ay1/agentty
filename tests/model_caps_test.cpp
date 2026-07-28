@@ -152,6 +152,59 @@ static void test_flagship_lane_caps() {
     CHECK(ModelCapabilities::from_id("claude-fable-5[1m]").extended_context_1m);
 }
 
+static void test_gpt5_codex_caps() {
+    using agentty::ModelCapabilities;
+    using agentty::Effort;
+    using agentty::effort_wire_for;
+
+    // gpt-5.x (ChatGPT/Codex Responses) decodes as Family::Gpt with effort.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5.6-sol");
+        CHECK(c.is_gpt());
+        CHECK(c.is_known_family());
+        CHECK(c.generation == 5);
+        CHECK(c.revision == 6);
+        CHECK(c.supports_effort());
+        CHECK(c.supports_effort_xhigh());
+        CHECK(c.supports_effort_max());     // gpt-5.6 flagship line takes max
+        CHECK(!c.is_weak_tool_user());
+    }
+    // gpt-5.4 supports the ladder up to xhigh but NOT max.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5.4");
+        CHECK(c.is_gpt());
+        CHECK(c.generation == 5);
+        CHECK(c.revision == 4);
+        CHECK(c.supports_effort());
+        CHECK(c.supports_effort_xhigh());
+        CHECK(!c.supports_effort_max());
+        // A stale `max` pick degrades to `high` rather than 400ing.
+        CHECK(effort_wire_for(Effort::Max, c) == "high");
+        CHECK(effort_wire_for(Effort::Xhigh, c) == "xhigh");
+    }
+    // Plain `gpt-5` (no revision) still gets effort.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5");
+        CHECK(c.is_gpt());
+        CHECK(c.generation == 5);
+        CHECK(c.supports_effort());
+    }
+    // gpt-5.4-mini output ceiling is the large-output 64k (not the 16k
+    // non-Claude default).
+    CHECK(agentty::max_output_tokens_for("gpt-5.4-mini") == 64000);
+    CHECK(agentty::max_output_tokens_for("gpt-5.6-sol") == 64000);
+
+    // CRITICAL non-regression: gpt-4o / gpt-4.1 / gpt-3.5 must NOT be caught
+    // by the gpt-5 family logic — they stay generic OpenAI-compat (no effort,
+    // 16k cap). Older gpt-* over the OpenAI-compat transport relies on this.
+    for (const char* legacy : {"gpt-4o", "gpt-4.1", "gpt-4o-mini", "gpt-3.5-turbo"}) {
+        const auto c = ModelCapabilities::from_id(legacy);
+        CHECK(!c.is_gpt());
+        CHECK(!c.supports_effort());
+        CHECK(agentty::max_output_tokens_for(legacy) == 16384);
+    }
+}
+
 int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
@@ -163,6 +216,7 @@ int main() {
     test_bare_size_signal();
     test_max_output_tokens();
     test_flagship_lane_caps();
+    test_gpt5_codex_caps();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");

@@ -26,6 +26,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
@@ -1515,36 +1516,38 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
 
     auto emit_terminal = [](StreamCtx& c, std::optional<std::string> err,
                             std::optional<std::chrono::seconds> retry_after = {}) {
-        if (c.terminated) return;
-        // Stream ended without a `done` frame (e.g. wire cut) but content may
-        // still be held — salvage or flush it before the terminal event.
-        if (!err) {
-            // Progressive-response already owned the turn — just drain any
-            // pending decoded bytes; never re-run rescue (would duplicate).
-            if (c.resp_active) {
-                if (!c.resp_done) {
-                    try_progressive_response(c);
-                    c.resp_done = true; c.holding = false; c.text_hold.clear();
-                    if (c.stop_reason != StopReason::ToolUse)
-                        c.stop_reason = StopReason::EndTurn;
+        // Shared terminal-event rule (see provider/stream_epilogue.hpp): emit
+        // exactly one StreamFinished/StreamError and latch `terminated`. The
+        // SUCCESS-only hook does Ollama's terminal salvage/flush — the stream
+        // may end without a `done` frame (wire cut) while content is still
+        // held, so drain/rescue it before finishing. Never runs on the error
+        // path (would duplicate) nor when already terminated.
+        provider::finish_turn_once(
+            c.terminated, c.sink, c.stop_reason, std::move(err), retry_after,
+            [&c] {
+                // Progressive-response already owned the turn — just drain any
+                // pending decoded bytes; never re-run rescue (would duplicate).
+                if (c.resp_active) {
+                    if (!c.resp_done) {
+                        try_progressive_response(c);
+                        c.resp_done = true; c.holding = false; c.text_hold.clear();
+                        if (c.stop_reason != StopReason::ToolUse)
+                            c.stop_reason = StopReason::EndTurn;
+                    }
+                } else {
+                    bool jp_fired = false;
+                    if (c.json_protocol) {
+                        jp_fired = rescue_json_protocol(c);
+                        if (jp_fired) { c.text_hold.clear(); c.holding = false; }
+                    }
+                    if (!jp_fired && c.holding && !c.text_hold.empty()) {
+                        if (!try_salvage_hold(c)) flush_text_hold(c);
+                        else { c.text_hold.clear(); c.holding = false; }
+                    }
+                    rescue_tool_from_prose(c);
                 }
-            } else {
-                bool jp_fired = false;
-                if (c.json_protocol) {
-                    jp_fired = rescue_json_protocol(c);
-                    if (jp_fired) { c.text_hold.clear(); c.holding = false; }
-                }
-                if (!jp_fired && c.holding && !c.text_hold.empty()) {
-                    if (!try_salvage_hold(c)) flush_text_hold(c);
-                    else { c.text_hold.clear(); c.holding = false; }
-                }
-                rescue_tool_from_prose(c);
-            }
-            flush_unhandled_content(c);
-        }
-        if (err) c.sink(StreamError{*err, retry_after});
-        else     c.sink(StreamFinished{c.stop_reason});
-        c.terminated = true;
+                flush_unhandled_content(c);
+            });
     };
 
     // ── Build /api/chat body ─────────────────────────────────────────────────
