@@ -128,30 +128,40 @@ shared layers:
 
 ### The two seams still imperative (and the target)
 
-Routing — which concrete transport streams a turn — is now a **single function**,
-`provider::dispatch_stream` (`src/provider/dispatch.cpp`), not a ladder inlined
-in the runtime bootstrap. `main.cpp`'s `stream_fn` is a one-line delegation to
-it; the routing reads `provider::active()` at call time (so a picker switch
-retargets the next turn) and lives next to the registry where a new native
-provider's arm belongs. Being a free function, it is unit-testable without
-standing up the whole runtime.
+Routing — which concrete transport streams a turn — is a **single,
+provider-agnostic function**, `provider::dispatch_stream`
+(`src/provider/dispatch.cpp`). It names **no concrete transport type**: the
+long-lived native providers (Anthropic + ChatGPT, which hold OAuth-token /
+connection state) and the external-ACP driver are passed in as type-erased
+`StreamFn`s via a `Routes` struct, bound once in `main()`. The short-lived
+OpenAI-compat / Ollama transports are cheap value types built per call from the
+active `Endpoint`. `main.cpp`'s `stream_fn` is a thin binder over `Routes`.
 
-Two hand-written spots remain for a genuinely new `Kind` (a new wire dialect,
-not an OpenAI-compat endpoint):
+Because the seam is type-erased, it is **unit-tested**
+(`tests/dispatch_route_test.cpp`): fake routes are injected and the test asserts
+exactly which one each `Selection` reaches (Anthropic→anthropic route,
+`is_chatgpt()`→chatgpt route) with no network and no concrete provider. A future
+edit can't silently misroute a backend.
 
-- one arm in `dispatch_stream` (construct/route the new transport), and
-- `prewarm_active_provider`, which derives the TLS-warmup host from the active
-  selection.
+"This is the native OAuth Codex backend" is likewise **one predicate**,
+`Selection::is_chatgpt()`, not a `label == "chatgpt"` literal re-derived at the
+~6 sites (dispatch, prewarm, model-list, effort clamp, login gate, picker) that
+used to compare the string themselves.
 
-The registry deliberately does **not** own the concrete `Provider` type (that
-stays behind the type-erased `Deps::stream` seam), which is why routing is a
-function rather than a table of constructors. **Remaining target:** give each
-`Kind` (or registry row) a `prewarm_host(sel)` accessor so prewarm reads the
-host off the row instead of re-deriving it, closing the last uncorrelated seam.
-At that point adding a native provider is: one catalog row + one registry row +
-one transport + one `dispatch_stream` arm + one test — fully uniform. This is
-the natural sibling of the epilogue's own end-state (folding into a
-`TurnResult` return value); both are tracked as follow-ups.
+One hand-written spot remains for a genuinely new `Kind` (a new wire dialect,
+not an OpenAI-compat endpoint): its arm in `dispatch_stream` (plus a `Routes`
+field if it is long-lived). Prewarm still derives its host in
+`prewarm_active_provider`; the registry deliberately does not own the concrete
+`Provider` type (kept behind the type-erased `Deps::stream` seam), which is why
+routing is a function over erased callables rather than a table of
+constructors. **Remaining target:** a `prewarm_host(sel)` accessor so prewarm
+reads the host off the row, closing the last uncorrelated seam. This is the
+natural sibling of the epilogue's own end-state (folding into a `TurnResult`
+return value); both are tracked as follow-ups.
+
+Adding a native provider is now: one catalog row + one registry row + one
+transport + one `dispatch_stream` arm (+ a `Routes` field if long-lived) + one
+routing-test row — fully uniform, type-erased, and tested.
 
 ---
 
