@@ -238,6 +238,16 @@ jobs:
       # hits hangup, and exits cleanly. A regression to the old behavior
       # aborts with a non-zero exit and "failed to initialize terminal".
       - name: Runtime smoke test (pipe stdin, mintty-like)
+        # Step-level watchdog: if agentty genuinely HANGS on a dead pipe
+        # (busy-spin on read()=0, blocking read that never sees EOF) the
+        # Actions runner kills the step after 2 minutes and fails the job.
+        # This replaces an in-shell `timeout`/background+`wait` watchdog,
+        # both of which returned a SPURIOUS 127 here: under MSYS2, `wait`
+        # on a fast-exiting *native Win32 PE* that the shell already reaped
+        # returns 127, and coreutils `timeout` can't supervise-exec a PE at
+        # all. Running the binary in the FOREGROUND and reading $? directly
+        # is the only way to get agentty's true exit code on this platform.
+        timeout-minutes: 2
         run: |
           set -o pipefail
           ls -l build/agentty* || true
@@ -253,39 +263,23 @@ jobs:
           echo "--version ok"
           # Drive the actual TUI with a non-console stdin. Redirecting from
           # /dev/null gives an immediately-EOF stdin that is NOT a console
-          # handle -- the same class of fd mintty hands agentty -- without
-          # nesting a second shell. COLUMNS/LINES stand in for a size query
-          # with no console buffer.
-          #
-          # NOTE: we deliberately do NOT wrap the run in coreutils `timeout`.
-          # Under MSYS2, `timeout` fork()s then exec()s the child under its
-          # own supervision, and that path cannot reliably launch a *native
-          # Win32 PE* (agentty.exe) -- it fails to invoke and returns 127,
-          # which looks like a bogus launch failure. Instead we background
-          # the binary directly (the shell launches it natively, exactly like
-          # the working --version call above) and run our own kill-watchdog.
+          # handle -- the same class of fd mintty hands agentty. A correct
+          # build initializes the terminal in pipe mode, hits hangup on the
+          # closed stdin, and exits 0; the old MSYS2 regression aborted
+          # non-zero with "failed to initialize terminal". We run in the
+          # FOREGROUND and capture $? directly -- NOT via `timeout` or a
+          # background+`wait` watchdog, both of which return a bogus 127 for
+          # a fast-exiting native PE under MSYS2 (see step comment above).
+          # The step-level `timeout-minutes` above is the real hang guard.
           set +e
-          COLUMNS=80 LINES=24 "$BIN" </dev/null >smoke.out 2>smoke.err &
-          app_pid=$!
-          # Watchdog: after 30s, if the app is still alive, kill it and mark
-          # a hang. Runs in the background; we cancel it if the app exits.
-          ( sleep 30; kill -9 "$app_pid" 2>/dev/null && echo HUNG >smoke.hung ) &
-          watchdog_pid=$!
-          wait "$app_pid"
+          COLUMNS=80 LINES=24 "$BIN" </dev/null >smoke.out 2>smoke.err
           rc=$?
-          kill "$watchdog_pid" 2>/dev/null
-          wait "$watchdog_pid" 2>/dev/null
           set -e
           echo "exit=$rc"
           echo "----- stdout (head) -----"; head -c 2000 smoke.out || true; echo
           echo "----- stderr -----"; cat smoke.err || true
           if grep -qi "failed to initialize terminal" smoke.err; then
             echo "::error::agentty could not initialize the terminal under a pipe (MSYS2/mintty regression)"
-            exit 1
-          fi
-          # smoke.hung exists (or rc reflects a SIGKILL: 137 / 9) => it hung.
-          if [ -f smoke.hung ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 9 ]; then
-            echo "::error::agentty hung on a pipe stdin (did not exit on EOF)"
             exit 1
           fi
           if [ "$rc" -ne 0 ]; then
