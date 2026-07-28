@@ -407,9 +407,22 @@ int main(int argc, char** argv) {
     std::function<void(provider::Request, provider::EventSink)> stream_fn =
         [&anthropic_provider, &chatgpt_provider]
         (provider::Request req, provider::EventSink sink) {
-            provider::dispatch_stream(
-                provider::NativeProviders{anthropic_provider, chatgpt_provider},
-                std::move(req), std::move(sink));
+            provider::Routes routes{
+                .anthropic = [&anthropic_provider](provider::Request r,
+                                                   provider::EventSink s) {
+                    anthropic_provider.stream(std::move(r), std::move(s));
+                },
+                .chatgpt = [&chatgpt_provider](provider::Request r,
+                                               provider::EventSink s) {
+                    chatgpt_provider.stream(std::move(r), std::move(s));
+                },
+                .external_acp = [](const std::string& agent_id,
+                                   provider::Request r, provider::EventSink s) {
+                    provider::stream_external_acp(agent_id, std::move(r),
+                                                  std::move(s));
+                },
+            };
+            provider::dispatch_stream(routes, std::move(req), std::move(sink));
         };
     app::install_deps(app::Deps{
         .stream        = stream_fn,

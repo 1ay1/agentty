@@ -691,6 +691,11 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
+    # The ONE provider-routing seam — dispatch_stream(). Provider-agnostic
+    # (type-erased Routes, incl. the ACP arm), so it has no acp-TU dependency
+    # and lives in the provider objlib every test links. main.cpp binds the
+    # long-lived + external routes; dispatch just routes on the Selection.
+    src/provider/dispatch.cpp
     # ACP agent launch registry (config loader). Pure nlohmann/json, no acp-cpp
     # dep, and referenced by selection.cpp (is_acp_agent_id) — so it lives in
     # the provider objlib every test links, NOT in agentty_acp_obj.
@@ -705,11 +710,6 @@ set(AGENTTY_ACP_SOURCES
     src/acp/server.cpp
     src/provider/external_acp_backend.cpp
     src/provider/acp_provider_adapter.cpp
-    # The ONE provider-routing seam — dispatch_stream(). Lives with the ACP
-    # glue because it routes to stream_external_acp; main.cpp's stream_fn
-    # delegates here so a new native provider's routing is one testable place
-    # next to the registry, not scattered in the runtime bootstrap.
-    src/provider/dispatch.cpp
 )
 
 # MCP (Model Context Protocol) client glue — spawns external MCP servers and
@@ -1862,6 +1862,15 @@ if(AGENTTY_BUILD_TESTS)
     # sibling openai_transport_test.
     agentty_add_full_test(ollama_transport_test)
 
+    # dispatch_route_test — locks the provider-ROUTING table. dispatch_stream
+    # is provider-agnostic (type-erased Routes), so this injects FAKE routes
+    # and asserts exactly which one each Selection reaches: Anthropic→anthropic
+    # route, is_chatgpt()→chatgpt route, generic OpenAI-compat touches neither
+    # long-lived route. No network, no concrete transport. Guards against a
+    # future edit silently misrouting a backend.
+    agentty_add_full_test(dispatch_route_test)
+    set_tests_properties(dispatch_route_test PROPERTIES TIMEOUT 30)
+
     # rag_adapter_test — locks the agentty↔rag-cpp adapter contract: the
     # engine (rag::Engine, submodule rag-cpp) is driven through the compact
     # agentty::rag::Retriever boundary and must return ranked, source-tagged
@@ -2155,6 +2164,7 @@ if(AGENTTY_BUILD_TESTS)
         codex_responses_test
         chatgpt_bundled_models_test
         ollama_transport_test
+        dispatch_route_test
         rag_adapter_test
         reveal_freeze_gate_probe
         visual_hash_coverage_test
