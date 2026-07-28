@@ -100,6 +100,44 @@ struct Request {
 
 using EventSink = std::function<void(Msg)>;
 
+// ── Uniform request lowering ─────────────────────────────────────────────
+//
+// `provider::Request` is the SUPERSET request every adapter receives. Each
+// HTTP transport still has its own local `Request` (anthropic::Request,
+// openai::Request) carrying just the fields its wire needs. Historically each
+// adapter lowered provider::Request into its local one by hand, field by
+// field — and that is exactly how fields got silently dropped (openai copied
+// context_window; anthropic forgot session_key).
+//
+// `lower_shared` copies the fields EVERY transport shares, in one place, by
+// (member-of-dst = member-of-src) pairs guarded so a typo can't compile. An
+// adapter becomes: `lower_shared(treq, req);` then set the 1-2 fields unique
+// to that wire (endpoint, json_protocol, effort). Add a shared field here once
+// and every transport inherits it — no adapter can forget it.
+//
+// Templated on the destination so it works for any transport Request that
+// exposes the same-named members; the requires-clause makes a missing member a
+// crisp error at the call site instead of deep in instantiation.
+template <class TReq>
+    requires requires(TReq t, Request r) {
+        t.model = std::move(r.model);
+        t.system_prompt = std::move(r.system_prompt);
+        t.messages = std::move(r.messages);
+        t.tools = std::move(r.tools);
+        t.max_tokens = r.max_tokens;
+        t.auth = std::move(r.auth);
+        t.retry_count = r.retry_count;
+    }
+void lower_shared(TReq& dst, Request& src) {
+    dst.model         = std::move(src.model);
+    dst.system_prompt = std::move(src.system_prompt);
+    dst.messages      = std::move(src.messages);
+    dst.tools         = std::move(src.tools);
+    dst.max_tokens    = src.max_tokens;
+    dst.auth          = std::move(src.auth);
+    dst.retry_count   = src.retry_count;
+}
+
 // How a streamed turn ended, as a value (defined in stream_epilogue.hpp, which
 // every transport already includes to end its turn). Forward-declared here so
 // the concept can name it without this header pulling the epilogue in.
