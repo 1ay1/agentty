@@ -1,6 +1,7 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -384,6 +385,10 @@ std::vector<CatalogModel> fetch_models() {
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(8'000);
     tos.total   = std::chrono::milliseconds(15'000);
+    // The catalog is a small JSON list (~a few KB). Cap hard so a misbehaving
+    // proxy / replay loop can't stream us into OOM on a routine picker probe
+    // (parity with Anthropic's list_models).
+    hr.max_body_bytes = 1ull * 1024 * 1024;
 
     auto result = http::default_client().send(hr, tos);
     if (!result || result->status < 200 || result->status >= 300) return {};
@@ -490,7 +495,15 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
         }
     };
     cbs.on_chunk = [&](std::string_view chunk) -> bool {
-        if (http_status >= 400) { error_body.append(chunk); return true; }
+        if (http_status >= 400) {
+            // Cap the buffered error body so a misbehaving edge / proxy that
+            // streams an unbounded 4xx/5xx body can't drive us into OOM on the
+            // error path (parity with the Anthropic transport's 64 KB guard).
+            if (error_body.size() < 64 * 1024)
+                error_body.append(chunk.data(),
+                                  std::min(chunk.size(), 64 * 1024 - error_body.size()));
+            return true;
+        }
         ctx.sse.feed(chunk.data(), chunk.size(),
             [&](std::string_view, std::string_view payload, char*) {
                 dispatch(ctx, payload);
@@ -501,6 +514,16 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(15'000);
     tos.total   = std::chrono::milliseconds(600'000);
+    // Idle/stall watchdog — parity with the Anthropic stream. A healthy
+    // Responses stream emits SSE frames (deltas / heartbeats) continuously,
+    // so 90 s without a single byte means the transport is dead (silent peer,
+    // proxy stall, half-open TCP). Without this, a mid-turn stall would hang
+    // on the 600 s `total` bound — the user stares at a frozen "thinking"
+    // spinner for up to 10 minutes instead of a fast Transient retry. The
+    // 15 s PING probe keeps a half-open TCP from going undetected; the reducer's
+    // own 120 s stall watchdog covers the app-layer-never-advances case.
+    tos.ping    = std::chrono::milliseconds(15'000);
+    tos.idle    = std::chrono::milliseconds(90'000);
 
     auto result = http::default_client().stream(hr, cbs, tos, req.cancel);
 
@@ -523,10 +546,18 @@ void stream_responses(provider::Request req, provider::EventSink sink) {
             std::string msg = "Codex backend returned HTTP " + std::to_string(http_status);
             try {
                 auto j = json::parse(error_body);
-                if (j.contains("error"))
-                    msg = j["error"].value("message", msg);
-                else if (j.contains("detail"))
+                if (j.contains("error") && j["error"].is_object()) {
+                    const auto& err = j["error"];
+                    std::string m   = err.value("message", std::string{});
+                    std::string tag = err.value("type", err.value("code", std::string{}));
+                    // Prefer a specific `{type}: {message}` — gives both the
+                    // user a clear reason AND the runtime's classify() a token
+                    // to route retryables (rate_limit_exceeded, server_error).
+                    if (!m.empty()) msg = tag.empty() ? m : tag + ": " + m;
+                    else if (!tag.empty()) msg += " (" + tag + ")";
+                } else if (j.contains("detail")) {
                     msg = j.value("detail", msg);
+                }
             } catch (...) {}
             if (http_status == 401)
                 msg += " — session expired; run `agentty login` and sign in to ChatGPT again";
