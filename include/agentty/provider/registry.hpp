@@ -55,6 +55,16 @@ struct ProviderPreset {
     // Anthropic (creds come from `agentty login`) and local backends.
     // Stored as a fixed 3-slot array of string_views; unused slots are "".
     std::array<std::string_view, 3> auth_env;
+
+    // The FIXED host to open a warm TLS connection to before the first turn,
+    // when it is NOT derivable from the runtime Endpoint. Two backends need
+    // this: Anthropic (the transport hardcodes api.anthropic.com; no Endpoint
+    // is dialled) and ChatGPT (talks to chatgpt.com/backend-api/codex while
+    // its Endpoint carries a sentinel port 0). Empty for every other row:
+    // hosted OpenAI-compat backends prewarm their own Endpoint host, and
+    // local / ACP backends have nothing worth warming. This makes
+    // prewarm_active_provider a data lookup instead of a hand-written switch.
+    std::string_view prewarm_host;
 };
 
 // ── The table ────────────────────────────────────────────────────────────
@@ -66,23 +76,23 @@ struct ProviderPreset {
 // openai/transport.cpp::from_spec keyed on the same `id`.
 inline constexpr std::array<ProviderPreset, 9> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
-     Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}},
+     Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}},
+     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, ""},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
+     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com"},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}},
+     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"openrouter", "OpenRouter", "Any model via openrouter.ai",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}},
+     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"together",   "Together",   "Open models on together.ai",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}},
+     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}},
+     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"ollama",     "Ollama",     "Local models at localhost:11434",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
+     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, ""},
     {"llama.cpp",  "llama.cpp",  "Local llama.cpp server at localhost:8080",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
+     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}, ""},
 }};
 
 // All presets, for the picker / iteration.

@@ -78,12 +78,36 @@ void select(Selection s);
 // no preset row. Used by the status bar provider badge.
 [[nodiscard]] std::string provider_display_name(const Selection& s);
 
+// The host to warm before the first turn, fully derived from a Selection.
+// `host` empty ⇒ nothing to warm (local backend / ACP subprocess / port-0
+// sentinel). `override_host`/`override_port` carry the AGENTTY_API_HOST dial
+// (Anthropic only) so the warm connection targets the real upstream. This is
+// a PURE function of (Selection, registry, endpoint) — no globals, no I/O —
+// so the prewarm routing table is unit-testable; prewarm_active_provider() is
+// then just "resolve target, open socket".
+struct PrewarmTarget {
+    std::string   host;             // "" ⇒ skip prewarm
+    std::uint16_t port = 443;
+    std::string   override_host;    // AGENTTY_API_HOST host (Anthropic), else ""
+    std::uint16_t override_port = 0;
+
+    [[nodiscard]] bool should_warm() const noexcept { return !host.empty(); }
+};
+
+// Resolve the prewarm target for a selection. Registry-driven: a preset row's
+// `prewarm_host` (Anthropic → api.anthropic.com, ChatGPT → chatgpt.com) wins;
+// otherwise the OpenAI-compat Endpoint's own host is used, skipped for local /
+// no-TLS / port-0 endpoints. Passed a Selection explicitly so tests can drive
+// it; prewarm_active_provider() calls it on active().
+[[nodiscard]] PrewarmTarget prewarm_target(const Selection& sel);
+
 // Open a TCP+TLS connection to the ACTIVE provider's host on a detached
 // background thread, parking it in the http client's pool so the first real
 // request skips the cold handshake. Uniform across native backends — Anthropic
 // and ChatGPT/Codex (and any hosted OpenAI-family endpoint) get the same head
 // start. Locals (Ollama / llama.cpp) and ACP subprocesses are no-ops.
 // Idempotent per (host,port); safe to call fire-and-forget from any thread.
+// A thin wrapper over prewarm_target(active()) — the routing lives there.
 void prewarm_active_provider();
 
 // Resolve the AuthHeader for a provider spec, registry-driven.

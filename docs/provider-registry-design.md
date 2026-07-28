@@ -150,18 +150,28 @@ used to compare the string themselves.
 
 One hand-written spot remains for a genuinely new `Kind` (a new wire dialect,
 not an OpenAI-compat endpoint): its arm in `dispatch_stream` (plus a `Routes`
-field if it is long-lived). Prewarm still derives its host in
-`prewarm_active_provider`; the registry deliberately does not own the concrete
-`Provider` type (kept behind the type-erased `Deps::stream` seam), which is why
-routing is a function over erased callables rather than a table of
-constructors. **Remaining target:** a `prewarm_host(sel)` accessor so prewarm
-reads the host off the row, closing the last uncorrelated seam. This is the
-natural sibling of the epilogue's own end-state (folding into a `TurnResult`
-return value); both are tracked as follow-ups.
+field if it is long-lived). **Prewarm is no longer one of them.** The
+connection-warming host is now a `prewarm_host` column on the `ProviderPreset`
+row (Anthropic → `api.anthropic.com`, ChatGPT → `chatgpt.com`; empty for every
+other row — hosted OpenAI-compat backends warm their own `Endpoint` host, local
+/ ACP backends warm nothing). `prewarm_target(Selection)` is a **pure,
+registry-driven function** returning the `{host, port}` to warm (or empty to
+skip); `prewarm_active_provider()` is a three-line wrapper that resolves the
+target and opens the socket. The whole warm-routing table is unit-tested in
+`dispatch_route_test` with no socket opened — Anthropic, ChatGPT, hosted
+OpenAI-compat, local, ACP, and the port-0 sentinel each assert their target.
 
-Adding a native provider is now: one catalog row + one registry row + one
-transport + one `dispatch_stream` arm (+ a `Routes` field if long-lived) + one
-routing-test row — fully uniform, type-erased, and tested.
+The registry deliberately does not own the concrete `Provider` type (kept
+behind the type-erased `Deps::stream` seam), which is why *routing* is a
+function over erased callables rather than a table of constructors — but every
+static *fact* about a backend (auth, env vars, warm host) now lives on its row.
+The last conceptual sibling is the epilogue's own end-state (folding into a
+`TurnResult` return value), tracked as a follow-up.
+
+Adding a native provider is now: one catalog row + one registry row (id, label,
+auth, env, warm host) + one transport + one `dispatch_stream` arm (+ a `Routes`
+field if long-lived) + one routing-test row — fully uniform, type-erased,
+data-driven, and tested.
 
 ---
 
