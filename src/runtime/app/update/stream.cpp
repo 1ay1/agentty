@@ -1168,7 +1168,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (m.s.compacting) {
                 if (auto* a = active_ctx(m.s.phase)) a->cancel.reset();
 
-                auto klass = provider::classify(e.message);
+                auto klass = provider::classify_stream_error(e.message, e.http_status);
                 if (e.from_stall
                     && klass == provider::ErrorClass::Cancelled) {
                     klass = provider::ErrorClass::Transient;
@@ -1301,7 +1301,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             }
 
             // Classify and decide retry vs terminal.
-            auto klass = provider::classify(e.message);
+            auto klass = provider::classify_stream_error(e.message, e.http_status);
             // A "cancelled" error is reclassified to Transient only when WE
             // cancelled the stream via the stall watchdog (not the user).
             // Two shapes carry that intent:

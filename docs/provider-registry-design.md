@@ -106,6 +106,23 @@ re-decode events. That is now a first-class **return value**:
   `StreamResult` (clean-close `ok()` vs. a transport error with its message)
   through the real erased seam, no network.
 
+### The retry path consumes the outcome, not the prose
+
+The payoff of carrying the outcome as data: the runtime's retry decision
+(`src/runtime/app/update/stream.cpp`) no longer reverse-engineers the failure
+class from the human error string. On an HTTP-status failure the transport
+stamps the exact status onto the emitted `StreamError` Msg
+(`StreamError::http_status`, set by `finish_stream` from the same
+`StreamOutcome`). The reducer calls **`provider::classify_stream_error(message,
+http_status)`**, which routes to the *typed*, compile-time-proven
+`classify(HttpError)` path whenever the status is known and only falls back to
+the substring sniff for the wire shapes that genuinely have none (SSE
+`event: error` bodies, transport/socket failures, user cancels, the synthetic
+stall). So a 429 phrased "Too Many Requests" (no digits) still backs off as
+`RateLimit`, and a terminal 400 whose message happens to contain "connection"
+is no longer mis-retried as `Transient` — the int the transport already had wins
+over a re-parse of the English. Locked by `tests/error_class_test.cpp`.
+
 All four native transports use it, differing only in their hooks:
 
 - `src/provider/anthropic/transport.cpp` — `on_any_end` closes the tool block.
