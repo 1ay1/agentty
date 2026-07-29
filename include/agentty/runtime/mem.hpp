@@ -15,25 +15,17 @@
 // at the few coarse-grained boundaries where the user has just done
 // something that frees megabytes of conversation state.
 //
-//   • jetalloc     → jet::trim(): releases empty slab pages and the large-
-//                    allocation caches back to the OS. Safe to call at any
-//                    time; a no-op when there is nothing to reclaim. This is
-//                    the path agentty takes by default (the vendored
-//                    allocator, linked into the exe). We call it through the
-//                    modern C++ facade jetalloc.hpp (jet::trim / jet::stats)
-//                    rather than the raw C ABI.
-//   • glibc        → malloc_trim(0): walks the main arena, returns fully-free
-//                    pages to the kernel via madvise. Fallback when built
-//                    without jetalloc (AGENTTY_USE_JETALLOC=OFF).
-//   • other        → no-op on musl / macOS / Windows system allocators
-//                    (they manage their own return-to-OS policy).
+//   • mimalloc     → mi_collect(true): forces collection and asks the OS to
+//                    reclaim unused pages. This is the default vendored path.
+//   • glibc        → malloc_trim(0): fallback when mimalloc is disabled.
+//   • other        → no-op on system allocators without a portable trim API.
 //
 // The function is declared `inline` and lives in this header so the
 // platform branch is resolved at compile-time per TU; no link-time
 // dispatch overhead.
 
-#if defined(AGENTTY_USE_JETALLOC)
-#  include <jetalloc.hpp>
+#if defined(AGENTTY_USE_MIMALLOC)
+#  include <mimalloc.h>
 #elif defined(__GLIBC__)
 #  include <malloc.h>
 #endif
@@ -44,8 +36,8 @@
 namespace agentty {
 
 inline void release_to_kernel() noexcept {
-#if defined(AGENTTY_USE_JETALLOC)
-    jet::trim();
+#if defined(AGENTTY_USE_MIMALLOC)
+    mi_collect(true);
 #elif defined(__GLIBC__)
     ::malloc_trim(0);
 #else
@@ -53,22 +45,11 @@ inline void release_to_kernel() noexcept {
 #endif
 }
 
-// Typed live-memory snapshot, when the vendored allocator is in play.
-// Returns std::nullopt on builds without jetalloc (system allocator exposes
-// no equivalent portable counter set). Handy for a debug/status readout or a
-// memory-pressure heuristic — no raw jet_stats struct at the call site.
-//
-//   if (auto m = agentty::memory_stats())
-//       log("live={} pages={}", m->bytes_live, m->pages_active);
-#if defined(AGENTTY_USE_JETALLOC)
-inline std::optional<jet::stats_t> memory_stats() noexcept {
-    return jet::stats();
-}
-#else
+// mimalloc exposes statistics through callback/printing APIs rather than a
+// stable typed snapshot, so keep this portable helper explicitly unavailable.
 struct memory_stats_unavailable_t {};
 inline std::optional<memory_stats_unavailable_t> memory_stats() noexcept {
     return std::nullopt;
 }
-#endif
 
 } // namespace agentty

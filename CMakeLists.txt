@@ -105,16 +105,13 @@ option(AGENTTY_FULLY_STATIC   "Fully static link (Linux only, requires musl tool
 # v0.2.7 crasher, which the build-time guard then rejects).
 option(AGENTTY_STATIC_PIE      "Emit a static-PIE (ET_DYN) instead of ET_EXEC for the fully-static build — Termux/Android only" OFF)
 
-# jetalloc override — our own fast, modern allocator, vendored as a submodule
-# (jetalloc/). agentty churns std::string everywhere (RenderOp, SSE parsing,
-# JSON, the Element view tree) — the small-alloc pattern jetalloc's per-thread
-# slabs win on. Linking the static jetalloc archive routes global operator
-# new/delete through it (the archive bundles jet_override.cpp) and gives us
-# jet_trim() to return freed pages to the kernel at conversation boundaries.
-# No external package, no distro dependency: builds from source, compiles
-# ANYWHERE (rseq fast path on Linux/x86-64, portable C11 core elsewhere).
+# mimalloc override — Microsoft's production allocator, vendored as a submodule
+# (mimalloc/). agentty churns std::string everywhere (RenderOp, SSE parsing,
+# JSON, and the Element view tree), which benefits from mimalloc's sharded
+# free lists and eager page purging. The static library overrides malloc/free
+# and global C++ new/delete.
 # Default ON; turn OFF to build against the plain system allocator.
-option(AGENTTY_USE_JETALLOC   "Route operator new/delete through the vendored jetalloc allocator" ON)
+option(AGENTTY_USE_MIMALLOC   "Route malloc/free and operator new/delete through vendored mimalloc" ON)
 
 # CPU ISA baseline. Default avx2 (Haswell+/Zen1+, ~2013), which covers ~every
 # desktop/laptop in use. Drop to "avx" for Sandy/Ivy Bridge (2011–2012) or
@@ -300,12 +297,9 @@ option(AGENTTY_AUTO_PULL_SUBMODULES
        "Sync every in-tree submodule to its tracking branch on every build" ON)
 # Back-compat: the old maya-only switch still disables maya's pull when OFF.
 option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" ON)
-# jetalloc is the allocator you are most likely to hack on locally, so its
-# auto-pull is OPT-IN (default OFF): your working copy of jetalloc/ — edits,
-# staged changes, or local commits — ALWAYS compiles as-is. Flip this ON (or
-# just run `git submodule update --remote jetalloc` yourself) when you want to
-# fast-forward to the newest upstream allocator.
-option(AGENTTY_AUTO_PULL_JETALLOC "Fast-forward jetalloc/ to origin/master on every build" OFF)
+# mimalloc follows its upstream main branch. Auto-pull is opt-in so local
+# allocator experiments are never changed unless explicitly requested.
+option(AGENTTY_AUTO_PULL_MIMALLOC "Fast-forward mimalloc/ to origin/main on every build" OFF)
 
 function(agentty_pull_submodule_latest sub branch lib)
     if(NOT AGENTTY_AUTO_PULL_SUBMODULES)
@@ -505,58 +499,32 @@ if(NOT TARGET nghttp2::nghttp2 AND NOT AGENTTY_FULLY_STATIC)
         endif()
     endif()
 endif()
-# jetalloc — our own fast, modern allocator, vendored as a submodule
-# (jetalloc/). No external package, no find_package, no distro dependency:
-# it builds from source right here, so agentty carries its allocator with it
-# and compiles ANYWHERE. Linking the static `jetalloc` target routes ALL C++
-# operator new/delete through it (jet_override.cpp is bundled in the archive) —
-# no header include needed in any TU. On Linux/x86-64 it uses its rseq per-CPU
-# fast path; on every other platform it falls back to its portable C11 core
-# (per-thread heaps + slabs) — same drop-in, still fast, always available.
-#
-# Why we ship our own instead of glibc/mimalloc: on a long interactive session
-# agentty frees hundreds of MiB (compacted conversations, dropped view caches).
-# glibc malloc hoards those freed arenas until exit -> bloated RSS. jetalloc
-# returns empty pages to the kernel on demand via jet_trim() (see mem.hpp), and
-# the small-string / JSON / Element-tree churn that dominates agentty is
-# exactly jetalloc's fast path.
-set(AGENTTY_HAS_JETALLOC FALSE)
-if(AGENTTY_USE_JETALLOC AND MSVC)
-    # jetalloc is now header-only C++23 (no C11 <stdatomic.h> core), so it builds
-    # under MSVC in principle. It's kept OFF on MSVC only until the global
-    # operator new/delete override (src/jet_global.cpp) is validated on MSVC's
-    # runtime; jetalloc is a pure PERFORMANCE optimization (per-thread slabs +
-    # jet::trim), never a correctness dependency, so MSVC falls back to the
-    # system allocator. The Linux/macOS release binaries keep jetalloc.
-    message(STATUS "agentty: jetalloc DISABLED on MSVC "
-                   "(global-new override not yet MSVC-validated) - using system allocator.")
-elseif(AGENTTY_USE_JETALLOC)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jetalloc/CMakeLists.txt")
-        # Header-only INTERFACE target: no objects to build here. When embedded,
-        # jetalloc's own CMake auto-suppresses its tests/benches (JET_IS_TOPLEVEL
-        # is false), so we just pull in the include path + C++23 requirement.
-        add_subdirectory(jetalloc EXCLUDE_FROM_ALL)
-        set(AGENTTY_HAS_JETALLOC TRUE)
-        # By DEFAULT we do NOT touch jetalloc/ — whatever is checked out there
-        # (your local edits / commits) is exactly what compiles. Opt into
-        # tracking upstream with -DAGENTTY_AUTO_PULL_JETALLOC=ON, and even then
-        # the guard fast-forwards only a clean tree and never discards your
-        # local work.
-        if(AGENTTY_AUTO_PULL_JETALLOC)
-            agentty_pull_submodule_latest(jetalloc master jetalloc)
+# mimalloc — Microsoft's general-purpose allocator, built from the vendored
+# submodule as a static library. This is not header-only: its C sources must be
+# compiled and linked. MI_OVERRIDE supplies malloc/free and global C++
+# new/delete overrides from the library itself.
+set(AGENTTY_HAS_MIMALLOC FALSE)
+if(AGENTTY_USE_MIMALLOC)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mimalloc/CMakeLists.txt")
+        set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+        set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+        set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+        set(MI_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
+        set(MI_OVERRIDE     ON CACHE BOOL "" FORCE)
+        # Standalone builds target broad CPU compatibility; prevent mimalloc
+        # from selecting an armv8.1-a baseline on arm64.
+        if(AGENTTY_STANDALONE)
+            set(MI_NO_OPT_ARCH ON CACHE BOOL "" FORCE)
+        endif()
+        add_subdirectory(mimalloc EXCLUDE_FROM_ALL)
+        set(AGENTTY_HAS_MIMALLOC TRUE)
+        if(AGENTTY_AUTO_PULL_MIMALLOC)
+            agentty_pull_submodule_latest(mimalloc main mimalloc-static)
         endif()
     else()
-        # The submodule wasn't checked out. Don't fail — fall back to the
-        # system allocator — but make the miss loud at configure time, because
-        # it's the difference between prompt RSS release and glibc hoarding a
-        # long session's freed arenas until exit.
-        message(WARNING "agentty: AGENTTY_USE_JETALLOC=ON but jetalloc/ is empty "
+        message(WARNING "agentty: AGENTTY_USE_MIMALLOC=ON but mimalloc/ is empty "
                        "— building against the system allocator. Run "
-                       "`git submodule update --init --recursive` to vendor the "
-                       "allocator and reconfigure. On Linux/glibc the system "
-                       "allocator does NOT return freed memory to the kernel "
-                       "until process exit; long sessions will look bloated "
-                       "in RSS.")
+                       "`git submodule update --init --recursive` and reconfigure.")
     endif()
 endif()
 
@@ -606,7 +574,7 @@ elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
     set(AGENTTY_HAS_RAGCPP TRUE)
     # Opt-in upstream tracking, off by default so local rag-cpp edits always
-    # compile (mirrors the jetalloc policy).
+    # compile (mirrors the mimalloc policy).
     option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward rag-cpp/ to origin/master on every build" OFF)
     if(AGENTTY_AUTO_PULL_RAGCPP)
         agentty_pull_submodule_latest(rag-cpp master ragcpp)
@@ -978,12 +946,12 @@ function(agentty_objlib name)
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
     endif()
     agentty_apply_compile_flags(${name})
-    # mem.hpp includes <jetalloc.hpp> when the allocator is vendored in. OBJECT
-    # libs don't link, but they DO need the header on the include path and the
-    # AGENTTY_USE_JETALLOC macro to select the jet::trim() branch.
-    if(AGENTTY_HAS_JETALLOC)
-        target_link_libraries(${name} PRIVATE jetalloc)
-        target_compile_definitions(${name} PRIVATE AGENTTY_USE_JETALLOC=1)
+    # mem.hpp includes <mimalloc.h> when the allocator is enabled. OBJECT libs
+    # need the include path and compile definition even though final linking is
+    # performed by the executable target.
+    if(AGENTTY_HAS_MIMALLOC)
+        target_link_libraries(${name} PRIVATE mimalloc-static)
+        target_compile_definitions(${name} PRIVATE AGENTTY_USE_MIMALLOC=1)
     endif()
     # The RAG adapter (agentty_rag_obj) includes <rag/rag.hpp>; other objlibs
     # only need the header path resolvable for transitive includes. Linking
@@ -1085,18 +1053,12 @@ endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
     target_link_libraries(agentty PRIVATE mcp::tools)
 endif()
-if(AGENTTY_HAS_JETALLOC)
-    # jetalloc is header-only, so linking the INTERFACE target only supplies the
-    # include path + the C++23 requirement — it does NOT by itself override the
-    # global allocator. src/jet_global.cpp is the ONE translation unit that
-    # defines JET_GLOBAL_NEW, emitting strong operator new/delete definitions the
-    # linker prefers over libstdc++'s weak ones. Compiling it into the exe routes
-    # every heap allocation in the whole image (agentty + all vendored submodules)
-    # through jetalloc. No DLL, no dylib, no header include in any other TU.
-    target_sources(agentty PRIVATE src/jet_global.cpp)
-    target_link_libraries(agentty PRIVATE jetalloc)
-    target_compile_definitions(agentty PRIVATE AGENTTY_USE_JETALLOC=1)
-    message(STATUS "agentty: jetalloc allocator override enabled (header-only, JET_GLOBAL_NEW).")
+if(AGENTTY_HAS_MIMALLOC)
+    # The static target contains both C allocation and global C++ new/delete
+    # overrides when MI_OVERRIDE is enabled.
+    target_link_libraries(agentty PRIVATE mimalloc-static)
+    target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
+    message(STATUS "agentty: mimalloc allocator override enabled.")
 endif()
 if(AGENTTY_HAS_RAGCPP)
     # The RAG engine. The adapter TU (in agentty_rag_obj) is already in the
@@ -1126,14 +1088,11 @@ if(WIN32)
     endif()
     # CRITICAL (MinGW/UCRT64): fold libstdc++, libgcc and the winpthread
     # runtime INTO the exe. Windows has no ELF-style symbol interposition,
-    # so a dynamically-linked libstdc++-6.dll keeps its OWN operator new/
-    # delete bound to the system heap. With jetalloc overriding the exe's
-    # allocator, a std::string / std::filesystem::path buffer allocated
-    # inside the DLL and freed through the exe (or vice-versa) mismatches
-    # allocators and corrupts the heap (STATUS_HEAP_CORRUPTION 0xC0000374,
-    # the pipe-stdin smoke-test crash). Static libstdc++/libgcc collapse the
-    # process to a SINGLE allocator and also drop the runtime DLL
-    # dependency, so the exe is portable. GCC/Clang driver flags only.
+    # so a dynamically-linked libstdc++-6.dll can keep its own allocator
+    # bindings. With mimalloc overriding the exe, a std::string or filesystem
+    # buffer crossing that DLL boundary could otherwise mismatch allocators
+    # and corrupt the heap. Static runtimes collapse the process to one
+    # allocator and remove the runtime DLL dependency.
     if(NOT MSVC)
         target_link_options(agentty PRIVATE
             -static-libstdc++ -static-libgcc
@@ -1500,10 +1459,10 @@ if(AGENTTY_BUILD_TESTS)
         else()
             target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
         endif()
-        # runtime_obj (mem.cpp) calls jet::trim() under AGENTTY_USE_JETALLOC, so
-        # a test linking the shared object set must also link the allocator.
-        if(AGENTTY_HAS_JETALLOC)
-            target_link_libraries(${name} PRIVATE jetalloc)
+        # Shared runtime objects call mi_collect() when mimalloc is enabled.
+        if(AGENTTY_HAS_MIMALLOC)
+            target_link_libraries(${name} PRIVATE mimalloc-static)
+            target_compile_definitions(${name} PRIVATE AGENTTY_USE_MIMALLOC=1)
         endif()
         if(WIN32)
             target_link_libraries(${name} PRIVATE
