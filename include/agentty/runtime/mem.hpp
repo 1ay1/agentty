@@ -16,7 +16,7 @@
 // something that frees megabytes of conversation state.
 //
 //   • mimalloc     → mi_collect(true): forces collection and asks the OS to
-//                    reclaim unused pages. This is the default vendored path.
+//                    reclaim unused pages. This is the default fetched path.
 //   • glibc        → malloc_trim(0): fallback when mimalloc is disabled.
 //   • other        → no-op on system allocators without a portable trim API.
 //

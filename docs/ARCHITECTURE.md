@@ -302,10 +302,12 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
   libgcc when their `.a` archives are present; libc stays dynamic. A musl
   toolchain with `-DAGENTTY_FULLY_STATIC=ON` yields a 100% static binary.
 - `-DAGENTTY_USE_MIMALLOC=ON` (default) routes `malloc`/`free` and global
-  `new`/`delete` through vendored **mimalloc** (submodule `mimalloc/`).
-  mimalloc is compiled as a static C library with its C and C++ allocation
-  overrides enabled. `release_to_kernel()` calls `mi_collect(true)` at coarse
-  memory-release boundaries.
+  `new`/`delete` through **mimalloc**. CMake `FetchContent` follows upstream
+  `main` and checks for updates on every configure; no mimalloc source or
+  submodule is stored in this repository. mimalloc is compiled as a static C
+  library with its C and C++ allocation overrides enabled.
+  `release_to_kernel()` calls `mi_collect(true)` at coarse memory-release
+  boundaries.
 - **Gotcha:** `AGENTTY_AUTO_PULL_MAYA=ON` is the default and runs
   `git reset --hard origin/master` on the `maya/` submodule during build. Its
   only guard checks for *uncommitted* changes, so committed local maya work

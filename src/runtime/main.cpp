@@ -7,9 +7,8 @@
 //   4. install the Deps so update/cmd_factory can reach them
 //   5. hand AgenttyApp to maya's runtime
 
-// Global malloc/free and operator new/delete are routed through the vendored
-// mimalloc static library when -DAGENTTY_USE_MIMALLOC=ON (the default). If the
-// submodule is unavailable, configuration falls back to the system allocator.
+// Global malloc/free and operator new/delete are routed through the mimalloc
+// static library fetched by CMake when -DAGENTTY_USE_MIMALLOC=ON (the default).
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
