@@ -996,6 +996,18 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // timer covers the full card lifetime (args streaming +
                 // execution). Preserve it as we move into Running.
                 tc.status = ToolUse::Running{tc.started_at(), {}};
+
+                // Live tool overlay is derived from Running, but its view
+                // state is per-tool: a new tool always starts tail-following,
+                // at scroll origin, and re-shows even if the user Esc-hid the
+                // previous one.
+                if (m.ui.live_tool.active_id != tc.id.value) {
+                    m.ui.live_tool.active_id = tc.id.value;
+                    m.ui.live_tool.dismissed_id.clear();
+                    m.ui.live_tool.auto_tail = true;
+                    m.ui.live_tool_scroll.y = 0;
+                    m.ui.live_tool_scroll.max_y = 0;
+                }
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args));
 
                 // Tool wall-clock watchdog removed at user request.

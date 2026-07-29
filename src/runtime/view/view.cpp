@@ -39,6 +39,9 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
     if (checkpoint_picker_is_open(m.ui.checkpoints)) return checkpoint_picker(m);
     if (pick::is_open(m.ui.diff_review))   return diff_review(m);
     if (pick::is_open(m.ui.todo.open))     return todo_modal(m);
+    // Lowest priority: the live tool overlay auto-shows while a tool runs, but
+    // any explicitly-opened picker above wins so the user is never blocked.
+    if (live_tool_overlay_is_visible(m)) return live_tool_overlay(m);
     return std::nullopt;
 }
 

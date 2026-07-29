@@ -433,6 +433,13 @@ struct ToolViewerCopy {};
 // unbound (the viewer swallows all keys while open, so they simply no-op).
 struct ToolViewerStep { int delta; };
 
+// ── Live tool overlay ──────────────────────────────────────────────────────
+// Automatically visible while any ToolUse is Running. Escape only hides this
+// overlay for the current tool (a second Escape, once hidden, keeps its normal
+// CancelStream meaning). Move pauses/resumes tail-following as it scrolls.
+struct LiveToolOverlayDismiss {};
+struct LiveToolOverlayMove { int delta; };
+
 // ── Todo modal ───────────────────────────────────────────────────────────
 struct OpenTodoModal {};
 struct CloseTodoModal {};
@@ -621,7 +628,8 @@ using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
     PermissionApprove, PermissionReject, PermissionApproveAlways,
     OpenToolOutputViewer, CloseToolOutputViewer,
-    ToolViewerMove, ToolViewerSelect, ToolViewerCopy, ToolViewerStep>;
+    ToolViewerMove, ToolViewerSelect, ToolViewerCopy, ToolViewerStep,
+    LiveToolOverlayDismiss, LiveToolOverlayMove>;
 
 using ModelPickerMsg = std::variant<
     OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
