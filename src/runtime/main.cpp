@@ -49,6 +49,7 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
 #include "agentty/mcp/oauth.hpp"
 #include "agentty/rag/rag_adapter.hpp"
@@ -569,6 +570,13 @@ int main(int argc, char** argv) {
     // The spinner-tick subscription (gated on stream.active) supplies frames
     // while streaming; idle agentty costs zero CPU.
     maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0, .mode = maya::Mode::Inline});
+
+    // Join any in-flight TLS prewarm dial BEFORE the process tears down. On a
+    // fast exit (e.g. immediate pipe-stdin EOF under MSYS2/mintty) the detached
+    // dial would otherwise still be inside SSL_connect when the CRT/OpenSSL
+    // static state is freed, corrupting the heap (Windows 0xC0000374). Trips
+    // the dial's cancel token then joins; a no-op if no prewarm ran.
+    http::default_client().join_prewarm();
 
     // Drain the async persistence queue. The Quit reducer arm enqueues
     // a final save_thread() right before maya returns; this blocks
