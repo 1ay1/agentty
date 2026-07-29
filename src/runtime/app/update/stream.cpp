@@ -744,6 +744,20 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
 Step stream_update(Model m, msg::StreamMsg sm) {
     using maya::overload;
 
+    // Native transports are ordered and address the newest call implicitly.
+    // ACP updates are snapshots keyed by toolCallId and may interleave, so its
+    // events use this same reducer through an explicit lookup.
+    auto find_streaming_tool = [&](const ToolCallId& id) -> ToolUse* {
+        if (m.d.current.messages.empty()
+            || m.d.current.messages.back().role != Role::Assistant)
+            return nullptr;
+        auto& calls = m.d.current.messages.back().tool_calls;
+        if (calls.empty()) return nullptr;
+        if (id.empty()) return &calls.back();
+        auto it = std::ranges::find(calls, id, &ToolUse::id);
+        return it == calls.end() ? nullptr : &*it;
+    };
+
     return std::visit(overload{
         [&](StreamStarted) -> Step {
             auto now = std::chrono::steady_clock::now();
@@ -901,6 +915,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // Esc.  Stream-level errors still surface via the
                 // StreamError handler, which clears the in-flight tools.
             }
+            resync_live_tool_viewer(m);
             return done(std::move(m));
         },
         [&](StreamToolUseDelta& e) -> Step {
@@ -948,15 +963,44 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                         sync_todo_state_from_args(m, tc.args);
                 }
             }
+            resync_live_tool_viewer(m);
             return done(std::move(m));
         },
-        [&](StreamToolUseEnd) -> Step {
+        [&](StreamToolUseSnapshot& e) -> Step {
+            auto now = std::chrono::steady_clock::now();
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = now;
+                if (!e.json.empty()) {
+                    if (a->first_delta_at.time_since_epoch().count() == 0) {
+                        a->first_delta_at = now;
+                        a->transient_retries = 0;
+                    }
+                    a->live_delta_bytes += e.json.size();
+                }
+            }
+            if (auto* tc = find_streaming_tool(e.id)) {
+                tc->args_streaming.assign(e.json, 0,
+                    std::min(e.json.size(), kMaxStreamingBytes));
+                // Snapshot replacement invalidates every append-only preview
+                // cursor. Rebuild from the new current value, including
+                // rewrites and shrinkage (not only prefix growth).
+                tc->stream_sniff_offset = 0;
+                tc->stream_sniff_size = 0;
+                tc->stream_decoded_value.clear();
+                tc->stream_decode_through = 0;
+                tc->stream_parse_through = 0;
+                update_stream_preview(*tc);
+                tc->last_preview_at = now;
+                if (tc->name == "todo") sync_todo_state_from_args(m, tc->args);
+            }
+            resync_live_tool_viewer(m);
+            return done(std::move(m));
+        },
+        [&](StreamToolUseEnd& e) -> Step {
             if (auto* a = active_ctx(m.s.phase))
                 a->last_event_at = std::chrono::steady_clock::now();
-            if (!m.d.current.messages.empty()
-                && m.d.current.messages.back().role == Role::Assistant
-                && !m.d.current.messages.back().tool_calls.empty()) {
-                auto& tc = m.d.current.messages.back().tool_calls.back();
+            if (auto* tcp = find_streaming_tool(e.id)) {
+                auto& tc = *tcp;
                 // Empty args_streaming is legitimate for argumentless tools;
                 // args was seeded to {} at StreamToolUseStart.
                 if (!tc.args_streaming.empty()) {
@@ -1006,6 +1050,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // Required-field check is deferred to finalize_turn so the
                 // turn-level retry logic owns the single decision point.
             }
+            resync_live_tool_viewer(m);
             return done(std::move(m));
         },
         [&](StreamThinkingDelta& e) -> Step {

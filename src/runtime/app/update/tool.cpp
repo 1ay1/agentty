@@ -101,30 +101,31 @@ void arm_reconcile_cooldown(Model& m) {
     std::vector<tool_viewer::Entry> out;
     std::size_t budget = tool_viewer::kSnapshotBudget;
 
-    // Row 0 is the LIVE tool, if one is running right now: the tool
-    // currently executing, tailing its stdout+stderr as it streams. This
-    // replaces the old separate auto-popping overlay — the live view is
-    // just the top row of the Ctrl+O picker, so nothing flickers for fast
-    // tools and the user opts in by opening the picker. Newest running
-    // tool wins (a fresh Bash after an in-flight Read).
+    // Row 0 is the LIVE tool, if one is active right now: this includes
+    // argument streaming / permission (Pending or Approved) as well as local
+    // execution (Running). Restricting this to Running made Ctrl+O say
+    // "nothing to inspect yet" during the entire model→tool-input phase —
+    // exactly when edit/write previews are most useful.
     for (auto mit = m.d.current.messages.rbegin();
          mit != m.d.current.messages.rend(); ++mit) {
         bool found = false;
         for (auto tit = mit->tool_calls.rbegin();
              tit != mit->tool_calls.rend(); ++tit) {
             const auto* run = std::get_if<ToolUse::Running>(&tit->status);
-            if (!run) continue;
+            if (!run && !tit->is_pending() && !tit->is_approved()) continue;
             tool_viewer::Entry e;
             e.is_live  = true;
             e.name     = tit->name.value;
             e.title    = ui::tool_display_name(tit->name.value);
             e.detail   = ui::tool_timeline_detail(*tit);
-            e.output   = run->progress_text;   // growing tail
+            e.output   = run ? run->progress_text : std::string{};
             e.call     = *tit;
             e.failed   = false;
             char buf[32];
-            std::snprintf(buf, sizeof buf, "running \xc2\xb7 %.1fs",
-                          ui::tool_elapsed(*tit));
+            const char* phase = run ? "running"
+                : (tit->is_approved() ? "approved" : "streaming input");
+            std::snprintf(buf, sizeof buf, "%s \xc2\xb7 %.1fs",
+                          phase, ui::tool_elapsed(*tit));
             e.trailing = buf;
             if (!e.output.empty())
                 e.trailing += (e.output.size() >= 1024)
@@ -232,15 +233,11 @@ void arm_reconcile_cooldown(Model& m) {
     return std::nullopt;
 }
 
-// Keep the Ctrl+O viewer's LIVE row (row 0) streaming while it's open: rebuild
-// the entry list from the current transcript so the running tool's growing
-// output tails in place and the row settles into a normal finished entry the
-// instant the tool completes. Preserves the user's cursor/stage as much as
-// possible — index is clamped, viewing stage kept. Cheap: bounded by the same
-// 4 MiB / 50-entry budget as the initial collect. No-op when the viewer is
-// closed so we pay nothing on the hot streaming path unless the user is
-// actually watching.
-inline void resync_live_viewer(Model& m) {
+} // namespace
+
+// Keep the Ctrl+O snapshot synchronized from both stream.cpp (tool-input
+// deltas/snapshots) and this TU (execution progress/results).
+void resync_live_tool_viewer(Model& m) {
     auto* o = tool_viewer_opened(m.ui.tool_viewer);
     if (!o) return;
     // Anchor: remember which entry the user is on by identity, not index —
@@ -266,8 +263,6 @@ inline void resync_live_viewer(Model& m) {
     o->index = std::clamp(o->index, 0,
                           std::max(0, static_cast<int>(o->entries.size()) - 1));
 }
-
-} // namespace
 
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result) {
@@ -414,7 +409,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             });
             // If the user is watching the Ctrl+O viewer, keep its Live row
             // (row 0) tailing this fresh output in place.
-            resync_live_viewer(m);
+            resync_live_tool_viewer(m);
             return done(std::move(m));
         },
 
@@ -466,7 +461,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             apply_tool_output(m, e.id, std::move(e.result));
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
-            resync_live_viewer(m);
+            resync_live_tool_viewer(m);
             // No mid-run freeze or trim here. The single freeze site is
             // finalize_turn (the agent_session MessageStop analog) — the
             // whole agent turn is wrapped into one Turn Element and

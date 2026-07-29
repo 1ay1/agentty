@@ -52,13 +52,19 @@ Selection parse_selection(std::string_view spec) {
         s.kind = Kind::Anthropic;
         return s;
     }
-    // External ACP agent: a registry row with Kind::ExternalAcp, OR any spec id
-    // that names a launchable agent (built-in default / config entry) even
-    // without a registry row. The runtime spawns/drives the subprocess.
+    // External ACP agent: only an explicitly configured launchable id routes
+    // here. There are no privileged built-ins.
     if ((p && p->kind() == Kind::ExternalAcp)
         || (!p && !spec.empty() && is_acp_agent_id(spec))) {
         s.kind         = Kind::ExternalAcp;
         s.acp_agent_id = std::string{spec};
+        return s;
+    }
+    // A removed/stale ACP selection must not fall through to Endpoint::from_spec
+    // and be interpreted as an OpenAI hostname. Fall back to the native default
+    // until the user explicitly configures that agent again.
+    if (!p && spec.ends_with("-acp")) {
+        s.kind = Kind::Anthropic;
         return s;
     }
     s.kind = Kind::OpenAI;

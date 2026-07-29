@@ -201,6 +201,10 @@ maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
 // (declared at module scope above — `update_stream_preview`, `salvage_args`,
 // `finalize_turn`. The stream_update reducer below uses them.)
 
+// Rebuild the open Ctrl+O snapshot from current live tool state. Called by
+// both argument-stream and execution reducers; no-op while the viewer is closed.
+void resync_live_tool_viewer(Model& m);
+
 // ── update/tool.cpp helpers ──────────────────────────────────────────────
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result);

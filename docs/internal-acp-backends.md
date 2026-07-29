@@ -276,23 +276,21 @@ the same one dispatch seam (`main.cpp` `stream_fn`) as the native backends —
 no `Kind` fan-out. The pieces:
 
 - **Registry** (`provider/registry.hpp`): `Kind::ExternalAcp` — but NO
-  hardcoded per-agent rows. ACP is generic, like Zed's `agent_servers`: the
-  provider picker lists agents from `enumerate_acp_agents()` (one built-in
-  reference agent + every `acp-agents.json` entry) as dynamic virtual rows.
-  `AuthStyle::None` (the agent handles its own auth), so selecting one never
-  prompts for a key. There is deliberately no `codex-acp` row — Codex is a
-  first-class NATIVE provider here, so a second "Codex (ACP)" row would be
-  redundant; drive codex-acp by naming it in `acp-agents.json`.
+  hardcoded per-agent rows or privileged built-ins. ACP is generic, like Zed's
+  `agent_servers`: the provider picker lists only agents explicitly named in
+  `acp-agents.json`, as dynamic virtual rows. `AuthStyle::None` (the agent
+  handles its own auth), so selecting one never prompts for a key. Native
+  Claude and Codex remain first-class providers; external ACP agents are
+  strictly opt-in.
 - **Adapter** (`provider/acp_provider_adapter.cpp`): presents
   `ExternalAcpBackend` as a plain `stream(Request, EventSink)` Provider —
   spawns + caches the subprocess per agent id, translates each round's
   `session/update` into the same `Stream*` Msgs the native providers emit,
   settles from the `TurnResult`. Cached processes are torn down at exit via
   `release_acp_agents()` (bounded even for a wedged agent).
-- **Launch config** (`provider/acp_agents.{hpp,cpp}`): resolves a spec id to
-  its argv. Built-in defaults mean a user with the binary on `$PATH` selects
-  it with ZERO config. To override the argv / pin a path / add another agent,
-  drop an `acp-agents.json` (resolution mirrors `mcp.json`):
+- **Launch config** (`provider/acp_agents.{hpp,cpp}`): resolves an explicitly
+  configured id to its argv. To opt into an external agent, add it to
+  `acp-agents.json` (resolution mirrors `mcp.json`):
 
   1. `$AGENTTY_ACP_AGENTS` — explicit path (trusted).
   2. `~/.agentty/acp-agents.json` — user-global (trusted).
@@ -314,8 +312,9 @@ no `Kind` fan-out. The pieces:
   }
   ```
 
-  Every config id (and the one built-in reference agent) is selectable
-  straight from the provider picker, or via a raw `--provider <id>` spec.
+  Every configured id is selectable straight from the provider picker, or via
+  a raw `--provider <id>` spec. With no config, no external ACP row is shown
+  and no external agent subprocess can be selected implicitly.
   Tests: `acp_agents_test` (config + enumerate + selection routing) and
   `external_acp_backend_test` (the backend itself + hardened lifecycle).
 ```
