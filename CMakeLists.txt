@@ -1123,6 +1123,28 @@ if(WIN32)
     if(AGENTTY_STANDALONE)
         target_link_libraries(agentty PRIVATE bcrypt secur32 advapi32 user32)
     endif()
+    # CRITICAL (MinGW/UCRT64): fold libstdc++, libgcc and the winpthread
+    # runtime INTO the exe. Windows has no ELF-style symbol interposition,
+    # so a dynamically-linked libstdc++-6.dll keeps its OWN operator new/
+    # delete bound to the system heap. With jetalloc overriding the exe's
+    # allocator, a std::string / std::filesystem::path buffer allocated
+    # inside the DLL and freed through the exe (or vice-versa) mismatches
+    # allocators and corrupts the heap (STATUS_HEAP_CORRUPTION 0xC0000374,
+    # the pipe-stdin smoke-test crash). Static libstdc++/libgcc collapse the
+    # process to a SINGLE allocator and also drop the runtime DLL
+    # dependency, so the exe is portable. GCC/Clang driver flags only.
+    if(NOT MSVC)
+        target_link_options(agentty PRIVATE
+            -static-libstdc++ -static-libgcc
+            -Wl,-Bstatic,--whole-archive -lwinpthread
+            -Wl,--no-whole-archive -Wl,-Bdynamic
+            # MinGW's static libstdc++.a ships cow-stdexcept.o defining the
+            # legacy-ABI logic_error/runtime_error copy ctors, which collide
+            # with the inline SSO-ABI copies the TUs already emitted. The
+            # duplicates are ABI-compatible; let the linker keep the first.
+            # This is the documented -static-libstdc++ workaround on MinGW.
+            -Wl,--allow-multiple-definition)
+    endif()
 endif()
 if(APPLE)
     # macOS root cert loader uses the Security and CoreFoundation frameworks.

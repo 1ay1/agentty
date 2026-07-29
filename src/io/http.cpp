@@ -759,6 +759,15 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
             std::string{"getaddrinfo: "} + gai_strerror(gai)));
     }
 
+    // getaddrinfo() is a blocking resolve with no cancellation hook — if a
+    // shutdown tripped the token while we were inside it (e.g. a prewarm dial
+    // racing a fast pipe-EOF exit), abort now rather than push on into the
+    // connect loop. Keeps join_prewarm() from waiting on a dial nobody wants.
+    if (cancel && cancel->is_cancelled()) {
+        ::freeaddrinfo(res);
+        return std::unexpected(HttpError::cancelled("cancelled after resolve"));
+    }
+
     auto deadline = clock_t_::now() + tos.connect;
 
     // After a successful TCP connect, this finishes the dial: SOCKS5
@@ -2109,10 +2118,15 @@ struct Client::Impl {
 
     // Outstanding prewarm() dials. Tracked (not detached) so join_prewarm()
     // can cancel + join them before CRT/OpenSSL teardown, closing the
-    // exit-race UAF that manifests as heap corruption on a fast exit.
-    std::mutex                     prewarm_mu;
-    std::vector<std::thread>       prewarm_threads;
-    std::vector<CancelTokenPtr>    prewarm_cancels;
+    // exit-race UAF that manifests as heap corruption on a fast exit. Each
+    // thread carries a `done` flag it sets right before returning, so
+    // join_prewarm() can wait with a deadline (std::thread has no timed join)
+    // and detach a dial genuinely wedged in a blocking getaddrinfo() instead
+    // of hanging teardown.
+    std::mutex                              prewarm_mu;
+    std::vector<std::thread>                prewarm_threads;
+    std::vector<CancelTokenPtr>             prewarm_cancels;
+    std::vector<std::shared_ptr<std::atomic<bool>>> prewarm_done;
 };
 
 Client::Client() : Client(Config{}) {}
@@ -2323,9 +2337,17 @@ void Client::prewarm(std::string host, uint16_t port,
     // join_prewarm() trips the token (which shuts the dialing socket to wake
     // poll()) and joins before teardown. Swallows errors — opportunistic.
     auto cancel = std::make_shared<CancelToken>();
-    std::thread th([this, cancel,
+    auto done   = std::make_shared<std::atomic<bool>>(false);
+    std::thread th([this, cancel, done,
                     host = std::move(host), port,
                     dial_host = std::move(dial_host), dial_port]() mutable {
+        // Set the done flag no matter how this thread exits (normal return,
+        // cancelled, or dial error) so join_prewarm()'s bounded wait can tell
+        // a settled dial from one still wedged in a blocking syscall.
+        struct DoneGuard {
+            std::shared_ptr<std::atomic<bool>> f;
+            ~DoneGuard() { f->store(true, std::memory_order_release); }
+        } done_guard{done};
 #if !defined(_WIN32)
         // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
         // main thread's handlers instead of being delivered here mid
@@ -2339,27 +2361,71 @@ void Client::prewarm(std::string host, uint16_t port,
         if (cancel->is_cancelled()) return;
         Endpoint ep{ std::move(host), port,
                      std::move(dial_host), dial_port };
-        auto r = dial_new(ep, Timeouts{}, cancel);
+        // Short, bounded connect budget. A prewarm is pure latency-hiding —
+        // it must never wedge the process at exit. With the default 10 s
+        // connect timeout a dial stuck in TCP/TLS would keep join_prewarm()
+        // blocked for up to 10 s on a fast pipe-EOF exit; cap it hard so the
+        // shutdown join returns promptly (and the dial's poll loops re-check
+        // the cancel token every 200 ms within that window).
+        Timeouts warm_tos{};
+        warm_tos.connect = std::chrono::milliseconds{4'000};
+        auto r = dial_new(ep, warm_tos, cancel);
         if (r && !cancel->is_cancelled()) impl_->pool.release(std::move(*r));
     });
     std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
     impl_->prewarm_cancels.push_back(std::move(cancel));
+    impl_->prewarm_done.push_back(std::move(done));
     impl_->prewarm_threads.push_back(std::move(th));
 }
 
 void Client::join_prewarm() noexcept {
-    std::vector<std::thread>    threads;
-    std::vector<CancelTokenPtr> cancels;
+    std::vector<std::thread>                        threads;
+    std::vector<CancelTokenPtr>                     cancels;
+    std::vector<std::shared_ptr<std::atomic<bool>>> dones;
     {
         std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
         threads.swap(impl_->prewarm_threads);
         cancels.swap(impl_->prewarm_cancels);
+        dones.swap(impl_->prewarm_done);
     }
-    // Trip every token first so the dials abort promptly, then join.
+    // Trip every token first so the dials abort at their next poll slice.
     for (auto& c : cancels)
         if (c) c->cancel();
-    for (auto& t : threads)
-        if (t.joinable()) { try { t.join(); } catch (...) {} }
+
+    // Bounded wait, then join. A cancelled dial's poll loops re-check the
+    // token every 200 ms and the connect budget is capped at 4 s, so it
+    // normally sets its `done` flag within a fraction of a second. We wait up
+    // to a bounded budget for that flag, then join (fast, the thread has
+    // finished). The one dial that can miss the window is one wedged inside a
+    // blocking getaddrinfo() (a hostile/offline resolver can stall for
+    // seconds) — for that we DETACH rather than let it block process
+    // teardown. Detach is safe here *because default_client() is a
+    // deliberately-leaked singleton*: its pool / OpenSSL statics are never
+    // destroyed, so a still-running dial can't race a destructor, and the OS
+    // reclaims the thread at process exit.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds{2'000};
+    for (std::size_t i = 0; i < threads.size(); ++i) {
+        auto& t = threads[i];
+        if (!t.joinable()) continue;
+        const bool have_flag = i < dones.size() && dones[i];
+        bool settled = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (have_flag && dones[i]->load(std::memory_order_acquire)) {
+                settled = true;
+                break;
+            }
+            if (!have_flag) break;   // no flag to observe — fall through to join
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        if (settled || !have_flag) {
+            try { t.join(); } catch (...) {}
+        } else {
+            // Genuinely wedged (blocking resolve). Leak the thread rather than
+            // hang or race teardown; see the safety note above.
+            try { t.detach(); } catch (...) {}
+        }
+    }
 }
 
 Client& default_client() {
