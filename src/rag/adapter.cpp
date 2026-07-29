@@ -27,8 +27,10 @@
 #if AGENTTY_HAS_RAGCPP
 
 #include <atomic>
+#include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -37,6 +39,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <rag/rag.hpp>
@@ -94,6 +97,164 @@ std::pair<std::string, std::string> split_uri(const std::string& uri) {
     return {uri.substr(0, pos), uri.substr(pos + 3)};
 }
 
+// ── FeedbackStore ─────────────────────────────────────────────────────────
+//   The learning loop, made real. A single process-wide store backs BOTH the
+//   write side (feedback::note_surfaced / note_file_opened free functions) and
+//   the read side (Retriever::Impl::feedback_boost). It persists an append-only
+//   TSV of `use`/`win` events to <cwd>/.agentty/rag_feedback.tsv and folds the
+//   Beta-smoothed per-path win-rate back into ranking as a BOUNDED nudge.
+//
+//   Signal semantics (matches docs/website/retrieval.md):
+//     use — search_docs surfaced this path (denominator).
+//     win — the agent then `read` a path that was RECENTLY surfaced
+//           (numerator). A read of a never-surfaced file is NOT a win: it
+//           carries no relevance judgment about retrieval.
+//
+//   The nudge is a multiplicative factor in [1-kMax, 1+kMax] centred on 1.0,
+//   scaled by how far the smoothed win-rate sits from the neutral prior and by
+//   a confidence term that grows with sample count. Paths with no history are
+//   untouched, so the loop can only help once it has evidence.
+class FeedbackStore {
+public:
+    static FeedbackStore& instance() {
+        static FeedbackStore s;
+        return s;
+    }
+
+    // Ranking nudge for `path`, in roughly [0.85, 1.15]. 1.0 (neutral) when
+    // learning is off, the path is unseen, or it has too little evidence.
+    float boost(const std::string& path) {
+        std::lock_guard<std::mutex> lk(mu_);
+        ensure_loaded_();
+        auto it = counts_.find(path);
+        if (it == counts_.end()) return 1.0f;
+        const double uses = it->second.uses;
+        const double wins = it->second.wins;
+        if (uses <= 0.0) return 1.0f;
+        // Beta(1,1) smoothing: (wins+1)/(uses+2) — a bounded win-rate that
+        // starts at the 0.5 prior and moves only as evidence accrues.
+        const double rate = (wins + 1.0) / (uses + 2.0);
+        // Confidence in the estimate grows with sample count (saturating).
+        const double conf = uses / (uses + kPriorN);
+        const double delta = (rate - 0.5) * 2.0;         // → [-1, 1]
+        double factor = 1.0 + kMax * delta * conf;
+        if (factor < 1.0 - kMax) factor = 1.0 - kMax;
+        if (factor > 1.0 + kMax) factor = 1.0 + kMax;
+        return static_cast<float>(factor);
+    }
+
+    // Record that these paths were surfaced by a retrieval (each a "use"), and
+    // remember them as recently-surfaced so a following read can be a win.
+    void note_surfaced(const std::vector<std::string>& paths) {
+        std::lock_guard<std::mutex> lk(mu_);
+        ensure_loaded_();
+        std::vector<std::string> to_write;
+        for (const auto& p : paths) {
+            if (p.empty()) continue;
+            counts_[p].uses += 1.0;
+            recent_.insert(p);
+            to_write.push_back(p);
+        }
+        append_("use", to_write);
+    }
+
+    // Record that `path` was opened. It is a WIN only if it (or its basename)
+    // was recently surfaced — otherwise the read tells us nothing about
+    // retrieval quality and is ignored (no denominator inflation either).
+    void note_opened(const std::string& path) {
+        if (path.empty()) return;
+        std::lock_guard<std::mutex> lk(mu_);
+        ensure_loaded_();
+        std::string matched = match_recent_(path);
+        if (matched.empty()) return;               // not surfaced ⇒ not a signal
+        counts_[matched].wins += 1.0;
+        append_("win", {matched});
+    }
+
+private:
+    struct Tally { double uses = 0.0; double wins = 0.0; };
+
+    static constexpr double kMax    = 0.15;   // max ±15% ranking nudge
+    static constexpr double kPriorN = 4.0;    // uses needed for ~half confidence
+
+    std::mutex mu_;
+    bool loaded_ = false;
+    std::string loaded_for_;                   // cwd the TSV was loaded for
+    std::unordered_map<std::string, Tally> counts_;
+    std::unordered_set<std::string> recent_;   // surfaced this session
+
+    fs::path tsv_path_() const {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        if (ec) return {};
+        return cwd / ".agentty" / "rag_feedback.tsv";
+    }
+
+    // Load (once per cwd) the persisted counts so nudges survive restarts.
+    void ensure_loaded_() {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        std::string cwds = ec ? std::string{} : cwd.string();
+        if (loaded_ && loaded_for_ == cwds) return;
+        counts_.clear();
+        loaded_ = true;
+        loaded_for_ = cwds;
+        auto p = tsv_path_();
+        if (p.empty()) return;
+        std::ifstream f(p);
+        if (!f) return;
+        std::string line;
+        while (std::getline(f, line)) {
+            // <epoch>\t<use|win>\t<path>
+            auto t1 = line.find('\t');
+            if (t1 == std::string::npos) continue;
+            auto t2 = line.find('\t', t1 + 1);
+            if (t2 == std::string::npos) continue;
+            std::string kind = line.substr(t1 + 1, t2 - t1 - 1);
+            std::string path = line.substr(t2 + 1);
+            if (path.empty()) continue;
+            if (kind == "use") counts_[path].uses += 1.0;
+            else if (kind == "win") counts_[path].wins += 1.0;
+        }
+    }
+
+    void append_(const char* kind, const std::vector<std::string>& paths) {
+        if (paths.empty()) return;
+        auto p = tsv_path_();
+        if (p.empty()) return;
+        std::error_code ec;
+        fs::create_directories(p.parent_path(), ec);
+        std::ofstream f(p, std::ios::app);
+        if (!f) return;
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                       std::chrono::system_clock::now().time_since_epoch()).count();
+        for (const auto& path : paths)
+            f << now << '\t' << kind << '\t' << path << '\n';
+    }
+
+    // A read matches a surfaced passage if the exact path is recent, or if a
+    // recent path ends with the same basename (docs://foo/bar.md surfaced,
+    // agent reads foo/bar.md or an absolute .../foo/bar.md).
+    std::string match_recent_(const std::string& opened) {
+        if (auto it = recent_.find(opened); it != recent_.end()) return opened;
+        auto slash = opened.find_last_of("/\\");
+        std::string base = slash == std::string::npos ? opened
+                                                       : opened.substr(slash + 1);
+        if (base.empty()) return {};
+        for (const auto& r : recent_) {
+            if (r.size() >= base.size() &&
+                r.compare(r.size() - base.size(), base.size(), base) == 0) {
+                // Guard against a bare-basename false match on a longer name.
+                if (r.size() == base.size() ||
+                    r[r.size() - base.size() - 1] == '/' ||
+                    r[r.size() - base.size() - 1] == '\\')
+                    return r;
+            }
+        }
+        return {};
+    }
+};
+
 } // namespace
 
 Config Config::from_env() {
@@ -129,6 +290,7 @@ Config Config::from_env() {
     c.hyde        = truthy_default_off("AGENTTY_RAG_HYDE");
     if (const char* g = std::getenv("AGENTTY_RAG_GEN_MODEL"); g && g[0]) c.gen_model = g;
     c.persist     = truthy_default_on("AGENTTY_RAG_PERSIST");
+    c.learn       = truthy_default_on("AGENTTY_RAG_LEARN");
     c.trace       = truthy_default_off("AGENTTY_RAG_TRACE");
     c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
     c.bm25_weight  = env_float("AGENTTY_RAG_BM25_WEIGHT", 1.0f);
@@ -537,7 +699,35 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         }
         if (hits.size() > want) hits.resize(want);
 
+        // 5. Learning-loop read side: nudge each hit by its historical
+        //    Beta-smoothed win-rate (bounded ±15%), then re-sort so a passage
+        //    that has repeatedly proven useful in THIS workspace edges ahead of
+        //    a near-tied one that hasn't. Neutral (×1.0) for unseen paths, so
+        //    this can only refine — never invent — ranking. Off with
+        //    AGENTTY_RAG_LEARN=0.
+        bool learned = false;
+        if (impl_->cfg.learn) {
+            auto& fb = FeedbackStore::instance();
+            for (auto& h : hits) {
+                auto [src, path] = split_uri(h.uri);
+                (void)src;
+                float b = fb.boost(path);
+                if (b != 1.0f) {
+                    h.score.value *= b;
+                    learned = true;
+                }
+            }
+            if (learned)
+                std::stable_sort(hits.begin(), hits.end(),
+                                 [](const ::rag::SearchResult& a,
+                                    const ::rag::SearchResult& b) {
+                                     return a.score.value > b.score.value;
+                                 });
+        }
+
         double top = 0.0;
+        std::vector<std::string> surfaced;
+        surfaced.reserve(hits.size());
         for (const auto& r : hits) {
             auto [src, path] = split_uri(r.uri);
             Passage p;
@@ -551,8 +741,13 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
             p.score      = s;
             p.text       = r.context.empty() ? r.text : (r.context + "\n" + r.text);
             top = std::max(top, p.score);
+            surfaced.push_back(path);
             out.passages.push_back(std::move(p));
         }
+        // Learning-loop write side (denominator): record what we surfaced so a
+        // later `read` of one of these can be scored as a win.
+        if (impl_->cfg.learn && !surfaced.empty())
+            FeedbackStore::instance().note_surfaced(surfaced);
         // Prefer CRAG's calibrated confidence when available; else top score.
         out.confidence = crag_conf >= 0.0 ? crag_conf : top;
 
@@ -561,6 +756,7 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         m += ", reranked";
         if (impl_->cfg.mmr)    m += "+mmr";
         if (impl_->cfg.stitch) m += "+stitch";
+        if (learned)           m += "+learned";
         if (!root.empty() && !skip_docs) m += ", docs=" + root.string();
         char buf[48];
         std::snprintf(buf, sizeof buf, ", confidence %.2f", out.confidence);
@@ -673,33 +869,96 @@ void Retriever::warm_async() {
     }).detach();
 }
 
-// ── Learning loop (write side) ───────────────────────────────────
+// ── Learning loop (write side) ─────────────
+// Both halves delegate to the process-wide FeedbackStore, which owns the TSV
+// and the read-side nudge. Best-effort; never throws.
 namespace feedback {
+void note_surfaced(const std::vector<std::string>& paths) {
+    if (paths.empty()) return;
+    try {
+        if (truthy_default_on("AGENTTY_RAG_LEARN"))
+            FeedbackStore::instance().note_surfaced(paths);
+    } catch (...) { /* best-effort */ }
+}
 void note_file_opened(const std::string& path) {
     // A `read` of a file a recent passage pointed at is an IMPLICIT relevance
-    // judgment — the passage pointed somewhere worth acting on. Persist a
-    // durable per-path win count to .agentty/rag_feedback.tsv so a future
-    // ranking rev can bias toward files that keep proving useful (the
-    // Beta-smoothed win-rate the docs describe). Best-effort, never throws.
+    // judgment. FeedbackStore credits a "win" ONLY if the path was recently
+    // surfaced by retrieval — a read of a never-surfaced file is not a signal
+    // and is dropped, so the win-rate stays attributable.
     if (path.empty()) return;
     try {
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        if (ec) return;
-        auto dir = cwd / ".agentty";
-        fs::create_directories(dir, ec);
-        auto fp = dir / "rag_feedback.tsv";
-        std::ofstream f(fp, std::ios::app);
-        if (!f) return;
-        auto now = std::chrono::duration_cast<std::chrono::seconds>(
-                       std::chrono::system_clock::now().time_since_epoch()).count();
-        f << now << '\t' << "win" << '\t' << path << '\n';
+        if (truthy_default_on("AGENTTY_RAG_LEARN"))
+            FeedbackStore::instance().note_opened(path);
     } catch (...) { /* best-effort */ }
 }
 } // namespace feedback
 
 // ── CLI: `agentty rag-bench <root>` ────────────────────────────────────
+// A pipeline you can't measure is a pile of vibes. rag-bench evaluates the
+// retrieval funnel ON YOUR OWN CORPUS, offline, in milliseconds — no LLM, no
+// network, fully deterministic.
+//
+// Method (known-item retrieval):
+//   1. Index the corpus (BM25 + local hash-dense fallback if Ollama is down).
+//   2. Sample chunks; for each, synthesize a query from its most
+//      DISCRIMINATIVE terms (top BM25 term contributions, via Corpus::explain).
+//      The chunk the query was minted from is that query's known GOLD answer.
+//   3. Run every query through the retrieval LADDER — one stage added per rung:
+//        bm25-only → hybrid+prf → +feature-rerank → +mmr
+//      and report recall@k, MRR, and nDCG@10 per rung. Because each rung adds
+//      exactly one stage, a metric that DROPS at a rung points at the stage
+//      worth tuning — and every AGENTTY_RAG_* knob can be set against numbers.
 namespace bench {
+namespace {
+
+struct Query {
+    std::string text;
+    std::uint32_t gold;   // ChunkId value of the source chunk
+};
+
+struct Metrics {
+    double recall = 0.0, mrr = 0.0, ndcg = 0.0;
+    std::size_t n = 0;
+    void add(int rank /* 1-based, 0 = miss */, std::size_t k) {
+        ++n;
+        if (rank >= 1 && static_cast<std::size_t>(rank) <= k) {
+            recall += 1.0;
+            mrr    += 1.0 / rank;
+        }
+        // Single relevant doc ⇒ IDCG = 1; DCG = 1/log2(rank+1) when in top-10.
+        if (rank >= 1 && rank <= 10)
+            ndcg += 1.0 / std::log2(static_cast<double>(rank) + 1.0);
+    }
+    void finalize() { if (n) { recall /= n; mrr /= n; ndcg /= n; } }
+};
+
+// 1-based rank of the gold chunk in a hit list, or 0 if absent.
+int rank_of(const std::vector<::rag::Hit>& hits, std::uint32_t gold, std::size_t k) {
+    for (std::size_t i = 0; i < hits.size() && i < k; ++i)
+        if (hits[i].chunk.value == gold) return static_cast<int>(i) + 1;
+    return 0;
+}
+
+// Split a chunk's text into distinct alphanumeric terms (deterministic order).
+std::vector<std::string> distinct_terms(const std::string& text) {
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    std::string cur;
+    auto flush = [&] {
+        if (cur.size() >= 3 && seen.insert(cur).second) out.push_back(cur);
+        cur.clear();
+    };
+    for (char c : text) {
+        if (std::isalnum(static_cast<unsigned char>(c)))
+            cur.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        else flush();
+    }
+    flush();
+    return out;
+}
+
+} // namespace
+
 int run(const std::string& root) {
     fs::path r = resolve_docs_root(root);
     if (r.empty()) {
@@ -712,7 +971,8 @@ int run(const std::string& root) {
         ::rag::plugin::Json spec = {
             {"type", "ollama"}, {"model", cfg.embed_model},
             {"host", cfg.embed_host}, {"port", cfg.embed_port}};
-        if (!engine.with_embedder_spec(spec))
+        bool have_dense = engine.with_embedder_spec(spec).has_value();
+        if (!have_dense)
             engine.with_embedder(::rag::dense::AnyEmbedder{::rag::dense::HashEmbedder{256}});
 
         auto t0 = std::chrono::steady_clock::now();
@@ -722,19 +982,114 @@ int run(const std::string& root) {
         if (docs) for (auto& d : *docs) { (void)engine.add(d.uri, std::move(d.text), d.meta, d.title); ++n; }
         (void)engine.build();
         auto t1 = std::chrono::steady_clock::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        std::printf("rag-bench: indexed %zu docs, %zu chunks from %s in %lld ms\n",
-                    n, engine.corpus().chunk_count(), r.string().c_str(),
-                    static_cast<long long>(ms));
+        auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
-        for (const char* q : {"how does it work", "configuration", "error handling"}) {
-            auto t2 = std::chrono::steady_clock::now();
-            auto res = engine.search(q, 5);
-            auto t3 = std::chrono::steady_clock::now();
-            auto us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
-            std::printf("  q=\"%s\": %zu hits in %lld us\n", q,
-                        res ? res->size() : 0u, static_cast<long long>(us));
+        const auto& corpus = engine.corpus();
+        std::size_t nchunks = corpus.chunk_count();
+        std::printf("rag-bench: indexed %zu docs, %zu chunks from %s in %lld ms "
+                    "(dense: %s)\n",
+                    n, nchunks, r.string().c_str(),
+                    static_cast<long long>(build_ms),
+                    have_dense ? "ollama" : "hash-fallback");
+        if (nchunks == 0) { std::fprintf(stderr, "rag-bench: empty corpus\n"); return 1; }
+
+        // 2. Synthesize known-item queries. Sample up to ~200 chunks evenly so a
+        //    large corpus still benches in milliseconds and reproducibly.
+        const std::size_t kQueryBudget = 200;
+        const std::size_t stride = nchunks > kQueryBudget ? nchunks / kQueryBudget : 1;
+        std::vector<Query> queries;
+        {
+            auto lease = corpus.chunks();
+            for (std::size_t i = 0; i < lease.size(); i += stride) {
+                const auto& ch = lease[i];
+                auto terms = distinct_terms(ch.text);
+                if (terms.size() < 3) continue;
+                // Rank terms by their BM25 contribution to THIS chunk, keep the
+                // top few most discriminative — the known-item query.
+                std::vector<std::pair<float, std::string>> scored;
+                scored.reserve(terms.size());
+                for (const auto& t : terms) {
+                    auto ex = corpus.explain(t, ch.id);
+                    scored.emplace_back(ex.lexical_score, t);
+                }
+                std::sort(scored.begin(), scored.end(),
+                          [](auto& a, auto& b) { return a.first > b.first; });
+                std::string q;
+                for (std::size_t j = 0; j < scored.size() && j < 5; ++j) {
+                    if (scored[j].first <= 0.0f) break;
+                    if (!q.empty()) q += ' ';
+                    q += scored[j].second;
+                }
+                if (q.empty()) continue;
+                queries.push_back({std::move(q), ch.id.value});
+            }
         }
+        if (queries.empty()) { std::fprintf(stderr, "rag-bench: no queries synthesized\n"); return 1; }
+
+        // 3. Assemble the ladder — one stage added per rung.
+        namespace pl = ::rag::pipeline;
+        auto hybrid_cfg = [&](bool dense) {
+            pl::HybridRetrieveConfig hy;
+            hy.candidate_k  = 60;
+            hy.bm25_weight  = 1.0f;
+            hy.dense_weight = dense ? 1.0f : 0.0f;
+            // convex fusion IGNORES the per-retriever weights (it uses
+            // convex.alpha), so to actually isolate BM25 for the first rung we
+            // fall back to weighted RRF, which honours dense_weight=0.
+            hy.fusion = dense ? pl::HybridRetrieveConfig::Fusion::convex
+                              : pl::HybridRetrieveConfig::Fusion::rrf;
+            return hy;
+        };
+        struct Rung { const char* name; pl::Pipeline pipe; };
+        std::vector<Rung> ladder;
+        {   // bm25-only
+            pl::Pipeline p;
+            p.add(std::make_shared<pl::HybridRetrieveStage>(hybrid_cfg(false)));
+            p.add(std::make_shared<pl::TopKStage>());
+            ladder.push_back({"bm25-only", std::move(p)});
+        }
+        {   // hybrid + prf
+            pl::Pipeline p;
+            p.add(std::make_shared<pl::PrfExpandStage>(pl::ExpandConfig{}));
+            p.add(std::make_shared<pl::HybridRetrieveStage>(hybrid_cfg(true)));
+            p.add(std::make_shared<pl::TopKStage>());
+            ladder.push_back({"hybrid+prf", std::move(p)});
+        }
+        {   // + feature-rerank
+            pl::Pipeline p;
+            p.add(std::make_shared<pl::PrfExpandStage>(pl::ExpandConfig{}));
+            p.add(std::make_shared<pl::HybridRetrieveStage>(hybrid_cfg(true)));
+            p.add(pl::make_feature_rerank_stage());
+            p.add(std::make_shared<pl::TopKStage>());
+            ladder.push_back({"+feature-rerank", std::move(p)});
+        }
+        {   // + mmr (the full quality funnel, PRF-prepended)
+            pl::Pipeline p = pl::Pipeline::quality_with(hybrid_cfg(true), cfg.mmr_lambda);
+            ladder.push_back({"+mmr", std::move(p)});
+        }
+
+        const std::size_t k = 10;
+        std::printf("\n  %-16s  recall@%zu   MRR    nDCG@10   ms/query\n",
+                    "stage", k);
+        std::printf("  %-16s  --------  ------  -------  --------\n", "----------------");
+        for (auto& rung : ladder) {
+            Metrics m;
+            auto s0 = std::chrono::steady_clock::now();
+            for (const auto& q : queries) {
+                auto hits = rung.pipe.run(corpus, q.text, k);
+                if (!hits) { m.add(0, k); continue; }
+                m.add(rank_of(*hits, q.gold, k), k);
+            }
+            auto s1 = std::chrono::steady_clock::now();
+            double per = std::chrono::duration_cast<std::chrono::microseconds>(s1 - s0).count()
+                         / 1000.0 / static_cast<double>(queries.size());
+            m.finalize();
+            std::printf("  %-16s   %.3f   %.3f   %.3f     %6.2f\n",
+                        rung.name, m.recall, m.mrr, m.ndcg, per);
+        }
+        std::printf("\n  %zu known-item queries over %zu chunks. "
+                    "A metric that DROPS at a rung is the stage to tune.\n",
+                    queries.size(), nchunks);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "rag-bench: %s\n", e.what());
@@ -792,6 +1147,7 @@ bool Retriever::warm() const { return true; }  // nothing to build → always wa
 void Retriever::warm_async() {}
 
 namespace feedback {
+void note_surfaced(const std::vector<std::string>& /*paths*/) {}
 void note_file_opened(const std::string& /*path*/) {}
 }  // namespace feedback
 
