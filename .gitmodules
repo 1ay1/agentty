@@ -8,10 +8,11 @@
 [submodule "mcp-cpp"]
 	path = mcp-cpp
 	url = https://github.com/1ay1/mcp-cpp.git
-[submodule "jetalloc"]
-	path = jetalloc
-	url = git@github.com:1ay1/jetalloc.git
 [submodule "rag-cpp"]
 	path = rag-cpp
 	url = git@github.com:1ay1/rag-cpp.git
+	branch = main
+[submodule "mimalloc"]
+	path = mimalloc
+	url = https://github.com/microsoft/mimalloc.git
 	branch = main
