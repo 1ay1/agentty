@@ -2106,6 +2106,13 @@ private:
 struct Client::Impl {
     Config cfg;
     Pool   pool;
+
+    // Outstanding prewarm() dials. Tracked (not detached) so join_prewarm()
+    // can cancel + join them before CRT/OpenSSL teardown, closing the
+    // exit-race UAF that manifests as heap corruption on a fast exit.
+    std::mutex                     prewarm_mu;
+    std::vector<std::thread>       prewarm_threads;
+    std::vector<CancelTokenPtr>    prewarm_cancels;
 };
 
 Client::Client() : Client(Config{}) {}
@@ -2119,7 +2126,7 @@ Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
     (void)tls::shared_context(impl_->cfg.insecure);
 }
 
-Client::~Client() = default;
+Client::~Client() { join_prewarm(); }
 
 // Helper: grab a connection from the pool or dial fresh.
 static std::expected<std::unique_ptr<Connection>, HttpError>
@@ -2309,11 +2316,16 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
 
 void Client::prewarm(std::string host, uint16_t port,
                      std::string dial_host, uint16_t dial_port) {
-    // Fire-and-forget thread.  Swallows errors — this is opportunistic;
-    // the first real request will dial again if prewarm failed.
-    std::thread([this,
-                 host = std::move(host), port,
-                 dial_host = std::move(dial_host), dial_port]() mutable {
+    // A prewarm dial races process exit: on a fast teardown (immediate
+    // pipe-stdin EOF) main() can return while this thread is mid-SSL_connect,
+    // and the CRT/OpenSSL static state gets freed under it — heap corruption.
+    // So the thread is TRACKED, not detached, with a cancel token; a shutdown
+    // join_prewarm() trips the token (which shuts the dialing socket to wake
+    // poll()) and joins before teardown. Swallows errors — opportunistic.
+    auto cancel = std::make_shared<CancelToken>();
+    std::thread th([this, cancel,
+                    host = std::move(host), port,
+                    dial_host = std::move(dial_host), dial_port]() mutable {
 #if !defined(_WIN32)
         // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
         // main thread's handlers instead of being delivered here mid
@@ -2324,11 +2336,30 @@ void Client::prewarm(std::string host, uint16_t port,
         sigfillset(&all);
         pthread_sigmask(SIG_BLOCK, &all, nullptr);
 #endif
+        if (cancel->is_cancelled()) return;
         Endpoint ep{ std::move(host), port,
                      std::move(dial_host), dial_port };
-        auto r = dial_new(ep, Timeouts{}, /*cancel=*/nullptr);
-        if (r) impl_->pool.release(std::move(*r));
-    }).detach();
+        auto r = dial_new(ep, Timeouts{}, cancel);
+        if (r && !cancel->is_cancelled()) impl_->pool.release(std::move(*r));
+    });
+    std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
+    impl_->prewarm_cancels.push_back(std::move(cancel));
+    impl_->prewarm_threads.push_back(std::move(th));
+}
+
+void Client::join_prewarm() noexcept {
+    std::vector<std::thread>    threads;
+    std::vector<CancelTokenPtr> cancels;
+    {
+        std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
+        threads.swap(impl_->prewarm_threads);
+        cancels.swap(impl_->prewarm_cancels);
+    }
+    // Trip every token first so the dials abort promptly, then join.
+    for (auto& c : cancels)
+        if (c) c->cancel();
+    for (auto& t : threads)
+        if (t.joinable()) { try { t.join(); } catch (...) {} }
 }
 
 Client& default_client() {

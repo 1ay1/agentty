@@ -322,6 +322,15 @@ public:
     void prewarm(std::string host, uint16_t port = 443,
                  std::string dial_host = "", uint16_t dial_port = 0);
 
+    // Signal every outstanding prewarm() thread to abort its dial and JOIN
+    // them. MUST be called before process exit: the detached-thread model of
+    // prewarm() otherwise leaves a thread mid-SSL_connect while the CRT /
+    // OpenSSL static state is torn down under it — a data race that surfaces as
+    // heap corruption (Windows STATUS_HEAP_CORRUPTION 0xC0000374) when the app
+    // exits within milliseconds of launch (e.g. immediate pipe-stdin EOF).
+    // Idempotent; safe to call with no prewarm in flight.
+    void join_prewarm() noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
