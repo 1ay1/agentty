@@ -41,8 +41,8 @@ Two source-layout facts shape the recipe:
 - **Build:** `nlohmann-json`, `simdjson` (plus `cmake`, `ninja`, `clang` from the base build image)
 
 All are present in the Termux repositories (verified: OpenSSL 3.6, nghttp2 1.69,
-nlohmann-json 3.12, simdjson 4.6). mimalloc is vendored as a submodule and
-built from source, so it needs no package.
+nlohmann-json 3.12, simdjson 4.6). CMake fetches and builds mimalloc directly
+from upstream, so it needs no Termux package.
 
 ## Submitting to the Termux repos
 

@@ -105,13 +105,13 @@ option(AGENTTY_FULLY_STATIC   "Fully static link (Linux only, requires musl tool
 # v0.2.7 crasher, which the build-time guard then rejects).
 option(AGENTTY_STATIC_PIE      "Emit a static-PIE (ET_DYN) instead of ET_EXEC for the fully-static build — Termux/Android only" OFF)
 
-# mimalloc override — Microsoft's production allocator, vendored as a submodule
-# (mimalloc/). agentty churns std::string everywhere (RenderOp, SSE parsing,
+# mimalloc override — Microsoft's production allocator, fetched by CMake from
+# upstream main. agentty churns std::string everywhere (RenderOp, SSE parsing,
 # JSON, and the Element view tree), which benefits from mimalloc's sharded
 # free lists and eager page purging. The static library overrides malloc/free
 # and global C++ new/delete.
 # Default ON; turn OFF to build against the plain system allocator.
-option(AGENTTY_USE_MIMALLOC   "Route malloc/free and operator new/delete through vendored mimalloc" ON)
+option(AGENTTY_USE_MIMALLOC   "Route malloc/free and operator new/delete through CMake-fetched mimalloc" ON)
 
 # CPU ISA baseline. Default avx2 (Haswell+/Zen1+, ~2013), which covers ~every
 # desktop/laptop in use. Drop to "avx" for Sandy/Ivy Bridge (2011–2012) or
@@ -297,9 +297,6 @@ option(AGENTTY_AUTO_PULL_SUBMODULES
        "Sync every in-tree submodule to its tracking branch on every build" ON)
 # Back-compat: the old maya-only switch still disables maya's pull when OFF.
 option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" ON)
-# mimalloc follows its upstream main branch. Auto-pull is opt-in so local
-# allocator experiments are never changed unless explicitly requested.
-option(AGENTTY_AUTO_PULL_MIMALLOC "Fast-forward mimalloc/ to origin/main on every build" OFF)
 
 function(agentty_pull_submodule_latest sub branch lib)
     if(NOT AGENTTY_AUTO_PULL_SUBMODULES)
@@ -499,33 +496,34 @@ if(NOT TARGET nghttp2::nghttp2 AND NOT AGENTTY_FULLY_STATIC)
         endif()
     endif()
 endif()
-# mimalloc — Microsoft's general-purpose allocator, built from the vendored
-# submodule as a static library. This is not header-only: its C sources must be
-# compiled and linked. MI_OVERRIDE supplies malloc/free and global C++
-# new/delete overrides from the library itself.
+# mimalloc — Microsoft's general-purpose allocator. FetchContent tracks the
+# upstream main branch and runs its update step on every configure, so builds
+# use the current upstream revision without storing mimalloc in this repository.
+# This is not header-only: its C sources are compiled into a static library.
 set(AGENTTY_HAS_MIMALLOC FALSE)
 if(AGENTTY_USE_MIMALLOC)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mimalloc/CMakeLists.txt")
-        set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-        set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
-        set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
-        set(MI_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
-        set(MI_OVERRIDE     ON CACHE BOOL "" FORCE)
-        # Standalone builds target broad CPU compatibility; prevent mimalloc
-        # from selecting an armv8.1-a baseline on arm64.
-        if(AGENTTY_STANDALONE)
-            set(MI_NO_OPT_ARCH ON CACHE BOOL "" FORCE)
-        endif()
-        add_subdirectory(mimalloc EXCLUDE_FROM_ALL)
-        set(AGENTTY_HAS_MIMALLOC TRUE)
-        if(AGENTTY_AUTO_PULL_MIMALLOC)
-            agentty_pull_submodule_latest(mimalloc main mimalloc-static)
-        endif()
-    else()
-        message(WARNING "agentty: AGENTTY_USE_MIMALLOC=ON but mimalloc/ is empty "
-                       "— building against the system allocator. Run "
-                       "`git submodule update --init --recursive` and reconfigure.")
+    set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
+    set(MI_OVERRIDE     ON CACHE BOOL "" FORCE)
+    # Standalone builds target broad CPU compatibility; prevent mimalloc from
+    # selecting an armv8.1-a baseline on arm64.
+    if(AGENTTY_STANDALONE)
+        set(MI_NO_OPT_ARCH ON CACHE BOOL "" FORCE)
     endif()
+    # Explicitly keep updates connected even if a parent project changes the
+    # general FetchContent policy. GIT_TAG main intentionally follows HEAD.
+    set(FETCHCONTENT_UPDATES_DISCONNECTED_MIMALLOC OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        mimalloc
+        GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
+        GIT_TAG        main
+        GIT_SHALLOW    TRUE
+        GIT_PROGRESS   TRUE
+    )
+    FetchContent_MakeAvailable(mimalloc)
+    set(AGENTTY_HAS_MIMALLOC TRUE)
 endif()
 
 # ── rag-cpp: the retrieval (RAG) engine ────────────────────────────────────
@@ -573,8 +571,8 @@ elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     set(RAGCPP_WITH_OPENCL    OFF CACHE BOOL "" FORCE)
     add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
     set(AGENTTY_HAS_RAGCPP TRUE)
-    # Opt-in upstream tracking, off by default so local rag-cpp edits always
-    # compile (mirrors the mimalloc policy).
+    # Opt-in upstream tracking, off by default so local rag-cpp edits compile
+    # without CMake changing the submodule checkout.
     option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward rag-cpp/ to origin/master on every build" OFF)
     if(AGENTTY_AUTO_PULL_RAGCPP)
         agentty_pull_submodule_latest(rag-cpp master ragcpp)
