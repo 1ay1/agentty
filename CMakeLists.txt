@@ -522,20 +522,19 @@ endif()
 # exactly jetalloc's fast path.
 set(AGENTTY_HAS_JETALLOC FALSE)
 if(AGENTTY_USE_JETALLOC AND MSVC)
-    # jetalloc's C11 core (<stdatomic.h>) needs MSVC's opt-in C11-atomics mode,
-    # which is still marked /experimental and doesn't reliably enable through
-    # this build. jetalloc is a pure PERFORMANCE optimization (per-thread slabs
-    # + jet_trim), never a correctness dependency — so on MSVC agentty simply
-    # uses the system allocator. The Linux/macOS release binaries keep jetalloc.
-    # Flip this on once jetalloc builds cleanly under MSVC.
+    # jetalloc is now header-only C++23 (no C11 <stdatomic.h> core), so it builds
+    # under MSVC in principle. It's kept OFF on MSVC only until the global
+    # operator new/delete override (src/jet_global.cpp) is validated on MSVC's
+    # runtime; jetalloc is a pure PERFORMANCE optimization (per-thread slabs +
+    # jet::trim), never a correctness dependency, so MSVC falls back to the
+    # system allocator. The Linux/macOS release binaries keep jetalloc.
     message(STATUS "agentty: jetalloc DISABLED on MSVC "
-                   "(C11 <stdatomic.h> core not yet MSVC-clean) — using system allocator.")
+                   "(global-new override not yet MSVC-validated) - using system allocator.")
 elseif(AGENTTY_USE_JETALLOC)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/jetalloc/CMakeLists.txt")
-        # Build only the static library — no tests, benches, or LD_PRELOAD lib.
-        set(JET_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
-        set(JET_BUILD_BENCH   OFF CACHE BOOL "" FORCE)
-        set(JET_BUILD_PRELOAD OFF CACHE BOOL "" FORCE)
+        # Header-only INTERFACE target: no objects to build here. When embedded,
+        # jetalloc's own CMake auto-suppresses its tests/benches (JET_IS_TOPLEVEL
+        # is false), so we just pull in the include path + C++23 requirement.
         add_subdirectory(jetalloc EXCLUDE_FROM_ALL)
         set(AGENTTY_HAS_JETALLOC TRUE)
         # By DEFAULT we do NOT touch jetalloc/ — whatever is checked out there
@@ -1087,15 +1086,17 @@ if(AGENTTY_MCP AND TARGET mcp::tools)
     target_link_libraries(agentty PRIVATE mcp::tools)
 endif()
 if(AGENTTY_HAS_JETALLOC)
-    # One clean line: the static archive carries the allocator AND the C++
-    # operator new/delete override (jet_override.cpp), so linking it routes
-    # every heap allocation in the exe through jetalloc. No DLL, no dylib, no
-    # header include in any TU. --whole-archive-free: the override symbols are
-    # strong global operator new/delete definitions, so the linker always pulls
-    # them in over libstdc++'s weak ones.
+    # jetalloc is header-only, so linking the INTERFACE target only supplies the
+    # include path + the C++23 requirement — it does NOT by itself override the
+    # global allocator. src/jet_global.cpp is the ONE translation unit that
+    # defines JET_GLOBAL_NEW, emitting strong operator new/delete definitions the
+    # linker prefers over libstdc++'s weak ones. Compiling it into the exe routes
+    # every heap allocation in the whole image (agentty + all vendored submodules)
+    # through jetalloc. No DLL, no dylib, no header include in any other TU.
+    target_sources(agentty PRIVATE src/jet_global.cpp)
     target_link_libraries(agentty PRIVATE jetalloc)
     target_compile_definitions(agentty PRIVATE AGENTTY_USE_JETALLOC=1)
-    message(STATUS "agentty: jetalloc allocator override enabled (vendored static).")
+    message(STATUS "agentty: jetalloc allocator override enabled (header-only, JET_GLOBAL_NEW).")
 endif()
 if(AGENTTY_HAS_RAGCPP)
     # The RAG engine. The adapter TU (in agentty_rag_obj) is already in the

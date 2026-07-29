@@ -90,6 +90,21 @@ void arm_reconcile_cooldown(Model& m) {
     ::maya::request_animation_frame();
 }
 
+// Newest tool still executing in the live thread. The live-overlay visibility
+// is derived by the view from this same predicate; the reducer needs it only
+// for Esc-dismiss and manual scrolling state.
+[[nodiscard]] const ToolUse* current_running_tool(const Model& m) {
+    for (auto mit = m.d.current.messages.rbegin();
+         mit != m.d.current.messages.rend(); ++mit) {
+        for (auto tit = mit->tool_calls.rbegin();
+             tit != mit->tool_calls.rend(); ++tit) {
+            if (std::holds_alternative<ToolUse::Running>(tit->status))
+                return &*tit;
+        }
+    }
+    return nullptr;
+}
+
 // Build the tool-output-viewer entry list: every settled tool call in the
 // current thread with a non-empty stored output, NEWEST FIRST (the one the
 // user just watched scroll past is entry 0). Bounded by kMaxEntries /
@@ -455,6 +470,24 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             });
             m.d.pending_permission.reset();
             return {std::move(m), cmd::kick_pending_tools(m)};
+        },
+
+        // ── Live tool overlay (auto-opened by Running state) ─────────
+        [&](LiveToolOverlayDismiss) -> Step {
+            // Esc hides only the overlay for the currently-running tool. It
+            // does NOT cancel the tool; once hidden, a second Esc falls
+            // through subscribe.cpp's normal CancelStream path.
+            if (const ToolUse* tc = current_running_tool(m))
+                m.ui.live_tool.dismissed_id = tc->id.value;
+            return done(std::move(m));
+        },
+        [&](LiveToolOverlayMove& e) -> Step {
+            auto& sc = m.ui.live_tool_scroll;
+            sc.y = std::clamp(sc.y + e.delta, 0, std::max(0, sc.max_y));
+            // Upward movement pauses tail-following; reaching the newest row
+            // resumes it, so End / enough Down behaves exactly like tail -f.
+            m.ui.live_tool.auto_tail = (sc.y >= sc.max_y);
+            return done(std::move(m));
         },
 
         // ── Tool-output viewer ────────────────────────────────────
