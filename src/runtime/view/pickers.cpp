@@ -904,18 +904,22 @@ Element tool_output_viewer(const Model& m) {
         int         index       = -1;
         const void* bytes_key   = nullptr;
         std::size_t bytes_len   = 0;
+        std::uint64_t call_key  = 0;
         std::vector<Element> rows;
     };
     static BodyCache cache;   // UI thread only — same discipline as pickers’ statics
 
     const void* entries_key = static_cast<const void*>(o->entries.data());
     const void* bytes_key   = static_cast<const void*>(e.output.data());
+    const auto call_key     = e.call.compute_render_key();
     if (cache.entries_key != entries_key || cache.index != cur
-        || cache.bytes_key != bytes_key || cache.bytes_len != e.output.size()) {
+        || cache.bytes_key != bytes_key || cache.bytes_len != e.output.size()
+        || cache.call_key != call_key) {
         cache.entries_key = entries_key;
         cache.index       = cur;
         cache.bytes_key   = bytes_key;
         cache.bytes_len   = e.output.size();
+        cache.call_key    = call_key;
         cache.rows.clear();
 
         using Kind = maya::ToolBodyPreview::Kind;

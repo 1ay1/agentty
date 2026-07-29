@@ -1982,6 +1982,11 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(proactive_deferred_test)
     set_tests_properties(proactive_deferred_test PROPERTIES TIMEOUT 30)
 
+    # ACP rawInput updates are full replacement snapshots, not append deltas.
+    # Drive the real stream reducer with interleaved IDs and snapshot rewrites.
+    agentty_add_full_test(tool_stream_snapshot_test)
+    set_tests_properties(tool_stream_snapshot_test PROPERTIES TIMEOUT 30)
+
     # persistence_proactive_test — the proactive-context marker + retrieval
     # confidence survive a real save→disk→load round-trip (public
     # save_thread + flush_pending_saves + load_thread_file against an
@@ -2214,6 +2219,7 @@ if(AGENTTY_BUILD_TESTS)
         subagent_report_test
         tool_wedge_liveness_test
         proactive_deferred_test
+        tool_stream_snapshot_test
         persistence_proactive_test
         codex_login_flow_test
         settings_default_test

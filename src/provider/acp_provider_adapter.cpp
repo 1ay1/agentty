@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <acp/acp.hpp>          // acp::InitializeParams, SessionUpdate arms, match
 #include <nlohmann/json.hpp>
@@ -119,11 +121,35 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
         return StreamResult::failed(err.empty() ? "ACP agent spawn failed" : err);
     }
 
-    // Translate the round's SessionUpdates into agentty Stream* Msgs. The tool
-    // arms map SU_ToolCall → Start+Delta(rawInput)+End (agentty's agent loop
-    // executes the tool itself; the delta carries the args JSON).
+    // Translate ACP's snapshot-based tool lifecycle into the runtime's
+    // canonical stream vocabulary. rawInput is always a replacement snapshot,
+    // never an append delta. Calls stay open through pending refinements and
+    // close once ACP reports execution starting/settled (or at turn end).
+    std::unordered_set<std::string> open_tools;
+    std::unordered_set<std::string> ended_tools;
+
+    auto tool_name = [](const a::ToolCall& call) {
+        // Claude's ACP adapter carries the executable name in metadata while
+        // title is a human label ("Edit file …"). Other agents commonly use
+        // title directly, so retain that as the protocol-neutral fallback.
+        try {
+            if (call.meta.contains("claudeCode")
+                && call.meta["claudeCode"].contains("toolName")) {
+                auto name = call.meta["claudeCode"]["toolName"].get<std::string>();
+                if (!name.empty()) return name;
+            }
+        } catch (...) { /* malformed optional metadata: use title */ }
+        return call.title.empty() ? call.toolCallId.value : call.title;
+    };
+
+    auto finish_tool = [&sink, &open_tools, &ended_tools](const std::string& id) {
+        if (!open_tools.contains(id) || !ended_tools.insert(id).second) return;
+        sink(StreamToolUseEnd{ToolCallId{id}});
+        open_tools.erase(id);
+    };
+
     TurnSink tsink;
-    tsink.update = [&sink](a::SessionUpdate su) {
+    tsink.update = [&sink, &open_tools, &ended_tools, &tool_name, &finish_tool](a::SessionUpdate su) {
         a::match(su,
             [&](const a::SU_AgentMessageChunk& c) {
                 std::string t = block_text(c.content);
@@ -135,12 +161,33 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
             },
             [&](const a::SU_ToolCall& tc) {
                 const auto& call = tc.toolCall;
-                sink(StreamToolUseStart{
-                    ToolCallId{call.toolCallId.value},
-                    ToolName{call.title.empty() ? call.toolCallId.value : call.title}});
+                const auto& id = call.toolCallId.value;
+                if (!open_tools.contains(id) && !ended_tools.contains(id)) {
+                    sink(StreamToolUseStart{ToolCallId{id}, ToolName{tool_name(call)}});
+                    open_tools.insert(id);
+                }
                 if (call.rawInput.has_value() && !call.rawInput.value().is_null())
-                    sink(StreamToolUseDelta{call.rawInput.value().dump()});
-                sink(StreamToolUseEnd{});
+                    sink(StreamToolUseSnapshot{ToolCallId{id}, call.rawInput.value().dump()});
+                if (call.status != a::ToolCallStatus::Pending)
+                    finish_tool(id);
+            },
+            [&](const a::SU_ToolCallUpdate& tc) {
+                const auto& update = tc.update;
+                const auto& id = update.toolCallId.value;
+                // A conforming ACP stream announces the call first. Be
+                // defensive for adapters that race a refinement ahead of it:
+                // open a stable fallback card rather than dropping the update.
+                if (!open_tools.contains(id) && !ended_tools.contains(id)) {
+                    const std::string name = update.title.has_value()
+                        ? update.title.value() : id;
+                    sink(StreamToolUseStart{ToolCallId{id}, ToolName{name}});
+                    open_tools.insert(id);
+                }
+                if (update.rawInput.has_value() && !update.rawInput.value().is_null())
+                    sink(StreamToolUseSnapshot{ToolCallId{id}, update.rawInput.value().dump()});
+                if (update.status.has_value()
+                    && update.status.value() != a::ToolCallStatus::Pending)
+                    finish_tool(id);
             },
             [&](const a::SU_Usage& u) {
                 StreamUsage su2;
@@ -160,6 +207,12 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
     // outcome; fold it onto the shared provider StreamResult so the ACP arm
     // reports through the same value type as the native transports.
     TurnResult res = live->backend->prompt(req, tsink, cancel);
+
+    // Some adapters omit a final status update on cancellation/early turn
+    // settlement. Close each remaining card exactly once using its latest
+    // snapshot so no Pending call is stranded forever.
+    std::vector<std::string> still_open(open_tools.begin(), open_tools.end());
+    for (const auto& id : still_open) finish_tool(id);
 
     if (!res.ok()) {
         if (res.error && res.error->user_cancel) {

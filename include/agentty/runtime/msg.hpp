@@ -141,8 +141,17 @@ struct StreamTextDelta { std::string text; };
 // burst at the text→tool seam). No-op if no text block was open.
 struct StreamTextBlockClosed {};
 struct StreamToolUseStart { ToolCallId id; ToolName name; };
+// Append-only wire fragment. Native Anthropic/OpenAI transports use this
+// when their protocol genuinely supplies argument deltas.
 struct StreamToolUseDelta { std::string partial_json; };
-struct StreamToolUseEnd {};
+// Full current argument snapshot. ACP tool_call_update.rawInput has replace
+// semantics (it is not a textual delta), so keeping this distinct prevents
+// repeated snapshots from producing concatenated, invalid JSON. The id makes
+// updates robust when multiple ACP tool calls overlap.
+struct StreamToolUseSnapshot { ToolCallId id; std::string json; };
+// Empty id preserves the native transports' ordered "close the latest call"
+// contract; ACP supplies the id so completion resolves the intended call.
+struct StreamToolUseEnd { ToolCallId id{}; };
 // A chunk of the assistant's thinking block (adaptive thinking). `text` is
 // the visible reasoning delta (empty under display:omitted); `signature` is
 // the opaque per-block signature that arrives once, near the block's end.
@@ -611,7 +620,8 @@ using ComposerMsg = std::variant<
 
 using StreamMsg = std::variant<
     StreamStarted, StreamTextDelta, StreamTextBlockClosed,
-    StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
+    StreamToolUseStart, StreamToolUseDelta, StreamToolUseSnapshot,
+    StreamToolUseEnd,
     StreamThinkingDelta,
     StreamReasoning,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
