@@ -90,21 +90,6 @@ void arm_reconcile_cooldown(Model& m) {
     ::maya::request_animation_frame();
 }
 
-// Newest tool still executing in the live thread. The live-overlay visibility
-// is derived by the view from this same predicate; the reducer needs it only
-// for Esc-dismiss and manual scrolling state.
-[[nodiscard]] const ToolUse* current_running_tool(const Model& m) {
-    for (auto mit = m.d.current.messages.rbegin();
-         mit != m.d.current.messages.rend(); ++mit) {
-        for (auto tit = mit->tool_calls.rbegin();
-             tit != mit->tool_calls.rend(); ++tit) {
-            if (std::holds_alternative<ToolUse::Running>(tit->status))
-                return &*tit;
-        }
-    }
-    return nullptr;
-}
-
 // Build the tool-output-viewer entry list: every settled tool call in the
 // current thread with a non-empty stored output, NEWEST FIRST (the one the
 // user just watched scroll past is entry 0). Bounded by kMaxEntries /
@@ -115,6 +100,43 @@ void arm_reconcile_cooldown(Model& m) {
 [[nodiscard]] std::vector<tool_viewer::Entry> collect_viewer_entries(const Model& m) {
     std::vector<tool_viewer::Entry> out;
     std::size_t budget = tool_viewer::kSnapshotBudget;
+
+    // Row 0 is the LIVE tool, if one is running right now: the tool
+    // currently executing, tailing its stdout+stderr as it streams. This
+    // replaces the old separate auto-popping overlay — the live view is
+    // just the top row of the Ctrl+O picker, so nothing flickers for fast
+    // tools and the user opts in by opening the picker. Newest running
+    // tool wins (a fresh Bash after an in-flight Read).
+    for (auto mit = m.d.current.messages.rbegin();
+         mit != m.d.current.messages.rend(); ++mit) {
+        bool found = false;
+        for (auto tit = mit->tool_calls.rbegin();
+             tit != mit->tool_calls.rend(); ++tit) {
+            const auto* run = std::get_if<ToolUse::Running>(&tit->status);
+            if (!run) continue;
+            tool_viewer::Entry e;
+            e.is_live  = true;
+            e.name     = tit->name.value;
+            e.title    = ui::tool_display_name(tit->name.value);
+            e.detail   = ui::tool_timeline_detail(*tit);
+            e.output   = run->progress_text;   // growing tail
+            e.call     = *tit;
+            e.failed   = false;
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "running \xc2\xb7 %.1fs",
+                          ui::tool_elapsed(*tit));
+            e.trailing = buf;
+            if (!e.output.empty())
+                e.trailing += (e.output.size() >= 1024)
+                    ? " \xc2\xb7 " + std::to_string(e.output.size() / 1024) + " KB"
+                    : " \xc2\xb7 " + std::to_string(e.output.size()) + " B";
+            budget -= std::min(budget, e.output.size());
+            out.push_back(std::move(e));
+            found = true;
+            break;
+        }
+        if (found) break;
+    }
     for (auto mit = m.d.current.messages.rbegin();
          mit != m.d.current.messages.rend(); ++mit) {
         // Retrieved-context cards surface here too, so the FULL passages the
@@ -195,6 +217,54 @@ void arm_reconcile_cooldown(Model& m) {
         }
     }
     return out;
+}
+
+// Newest tool still Running in the live (non-frozen) tail, if any.
+[[nodiscard]] std::optional<ToolCallId> find_running_tool(const Model& m) {
+    for (auto mit = m.d.current.messages.rbegin();
+         mit != m.d.current.messages.rend(); ++mit) {
+        for (auto tit = mit->tool_calls.rbegin();
+             tit != mit->tool_calls.rend(); ++tit) {
+            if (std::holds_alternative<ToolUse::Running>(tit->status))
+                return tit->id;
+        }
+    }
+    return std::nullopt;
+}
+
+// Keep the Ctrl+O viewer's LIVE row (row 0) streaming while it's open: rebuild
+// the entry list from the current transcript so the running tool's growing
+// output tails in place and the row settles into a normal finished entry the
+// instant the tool completes. Preserves the user's cursor/stage as much as
+// possible — index is clamped, viewing stage kept. Cheap: bounded by the same
+// 4 MiB / 50-entry budget as the initial collect. No-op when the viewer is
+// closed so we pay nothing on the hot streaming path unless the user is
+// actually watching.
+inline void resync_live_viewer(Model& m) {
+    auto* o = tool_viewer_opened(m.ui.tool_viewer);
+    if (!o) return;
+    // Anchor: remember which entry the user is on by identity, not index —
+    // prepending/removing the live row shifts indices under them.
+    const bool was_live_selected =
+        o->index >= 0 && o->index < static_cast<int>(o->entries.size())
+        && o->entries[static_cast<std::size_t>(o->index)].is_live;
+    auto fresh = collect_viewer_entries(m);
+    const bool has_live = !fresh.empty() && fresh.front().is_live;
+    if (fresh.empty()) { return; }   // keep the last snapshot rather than blank
+    // If the user was reading the live row, keep them pinned to row 0 (it
+    // either still lives there or has just settled into the newest entry).
+    if (was_live_selected) {
+        o->index = 0;
+    } else {
+        // Non-live selection: the live row's presence shifts everything by
+        // one. Adjust the index by the delta in live-row count so the same
+        // finished entry stays under the cursor.
+        const bool had_live = !o->entries.empty() && o->entries.front().is_live;
+        o->index += (has_live ? 1 : 0) - (had_live ? 1 : 0);
+    }
+    o->entries = std::move(fresh);
+    o->index = std::clamp(o->index, 0,
+                          std::max(0, static_cast<int>(o->entries.size()) - 1));
 }
 
 } // namespace
@@ -342,6 +412,9 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     r->last_progress_at = std::chrono::steady_clock::now();
                 }
             });
+            // If the user is watching the Ctrl+O viewer, keep its Live row
+            // (row 0) tailing this fresh output in place.
+            resync_live_viewer(m);
             return done(std::move(m));
         },
 
@@ -391,6 +464,9 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                             sync_todo_state_from_args(m, tc.args);
             }
             apply_tool_output(m, e.id, std::move(e.result));
+            // If the Ctrl+O viewer is open, refresh it so the Live row settles
+            // into a finished entry the instant this tool completes.
+            resync_live_viewer(m);
             // No mid-run freeze or trim here. The single freeze site is
             // finalize_turn (the agent_session MessageStop analog) — the
             // whole agent turn is wrapped into one Turn Element and
@@ -472,25 +548,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             return {std::move(m), cmd::kick_pending_tools(m)};
         },
 
-        // ── Live tool overlay (auto-opened by Running state) ─────────
-        [&](LiveToolOverlayDismiss) -> Step {
-            // Esc hides only the overlay for the currently-running tool. It
-            // does NOT cancel the tool; once hidden, a second Esc falls
-            // through subscribe.cpp's normal CancelStream path.
-            if (const ToolUse* tc = current_running_tool(m))
-                m.ui.live_tool.dismissed_id = tc->id.value;
-            return done(std::move(m));
-        },
-        [&](LiveToolOverlayMove& e) -> Step {
-            auto& sc = m.ui.live_tool_scroll;
-            sc.y = std::clamp(sc.y + e.delta, 0, std::max(0, sc.max_y));
-            // Upward movement pauses tail-following; reaching the newest row
-            // resumes it, so End / enough Down behaves exactly like tail -f.
-            m.ui.live_tool.auto_tail = (sc.y >= sc.max_y);
-            return done(std::move(m));
-        },
-
-        // ── Tool-output viewer ────────────────────────────────────
+        // ── Tool-output viewer ─────────────────────────
         [&](OpenToolOutputViewer) -> Step {
             auto entries = collect_viewer_entries(m);
             if (entries.empty()) {
@@ -499,6 +557,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             }
             m.ui.tool_viewer = tool_viewer::Open{std::move(entries), 0, false};
             m.ui.tool_viewer_scroll.y = 0;
+            m.ui.tool_viewer_tail = true;
             return done(std::move(m));
         },
         [&](CloseToolOutputViewer) -> Step {
@@ -519,6 +578,10 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 // max_y is paint-written-back by the Picker widget.
                 auto& sc = m.ui.tool_viewer_scroll;
                 sc.y = std::clamp(sc.y + e.delta, 0, std::max(0, sc.max_y));
+                // Live tail-follow: scrolling UP off the bottom disengages
+                // auto-tail so the user can read earlier output; scrolling
+                // (or Ending) back to the bottom re-engages it.
+                m.ui.tool_viewer_tail = (sc.y >= sc.max_y);
             } else {
                 int sz = static_cast<int>(o->entries.size());
                 if (sz > 0)
@@ -534,6 +597,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 return done(std::move(m));
             o->viewing = true;
             m.ui.tool_viewer_scroll.y = 0;
+            m.ui.tool_viewer_tail = true;
             return done(std::move(m));
         },
         [&](ToolViewerStep& e) -> Step {
@@ -565,6 +629,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 maya::Cmd<Msg>::write_clipboard(std::move(body)),
                 std::move(toast))};
         },
+
     }, tm);
 }
 

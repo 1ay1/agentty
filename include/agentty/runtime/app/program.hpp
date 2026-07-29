@@ -183,6 +183,13 @@ struct AgenttyApp {
             mix(static_cast<std::uint64_t>(o->index));
             mix(o->viewing ? 1ULL : 0ULL);
             mix(static_cast<std::uint64_t>(m.ui.tool_viewer_scroll.y));
+            // Live row (row 0) tail-follow toggle: flipping it force-scrolls
+            // the body to the newest output, a view-affecting change with no
+            // other backing field, so it MUST advance the hash. The running
+            // tool's growing progress_text already advances the hash via its
+            // live-tail render_key, so streamed output repaints on its own
+            // and the tailing body follows.
+            mix(m.ui.tool_viewer_tail ? 1ULL : 0ULL);
         }
         // Code-block picker (and its Result card): same contract.
         mix(static_cast<std::uint64_t>(m.ui.code_blocks.index()));

@@ -45,6 +45,12 @@ struct Entry {
     std::string trailing;  // "ok · 4.2s · 48 KB"  or  "failed · 0.3s"
     std::string output;    // full stored output (≤ 256 KiB by upstream cap)
     bool        failed = false;
+    // The live entry: the tool CURRENTLY running, pinned as row 0. Its
+    // `output` is the growing progress_text (stdout+stderr tail) rather
+    // than a settled snapshot, and the view tail-anchors it + labels the
+    // row "Live". Rebuilt from the transcript on every tool event while
+    // the viewer is open, so it streams in place. At most one per list.
+    bool        is_live = false;
     // A snapshot of the settled tool call. The body stage renders it
     // through the SAME maya::ToolBodyPreview path the timeline uses
     // (show_all) — so edit/write show a coloured diff, read/write show

@@ -185,39 +185,17 @@ struct Model {
         CodeBlockPickerState code_blocks;      // Closed | Open{blocks, index}
         CheckpointPickerState checkpoints;     // Closed | Open{entries, index}
         ToolViewerState     tool_viewer;       // Closed | Open{entries, index, viewing}
+        // Tail-follow toggle for the tool viewer's LIVE row (row 0). True =
+        // the body auto-scrolls to the newest streamed output (tail -f);
+        // scrolling up disengages it, End / scrolling back to the bottom
+        // re-engages. Only consulted while viewing a live entry.
+        bool                tool_viewer_tail = true;
         ui::pick::TwoAxis   diff_review;      // Closed | OpenAtCell{file_index,hunk_index}
         TodoState           todo;
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
         int                 thread_scroll = 0;
 
-        // ── Live tool overlay ──────────────────────────────────────
-        // A Codex-style auto-overlay: while ANY tool is executing, its full
-        // streaming output is painted over the live viewport, formatted the
-        // same way the settled card is (diffs, read gutters, git +/-). It
-        // needs no open/close Msg — visibility is DERIVED in the view from
-        // "is a tool currently Running", so it appears the instant a tool
-        // starts and vanishes the instant it settles, leaving the inline
-        // card as the permanent record. This struct only holds the transient
-        // read state a viewer needs.
-        struct LiveToolOverlay {
-            // When the user scrolls up to read, auto_tail pauses so the view
-            // stops snapping to newest output; scrolling back to the bottom
-            // (or a new tool starting) resumes it. Default: follow like
-            // `tail -f`.
-            bool        auto_tail = true;
-            // Identity of the tool whose scroll/dismiss state is currently
-            // active. The launch reducer resets auto_tail + scroll whenever
-            // this changes, so one tool's manual reading never affects the
-            // next tool.
-            std::string active_id;
-            // Esc hides the overlay for the CURRENTLY running tool without
-            // killing it. Keyed by the tool's id so a NEW tool re-shows the
-            // overlay automatically (a dismiss doesn't persist across tools).
-            std::string dismissed_id;
-        };
-        LiveToolOverlay     live_tool;
-
-        // ── Sealed scrollback prefix (maya ScrollbackLedger) ───────
+        // ── Sealed scrollback prefix (maya ScrollbackLedger) ───
         //
         // Append-only ledger of fully-built Element blocks that
         // represent the settled portion of the transcript. The view
@@ -369,7 +347,6 @@ struct Model {
         mutable maya::ScrollState checkpoints_scroll{.auto_dispatch = false};
         mutable maya::ScrollState todo_scroll{.auto_dispatch = false};
         mutable maya::ScrollState tool_viewer_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState live_tool_scroll{.auto_dispatch = false};
     };
 
     Domain      d;
