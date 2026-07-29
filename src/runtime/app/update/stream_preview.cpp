@@ -15,6 +15,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update/stream_args.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <span>
 #include <string>
@@ -80,14 +81,20 @@ void update_stream_preview(ToolUse& tc) {
     // on first access.
     //
     // Growth-window amortization: even for edit/todo we don't re-parse
-    // on every tick. The buffer must have grown by kStreamParseGrowth
-    // bytes since the last structured parse (tracked in
-    // tc.stream_parse_through) before we pay the O(N) parse again. The
-    // preview then lags the wire by at most that window — imperceptible,
-    // and StreamToolUseEnd re-parses the complete buffer authoritatively,
-    // so the final rendered args are always exact. This turns the parse
-    // COUNT from one-per-tick into one-per-window.
-    constexpr std::size_t kStreamParseGrowth = 512;
+    // on every tick. But the window is ADAPTIVE, not a flat 512 bytes
+    // — a flat window made edits reveal in coarse ~512-byte BLOCKS that
+    // felt slow and janky ("block-wise, not streaming"). Instead we scale
+    // the window with the buffer size so cost stays bounded (≈ the whole
+    // stream re-parsed a constant number of times) while SMALL edits — the
+    // common case — re-parse every ~64 bytes, i.e. roughly line-by-line,
+    // for a smooth Codex-style reveal. StreamToolUseEnd re-parses the
+    // complete buffer authoritatively, so the final args are always exact.
+    //   window = clamp(buffer_size / 8, 64, 4096)
+    // → a 256 B hunk reveals in ~64 B steps (4 repaints); a 32 KB write
+    //   reparses at most ~8× total. Newline-dense edit bodies therefore
+    //   stream one or two lines at a time instead of half-a-KB at once.
+    const std::size_t kStreamParseGrowth =
+        std::clamp<std::size_t>(tc.args_streaming.size() / 8, 64, 4096);
     std::optional<json> parsed_cache;
     bool                parsed_attempted = false;
     auto get_parsed = [&]() -> const std::optional<json>& {

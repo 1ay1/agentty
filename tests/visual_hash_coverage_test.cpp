@@ -240,6 +240,11 @@ const std::vector<Axis>& visual_axes() {
             m.ui.tool_viewer = agentty::tool_viewer::Open{{}, 0, true};
             m.ui.tool_viewer_scroll.y = 5;
         }},
+        {"tool viewer live tail toggled", [](Model& m) {
+            m.ui.tool_viewer = agentty::tool_viewer::Open{
+                {agentty::tool_viewer::Entry{}}, 0, /*viewing=*/true};
+            m.ui.tool_viewer_tail = false;
+        }},
         {"code block picker opens", [](Model& m) {
             m.ui.code_blocks = agentty::code_block_picker::Open{{}, 0};
         }},

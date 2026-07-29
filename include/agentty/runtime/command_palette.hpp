@@ -50,7 +50,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenThreads,   "Open threads",        "Browse saved conversations"},
     CommandDef{Command::OpenPlan,      "Open plan",          "View task progress"},
     CommandDef{Command::RunCodeBlock,  "Run code block",     "Run a fenced block from the last reply (Ctrl+G)"},
-    CommandDef{Command::InspectToolOutputs, "Inspect tool outputs", "Read the full output of any tool call (Ctrl+O)"},
+    CommandDef{Command::InspectToolOutputs, "Inspect tool outputs", "Read tool outputs — the running tool is the live top row (Ctrl+O)"},
     CommandDef{Command::CompactContext,"Compact context",    "Replace history with a structured summary"},
     CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn"},
     CommandDef{Command::OpenLogin,     "Sign in / switch account", "Sign in — or switch OAuth ↔ API key / account"},

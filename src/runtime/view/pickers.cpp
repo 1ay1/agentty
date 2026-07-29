@@ -15,6 +15,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
@@ -811,6 +812,25 @@ Element tool_output_viewer(const Model& m) {
         for (int i = 0; i < sz; ++i) {
             const auto& e = o->entries[static_cast<std::size_t>(i)];
             Picker::Config::Row row;
+            const Color cat_hue = tool_category_color(e.name);
+            if (e.is_live) {
+                // The currently-running tool, pinned to the top. A bright
+                // "● LIVE" badge in the tool's hue reads as "streaming now";
+                // the detail line carries the tool name so the row is still
+                // self-describing.
+                std::string badge = "\xe2\x97\x8f LIVE";
+                if (badge.size() < badge_w + 2)
+                    badge.append(badge_w + 2 - badge.size(), ' ');
+                row.badge          = std::move(badge);
+                row.badge_style    = fg_bold(cat_hue);
+                row.leading        = e.title + (e.detail.empty() ? "" : "  " + e.detail);
+                row.leading_style  = fg_of(fg);
+                row.trailing       = e.trailing;
+                row.trailing_style = fg_dim(cat_hue);
+                row.selected       = (i == cur);
+                cfg.rows.push_back(std::move(row));
+                continue;
+            }
             row.badge = e.title;
             row.badge.append(badge_w - e.title.size(), ' ');
             // Category hue — the same colour identity the transcript
@@ -818,7 +838,7 @@ Element tool_output_viewer(const Model& m) {
             // before the label is even read. Failures go red on the
             // badge too: status outranks category.
             row.badge_style    = e.failed ? fg_bold(danger)
-                                          : fg_bold(tool_category_color(e.name));
+                                          : fg_bold(cat_hue);
             row.leading        = e.detail.empty() ? std::string{"\xe2\x80\xa6"}
                                                   : e.detail;
             row.leading_style  = e.failed ? fg_of(danger) : fg_of(fg);
@@ -840,7 +860,9 @@ Element tool_output_viewer(const Model& m) {
     // ── BODY stage ──
     const auto& e = o->entries[static_cast<std::size_t>(cur)];
     const Color tool_hue = e.failed ? danger : tool_category_color(e.name);
-    cfg.title    = " " + e.title + " \xc2\xb7 " + pos + " ";
+    cfg.title    = (e.is_live ? std::string(" \xe2\x97\x8f LIVE \xc2\xb7 ") + e.title
+                              : " " + e.title)
+                 + " \xc2\xb7 " + pos + " ";
     cfg.accent   = tool_hue;
     cfg.selected = -1;   // read-only — no cursor row; manual scroll rules
 
@@ -905,7 +927,7 @@ Element tool_output_viewer(const Model& m) {
 
         if (structured) {
             bp.show_all   = true;    // no "⋯ N more" elision — full output
-            bp.tail_only  = false;   // head-anchored, show from the top
+            bp.tail_only  = e.is_live;  // live: newest pinned bottom; settled: from top
             bp.show_streaming_placeholder = false;
             Element body = maya::ToolBodyPreview{std::move(bp)}.build();
             // The preview renders as one vstack of row Elements. Explode
@@ -961,6 +983,12 @@ Element tool_output_viewer(const Model& m) {
     const int vh = std::max(1, cfg.viewport_h);
     auto& sc = m.ui.tool_viewer_scroll;
     sc.max_y = std::max(0, total_rows - vh);
+    // Live entry tails by default: pin to the newest output (bottom) unless
+    // the user has scrolled up to read earlier lines. `auto_tail` re-engages
+    // when they scroll back to the bottom (maintained in the reducer). For a
+    // settled entry the saved scroll position rules.
+    if (e.is_live && m.ui.tool_viewer_tail)
+        sc.y = sc.max_y;
     sc.y     = std::clamp(sc.y, 0, sc.max_y);
     cfg.scroll = nullptr;
     const int first = sc.y;
@@ -968,175 +996,35 @@ Element tool_output_viewer(const Model& m) {
     for (int i = first; i < last; ++i)
         cfg.items.push_back(cache.rows[static_cast<std::size_t>(i)]);
 
+    if (total_rows == 0)
+        cfg.items.push_back(text("  waiting for output\xe2\x80\xa6", fg_italic(muted)));
+
     cfg.footer.push_back(text(""));
     // Position line: which rows of the output are on screen — the manual
     // window has no scrollbar, so this is the scroll affordance.
     if (total_rows > vh) {
-        cfg.footer.push_back(text(
+        std::string pos_line =
             "  " + std::to_string(first + 1) + "\xe2\x80\x93"      // –
                  + std::to_string(last) + " / "
-                 + std::to_string(total_rows) + " rows",
-            fg_dim(muted)));
+                 + std::to_string(total_rows) + " rows";
+        if (e.is_live && m.ui.tool_viewer_tail) pos_line += "  \xc2\xb7 tailing";
+        cfg.footer.push_back(text(pos_line,
+            fg_dim(e.is_live && m.ui.tool_viewer_tail ? tool_hue : muted)));
     }
-    cfg.footer.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},               // ↑↓
-        {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},            // ←→
-        {"y", "copy", 4},
-        {"Esc", "back", 3},
-    }));
-    return Picker{std::move(cfg)}.build();
-}
-
-// ── Live tool overlay ───────────────────────────────────────────────
-// Auto-shown while a tool executes: paints the tool's LIVE streaming output
-// over the viewport, formatted exactly like the settled card (diff/read/git),
-// and disappears the instant the tool settles. Visibility is derived, not
-// stored — this returns nothing() unless a tool is currently Running (and the
-// user hasn't Esc-dismissed THIS tool). Because the turn worker blocks while a
-// tool runs, there is no interaction to steal: we just show what's happening.
-namespace {
-// Find the newest still-running tool in the live (non-frozen) transcript.
-[[nodiscard]] const ToolUse* current_running_tool(const Model& m) {
-    for (auto mit = m.d.current.messages.rbegin();
-         mit != m.d.current.messages.rend(); ++mit) {
-        for (auto tit = mit->tool_calls.rbegin();
-             tit != mit->tool_calls.rend(); ++tit) {
-            if (std::holds_alternative<ToolUse::Running>(tit->status))
-                return &*tit;
-        }
-    }
-    return nullptr;
-}
-} // namespace
-
-bool live_tool_overlay_is_visible(const Model& m) {
-    const ToolUse* rt = current_running_tool(m);
-    return rt && m.ui.live_tool.dismissed_id != rt->id.value;
-}
-
-Element live_tool_overlay(const Model& m) {
-    const ToolUse* rt = current_running_tool(m);
-    if (!rt) return nothing();
-    // Esc dismissed the overlay for this exact tool: stay hidden until the
-    // next tool starts (a different id re-arms it automatically).
-    if (m.ui.live_tool.dismissed_id == rt->id.value) return nothing();
-
-    const Color tool_hue = tool_category_color(rt->name.value);
-    const std::string title = ui::tool_display_name(rt->name.value);
-    const std::string detail = ui::tool_timeline_detail(*rt);
-
-    Picker::Config cfg;
-    cfg.min_width  = 60;
-    cfg.viewport_h = picker_viewport_h();
-    cfg.accent     = tool_hue;
-    cfg.selected   = -1;   // read-only, manual scroll
-
-    // Header: spinner-less "running" marker + coloured name + live detail +
-    // elapsed. The user always sees WHICH tool is live and for how long.
-    std::string elapsed;
-    const auto started = rt->started_at();
-    if (started != std::chrono::steady_clock::time_point{}) {
-        const float secs = std::chrono::duration<float>(
-            std::chrono::steady_clock::now() - started).count();
-        if (secs >= 0.05f) {
-            char buf[32];
-            std::snprintf(buf, sizeof buf, "%.1fs", secs);
-            elapsed = buf;
-        }
-    }
-    cfg.title = " \xe2\x97\x8f " + title + " \xc2\xb7 running ";   // ●
-    cfg.header.push_back(
-        hstack().width(Dimension::percent(100))(
-            text(" " + title, fg_bold(tool_hue)),
-            text(detail.empty() ? "" : "  " + detail, fg_of(fg))
-                | clip | grow(1.0f) | shrink(1.0f),
-            text(elapsed.empty() ? "" : elapsed + " ", fg_dim(muted))
-        ).build());
-    cfg.header.push_back(sep);
-
-    // Build the body rows from the LIVE progress text through the SAME
-    // formatter the settled card uses — diffs, read gutters, git +/- all
-    // render identically, just streaming. Rebuilt each frame (progress grows
-    // ~12×/s); the output is bounded to 256 KiB upstream so this stays cheap.
-    std::vector<Element> rows;
-    {
-        using Kind = maya::ToolBodyPreview::Kind;
-        auto bp = tool_body_preview_config(*rt);
-        const bool structured =
-            bp.kind == Kind::EditDiff || bp.kind == Kind::GitDiff
-         || bp.kind == Kind::FileRead || bp.kind == Kind::FileWrite
-         || bp.kind == Kind::TodoList;
-        if (structured) {
-            bp.show_all  = true;
-            bp.tail_only = false;
-            bp.show_streaming_placeholder = true;
-            Element body = maya::ToolBodyPreview{std::move(bp)}.build();
-            if (auto* box = maya::as_box(body);
-                box && box->layout.direction == maya::FlexDirection::Column
-                && !box->children.empty())
-                rows = std::move(box->children);
-            else
-                rows.push_back(std::move(body));
-        } else {
-            const std::string& out = rt->progress_text();
-            if (out.empty()) {
-                rows.push_back(text("  \xe2\x80\xa6 waiting for output", fg_italic(muted)));
-            } else {
-                std::vector<std::string_view> lines;
-                std::string_view b{out};
-                std::size_t p = 0;
-                while (p <= b.size()) {
-                    std::size_t nl = b.find('\n', p);
-                    std::size_t len = (nl == std::string_view::npos ? b.size() : nl) - p;
-                    lines.push_back(b.substr(p, len));
-                    if (nl == std::string_view::npos) break;
-                    p = nl + 1;
-                }
-                const int gutter_w = static_cast<int>(
-                    std::to_string(std::max<std::size_t>(1, lines.size())).size());
-                rows.reserve(lines.size());
-                for (std::size_t i = 0; i < lines.size(); ++i) {
-                    std::string num = std::to_string(i + 1);
-                    if (static_cast<int>(num.size()) < gutter_w)
-                        num.insert(0, gutter_w - num.size(), ' ');
-                    rows.push_back(
-                        h(text("  " + num + " ", fg_dim(warn)),
-                          text("\xe2\x94\x82 ", fg_dim(tool_hue)),   // │
-                          text(std::string{lines[i]}, fg_of(muted)))
-                        .build());
-                }
-            }
-        }
-    }
-
-    // Window to the viewport. auto_tail pins to the newest output (tail -f);
-    // the reducer clears auto_tail when the user scrolls up to read, and the
-    // scroll offset is honoured then.
-    const int total_rows = static_cast<int>(rows.size());
-    const int vh = std::max(1, cfg.viewport_h);
-    auto& sc = m.ui.live_tool_scroll;
-    sc.max_y = std::max(0, total_rows - vh);
-    if (m.ui.live_tool.auto_tail) sc.y = sc.max_y;   // follow newest
-    sc.y = std::clamp(sc.y, 0, sc.max_y);
-    cfg.scroll = nullptr;
-    const int first = sc.y;
-    const int last  = std::min(total_rows, first + vh);
-    for (int i = first; i < last; ++i)
-        cfg.items.push_back(rows[static_cast<std::size_t>(i)]);
-
-    cfg.footer.push_back(text(""));
-    if (total_rows > vh) {
-        cfg.footer.push_back(text(
-            "  " + std::to_string(first + 1) + "\xe2\x80\x93"
-                 + std::to_string(last) + " / "
-                 + std::to_string(total_rows) + " rows"
-                 + (m.ui.live_tool.auto_tail ? "  \xc2\xb7 following" : ""),
-            fg_dim(muted)));
-    }
-    cfg.footer.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},   // ↑↓
-        {"Esc", "hide", 3},
-    }));
+    cfg.footer.push_back(key_hints(
+        e.is_live
+        ? std::vector<Hint>{
+            {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
+            {"End", "tail", 4},
+            {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
+            {"Esc", "back", 3},
+          }
+        : std::vector<Hint>{
+            {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
+            {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
+            {"y", "copy", 4},
+            {"Esc", "back", 3},
+          }));
     return Picker{std::move(cfg)}.build();
 }
 

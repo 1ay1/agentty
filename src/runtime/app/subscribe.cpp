@@ -373,34 +373,6 @@ std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
     return std::nullopt;
 }
 
-// Live overlay owns navigation while a tool runs: ↑/↓/j/k/page/home/end read
-// the streamed output; Esc hides THIS overlay only (the next Esc, after it is
-// gone, retains the normal CancelStream meaning). No select/copy mode: this is
-// intentionally a frictionless, auto-following progress surface.
-std::optional<Msg> on_live_tool_overlay(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:   return LiveToolOverlayDismiss{};
-            case SpecialKey::Up:       return LiveToolOverlayMove{-1};
-            case SpecialKey::Down:     return LiveToolOverlayMove{+1};
-            case SpecialKey::PageUp:   return LiveToolOverlayMove{-10};
-            case SpecialKey::PageDown: return LiveToolOverlayMove{+10};
-            case SpecialKey::Home:     return LiveToolOverlayMove{-1000000};
-            case SpecialKey::End:      return LiveToolOverlayMove{+1000000};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'k': case U'K': return LiveToolOverlayMove{-1};
-            case U'j': case U'J': return LiveToolOverlayMove{+1};
-            case U'q': case U'Q': return LiveToolOverlayDismiss{};
-            default: break;
-        }
-    }
-    return std::nullopt;
-}
-
 // Login modal — dispatches based on which sub-state we're in.
 // Picking accepts only '1'/'2' (and Esc to close);
 // OAuthCode + ApiKeyInput consume free-text input + cursor keys + Enter;
@@ -719,19 +691,6 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_diff    = pick::is_open(m.ui.diff_review);
     const bool in_todo    = pick::is_open(m.ui.todo.open);
     const bool in_login   = ui::login::is_open(m.ui.login);
-    // Derived exactly like the view's live_tool_overlay(): newest Running tool
-    // owns tool-output navigation unless the user Esc-dismissed this id.
-    bool in_live_tool = false;
-    for (auto mit = m.d.current.messages.rbegin();
-         mit != m.d.current.messages.rend() && !in_live_tool; ++mit) {
-        for (auto tit = mit->tool_calls.rbegin();
-             tit != mit->tool_calls.rend(); ++tit) {
-            if (std::holds_alternative<ToolUse::Running>(tit->status)) {
-                in_live_tool = (m.ui.live_tool.dismissed_id != tit->id.value);
-                break;
-            }
-        }
-    }
     const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
     // Ctrl+←/→ thread-cycle gate: the agent turn must be fully idle.
@@ -781,10 +740,6 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_threads) return on_thread_list(ev);
             if (in_diff)    return on_diff_review(ev);
             if (in_todo)    if (auto r = on_todo_modal(ev)) return r;
-            // While a tool executes the live overlay is the progress surface:
-            // it owns navigation and Esc hides it (not cancels). Once hidden,
-            // the normal streaming Esc below still cancels the tool/request.
-            if (in_live_tool) return on_live_tool_overlay(ev);
             // Esc during a live stream cancels the request rather than
             // quitting the app. Modals above swallow Esc themselves, so this
             // only fires from the bare composer view.

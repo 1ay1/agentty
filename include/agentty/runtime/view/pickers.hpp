@@ -13,8 +13,6 @@ namespace agentty::ui {
 [[nodiscard]] maya::Element code_block_picker(const Model& m);
 [[nodiscard]] maya::Element code_block_result_card(const Model& m);
 [[nodiscard]] maya::Element tool_output_viewer(const Model& m);
-[[nodiscard]] maya::Element live_tool_overlay(const Model& m);
-[[nodiscard]] bool          live_tool_overlay_is_visible(const Model& m);
 [[nodiscard]] maya::Element checkpoint_picker(const Model& m);
 [[nodiscard]] maya::Element todo_modal(const Model& m);
 
