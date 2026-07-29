@@ -188,19 +188,25 @@ public:
 };
 
 // ── DocRetriever ───────────────────────────────────────────────
-//   Backs search_docs. Runs agentty's full SOTA RAG pipeline and returns
-//   flat passages. The funnel (2026 canonical shape):
+//   Backs search_docs. Runs agentty's full RAG pipeline (rag-cpp) and returns
+//   flat passages. The funnel, as actually wired in src/rag/adapter.cpp:
 //
-//     sources:  docs folder (contextual hybrid BM25+dense+RRF, HNSW)
+//     sources:  docs folder (contextual hybrid BM25+dense, HNSW)
 //               ∪ skills (agentskills.io bodies, BM25, lazy)   [default ON]
 //               ∪ memory (learned facts, BM25, lazy)           [default ON]
 //               ∪ MCP resources                                [opt-in]
-//     query:    optional RAG-Fusion expansion (opt-in, needs local LLM)
-//     retrieve: WIDE pool (k*5, ≥30) fan-out + RRF fusion
-//     rerank:   feature-fusion lexical rerank → k*3
-//               → optional neural (cross-encoder-style) rerank → k*2
-//     diversify: MMR (λ=0.75) → k
+//     query:    optional RAG-Fusion / HyDE expansion (opt-in, needs local LLM)
+//     retrieve: WIDE candidate pool (candidate_k=60) + CONVEX (TM2C2) fusion
+//               of BM25 + dense — rag-cpp's measured default (beats RRF on NDCG)
+//     expand:   optional GraphRAG multi-hop over the doc graph, fused in
+//     rerank:   feature-fusion lexical rerank (semantics-aware: adds calibrated
+//               cosine(query,chunk) so score magnitude isn't thrown away)
+//     diversify: MMR (λ=AGENTTY_RAG_MMR_LAMBDA, default 0.5) → k
+//     stitch:   optional parent-document stitch of adjacent fragments
+//     learn:    per-passage Beta-smoothed win-rate nudge (±15%), off with
+//               AGENTTY_RAG_LEARN=0 — see feedback:: in the adapter
 //     compress: extractive query-relevant span per chunk
+//     grade:    optional CRAG corrective evaluator → calibrated confidence
 //
 //   The `mode` string carries the rich provenance (root path, mode,
 //   reranked, +N variants, confidence) so no signal is lost when the

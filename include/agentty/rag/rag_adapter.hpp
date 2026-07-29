@@ -82,6 +82,8 @@ struct Config {
     // Override the model via AGENTTY_RAG_GEN_MODEL.
     std::string gen_model = "qwen2.5:0.5b";   // tiny, fast, ubiquitous on Ollama
     bool     persist    = true;   // AGENTTY_RAG_PERSIST — .ragdb cache under .agentty/
+    bool     learn      = true;   // AGENTTY_RAG_LEARN — fold the per-passage
+                                  // win-rate (rag_feedback.tsv) back into ranking
     bool     trace      = false;  // AGENTTY_RAG_TRACE — fold per-stage trace into mode
     // Convex (TM2C2) fusion of BM25+dense — rag-cpp's measured default, beats RRF.
     float    dense_weight = 1.0f; // AGENTTY_RAG_DENSE_WEIGHT
@@ -136,10 +138,19 @@ private:
 };
 
 // ── Learning loop (write side) ─────────────────────────────────────────
-// Record that the user opened `path` — if a recently-surfaced passage pointed
-// at it, that's a "win" and the passage's file rises in future rankings.
-// Best-effort, never throws.
+// A closed feedback loop with two halves:
+//   note_surfaced(paths) — search_docs calls this with the file paths it just
+//                          surfaced. Each is recorded as a "use" (denominator)
+//                          and remembered as a recently-surfaced candidate.
+//   note_file_opened(path) — the tool seam calls this when the agent `read`s a
+//                          file. It counts as a "win" (numerator) ONLY when that
+//                          path was recently surfaced by retrieval — i.e. the
+//                          passage pointed somewhere worth acting on. The
+//                          Beta-smoothed win/use rate then nudges that path's
+//                          future ranking (read side lives in Retriever).
+// Both are best-effort and never throw. AGENTTY_RAG_LEARN=0 disables the loop.
 namespace feedback {
+void note_surfaced(const std::vector<std::string>& paths);
 void note_file_opened(const std::string& path);
 }
 

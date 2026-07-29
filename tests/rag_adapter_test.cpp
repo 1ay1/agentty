@@ -69,9 +69,21 @@ int main() {
     // Force the offline path: no Ollama in CI. An unreachable host makes the
     // adapter fall back to the hash embedder.
     _putenv_s("AGENTTY_OLLAMA_HOST", "127.0.0.1:1");
+    // Isolate ranking from the AMBIENT environment: the developer's installed
+    // skills and learned memory would otherwise be indexed alongside the tiny
+    // temp docs and can out-rank them, and a stale .ragdb / feedback TSV under
+    // the repo's own .agentty/ would perturb results. Disable both knowledge
+    // sources, persistence, and the learning loop for the deterministic
+    // ranking assertions.
+    _putenv_s("AGENTTY_RAG_SKILLS", "0");
+    _putenv_s("AGENTTY_RAG_MEMORY", "0");
+    _putenv_s("AGENTTY_RAG_PERSIST", "0");
 #else
     ::setenv("AGENTTY_DOCS_DIR", docs.string().c_str(), 1);
     ::setenv("AGENTTY_OLLAMA_HOST", "127.0.0.1:1", 1);   // unreachable ⇒ hash fallback
+    ::setenv("AGENTTY_RAG_SKILLS", "0", 1);
+    ::setenv("AGENTTY_RAG_MEMORY", "0", 1);
+    ::setenv("AGENTTY_RAG_PERSIST", "0", 1);
 #endif
 
     {
@@ -147,12 +159,34 @@ int main() {
 #endif
         }
 
-        // Learning-loop feedback: note_file_opened persists a win.
+        // Learning loop: the closed feedback loop is attributable — a read is
+        // only a WIN if the path was recently surfaced. note_surfaced (the
+        // "use") is recorded by retrieve() itself, so run a real retrieval
+        // first, then feed back a read of a surfaced path.
         {
-            agentty::rag::feedback::note_file_opened("docs/auth.md");
             std::error_code ec;
             auto fb = fs::current_path(ec) / ".agentty" / "rag_feedback.tsv";
-            check(fs::exists(fb, ec), "note_file_opened writes rag_feedback.tsv");
+            fs::remove(fb, ec);
+
+            // A read with nothing surfaced yet is NOT a signal → no TSV row.
+            agentty::rag::feedback::note_file_opened("totally/unrelated.md");
+            bool wrote_on_unsurfaced = fs::exists(fb, ec);
+
+            // Surface real passages, then read one of them → a win row appears.
+            auto surf = r.retrieve("how do I configure the retrieval engine", 5);
+            check(surf.error.empty(), "retrieval for feedback loop succeeds");
+            check(fs::exists(fb, ec),
+                  "retrieve() records surfaced 'use' rows to rag_feedback.tsv");
+            if (!surf.passages.empty()) {
+                agentty::rag::feedback::note_file_opened(surf.passages.front().path);
+                std::ifstream ff(fb);
+                std::string content((std::istreambuf_iterator<char>(ff)),
+                                    std::istreambuf_iterator<char>());
+                check(content.find("\twin\t") != std::string::npos,
+                      "reading a surfaced path records a 'win'");
+            }
+            check(!wrote_on_unsurfaced,
+                  "reading a never-surfaced path is not credited as a win");
         }
 
         // (5): code search over the cwd source tree finds a known symbol.
