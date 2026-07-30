@@ -2,10 +2,10 @@
 // agentty::rag — the retrieval adapter.
 //
 // agentty's RAG engine is the external rag-cpp library (rag::Engine: contextual
-// hybrid BM25 + dense/HNSW, RRF fusion, CRAG, HyDE, MMR rerank, GraphRAG,
-// .ragdb persistence). This header is the ONLY surface the rest of agentty
-// sees: it hides every rag:: type behind a compact, stable API so the app never
-// depends on the engine's internals.
+// BM25 + optional dense/HNSW retrieval, weighted RRF, MMR rerank, opt-in CRAG/
+// HyDE/GraphRAG, and validated .ragdb persistence). This header is the ONLY
+// surface the rest of agentty sees: it hides every rag:: type behind a compact,
+// stable API so the app never depends on the engine's internals.
 //
 // The boundary is deliberately tiny — three things the app needs:
 //
@@ -60,18 +60,17 @@ struct Config {
     std::uint16_t embed_port  = 11434;                 // AGENTTY_OLLAMA_HOST (:port)
     bool         skills   = true;         // AGENTTY_RAG_SKILLS
     bool         memory   = true;         // AGENTTY_RAG_MEMORY
-    bool         mcp_resources = false;   // opt-in
+    bool         mcp_resources = false;   // AGENTTY_RAG_MCP, explicit opt-in
 
-    // ── rag-cpp power features (all measured wins, model-free unless noted) ─
-    bool     contextual = true;   // AGENTTY_RAG_CONTEXTUAL — Anthropic Contextual
-                                  // Retrieval: situate each chunk before indexing
-                                  // (big recall win; index-time cost only).
-    bool     mmr        = true;   // AGENTTY_RAG_MMR — MMR diversity rerank (+coverage)
-    float    mmr_lambda = 0.5f;   // AGENTTY_RAG_MMR_LAMBDA
-    bool     stitch     = true;   // AGENTTY_RAG_STITCH — parent-document stitch
-    bool     prf        = true;   // AGENTTY_RAG_PRF — pseudo-relevance-feedback expand
-    bool     corrective = true;   // AGENTTY_RAG_CORRECT — CRAG grade + drop-irrelevant
-    bool     graph      = true;   // AGENTTY_RAG_GRAPH — GraphRAG multi-hop expansion
+    // Conservative production defaults: each optional stage must earn its
+    // latency and output cost on the user's corpus before it is enabled.
+    bool     contextual = true;   // index-time situating context
+    bool     mmr        = true;   // diversity over the final candidate pool
+    float    mmr_lambda = 0.65f;
+    bool     stitch     = true;
+    bool     prf        = false;  // can drift queries; opt in after benchmarking
+    bool     corrective = false; // lexical proxy rejects semantic matches
+    bool     graph      = false; // quadratic graph build; explicit power mode
     // LLM query generation improves recall for difficult research questions,
     // but adds one or more model round trips. Keep normal coding turns on the
     // deterministic hybrid path; users can enable either feature explicitly.
@@ -82,12 +81,12 @@ struct Config {
     // Override the model via AGENTTY_RAG_GEN_MODEL.
     std::string gen_model = "qwen2.5:0.5b";   // tiny, fast, ubiquitous on Ollama
     bool     persist    = true;   // AGENTTY_RAG_PERSIST — .ragdb cache under .agentty/
-    bool     learn      = true;   // AGENTTY_RAG_LEARN — fold the per-passage
-                                  // win-rate (rag_feedback.tsv) back into ranking
+    bool     learn      = false;  // implicit file-open feedback is opt-in until
+                                  // every source type has an attributable signal
     bool     trace      = false;  // AGENTTY_RAG_TRACE — fold per-stage trace into mode
-    // Convex (TM2C2) fusion of BM25+dense — rag-cpp's measured default, beats RRF.
-    float    dense_weight = 1.0f; // AGENTTY_RAG_DENSE_WEIGHT
-    float    bm25_weight  = 1.0f; // AGENTTY_RAG_BM25_WEIGHT
+    // Weighted RRF; both public weights directly affect fusion.
+    float    dense_weight = 1.0f;
+    float    bm25_weight  = 1.0f;
 
     [[nodiscard]] static Config from_env();
 };
@@ -102,9 +101,8 @@ public:
     Retriever(const Retriever&) = delete;
     Retriever& operator=(const Retriever&) = delete;
 
-    // Retrieve up to k passages for `query`. `skip_docs` runs the WARM path
-    // (skills + memory + MCP only, no docs-folder walk) for the proactive
-    // pre-turn hedge. Never throws; failures surface in Retrieval::error.
+    // Retrieve up to k passages for `query`. `skip_docs` uses the independent
+    // skills+memory index and cannot walk, rebuild, or discard the docs corpus.
     [[nodiscard]] Retrieval retrieve(const std::string& query, int k,
                                      bool skip_docs = false);
 

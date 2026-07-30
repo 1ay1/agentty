@@ -267,8 +267,8 @@ int main() {
     {
         auto r = run("search_docs", {{"query", "zebra quagga migration"}});
         check(has(r, "zebra"), "search_docs: BM25 retrieval hits the passage");
-        check(has(r, "hybrid") || has(r, "BM25"),
-              "search_docs: reports a retrieval mode (hybrid via rag-cpp)");
+        check(has(r, "hybrid") || has(r, "bm25"),
+              "search_docs: reports truthful BM25 or hybrid mode");
     }
 
     // ── repeat query: the engine idempotently serves the SAME passage ──
@@ -332,13 +332,9 @@ int main() {
         ::unsetenv("AGENTTY_RAG_PROACTIVE_MIN");
     }
 
-    // ── latency-budget hedge + async fallback: proactive retrieval must ──
-    // NEVER freeze the submit thread. A 0ms hedge returns nothing on the
-    // submit path (the app then grounds via the async proactive_retrieve_
-    // blocking task); crucially the hedge is PEEK-only, so a 0ms skip must
-    // not commit dedup keys — the blocking variant must still yield the
-    // passage afterward. Then the blocking variant, having injected, must
-    // dedup a second call.
+    // ── single-execution proactive retrieval + dedup ────────────────
+    // The compatibility entry point and isolated-worker entry point share one
+    // funnel; there is no detached hedge and no duplicate query.
     {
         ::setenv("AGENTTY_RAG_PROACTIVE_MIN", "0.0", 1);
         // A dedicated doc so this passage has NEVER been injected before —
@@ -357,19 +353,9 @@ int main() {
                   "proactive_retrieve: okapi seed doc is indexed");
         }
 
-        // 0 ms hedge: the submit-path call returns nothing and blocks for 0ms.
-        ::setenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS", "0", 1);
-        auto skipped = tools::proactive_retrieve("okapi bongo rainforest", 3);
-        check(!skipped.has_value(),
-              "proactive_retrieve: a 0ms hedge never blocks the submit path");
-        ::unsetenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS");
-
-        // The async fallback (blocking variant, runs off-thread in the app)
-        // must now yield the passage — the 0ms hedge PEEK didn't poison
-        // dedup — and COMMIT it.
-        auto landed = tools::proactive_retrieve_blocking("okapi bongo rainforest", 3);
+        auto landed = tools::proactive_retrieve("okapi bongo rainforest", 3);
         check(landed.has_value(),
-              "proactive_retrieve_blocking: async fallback yields the passage");
+              "proactive_retrieve: single funnel yields the passage");
         if (landed)
             check(landed->block.find("okapi") != std::string::npos,
                   "proactive_retrieve_blocking: block carries the passage");
@@ -399,8 +385,8 @@ int main() {
         fs::current_path(prev_cwd);
         check(has(r, "backoff"), "search_code: BM25 retrieval hits the function");
         check(has(r, "throttler.cpp"), "search_code: result cites the source path");
-        check(has(r, "hybrid") || has(r, "BM25"),
-              "search_code: reports a retrieval mode (hybrid via rag-cpp)");
+        check(has(r, "hybrid") || has(r, "bm25"),
+              "search_code: reports truthful BM25 or hybrid mode");
     }
 
     // ── task: no subagent runner installed → graceful refusal ────────────

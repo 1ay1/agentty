@@ -22,14 +22,11 @@ namespace agentty::tools {
 // state) and svc.http untouched (the bridge installs the HttpClient).
 void install_host_backends(::mcp::tools::HostServices& svc);
 
-// ── Proactive retrieval (SOTA active-RAG) ──────────────────────────────
-// Run the RAG pipeline OUTSIDE the model's tool loop, for the pre-turn
-// "inject context before the model even sees the question" path
-// (FLARE/Self-RAG family). Returns a ready-to-embed context block ONLY
-// when retrieval cleared the confidence bar; std::nullopt when there is no
-// knowledge configured, nothing relevant was found, or confidence was too
-// low to be worth the tokens. Cheap (BM25 sub-ms; shares the search_docs
-// corpus + per-turn cache). Never throws.
+// ── Proactive retrieval (explicit opt-in) ────────────────────────────
+// Run the RAG pipeline outside the model's tool loop. The app invokes the
+// blocking form on an isolated worker and launches the model only after it
+// settles, so each turn performs at most one retrieval. Automatic proactive
+// injection is disabled unless AGENTTY_RAG_PROACTIVE=1.
 struct ProactiveHit {
     std::string block;        // fenced <retrieved-context> text for the wire
     double      confidence;   // [0,1] retrieval confidence that cleared the bar
@@ -44,10 +41,7 @@ struct ProactiveHit {
 [[nodiscard]] std::optional<ProactiveHit>
 proactive_retrieve(const std::string& query, int k = 3);
 
-// Same funnel as proactive_retrieve but with NO wall-clock hedge — blocks
-// until retrieval completes (bounded internally by the query-embed timeout).
-// Intended to run INSIDE an isolated worker task the caller owns (never on
-// the UI thread). Commits the cross-turn dedup keys before returning, because
+// Same single-execution funnel used by the app's isolated worker.
 // the caller always injects/stages this result. Never throws.
 [[nodiscard]] std::optional<ProactiveHit>
 proactive_retrieve_blocking(const std::string& query, int k = 3);

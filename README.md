@@ -72,6 +72,13 @@ agentty -m claude-opus-4-5                 # Claude (API key or Pro/Max OAuth)
 
 ## Retrieval (RAG)
 
+### Retrieval without context dumping
+
+Rather than injecting a repository or every project document into each prompt,
+agentty retrieves a **small, source-tagged set of relevant passages** only when
+the task needs project knowledge. That keeps context focused, leaves more room
+for the task itself, and avoids paying to repeatedly send irrelevant material.
+
 agentty ships a **complete, fully-local retrieval engine** behind two tools — no
 cloud, no dependencies, works offline. The only optional network hop is a
 *localhost* [Ollama](https://ollama.com) server for embeddings; with none

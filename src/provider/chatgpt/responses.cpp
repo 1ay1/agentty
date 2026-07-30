@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -189,18 +190,28 @@ struct StreamCtx {
     // item.id (fc_…) → call_id (call_…) so argument deltas keyed by item_id
     // can be forwarded under the correlation id the result must echo.
     std::unordered_map<std::string, std::string> call_ids;
-    std::string open_tool_item;   // item.id of the function_call currently open
+    std::unordered_set<std::string> open_tool_items;
+    std::string latest_tool_item;   // fallback for older events without item_id
     bool text_block_open = false;
     bool saw_function_call = false;
     bool terminated = false;
     StopReason stop = StopReason::EndTurn;
 };
 
-void close_open_tool(StreamCtx& ctx) {
-    if (!ctx.open_tool_item.empty()) {
-        ctx.sink(StreamToolUseEnd{});
-        ctx.open_tool_item.clear();
+void close_tool(StreamCtx& ctx, const std::string& item_id) {
+    if (item_id.empty() || !ctx.open_tool_items.erase(item_id)) return;
+    if (const auto it = ctx.call_ids.find(item_id); it != ctx.call_ids.end())
+        ctx.sink(StreamToolUseEnd{ToolCallId{it->second}});
+    if (ctx.latest_tool_item == item_id) {
+        ctx.latest_tool_item = ctx.open_tool_items.empty()
+            ? std::string{} : *ctx.open_tool_items.begin();
     }
+}
+
+void close_all_tools(StreamCtx& ctx) {
+    std::vector<std::string> ids(ctx.open_tool_items.begin(),
+                                 ctx.open_tool_items.end());
+    for (const auto& id : ids) close_tool(ctx, id);
 }
 
 void emit_usage(StreamCtx& ctx, const json& usage) {
@@ -241,29 +252,32 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
                 ctx.text_block_open = false;
                 ctx.sink(StreamTextBlockClosed{});
             }
-            close_open_tool(ctx);
             const std::string item_id = item.value("id", std::string{});
             const std::string call_id = item.value("call_id", item_id);
             const std::string name    = item.value("name", std::string{});
             ctx.call_ids[item_id] = call_id;
-            ctx.open_tool_item    = item_id;
+            ctx.open_tool_items.insert(item_id);
+            ctx.latest_tool_item = item_id;
             ctx.saw_function_call = true;
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Some backends deliver the whole args string up-front on `added`.
             if (const auto a = item.value("arguments", std::string{}); !a.empty())
-                ctx.sink(StreamToolUseDelta{a});
+                ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, a});
         }
         return;
     }
     if (type == "response.function_call_arguments.delta") {
-        ctx.sink(StreamToolUseDelta{j.value("delta", std::string{})});
+        const std::string item_id = j.value("item_id", ctx.latest_tool_item);
+        if (const auto it = ctx.call_ids.find(item_id); it != ctx.call_ids.end())
+            ctx.sink(StreamToolUseDelta{
+                ToolCallId{it->second}, j.value("delta", std::string{})});
         return;
     }
     if (type == "response.output_item.done") {
         const auto& item = j.value("item", json::object());
         const auto itype = item.value("type", std::string{});
         if (itype == "function_call")
-            close_open_tool(ctx);
+            close_tool(ctx, item.value("id", std::string{}));
         else if (itype == "reasoning") {
             // A reasoning item completed. Capture its opaque encrypted_content
             // so the reducer can stash it on the assistant message and replay
@@ -285,7 +299,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         return;
     }
     if (type == "response.completed") {
-        close_open_tool(ctx);
+        close_all_tools(ctx);
         const auto& resp = j.value("response", json::object());
         emit_usage(ctx, resp.value("usage", json::object()));
         // No finish_reason on the wire — a function_call in the output means
@@ -296,7 +310,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         return;
     }
     if (type == "response.incomplete") {
-        close_open_tool(ctx);
+        close_all_tools(ctx);
         const auto& resp = j.value("response", json::object());
         emit_usage(ctx, resp.value("usage", json::object()));
         const auto reason = resp.value("incomplete_details", json::object())
@@ -308,7 +322,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         return;
     }
     if (type == "response.failed" || type == "error") {
-        close_open_tool(ctx);
+        close_all_tools(ctx);
         std::string msg;
         // Surface the error TYPE/CODE alongside the message. The runtime's
         // classify(string_view) sniffs this text to decide retryability

@@ -1015,20 +1015,23 @@ Element tool_output_viewer(const Model& m) {
         cfg.footer.push_back(text(pos_line,
             fg_dim(e.is_live && m.ui.tool_viewer_tail ? tool_hue : muted)));
     }
-    cfg.footer.push_back(key_hints(
-        e.is_live
-        ? std::vector<Hint>{
+    std::vector<Hint> viewer_hints;
+    if (e.is_live) {
+        viewer_hints = {
             {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
             {"End", "tail", 4},
             {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
             {"Esc", "back", 3},
-          }
-        : std::vector<Hint>{
+        };
+    } else {
+        viewer_hints = {
             {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
             {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
             {"y", "copy", 4},
             {"Esc", "back", 3},
-          }));
+        };
+    }
+    cfg.footer.push_back(key_hints(std::move(viewer_hints)));
     return Picker{std::move(cfg)}.build();
 }
 

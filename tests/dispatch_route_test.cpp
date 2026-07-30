@@ -16,6 +16,7 @@
 #include <string>
 
 #include "agentty/provider/dispatch.hpp"
+#include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 
 using namespace agentty;
@@ -260,6 +261,17 @@ static void test_classify_stream_end_precedence() {
           == provider::StreamEnd::CleanClose);
 }
 
+static void test_hosted_models_share_agent_prompt_policy() {
+    const auto anthropic = provider::parse_selection("anthropic");
+    const auto chatgpt   = provider::parse_selection("chatgpt");
+    const auto local     = provider::parse_selection("llama.cpp");
+
+    const std::string full = provider::system_prompt_for(anthropic);
+    CHECK(!full.empty());
+    CHECK(provider::system_prompt_for(chatgpt) == full);
+    CHECK(provider::system_prompt_for(local) != full);
+}
+
 int main() {
     test_anthropic_selection_hits_anthropic_route();
     test_chatgpt_selection_hits_chatgpt_route();
@@ -268,6 +280,7 @@ int main() {
     test_prewarm_target_table();
     test_dispatch_propagates_stream_result();
     test_classify_stream_end_precedence();
+    test_hosted_models_share_agent_prompt_policy();
 
     if (g_failures == 0) {
         std::printf("dispatch_route_test: all checks passed\n");

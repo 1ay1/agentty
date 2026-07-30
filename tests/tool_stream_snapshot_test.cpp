@@ -1,4 +1,4 @@
-// tool_stream_snapshot_test — canonical replacement semantics for ACP rawInput.
+// tool_stream_snapshot_test — canonical ID-addressed append/snapshot semantics.
 
 #include <cstdio>
 #include <string>
@@ -56,12 +56,36 @@ int main() {
           "snapshot is routed by tool call id, not the newest call");
 
     m = apply(std::move(m), A::StreamToolUseEnd{A::ToolCallId{"call-a"}});
+    m = apply(std::move(m), A::StreamObservedToolResult{
+        A::ToolCallId{"call-a"}, false, "external edit complete"});
     auto& calls = m.d.current.messages.back().tool_calls;
     check(calls[0].args_streaming.empty(), "ID-addressed end consumes target snapshot");
     check(calls[0].args.value("new_string", "") == "y",
           "final executable arguments equal the latest snapshot");
+    check(std::holds_alternative<A::ToolUse::Done>(calls[0].status),
+          "delegated ACP result settles the card without host execution");
+    check(calls[0].output() == "external edit complete",
+          "delegated ACP output is preserved");
     check(calls[1].args_streaming == R"({"path":"b.cpp"})",
           "ending one call does not close an interleaved call");
+
+    m = apply(std::move(m), A::StreamToolUseStart{
+        A::ToolCallId{"call-c"}, A::ToolName{"write"}});
+    m = apply(std::move(m), A::StreamToolUseStart{
+        A::ToolCallId{"call-d"}, A::ToolName{"bash"}});
+    m = apply(std::move(m), A::StreamToolUseDelta{
+        A::ToolCallId{"call-c"}, R"({"path":"c.cpp",")"});
+    m = apply(std::move(m), A::StreamToolUseDelta{
+        A::ToolCallId{"call-d"}, R"({"command":"true"})"});
+    m = apply(std::move(m), A::StreamToolUseDelta{
+        A::ToolCallId{"call-c"}, R"(content":"ok"})"});
+
+    const auto& interleaved = m.d.current.messages.back().tool_calls;
+    check(interleaved[2].args_streaming ==
+              R"({"path":"c.cpp","content":"ok"})",
+          "append deltas are assembled by call id across interleaving");
+    check(interleaved[3].args_streaming == R"({"command":"true"})",
+          "a sibling delta never appends to the newest call implicitly");
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

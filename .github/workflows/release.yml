@@ -369,6 +369,13 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-static
           cmake --build build --config Release -j
+      - name: Smoke test retrieval engine
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
+          $env:AGENTTY_OLLAMA_HOST = "127.0.0.1:1"
+          & $exe.FullName rag-bench docs
+          if ($LASTEXITCODE -ne 0) { throw "Windows retrieval smoke test failed" }
       - name: Stage binary
         shell: pwsh
         run: |

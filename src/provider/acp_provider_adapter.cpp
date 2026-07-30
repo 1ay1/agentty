@@ -121,12 +121,14 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
         return StreamResult::failed(err.empty() ? "ACP agent spawn failed" : err);
     }
 
-    // Translate ACP's snapshot-based tool lifecycle into the runtime's
-    // canonical stream vocabulary. rawInput is always a replacement snapshot,
-    // never an append delta. Calls stay open through pending refinements and
-    // close once ACP reports execution starting/settled (or at turn end).
+    // Translate ACP's snapshot-based, agent-owned tool lifecycle into visible
+    // canonical cards. rawInput is replacement state, never an append delta.
+    // These calls have already been executed by the delegated agent;
+    // StreamObservedToolResult settles them before finalize_turn, so the host
+    // scheduler never executes them a second time.
     std::unordered_set<std::string> open_tools;
     std::unordered_set<std::string> ended_tools;
+    std::unordered_map<std::string, std::string> observed_outputs;
 
     auto tool_name = [](const a::ToolCall& call) {
         // Claude's ACP adapter carries the executable name in metadata while
@@ -142,14 +144,20 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
         return call.title.empty() ? call.toolCallId.value : call.title;
     };
 
-    auto finish_tool = [&sink, &open_tools, &ended_tools](const std::string& id) {
+    auto finish_tool = [&sink, &open_tools, &ended_tools, &observed_outputs](
+                           const std::string& id, bool failed = false) {
         if (!open_tools.contains(id) || !ended_tools.insert(id).second) return;
         sink(StreamToolUseEnd{ToolCallId{id}});
+        std::string output;
+        if (auto it = observed_outputs.find(id); it != observed_outputs.end())
+            output = std::move(it->second);
+        sink(StreamObservedToolResult{ToolCallId{id}, failed, std::move(output)});
         open_tools.erase(id);
     };
 
     TurnSink tsink;
-    tsink.update = [&sink, &open_tools, &ended_tools, &tool_name, &finish_tool](a::SessionUpdate su) {
+    tsink.update = [&sink, &open_tools, &ended_tools, &observed_outputs,
+                    &tool_name, &finish_tool](a::SessionUpdate su) {
         a::match(su,
             [&](const a::SU_AgentMessageChunk& c) {
                 std::string t = block_text(c.content);
@@ -168,8 +176,11 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
                 }
                 if (call.rawInput.has_value() && !call.rawInput.value().is_null())
                     sink(StreamToolUseSnapshot{ToolCallId{id}, call.rawInput.value().dump()});
-                if (call.status != a::ToolCallStatus::Pending)
-                    finish_tool(id);
+                if (call.rawOutput.has_value() && !call.rawOutput.value().is_null())
+                    observed_outputs[id] = call.rawOutput.value().dump();
+                if (call.status == a::ToolCallStatus::Completed
+                    || call.status == a::ToolCallStatus::Failed)
+                    finish_tool(id, call.status == a::ToolCallStatus::Failed);
             },
             [&](const a::SU_ToolCallUpdate& tc) {
                 const auto& update = tc.update;
@@ -185,9 +196,13 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
                 }
                 if (update.rawInput.has_value() && !update.rawInput.value().is_null())
                     sink(StreamToolUseSnapshot{ToolCallId{id}, update.rawInput.value().dump()});
+                if (update.rawOutput.has_value() && !update.rawOutput.value().is_null())
+                    observed_outputs[id] = update.rawOutput.value().dump();
                 if (update.status.has_value()
-                    && update.status.value() != a::ToolCallStatus::Pending)
-                    finish_tool(id);
+                    && (update.status.value() == a::ToolCallStatus::Completed
+                        || update.status.value() == a::ToolCallStatus::Failed))
+                    finish_tool(id,
+                        update.status.value() == a::ToolCallStatus::Failed);
             },
             [&](const a::SU_Usage& u) {
                 StreamUsage su2;

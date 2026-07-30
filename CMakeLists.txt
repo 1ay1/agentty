@@ -535,23 +535,12 @@ endif()
 # the rest of the app never sees a rag:: type. Built from source in-tree so
 # agentty carries its RAG engine with it and compiles ANYWHERE.
 set(AGENTTY_HAS_RAGCPP FALSE)
-if(MSVC)
-    # rag-cpp builds under MSYS2/mingw (its store layer's POSIX file-durability
-    # calls are shimmed by rag-cpp's include/rag/store/posix_compat.hpp), so the
-    # elseif branch below compiles it for the ucrt64/mingw Windows toolchain.
-    # MSVC is still gated OFF: several TUs rely on GCC/Clang-only SIMD
-    # attributes (__attribute__((target("avx2")))) that MSVC's frontend rejects
-    # outright. Rather than block the MSVC package builds (scoop, winget) on a
-    # full clang-cl port, agentty degrades gracefully there: the retrieval
-    # adapter compiles to a no-op (AGENTTY_HAS_RAGCPP=0), search_docs/
-    # search_code return "retrieval unavailable on this platform", and every
-    # other feature works. Linux/macOS/mingw binaries carry the full engine.
-    message(STATUS "agentty: rag-cpp retrieval engine DISABLED on MSVC "
-                   "(GCC/Clang-only SIMD attrs) — retrieval degrades to no-op. "
-                   "mingw/ucrt64 builds it fine.")
-elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
-    # Library only — no tests / bench / examples / CLI, and no RCP front-end
-    # (that would FetchContent the RCP SDK; agentty drives the Engine in-proc).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
+    # rag-cpp is portable across GCC, Clang, MinGW, and MSVC. Its durability
+    # layer uses posix_compat.hpp on Windows, while SIMD/prefetch kernels use
+    # compiler-specific wrappers and retain scalar/runtime-dispatched fallbacks.
+    # Keep retrieval enabled in the official MSVC release: a platform package
+    # must not silently replace search_docs/search_code with no-op stubs.
     set(RAGCPP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
     set(RAGCPP_BUILD_BENCH    OFF CACHE BOOL "" FORCE)
     set(RAGCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -656,6 +645,7 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
+    src/provider/prompt_policy.cpp
     # The ONE provider-routing seam — dispatch_stream(). Provider-agnostic
     # (type-erased Routes, incl. the ACP arm), so it has no acp-TU dependency
     # and lives in the provider objlib every test links. main.cpp binds the

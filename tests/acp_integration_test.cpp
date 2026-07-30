@@ -72,12 +72,13 @@ int main() {
             std::string tcid = "tc_write_" + std::to_string(n);
             sink(ag::Msg{ag::StreamStarted{}});
             sink(ag::Msg{ag::StreamTextDelta{"Writing the file. "}});
+            const ag::ToolCallId call_id{tcid};
             sink(ag::Msg{ag::StreamToolUseStart{
-                ag::ToolCallId{tcid}, ag::ToolName{"write"}}});
+                call_id, ag::ToolName{"write"}}});
             std::string args = std::string("{\"path\":\"") + target.string()
                              + "\",\"content\":\"hello from acp\\n\"}";
-            sink(ag::Msg{ag::StreamToolUseDelta{args}});
-            sink(ag::Msg{ag::StreamToolUseEnd{}});
+            sink(ag::Msg{ag::StreamToolUseDelta{call_id, args}});
+            sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
             sink(ag::Msg{ag::StreamUsage{1200, 40, 0, 0}});
             sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
         } else {

@@ -91,8 +91,8 @@ void emit_text(const provider::EventSink& sink, const std::string& t) {
 void emit_tool_call(const provider::EventSink& sink, const std::string& id,
                     const std::string& name, const json& jargs) {
     sink(Msg{msg::StreamMsg{StreamToolUseStart{ToolCallId{id}, ToolName{name}}}});
-    sink(Msg{msg::StreamMsg{StreamToolUseDelta{jargs.dump()}}});
-    sink(Msg{msg::StreamMsg{StreamToolUseEnd{}}});
+    sink(Msg{msg::StreamMsg{StreamToolUseDelta{ToolCallId{id}, jargs.dump()}}});
+    sink(Msg{msg::StreamMsg{StreamToolUseEnd{ToolCallId{id}}}});
 }
 void emit_finish(const provider::EventSink& sink,
                  StopReason r = StopReason::EndTurn) {
