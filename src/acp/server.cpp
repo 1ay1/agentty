@@ -25,9 +25,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/persistence.hpp"
-#include "agentty/provider/anthropic/transport.hpp"
-#include "agentty/provider/openai/transport.hpp"
-#include "agentty/provider/ollama/transport.hpp"
+#include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -1082,18 +1080,12 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     // transport then applies its safe agent-sized num_ctx default, still 4x
     // Ollama's truncating floor.
     req.max_tokens    = max_output_tokens_for(req.model);
-    // System prompt is chosen per provider (mirrors cmd_factory): Anthropic
-    // gets the full Claude agentic prompt, Ollama (native /api/chat) its own
-    // local-tuned prompt, other OpenAI-compatible backends the openai local
-    // prompt (verbose Claude prose breaks small models).
+    // Product-level prompt policy is shared with the TUI request builder:
+    // hosted models get the complete agent/tool/RAG contract, while constrained
+    // local endpoints get the compact profile.
     {
-        const auto& sel = provider::active();
-        if (sel.kind == provider::Kind::OpenAI && sel.openai_endpoint.native_api)
-            req.system_prompt = provider::ollama::system_prompt();
-        else if (sel.kind == provider::Kind::OpenAI)
-            req.system_prompt = provider::openai::local_model_system_prompt();
-        else
-            req.system_prompt = provider::anthropic::default_system_prompt();
+        const auto sel = provider::active();
+        req.system_prompt = provider::system_prompt_for(sel);
         // First-class weak-model support (agent-zero style): weak models on
         // the Ollama native endpoint use the JSON-protocol path (inline tool
         // catalog, single {tool_name,tool_args} object) instead of the native

@@ -80,6 +80,7 @@ struct ToolCallSlot {
     std::string id;
     std::string name;
     bool started = false;   // StreamToolUseStart already emitted
+    bool ended   = false;   // StreamToolUseEnd already emitted
 };
 
 struct StreamCtx {
@@ -99,9 +100,9 @@ struct StreamCtx {
     simdjson::ondemand::parser simd_parser;
 
     // Tool-call streaming state, indexed by OpenAI's tool_calls[].index.
+    // Calls may interleave, so each slot owns its own lifecycle; there is no
+    // provider-global "active" call.
     std::vector<ToolCallSlot> tool_slots;
-    int  active_tool_index = -1;     // the index currently open, -1 = none
-    bool in_tool_use = false;
     bool any_structured_tool = false; // a real tool_calls[] delta arrived
 
     // ── Incremental leaked-tool-call salvage (local models) ─────────────
@@ -219,12 +220,14 @@ struct StreamCtx {
     return StopReason::Unspecified;
 }
 
-// Close the currently-open tool call, if any, with a StreamToolUseEnd.
-void close_active_tool(StreamCtx& ctx) {
-    if (ctx.in_tool_use) {
-        ctx.sink(StreamToolUseEnd{});
-        ctx.in_tool_use = false;
-        ctx.active_tool_index = -1;
+// Close every still-open tool call exactly once. OpenAI Chat can interleave
+// argument deltas by tool_calls[].index and only gives a turn-level finish, so
+// closing a call merely because another index emitted would truncate siblings.
+void close_open_tools(StreamCtx& ctx) {
+    for (auto& slot : ctx.tool_slots) {
+        if (!slot.started || slot.ended || slot.id.empty()) continue;
+        ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
+        slot.ended = true;
     }
 }
 
@@ -434,8 +437,8 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
 
     std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
     ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
-    ctx.sink(StreamToolUseDelta{args});
-    ctx.sink(StreamToolUseEnd{});
+    ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, args});
+    ctx.sink(StreamToolUseEnd{ToolCallId{call_id}});
     ctx.stop_reason = StopReason::ToolUse;
     return true;
 }
@@ -787,21 +790,16 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             }
             if (!fn_name.empty()) slot.name = fn_name;
 
-            if (index != ctx.active_tool_index) {
-                close_active_tool(ctx);
-            }
-
-            if (!slot.started) {
+            if (!slot.started && !slot.name.empty()) {
                 if (slot.id.empty())
                     slot.id = "call_" + std::to_string(index);
                 ctx.sink(StreamToolUseStart{ToolCallId{slot.id},
                                             ToolName{slot.name}});
                 slot.started = true;
-                ctx.in_tool_use = true;
-                ctx.active_tool_index = index;
             }
 
-            if (!fn_args.empty()) ctx.sink(StreamToolUseDelta{fn_args});
+            if (!fn_args.empty() && slot.started)
+                ctx.sink(StreamToolUseDelta{ToolCallId{slot.id}, fn_args});
         }
     }
 }
@@ -875,7 +873,7 @@ FastData dispatch_data_fast(StreamCtx& ctx, std::string_view data, char* padded)
 void dispatch_data(StreamCtx& ctx, std::string_view data) {
     if (data.empty()) return;
     if (data == "[DONE]") {
-        close_active_tool(ctx);
+        close_open_tools(ctx);
         if (!ctx.terminated) {
             // Salvage a leaked tool call (or flush held text as prose)
             // before the terminal event.
@@ -941,7 +939,7 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
             choice["finish_reason"].get<std::string_view>());
         if (ctx.stop_reason != StopReason::ToolUse)
             ctx.stop_reason = server_reason;
-        close_active_tool(ctx);
+        close_open_tools(ctx);
     }
 }
 
@@ -1077,8 +1075,8 @@ void handle_native_message(StreamCtx& ctx, const json& message) {
                 + std::to_string(ctx.salvage_seq++) + "_"
                 + std::to_string(idx++);
             ctx.sink(StreamToolUseStart{ToolCallId{id}, ToolName{name}});
-            ctx.sink(StreamToolUseDelta{args});
-            ctx.sink(StreamToolUseEnd{});
+            ctx.sink(StreamToolUseDelta{ToolCallId{id}, args});
+            ctx.sink(StreamToolUseEnd{ToolCallId{id}});
             ctx.stop_reason = StopReason::ToolUse;
         }
     }
@@ -1569,10 +1567,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             ensure_nonempty_turn(ctx);
         },
         .on_any_end = [&ctx]() {
-            if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{});
-                ctx.in_tool_use = false;
-            }
+            close_open_tools(ctx);
         },
     });
 }
@@ -1845,7 +1840,7 @@ std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
     // Mirror run_stream_sync's terminal guarantee: if [DONE] never arrived,
     // synthesise the close so a test sees a StreamFinished.
     if (!ctx.terminated) {
-        if (ctx.in_tool_use) { ctx.sink(StreamToolUseEnd{}); ctx.in_tool_use = false; }
+        close_open_tools(ctx);
         if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);
         ensure_nonempty_turn(ctx);
         ctx.sink(StreamFinished{ctx.stop_reason});
@@ -1864,7 +1859,7 @@ std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     feed_ndjson(ctx, ndjson_bytes.data(), ndjson_bytes.size());
     if (!ctx.terminated) {
-        if (ctx.in_tool_use) { ctx.sink(StreamToolUseEnd{}); ctx.in_tool_use = false; }
+        close_open_tools(ctx);
         if (!try_salvage_tool_call(ctx)) flush_text_hold(ctx);
         ensure_nonempty_turn(ctx);
         ctx.sink(StreamFinished{ctx.stop_reason});

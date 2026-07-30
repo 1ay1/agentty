@@ -12,6 +12,7 @@
 // Run: build the `codex_responses_test` target, execute. Exit 0 = pass.
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <variant>
 #include <vector>
@@ -153,8 +154,14 @@ static void test_sse_tool_call() {
     StopReason stop = StopReason::Unspecified;
     for (const auto& m : msgs) {
         if (auto* s = leaf<StreamToolUseStart>(m)) { start = true; name = s->name.value; id = s->id.value; }
-        if (auto* d = leaf<StreamToolUseDelta>(m)) args += d->partial_json;
-        if (leaf<StreamToolUseEnd>(m)) end = true;
+        if (auto* d = leaf<StreamToolUseDelta>(m)) {
+            CHECK(d->id.value == "call_9");
+            args += d->partial_json;
+        }
+        if (auto* e = leaf<StreamToolUseEnd>(m)) {
+            CHECK(e->id.value == "call_9");
+            end = true;
+        }
         if (auto* f = leaf<StreamFinished>(m)) { finished = true; stop = f->stop_reason; }
     }
     CHECK(start);
@@ -164,6 +171,33 @@ static void test_sse_tool_call() {
     CHECK(end);
     CHECK(finished);
     CHECK(stop == StopReason::ToolUse);    // a function_call ⇒ ToolUse stop
+}
+
+static void test_sse_parallel_tool_calls_are_id_addressed() {
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
+        R"({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"a.cpp\","})",
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"bash"}})",
+        R"({"type":"response.function_call_arguments.delta","item_id":"fc_2","delta":"{\"command\":\"true\"}"})",
+        R"({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\"old_text\":\"x\",\"new_text\":\"y\"}"})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_2"}})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    std::map<std::string, std::string> args;
+    std::map<std::string, int> ends;
+    for (const auto& m : cc::parse_sse_for_test(sse)) {
+        if (auto* d = leaf<StreamToolUseDelta>(m))
+            args[d->id.value] += d->partial_json;
+        if (auto* e = leaf<StreamToolUseEnd>(m))
+            ++ends[e->id.value];
+    }
+
+    CHECK(json::parse(args["call_1"])["new_text"] == "y");
+    CHECK(json::parse(args["call_2"])["command"] == "true");
+    CHECK(ends["call_1"] == 1);
+    CHECK(ends["call_2"] == 1);
 }
 
 static void test_sse_reasoning() {
@@ -292,6 +326,7 @@ int main() {
     test_build_body();
     test_sse_text_and_usage();
     test_sse_tool_call();
+    test_sse_parallel_tool_calls_are_id_addressed();
     test_sse_reasoning();
     test_sse_reasoning_encrypted_capture();
     test_build_body_requests_encrypted_reasoning();

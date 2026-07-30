@@ -45,6 +45,7 @@
 #include <rag/rag.hpp>
 
 #include "agentty/io/http.hpp"
+#include "agentty/mcp/client.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -95,6 +96,103 @@ std::pair<std::string, std::string> split_uri(const std::string& uri) {
     auto pos = uri.find("://");
     if (pos == std::string::npos) return {"docs", uri};
     return {uri.substr(0, pos), uri.substr(pos + 3)};
+}
+
+std::size_t retrieval_output_budget() {
+    std::size_t value = 12 * 1024; // about 3k tokens across the whole result
+    if (const char* v = std::getenv("AGENTTY_RAG_OUTPUT_BYTES"); v && v[0]) {
+        try { value = std::clamp<std::size_t>(std::stoull(v), 2048, 64 * 1024); }
+        catch (...) {}
+    }
+    return value;
+}
+
+std::vector<std::string> query_terms(std::string_view query) {
+    std::vector<std::string> terms;
+    std::string word;
+    auto flush = [&] {
+        if (word.size() >= 2
+            && std::find(terms.begin(), terms.end(), word) == terms.end())
+            terms.push_back(word);
+        word.clear();
+    };
+    for (unsigned char c : query) {
+        if (std::isalnum(c)) word.push_back(static_cast<char>(std::tolower(c)));
+        else flush();
+    }
+    flush();
+    return terms;
+}
+
+std::size_t utf8_boundary(std::string_view text, std::size_t at) {
+    at = std::min(at, text.size());
+    while (at > 0 && at < text.size()
+           && (static_cast<unsigned char>(text[at]) & 0xc0) == 0x80) --at;
+    return at;
+}
+
+std::string compress_passage(std::string_view query, std::string_view text,
+                             std::size_t budget) {
+    if (text.size() <= budget) return std::string{text};
+    const auto terms = query_terms(query);
+    std::vector<std::pair<std::size_t, std::size_t>> lines;
+    for (std::size_t start = 0; start < text.size();) {
+        auto end = text.find('\n', start);
+        if (end == std::string_view::npos) end = text.size(); else ++end;
+        lines.emplace_back(start, end);
+        start = end;
+    }
+    auto line_score = [&](std::size_t i) {
+        std::string lower{text.substr(lines[i].first, lines[i].second - lines[i].first)};
+        for (char& c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        std::size_t score = 0;
+        for (const auto& term : terms) if (lower.find(term) != std::string::npos) ++score;
+        return score;
+    };
+    std::size_t best = 0, best_score = 0;
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        if (auto score = line_score(i); score > best_score) { best = i; best_score = score; }
+
+    std::size_t first = best, last = best + 1;
+    while (true) {
+        bool grew = false;
+        if (first > 0 && lines[last - 1].second - lines[first - 1].first <= budget) {
+            --first; grew = true;
+        }
+        if (last < lines.size() && lines[last].second - lines[first].first <= budget) {
+            ++last; grew = true;
+        }
+        if (!grew) break;
+    }
+    std::size_t begin = lines[first].first;
+    std::size_t end = lines[last - 1].second;
+    if (end - begin > budget) {
+        // A minified/generated single line: center the excerpt on the first
+        // query term rather than blindly keeping an unrelated prefix.
+        std::string lower{text};
+        for (char& c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        std::size_t hit = std::string::npos;
+        for (const auto& term : terms) {
+            hit = lower.find(term);
+            if (hit != std::string::npos) break;
+        }
+        if (hit == std::string::npos) hit = begin;
+        begin = hit > budget / 3 ? hit - budget / 3 : 0;
+        end = std::min(text.size(), begin + budget);
+    }
+    begin = utf8_boundary(text, begin);
+    end = utf8_boundary(text, end);
+    std::string out;
+    if (begin > 0) out += "…\n";
+    out.append(text.substr(begin, end - begin));
+    if (end < text.size()) {
+        if (!out.empty() && out.back() != '\n') out += '\n';
+        out += "…";
+    }
+    if (out.size() > budget) out.resize(utf8_boundary(out, budget));
+    return out;
 }
 
 // ── FeedbackStore ─────────────────────────────────────────────────────────
@@ -275,22 +373,22 @@ Config Config::from_env() {
     }
     c.skills        = truthy_default_on("AGENTTY_RAG_SKILLS");
     c.memory        = truthy_default_on("AGENTTY_RAG_MEMORY");
-    c.mcp_resources = false;   // opt-in; the backend flips this per call
+    c.mcp_resources = truthy_default_off("AGENTTY_RAG_MCP");
 
     c.contextual  = truthy_default_on("AGENTTY_RAG_CONTEXTUAL");
     c.mmr         = truthy_default_on("AGENTTY_RAG_MMR");
-    c.mmr_lambda  = env_float("AGENTTY_RAG_MMR_LAMBDA", 0.5f);
+    c.mmr_lambda  = env_float("AGENTTY_RAG_MMR_LAMBDA", 0.65f);
     c.stitch      = truthy_default_on("AGENTTY_RAG_STITCH");
-    c.prf         = truthy_default_on("AGENTTY_RAG_PRF");
-    c.corrective  = truthy_default_on("AGENTTY_RAG_CORRECT");
-    c.graph       = truthy_default_on("AGENTTY_RAG_GRAPH");
+    c.prf         = truthy_default_off("AGENTTY_RAG_PRF");
+    c.corrective  = truthy_default_off("AGENTTY_RAG_CORRECT");
+    c.graph       = truthy_default_off("AGENTTY_RAG_GRAPH");
     // Generative query expansion has a measurable latency cost even when its
     // model is local. It is an explicit power-mode, not a tax on every turn.
     c.expand      = truthy_default_off("AGENTTY_RAG_EXPAND");
     c.hyde        = truthy_default_off("AGENTTY_RAG_HYDE");
     if (const char* g = std::getenv("AGENTTY_RAG_GEN_MODEL"); g && g[0]) c.gen_model = g;
     c.persist     = truthy_default_on("AGENTTY_RAG_PERSIST");
-    c.learn       = truthy_default_on("AGENTTY_RAG_LEARN");
+    c.learn       = truthy_default_off("AGENTTY_RAG_LEARN");
     c.trace       = truthy_default_off("AGENTTY_RAG_TRACE");
     c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
     c.bm25_weight  = env_float("AGENTTY_RAG_BM25_WEIGHT", 1.0f);
@@ -304,14 +402,30 @@ struct Retriever::Impl {
     std::mutex mu;
     ::rag::Engine engine;
     bool   embedder_ready = false;
+    bool   ollama_probed = false;
+    bool   ollama_ready = false;
     // Freshness of the docs index: (root, fingerprint) it was built for.
     std::string indexed_root;
     std::uint64_t indexed_fp = 0;
-    // Skills / memory generation the in-memory sources were built for.
-    std::size_t skills_gen = static_cast<std::size_t>(-1);
-    std::size_t memory_gen = static_cast<std::size_t>(-1);
+    bool docs_initialized = false;
+    std::unordered_map<std::string, std::uint64_t> docs_files;
+    std::string persist_checked_for;
+    // Content fingerprints, not item counts: editing a skill or replacing a
+    // memory record without changing cardinality must invalidate retrieval.
+    std::uint64_t skills_gen = 0;
+    std::uint64_t memory_gen = 0;
+    std::uint64_t mcp_gen = 0;
+
+    // Skills/memory-only engine for latency-budgeted proactive retrieval. It is
+    // deliberately separate so a cold warm-only query can never walk, rebuild,
+    // or discard the docs corpus.
+    ::rag::Engine warm_engine;
+    bool warm_initialized = false;
+    std::uint64_t warm_skills_gen = 0;
+    std::uint64_t warm_memory_gen = 0;
 
     std::atomic<bool> warming{false};
+    std::jthread warmer;
 
     // Optional LLM seam for HyDE / multi-query (agentty's provider).
     Retriever::Generator generator;
@@ -321,12 +435,19 @@ struct Retriever::Impl {
     // reindex never disturbs code search and vice-versa.
     ::rag::Engine code_engine{::rag::index::CorpusConfig{}};
     bool          code_embedder_ready = false;
-    std::uint64_t code_fp = 0;
+    bool          code_initialized = false;
+    std::string code_root;
+    std::unordered_map<std::string, std::uint64_t> code_files;
 
     Impl() : engine(make_engine_config()) {
+        probe_ollama();
         attach_embedder();
         apply_pipeline(engine);
         install_default_generator();
+    }
+
+    ~Impl() {
+        if (warmer.joinable()) warmer.join();
     }
 
     // Install a ZERO-COST local generator for HyDE / multi-query: a tiny model
@@ -376,14 +497,11 @@ struct Retriever::Impl {
         };
     }
 
-    ::rag::index::CorpusConfig make_engine_config() {
+    ::rag::index::CorpusConfig make_engine_config(bool source_code = false) {
         ::rag::index::CorpusConfig cc;
-        // Anthropic Contextual Retrieval: situate each chunk in its document
-        // before indexing so a fragment that lost its heading still ranks.
-        // Index-time cost only; a large measured recall win. With no LLM
-        // contextualizer set, rag-cpp uses its deterministic extractive
-        // fallback (needs no model, never fails).
         cc.contextual = cfg.contextual;
+        if (source_code)
+            cc.chunking = ::rag::index::CorpusConfig::Chunking::source;
         return cc;
     }
 
@@ -396,9 +514,12 @@ struct Retriever::Impl {
         namespace pl = ::rag::pipeline;
         pl::HybridRetrieveConfig hy;
         hy.candidate_k  = 60;
-        hy.fusion       = pl::HybridRetrieveConfig::Fusion::convex;
-        hy.bm25_weight  = cfg.bm25_weight;
-        hy.dense_weight = cfg.dense_weight;
+        // Weighted RRF honors the public BM25/dense weights. The convex path
+        // uses a separate alpha when exactly two lists are present, which made
+        // AGENTTY_RAG_*_WEIGHT silently ineffective.
+        hy.fusion       = pl::HybridRetrieveConfig::Fusion::rrf;
+        hy.bm25_weight  = std::max(0.0f, cfg.bm25_weight);
+        hy.dense_weight = std::max(0.0f, cfg.dense_weight);
 
         pl::Pipeline p;
         if (cfg.prf)
@@ -416,41 +537,141 @@ struct Retriever::Impl {
         eng.with_pipeline(std::move(p));
     }
 
-    void attach_embedder() {
-        // Ollama dense embedder, with a deterministic local-hash fallback so a
-        // machine with no Ollama still gets (BM25 + hash-dense) hybrid — the
-        // engine NEVER hard-fails on a missing model.
-        ::rag::plugin::Json spec = {
-            {"type", "ollama"},
-            {"model", cfg.embed_model},
-            {"host", cfg.embed_host},
-            {"port", cfg.embed_port},
+    ::rag::plugin::Json ollama_spec() const {
+        return {
+            {"type", "ollama"}, {"model", cfg.embed_model},
+            {"host", cfg.embed_host}, {"port", cfg.embed_port},
+            {"timeout_ms", 1200},
         };
-        auto r = engine.with_embedder_spec(spec);
-        if (!r) {
-            // Fallback to the local hash embedder (no network).
-            engine.with_embedder(::rag::dense::AnyEmbedder{::rag::dense::HashEmbedder{256}});
-            ::agentty::util::dbglog("rag.embed", "ollama spec failed, using hash embedder");
-        }
-        embedder_ready = true;
     }
 
-    // Cheap directory fingerprint: sum of (size ^ mtime) over indexable files.
-    std::uint64_t fingerprint(const fs::path& root) {
+    void probe_ollama() {
+        if (ollama_probed) return;
+        ollama_probed = true;
+        try {
+            ::rag::Engine probe;
+            if (!probe.with_embedder_spec(ollama_spec())) return;
+            auto vector = probe.corpus().embed_text("agentty retrieval availability probe");
+            ollama_ready = vector.has_value() && !vector->empty();
+        } catch (...) { ollama_ready = false; }
+        ::agentty::util::dbglog("rag.embed",
+            ollama_ready ? "ollama ready" : "ollama unavailable; using BM25");
+    }
+
+    void attach_embedder() {
+        embedder_ready = false;
+        if (!ollama_ready) return;
+        embedder_ready = engine.with_embedder_spec(ollama_spec()).has_value();
+    }
+
+    // Fingerprint exactly the files the loader can index. Directory pruning is
+    // essential on Windows: descending into .git/build/node_modules and only
+    // filtering files afterwards turns every query into thousands of NTFS and
+    // Defender metadata operations.
+    std::uint64_t fingerprint(
+        const fs::path& root,
+        const ::rag::loaders::DirOptions& opts = ::rag::loaders::DirOptions{}) {
         std::uint64_t fp = 1469598103934665603ull;
         if (root.empty()) return fp;
+        std::unordered_set<std::string> wanted(opts.include_ext.begin(), opts.include_ext.end());
+        std::unordered_set<std::string> skipped(opts.exclude_dirs.begin(), opts.exclude_dirs.end());
         std::error_code ec;
-        for (auto it = fs::recursive_directory_iterator(
-                 root, fs::directory_options::skip_permission_denied, ec);
-             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-            if (!it->is_regular_file(ec)) continue;
-            auto sz = fs::file_size(it->path(), ec);
-            auto tm = fs::last_write_time(it->path(), ec).time_since_epoch().count();
-            fp ^= (static_cast<std::uint64_t>(sz) * 1099511628211ull)
-                  ^ static_cast<std::uint64_t>(tm);
+        std::size_t files = 0;
+        auto flags = fs::directory_options::skip_permission_denied;
+        if (opts.follow_symlinks) flags |= fs::directory_options::follow_directory_symlink;
+        for (fs::recursive_directory_iterator it(root, flags, ec), end;
+             it != end; it.increment(ec)) {
+            if (ec) { ec.clear(); continue; }
+            const auto& entry = *it;
+            if (entry.is_directory(ec)) {
+                if (skipped.contains(entry.path().filename().string()))
+                    it.disable_recursion_pending();
+                continue;
+            }
+            if (!entry.is_regular_file(ec)) continue;
+            std::string ext = entry.path().extension().string();
+            for (char& c : ext)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (!wanted.contains(ext)) continue;
+            auto sz = entry.file_size(ec);
+            if (ec || sz > opts.max_file_bytes) { ec.clear(); continue; }
+            if (opts.max_files > 0 && files >= opts.max_files) break;
+            ++files;
+            auto tm = entry.last_write_time(ec).time_since_epoch().count();
+            if (ec) { ec.clear(); continue; }
+            auto rel = fs::relative(entry.path(), root, ec).generic_string();
+            if (ec) { ec.clear(); rel = entry.path().generic_string(); }
+            for (unsigned char c : rel) { fp ^= c; fp *= 1099511628211ull; }
+            fp ^= static_cast<std::uint64_t>(sz);
+            fp *= 1099511628211ull;
+            fp ^= static_cast<std::uint64_t>(tm);
             fp *= 1099511628211ull;
         }
         return fp;
+    }
+
+    static void hash_text(std::uint64_t& h, std::string_view value) {
+        for (unsigned char c : value) { h ^= c; h *= 1099511628211ull; }
+        h ^= 0xff; h *= 1099511628211ull;
+    }
+
+    std::uint64_t skills_fingerprint() const {
+        std::uint64_t h = 1469598103934665603ull;
+        if (!cfg.skills) return h;
+        for (const auto& s : tools::skills::all()) {
+            hash_text(h, s.name);
+            hash_text(h, s.body);
+        }
+        return h;
+    }
+
+    std::uint64_t memory_fingerprint() const {
+        std::uint64_t h = 1469598103934665603ull;
+        if (!cfg.memory) return h;
+        for (auto scope : {tools::memory::Scope::User, tools::memory::Scope::Project})
+            for (const auto& r : tools::memory::load_all(scope)) {
+                hash_text(h, r.id);
+                hash_text(h, r.text);
+            }
+        return h;
+    }
+
+    std::uint64_t mcp_fingerprint() const {
+        std::uint64_t h = 1469598103934665603ull;
+        if (!cfg.mcp_resources) return h;
+        for (const auto& r : ::agentty::mcp::mcp_resources()) {
+            hash_text(h, r.uri);
+            hash_text(h, r.title);
+            hash_text(h, r.description);
+            hash_text(h, r.mime_type);
+        }
+        return h;
+    }
+
+    void ensure_warm_index() {
+        const auto sfp = skills_fingerprint();
+        const auto mfp = memory_fingerprint();
+        if (warm_initialized
+            && sfp == warm_skills_gen && mfp == warm_memory_gen) return;
+        warm_engine = ::rag::Engine(make_engine_config());
+        if (ollama_ready) (void)warm_engine.with_embedder_spec(ollama_spec());
+        if (cfg.skills)
+            for (const auto& s : tools::skills::all())
+                if (!s.body.empty())
+                    (void)warm_engine.add("skill://" + s.name, s.body,
+                                          {{"kind", "skill"}}, s.name);
+        if (cfg.memory)
+            for (auto scope : {tools::memory::Scope::User, tools::memory::Scope::Project})
+                for (const auto& r : tools::memory::load_all(scope))
+                    if (!r.text.empty())
+                        (void)warm_engine.add("memory://" + r.id, r.text,
+                            {{"kind", "memory"},
+                             {"scope", std::string(tools::memory::to_string(scope))}});
+        (void)warm_engine.build();
+        apply_pipeline(warm_engine);
+        warm_skills_gen = sfp;
+        warm_memory_gen = mfp;
+        warm_initialized = true;
     }
 
     // Rebuild the whole engine from scratch for the current source set. Called
@@ -477,6 +698,8 @@ struct Retriever::Impl {
             if (docs) {
                 for (auto& d : *docs) {
                     std::string rel = d.meta.count("rel") ? d.meta["rel"] : d.uri;
+                    rel = fs::path{rel}.generic_string();
+                    d.meta["rel"] = rel;
                     (void)engine.add("docs://" + rel, std::move(d.text), d.meta, d.title);
                 }
             }
@@ -501,28 +724,41 @@ struct Retriever::Impl {
             }
         }
 
-        (void)engine.build();
+        // Connected MCP resources are explicitly opt-in because reading them
+        // may involve server I/O. Failures are isolated per resource.
+        if (cfg.mcp_resources) {
+            for (const auto& r : ::agentty::mcp::mcp_resources()) {
+                std::string err;
+                auto text = ::agentty::mcp::mcp_read_resource(r.uri, err);
+                if (!text || text->empty()) continue;
+                (void)engine.add("mcp://" + r.uri, std::move(*text),
+                    {{"kind", "mcp"}, {"server", r.server},
+                     {"mime", r.mime_type}}, r.title);
+            }
+        }
+
+        auto built = engine.build();
+        if (!built)
+            ::agentty::util::dbglog("rag.build", std::string(::rag::to_string(built.error().code)));
         apply_pipeline(engine);
 
         if (!skip_docs) {
             indexed_root = root.string();
-            indexed_fp   = fingerprint(root);
+            ::rag::loaders::DirOptions opts;
+            docs_files = file_manifest(root, opts);
+            indexed_fp = manifest_fingerprint(docs_files);
+            docs_initialized = true;
         } else if (indexed_root.empty() && !root.empty()) {
             indexed_root = root.string();
         }
-        skills_gen   = tools::skills::all().size();
-        memory_gen   = tools::memory::load_all(tools::memory::Scope::User).size()
-                       + tools::memory::load_all(tools::memory::Scope::Project).size();
+        skills_gen = skills_fingerprint();
+        memory_gen = memory_fingerprint();
+        mcp_gen = mcp_fingerprint();
 
-        // Persist the built corpus to a .ragdb so a later session opens warm
-        // without re-walking + re-embedding the whole folder. Best-effort.
-        if (cfg.persist) {
-            if (auto p = ragdb_path(); !p.empty()) {
-                std::error_code ec;
-                fs::create_directories(p.parent_path(), ec);
-                (void)engine.save(p.string());
-            }
-        }
+        // Persist the built corpus and a source/config manifest. The manifest
+        // prevents a warm open from serving an index built for another root,
+        // source generation, chunking profile, or embedding model.
+        persist_index();
     }
 
     // Where the persisted docs index lives (under the workspace .agentty/).
@@ -533,48 +769,265 @@ struct Retriever::Impl {
         return cwd / ".agentty" / "rag_docs.ragdb";
     }
 
+    fs::path ragmeta_path() {
+        auto p = ragdb_path();
+        return p.empty() ? fs::path{} : fs::path{p.string() + ".meta.json"};
+    }
+
+    void persist_index() {
+        if (!cfg.persist || cfg.mcp_resources) return;
+        auto db = ragdb_path();
+        auto meta = ragmeta_path();
+        if (db.empty() || meta.empty()) return;
+        std::error_code ec;
+        fs::create_directories(db.parent_path(), ec);
+        auto saved = engine.save(db.string());
+        if (!saved) return;
+        ::rag::plugin::Json j = {
+            {"version", 2}, {"root", indexed_root}, {"docs_fp", indexed_fp},
+            {"skills_fp", skills_gen}, {"memory_fp", memory_gen},
+            {"contextual", cfg.contextual}, {"embed_model", cfg.embed_model},
+            {"dense", embedder_ready},
+        };
+        std::ofstream out(meta, std::ios::trunc);
+        if (out) out << j.dump();
+    }
+
+    bool try_load_persisted(const fs::path& root) {
+        if (!cfg.persist || cfg.mcp_resources) return false;
+        const std::string root_s = root.string();
+        if (persist_checked_for == root_s) return false;
+        persist_checked_for = root_s;
+        auto db = ragdb_path();
+        auto meta = ragmeta_path();
+        if (db.empty() || meta.empty()) return false;
+        try {
+            std::ifstream in(meta);
+            if (!in) return false;
+            ::rag::plugin::Json j;
+            in >> j;
+            ::rag::loaders::DirOptions opts;
+            auto current_files = file_manifest(root, opts);
+            const auto current_docs = manifest_fingerprint(current_files);
+            const auto current_skills = skills_fingerprint();
+            const auto current_memory = memory_fingerprint();
+            if (j.value("version", 0) != 2
+                || j.value("root", std::string{}) != root_s
+                || j.value("docs_fp", std::uint64_t{}) != current_docs
+                || j.value("skills_fp", std::uint64_t{}) != current_skills
+                || j.value("memory_fp", std::uint64_t{}) != current_memory
+                || j.value("contextual", false) != cfg.contextual
+                || j.value("embed_model", std::string{}) != cfg.embed_model
+                || j.value("dense", false) != ollama_ready)
+                return false;
+            auto opened = ::rag::Engine::open(db.string());
+            if (!opened) return false;
+            engine = std::move(*opened);
+            embedder_ready = false;
+            attach_embedder();
+            apply_pipeline(engine);
+            indexed_root = root_s;
+            indexed_fp = current_docs;
+            docs_files = std::move(current_files);
+            docs_initialized = true;
+            skills_gen = current_skills;
+            memory_gen = current_memory;
+            ::agentty::util::dbglog("rag.persist", "opened warm index " + db.string());
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
     bool needs_reindex(const fs::path& root, bool skip_docs) {
         // A changed docs root ALWAYS forces a rebuild — even on the warm path —
         // so proactive retrieval can never serve a stale corpus after the
         // folder is repointed.
         if (!root.empty() && indexed_root != root.string()) return true;
-        if (!skip_docs && fingerprint(root) != indexed_fp) return true;
-        if (skills_gen != tools::skills::all().size()) return true;
-        std::size_t mgen = tools::memory::load_all(tools::memory::Scope::User).size()
-                           + tools::memory::load_all(tools::memory::Scope::Project).size();
-        if (memory_gen != mgen) return true;
+        if (!skip_docs) {
+            ::rag::loaders::DirOptions opts;
+            if (manifest_fingerprint(file_manifest(root, opts)) != indexed_fp) return true;
+        }
+        if (skills_gen != skills_fingerprint()) return true;
+        if (memory_gen != memory_fingerprint()) return true;
+        if (mcp_gen != mcp_fingerprint()) return true;
         return false;
     }
 
-    // Fingerprint over source files only (search_code drift signal).
-    std::uint64_t code_fingerprint(const fs::path& root,
-                                   ::rag::loaders::DirOptions& opts) {
-        std::uint64_t fp = 1469598103934665603ull;
+    using FileManifest = std::unordered_map<std::string, std::uint64_t>;
+
+    FileManifest file_manifest(const fs::path& root,
+                               const ::rag::loaders::DirOptions& opts) {
+        FileManifest out;
+        if (root.empty()) return out;
+        std::unordered_set<std::string> wanted(opts.include_ext.begin(), opts.include_ext.end());
+        std::unordered_set<std::string> skipped(opts.exclude_dirs.begin(), opts.exclude_dirs.end());
         std::error_code ec;
-        for (auto it = fs::recursive_directory_iterator(
-                 root, fs::directory_options::skip_permission_denied, ec);
-             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-            if (!it->is_regular_file(ec)) continue;
-            auto ext = it->path().extension().string();
-            for (auto& c : ext) c = static_cast<char>(std::tolower((unsigned char)c));
-            bool want = false;
-            for (auto& e : opts.include_ext) if (e == ext) { want = true; break; }
-            if (!want) continue;
-            auto sz = fs::file_size(it->path(), ec);
-            auto tm = fs::last_write_time(it->path(), ec).time_since_epoch().count();
-            fp = (fp ^ (static_cast<std::uint64_t>(sz)
-                        ^ static_cast<std::uint64_t>(tm))) * 1099511628211ull;
+        auto flags = fs::directory_options::skip_permission_denied;
+        if (opts.follow_symlinks) flags |= fs::directory_options::follow_directory_symlink;
+        for (fs::recursive_directory_iterator it(root, flags, ec), end;
+             it != end; it.increment(ec)) {
+            if (ec) { ec.clear(); continue; }
+            const auto& e = *it;
+            if (e.is_directory(ec)) {
+                if (skipped.contains(e.path().filename().string())) it.disable_recursion_pending();
+                continue;
+            }
+            if (!e.is_regular_file(ec)) continue;
+            auto ext = e.path().extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (!wanted.contains(ext)) continue;
+            auto size = e.file_size(ec);
+            if (ec || size > opts.max_file_bytes) { ec.clear(); continue; }
+            if (opts.max_files > 0 && out.size() >= opts.max_files) break;
+            auto mtime = e.last_write_time(ec).time_since_epoch().count();
+            if (ec) { ec.clear(); continue; }
+            auto rel = fs::relative(e.path(), root, ec).generic_string();
+            if (ec) { ec.clear(); continue; }
+            std::uint64_t stamp = 1469598103934665603ull;
+            hash_text(stamp, rel);
+            stamp ^= static_cast<std::uint64_t>(size); stamp *= 1099511628211ull;
+            stamp ^= static_cast<std::uint64_t>(mtime); stamp *= 1099511628211ull;
+            out.emplace(std::move(rel), stamp);
         }
-        return fp;
+        return out;
+    }
+
+    static std::uint64_t manifest_fingerprint(const FileManifest& files) {
+        std::vector<std::pair<std::string, std::uint64_t>> ordered(files.begin(), files.end());
+        std::sort(ordered.begin(), ordered.end());
+        std::uint64_t h = 1469598103934665603ull;
+        for (const auto& [path, stamp] : ordered) {
+            hash_text(h, path);
+            h ^= stamp; h *= 1099511628211ull;
+        }
+        return h;
+    }
+
+    fs::path code_ragdb_path() const {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        return ec ? fs::path{} : cwd / ".agentty" / "rag_code.ragdb";
+    }
+
+    fs::path code_meta_path() const {
+        auto db = code_ragdb_path();
+        return db.empty() ? fs::path{} : fs::path{db.string() + ".meta.json"};
+    }
+
+    bool try_load_code_index(const fs::path& root, const FileManifest& manifest) {
+        if (!cfg.persist) return false;
+        auto db = code_ragdb_path();
+        auto meta = code_meta_path();
+        if (db.empty() || meta.empty()) return false;
+        try {
+            std::ifstream in(meta);
+            if (!in) return false;
+            ::rag::plugin::Json j;
+            in >> j;
+            const auto stored = j.value("files", FileManifest{});
+            if (j.value("version", 0) != 1
+                || j.value("root", std::string{}) != root.string()
+                || stored != manifest
+                || j.value("contextual", false) != cfg.contextual
+                || j.value("embed_model", std::string{}) != cfg.embed_model
+                || j.value("dense", false) != ollama_ready)
+                return false;
+            auto opened = ::rag::Engine::open(db.string());
+            if (!opened) return false;
+            code_engine = std::move(*opened);
+            attach_code_embedder();
+            apply_pipeline(code_engine);
+            code_root = root.string();
+            code_files = manifest;
+            code_initialized = true;
+            return true;
+        } catch (...) { return false; }
+    }
+
+    void persist_code_index() {
+        if (!cfg.persist || !code_initialized) return;
+        auto db = code_ragdb_path();
+        auto meta = code_meta_path();
+        if (db.empty() || meta.empty()) return;
+        std::error_code ec;
+        fs::create_directories(db.parent_path(), ec);
+        if (!code_engine.save(db.string())) return;
+        ::rag::plugin::Json j = {
+            {"version", 1}, {"root", code_root}, {"files", code_files},
+            {"contextual", cfg.contextual}, {"embed_model", cfg.embed_model},
+            {"dense", code_embedder_ready},
+        };
+        std::ofstream out(meta, std::ios::trunc);
+        if (out) out << j.dump();
+    }
+
+    void refresh_docs(const fs::path& root) {
+        ::rag::loaders::DirOptions opts;
+        auto manifest = file_manifest(root, opts);
+        const auto fp = manifest_fingerprint(manifest);
+        const bool non_doc_changed = skills_gen != skills_fingerprint()
+                                  || memory_gen != memory_fingerprint()
+                                  || mcp_gen != mcp_fingerprint();
+        if (!docs_initialized || indexed_root != root.string()
+            || non_doc_changed) {
+            reindex(root, /*skip_docs=*/false);
+            return;
+        }
+        if (fp == indexed_fp) return;
+
+        std::size_t changed = 0;
+        for (const auto& [path, stamp] : manifest) {
+            auto old = docs_files.find(path);
+            if (old == docs_files.end() || old->second != stamp) ++changed;
+        }
+        for (const auto& [path, _] : docs_files)
+            if (!manifest.contains(path)) ++changed;
+        if (changed > std::max<std::size_t>(32, docs_files.size() / 3)) {
+            reindex(root, /*skip_docs=*/false);
+            return;
+        }
+
+        auto remove_uri = [&](const std::string& rel) {
+            const std::string uri = "docs://" + rel;
+            auto& corpus = engine.corpus();
+            for (std::uint32_t i = 0; i < corpus.document_count(); ++i) {
+                ::rag::DocId id{i};
+                const auto* doc = corpus.document(id);
+                if (doc && doc->uri == uri && !corpus.is_deleted(id)) {
+                    (void)corpus.remove_document(id);
+                    return;
+                }
+            }
+        };
+        for (const auto& [path, old_stamp] : docs_files) {
+            auto now = manifest.find(path);
+            if (now == manifest.end() || now->second != old_stamp) remove_uri(path);
+        }
+        for (const auto& [path, stamp] : manifest) {
+            auto old = docs_files.find(path);
+            if (old != docs_files.end() && old->second == stamp) continue;
+            auto loaded = ::rag::loaders::load_file(root / fs::path{path});
+            if (!loaded) continue;
+            loaded->meta["rel"] = path;
+            (void)engine.add("docs://" + path, std::move(loaded->text),
+                             loaded->meta, loaded->title);
+        }
+        auto built = engine.build();
+        if (!built) {
+            reindex(root, /*skip_docs=*/false);
+            return;
+        }
+        apply_pipeline(engine);
+        docs_files = std::move(manifest);
+        indexed_fp = fp;
+        persist_index();
     }
 
     void attach_code_embedder() {
-        ::rag::plugin::Json spec = {
-            {"type", "ollama"}, {"model", cfg.embed_model},
-            {"host", cfg.embed_host}, {"port", cfg.embed_port}};
-        if (!code_engine.with_embedder_spec(spec))
-            code_engine.with_embedder(::rag::dense::AnyEmbedder{::rag::dense::HashEmbedder{256}});
-        code_embedder_ready = true;
+        code_embedder_ready = false;
+        if (!ollama_ready) return;
+        code_embedder_ready = code_engine.with_embedder_spec(ollama_spec()).has_value();
     }
 };
 
@@ -592,12 +1045,19 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     const int kk = k > 0 ? k : 6;
     try {
         std::lock_guard<std::mutex> lock(impl_->mu);
-        auto root = resolve_docs_root(skip_docs ? std::string{} : impl_->cfg.docs_root);
+        auto root = skip_docs ? fs::path{}
+                              : resolve_docs_root(impl_->cfg.docs_root);
 
-        if (impl_->needs_reindex(root, skip_docs))
-            impl_->reindex(root, skip_docs);
+        if (skip_docs) {
+            impl_->ensure_warm_index();
+        } else {
+            if (impl_->engine.corpus().chunk_count() == 0)
+                (void)impl_->try_load_persisted(root);
+            impl_->refresh_docs(root);
+        }
 
-        const bool any = impl_->engine.corpus().chunk_count() > 0;
+        auto& active_engine = skip_docs ? impl_->warm_engine : impl_->engine;
+        const bool any = active_engine.corpus().chunk_count() > 0;
         if (!any) {
             out.error = "no knowledge configured. Set AGENTTY_DOCS_DIR to a "
                         "folder of docs, put files under ./docs, install skills, "
@@ -614,7 +1074,8 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         const std::size_t want = static_cast<std::size_t>(kk);
 
         std::vector<::rag::SearchResult> hits;
-        std::string retriever_mode = "hybrid+ctx";
+        std::string retriever_mode = active_engine.corpus().has_embedder()
+                                   ? "hybrid+ctx" : "bm25+ctx";
 
         // 2. LLM-assisted retrieval (HyDE / multi-query) when a Generator is
         //    wired AND enabled — closes the query↔document asymmetry gap and
@@ -636,36 +1097,53 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
             ::rag::Result<std::vector<::rag::Hit>> lh =
                 std::unexpected(::rag::Error{});
             if (impl_->cfg.expand)
-                lh = ::rag::query::multi_query_search(impl_->engine.corpus(), query, want, gen, 3);
+                lh = ::rag::query::multi_query_search(active_engine.corpus(), query, want, gen, 3);
             else
-                lh = ::rag::query::hyde_search(impl_->engine.corpus(), query, want, gen);
+                lh = ::rag::query::hyde_search(active_engine.corpus(), query, want, gen);
             if (lh && !lh->empty()) {
-                for (const auto& h : *lh) hits.push_back(impl_->engine.corpus().resolve(h));
+                for (const auto& h : *lh) hits.push_back(active_engine.corpus().resolve(h));
                 used_llm = true;
                 retriever_mode += impl_->cfg.expand ? "+multiquery" : "+hyde";
             }
         }
 
         if (!used_llm) {
-            auto res = impl_->engine.search(query, want, {}, tracep);
+            auto res = active_engine.search(query, want, {}, tracep);
             if (!res) { out.error = "retrieval failed"; return out; }
             hits = std::move(*res);
         }
 
-        // 3. GraphRAG local expansion: multi-hop over the doc graph, fused with
-        //    the base hits so a passage reachable only through a related
-        //    document (shared entities) still surfaces. Best-effort.
+        // 3. Optional GraphRAG expansion. Fuse by reciprocal rank because graph
+        // and base scores have different scales; appending after an already-k
+        // base list made graph hits either dominate incorrectly or get trimmed
+        // without ever surfacing.
         if (impl_->cfg.graph) {
             try {
-                auto g = impl_->engine.graph_local(query, want);
+                auto g = active_engine.graph_local(query, want);
                 if (g && !g->empty()) {
-                    // Union by uri+line, keeping the best score.
-                    for (auto& gr : *g) {
-                        bool dup = false;
-                        for (auto& h : hits)
-                            if (h.uri == gr.uri && h.start_line == gr.start_line) { dup = true; break; }
-                        if (!dup) hits.push_back(std::move(gr));
+                    std::unordered_map<std::string, std::size_t> positions;
+                    auto key_of = [](const ::rag::SearchResult& r) {
+                        return r.uri + "\n" + std::to_string(r.start_line);
+                    };
+                    for (std::size_t i = 0; i < hits.size(); ++i) {
+                        hits[i].score.value = 1.0f / static_cast<float>(60 + i + 1);
+                        positions.emplace(key_of(hits[i]), i);
                     }
+                    for (std::size_t i = 0; i < g->size(); ++i) {
+                        const float add = 1.0f / static_cast<float>(60 + i + 1);
+                        auto key = key_of((*g)[i]);
+                        if (auto it = positions.find(key); it != positions.end()) {
+                            hits[it->second].score.value += add;
+                        } else {
+                            (*g)[i].score.value = add;
+                            positions.emplace(std::move(key), hits.size());
+                            hits.push_back(std::move((*g)[i]));
+                        }
+                    }
+                    std::stable_sort(hits.begin(), hits.end(),
+                        [](const auto& a, const auto& b) {
+                            return a.score.value > b.score.value;
+                        });
                     retriever_mode += "+graph";
                 }
             } catch (...) { /* graph optional */ }
@@ -681,13 +1159,16 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
                 std::vector<::rag::Hit> raw;
                 raw.reserve(hits.size());
                 for (const auto& h : hits) raw.push_back(::rag::Hit{h.chunk, h.score});
-                auto corr = ::rag::crag::correct(impl_->engine.corpus(), query, raw);
+                ::rag::crag::CragConfig cc;
+                cc.strips = want;
+                cc.drop_irrelevant = false;
+                auto corr = ::rag::crag::correct(active_engine.corpus(), query, raw, cc);
                 crag_conf = static_cast<double>(corr.confidence);
                 if (!corr.kept.empty()) {
                     // Re-resolve only the kept chunks, preserving CRAG's order.
                     std::vector<::rag::SearchResult> kept;
                     for (const auto& h : corr.kept)
-                        kept.push_back(impl_->engine.corpus().resolve(h));
+                        kept.push_back(active_engine.corpus().resolve(h));
                     if (!kept.empty()) { hits = std::move(kept); retriever_mode += "+crag"; }
                 }
             } catch (...) { /* grading optional */ }
@@ -728,6 +1209,9 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         double top = 0.0;
         std::vector<std::string> surfaced;
         surfaced.reserve(hits.size());
+        const std::size_t total_budget = retrieval_output_budget();
+        std::size_t remaining_budget = total_budget;
+        const std::size_t per_passage = std::max<std::size_t>(768, total_budget / hits.size());
         for (const auto& r : hits) {
             auto [src, path] = split_uri(r.uri);
             Passage p;
@@ -739,7 +1223,11 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
             if (s < 0.0) s = 0.0;
             if (s > 1.0) s = 1.0;
             p.score      = s;
-            p.text       = r.context.empty() ? r.text : (r.context + "\n" + r.text);
+            std::string raw = r.context.empty() ? r.text : (r.context + "\n" + r.text);
+            const std::size_t allowance = std::min(per_passage, remaining_budget);
+            if (allowance < 256) break;
+            p.text = compress_passage(query, raw, allowance);
+            remaining_budget -= std::min(remaining_budget, p.text.size());
             top = std::max(top, p.score);
             surfaced.push_back(path);
             out.passages.push_back(std::move(p));
@@ -799,22 +1287,79 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             "target","venv",".venv","__pycache__",".cache","_deps",
             "CMakeFiles",".agentty","vendor","third_party"};
         opts.max_file_bytes = 256 * 1024;
+        opts.max_files = 4000;
 
-        std::uint64_t fp = impl_->code_fingerprint(root, opts);
-        if (fp != impl_->code_fp || impl_->code_engine.corpus().chunk_count() == 0) {
-            impl_->code_engine = ::rag::Engine(impl_->make_engine_config());
+        auto manifest = impl_->file_manifest(root, opts);
+        if (!impl_->code_initialized)
+            (void)impl_->try_load_code_index(root, manifest);
+        const bool cold = !impl_->code_initialized
+                       || impl_->code_root != root.string();
+
+        std::size_t changed = 0;
+        if (!cold) {
+            for (const auto& [path, stamp] : manifest) {
+                auto it = impl_->code_files.find(path);
+                if (it == impl_->code_files.end() || it->second != stamp) ++changed;
+            }
+            for (const auto& [path, _] : impl_->code_files)
+                if (!manifest.contains(path)) ++changed;
+        }
+        const bool rebuild = cold
+            || changed > std::max<std::size_t>(64, impl_->code_files.size() / 3);
+
+        if (rebuild) {
+            impl_->code_engine = ::rag::Engine(
+                impl_->make_engine_config(/*source_code=*/true));
             impl_->attach_code_embedder();
             auto files = ::rag::loaders::load_directory(root, opts);
             if (files) {
                 for (auto& d : *files) {
                     std::string rel = d.meta.count("rel") ? d.meta["rel"] : d.uri;
-                    (void)impl_->code_engine.add("code://" + rel, std::move(d.text), d.meta, d.title);
+                    rel = fs::path{rel}.generic_string();
+                    d.meta["rel"] = rel;
+                    (void)impl_->code_engine.add("code://" + rel,
+                                                 std::move(d.text), d.meta, d.title);
                 }
             }
-            (void)impl_->code_engine.build();
+            auto built = impl_->code_engine.build();
+            if (!built) { out.error = "search_code: index build failed"; return out; }
             impl_->apply_pipeline(impl_->code_engine);
-            impl_->code_fp = fp;
+        } else if (changed > 0) {
+            auto remove_uri = [&](const std::string& rel) {
+                const std::string uri = "code://" + rel;
+                auto& corpus = impl_->code_engine.corpus();
+                for (std::uint32_t i = 0; i < corpus.document_count(); ++i) {
+                    ::rag::DocId id{i};
+                    const auto* doc = corpus.document(id);
+                    if (doc && doc->uri == uri && !corpus.is_deleted(id)) {
+                        (void)corpus.remove_document(id);
+                        return;
+                    }
+                }
+            };
+
+            for (const auto& [path, old_stamp] : impl_->code_files) {
+                auto it = manifest.find(path);
+                if (it == manifest.end() || it->second != old_stamp)
+                    remove_uri(path);
+            }
+            for (const auto& [path, stamp] : manifest) {
+                auto old = impl_->code_files.find(path);
+                if (old != impl_->code_files.end() && old->second == stamp) continue;
+                auto loaded = ::rag::loaders::load_file(root / fs::path{path});
+                if (!loaded) continue;
+                loaded->meta["rel"] = path;
+                (void)impl_->code_engine.add("code://" + path,
+                    std::move(loaded->text), loaded->meta, loaded->title);
+            }
+            auto built = impl_->code_engine.build();
+            if (!built) { out.error = "search_code: incremental update failed"; return out; }
+            impl_->apply_pipeline(impl_->code_engine);
         }
+        impl_->code_root = root.string();
+        impl_->code_files = std::move(manifest);
+        impl_->code_initialized = true;
+        if (rebuild || changed > 0) impl_->persist_code_index();
 
         if (impl_->code_engine.corpus().chunk_count() == 0) {
             out.error = "search_code: no source files found under " + root.string();
@@ -824,6 +1369,10 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
         auto res = impl_->code_engine.search(query, static_cast<std::size_t>(kk));
         if (!res) { out.error = "search_code failed"; return out; }
         double top = 0.0;
+        const std::size_t total_budget = retrieval_output_budget();
+        std::size_t remaining_budget = total_budget;
+        const std::size_t per_passage = std::max<std::size_t>(768,
+            total_budget / std::max<std::size_t>(res->size(), 1));
         for (const auto& r : *res) {
             auto [src, path] = split_uri(r.uri);
             (void)src;
@@ -833,12 +1382,16 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             p.line_start = static_cast<int>(r.start_line);
             p.line_end   = static_cast<int>(r.end_line);
             p.score      = static_cast<double>(r.score.value);
-            p.text       = r.text;
+            const std::size_t allowance = std::min(per_passage, remaining_budget);
+            if (allowance < 256) break;
+            p.text = compress_passage(query, r.text, allowance);
+            remaining_budget -= std::min(remaining_budget, p.text.size());
             top = std::max(top, p.score);
             out.passages.push_back(std::move(p));
         }
         out.confidence = top;
-        out.mode = "hybrid, " + std::to_string(impl_->code_engine.corpus().chunk_count())
+        out.mode = std::string(impl_->code_embedder_ready ? "hybrid, " : "bm25, ")
+                 + std::to_string(impl_->code_engine.corpus().chunk_count())
                  + " chunks from " + root.string();
     } catch (const std::exception& e) {
         out.error = std::string("search_code failed: ") + e.what();
@@ -851,22 +1404,27 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
 bool Retriever::warm() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto root = resolve_docs_root(impl_->cfg.docs_root);
-    if (root.empty()) return true;                 // no docs ⇒ always warm
+    if (root.empty()) return true;
+    if (impl_->engine.corpus().chunk_count() == 0)
+        (void)impl_->try_load_persisted(root);
     return !impl_->needs_reindex(root, /*skip_docs=*/false);
 }
 
 void Retriever::warm_async() {
     bool expected = false;
     if (!impl_->warming.compare_exchange_strong(expected, true)) return;
-    std::thread([this] {
+    if (impl_->warmer.joinable()) impl_->warmer.join();
+    Impl* state = impl_;
+    impl_->warmer = std::jthread([state] {
         try {
-            std::lock_guard<std::mutex> lock(impl_->mu);
-            auto root = resolve_docs_root(impl_->cfg.docs_root);
-            if (impl_->needs_reindex(root, /*skip_docs=*/false))
-                impl_->reindex(root, /*skip_docs=*/false);
+            std::lock_guard<std::mutex> lock(state->mu);
+            auto root = resolve_docs_root(state->cfg.docs_root);
+            if (state->engine.corpus().chunk_count() == 0)
+                (void)state->try_load_persisted(root);
+            state->refresh_docs(root);
         } catch (...) { /* best-effort */ }
-        impl_->warming.store(false);
-    }).detach();
+        state->warming.store(false);
+    });
 }
 
 // ── Learning loop (write side) ─────────────
@@ -876,7 +1434,7 @@ namespace feedback {
 void note_surfaced(const std::vector<std::string>& paths) {
     if (paths.empty()) return;
     try {
-        if (truthy_default_on("AGENTTY_RAG_LEARN"))
+        if (truthy_default_off("AGENTTY_RAG_LEARN"))
             FeedbackStore::instance().note_surfaced(paths);
     } catch (...) { /* best-effort */ }
 }
@@ -887,7 +1445,7 @@ void note_file_opened(const std::string& path) {
     // and is dropped, so the win-rate stays attributable.
     if (path.empty()) return;
     try {
-        if (truthy_default_on("AGENTTY_RAG_LEARN"))
+        if (truthy_default_off("AGENTTY_RAG_LEARN"))
             FeedbackStore::instance().note_opened(path);
     } catch (...) { /* best-effort */ }
 }
@@ -970,10 +1528,14 @@ int run(const std::string& root) {
         ::rag::Engine engine;
         ::rag::plugin::Json spec = {
             {"type", "ollama"}, {"model", cfg.embed_model},
-            {"host", cfg.embed_host}, {"port", cfg.embed_port}};
-        bool have_dense = engine.with_embedder_spec(spec).has_value();
-        if (!have_dense)
-            engine.with_embedder(::rag::dense::AnyEmbedder{::rag::dense::HashEmbedder{256}});
+            {"host", cfg.embed_host}, {"port", cfg.embed_port},
+            {"timeout_ms", 1200}};
+        bool have_dense = false;
+        if (engine.with_embedder_spec(spec)) {
+            auto probe = engine.corpus().embed_text("rag benchmark availability probe");
+            have_dense = probe.has_value() && !probe->empty();
+        }
+        if (!have_dense) engine = ::rag::Engine{};
 
         auto t0 = std::chrono::steady_clock::now();
         ::rag::loaders::DirOptions opts;
@@ -990,7 +1552,7 @@ int run(const std::string& root) {
                     "(dense: %s)\n",
                     n, nchunks, r.string().c_str(),
                     static_cast<long long>(build_ms),
-                    have_dense ? "ollama" : "hash-fallback");
+                    have_dense ? "ollama" : "bm25-only");
         if (nchunks == 0) { std::fprintf(stderr, "rag-bench: empty corpus\n"); return 1; }
 
         // 2. Synthesize known-item queries. Sample up to ~200 chunks evenly so a

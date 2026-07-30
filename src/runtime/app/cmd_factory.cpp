@@ -14,11 +14,9 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
-#include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
-#include "agentty/provider/openai/transport.hpp"
-#include "agentty/provider/ollama/transport.hpp"
+#include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
@@ -484,7 +482,7 @@ Cmd<Msg> launch_stream(Model& m) {
     //   • compaction-vs-normal payload branch
     //   • soft_trim_to_ceiling
     //   • tools::registry() walk
-    //   • provider::anthropic::default_system_prompt()
+    //   • provider::system_prompt_for(active selection)
     //   • deps().stream(...) (already async)
     //
     // Mint a fresh cancel token per turn and stash it on the active
@@ -564,19 +562,12 @@ Cmd<Msg> launch_stream(Model& m) {
         // hosted models). The Ollama transport turns this into options.num_ctx
         // so long agent conversations aren't truncated to Ollama's tiny default.
         req.context_window = model_context_window;
-        // System prompt is chosen PER PROVIDER. Anthropic (Claude) gets the
-        // full Claude agentic prompt. Ollama (native /api/chat) gets its own
-        // local-tuned prompt. Other OpenAI-compatible backends get the
-        // openai local-model prompt. The verbose Claude prose primes small
-        // local models to over-call tools and some break outright on it.
-        const auto& sel_now = provider::active();
+        // Prompt policy is shared by every entry point. Hosted Claude, Codex,
+        // and OpenAI-compatible models receive the same complete agent/tool/RAG
+        // instructions; only constrained local endpoints use a compact profile.
+        const auto sel_now = provider::active();
+        req.system_prompt = provider::system_prompt_for(sel_now);
         const bool openai_provider = sel_now.kind == provider::Kind::OpenAI;
-        if (openai_provider && sel_now.openai_endpoint.native_api)
-            req.system_prompt = provider::ollama::system_prompt();
-        else if (openai_provider)
-            req.system_prompt = provider::openai::local_model_system_prompt();
-        else
-            req.system_prompt = provider::anthropic::default_system_prompt();
         // Weak models (small local / coder ids) still hide a few footgun
         // tools below; the prompt no longer branches on it.
         const bool weak_model = is_weak_model(req.model);
@@ -618,14 +609,38 @@ Cmd<Msg> launch_stream(Model& m) {
         //                  reply with text — a tool_use during compaction
         //                  would have nowhere to land (we don't surface
         //                  the synthetic turn in the UI).
+        // Proactive context is useful for the turn it grounds, not a permanent
+        // user message to replay on every later request. Keep only context
+        // attached after the newest real user message.
+        auto drop_stale_proactive = [](std::vector<Message>& messages) {
+            std::size_t newest_user = 0;
+            bool have_user = false;
+            for (std::size_t i = 0; i < messages.size(); ++i)
+                if (messages[i].role == Role::User && !messages[i].proactive_context) {
+                    newest_user = i;
+                    have_user = true;
+                }
+            if (!have_user) return;
+            for (std::size_t i = 0; i < newest_user;) {
+                if (messages[i].proactive_context) {
+                    messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i));
+                    --newest_user;
+                } else {
+                    ++i;
+                }
+            }
+        };
+
         if (compacting) {
             req.messages = wire_messages_for_compaction(thread, context_max);
+            drop_stale_proactive(req.messages);
             // req.tools left empty — summarisation is text-only.
         } else {
             // Worker owns `thread` — move it into the builder so the common
             // no-compaction path relocates the messages vector instead of
             // deep-copying it a second time (see wire_messages_for_impl&&).
             req.messages = wire_messages_for_impl(std::move(thread));
+            drop_stale_proactive(req.messages);
             // Adaptive soft-trim: if the wire view is still over the
             // window (no compactions yet, or the latest one is stale
             // and the user has run many turns since), drop oldest raw

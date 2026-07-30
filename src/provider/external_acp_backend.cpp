@@ -28,27 +28,38 @@ namespace agentty::provider {
 
 namespace {
 
-// ── The tail user turn → a single ACP prompt block ───────────────────────────
-// The agent keeps its OWN transcript across rounds (reuse_session), exactly like
-// claude-agent-acp: each `session/prompt` carries only the NEW user turn, not
-// the whole history. We forward the last user message's text as one TextContent
-// block. (Images/attachments are a follow-up: the ACP prompt is a List<Content
-// Block>, so adding image arms here is additive and doesn't change the shape.)
+// ── Current host turn → ACP prompt blocks ───────────────────────────────────
+// The delegated agent keeps its own transcript across rounds, so each prompt
+// carries only the newest REAL user turn plus synthetic context attached to
+// that turn. Proactive RAG is stored as a User message for native model wires;
+// treating it as the user question here would drop the actual request.
 [[nodiscard]] acp::List<acp::ContentBlock> prompt_blocks_from(const Request& req) {
     acp::List<acp::ContentBlock> out;
 
-    // Find the last User message — that's the turn we're asking the agent to
-    // answer. Everything before it the agent already has (reuse_session) or was
-    // replayed at session/new for a stateless agent.
-    const agentty::Message* last_user = nullptr;
-    for (const auto& m : req.messages)
-        if (m.role == agentty::Role::User && !m.text.empty())
-            last_user = &m;
+    std::size_t user_index = req.messages.size();
+    for (std::size_t i = req.messages.size(); i-- > 0;) {
+        const auto& m = req.messages[i];
+        if (m.role == agentty::Role::User && !m.proactive_context
+            && !m.text.empty()) {
+            user_index = i;
+            break;
+        }
+    }
 
-    if (last_user != nullptr) {
+    auto append_text = [&out](const std::string& text) {
+        if (text.empty()) return;
         acp::TextContent t;
-        t.text = last_user->text;
+        t.text = text;
         out.emplace_back(std::move(t));
+    };
+
+    if (user_index < req.messages.size()) {
+        append_text(req.messages[user_index].text);
+        for (std::size_t i = user_index + 1; i < req.messages.size(); ++i) {
+            const auto& m = req.messages[i];
+            if (m.role == agentty::Role::User && m.proactive_context)
+                append_text(m.text);
+        }
     }
 
     // A prompt with no content is invalid; send an empty text block so the

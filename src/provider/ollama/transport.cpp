@@ -412,8 +412,8 @@ void repair_arg_keys(const std::string& tool, json& args) {
 
     std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
     ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
-    ctx.sink(StreamToolUseDelta{args});
-    ctx.sink(StreamToolUseEnd{});
+    ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, args});
+    ctx.sink(StreamToolUseEnd{ToolCallId{call_id}});
     ctx.stop_reason = StopReason::ToolUse;
     return true;
 }
@@ -940,8 +940,8 @@ void handle_message(StreamCtx& ctx, const json& message) {
                 } catch (...) { /* leave args as-is on parse failure */ }
             }
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
-            ctx.sink(StreamToolUseDelta{args});
-            ctx.sink(StreamToolUseEnd{});
+            ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, args});
+            ctx.sink(StreamToolUseEnd{ToolCallId{call_id}});
             ctx.stop_reason = StopReason::ToolUse;
             ctx.any_structured_tool = true;
             ctx.salvage_eligible    = false;  // model drives the real channel

@@ -141,17 +141,27 @@ struct StreamTextDelta { std::string text; };
 // burst at the text→tool seam). No-op if no text block was open.
 struct StreamTextBlockClosed {};
 struct StreamToolUseStart { ToolCallId id; ToolName name; };
-// Append-only wire fragment. Native Anthropic/OpenAI transports use this
-// when their protocol genuinely supplies argument deltas.
-struct StreamToolUseDelta { std::string partial_json; };
+// Append-only wire fragment, always addressed by the stable tool-call id.
+// Anthropic, Codex Responses, and OpenAI Chat all expose an id when the call
+// opens; carrying it on every update makes overlapping/parallel streams safe
+// and removes the reducer's provider-ordering fallback.
+struct StreamToolUseDelta { ToolCallId id; std::string partial_json; };
 // Full current argument snapshot. ACP tool_call_update.rawInput has replace
 // semantics (it is not a textual delta), so keeping this distinct prevents
-// repeated snapshots from producing concatenated, invalid JSON. The id makes
-// updates robust when multiple ACP tool calls overlap.
+// repeated snapshots from producing concatenated, invalid JSON.
 struct StreamToolUseSnapshot { ToolCallId id; std::string json; };
-// Empty id preserves the native transports' ordered "close the latest call"
-// contract; ACP supplies the id so completion resolves the intended call.
-struct StreamToolUseEnd { ToolCallId id{}; };
+// Completion is also explicitly addressed. An empty/default id is not a valid
+// wire event: adapters must retain the id they received at call start.
+struct StreamToolUseEnd { ToolCallId id; };
+// Terminal result for a tool executed by a delegated agent (external ACP).
+// It follows StreamToolUseEnd so the shared argument assembler still parses
+// the final input, then marks the card terminal without scheduling the host's
+// tool executor a second time.
+struct StreamObservedToolResult {
+    ToolCallId id;
+    bool failed = false;
+    std::string output;
+};
 // A chunk of the assistant's thinking block (adaptive thinking). `text` is
 // the visible reasoning delta (empty under display:omitted); `signature` is
 // the opaque per-block signature that arrives once, near the block's end.
@@ -621,7 +631,7 @@ using ComposerMsg = std::variant<
 using StreamMsg = std::variant<
     StreamStarted, StreamTextDelta, StreamTextBlockClosed,
     StreamToolUseStart, StreamToolUseDelta, StreamToolUseSnapshot,
-    StreamToolUseEnd,
+    StreamToolUseEnd, StreamObservedToolResult,
     StreamThinkingDelta,
     StreamReasoning,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,

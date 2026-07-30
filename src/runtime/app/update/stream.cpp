@@ -744,16 +744,16 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
 Step stream_update(Model m, msg::StreamMsg sm) {
     using maya::overload;
 
-    // Native transports are ordered and address the newest call implicitly.
-    // ACP updates are snapshots keyed by toolCallId and may interleave, so its
-    // events use this same reducer through an explicit lookup.
+    // Every provider addresses tool stream updates by stable ToolCallId. This
+    // is the canonical assembler boundary: wire adapters may deliver append
+    // deltas or replacement snapshots, but neither ordering nor "latest call"
+    // is provider-dependent here.
     auto find_streaming_tool = [&](const ToolCallId& id) -> ToolUse* {
-        if (m.d.current.messages.empty()
+        if (id.empty()
+            || m.d.current.messages.empty()
             || m.d.current.messages.back().role != Role::Assistant)
             return nullptr;
         auto& calls = m.d.current.messages.back().tool_calls;
-        if (calls.empty()) return nullptr;
-        if (id.empty()) return &calls.back();
         auto it = std::ranges::find(calls, id, &ToolUse::id);
         return it == calls.end() ? nullptr : &*it;
     };
@@ -931,10 +931,8 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     a->live_delta_bytes += e.partial_json.size();
                 }
             }
-            if (!m.d.current.messages.empty()
-                && m.d.current.messages.back().role == Role::Assistant
-                && !m.d.current.messages.back().tool_calls.empty()) {
-                auto& tc = m.d.current.messages.back().tool_calls.back();
+            if (auto* tcp = find_streaming_tool(e.id)) {
+                auto& tc = *tcp;
                 // Bounded append — beyond the cap we drop further bytes so
                 // the salvage path at StreamToolUseEnd runs on whatever
                 // scalars sniffed cleanly.
@@ -1049,6 +1047,25 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
                 // Required-field check is deferred to finalize_turn so the
                 // turn-level retry logic owns the single decision point.
+            }
+            resync_live_tool_viewer(m);
+            return done(std::move(m));
+        },
+        [&](StreamObservedToolResult& e) -> Step {
+            if (auto* a = active_ctx(m.s.phase))
+                a->last_event_at = std::chrono::steady_clock::now();
+            if (auto* tc = find_streaming_tool(e.id)) {
+                const auto now = std::chrono::steady_clock::now();
+                std::string output = std::move(e.output);
+                if (output.empty())
+                    output = e.failed ? "External agent tool failed."
+                                      : "Executed by external agent.";
+                if (e.failed)
+                    tc->status = ToolUse::Failed{tc->started_at(), now,
+                                                 std::move(output)};
+                else
+                    tc->status = ToolUse::Done{tc->started_at(), now,
+                                               std::move(output)};
             }
             resync_live_tool_viewer(m);
             return done(std::move(m));

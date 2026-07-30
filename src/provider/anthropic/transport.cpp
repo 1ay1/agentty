@@ -291,7 +291,8 @@ FastDelta dispatch_content_block_delta_fast(StreamCtx& ctx, std::string_view dat
     if (delta_type == "input_json_delta") {
         std::string_view partial;
         if (delta["partial_json"].get_string().get(partial)) return FastDelta::Recognized;
-        ctx.sink(StreamToolUseDelta{std::string{partial}});
+        ctx.sink(StreamToolUseDelta{
+            ToolCallId{ctx.current_tool_id}, std::string{partial}});
         return FastDelta::Handled;
     }
     // Thinking blocks have nothing to render but they ARE proof that the
@@ -497,7 +498,9 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
             if (type == "text_delta") {
                 ctx.sink(StreamTextDelta{delta.value("text", "")});
             } else if (type == "input_json_delta") {
-                ctx.sink(StreamToolUseDelta{delta.value("partial_json", "")});
+                ctx.sink(StreamToolUseDelta{
+                    ToolCallId{ctx.current_tool_id},
+                    delta.value("partial_json", "")});
             } else if (type == "thinking_delta") {
                 // Capture reasoning text for replay; also a liveness signal.
                 ++ctx.thinking_deltas;
@@ -511,7 +514,7 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
 
         case SseEventKind::ContentBlockStop: {
             if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{});
+                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
                 ctx.in_tool_use = false;
                 ctx.current_tool_id.clear();
                 ctx.current_tool_name.clear();
@@ -547,7 +550,7 @@ void dispatch_event(StreamCtx& ctx, std::string_view name, std::string_view data
 
         case SseEventKind::MessageStop: {
             if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{});
+                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
                 ctx.in_tool_use = false;
                 ctx.current_tool_id.clear();
                 ctx.current_tool_name.clear();
@@ -1841,7 +1844,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         },
         .on_any_end = [&ctx]() {
             if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{});
+                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
                 ctx.in_tool_use = false;
                 ctx.current_tool_id.clear();
                 ctx.current_tool_name.clear();

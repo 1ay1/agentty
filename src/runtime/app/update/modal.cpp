@@ -243,22 +243,15 @@ Step submit_message(Model m) {
         checkpoint_to_create = user.id.value;
     }
 
-    // ── #1 PROACTIVE RETRIEVAL (SOTA active-RAG / FLARE / Self-RAG) ────
-    // Before the model even sees this turn, if the message looks like a
-    // QUESTION about the user's own knowledge (not a command like "edit
-    // X", not a greeting), silently run the RAG pipeline and — only on a
-    // HIGH-confidence hit — stage a synthetic context message to insert
-    // right after the user's turn. This makes RAG fire even when the model
-    // doesn't think to call search_docs itself: retrieval becomes part of
-    // the loop, not just a tool the model may forget. Off with
-    // AGENTTY_RAG_PROACTIVE=0. Cheap: BM25 is sub-ms and shares the
-    // search_docs corpus + per-turn cache; best-effort, never blocks submit.
-    std::optional<tools::ProactiveHit> proactive;
-    std::string proactive_probe;   // set when we need the async fallback
+    // Optional proactive grounding. It is OFF by default because automatic
+    // transcript injection spends context on the user's behalf. When enabled,
+    // run exactly one isolated retrieval and defer this turn's launch until it
+    // settles; do not race a synchronous hedge against a duplicate fallback.
+    std::string proactive_probe;
     {
         auto proactive_on = [] {
             const char* v = std::getenv("AGENTTY_RAG_PROACTIVE");
-            if (!v || !v[0]) return true;   // default ON
+            if (!v || !v[0]) return false;  // explicit opt-in
             std::string s{v};
             return s != "0" && s != "false" && s != "FALSE" && s != "False";
         };
@@ -307,15 +300,7 @@ Step submit_message(Model m) {
         const bool slash = !user.text.empty() && user.text.front() == '/';
         if (proactive_on() && !slash && !probe.empty()
             && word_count(probe) >= 3 && !looks_imperative(probe)) {
-            // SYNCHRONOUS HEDGE: bounded wall-clock attempt so Enter never
-            // freezes. If it lands in time the grounding rides THIS turn.
-            proactive = tools::proactive_retrieve(probe, /*k=*/3);
-            // Hedge missed (slow/large corpus): remember the probe so we can
-            // kick the un-hedged funnel on an isolated worker below. When it
-            // lands it dispatches ProactiveContextReady, which stages the
-            // block for the NEXT turn's transcript — grounding is deferred by
-            // one turn instead of dropped, and the UI never blocked.
-            if (!proactive) proactive_probe = probe;
+            proactive_probe = std::move(probe);
         }
     }
 
@@ -332,25 +317,6 @@ Step submit_message(Model m) {
     // settle-time freeze has one fewer seam to hand off.
     m.d.current.messages.push_back(std::move(user));
 
-    // #1: stage the proactive-context message right after the user's turn,
-    // so the model reads the retrieved passages inline with the question.
-    // It's a normal User message on the wire (like the compaction summary)
-    // but flagged proactive_context so the view renders it as a compact
-    // "retrieved context" affordance, not the user's own words.
-    //
-    // This injects only the FAST-PATH hedge hit (retrieval that finished
-    // within the small synchronous budget). When the hedge misses, the block
-    // isn't dropped or deferred to a later turn — the stream launch is held
-    // behind an async retrieval that injects SAME-TURN via
-    // ProactiveContextReady (see the deferred-launch section below).
-    if (proactive) {
-        Message ctx_msg;
-        ctx_msg.role                = Role::User;
-        ctx_msg.proactive_confidence = proactive->confidence;
-        ctx_msg.text                = std::move(proactive->block);
-        ctx_msg.proactive_context   = true;
-        m.d.current.messages.push_back(std::move(ctx_msg));
-    }
     // Force the prior turn's reveal to settle BEFORE the freeze snapshot.
     // Normally the deferred settle-freeze (meta.cpp) waits for the reveal
     // to drain on its own, but a user can submit while it's still mid-

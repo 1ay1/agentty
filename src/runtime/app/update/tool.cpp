@@ -220,19 +220,6 @@ void arm_reconcile_cooldown(Model& m) {
     return out;
 }
 
-// Newest tool still Running in the live (non-frozen) tail, if any.
-[[nodiscard]] std::optional<ToolCallId> find_running_tool(const Model& m) {
-    for (auto mit = m.d.current.messages.rbegin();
-         mit != m.d.current.messages.rend(); ++mit) {
-        for (auto tit = mit->tool_calls.rbegin();
-             tit != mit->tool_calls.rend(); ++tit) {
-            if (std::holds_alternative<ToolUse::Running>(tit->status))
-                return tit->id;
-        }
-    }
-    return std::nullopt;
-}
-
 } // namespace
 
 // Keep the Ctrl+O snapshot synchronized from both stream.cpp (tool-input

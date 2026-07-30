@@ -191,22 +191,12 @@ public:
 //   Backs search_docs. Runs agentty's full RAG pipeline (rag-cpp) and returns
 //   flat passages. The funnel, as actually wired in src/rag/adapter.cpp:
 //
-//     sources:  docs folder (contextual hybrid BM25+dense, HNSW)
-//               ∪ skills (agentskills.io bodies, BM25, lazy)   [default ON]
-//               ∪ memory (learned facts, BM25, lazy)           [default ON]
-//               ∪ MCP resources                                [opt-in]
-//     query:    optional RAG-Fusion / HyDE expansion (opt-in, needs local LLM)
-//     retrieve: WIDE candidate pool (candidate_k=60) + CONVEX (TM2C2) fusion
-//               of BM25 + dense — rag-cpp's measured default (beats RRF on NDCG)
-//     expand:   optional GraphRAG multi-hop over the doc graph, fused in
-//     rerank:   feature-fusion lexical rerank (semantics-aware: adds calibrated
-//               cosine(query,chunk) so score magnitude isn't thrown away)
-//     diversify: MMR (λ=AGENTTY_RAG_MMR_LAMBDA, default 0.5) → k
-//     stitch:   optional parent-document stitch of adjacent fragments
-//     learn:    per-passage Beta-smoothed win-rate nudge (±15%), off with
-//               AGENTTY_RAG_LEARN=0 — see feedback:: in the adapter
-//     compress: extractive query-relevant span per chunk
-//     grade:    optional CRAG corrective evaluator → calibrated confidence
+//     sources:  docs folder + skills + memory, with MCP resources opt-in
+//     retrieve: BM25 plus probed Ollama dense retrieval, weighted RRF fusion
+//     optional: PRF, GraphRAG, CRAG, HyDE, and multi-query are explicit modes
+//     rerank:   deterministic feature rerank + MMR + adjacent-hit stitch
+//     compress: query-focused spans under one aggregate output budget
+//     persist:  validated manifest + incremental docs/code refresh
 //
 //   The `mode` string carries the rich provenance (root path, mode,
 //   reranked, +N variants, confidence) so no signal is lost when the
@@ -223,31 +213,14 @@ class AgenttyDocRetriever final : public mt::DocRetriever {
 public:
     std::vector<mt::DocPassage>
     retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
-        return run_(q, mode, err, /*skip_docs=*/false);
+        return run_(q, mode, err);
     }
-
-    // Skills+memory-ONLY retrieval: never walks the docs folder. Safe on the
-    // latency-sensitive proactive pre-turn path even when the docs index is
-    // cold. Public so proactive_retrieve can reach it.
-    std::vector<mt::DocPassage>
-    retrieve_warm_only(const mt::DocQuery& q, std::string& mode, std::string& err) {
-        return run_(q, mode, err, /*skip_docs=*/true);
-    }
-
-    // Non-blocking warm probe: TRUE when the docs index is built & fresh for
-    // the current root (or there is no docs root — skills/memory are always
-    // warm). Delegates to the engine's freshness check.
-    static bool index_warm() { return shared_retriever().warm(); }
-
-    // Kick a detached background index build so a FUTURE turn is warm.
-    // Single-flight inside the engine.
-    static void warm_async() { shared_retriever().warm_async(); }
 
 private:
     static std::vector<mt::DocPassage>
-    run_(const mt::DocQuery& q, std::string& mode, std::string& err, bool skip_docs) {
+    run_(const mt::DocQuery& q, std::string& mode, std::string& err) {
         std::vector<mt::DocPassage> out;
-        auto res = shared_retriever().retrieve(q.query, q.k, skip_docs);
+        auto res = shared_retriever().retrieve(q.query, q.k);
         if (!res.error.empty()) { err = res.error; return out; }
         mode = res.mode;
         out.reserve(res.passages.size());
@@ -267,16 +240,9 @@ private:
 
 
 // ── CodeRetriever ──────────────────────────────────────────
-//   Backs search_code — SEMANTIC retrieval over source files, the hybrid
-//   complement to grep (2025 consensus: agentic grep for exact/structural,
-//   embeddings for conceptual — Cursor/Sourcegraph ship both; agentty's own
-//   rag.hpp design note reserves doc-RAG for documents and this class fills
-//   the code half). BM25 over identifier-tokenized chunks is always on;
-//   dense embeddings join when Ollama is reachable. Edit-invalidated: a
-//   cheap (size,mtime) fingerprint over the walked tree is recomputed per
-//   call and any drift rebuilds the index — embeddings can go stale between
-//   rebuilds, BM25 cannot lie for long. Bounded walk: skips VCS/build/dep
-//   dirs, binary files, >256 KiB files, and caps the corpus at 4000 files.
+//   definition-aware source chunks; BM25 is always available and a bounded
+//   Ollama probe enables dense retrieval. A pruned 4,000-file manifest detects
+//   drift, and small edit sets update only changed files.
 class AgenttyCodeRetriever final : public mt::DocRetriever {
 public:
     std::vector<mt::DocPassage>
@@ -906,13 +872,11 @@ run_proactive_funnel_(const std::string& query, int k, double min_conf) {
     q.query = query;
     q.k     = k > 0 ? k : 3;
     std::string mode, err;
-    std::vector<mt::DocPassage> passages;
-    if (!AgenttyDocRetriever::index_warm()) {
-        AgenttyDocRetriever::warm_async();
-        passages = r.retrieve_warm_only(q, mode, err);
-    } else {
-        passages = r.retrieve(q, mode, err);
-    }
+    // Proactive retrieval is explicit opt-in and already runs on an isolated
+    // worker, so use the complete index once. The old cold-index shortcut could
+    // silently search only skills/memory and miss the document that triggered
+    // the knowledge-shaped query.
+    auto passages = r.retrieve(q, mode, err);
     if (!err.empty() || passages.empty()) return std::nullopt;
 
     // Recover the confidence the pipeline computed (mode carries
@@ -975,78 +939,15 @@ run_proactive_funnel_(const std::string& query, int k, double min_conf) {
 }
 } // namespace
 
-// worth it). Parses the confidence out of the retriever's mode string so
-// there's a single source of truth for the score.
+// Compatibility entry point. Proactive retrieval is now opt-in and the submit
+// path always owns an isolated worker, so there is no reason to start a second
+// detached hedge. Execute the funnel exactly once.
 std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) {
-    const double min_conf = proactive_min_conf_();
-
-    // ── LATENCY GUARD ───────────────────────────────────────
-    // proactive_retrieve runs on the SUBMIT path (TUI update thread), so
-    // ANY blocking here freezes the UI between the user pressing Enter and
-    // their turn appearing. This is the SYNCHRONOUS HEDGE: run the funnel on
-    // a worker but wait only a small wall-clock budget. If it lands in time
-    // (the common case — BM25-only is sub-ms; a warm dense query is tens of
-    // ms) the grounding rides THIS turn's first request. If it overruns (a
-    // large/slow corpus whose dense query-embed round-trip can take up to
-    // 10s), we return nullopt so submit never freezes — the app's async path
-    // (proactive_retrieve_blocking on an isolated task) then lands the block
-    // a moment later via ProactiveContextReady. Kept SMALL (250ms) precisely
-    // because that async fallback exists: a miss is no longer a dropped
-    // result, just a one-turn deferral, so we bias toward a snappy Enter.
-    // Budget tunable via AGENTTY_RAG_PROACTIVE_BUDGET_MS.
-    long budget_ms = 250;
-    if (const char* bm = std::getenv("AGENTTY_RAG_PROACTIVE_BUDGET_MS");
-        bm && bm[0]) {
-        try { long v = std::stol(bm); if (v >= 0) budget_ms = v; }
-        catch (...) { /* keep default */ }
-    }
-
-    auto funnel = [query, k, min_conf] {
-        return run_proactive_funnel_(query, k, min_conf);
-    };
-
-    // A budget of 0 means "never block the submit thread at all" — skip the
-    // synchronous hedge entirely. The app's async path handles injection.
-    if (budget_ms == 0) return std::nullopt;
-
-    try {
-        // std::async(launch::async) guarantees a fresh worker thread (not a
-        // deferred lazy eval that would run inline on .get()). We wait at
-        // most budget_ms; if it hasn't landed we DETACH the future's shared
-        // state so its destructor doesn't block (a plain std::future from
-        // std::async blocks in ~future until the task finishes — that would
-        // reintroduce the very freeze we're removing). Move it to the heap
-        // and hand it to a reaper: the worker finishes on its own (warming
-        // the per-turn cache so the async retry is cheap), and the process
-        // is long-lived so this is bounded by over-budget turns.
-        auto fut = std::make_shared<std::future<std::optional<ProactiveHit>>>(
-            std::async(std::launch::async, funnel));
-        if (fut->wait_for(std::chrono::milliseconds(budget_ms))
-                == std::future_status::ready) {
-            auto hit = fut->get();
-            // COMMIT the dedup keys only now that we're actually returning
-            // the block to the wire.
-            if (hit)
-                for (const auto& key : hit->dedup_keys)
-                    proactive_mark_injected_(key);
-            return hit;
-        }
-        // Over budget: hand ownership to a detached reaper so ~future never
-        // blocks the caller, and give up on the HEDGE. The async path picks
-        // it up (and its dedup keys stay uncommitted here).
-        std::thread([fut] { (void)fut->get(); }).detach();
-        return std::nullopt;
-    } catch (...) {
-        return std::nullopt;   // best-effort, never fatal
-    }
+    return proactive_retrieve_blocking(query, k);
 }
 
-// Full funnel with NO wall-clock budget — for running INSIDE an isolated
-// worker task the app owns (Cmd::task_isolated), off the UI thread. Blocks as
-// long as retrieval takes (bounded internally by the 10s query-embed cap).
-// Commits the dedup keys before returning, because the app ALWAYS injects
-// this result (stages it for the next turn) — unlike the hedge, there's no
-// "discarded" path here. Never throws.
+// Full funnel for the isolated worker owned by the app. Commits dedup keys only
+// when a block is actually returned for injection.
 std::optional<ProactiveHit>
 proactive_retrieve_blocking(const std::string& query, int k) {
     auto hit = run_proactive_funnel_(query, k, proactive_min_conf_());
