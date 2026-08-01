@@ -48,7 +48,10 @@ int main() {
     namespace fs = std::filesystem;
     // The write tool's sandbox refuses paths outside the workspace root.
     // Point the root at a tmp dir we own so the scripted `write` succeeds.
-    const fs::path tmp = fs::temp_directory_path() / "agentty_acp_it";
+    // PID-unique so the suite stays hermetic under parallel CTest (-j).
+    const fs::path tmp = fs::temp_directory_path() /
+                         ("agentty_acp_it_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
     fs::create_directories(tmp);
     // Sandbox persistence too: AgentServer::persist() writes every turn
     // to persistence::threads_dir() = $HOME/.agentty/threads. Without

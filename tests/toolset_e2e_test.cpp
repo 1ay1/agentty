@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <unistd.h>   // getpid
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -83,7 +84,13 @@ int main() {
     // ── Sandbox: everything under one temp root, BEFORE first registry()
     // touch (the registry is a process-lifetime static; workspace root and
     // HOME must be final before it is built).
-    auto root = fs::temp_directory_path() / "agentty_toolset_e2e";
+    // PID-unique sandbox: CTest runs the suite with -j, and this test spawns
+    // real subprocesses (bash/process_start) under a global HOME. A FIXED
+    // shared path let a sibling test's teardown race our tree — the source of
+    // the intermittent toolset_e2e failure under -j12. Match the rest of the
+    // suite and key the root on getpid().
+    auto root = fs::temp_directory_path() /
+                ("agentty_toolset_e2e_" + std::to_string(::getpid()));
     std::error_code ec;
     fs::remove_all(root, ec);
     fs::create_directories(root / "src");
@@ -265,9 +272,31 @@ int main() {
             const auto marker = started->text.find("proc-");
             const auto end = started->text.find(' ', marker);
             const std::string id = started->text.substr(marker, end - marker);
-            auto first = run("process_poll", {{"id", id}, {"wait_ms", 500}});
+
+            // Poll until a marker shows rather than racing one fixed window:
+            // under a loaded CI box (this test co-schedules with the whole
+            // suite) the child can take far longer than any single wait_ms to
+            // be scheduled and have its pipe drained. Loop with a generous
+            // overall deadline so the assertion tests SEMANTICS (initial
+            // output arrives, later output arrives once, no replay) instead
+            // of subprocess scheduling latency.
+            auto poll_until = [&](const char* needle, int budget_ms) {
+                auto last = run("process_poll", {{"id", id}, {"wait_ms", 500}});
+                int waited = 500;
+                while (!has(last, needle) && waited < budget_ms) {
+                    auto r = run("process_poll", {{"id", id}, {"wait_ms", 500}});
+                    waited += 500;
+                    // A poll only returns output produced since the previous
+                    // poll; keep the newest non-empty result so the hit isn't
+                    // lost when a later poll comes back empty.
+                    if (has(r, needle) || r) last = std::move(r);
+                }
+                return last;
+            };
+
+            auto first = poll_until("process-first", 10000);
             check(has(first, "process-first"), "process_poll: returns initial output");
-            auto second = run("process_poll", {{"id", id}, {"wait_ms", 2000}});
+            auto second = poll_until("process-second", 10000);
             check(has(second, "process-second"), "process_poll: waits for new output");
             check(second.has_value() && !has(second, "process-first"),
                   "process_poll: does not repeat previously delivered output");
