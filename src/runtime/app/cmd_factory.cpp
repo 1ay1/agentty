@@ -1,7 +1,10 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <filesystem>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -21,6 +24,7 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
 namespace agentty::app::cmd {
@@ -777,14 +781,46 @@ namespace {
 
 // Pull the fs target(s) out of a tool call's args, mirroring the built-in
 // tool vocabulary (read/write/edit/find_definition use path|file_path;
-// grep/glob/list_dir scope under an optional dir). Empty ⇒ unknown target.
-[[nodiscard]] std::vector<std::string> tc_paths(const ToolUse& tc) {
+// grep/glob/list_dir scope under an optional dir). Paths are resolved against
+// the workspace and weakly canonicalised so lexical aliases (./, .., and
+// absolute-vs-workspace-relative spellings) compare identically. nullopt means
+// a path was present but could not be normalised; callers must fail closed.
+[[nodiscard]] std::optional<std::vector<std::string>> tc_paths(const ToolUse& tc) {
     std::vector<std::string> out;
     if (!tc.args.is_object()) return out;
+    bool uncertain = false;
     auto take = [&](const char* k) {
-        if (auto it = tc.args.find(k); it != tc.args.end() && it->is_string()) {
-            auto s = it->get<std::string>();
-            if (!s.empty()) out.push_back(std::move(s));
+        if (auto it = tc.args.find(k); it != tc.args.end()) {
+            if (!it->is_string()) { uncertain = true; return; }
+            auto raw = it->get<std::string>();
+            if (raw.empty()) { uncertain = true; return; }
+            try {
+                namespace fs = std::filesystem;
+                fs::path p{raw};
+                if (p.is_relative()) {
+                    const auto& root = tools::util::workspace_root();
+                    if (root.empty()) { uncertain = true; return; }
+                    p = root / p;
+                }
+                std::error_code ec;
+                p = fs::weakly_canonical(p, ec);
+                if (ec || p.empty() || !p.is_absolute()) {
+                    uncertain = true;
+                    return;
+                }
+                auto normal = p.generic_string();
+#ifdef _WIN32
+                // NTFS and the Win32 API are case-insensitive by default;
+                // compare scheduler resource identities the same way so
+                // File.cpp and FILE.CPP cannot race a writer.
+                std::ranges::transform(normal, normal.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+#endif
+                out.push_back(std::move(normal));
+            } catch (...) {
+                uncertain = true;
+            }
         }
     };
     take("path"); take("file_path"); take("filepath"); take("filename");
@@ -793,6 +829,7 @@ namespace {
     if (n == "grep" || n == "glob" || n == "list_dir") {
         take("dir"); take("directory"); take("root");
     }
+    if (uncertain) return std::nullopt;
     return out;
 }
 
@@ -826,16 +863,18 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
         active_effects |= fx;
         auto ps = tc_paths(tc);
         if (fx.has(tools::Effect::Exec)
-            || (fx.has(tools::Effect::WriteFs) && ps.empty()))
+            || (fx.has(tools::Effect::WriteFs) && (!ps || ps->empty())))
             active_unbounded = true;
-        for (auto& p : ps) active_paths.push_back(std::move(p));
+        if (ps) for (auto& p : *ps) active_paths.push_back(std::move(p));
     };
     auto can_run = [&](const ToolUse& tc, tools::EffectSet want) -> bool {
         if (tools::is_parallel_safe(active_effects, want)) return true;
         if (want.has(tools::Effect::Exec) || active_unbounded) return false;
         auto ps = tc_paths(tc);
-        if (ps.empty()) return false;
-        for (const auto& cp : ps)
+        // Once a writer is involved, an absent or unnormalisable resource set
+        // has unknown blast radius and must not be parallelised.
+        if (!ps || ps->empty()) return false;
+        for (const auto& cp : *ps)
             for (const auto& ap : active_paths)
                 if (paths_overlap(cp, ap)) return false;
         return true;
@@ -885,9 +924,10 @@ std::optional<LoopBreak> agent_loop_should_break(
     }
 
     int tool_turns = 0;
-    // (name + canonical args) → [count, all_failed]. Detects a repeated dead
-    // call regardless of the synthetic id minted per attempt.
-    std::unordered_map<std::string, std::pair<int, bool>> seen;
+    // (name + canonical args) → consecutive terminal failure/rejection
+    // streak. A success resets that call's streak; historical failures before
+    // demonstrated recovery must not trip the breaker later.
+    std::unordered_map<std::string, int> failure_streaks;
     for (std::size_t i = run_start; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (msg.role != Role::Assistant || msg.tool_calls.empty()) continue;
@@ -901,22 +941,20 @@ std::optional<LoopBreak> agent_loop_should_break(
             // per tool sub-turn — raw args.dump() made it O(N²) over the run).
             std::string key = tc.name.value + '\0'
                 + (tc.args.is_null() ? std::string{} : tc.args_dump());
-            auto& [count, all_failed] = seen[key];
-            if (count == 0) all_failed = true;
-            ++count;
-            if (!tc.is_failed()) all_failed = false;
+            auto& streak = failure_streaks[key];
+            if (tc.is_failed() || tc.is_rejected()) ++streak;
+            else streak = 0;
         }
     }
 
-    for (const auto& [key, v] : seen) {
-        const auto& [count, all_failed] = v;
-        if (count >= kRepeatLimit && all_failed) {
+    for (const auto& [key, streak] : failure_streaks) {
+        if (streak >= kRepeatLimit) {
             auto nul = key.find('\0');
             std::string name = nul == std::string::npos ? key : key.substr(0, nul);
             return LoopBreak{
-                "Stopped: the `" + name + "` tool was called "
-                + std::to_string(count) + " times with the same arguments and "
-                "failed every time. Re-trying the identical call won't help — "
+                "Stopped: the `" + name + "` tool failed or was rejected "
+                + std::to_string(streak) + " consecutive times with the same "
+                "arguments. Re-trying the identical call won't help — "
                 "change the arguments (check the path/target exists, or pick a "
                 "different tool), or answer the user directly with what you "
                 "already know."};
@@ -982,6 +1020,30 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     std::vector<bool> promote(last.tool_calls.size(), false);
     for (auto i : plan.promote) promote[i] = true;
 
+    // Permission preflight is deliberately a separate, non-dispatching phase.
+    // If a later sibling needs approval, return before marking any earlier
+    // sibling Running: returning a permission prompt discards this function's
+    // accumulated Cmd, so mutating first would strand that tool forever.
+    if (!m.d.pending_permission) {
+        for (std::size_t i = 0; i < last.tool_calls.size(); ++i) {
+            const auto& tc = last.tool_calls[i];
+            // Only a call selected for this wave may prompt. Conflicting calls
+            // stay pending until the active wave completes; prompting them
+            // early would reorder permission UX ahead of runnable work.
+            if (!promote[i] || !tc.is_pending()) continue;
+            if (m.d.session_grants.contains(tc.name.value)
+                || !tool::DynamicDispatch::needs_permission(tc.name.value, m.d.profile))
+                continue;
+            m.d.pending_permission = PendingPermission{
+                tc.id, tc.name,
+                "Tool " + tc.name.value + " needs permission under "
+                    + std::string{ui::profile_label(m.d.profile)} + " profile"};
+            auto ctx = take_active_ctx(std::move(m.s.phase));
+            m.s.phase = phase::AwaitingPermission{std::move(ctx).value()};
+            return Cmd<Msg>::none();
+        }
+    }
+
     for (std::size_t i = 0; i < last.tool_calls.size(); ++i) {
         auto& tc = last.tool_calls[i];
         // Approved: user already granted permission; advance it exactly
@@ -994,20 +1056,13 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 ? false
                 : (!m.d.session_grants.contains(tc.name.value)
                    && tool::DynamicDispatch::needs_permission(tc.name.value, m.d.profile));
-            if (needs_perm && !m.d.pending_permission) {
-                m.d.pending_permission = PendingPermission{
-                    tc.id, tc.name,
-                    "Tool " + tc.name.value + " needs permission under "
-                        + std::string{ui::profile_label(m.d.profile)} + " profile"};
-                // Streaming → AwaitingPermission. The active ctx
-                // (cancel token, retry state, started stamp) flows
-                // through unchanged; the phase tag is the only thing
-                // that moves.
-                auto ctx = take_active_ctx(std::move(m.s.phase));
-                m.s.phase = phase::AwaitingPermission{std::move(ctx).value()};
-                return Cmd<Msg>::none();
+            if (needs_perm) {
+                // A permission request is already displayed for this call (or
+                // another sibling). Keep it Pending and do not dispatch it.
+                any_pending = true;
+                continue;
             }
-            if (!needs_perm) {
+            {
                 // Effect/path-compatibility gate: the planner decided this
                 // tool conflicts with the in-flight wave (or an earlier
                 // sibling promoted this same tick). Leave it Pending;

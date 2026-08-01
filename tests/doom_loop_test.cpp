@@ -38,7 +38,7 @@ void check(bool ok, const char* what) {
     else     { std::fprintf(stderr, "ok:   %s\n", what); }
 }
 
-enum class Term { Done, Failed };
+enum class Term { Done, Failed, Rejected };
 
 ToolUse call(const std::string& name, json args, Term t) {
     static int seq = 0;
@@ -47,7 +47,8 @@ ToolUse call(const std::string& name, json args, Term t) {
     tc.name = ToolName{name};
     tc.args = std::move(args);
     if (t == Term::Done) tc.status = ToolUse::Done{{}, {}, "ok"};
-    else                 tc.status = ToolUse::Failed{{}, {}, "no such file"};
+    else if (t == Term::Failed) tc.status = ToolUse::Failed{{}, {}, "no such file"};
+    else tc.status = ToolUse::Rejected{};
     return tc;
 }
 
@@ -168,6 +169,34 @@ void test_repeat_failure_breaks_even_for_capable() {
           "repeat-failure reason names the tool");
 }
 
+// ── 5d. Only the CURRENT consecutive streak counts. Earlier failures that
+//       were followed by success are recovery history, not a doom loop.
+void test_success_resets_failure_streak() {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "flaky.txt"}};
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Done));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    check(!agent_loop_should_break(msgs).has_value(),
+          "success resets identical-call failure streak");
+}
+
+// Rejections are terminal failures for loop purposes: repeatedly refusing the
+// same permission cannot make progress and should receive the same breaker.
+void test_rejection_streak_breaks() {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"command", "dangerous"}};
+    msgs.push_back(asst_call("bash", a, Term::Rejected));
+    msgs.push_back(asst_call("bash", a, Term::Rejected));
+    msgs.push_back(asst_call("bash", a, Term::Rejected));
+    check(agent_loop_should_break(msgs).has_value(),
+          "3x identical rejection streak breaks");
+}
+
 // ── 6. A modest healthy multi-step task does NOT break ───────────────────────
 void test_healthy_progress_no_break() {
     std::vector<Message> msgs;
@@ -216,6 +245,8 @@ int main() {
     test_runaway_step_cap_breaks();
     test_runaway_step_cap_skipped_for_capable();
     test_repeat_failure_breaks_even_for_capable();
+    test_success_resets_failure_streak();
+    test_rejection_streak_breaks();
     test_healthy_progress_no_break();
     test_user_boundary_resets_run();
     test_empty_and_text_only_no_break();

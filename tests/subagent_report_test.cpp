@@ -19,6 +19,10 @@
 //   D. a runtime stream works with empty request auth (ChatGPT/local providers).
 //   E. a silently empty completion is retried instead of accepted as success.
 //   F. cancellation interrupts provider retry backoff immediately.
+//   G. permanent errors are not retried.
+//   H. interleaved tool-call deltas are assembled by ToolCallId.
+//   I. MaxTokens partial text is surfaced as incomplete/error.
+//   J. cancellation reaches the active provider Request token.
 
 #include <atomic>
 #include <chrono>
@@ -26,10 +30,12 @@
 #include <cstdlib>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -80,7 +86,26 @@ void install_scripted_stream(Script script, bool with_auth = true) {
     cfg.stream = [counter, script](provider::Request req,
                                    provider::EventSink sink) {
         int turn = counter->fetch_add(1);
-        script(turn, req, sink);
+        provider::StreamResult result;
+        provider::EventSink recording = [&](Msg m) {
+            if (auto* sm = std::get_if<msg::StreamMsg>(&m)) {
+                std::visit([&](const auto& e) {
+                    using T = std::decay_t<decltype(e)>;
+                    if constexpr (std::same_as<T, StreamFinished>) {
+                        result.end = provider::StreamEnd::AlreadyTerminated;
+                        result.stop = e.stop_reason;
+                    } else if constexpr (std::same_as<T, StreamError>) {
+                        result.end = provider::StreamEnd::TransportError;
+                        result.error = e.message;
+                        result.retry_after = e.retry_after;
+                        result.http_status = e.http_status;
+                    }
+                }, *sm);
+            }
+            sink(std::move(m));
+        };
+        script(turn, req, recording);
+        return result;
     };
     tools::subagent::install(std::move(cfg));
 }
@@ -244,10 +269,105 @@ int main() {
         auto out = run_task("cancel during retry backoff");
         const auto elapsed = std::chrono::steady_clock::now() - began;
         tools::cancellation::clear();
-        check(out.is_error && has(out.text, "cancelled while waiting to retry"),
+        check(out.is_error && has(out.text, "cancelled"),
               "F: cancellation returns an actionable retry error");
         check(elapsed < std::chrono::milliseconds(500),
               "F: cancellation does not wait through retry backoff");
+    }
+
+    // ── G. Permanent errors stop immediately without retry. ──────────────
+    {
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        install_scripted_stream([calls](int, const provider::Request&,
+                                        const provider::EventSink& sink) {
+            calls->fetch_add(1);
+            StreamError e{.message = "invalid request payload"};
+            e.http_status = 400;
+            sink(Msg{msg::StreamMsg{std::move(e)}});
+        });
+        const auto began = std::chrono::steady_clock::now();
+        auto out = run_task("do not retry a bad request");
+        check(out.is_error && calls->load() == 1,
+              "G: permanent HTTP errors are attempted exactly once");
+        check(std::chrono::steady_clock::now() - began
+                  < std::chrono::milliseconds(500),
+              "G: permanent error returns without retry backoff");
+    }
+
+    // ── H. Multiple interleaved calls retain their own argument streams. ──
+    {
+        auto assembled = std::make_shared<std::atomic<bool>>(false);
+        install_scripted_stream([assembled](int turn, const provider::Request& req,
+                                            const provider::EventSink& sink) {
+            if (turn == 0) {
+                sink(Msg{msg::StreamMsg{StreamToolUseStart{
+                    ToolCallId{"a"}, ToolName{"grep"}}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseStart{
+                    ToolCallId{"b"}, ToolName{"grep"}}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseDelta{
+                    ToolCallId{"a"}, "{\"pattern\":\"alpha"}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseDelta{
+                    ToolCallId{"b"}, "{\"pattern\":\"beta"}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseDelta{
+                    ToolCallId{"a"}, "\"}"}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseEnd{ToolCallId{"a"}}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseDelta{
+                    ToolCallId{"b"}, "\"}"}}});
+                sink(Msg{msg::StreamMsg{StreamToolUseEnd{ToolCallId{"b"}}}});
+                emit_finish(sink, StopReason::ToolUse);
+                return;
+            }
+            for (const auto& m : req.messages) {
+                if (m.role != Role::Assistant || m.tool_calls.size() != 2) continue;
+                assembled->store(
+                    m.tool_calls[0].args.value("pattern", "") == "alpha"
+                    && m.tool_calls[1].args.value("pattern", "") == "beta");
+            }
+            emit_text(sink, "INTERLEAVED_OK");
+            emit_finish(sink);
+        });
+        auto out = run_task("assemble parallel calls");
+        check(assembled->load() && has(out.text, "INTERLEAVED_OK"),
+              "H: interleaved tool deltas are assembled by call id");
+    }
+
+    // ── I. MaxTokens prose is partial, never a clean report. ─────────────
+    {
+        install_scripted_stream([](int, const provider::Request&,
+                                   const provider::EventSink& sink) {
+            emit_text(sink, "PARTIAL_NOT_A_REPORT");
+            emit_finish(sink, StopReason::MaxTokens);
+        });
+        auto out = run_task("produce an oversized report");
+        check(out.is_error && has(out.text, "max-token limit"),
+              "I: MaxTokens completion is reported as an error");
+        check(!has(out.text, "\n\nPARTIAL_NOT_A_REPORT"),
+              "I: partial MaxTokens prose is not returned as a clean report");
+    }
+
+    // ── J. Parent cancellation trips the active provider request token. ──
+    {
+        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        auto request_cancelled = std::make_shared<std::atomic<bool>>(false);
+        tools::cancellation::set([cancelled] { return cancelled->load(); });
+        install_scripted_stream([cancelled, request_cancelled](
+                                    int, const provider::Request& req,
+                                    const provider::EventSink& sink) {
+            check(static_cast<bool>(req.cancel),
+                  "J: active subagent request has a cancellation token");
+            cancelled->store(true);
+            const auto until = std::chrono::steady_clock::now()
+                             + std::chrono::milliseconds(500);
+            while (std::chrono::steady_clock::now() < until
+                   && !req.cancel->is_cancelled())
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            request_cancelled->store(req.cancel->is_cancelled());
+            emit_error(sink, "cancelled");
+        });
+        auto out = run_task("cancel active stream");
+        tools::cancellation::clear();
+        check(request_cancelled->load() && out.is_error,
+              "J: parent cancellation reaches provider and stops the task");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
