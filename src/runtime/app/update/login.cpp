@@ -171,6 +171,7 @@ Step account_move(Model m, int delta) {
     if (auto* al = std::get_if<login::AccountList>(&m.ui.login)) {
         const int n = static_cast<int>(al->rows.size()) + 1;   // +1 add-new row
         if (n > 0) al->cursor = ((al->cursor + delta) % n + n) % n;
+        al->confirm_remove.clear();
     }
     return done(std::move(m));
 }
@@ -180,9 +181,16 @@ Step account_select(Model m) {
     if (!al) return done(std::move(m));
     const int add_row = static_cast<int>(al->rows.size());
 
-    // Trailing "+ Add another account…" row → normal sign-in flow.
+    // Trailing "+ Add another account…" row. Keep the continuation scoped
+    // to the provider the user was managing: ChatGPT has one native OAuth
+    // method, while Anthropic offers only its API-key and OAuth choices.
     if (al->cursor >= add_row) {
-        m.ui.login = login::Picking{};
+        const std::string provider = al->provider;
+        if (provider == "chatgpt") {
+            m.ui.login = login::ChatGptWaiting{};
+            return {std::move(m), cmd::codex_login_async()};
+        }
+        m.ui.login = login::Picking{.provider = provider};
         return done(std::move(m));
     }
 
@@ -208,8 +216,9 @@ Step account_select(Model m) {
         // clearing the cached header forces a fresh read next turn.
         agentty::app::update_auth(auth::AuthHeader{});
     }
+    const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
-    m.s.status = "switched to " + label;
+    m.s.status = "switched " + provider_label + " to " + label;
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{4};
     return done(std::move(m));
@@ -223,7 +232,17 @@ Step account_remove(Model m) {
 
     namespace acc = agentty::auth::accounts;
     const auto row = al->rows[static_cast<std::size_t>(al->cursor)];
+
+    // Destructive actions are deliberately two-step. A stray Backspace or
+    // vim `d` must never erase a saved refresh token with no way back.
+    if (al->confirm_remove != row.label) {
+        al->confirm_remove = row.label;
+        return done(std::move(m));
+    }
+
     const bool was_active = row.active;
+    const int old_cursor = al->cursor;
+    const std::string provider_label = al->provider_label;
     acc::remove(row.provider, row.label);
 
     // If we removed the account we're currently authed as, the newest
@@ -237,28 +256,44 @@ Step account_remove(Model m) {
             } else {
                 agentty::app::update_auth(auth::AuthHeader{});
             }
+            m.s.status = "removed " + row.label + " · switched to " + next->label;
         } else {
-            // Removed the last account: clear the live header and re-auth.
+            // The registry is empty. Clear the underlying live credential
+            // file too; otherwise build_account_list() would rediscover and
+            // silently resurrect the account the user just removed.
+            if (row.provider == "anthropic") auth::clear_credentials();
+            else provider::chatgpt::clear_codex_credentials();
             agentty::app::update_auth(auth::AuthHeader{});
+
+            login::AccountList empty;
+            empty.provider = row.provider;
+            empty.provider_label = provider_label;
+            m.ui.login = std::move(empty);  // stays on "+ Add another account…"
+            m.s.status = "removed the last " + provider_label + " account";
+            m.s.status_until = std::chrono::steady_clock::now()
+                             + std::chrono::seconds{4};
+            return done(std::move(m));
         }
+    } else {
+        m.s.status = "removed " + row.label;
     }
 
-    // Rebuild the list in place so the view updates.
+    m.s.status_until = std::chrono::steady_clock::now()
+                     + std::chrono::seconds{4};
+
+    // Rebuild the list in place and keep the cursor near the removed row.
     auto rebuilt = build_account_list(provider::active());
-    if (rebuilt.rows.empty()) {
-        m.ui.login = login::Picking{};
-    } else {
-        rebuilt.cursor = std::min(al->cursor,
-                                  static_cast<int>(rebuilt.rows.size()));
-        m.ui.login = std::move(rebuilt);
-    }
+    rebuilt.cursor = std::min(old_cursor,
+                              static_cast<int>(rebuilt.rows.size()));
+    m.ui.login = std::move(rebuilt);
     return done(std::move(m));
 }
 
 Step login_pick_method(Model m, char32_t key) {
-    if (!std::holds_alternative<login::Picking>(m.ui.login)
-        && !std::holds_alternative<login::Failed>(m.ui.login))
+    const auto* picking = std::get_if<login::Picking>(&m.ui.login);
+    if (!picking && !std::holds_alternative<login::Failed>(m.ui.login))
         return done(std::move(m));
+    const bool anthropic_only = picking && picking->provider == "anthropic";
     if (key == U'2') {
         // OAuth: mint PKCE pair, open browser, transition to OAuthCode.
         // The URL lives in state so the modal can show it as a fallback
@@ -289,7 +324,7 @@ Step login_pick_method(Model m, char32_t key) {
         m.ui.login = login::ApiKeyInput{};
         return done(std::move(m));
     }
-    if (key == U'3') {
+    if (key == U'3' && !anthropic_only) {
         // Native ChatGPT (Codex) login — the loopback-callback flow. Open
         // the browser and run the whole handshake off-thread; the modal
         // sits in ChatGptWaiting until CodexLoginDone lands. No PKCE/state

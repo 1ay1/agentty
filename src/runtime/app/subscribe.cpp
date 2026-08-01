@@ -402,7 +402,7 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
 
     // ── Account switcher: a LIST, not a text field ──────────────────
     // ↑/↓ (and j/k) move the highlight, Enter switches to / adds the
-    // highlighted account, Delete/Backspace removes a saved one.
+    // highlighted account, Delete/Backspace/d twice confirms removal.
     if (std::holds_alternative<AccountList>(state)) {
         if (std::holds_alternative<SpecialKey>(ev.key)) {
             switch (std::get<SpecialKey>(ev.key)) {
