@@ -323,6 +323,45 @@ Element panel_custom_host(const login::CustomHostInput& s) {
     return v(std::move(rows)).build();
 }
 
+// The account switcher: a selectable list of saved accounts for the active
+// provider plus a trailing "+ Add another account…" row. The highlighted
+// row is inverse-styled; the active account carries a ✓.
+Element panel_account_list(const login::AccountList& s) {
+    std::vector<Element> rows;
+    rows.push_back(text("Switch " + s.provider_label + " account",
+                        fg_bold(fg)));
+    rows.push_back(body_text(
+        "Pick who you're signed in as — switching is instant and never leaves "
+        "agentty. Delete removes a saved account.",
+        fg_dim(muted)));
+    rows.push_back(text(""));
+
+    const int add_row = static_cast<int>(s.rows.size());
+    for (int i = 0; i < add_row; ++i) {
+        const auto& r = s.rows[static_cast<std::size_t>(i)];
+        const bool sel = (i == s.cursor);
+        std::string line = std::string(sel ? "› " : "  ")
+                         + (r.active ? "✓ " : "  ") + r.label;
+        Style sty = sel ? Style{}.with_fg(fg).with_bold().with_inverse()
+                        : (r.active ? fg_bold(accent) : fg_of(fg));
+        rows.push_back(text(line, sty));
+    }
+    // Trailing add-new row.
+    {
+        const bool sel = (s.cursor >= add_row);
+        std::string line = std::string(sel ? "› " : "  ")
+                         + "  + Add another account…";
+        Style sty = sel ? Style{}.with_fg(fg).with_bold().with_inverse()
+                        : fg_dim(muted);
+        rows.push_back(text(line, sty));
+    }
+
+    rows.push_back(text(""));
+    rows.push_back(key_hints({{"↑↓", "move"}, {"Enter", "switch"},
+                              {"Del", "remove"}, {"Esc", "close"}}));
+    return v(std::move(rows)).build();
+}
+
 } // namespace
 
 Element login_modal(const Model& m) {
@@ -344,6 +383,8 @@ Element login_modal(const Model& m) {
             return panel_api_key(s);
         } else if constexpr (std::same_as<T, login::CustomHostInput>) {
             return panel_custom_host(s);
+        } else if constexpr (std::same_as<T, login::AccountList>) {
+            return panel_account_list(s);
         } else if constexpr (std::same_as<T, login::Failed>) {
             return panel_picking(true, s.message);
         }

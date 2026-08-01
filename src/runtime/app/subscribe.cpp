@@ -400,6 +400,31 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
         return NoOp{};
     }
 
+    // ── Account switcher: a LIST, not a text field ──────────────────
+    // ↑/↓ (and j/k) move the highlight, Enter switches to / adds the
+    // highlighted account, Delete/Backspace removes a saved one.
+    if (std::holds_alternative<AccountList>(state)) {
+        if (std::holds_alternative<SpecialKey>(ev.key)) {
+            switch (std::get<SpecialKey>(ev.key)) {
+                case SpecialKey::Up:        return AccountMove{-1};
+                case SpecialKey::Down:      return AccountMove{+1};
+                case SpecialKey::Enter:     return AccountSelect{};
+                case SpecialKey::Backspace: return AccountRemove{};
+                case SpecialKey::Delete:    return AccountRemove{};
+                default: return std::nullopt;
+            }
+        }
+        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+            switch (ck->codepoint) {
+                case U'k': return AccountMove{-1};
+                case U'j': return AccountMove{+1};
+                case U'd': return AccountRemove{};   // vim-ish "delete"
+                default: return std::nullopt;
+            }
+        }
+        return std::nullopt;
+    }
+
     // ── OAuthCode-only chrome shortcuts ─────────────────────────────
     // Bare letter `c` / `o` would collide with text input on the code
     // field, so we gate these on a modifier OR on the field being

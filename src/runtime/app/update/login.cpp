@@ -18,6 +18,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/auth/accounts.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -39,6 +40,25 @@ namespace {
 void install_and_close(Model& m, auth::Credentials creds) {
     auth::save_credentials(creds);
     agentty::app::update_auth(auth::make_auth_header(creds));
+
+    // Capture this login as a named account so it's switchable in-app. When
+    // the registry already has a "default", a subsequent OAuth/key login is a
+    // DIFFERENT account — register it under an incrementing name so both
+    // survive and the user can flip between them without re-authing.
+    {
+        namespace acc = agentty::auth::accounts;
+        const std::string provider = "anthropic";
+        std::string base = acc::derive_current_label(provider);
+        if (base.empty()) base = "account";
+        std::string label = base;
+        // Avoid clobbering an existing DIFFERENT account that happens to share
+        // the derived label (both "OAuth login", say): suffix until unique,
+        // unless a slot with this exact label already holds this same login.
+        for (int n = 2; acc::get(provider, label).has_value() && n < 100; ++n)
+            label = base + " " + std::to_string(n);
+        acc::snapshot_active(provider, label);
+    }
+
     m.ui.login = login::Closed{};
     m.s.status = "logged in";
     m.s.status_until = std::chrono::steady_clock::now()
@@ -87,6 +107,151 @@ Step sign_out(Model m) {
     m.s.status = "signed out of " + what + " — sign in to continue";
     m.s.status_until = std::chrono::steady_clock::now()
                      + std::chrono::seconds{5};
+    return done(std::move(m));
+}
+
+namespace {
+
+// Canonical registry id for the active provider's accounts. Only Anthropic
+// and ChatGPT have file-backed credential stores the account layer can
+// snapshot; OpenAI-family keys already switch per-endpoint via the picker.
+std::string account_provider_id(const provider::Selection& sel) {
+    if (sel.is_chatgpt())                 return "chatgpt";
+    if (sel.kind == provider::Kind::Anthropic) return "anthropic";
+    return {};   // no account switching for this provider
+}
+
+// Build the AccountList state for the active provider, auto-registering the
+// current live login as "default" the first time so it appears as a row.
+login::AccountList build_account_list(const provider::Selection& sel) {
+    namespace acc = agentty::auth::accounts;
+    login::AccountList al;
+    al.provider       = account_provider_id(sel);
+    al.provider_label = provider::provider_display_name(sel);
+    if (al.provider.empty()) return al;
+
+    auto saved = acc::list_for(al.provider);
+    if (saved.empty()) {
+        // Legacy single-login: capture whatever is signed in right now under
+        // a derived name so the user has a switchable, removable row.
+        std::string label = acc::derive_current_label(al.provider);
+        if (!label.empty() && acc::snapshot_active(al.provider, label))
+            saved = acc::list_for(al.provider);
+    }
+    const std::string active = acc::active_label(al.provider);
+    for (auto& a : saved) {
+        login::AccountRow row;
+        row.provider = a.provider;
+        row.label    = a.label;
+        row.active   = (a.label == active);
+        al.rows.push_back(std::move(row));
+    }
+    // Land the cursor on the active row so "open, hit enter" is a no-op.
+    for (int i = 0; i < static_cast<int>(al.rows.size()); ++i)
+        if (al.rows[static_cast<std::size_t>(i)].active) { al.cursor = i; break; }
+    return al;
+}
+
+} // namespace
+
+Step open_accounts(Model m) {
+    const auto sel = provider::active();
+    auto al = build_account_list(sel);
+    if (al.provider.empty()) {
+        // Provider has no switchable accounts — fall back to the normal
+        // sign-in / add-key flow rather than showing an empty list.
+        m.ui.login = login::Picking{};
+        return done(std::move(m));
+    }
+    m.ui.login = std::move(al);
+    return done(std::move(m));
+}
+
+Step account_move(Model m, int delta) {
+    if (auto* al = std::get_if<login::AccountList>(&m.ui.login)) {
+        const int n = static_cast<int>(al->rows.size()) + 1;   // +1 add-new row
+        if (n > 0) al->cursor = ((al->cursor + delta) % n + n) % n;
+    }
+    return done(std::move(m));
+}
+
+Step account_select(Model m) {
+    auto* al = std::get_if<login::AccountList>(&m.ui.login);
+    if (!al) return done(std::move(m));
+    const int add_row = static_cast<int>(al->rows.size());
+
+    // Trailing "+ Add another account…" row → normal sign-in flow.
+    if (al->cursor >= add_row) {
+        m.ui.login = login::Picking{};
+        return done(std::move(m));
+    }
+
+    const auto& row = al->rows[static_cast<std::size_t>(al->cursor)];
+    if (row.active) {                         // already this account
+        m.ui.login = login::Closed{};
+        return done(std::move(m));
+    }
+
+    namespace acc = agentty::auth::accounts;
+    const std::string provider = row.provider;
+    const std::string label    = row.label;
+    if (!acc::activate(provider, label)) {
+        m.ui.login = login::Failed{"could not switch to \"" + label + "\""};
+        return done(std::move(m));
+    }
+    // Re-install the live auth header from the now-swapped active store.
+    if (provider == "anthropic") {
+        if (auto c = auth::load_credentials())
+            agentty::app::update_auth(auth::make_auth_header(*c));
+    } else if (provider == "chatgpt") {
+        // The Codex transport reads its token from the store on each turn;
+        // clearing the cached header forces a fresh read next turn.
+        agentty::app::update_auth(auth::AuthHeader{});
+    }
+    m.ui.login = login::Closed{};
+    m.s.status = "switched to " + label;
+    m.s.status_until = std::chrono::steady_clock::now()
+                     + std::chrono::seconds{4};
+    return done(std::move(m));
+}
+
+Step account_remove(Model m) {
+    auto* al = std::get_if<login::AccountList>(&m.ui.login);
+    if (!al) return done(std::move(m));
+    const int add_row = static_cast<int>(al->rows.size());
+    if (al->cursor >= add_row) return done(std::move(m));   // add-new row: nothing to remove
+
+    namespace acc = agentty::auth::accounts;
+    const auto row = al->rows[static_cast<std::size_t>(al->cursor)];
+    const bool was_active = row.active;
+    acc::remove(row.provider, row.label);
+
+    // If we removed the account we're currently authed as, the newest
+    // remaining one (promoted to active by remove()) becomes live.
+    if (was_active) {
+        if (auto next = acc::get(row.provider, acc::active_label(row.provider))) {
+            acc::activate(row.provider, next->label);
+            if (row.provider == "anthropic") {
+                if (auto c = auth::load_credentials())
+                    agentty::app::update_auth(auth::make_auth_header(*c));
+            } else {
+                agentty::app::update_auth(auth::AuthHeader{});
+            }
+        } else {
+            // Removed the last account: clear the live header and re-auth.
+            agentty::app::update_auth(auth::AuthHeader{});
+        }
+    }
+
+    // Rebuild the list in place so the view updates.
+    auto rebuilt = build_account_list(provider::active());
+    if (rebuilt.rows.empty()) {
+        m.ui.login = login::Picking{};
+    } else {
+        rebuilt.cursor = std::min(al->cursor,
+                                  static_cast<int>(rebuilt.rows.size()));
+        m.ui.login = std::move(rebuilt);
+    }
     return done(std::move(m));
 }
 
@@ -515,6 +680,10 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](OpenLogin)              -> Step { return open_login(std::move(m)); },
         [&](CloseLogin)             -> Step { return close_login(std::move(m)); },
         [&](SignOut)                -> Step { return sign_out(std::move(m)); },
+        [&](OpenAccounts)           -> Step { return open_accounts(std::move(m)); },
+        [&](AccountMove& e)         -> Step { return account_move(std::move(m), e.delta); },
+        [&](AccountSelect)          -> Step { return account_select(std::move(m)); },
+        [&](AccountRemove)          -> Step { return account_remove(std::move(m)); },
         [&](LoginPickMethod& e)     -> Step { return login_pick_method(std::move(m), e.key); },
         [&](LoginCharInput& e)      -> Step { return login_char_input(std::move(m), e.ch); },
         [&](LoginBackspace)         -> Step { return login_backspace(std::move(m)); },

@@ -472,6 +472,23 @@ struct CloseLogin {};
 // palette ("Sign out"). Lets a user switch OAuth ↔ API key / accounts without
 // dropping to the CLI `agentty logout`.
 struct SignOut {};
+// Open the in-app account switcher for the ACTIVE provider. Lists every saved
+// account so the user can switch who they're signed in as without leaving
+// agentty. On first open with only a legacy single login, that login is
+// auto-registered as "default" so it shows up as a switchable row.
+struct OpenAccounts {};
+// Move the highlight in the account switcher (wraps at both ends; the last
+// row is always "+ Add another account…").
+struct AccountMove { int delta; };
+// Activate the highlighted account switcher row. On a saved account: swap its
+// stored credential into the live store + re-install the auth header. On the
+// trailing add-new row: drop into the normal Picking flow, tagged so the
+// resulting login is captured under a new name.
+struct AccountSelect {};
+// Remove the highlighted saved account (its stored credential snapshot). If it
+// was the active one, the newest remaining account for the provider becomes
+// active; if it was the last, the switcher falls back to Picking.
+struct AccountRemove {};
 struct LoginPickMethod  { char32_t key; };          // '1' = ApiKey, '2' = OAuth, '3' = ChatGPT
 struct LoginCharInput   { char32_t ch; };
 struct LoginBackspace   {};
@@ -683,7 +700,9 @@ using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
 
 using LoginMsg = std::variant<
-    OpenLogin, CloseLogin, SignOut, LoginPickMethod, LoginCharInput, LoginBackspace,
+    OpenLogin, CloseLogin, SignOut,
+    OpenAccounts, AccountMove, AccountSelect, AccountRemove,
+    LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginOpenBrowserAgain,
     LoginExchanged, CodexLoginDone, TokenRefreshed>;
