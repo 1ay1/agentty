@@ -22,6 +22,7 @@
 
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "agentty/auth/auth.hpp"
 
@@ -76,9 +77,30 @@ struct Failed {
     std::string message;
 };
 
+// One row in the account switcher.
+struct AccountRow {
+    std::string provider;    // canonical id
+    std::string label;       // user-facing name
+    bool        active = false;
+};
+
+// The in-app account switcher: lists every saved account for the ACTIVE
+// provider so the user can switch who they're signed in as — or add a new
+// one / remove one — without ever leaving agentty. Selecting a row that
+// isn't the active one swaps that account's credential into the live store;
+// the last row is always "+ Add another account…" which drops into the
+// normal Picking flow, tagged so the resulting login is snapshotted under a
+// fresh name.
+struct AccountList {
+    std::string             provider;       // provider these rows belong to
+    std::string             provider_label; // display name for the header
+    std::vector<AccountRow> rows;           // saved accounts (+ synthesized add row is index == rows.size())
+    int                     cursor = 0;      // 0..rows.size() (last = add-new)
+};
+
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
                            ChatGptWaiting, ApiKeyInput, CustomHostInput,
-                           Failed>;
+                           AccountList, Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {
     return !std::holds_alternative<Closed>(s);

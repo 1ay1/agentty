@@ -619,6 +619,8 @@ set(AGENTTY_IO_SOURCES
     src/io/http.cpp
     src/io/tls.cpp
     src/io/auth.cpp
+    src/io/accounts.cpp
+    src/io/account_switch.cpp
     src/io/cred_crypt.cpp
     src/io/keystore.cpp
     src/io/persistence.cpp
@@ -1640,6 +1642,15 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME cred_crypt_test COMMAND cred_crypt_test)
     set_tests_properties(cred_crypt_test PROPERTIES TIMEOUT 60)
 
+    # accounts_registry_test — the named per-provider account store
+    # (list/upsert/get/remove/set_active/active_label) that backs the in-app
+    # account switcher. Runs against a sandboxed XDG_CONFIG_HOME so it never
+    # touches real credentials; locks the pure registry semantics the
+    # switcher UI depends on (newest-active, no-duplicate upsert, active
+    # promotion on remove, empty-input rejection).
+    agentty_add_full_test(accounts_registry_test)
+    set_tests_properties(accounts_registry_test PROPERTIES TIMEOUT 30)
+
     # keystore_test — OS keystore round-trip (store/retrieve/remove/notfound).
     # SKIPS with success when no backend is available/enabled (headless CI),
     # so it never blocks a build lacking a Secret Service / keychain. Links
@@ -2139,6 +2150,7 @@ if(AGENTTY_BUILD_TESTS)
         model_label_test
         skills_engine_test
         cred_crypt_test
+        accounts_registry_test
         keystore_test
         midrun_freeze_test
         midrun_seam_test
