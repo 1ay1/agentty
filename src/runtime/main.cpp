@@ -426,7 +426,8 @@ int main(int argc, char** argv) {
     // rebuild. The two long-lived native providers are captured by ref;
     // short-lived OpenAI-compat / Ollama transports are built per call inside
     // dispatch from the active endpoint.
-    std::function<void(provider::Request, provider::EventSink)> stream_fn =
+    std::function<provider::StreamResult(provider::Request,
+                                         provider::EventSink)> stream_fn =
         [&anthropic_provider, &chatgpt_provider]
         (provider::Request req, provider::EventSink sink) {
             provider::ProviderRouter router;
@@ -445,11 +446,8 @@ int main(int argc, char** argv) {
                 return provider::stream_external_acp(agent_id, std::move(r),
                                                      std::move(s));
             };
-            // The runtime seam is Msg-driven, so the StreamResult return is
-            // consumed at the transport boundary (terminal Msg already emitted)
-            // and dropped here; dispatch still returns it for callers that want
-            // the outcome as a value.
-            provider::dispatch_stream(router, std::move(req), std::move(sink));
+            return provider::dispatch_stream(router, std::move(req),
+                                             std::move(sink));
         };
     app::install_deps(app::Deps{
         .stream        = stream_fn,

@@ -31,7 +31,8 @@ struct Config {
     // every non-Anthropic provider (wrong wire, wrong auth). Null ⇒ the
     // runner falls back to the Anthropic transport (old behaviour, keeps
     // tests that install only auth+model working).
-    std::function<void(provider::Request, provider::EventSink)> stream;
+    std::function<provider::StreamResult(provider::Request,
+                                         provider::EventSink)> stream;
 };
 
 // Install the subagent config (call once at startup, after auth resolves).

@@ -10,15 +10,24 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/domain/conversation.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 using agentty::ToolUse;
 using agentty::ToolName;
 using agentty::ToolCallId;
+using agentty::Model;
+using agentty::Message;
+using agentty::Role;
+using agentty::Profile;
+using agentty::phase::Streaming;
+using agentty::phase::Active;
+using agentty::app::cmd::kick_pending_tools;
 using agentty::app::cmd::schedule_parallel_batch;
 
 namespace {
@@ -59,6 +68,10 @@ bool has(const std::vector<std::size_t>& v, std::size_t i) {
 
 int main() {
     std::printf("scheduler_path_test — path-aware parallel scheduling\n\n");
+
+    namespace fs = std::filesystem;
+    const fs::path workspace = fs::temp_directory_path() / "agentty_scheduler_workspace";
+    agentty::tools::util::set_workspace_root(workspace);
 
     // (a) Two writes to DISJOINT files → BOTH promoted (run concurrently).
     {
@@ -214,6 +227,52 @@ int main() {
         auto d = schedule_parallel_batch(b);
         check("bash excludes task", d.promote.size() == 1 && has(d.promote, 0),
               promoted_str(d.promote));
+    }
+
+    // (n) Lexical aliases and absolute-vs-relative spellings name the same
+    //     resource and therefore serialise.
+    {
+        std::vector<ToolUse> b = {
+            pending("write", {{"file_path", "src/./nested/../a.cpp"}, {"content", "x"}}),
+            pending("read",  {{"path", (workspace / "src/a.cpp").string()}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        check("lexical and absolute aliases serialise",
+              d.promote.size() == 1 && has(d.promote, 0), promoted_str(d.promote));
+    }
+
+    // (o) Normalisation uncertainty fails closed once a writer is active.
+    {
+        std::vector<ToolUse> b = {
+            pending("write", {{"file_path", "a.cpp"}, {"content", "x"}}),
+            pending("read",  {{"path", 42}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        check("uncertain path serialises with writer",
+              d.promote.size() == 1 && has(d.promote, 0), promoted_str(d.promote));
+    }
+
+    // (p) Safe two-phase permission behavior: discovering a later permission
+    //     prompt must happen before an earlier dispatchable call is mutated to
+    //     Running (its Cmd would otherwise be discarded by the early return).
+    {
+        Model m;
+        m.d.profile = Profile::Ask;
+        m.s.phase = Streaming{Active{}};
+        Message asst;
+        asst.role = Role::Assistant;
+        asst.tool_calls.push_back(pending("read", {{"path", "a.cpp"}}));
+        asst.tool_calls.push_back(pending("write", {{"file_path", "b.cpp"},
+                                                     {"content", "x"}}));
+        const auto permission_id = asst.tool_calls[1].id;
+        m.d.current.messages.push_back(std::move(asst));
+        auto ignored = kick_pending_tools(m);
+        (void)ignored;
+        const auto& calls = m.d.current.messages.back().tool_calls;
+        check("permission preflight leaves earlier tool Pending",
+              calls[0].is_pending() && calls[1].is_pending());
+        check("permission preflight selects later guarded tool",
+              m.d.pending_permission && m.d.pending_permission->id == permission_id);
     }
 
     std::printf("\n%d/%d checks passed\n", total - failures, total);

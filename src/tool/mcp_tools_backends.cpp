@@ -24,6 +24,7 @@
 
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/error_class.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
 
@@ -129,10 +130,6 @@ public:
     }
     std::vector<mt::MemoryRecord> preview_forget(const std::string& needle) override {
         std::vector<mt::MemoryRecord> out;
-        // The wipe shell calls preview_forget("") to enumerate a scope; the
-        // native forget refused an empty needle. Treat empty as "no preview"
-        // (the wipe shell only uses the call's existence, not its contents).
-        if (needle.empty()) return out;
         for (const auto& r : memory::preview_forget_by_substring(needle)) {
             mt::MemoryRecord m;
             m.id     = r.id;
@@ -145,6 +142,12 @@ public:
             out.push_back(std::move(m));
         }
         return out;
+    }
+
+    std::optional<std::size_t> preview_wipe(const std::string& scope) override {
+        auto s = memory::parse_scope(scope);
+        if (!s || memory::path_for(*s).empty()) return std::nullopt;
+        return memory::load_all(*s).size();
     }
 
     std::optional<std::size_t> wipe(const std::string& scope) override {
@@ -372,9 +375,10 @@ std::string summarize_call(const ToolUse& tc) {
     return s;
 }
 
-StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
+provider::StreamResult run_one_completion(Thread& thread,
+                              const subagent::Config& cfg,
                               const AgentType& type,
-                              std::string& log, std::string& err_out) {
+                              std::string& log) {
     // Provider-agnostic request — the generic shape every transport accepts.
     // fresh_auth_header refreshes the ANTHROPIC OAuth token from disk; on any
     // other backend it would CLOBBER the provider's key with Anthropic
@@ -387,6 +391,7 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
                       : cfg.auth;
     req.max_tokens    = 32000;
     req.messages      = thread.messages;
+    req.cancel        = std::make_shared<http::CancelToken>();
 
     auto allowed = [&](const tools::ToolDef& t) -> bool {
         if (t.name.value == "task") return false;
@@ -422,7 +427,13 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
     Message asst;
     asst.role = Role::Assistant;
     StopReason stop = StopReason::Unspecified;
-    std::string cur_tool_json;
+    std::unordered_map<std::string, std::string> tool_json;
+
+    auto find_tool = [&](const ToolCallId& id) -> ToolUse* {
+        auto it = std::find_if(asst.tool_calls.begin(), asst.tool_calls.end(),
+            [&](const ToolUse& tc) { return tc.id == id; });
+        return it == asst.tool_calls.end() ? nullptr : &*it;
+    };
 
     // Throttled feed pump: a fast model streams hundreds of text deltas
     // per second, and every progress::emit crosses a thread boundary as a
@@ -456,45 +467,50 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
                     tc.name   = e.name;
                     tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
                     asst.tool_calls.push_back(std::move(tc));
-                    cur_tool_json.clear();
+                    tool_json[e.id.value].clear();
                 } else if constexpr (std::same_as<T, StreamToolUseDelta>) {
-                    cur_tool_json += e.partial_json;
+                    tool_json[e.id.value] += e.partial_json;
                 } else if constexpr (std::same_as<T, StreamToolUseEnd>) {
-                    if (!asst.tool_calls.empty() && !cur_tool_json.empty()) {
+                    ToolUse* tc = find_tool(e.id);
+                    auto json_it = tool_json.find(e.id.value);
+                    const std::string partial = json_it == tool_json.end()
+                                              ? std::string{} : json_it->second;
+                    if (tc && !partial.empty()) {
                         try {
-                            asst.tool_calls.back().args = json::parse(cur_tool_json);
+                            tc->args = json::parse(partial);
                         } catch (...) {
                             // Truncated/unbalanced args JSON (stream cut, weak
                             // model). Salvage by synthesising the missing
                             // closers — but NEVER when the cut landed inside a
                             // string VALUE: the repaired JSON would parse fine
                             // and silently run a tool with a half-written body.
-                            if (!util::ended_inside_string(cur_tool_json)) {
+                            if (!util::ended_inside_string(partial)) {
                                 try {
-                                    asst.tool_calls.back().args = json::parse(
-                                        util::close_partial_json(cur_tool_json));
+                                    tc->args = json::parse(
+                                        util::close_partial_json(partial));
                                     ::agentty::util::dbglog("subagent.tool_args.repaired",
-                                                 cur_tool_json);
+                                                 partial);
                                 } catch (...) {
                                     ::agentty::util::dbglog("subagent.tool_args.parse",
-                                                 cur_tool_json);
+                                                 partial);
                                 }
                             } else {
                                 ::agentty::util::dbglog("subagent.tool_args.mid_string",
-                                             cur_tool_json);
+                                             partial);
                             }
                         }
                     }
-                    cur_tool_json.clear();
-                    if (!asst.tool_calls.empty()) {
-                        log += "\n  \xe2\x9a\x99 ";
-                        log += summarize_call(asst.tool_calls.back());
+                    tool_json.erase(e.id.value);
+                    if (tc) {
+                        log += "\n  ⚙ ";
+                        log += summarize_call(*tc);
                         pump(/*force=*/true);
                     }
                 } else if constexpr (std::same_as<T, StreamFinished>) {
                     stop = e.stop_reason;
                 } else if constexpr (std::same_as<T, StreamError>) {
-                    err_out = e.message;
+                    // StreamResult is authoritative. The event remains useful
+                    // for legacy/scripted seams that cannot stamp a result.
                 }
             }, *sm);
         };
@@ -502,23 +518,42 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
     // Route through the SAME provider dispatch the parent uses (installed
     // at startup); fall back to the Anthropic transport when no seam is
     // wired (tests that install only auth+model).
+    provider::StreamResult result;
+    auto cancel = req.cancel;
+    auto parent_cancel = cancellation::current();
+    std::jthread cancel_bridge;
+    if (parent_cancel) {
+        cancel_bridge = std::jthread([parent_cancel, cancel](std::stop_token st) {
+            while (!st.stop_requested() && !cancel->is_cancelled()) {
+                if (parent_cancel()) { cancel->cancel(); return; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
+    }
+    if (cancellation::requested()) cancel->cancel();
     if (cfg.stream) {
-        cfg.stream(std::move(req), sink);
+        result = cfg.stream(std::move(req), sink);
     } else {
         provider::anthropic::AnthropicProvider p;
-        p.stream(std::move(req), sink);
+        result = p.stream(std::move(req), sink);
     }
+    cancel_bridge.request_stop();
     pump(/*force=*/true);   // flush the throttled tail
 
-    // A transport can terminate without emitting StreamError (proxy closed the
-    // body, malformed SSE, native provider returned no usable events). Treat an
-    // entirely empty completion as retryable instead of accepting it as a
-    // successful one-turn subagent with no report.
-    if (err_out.empty() && asst.text.empty() && asst.tool_calls.empty())
-        err_out = "provider returned an empty completion";
+    // An empty successful close is a transient transport failure. A max-token
+    // turn is also incomplete: partial prose/tool JSON is not a final report.
+    if (result.ok() && asst.text.empty() && asst.tool_calls.empty())
+        result = provider::StreamResult::failed(
+            "provider returned an empty completion");
+    if (result.ok() && (result.stop == StopReason::MaxTokens
+                        || stop == StopReason::MaxTokens)) {
+        result = provider::StreamResult::failed(
+            "provider hit the max-token limit before completing the subagent turn");
+        result.stop = StopReason::MaxTokens;
+    }
 
     thread.messages.push_back(std::move(asst));
-    return stop;
+    return result;
 }
 
 class AgenttySubagentRunner final : public mt::SubagentRunner {
@@ -613,37 +648,55 @@ public:
                 wrapup_nudged = true;
             }
 
-            std::string err;
-            StopReason stop = run_one_completion(thread, cfg, type, log, err);
-            (void)stop;   // loop advance is decided by ran_a_tool below
+            provider::StreamResult stream_result =
+                run_one_completion(thread, cfg, type, log);
 
-            if (!err.empty()) {
+            if (!stream_result.ok()) {
+                const std::string err = stream_result.error.value_or("stream failed");
                 last_error = err;
-                ++stream_failures;
-                // run_one_completion pushed a (possibly partial) assistant
-                // message for the failed completion. Drop it unconditionally:
-                // a partial turn carrying tool_use blocks with no tool_results
-                // would 400 the retry request (wire pairing), and partial text
-                // would duplicate once the retry streams the full reply.
+                const auto error_class = stream_result.cancelled()
+                    ? provider::ErrorClass::Cancelled
+                    : provider::classify_stream_error(err,
+                                                       stream_result.http_status);
+                const bool empty_completion =
+                    err == "provider returned an empty completion";
+                const bool retryable = empty_completion
+                    || error_class == provider::ErrorClass::Transient
+                    || error_class == provider::ErrorClass::RateLimit;
+                // A partial assistant message can contain unpaired tool calls
+                // and must never be replayed on retry or reported as complete.
                 if (!thread.messages.empty()
                     && thread.messages.back().role == Role::Assistant)
                     thread.messages.pop_back();
+                if (!retryable || error_class == provider::ErrorClass::Cancelled
+                    || cancellation::requested()) {
+                    is_error = true;
+                    if (error_class == provider::ErrorClass::Cancelled
+                        || cancellation::requested())
+                        last_error = "subagent cancelled: " + err;
+                    break;
+                }
+                ++stream_failures;
                 if (stream_failures > kMaxStreamRetries) {
-                    log += "\n  \xe2\x9a\xa0 stream failed "
-                         + std::to_string(stream_failures) + "\xc3\x97 \xe2\x80\x94 giving up: "
+                    log += "\n  ⚠ stream failed "
+                         + std::to_string(stream_failures) + "× — giving up: "
                          + err;
                     progress::emit(log);
                     break;
                 }
-                const int wait_s = 1 << (stream_failures - 1);   // 1,2,4s
-                log += "\n  \xe2\x86\xbb retry " + std::to_string(stream_failures)
+                // Honor server guidance, but cap it so a hostile/mistaken
+                // Retry-After cannot pin a task worker indefinitely.
+                constexpr auto kMaxRetryAfter = std::chrono::seconds{30};
+                auto wait = stream_result.retry_after
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::min(*stream_result.retry_after, kMaxRetryAfter))
+                    : provider::backoff_with_jitter(error_class,
+                                                    stream_failures - 1);
+                log += "\n  ↻ retry " + std::to_string(stream_failures)
                      + "/" + std::to_string(kMaxStreamRetries)
-                     + " in " + std::to_string(wait_s) + "s (" + err + ")";
+                     + " in " + std::to_string(wait.count()) + "ms (" + err + ")";
                 progress::emit(log);
-                // Keep retry backoff responsive to Ctrl-C / turn cancellation
-                // instead of blocking the tool worker in one long sleep.
-                const auto retry_until = std::chrono::steady_clock::now()
-                                       + std::chrono::seconds(wait_s);
+                const auto retry_until = std::chrono::steady_clock::now() + wait;
                 while (std::chrono::steady_clock::now() < retry_until) {
                     if (cancellation::requested()) {
                         is_error = true;
@@ -651,7 +704,7 @@ public:
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
-                --turns;   // a retried completion doesn't consume budget
+                --turns;
                 continue;
             }
             stream_failures = 0;
@@ -662,6 +715,12 @@ public:
             if (!asst.tool_calls.empty()) {
                 const auto now = std::chrono::steady_clock::now();
                 for (auto& tc : asst.tool_calls) {
+                    if (cancellation::requested()) {
+                        is_error = true;
+                        last_error = "subagent cancelled before local tool execution";
+                        doomed = true;
+                        break;
+                    }
                     if (tc.args.is_null()) {
                         tc.status = ToolUse::Failed{now, now,
                             "tool args failed to parse \xe2\x80\x94 re-emit the call "
