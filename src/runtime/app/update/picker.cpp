@@ -446,8 +446,15 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // commits the switch to codex-cli on success.
             if ((spec == "chatgpt" || spec == "codex-cli")
                 && !provider::chatgpt::responses_available()) {
-                m.ui.login = ui::login::ChatGptWaiting{};
-                return {std::move(m), cmd::codex_login_async()};
+                const auto attempt_id = cmd::next_codex_login_attempt_id();
+                auto cancel = std::make_shared<std::atomic_bool>(false);
+                m.ui.login = ui::login::ChatGptWaiting{
+                    .attempt_id = attempt_id,
+                    .cancel = cancel,
+                    .device_auth = provider::chatgpt::codex_device_auth_preferred(),
+                };
+                return {std::move(m),
+                        cmd::codex_login_async(attempt_id, std::move(cancel))};
             }
 
             // Every entry point funnels the actual switch through the ONE

@@ -20,6 +20,9 @@
 //                    to that endpoint directly.
 //   Failed         — error toast; press any key to return to Picking.
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
@@ -46,13 +49,16 @@ struct OAuthCode {
 
 struct OAuthExchanging {};
 
-// Native ChatGPT (Codex) login is in flight. The browser is open and the
-// loopback callback server (port 1455) is waiting for the redirect; this
-// state shows a "waiting for the browser…" panel. No user input is needed
-// — codex_login() drives the whole handshake and lands CodexLoginDone. Esc
-// aborts (the task is best-effort abandoned; the timeout bounds it).
+// Native ChatGPT (Codex) login is in flight. Local sessions wait for the
+// port-1455 browser callback. SSH sessions use device authorization and this
+// same state is updated with the URL + one-time code as soon as OpenAI issues
+// them. Esc closes the modal; the bounded worker eventually exits.
 struct ChatGptWaiting {
-    std::string authorize_url;   // shown as a copy/open-again fallback
+    std::uint64_t                      attempt_id = 0;
+    std::shared_ptr<std::atomic_bool> cancel;
+    bool                               device_auth = false;
+    std::string                        authorize_url;
+    std::string                        user_code;
 };
 
 struct ApiKeyInput {
