@@ -79,7 +79,12 @@ Registry read_registry() {
             if (!acc.provider.empty() && !acc.label.empty())
                 reg.all.push_back(std::move(acc));
         }
-        for (const auto& [prov, lbl] : j.value("active", json::object()).items())
+        // Do not call .items() on j.value(...) directly: value() returns a
+        // temporary JSON object, while items() is a proxy holding a reference
+        // to that object. GCC 14 Release exposed the resulting dangling view
+        // by dropping the entire registry on the next read.
+        const json active = j.value("active", json::object());
+        for (const auto& [prov, lbl] : active.items())
             reg.set_active(prov, lbl.get<std::string>());
     } catch (...) {
         return Registry{};
