@@ -13,6 +13,7 @@
 #include <maya/widget/agent_timeline.hpp>
 #include <maya/widget/markdown.hpp>
 #include <maya/core/render_context.hpp> // available_height (resize-shrink detect)
+#include <maya/core/anim_clock.hpp>     // maya::anim_now_ms (deterministic under a test clock)
 #include <maya/render/cache_id.hpp>
 #include <maya/render/renderer.hpp> // build_layout_tree / layout::compute
 #include <maya/layout/yoga.hpp>     // maya::layout::compute / LayoutNode
@@ -447,14 +448,14 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // extended-thinking pause with no deltas). Used by the RAF gate just
     // below.
     {
-        const auto now2 = std::chrono::steady_clock::now();
+        const std::int64_t now2 = ::maya::anim_now_ms();
         if (source.size() > cache.last_grow_size) {
             cache.last_grow_size = source.size();
-            cache.last_grow_tick = now2;
+            cache.last_grow_tick_ms = now2;
         } else if (source.size() < cache.last_grow_size) {
             // Source rolled / shrank (set_content rollback, message reset).
             cache.last_grow_size = source.size();
-            cache.last_grow_tick = now2;
+            cache.last_grow_tick_ms = now2;
         }
     }
 
@@ -493,12 +494,11 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
     // (it only EXTENDS arming, never cuts it short while is_streaming()).
     const bool wire_streaming_here = !settled && m.s.is_streaming();
     constexpr std::int64_t kRevealActiveMs = 3000;
-    const auto now3 = std::chrono::steady_clock::now();
+    const std::int64_t now3 = ::maya::anim_now_ms();
     const std::int64_t since_grow_ms =
-        cache.last_grow_tick.time_since_epoch().count() == 0
+        cache.last_grow_tick_ms == 0
             ? kRevealActiveMs + 1
-            : std::chrono::duration_cast<std::chrono::milliseconds>(
-                  now3 - cache.last_grow_tick).count();
+            : now3 - cache.last_grow_tick_ms;
     const bool stream_in_motion =
         wire_streaming_here
         || (!settled && since_grow_ms <= kRevealActiveMs);
@@ -580,7 +580,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         const bool text_gone_quiet =
             !settled && !has_cards && cache.streaming->is_live()
             && cache.streaming->reveal_in_progress()
-            && cache.last_grow_tick.time_since_epoch().count() != 0
+            && cache.last_grow_tick_ms != 0
             && since_grow_ms >= kTextQuietMs;
         if (text_gone_quiet || msg.text_block_closed)
             cache.streaming->request_finalize(/*ramp_ms=*/160);
@@ -675,12 +675,11 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // reads as "typewriter finished, then the result landed".
         if (has_cards && !settled && cache.streaming->is_live()) {
             constexpr std::int64_t kMaxCardDeferMs = 1500;
-            const auto defer_now = std::chrono::steady_clock::now();
+            const std::int64_t defer_now = ::maya::anim_now_ms();
             const std::int64_t deferred_ms =
-                cache.card_defer_since.time_since_epoch().count() == 0
+                cache.card_defer_since_ms == 0
                     ? 0
-                    : std::chrono::duration_cast<std::chrono::milliseconds>(
-                          defer_now - cache.card_defer_since).count();
+                    : defer_now - cache.card_defer_since_ms;
             const bool is_tail_bottom =
                 !m.d.current.messages.empty()
                 && &msg == &m.d.current.messages.back();
@@ -704,8 +703,8 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 && !m.d.pending_permission
                 && deferred_ms < kMaxCardDeferMs;
             if (can_defer) {
-                if (cache.card_defer_since.time_since_epoch().count() == 0)
-                    cache.card_defer_since = defer_now;
+                if (cache.card_defer_since_ms == 0)
+                    cache.card_defer_since_ms = defer_now;
                 cache.defer_tool_panel = true;
                 // Glide to the edge now — covers transports that never
                 // emit StreamTextBlockClosed (the drain above may not
@@ -724,7 +723,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 cache.streaming->snap_reveal_to_edge();
                 cache.streaming->set_reveal_fx(false);
                 cache.streaming->finish();
-                cache.card_defer_since = {};
+                cache.card_defer_since_ms = 0;
                 if (was_deferring) {
                     cache.defer_exit_finished = true;   // unhide next frame
                     ::maya::request_animation_frame();
@@ -751,14 +750,14 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 // panel now appears as a pure bottom-append grow.
                 cache.defer_tool_panel   = false;
                 cache.defer_exit_finished = false;
-                cache.card_defer_since   = {};
+                cache.card_defer_since_ms = 0;
             }
         } else {
             // No cards / settled / widget already finished — make sure a
             // stale defer can never hide a panel on a later frame.
             cache.defer_tool_panel    = false;
             cache.defer_exit_finished = false;
-            cache.card_defer_since    = {};
+            cache.card_defer_since_ms = 0;
         }
     }
 
@@ -1735,7 +1734,7 @@ maya::Turn::Config turn_config_for_assistant_run(
         // so nullptr → keyable-so-far.
         const auto* mc = m.ui.view_cache.peek(m.d.current.id, mj.id);
         if (mc && (mc->defer_tool_panel || mc->defer_exit_finished
-                || mc->card_defer_since.time_since_epoch().count() != 0))
+                || mc->card_defer_since_ms != 0))
             return false;
         // Reveal widget still animating (live / finalize ramp / cursor
         // gliding backlog / async parse) → same freeze hazard as live

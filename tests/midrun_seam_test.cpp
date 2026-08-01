@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include <maya/render/canvas.hpp>
+#include <maya/core/anim_clock.hpp>   // maya::testing::freeze_anim_clock
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/widget/app_layout.hpp>
@@ -1475,6 +1476,14 @@ static void test_running_tool_then_followup_user_turn() {
 
 int main() {
     std::printf("midrun_seam_test\n");
+    // Pin the animation clock: this test drives frames synchronously and
+    // asserts the committed-scrollback prefix never mutates. The render
+    // path's reveal/finalize timing reads maya::anim_now_ms(); without a
+    // freeze, real wall-clock between synchronous render_rows() calls would
+    // cross the quiet/finalize thresholds at a scheduler-dependent step and
+    // the "immutable" prefix would shift under load. Frozen -> render is a
+    // pure function of the model.
+    maya::testing::freeze_anim_clock();
     test_incremental_freeze_prefix_stable();
     test_prefix_hoist_all_cards_present();
     test_running_tool_then_followup_user_turn();

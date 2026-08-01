@@ -99,14 +99,21 @@ struct MessageMdCache {
     // has been fed before treating it as final.
     std::size_t                               revealed_size = 0;
 
-    // Wall-clock of the last frame at which `source` grew (new bytes
-    // arrived from the wire). Drives the "stream in motion" grace window
-    // that keeps the 16 ms animation frame armed while bytes are flowing
-    // so reveal_fx animates smoothly. Once the wire goes quiet for longer
-    // than the window (a model stall) RAF lapses and the loop falls back
-    // to the calmer Tick cadence; the next delta's eventfd wake revives
-    // it. Reset to zero on source shrink / roll.
-    std::chrono::steady_clock::time_point     last_grow_tick{};
+    // Animation-clock timestamp (ms, maya::anim_now_ms) of the last frame
+    // at which `source` grew (new bytes arrived from the wire). Drives the
+    // "stream in motion" grace window that keeps the 16 ms animation frame
+    // armed while bytes are flowing so reveal_fx animates smoothly. Once the
+    // wire goes quiet for longer than the window (a model stall) RAF lapses
+    // and the loop falls back to the calmer Tick cadence; the next delta's
+    // eventfd wake revives it. Reset to zero on source shrink / roll.
+    //
+    // On the ANIMATION clock (not raw steady_clock) so it advances in
+    // lockstep with the reveal widget it gates and stays deterministic
+    // under maya::testing::advance_anim_clock_ms — otherwise a
+    // synchronous, byte-identical render sequence could take a different
+    // finalize/defer path run-to-run purely from wall-clock jitter
+    // (the flaky midrun_seam_test committed-prefix divergence). 0 = unset.
+    std::int64_t                              last_grow_tick_ms = 0;
     std::size_t                               last_grow_size = 0;
 
     // Scratch buffer for multi-sub-turn rendering. When a single
@@ -166,8 +173,9 @@ struct MessageMdCache {
     bool defer_tool_panel = false;
     // First frame the defer engaged — drives the kMaxCardDeferMs hard cap
     // in cached_markdown_for so the card can never hide indefinitely.
-    // Zero-initialised = "not deferring".
-    std::chrono::steady_clock::time_point card_defer_since{};
+    // Animation-clock ms (maya::anim_now_ms) for determinism under a test
+    // clock, same rationale as last_grow_tick_ms. Zero = "not deferring".
+    std::int64_t card_defer_since_ms = 0;
     // Two-phase defer exit. When the glide completes, the exit frame runs
     // finish() + fx-off — which MUTATES rows at the viewport bottom (the
     // scramble tail un-ghosts, the trailing paragraph rewraps into the

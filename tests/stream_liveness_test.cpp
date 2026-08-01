@@ -164,8 +164,8 @@ static void test_caret_armed_across_delta_gap() {
     maya::testing::advance_anim_clock_ms(400);
     m.ui.view_cache
         .message_md_live(m.d.current.id, m.d.current.messages.back().id)
-        .last_grow_tick =
-        std::chrono::steady_clock::now() - std::chrono::seconds{10};
+        .last_grow_tick_ms =
+        maya::anim_now_ms() - 10000;   // simulate a 10 s inter-delta gap
 
     // Six back-to-back frames inside the gap — EVERY one must re-arm.
     // A timeout-only gate leaves same-phase-bucket frames unarmed and
@@ -382,8 +382,8 @@ static void test_caret_armed_when_live_but_phase_not_streaming() {
     m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
     m.ui.view_cache
         .message_md_live(m.d.current.id, m.d.current.messages.back().id)
-        .last_grow_tick =
-        std::chrono::steady_clock::now() - std::chrono::seconds{10};
+        .last_grow_tick_ms =
+        maya::anim_now_ms() - 10000;   // simulate a 10 s inter-delta gap
 
     // Advance the anim clock past maya's own recency window so its
     // quiescent regime only self-arms once per phase bucket —
@@ -530,8 +530,8 @@ static void test_deep_run_live_edge_stays_armed() {
         m.d.current.messages.back().streaming_text += ".";
         auto& edge_cache = m.ui.view_cache.message_md(
             m.d.current.id, m.d.current.messages.back().id);
-        edge_cache.last_grow_tick =
-            std::chrono::steady_clock::now() - std::chrono::seconds{10};
+        edge_cache.last_grow_tick_ms =
+            maya::anim_now_ms() - 10000;   // simulate a 10 s inter-delta gap
         CHECK(frame_requests_animation(m, 100, 4000),
               "deep-run live edge STILL armed (40 settled sub-turns above, "
               "phase=ExecutingTool, recency expired) — the streaming edge "
