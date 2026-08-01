@@ -1327,26 +1327,49 @@ Cmd<Msg> load_thread_async(ThreadId id) {
         });
 }
 
-Cmd<Msg> codex_login_async() {
-    // task_isolated: codex_login() BLOCKS for up to its timeout on the
-    // loopback callback server (accept() on port 1455 waiting for the
-    // browser redirect) and opens the browser via posix_spawn/ShellExecute
-    // — both must be off the shared worker pool so a slow sign-in can't
-    // starve stream/tool tasks. It runs the whole handshake (build URL →
-    // open browser → wait → exchange → mint api key → persist) and returns
-    // the credential or a typed OAuthError; the reducer takes it from there.
-    return Cmd<Msg>::task_isolated([](std::function<void(Msg)> dispatch) {
+std::uint64_t next_codex_login_attempt_id() noexcept {
+    static std::atomic_uint64_t next{0};
+    return next.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+Cmd<Msg> codex_login_async(std::uint64_t attempt_id,
+                           std::shared_ptr<std::atomic_bool> cancel) {
+    // Isolated because either OAuth mode blocks while the user signs in. Every
+    // message carries attempt_id so a late worker cannot complete a newer
+    // login, and Esc trips cancel for cooperative polling shutdown.
+    return Cmd<Msg>::task_isolated(
+        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
+        const auto cancelled = [cancel] {
+            return cancel && cancel->load(std::memory_order_acquire);
+        };
         try {
-            auto r = provider::chatgpt::codex_login();
-            dispatch(CodexLoginDone{std::move(r)});
+            auto r = provider::chatgpt::codex_login(
+                900, [attempt_id, &dispatch](
+                         const provider::chatgpt::CodexDeviceCode& code) {
+                    dispatch(CodexDeviceCodeReady{
+                        .attempt_id = attempt_id,
+                        .verification_url = code.verification_url,
+                        .user_code = code.user_code,
+                    });
+                }, cancelled);
+            dispatch(CodexLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::move(r),
+            });
         } catch (const std::exception& e) {
-            dispatch(CodexLoginDone{std::unexpected(auth::OAuthError{
-                auth::OAuthErrorKind::Network,
-                std::string{"ChatGPT login threw: "} + e.what()})});
+            dispatch(CodexLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network,
+                    std::string{"ChatGPT login threw: "} + e.what()}),
+            });
         } catch (...) {
-            dispatch(CodexLoginDone{std::unexpected(auth::OAuthError{
-                auth::OAuthErrorKind::Network,
-                "ChatGPT login threw: unknown exception"})});
+            dispatch(CodexLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network,
+                    "ChatGPT login threw: unknown exception"}),
+            });
         }
     });
 }

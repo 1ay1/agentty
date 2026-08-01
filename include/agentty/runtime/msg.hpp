@@ -513,14 +513,20 @@ struct LoginOpenBrowserAgain {};
 // `auth::TokenResult` so the reducer can distinguish ApiError /
 // Network / MissingToken without parsing strings.
 struct LoginExchanged   { agentty::auth::TokenResult result; };
-// Result of the native ChatGPT (Codex) OAuth login. Unlike the Anthropic
-// paste-the-code flow, the Codex flow runs a loopback callback server on
-// port 1455: agentty opens the browser, the redirect comes straight back to
-// the local server, and codex_login() returns the fully-minted credential
-// (or a typed OAuthError). This lands when that blocking task completes; the
-// reducer installs the codex creds, live-switches the provider to chatgpt,
-// and closes the modal — or transitions to Failed.
+// The SSH/device flow dispatches this as soon as OpenAI allocates the
+// one-time code, while the same worker continues polling for approval.
+struct CodexDeviceCodeReady {
+    std::uint64_t attempt_id = 0;
+    std::string verification_url;
+    std::string user_code;
+};
+
+// Final result of the native ChatGPT OAuth login. The flow is either the
+// local loopback callback or SSH-friendly device authorization; both return
+// the same credential shape. The reducer persists it only after matching the
+// active attempt id.
 struct CodexLoginDone {
+    std::uint64_t attempt_id = 0;
     std::expected<agentty::provider::chatgpt::CodexCredentials,
                   agentty::auth::OAuthError> result;
 };
@@ -707,7 +713,7 @@ using LoginMsg = std::variant<
     LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginOpenBrowserAgain,
-    LoginExchanged, CodexLoginDone, TokenRefreshed>;
+    LoginExchanged, CodexDeviceCodeReady, CodexLoginDone, TokenRefreshed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove,

@@ -896,16 +896,33 @@ int cmd_login() {
     std::getline(std::cin, choice);
     for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
 
-    // ChatGPT (Codex) OAuth — native loopback flow, mirrors the Claude path
-    // but talks to auth.openai.com and stores under codex_credentials.json.
+    // ChatGPT OAuth. SSH sessions automatically use OpenAI's device-code
+    // flow; local sessions keep the browser + loopback callback.
     if (choice == "3" || choice == "chatgpt" || choice == "codex"
         || choice == "openai") {
-        std::cout << "\nOpening browser to sign in to ChatGPT…\n"
-                  << "(a local page on http://localhost:1455 will confirm)\n\n"
-                  << std::flush;
-        auto r = provider::chatgpt::codex_login();
+        const bool device_auth = provider::chatgpt::codex_device_auth_preferred();
+        if (device_auth) {
+            std::cout << "\nRequesting a ChatGPT device code for this SSH session…\n"
+                      << std::flush;
+        } else {
+            std::cout << "\nOpening browser to sign in to ChatGPT…\n"
+                      << "(a local page on http://localhost:1455 will confirm)\n\n"
+                      << std::flush;
+        }
+        auto r = provider::chatgpt::codex_login(
+            900, [](const provider::chatgpt::CodexDeviceCode& code) {
+                std::cout << "\nOpen this link in a browser on any device:\n  "
+                          << code.verification_url
+                          << "\n\nEnter this one-time code (expires in 15 minutes):\n  "
+                          << code.user_code
+                          << "\n\nWaiting for approval…\n" << std::flush;
+            });
         if (!r) {
             std::cerr << "ChatGPT sign-in failed: " << r.error().render() << "\n";
+            return 1;
+        }
+        if (!provider::chatgpt::save_codex_credentials(*r)) {
+            std::cerr << "ChatGPT sign-in succeeded but credentials could not be saved.\n";
             return 1;
         }
         std::cout << "\n\xE2\x9C\x93 Signed in to ChatGPT. Saved to "

@@ -6,6 +6,9 @@
 
 #include <maya/maya.hpp>
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -131,11 +134,15 @@ struct LoopBreak {
 // gated on the network round trip.
 [[nodiscard]] maya::Cmd<Msg> refresh_oauth(std::string refresh_token);
 
-// Kick the native ChatGPT (Codex) OAuth login off the UI thread. Runs the
-// full loopback-callback handshake (open browser → wait on port 1455 →
-// exchange → mint api key → persist) and dispatches CodexLoginDone with the
-// minted credential or a typed OAuthError.
-[[nodiscard]] maya::Cmd<Msg> codex_login_async();
+// Allocate a process-unique identity for a ChatGPT login attempt. Async
+// progress/completion must carry it so an abandoned attempt cannot mutate a
+// newer login modal.
+[[nodiscard]] std::uint64_t next_codex_login_attempt_id() noexcept;
+
+// Kick native ChatGPT OAuth off the UI thread. The attempt id correlates all
+// async messages; `cancel` is tripped when Esc closes that exact modal.
+[[nodiscard]] maya::Cmd<Msg> codex_login_async(
+    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
 
 // Walk ~/.agentty/threads/ and parse every thread JSON off the UI thread.
 // Dispatches `ThreadsLoaded{vec}` on completion. The directory walk +

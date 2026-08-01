@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -48,13 +49,33 @@ bool clear_codex_credentials();
                                               const auth::OAuthState&   state);
 
 // ── Interactive login ──────────────────────────────────────────────────────
-// Runs the full flow: spins up the loopback server on port 1455, opens the
-// browser, waits for the callback, exchanges the code, mints the API key, and
-// persists the result. Blocking (bounded by `timeout_s`); intended for
-// `cmd_login` and a Cmd::task off the reducer. Returns the stored credential
-// or a typed OAuthError.
+// SSH sessions automatically use OpenAI's device-code flow: agentty displays
+// a URL + one-time code and polls until the browser on any machine approves
+// it. Local sessions retain the loopback callback flow on port 1455.
+struct CodexDeviceCode {
+    std::string verification_url;
+    std::string user_code;
+};
+
+using CodexDeviceCodeSink = std::function<void(const CodexDeviceCode&)>;
+using CodexCancelProbe = std::function<bool()>;
+
+// True when the environment requests device auth explicitly or identifies an
+// SSH session. AGENTTY_CHATGPT_DEVICE_AUTH=0/1 is an override for unusual
+// terminals and test harnesses.
+[[nodiscard]] bool codex_device_auth_preferred() noexcept;
+
+// Runs the appropriate full flow and returns credentials without persisting
+// them. The caller must save only after it confirms the attempt is still
+// active. `on_device_code` fires once before polling begins.
 [[nodiscard]] std::expected<CodexCredentials, auth::OAuthError>
-codex_login(int timeout_s = 300);
+codex_login(int timeout_s = 900, CodexDeviceCodeSink on_device_code = {},
+            CodexCancelProbe cancelled = {});
+
+// Explicit device flow with the same side-effect-free completion contract.
+[[nodiscard]] std::expected<CodexCredentials, auth::OAuthError>
+codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s = 900,
+                   CodexCancelProbe cancelled = {});
 
 // ── Exchange / refresh / mint (exposed for the reducer + tests) ────────────
 // Exchange an authorization code (from the callback) for tokens.

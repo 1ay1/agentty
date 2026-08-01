@@ -73,6 +73,10 @@ Step open_login(Model m) {
 }
 
 Step close_login(Model m) {
+    if (auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
+        waiting && waiting->cancel) {
+        waiting->cancel->store(true, std::memory_order_release);
+    }
     m.ui.login = login::Closed{};
     return done(std::move(m));
 }
@@ -187,8 +191,14 @@ Step account_select(Model m) {
     if (al->cursor >= add_row) {
         const std::string provider = al->provider;
         if (provider == "chatgpt") {
-            m.ui.login = login::ChatGptWaiting{};
-            return {std::move(m), cmd::codex_login_async()};
+            const auto attempt_id = cmd::next_codex_login_attempt_id();
+            auto cancel = std::make_shared<std::atomic_bool>(false);
+            m.ui.login = login::ChatGptWaiting{
+                .attempt_id = attempt_id,
+                .cancel = cancel,
+                .device_auth = provider::chatgpt::codex_device_auth_preferred(),
+            };
+            return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
         }
         m.ui.login = login::Picking{.provider = provider};
         return done(std::move(m));
@@ -325,14 +335,17 @@ Step login_pick_method(Model m, char32_t key) {
         return done(std::move(m));
     }
     if (key == U'3' && !anthropic_only) {
-        // Native ChatGPT (Codex) login — the loopback-callback flow. Open
-        // the browser and run the whole handshake off-thread; the modal
-        // sits in ChatGptWaiting until CodexLoginDone lands. No PKCE/state
-        // wiring here: codex_login() owns the full flow (mints its own
-        // verifier, runs the port-1455 server, exchanges, mints the api
-        // key, persists) so this reducer stays a thin launcher.
-        m.ui.login = login::ChatGptWaiting{};
-        return {std::move(m), cmd::codex_login_async()};
+        // Native ChatGPT OAuth. Local terminals use the browser + loopback
+        // callback; SSH terminals automatically use OpenAI device auth and
+        // receive a one-time code through CodexDeviceCodeReady.
+        const auto attempt_id = cmd::next_codex_login_attempt_id();
+        auto cancel = std::make_shared<std::atomic_bool>(false);
+        m.ui.login = login::ChatGptWaiting{
+            .attempt_id = attempt_id,
+            .cancel = cancel,
+            .device_auth = provider::chatgpt::codex_device_auth_preferred(),
+        };
+        return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
     }
     return done(std::move(m));
 }
@@ -569,24 +582,39 @@ Step login_exchanged(Model m, auth::TokenResult result) {
     return done(std::move(m));
 }
 
+Step login_codex_device_code_ready(Model m, std::uint64_t attempt_id,
+                                   std::string verification_url,
+                                   std::string user_code) {
+    auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
+    if (!waiting || waiting->attempt_id != attempt_id)
+        return done(std::move(m));
+    waiting->device_auth = true;
+    waiting->authorize_url = std::move(verification_url);
+    waiting->user_code = std::move(user_code);
+    return done(std::move(m));
+}
+
 Step login_codex_done(
-    Model m,
+    Model m, std::uint64_t attempt_id,
     std::expected<provider::chatgpt::CodexCredentials, auth::OAuthError> result)
 {
-    // Only act while the ChatGPT flow is actually in flight — a stray late
-    // arrival after the user Esc'd out (modal closed / moved on) is dropped.
-    if (!std::holds_alternative<login::ChatGptWaiting>(m.ui.login))
+    auto* waiting = std::get_if<login::ChatGptWaiting>(&m.ui.login);
+    if (!waiting || waiting->attempt_id != attempt_id)
         return done(std::move(m));
+    if (waiting->cancel)
+        waiting->cancel->store(true, std::memory_order_release);
     if (!result) {
         m.ui.login = login::Failed{result.error().render()};
         return done(std::move(m));
     }
-    // codex_login() already persisted the credential to its own encrypted
-    // store; the ChatGPT provider reads that store directly, so no auth header
-    // needs installing here. Just live-switch the active backend to the
-    // "chatgpt" provider (through the ONE shared switch path: provider::select
-    // + per-provider model recall + settings persist + model refetch) and
-    // close the modal.
+    if (!provider::chatgpt::save_codex_credentials(*result)) {
+        m.ui.login = login::Failed{
+            "signed in, but encrypted credentials could not be saved"};
+        return done(std::move(m));
+    }
+    // Persistence happens only after the attempt identity check above. An
+    // abandoned or superseded worker can therefore neither switch provider
+    // nor overwrite the active credential store.
     m.ui.login = login::Closed{};
     m.s.status = "signed in to ChatGPT";
     m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
@@ -729,7 +757,14 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](LoginCopyAuthUrl)       -> Step { return login_copy_auth_url(std::move(m)); },
         [&](LoginOpenBrowserAgain)  -> Step { return login_open_browser_again(std::move(m)); },
         [&](LoginExchanged& e)      -> Step { return login_exchanged(std::move(m), std::move(e.result)); },
-        [&](CodexLoginDone& e)      -> Step { return login_codex_done(std::move(m), std::move(e.result)); },
+        [&](CodexDeviceCodeReady& e) -> Step {
+            return login_codex_device_code_ready(std::move(m), e.attempt_id,
+                std::move(e.verification_url), std::move(e.user_code));
+        },
+        [&](CodexLoginDone& e)      -> Step {
+            return login_codex_done(std::move(m), e.attempt_id,
+                                    std::move(e.result));
+        },
         [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
     }, lm);
 }

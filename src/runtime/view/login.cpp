@@ -262,21 +262,49 @@ Element panel_oauth_exchanging() {
 
 Element panel_chatgpt_waiting(const login::ChatGptWaiting& s) {
     std::vector<Element> rows;
-    rows.push_back(text("Waiting for ChatGPT\xE2\x80\xA6", fg_bold(fg)));   // …
-    rows.push_back(text(""));
-    rows.push_back(body_text(
-        "A browser tab has opened at chatgpt.com \xE2\x80\x94 authorize agentty "
-        "there. The sign-in completes automatically over a local callback "
-        "(http://localhost:1455); you don't need to paste anything.",
-        fg_dim(muted)));
-    rows.push_back(text(""));
-    if (!s.authorize_url.empty()) {
+    if (s.device_auth) {
+        rows.push_back(text(s.user_code.empty()
+                                ? "Requesting ChatGPT device code\xE2\x80\xA6"
+                                : "Sign in to ChatGPT",
+                            fg_bold(fg)));
+        rows.push_back(text(""));
+        if (s.user_code.empty()) {
+            rows.push_back(body_text(
+                "This SSH session uses device authorization. Waiting for "
+                "OpenAI to issue a one-time code\xE2\x80\xA6",
+                fg_dim(muted)));
+        } else {
+            rows.push_back(body_text(
+                "Open this link in a browser on any device:", fg_dim(muted)));
+            rows.push_back(text(""));
+            rows.push_back(url_panel(s.authorize_url));
+            rows.push_back(text(""));
+            rows.push_back(body_text("Then enter this one-time code:",
+                                     fg_dim(muted)));
+            rows.push_back(text(s.user_code, fg_bold(fg)));
+            rows.push_back(text(""));
+            rows.push_back(body_text(
+                "The code expires in 15 minutes. Continue only because you "
+                "started this login in agentty.", fg_dim(muted)));
+        }
+    } else {
+        rows.push_back(text("Waiting for ChatGPT\xE2\x80\xA6", fg_bold(fg)));
+        rows.push_back(text(""));
         rows.push_back(body_text(
-            "Browser didn't open? Visit this URL manually:", fg_dim(muted)));
+            "A browser tab has opened at chatgpt.com \xE2\x80\x94 authorize agentty "
+            "there. The sign-in completes automatically over a local callback "
+            "(http://localhost:1455); you don't need to paste anything.",
+            fg_dim(muted)));
         rows.push_back(text(""));
-        rows.push_back(url_panel(s.authorize_url));
-        rows.push_back(text(""));
+        if (!s.authorize_url.empty()) {
+            rows.push_back(body_text(
+                "Browser didn't open? Visit this URL manually:", fg_dim(muted)));
+            rows.push_back(text(""));
+            rows.push_back(url_panel(s.authorize_url));
+            rows.push_back(text(""));
+        }
     }
+    rows.push_back(text(""));
     rows.push_back(key_hints({{"Esc", "cancel"}}));
     return v(std::move(rows)).build();
 }
