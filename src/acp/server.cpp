@@ -62,12 +62,19 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Read:           return a::ToolKind::Read;
         case sp::Kind::Edit:           return a::ToolKind::Edit;
         case sp::Kind::Write:          return a::ToolKind::Edit;
+        case sp::Kind::Move:           return a::ToolKind::Edit;
+        case sp::Kind::Remove:         return a::ToolKind::Edit;
         case sp::Kind::Bash:           return a::ToolKind::Execute;
+        case sp::Kind::ProcessStart:   return a::ToolKind::Execute;
+        case sp::Kind::ProcessPoll:    return a::ToolKind::Execute;
+        case sp::Kind::ProcessStop:    return a::ToolKind::Execute;
         case sp::Kind::Diagnostics:    return a::ToolKind::Execute;
+        case sp::Kind::Test:           return a::ToolKind::Execute;
         case sp::Kind::GitCommit:      return a::ToolKind::Execute;
         case sp::Kind::Grep:           return a::ToolKind::Search;
         case sp::Kind::Glob:           return a::ToolKind::Search;
         case sp::Kind::FindDefinition: return a::ToolKind::Search;
+        case sp::Kind::FindReferences: return a::ToolKind::Search;
         case sp::Kind::SearchDocs:     return a::ToolKind::Search;
         case sp::Kind::SearchCode:     return a::ToolKind::Search;
         case sp::Kind::RepoMap:        return a::ToolKind::Search;
@@ -75,6 +82,8 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::GitStatus:      return a::ToolKind::Read;
         case sp::Kind::GitDiff:        return a::ToolKind::Read;
         case sp::Kind::GitLog:         return a::ToolKind::Read;
+        case sp::Kind::GitShow:        return a::ToolKind::Read;
+        case sp::Kind::GitBlame:       return a::ToolKind::Read;
         case sp::Kind::WebFetch:       return a::ToolKind::Fetch;
         case sp::Kind::WebSearch:      return a::ToolKind::Fetch;
         case sp::Kind::Todo:           return a::ToolKind::Think;
@@ -178,12 +187,28 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
             std::string p = path_arg();
             return p.empty() ? "Write" : "Write " + p;
         }
+        case sp::Kind::Move: {
+            auto source = display_path(str("source"), cwd);
+            auto destination = display_path(str("destination"), cwd);
+            return source.empty() ? "Move" : "Move " + source + " → " + destination;
+        }
+        case sp::Kind::Remove: {
+            auto path = path_arg();
+            return path.empty() ? "Remove" : "Remove " + path;
+        }
         case sp::Kind::Bash:
-        case sp::Kind::Diagnostics: {
+        case sp::Kind::Diagnostics:
+        case sp::Kind::Test:
+        case sp::Kind::ProcessStart: {
             std::string c = str("command");
             if (!c.empty()) return clip(c, 96);
             std::string d = str("display_description");
-            return d.empty() ? "Terminal" : d;
+            return d.empty() ? (kind == sp::Kind::Test ? "Run tests" : "Terminal") : d;
+        }
+        case sp::Kind::ProcessPoll:
+        case sp::Kind::ProcessStop: {
+            auto id = str("id");
+            return (kind == sp::Kind::ProcessPoll ? "Poll process " : "Stop process ") + id;
         }
         case sp::Kind::GitCommit: {
             std::string m = str("message");
@@ -199,9 +224,12 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
             if (!p.empty())    label += " `" + p + "`";
             return label;
         }
-        case sp::Kind::FindDefinition: {
+        case sp::Kind::FindDefinition:
+        case sp::Kind::FindReferences: {
             std::string s = str("symbol");
-            return s.empty() ? "Find definition" : "Find definition `" + s + "`";
+            const std::string label = kind == sp::Kind::FindDefinition
+                ? "Find definition" : "Find references";
+            return s.empty() ? label : label + " `" + s + "`";
         }
         case sp::Kind::SearchDocs:
         case sp::Kind::SearchCode: {
@@ -220,6 +248,8 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
         case sp::Kind::GitStatus: return "git status";
         case sp::Kind::GitDiff:   return "git diff";
         case sp::Kind::GitLog:    return "git log";
+        case sp::Kind::GitShow:   return "git show";
+        case sp::Kind::GitBlame:  return "git blame";
         case sp::Kind::WebFetch: {
             std::string u = str("url");
             return u.empty() ? "Fetch" : "Fetch " + u;
@@ -1102,17 +1132,26 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
     // and answers the user in plain text (proven: qwen2.5-coder:7b greets
     // cleanly only when no tools are on the wire).
     if (!suppress_tools) {
+        std::string_view newest_user;
+        for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+            if (it->role == Role::User && !it->proactive_context) {
+                newest_user = it->text;
+                break;
+            }
+        }
+        auto selected = tools::select_wire_tools(newest_user);
         // Weak local models hallucinate `skill` and the memory tools on
         // greetings/small talk — don't advertise them (mirrors cmd_factory).
-        if (is_weak_model(req.model)) {
-            auto weak_hidden = [](std::string_view n) {
-                return n == "skill" || n == "remember"
-                    || n == "forget" || n == "wipe_memory";
-            };
-            for (const auto& t : wire_tools())
-                if (!weak_hidden(t.name)) req.tools.push_back(t);
-        } else {
-            req.tools = wire_tools();
+        const bool weak = is_weak_model(req.model);
+        auto weak_hidden = [](std::string_view n) {
+            return n == "skill" || n == "remember"
+                || n == "forget" || n == "wipe_memory";
+        };
+        req.tools.reserve(selected.size());
+        for (const auto* tool : selected) {
+            if (weak && weak_hidden(tool->name.value)) continue;
+            req.tools.push_back({tool->name.value, tool->description,
+                                 tool->input_schema, tool->eager_input_streaming});
         }
     }
 

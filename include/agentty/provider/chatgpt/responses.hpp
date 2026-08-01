@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace agentty::provider::chatgpt {
@@ -48,6 +49,8 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
 // ── Test seams (pure, no network) ──────────────────────────────────────────
 // The Request → Responses-API JSON body the transport would POST.
 [[nodiscard]] nlohmann::json build_body_for_test(const provider::Request& req);
+// HTTP error response body → actionable user-facing diagnostic.
+[[nodiscard]] std::string format_http_error_for_test(int status, std::string_view body);
 // Scripted SSE `data:` payloads → the agentty Msg sequence the reducer sees.
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
     const std::vector<std::string>& sse_data_lines);

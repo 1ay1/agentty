@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/io/http.hpp"                       // http::CancelToken
+#include "agentty/mcp/client.hpp"                    // configured MCP delegation
 #include "agentty/provider/acp_agents.hpp"           // resolve_acp_agent
 #include "agentty/provider/acp_backend.hpp"          // TurnSink, TurnResult
 #include "agentty/provider/external_acp_backend.hpp" // ExternalAcpBackend, spawn_acp_agent
@@ -86,6 +87,28 @@ std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err
                        ? tools::util::workspace_root().string()
                        : spec->cwd;
     opts.reuse_session = true;
+    for (const auto& server : mcp::configured_servers_for_delegation()) {
+        auto key_values = [](const auto& values) {
+            a::List<a::KeyValue> out;
+            for (const auto& [name, value] : values)
+                out.push_back(a::KeyValue{name, value});
+            return out;
+        };
+        switch (server.transport) {
+            case mcp::ServerLaunch::Transport::Stdio:
+                opts.mcp_servers.push_back(a::McpServer{a::StdioMcpServer{
+                    server.name, server.command, server.args, key_values(server.env)}});
+                break;
+            case mcp::ServerLaunch::Transport::Http:
+                opts.mcp_servers.push_back(a::McpServer{a::HttpMcpServer{
+                    server.name, server.url, key_values(server.headers)}});
+                break;
+            case mcp::ServerLaunch::Transport::Sse:
+                opts.mcp_servers.push_back(a::McpServer{a::SseMcpServer{
+                    server.name, server.url, key_values(server.headers)}});
+                break;
+        }
+    }
     opts.delegate      = default_sandbox_delegate();
 
     auto live     = std::make_shared<LiveAgent>();

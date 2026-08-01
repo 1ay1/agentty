@@ -29,11 +29,13 @@
 
 #include "agentty/mcp/client.hpp"
 #include "agentty/mcp/http_server.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/dbglog.hpp"
 
 #include <mcp/cap/cap.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -43,6 +45,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -57,10 +61,22 @@ using json   = nlohmann::json;
 // processes + transports). A mutex guards dispatch since several tool workers
 // may call into it concurrently; the Registry routes to per-server providers
 // that already serialize their own transport.
+struct ServerPolicy {
+    bool trust_annotations = false;
+    int max_output_chars = 30'000;
+    std::unordered_set<std::string> include;
+    std::unordered_set<std::string> exclude;
+    std::unordered_set<std::string> pin;
+};
+
 struct ConnectionPool {
-    ::mcp::cap::Registry registry;
-    std::mutex           mu;          // guards registry dispatch + list rebuild
+    // External capabilities are always namespaced. Conditional namespacing
+    // makes a tool's wire identity change when another server is enabled and
+    // cannot detect collisions with agentty's native catalog.
+    ::mcp::cap::Registry registry{true};
+    std::mutex           mu;          // guards list/resource/prompt projection
     std::atomic<unsigned long> generation{0};   // bumps on any *_list_changed
+    std::unordered_map<std::string, ServerPolicy> policies;
 };
 
 namespace {
@@ -148,6 +164,20 @@ make_provider(const std::string& name, const json& spec) {
             cfg.spawn.env_kv.push_back(it.key() + "=" + as_str(it.value()));
     cfg.client_info  = ::mcp::Implementation{"agentty", AGENTTY_VERSION};
     cfg.call_timeout = call_timeout();
+    if (const auto ms = spec.value("timeoutMs", 0L); ms > 0)
+        cfg.call_timeout = std::chrono::milliseconds{ms};
+    if (const auto ms = spec.value("connectTimeoutMs", 0L); ms > 0)
+        cfg.handshake_timeout = std::chrono::milliseconds{ms};
+
+    const std::string root = tools::util::workspace_root().generic_string();
+    if (!root.empty()) {
+        std::string uri = "file://" + root;
+#ifdef _WIN32
+        if (root.size() > 1 && root[1] == ':') uri = "file:///" + root;
+#endif
+        cfg.integration.roots.push_back(
+            ::mcp::Root{std::move(uri), std::string{"workspace"}, json::object()});
+    }
 
     try {
         return std::make_shared<::mcp::cap::StdioServerProvider>(std::move(cfg));
@@ -167,10 +197,12 @@ make_provider(const std::string& name, const json& spec) {
 // affirmatively says readOnlyHint:true AND does NOT also claim destructive.
 // Everything else gets the full effect set (always asks permission) — the
 // safe default that the original bridge applied unconditionally.
-tools::EffectSet effects_for(const ::mcp::Tool& t) {
+tools::EffectSet effects_for(const ::mcp::Tool& t, bool trust_annotations) {
     using tools::Effect;
     const tools::EffectSet full{Effect::Exec, Effect::WriteFs, Effect::Net, Effect::ReadFs};
-    if (!t.annotations.has_value()) return full;
+    // An annotation is an untrusted server hint. Only an explicitly trusted
+    // server may use it to reduce permission/scheduling effects.
+    if (!trust_annotations || !t.annotations.has_value()) return full;
     const auto& a = *t.annotations;
     const bool read_only   = a.readOnlyHint.has_value()    && *a.readOnlyHint;
     const bool destructive = a.destructiveHint.has_value() && *a.destructiveHint;
@@ -224,14 +256,48 @@ std::string render_result(const ::mcp::cap::Result& r) {
     return out;
 }
 
+std::string canonical_mcp_name(std::string_view exposed) {
+    // Registry names are `mcp:<server>__<tool>` when always_namespace=true.
+    // Provider APIs accept only a conservative identifier alphabet, so map
+    // punctuation to underscores and retain the raw route only in execute().
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    std::string out = "mcp__";
+    out.reserve(out.size() + exposed.size());
+    for (unsigned char c : exposed)
+        out.push_back((std::isalnum(c) || c == '_' || c == '-')
+                          ? static_cast<char>(c)
+                          : '_');
+    constexpr std::size_t kMaxToolName = 128;
+    if (out.size() > kMaxToolName) out.resize(kMaxToolName);
+    return out;
+}
+
+std::string mcp_origin_id(std::string_view exposed) {
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    if (auto split = exposed.find("__"); split != std::string_view::npos)
+        exposed = exposed.substr(0, split);
+    return std::string{exposed};
+}
+
+std::string mcp_bare_name(std::string_view exposed) {
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    if (auto split = exposed.find("__"); split != std::string_view::npos)
+        exposed.remove_prefix(split + 2);
+    return std::string{exposed};
+}
+
 // Synthesize a ToolDef that routes through the shared registry by EXPOSED name.
-tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t) {
+tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
+                         const ServerPolicy& policy) {
     tools::ToolDef def;
-    def.name = ToolName{t.name};   // already namespaced by the registry
+    const std::string exposed = t.name;
+    def.name = ToolName{canonical_mcp_name(exposed)};
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = mcp_origin_id(exposed);
 
     std::string desc = t.description.has_value() ? *t.description : std::string{};
-    def.description = "[MCP] " +
-        (desc.empty() ? ("Remote MCP tool '" + t.name + "'.") : desc);
+    def.description = "[MCP " + def.origin_id + "] " +
+        (desc.empty() ? ("Remote tool '" + def.name.value + "'.") : desc);
 
     json schema = ::mcp::to_json(t.inputSchema);
     if (!schema.is_object()) schema = json::object();
@@ -239,16 +305,21 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t) {
     if (!schema.contains("properties")) schema["properties"] = json::object();
     def.input_schema = std::move(schema);
 
-    def.effects = effects_for(t);
+    def.effects = effects_for(t, policy.trust_annotations);
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = std::clamp(policy.max_output_chars, 2'000, 100'000);
+    def.always_expose = policy.pin.contains(mcp_bare_name(exposed));
+    def.output_truncation = tools::OutputTruncation::HeadTail;
 
-    const std::string exposed = t.name;
     def.execute = [pool, exposed](const json& args) -> tools::ExecResult {
         try {
             ::mcp::cap::Result r;
-            {
-                std::lock_guard<std::mutex> lk(pool->mu);
-                r = pool->registry.dispatch(exposed, args);
-            }
+            // Registry dispatch resolves a provider through its own
+            // generation-safe route snapshot; independent servers may run in
+            // parallel and each provider serializes only its own transport.
+            r = pool->registry.dispatch(::mcp::cap::Request{
+                exposed, args, tools::progress::current(),
+                tools::cancellation::current()});
             if (r.is_error)
                 return std::unexpected(tools::ToolError::subprocess(
                     r.text.empty() ? "MCP tool reported an error" : r.text));
@@ -285,6 +356,10 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
         }},
     };
     def.effects = tools::EffectSet{tools::Effect::ReadFs, tools::Effect::Net};
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "resources";
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = 30'000;
     def.execute = [pool](const json& args) -> tools::ExecResult {
         const std::string uri = args.is_object() ? args.value("uri", std::string{}) : std::string{};
         const bool want_list  = uri.empty() || (args.is_object() && args.value("list", false));
@@ -362,6 +437,21 @@ std::string render_prompt(const ::mcp::GetPromptResult& r) {
     return out;
 }
 
+std::optional<std::string> resolve_prompt_route(
+    const ::mcp::cap::Registry& registry, std::string_view requested) {
+    std::optional<std::string> match;
+    for (const auto& prompt : registry.prompts()) {
+        const std::string canonical = canonical_mcp_name(prompt.name);
+        const bool bare_match = prompt.name.size() > requested.size() + 2
+            && prompt.name.ends_with("__" + std::string{requested});
+        if (prompt.name == requested || canonical == requested || bare_match) {
+            if (match && *match != prompt.name) return std::nullopt;
+            match = prompt.name;
+        }
+    }
+    return match;
+}
+
 tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
     tools::ToolDef def;
     def.name        = ToolName{"mcp_get_prompt"};
@@ -379,6 +469,10 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
         }},
     };
     def.effects = tools::EffectSet{tools::Effect::ReadFs, tools::Effect::Net};
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "prompts";
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = 30'000;
     def.execute = [pool](const json& args) -> tools::ExecResult {
         const std::string name = args.is_object() ? args.value("name", std::string{}) : std::string{};
         const bool want_list   = name.empty() || (args.is_object() && args.value("list", false));
@@ -390,7 +484,7 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
                     return tools::ToolOutput{"(no prompts advertised)", std::nullopt};
                 std::string out = "Available MCP prompts:\n";
                 for (const auto& p : prompts) {
-                    out += "  " + p.name;
+                    out += "  " + canonical_mcp_name(p.name);
                     if (p.description.has_value() && !p.description->empty())
                         out += "  — " + *p.description;
                     out += '\n';
@@ -416,7 +510,11 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
             bool ok;
             {
                 std::lock_guard<std::mutex> lk(pool->mu);
-                ok = pool->registry.get_prompt(name, kv, res, err);
+                auto route = resolve_prompt_route(pool->registry, name);
+                if (!route)
+                    return std::unexpected(tools::ToolError::not_found(
+                        "MCP prompt is missing or ambiguous: " + name));
+                ok = pool->registry.get_prompt(*route, kv, res, err);
             }
             if (!ok)
                 return std::unexpected(tools::ToolError::subprocess(
@@ -433,6 +531,121 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
     return def;
 }
 
+std::optional<std::string> resolve_tool_route(
+    const ::mcp::cap::Registry& registry, std::string_view requested) {
+    std::optional<std::string> match;
+    for (const auto& tool : registry.tools()) {
+        const std::string canonical = canonical_mcp_name(tool.name);
+        const bool bare_match = tool.name.size() > requested.size() + 2
+            && tool.name.ends_with("__" + std::string{requested});
+        if (tool.name == requested || canonical == requested || bare_match) {
+            if (match && *match != tool.name) return std::nullopt;
+            match = tool.name;
+        }
+    }
+    return match;
+}
+
+tools::ToolDef make_search_tools_tool(PoolHandle pool) {
+    tools::ToolDef def;
+    def.name = ToolName{"mcp_search_tools"};
+    def.description =
+        "Search connected MCP capability catalogs by meaning. Use this when "
+        "the needed integration is not already visible as a direct mcp__ tool; "
+        "then invoke it through mcp_call.";
+    def.input_schema = json{
+        {"type", "object"},
+        {"properties", json{
+            {"query", json{{"type", "string"}, {"description", "Capability or action to find."}}},
+            {"k", json{{"type", "integer"}, {"minimum", 1}, {"maximum", 20}, {"default", 8}}},
+        }},
+        {"required", json::array({"query"})},
+    };
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "catalog";
+    def.effects = tools::EffectSet{};
+    def.scheduling_effects = tools::EffectSet{};
+    def.max_output_chars = 12'000;
+    def.always_expose = true;
+    def.execute = [pool](const json& args) -> tools::ExecResult {
+        const std::string query = args.value("query", std::string{});
+        if (query.empty())
+            return std::unexpected(tools::ToolError::invalid_args("query is required"));
+        const int k = std::clamp(args.value("k", 8), 1, 20);
+        std::string needle = query;
+        std::ranges::transform(needle, needle.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::vector<std::pair<int, ::mcp::Tool>> ranked;
+        for (auto tool : pool->registry.tools()) {
+            std::string text = tool.name + " " + tool.description.value_or("");
+            std::ranges::transform(text, text.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            int score = text.find(needle) != std::string::npos ? 20 : 0;
+            std::size_t pos = 0;
+            while (pos < needle.size()) {
+                while (pos < needle.size() && !std::isalnum(static_cast<unsigned char>(needle[pos]))) ++pos;
+                auto begin = pos;
+                while (pos < needle.size() && std::isalnum(static_cast<unsigned char>(needle[pos]))) ++pos;
+                if (pos - begin > 1 && text.find(needle.substr(begin, pos - begin)) != std::string::npos)
+                    score += 3;
+            }
+            ranked.emplace_back(score, std::move(tool));
+        }
+        std::stable_sort(ranked.begin(), ranked.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::string out;
+        for (int i = 0; i < k && i < static_cast<int>(ranked.size()); ++i) {
+            const auto& tool = ranked[static_cast<std::size_t>(i)].second;
+            out += "- `" + canonical_mcp_name(tool.name) + "`";
+            if (tool.description && !tool.description->empty()) out += " — " + *tool.description;
+            out += '\n';
+        }
+        return tools::ToolOutput{out.empty() ? "(no MCP tools available)" : out, std::nullopt};
+    };
+    return def;
+}
+
+tools::ToolDef make_call_tool(PoolHandle pool) {
+    tools::ToolDef def;
+    def.name = ToolName{"mcp_call"};
+    def.description =
+        "Call a connected MCP tool discovered with mcp_search_tools. Direct "
+        "mcp__ tools are preferred when visible because their typed schema is safer.";
+    def.input_schema = json{
+        {"type", "object"},
+        {"properties", json{
+            {"name", json{{"type", "string"}, {"description", "Canonical mcp__server__tool name."}}},
+            {"arguments", json{{"type", "object"}, {"description", "Arguments for the target tool."}}},
+        }},
+        {"required", json::array({"name", "arguments"})},
+    };
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "catalog";
+    def.effects = tools::EffectSet{tools::Effect::Exec, tools::Effect::WriteFs,
+                                   tools::Effect::Net, tools::Effect::ReadFs};
+    def.scheduling_effects = tools::EffectSet{tools::Effect::Exec};
+    def.max_output_chars = 30'000;
+    def.always_expose = true;
+    def.execute = [pool](const json& args) -> tools::ExecResult {
+        const std::string name = args.value("name", std::string{});
+        const json call_args = args.contains("arguments") && args["arguments"].is_object()
+            ? args["arguments"] : json::object();
+        auto route = resolve_tool_route(pool->registry, name);
+        if (!route)
+            return std::unexpected(tools::ToolError::not_found(
+                "MCP tool is missing or ambiguous: " + name));
+        auto result = pool->registry.dispatch(::mcp::cap::Request{
+            *route, call_args, tools::progress::current(),
+            tools::cancellation::current()});
+        if (result.is_error)
+            return std::unexpected(tools::ToolError::subprocess(
+                result.text.empty() ? "MCP tool reported an error" : result.text));
+        auto text = render_result(result);
+        return tools::ToolOutput{text.empty() ? "(no output)" : text, std::nullopt};
+    };
+    return def;
+}
+
 // Build the full ToolDef vector for a pool: every server tool + the generic
 // resource/prompt access tools (only when the union exposes any).
 std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
@@ -440,11 +653,24 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     bool any_resources = false, any_prompts = false;
     {
         std::lock_guard<std::mutex> lk(pool->mu);
-        for (auto& t : pool->registry.tools()) out.push_back(make_tool(pool, t));
+        for (auto& t : pool->registry.tools()) {
+            const auto origin = mcp_origin_id(t.name);
+            const auto bare = mcp_bare_name(t.name);
+            const auto policy_it = pool->policies.find(origin);
+            const ServerPolicy fallback;
+            const auto& policy = policy_it == pool->policies.end()
+                ? fallback : policy_it->second;
+            if ((!policy.include.empty() && !policy.include.contains(bare))
+                || policy.exclude.contains(bare))
+                continue;
+            out.push_back(make_tool(pool, t, policy));
+        }
         any_resources = !pool->registry.resources().empty() ||
                         !pool->registry.resource_templates().empty();
         any_prompts   = !pool->registry.prompts().empty();
     }
+    out.push_back(make_search_tools_tool(pool));
+    out.push_back(make_call_tool(pool));
     if (any_resources) out.push_back(make_read_resource_tool(pool));
     if (any_prompts)   out.push_back(make_get_prompt_tool(pool));
     return out;
@@ -453,6 +679,57 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
 } // namespace
 
 bool mcp_config_present() { return !resolve_config().empty(); }
+
+std::vector<ServerLaunch> configured_servers_for_delegation() {
+    bool project_local = false;
+    const fs::path path = resolve_config(project_local);
+    if (path.empty()) return {};
+    const char* allow = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
+    const bool project_allowed = allow && (allow[0] == '1' || allow[0] == 't'
+        || allow[0] == 'T' || allow[0] == 'y' || allow[0] == 'Y');
+    if (project_local && !project_allowed) return {};
+
+    json document;
+    try { std::ifstream input(path); input >> document; }
+    catch (...) { return {}; }
+    const json* servers = nullptr;
+    if (document.contains("mcpServers") && document["mcpServers"].is_object())
+        servers = &document["mcpServers"];
+    else if (document.contains("servers") && document["servers"].is_object())
+        servers = &document["servers"];
+    if (!servers) return {};
+
+    auto string_value = [](const json& value) {
+        return value.is_string() ? value.get<std::string>() : value.dump();
+    };
+    std::vector<ServerLaunch> out;
+    for (auto it = servers->begin(); it != servers->end(); ++it) {
+        if (!it.value().is_object() || it.value().value("disabled", false)) continue;
+        const auto& spec = it.value();
+        ServerLaunch launch;
+        launch.name = it.key();
+        launch.command = spec.value("command", std::string{});
+        launch.url = spec.value("url", std::string{});
+        const auto type = spec.value("type", std::string{});
+        if (!launch.url.empty() || type == "http" || type == "streamable-http")
+            launch.transport = ServerLaunch::Transport::Http;
+        else if (type == "sse")
+            launch.transport = ServerLaunch::Transport::Sse;
+        if (auto args = spec.find("args"); args != spec.end() && args->is_array())
+            for (const auto& value : *args) launch.args.push_back(string_value(value));
+        if (auto env = spec.find("env"); env != spec.end() && env->is_object())
+            for (auto entry = env->begin(); entry != env->end(); ++entry)
+                launch.env.emplace_back(entry.key(), string_value(entry.value()));
+        if (auto headers = spec.find("headers"); headers != spec.end() && headers->is_object())
+            for (auto entry = headers->begin(); entry != headers->end(); ++entry)
+                launch.headers.emplace_back(entry.key(), string_value(entry.value()));
+        if ((launch.transport == ServerLaunch::Transport::Stdio && launch.command.empty())
+            || (launch.transport != ServerLaunch::Transport::Stdio && launch.url.empty()))
+            continue;
+        out.push_back(std::move(launch));
+    }
+    return out;
+}
 
 std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     std::vector<tools::ToolDef> out;
@@ -530,6 +807,22 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     for (auto it = servers->begin(); it != servers->end(); ++it) {
         const std::string sname = it.key();
         const json spec = it.value();   // copy: detached worker outlives `doc`
+        if (spec.value("disabled", false)) continue;
+
+        ServerPolicy policy;
+        policy.trust_annotations = spec.value("trustAnnotations", false);
+        policy.max_output_chars = spec.value("maxOutputChars", 30'000);
+        auto add_names = [&](const json& values, std::unordered_set<std::string>& out) {
+            if (!values.is_array()) return;
+            for (const auto& value : values)
+                if (value.is_string()) out.insert(value.get<std::string>());
+        };
+        if (auto tools_it = spec.find("tools"); tools_it != spec.end() && tools_it->is_object()) {
+            add_names(tools_it->value("include", json::array()), policy.include);
+            add_names(tools_it->value("exclude", json::array()), policy.exclude);
+            add_names(tools_it->value("pin", json::array()), policy.pin);
+        }
+        pool->policies[sname] = std::move(policy);
         // A server entry with a "url" (or type:"http"/"sse") is a remote
         // Streamable HTTP server; anything with a "command" is a spawned
         // stdio server. URL wins when both are present.
@@ -548,6 +841,9 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
                                                                  ? h.value().get<std::string>()
                                                                  : h.value().dump());
                     hc.call_timeout = call_timeout();
+                    hc.workspace_root = tools::util::workspace_root().generic_string();
+                    if (const auto ms = spec.value("timeoutMs", 0L); ms > 0)
+                        hc.call_timeout = std::chrono::milliseconds{ms};
                     std::string err;
                     auto p = make_http_provider(sname, hc, err);
                     if (!p) std::fprintf(stderr, "mcp: %s\n", err.c_str());
@@ -653,7 +949,8 @@ std::vector<PromptInfo> mcp_prompts() {
     std::lock_guard<std::mutex> lk(pool->mu);
     for (const auto& p : pool->registry.prompts()) {
         PromptInfo pi;
-        pi.name        = p.name;
+        pi.name        = canonical_mcp_name(p.name);
+        pi.server      = mcp_origin_id(p.name);
         pi.title       = p.title.has_value() ? *p.title : p.name;
         pi.description = p.description.has_value() ? *p.description : std::string{};
         if (p.arguments.has_value())
@@ -676,7 +973,9 @@ std::optional<std::string> mcp_get_prompt(
     ::mcp::GetPromptResult res;
     {
         std::lock_guard<std::mutex> lk(pool->mu);
-        if (!pool->registry.get_prompt(name, args, res, err)) return std::nullopt;
+        auto route = resolve_prompt_route(pool->registry, name);
+        if (!route) { err = "prompt is missing or ambiguous: '" + name + "'"; return std::nullopt; }
+        if (!pool->registry.get_prompt(*route, args, res, err)) return std::nullopt;
     }
     return render_prompt(res);
 }

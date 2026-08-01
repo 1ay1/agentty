@@ -20,6 +20,7 @@
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/util/base64.hpp"
 
 namespace agentty::provider::chatgpt {
 namespace {
@@ -45,6 +46,64 @@ std::string scrub_utf8(std::string_view in) {
         p += extra + 1;
     }
     return out;
+}
+
+std::string format_http_error(int status, std::string_view body) {
+    const std::string generic = "Codex backend returned HTTP " + std::to_string(status);
+    std::string message = generic;
+
+    auto decode = [&](const json& j) -> bool {
+        const json* detail = &j;
+        std::string tag;
+        if (j.is_object() && j.contains("error")) detail = &j["error"];
+        if (detail->is_string()) {
+            message = detail->get<std::string>();
+            return !message.empty();
+        }
+        if (!detail->is_object()) return false;
+        tag = detail->value("type", detail->value("code", std::string{}));
+        std::string text = detail->value("message", std::string{});
+        if (text.empty() && detail->contains("detail") && (*detail)["detail"].is_string())
+            text = (*detail)["detail"].get<std::string>();
+        if (text.empty() && detail != &j && j.contains("message") && j["message"].is_string())
+            text = j["message"].get<std::string>();
+        if (text.empty()) return false;
+        message = tag.empty() ? std::move(text) : tag + ": " + text;
+        return true;
+    };
+
+    bool decoded = false;
+    try { decoded = decode(json::parse(body)); } catch (...) {}
+
+    // Some edge responses retain SSE framing even on an HTTP error. Decode
+    // their `data: {...}` payload instead of hiding the useful reason behind
+    // a generic status line.
+    if (!decoded) {
+        std::size_t pos = 0;
+        while ((pos = body.find("data:", pos)) != std::string_view::npos) {
+            pos += 5;
+            while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+            const auto end = body.find('\n', pos);
+            try {
+                if (decode(json::parse(body.substr(pos, end - pos)))) {
+                    decoded = true;
+                    break;
+                }
+            } catch (...) {}
+            if (end == std::string_view::npos) break;
+            pos = end + 1;
+        }
+    }
+
+    if (!decoded && !body.empty()) {
+        std::string raw = scrub_utf8(body.substr(0, 1024));
+        while (!raw.empty() && (raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' '))
+            raw.pop_back();
+        if (!raw.empty()) message = generic + ": " + raw;
+    }
+    if (status == 401)
+        message += " — session expired; run `agentty login` and sign in to ChatGPT again";
+    return message;
 }
 
 std::string new_uuid_v4() {
@@ -78,11 +137,26 @@ json build_input(const provider::Request& req) {
             : attachment::expand(m.text, m.attachments);
 
         if (m.role == Role::User) {
-            if (text.empty()) continue;
+            json content = json::array();
+            if (!text.empty())
+                content.push_back({
+                    {"type", "input_text"}, {"text", scrub_utf8(text)},
+                });
+            for (const auto& img : m.images) {
+                if (img.bytes.empty()) continue;
+                const std::string_view media_type = img.media_type.empty()
+                    ? std::string_view{"image/png"}
+                    : std::string_view{img.media_type};
+                content.push_back({
+                    {"type", "input_image"},
+                    {"image_url", "data:" + std::string{media_type} + ";base64,"
+                                    + util::base64_encode(img.bytes)},
+                });
+            }
+            if (content.empty()) continue;
             input.push_back({
                 {"type", "message"}, {"role", "user"},
-                {"content", json::array({
-                    json{{"type", "input_text"}, {"text", scrub_utf8(text)}}})},
+                {"content", std::move(content)},
             });
             continue;
         }
@@ -556,25 +630,7 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
         .cancel      = req.cancel,
         .stop        = ctx.stop,
         .http_error_message = [&]() -> std::string {
-            std::string msg = "Codex backend returned HTTP " + std::to_string(http_status);
-            try {
-                auto j = json::parse(error_body);
-                if (j.contains("error") && j["error"].is_object()) {
-                    const auto& err = j["error"];
-                    std::string m   = err.value("message", std::string{});
-                    std::string tag = err.value("type", err.value("code", std::string{}));
-                    // Prefer a specific `{type}: {message}` — gives both the
-                    // user a clear reason AND the runtime's classify() a token
-                    // to route retryables (rate_limit_exceeded, server_error).
-                    if (!m.empty()) msg = tag.empty() ? m : tag + ": " + m;
-                    else if (!tag.empty()) msg += " (" + tag + ")";
-                } else if (j.contains("detail")) {
-                    msg = j.value("detail", msg);
-                }
-            } catch (...) {}
-            if (http_status == 401)
-                msg += " — session expired; run `agentty login` and sign in to ChatGPT again";
-            return msg;
+            return format_http_error(http_status, error_body);
         },
         .retry_after = retry_after_hint,
         .transport_error_message = [&]() -> std::string {
@@ -586,6 +642,10 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
 // ── Test seams ────────────────────────────────────────────────────
 nlohmann::json build_body_for_test(const provider::Request& req) {
     return build_body(req);
+}
+
+std::string format_http_error_for_test(int status, std::string_view body) {
+    return format_http_error(status, body);
 }
 
 std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines) {

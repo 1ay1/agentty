@@ -98,13 +98,14 @@ int main() {
         }
     }
 
-    // ── tool annotations → effects ────────────────────────────────────────
-    // The example `add` tool declares readOnlyHint:true, so the bridge maps
-    // it to a permission-free (ReadFs|Net) effect set, NOT the full set.
+    // ── untrusted annotations fail closed ────────────────────────────────
+    // Server annotations are hints, not an enforcement boundary. Unless the
+    // config explicitly sets trustAnnotations:true, even a claimed read-only
+    // tool receives the conservative full effect set.
     if (add) {
         CHECK(add->effects.has(tools::Effect::ReadFs));
-        CHECK(!add->effects.has(tools::Effect::WriteFs));
-        CHECK(!add->effects.has(tools::Effect::Exec));
+        CHECK(add->effects.has(tools::Effect::WriteFs));
+        CHECK(add->effects.has(tools::Effect::Exec));
     }
     // `now` has no readOnlyHint → conservative full effect set (asks perms).
     const tools::ToolDef* now = nullptr;

@@ -23,6 +23,7 @@
 //     std::future::get() with a timeout — no coroutine runtime, no event loop
 //     grafted onto the render/stream loop.
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -72,6 +73,22 @@ using PoolHandle = std::shared_ptr<ConnectionPool>;
 // True when an MCP config file is present (cheap stat, no connection). Lets
 // the registry decide whether to even attempt mcp_tools(). Pure I/O probe.
 [[nodiscard]] bool mcp_config_present();
+
+struct ServerLaunch {
+    enum class Transport : std::uint8_t { Stdio, Http, Sse };
+    std::string name;
+    Transport transport = Transport::Stdio;
+    std::string command;
+    std::vector<std::string> args;
+    std::vector<std::pair<std::string, std::string>> env;
+    std::string url;
+    std::vector<std::pair<std::string, std::string>> headers;
+};
+
+// Return trusted configured servers in a protocol-neutral shape suitable for
+// ACP session/new.mcpServers. Workspace-local configs obey the same explicit
+// AGENTTY_MCP_ALLOW_PROJECT gate as direct MCP consumption.
+[[nodiscard]] std::vector<ServerLaunch> configured_servers_for_delegation();
 
 // ── Dynamic tool surface (tools/list_changed) ────────────────────────────
 // MCP servers may emit `notifications/tools/list_changed` at any time. The

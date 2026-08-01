@@ -101,6 +101,7 @@ struct Harness {
     std::atomic<bool> release_prompt{false};
     std::condition_variable release_cv;
     std::mutex release_mu;
+    acp::List<acp::ContentBlock> last_prompt;
     std::shared_ptr<AgentScript> script_out;   // async worker writes callback results here
 
     ~Harness() {
@@ -136,6 +137,7 @@ std::unique_ptr<Harness> make_harness(AgentScript script,
     a.on_session_prompt = [hp, script](const PromptParams& p) -> PromptResult {
         assert(p.sessionId == SessionId{std::string("sess_fake")});
         assert(!p.prompt.empty());
+        hp->last_prompt = p.prompt;
 
         if (script.stream_updates) {
             auto send = [&](SessionUpdate u) {
@@ -311,6 +313,44 @@ void test_clean_turn_streams_and_settles() {
         CHECK(kinds[1] == "thought");
         CHECK(kinds[2] == "tool_call");
         CHECK(kinds[3] == "usage");
+    }
+}
+
+void test_prompt_forwards_text_and_image_content() {
+    auto h = make_harness(AgentScript{StopReason::EndTurn, false, false});
+    auto req = make_req("look at this");
+    req.messages.back().images.push_back(
+        agentty::ImageContent{"image/jpeg", std::string{"\x01\x02\x03", 3}});
+    P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
+
+    auto res = h->backend->prompt(req, sink, nullptr);
+
+    CHECK(res.ok());
+    CHECK(h->last_prompt.size() == 2);
+    if (h->last_prompt.size() == 2) {
+        const auto* text = std::get_if<acp::TextContent>(&h->last_prompt[0]);
+        const auto* image = std::get_if<acp::ImageContent>(&h->last_prompt[1]);
+        CHECK(text && text->text == "look at this");
+        CHECK(image && image->mimeType == "image/jpeg");
+        CHECK(image && image->data == "AQID");
+    }
+}
+
+void test_prompt_forwards_image_only_turn() {
+    auto h = make_harness(AgentScript{StopReason::EndTurn, false, false});
+    auto req = make_req("");
+    req.messages.back().images.push_back(
+        agentty::ImageContent{"image/png", std::string{"PNG", 3}});
+    P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
+
+    auto res = h->backend->prompt(req, sink, nullptr);
+
+    CHECK(res.ok());
+    CHECK(h->last_prompt.size() == 1);
+    if (h->last_prompt.size() == 1) {
+        const auto* image = std::get_if<acp::ImageContent>(&h->last_prompt[0]);
+        CHECK(image && image->mimeType == "image/png");
+        CHECK(image && image->data == "UE5H");
     }
 }
 
@@ -598,9 +638,10 @@ void test_wedged_child_teardown_is_bounded(const std::string& self_path) {
     // Now tear down. The child will IGNORE the stdin-EOF we send; only the
     // force-kill watchdog reaps it. Time the teardown: it must be bounded.
     auto t0 = std::chrono::steady_clock::now();
-    backend.reset();   // backend holds nothing that blocks; connection first
-    agent.connection.reset();
-    agent.process.reset();   // <- AgentProcessHolder dtor runs here (the watchdog)
+    backend.reset();   // backend holds nothing that blocks
+    // SpawnedAcpAgent::reset stops/joins the transport reader while its engine
+    // is alive, then destroys the connection.
+    agent.reset();
     auto elapsed = std::chrono::steady_clock::now() - t0;
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     // Grace is ~1s; give generous headroom for CI. A regression to the old
@@ -620,6 +661,8 @@ int main(int argc, char** argv) {
         return run_wedged_agent_mode();
 
     test_clean_turn_streams_and_settles();
+    test_prompt_forwards_text_and_image_content();
+    test_prompt_forwards_image_only_turn();
     test_max_turn_requests_maps_to_endturn();
     test_refusal_is_error();
     test_agent_cancelled_stop_reason();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <optional>
@@ -76,10 +78,26 @@ using ExecResult = std::expected<ToolOutput, ToolError>;
 
 // ── Tool definition ──────────────────────────────────────────────────────
 
+enum class ToolOrigin : std::uint8_t { Native, Mcp };
+enum class OutputTruncation : std::uint8_t { Head, Tail, HeadTail };
+
 struct ToolDef {
     ToolName    name;
     std::string description;
     nlohmann::json input_schema;
+
+    // Stable provenance. Dynamic MCP tools are never allowed to masquerade as
+    // native tools; the origin also drives catalog replacement and UX labels.
+    ToolOrigin origin = ToolOrigin::Native;
+    std::string origin_id; // empty for native; configured MCP server id otherwise
+
+    // Runtime metadata lives on ToolDef so dynamic tools receive the same
+    // safety/performance treatment as compile-time native tools.
+    EffectSet scheduling_effects;
+    int max_output_chars = 30'000;
+    OutputTruncation output_truncation = OutputTruncation::HeadTail;
+    std::chrono::milliseconds timeout{60'000};
+    bool always_expose = false; // native, pinned, or MCP catalog discovery
 
     // Anthropic's fine-grained tool streaming flag (GA on Claude 4.6, gated by
     // beta `fine-grained-tool-streaming-2025-05-14` on older models). When set,
@@ -102,6 +120,7 @@ struct ToolDef {
     std::function<ExecResult(const nlohmann::json& args)> execute;
 };
 
+[[nodiscard]] const std::vector<ToolDef>& native_registry();
 [[nodiscard]] const std::vector<ToolDef>& registry();
 [[nodiscard]] const ToolDef* find(std::string_view name);
 
@@ -113,6 +132,10 @@ struct ToolDef {
 // not registry(), so a server adding a tool mid-session reaches the model on
 // the next turn. Dispatch (`find`) already resolves these names live.
 [[nodiscard]] const std::vector<ToolDef>& wire_tools();
+// Build a bounded per-turn catalog: all native/pinned tools plus the external
+// MCP tools most relevant to the current user request.
+[[nodiscard]] std::vector<const ToolDef*> select_wire_tools(
+    std::string_view query, std::size_t max_external = 16);
 
 // The MCP tool-list generation counter, surfaced through the tools namespace
 // so callers (ACP server, wire walks) don't need to link the mcp TU or know
@@ -138,12 +161,30 @@ namespace progress {
     void clear();
     // No-op if no sink is installed — cheap enough to call per pipe read.
     void emit(std::string_view snapshot);
+    // Copy the sink installed on this worker so an async protocol reader can
+    // forward progress back to the originating tool card.
+    [[nodiscard]] Sink current();
 
     // RAII guard. `set` on construction, `clear` on destruction.
     struct Scope {
         explicit Scope(Sink s) { set(std::move(s)); }
         ~Scope()                { clear(); }
         Scope(const Scope&)            = delete;
+        Scope& operator=(const Scope&) = delete;
+    };
+}
+
+namespace cancellation {
+    using Probe = std::function<bool()>;
+    void set(Probe probe);
+    void clear();
+    [[nodiscard]] Probe current();
+    [[nodiscard]] bool requested();
+
+    struct Scope {
+        explicit Scope(Probe probe) { set(std::move(probe)); }
+        ~Scope() { clear(); }
+        Scope(const Scope&) = delete;
         Scope& operator=(const Scope&) = delete;
     };
 }

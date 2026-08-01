@@ -35,6 +35,7 @@ struct HttpConfig {
     std::vector<std::pair<std::string, std::string>> headers;   // extra request headers (auth, etc.)
     std::chrono::milliseconds handshake_timeout{15'000};
     std::chrono::milliseconds call_timeout{60'000};
+    std::string workspace_root;
 };
 
 // Connect to the server and return a CapabilityProvider, or nullptr (+ a human

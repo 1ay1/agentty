@@ -78,12 +78,12 @@ namespace detail {
 //              (Grep, Web*, Git diff/log/status).
 [[nodiscard]] inline std::string
 apply_output_budget(std::string text, int budget,
-                    tools::spec::ToolSpec::TruncStrategy strategy) {
+                    tools::OutputTruncation strategy) {
     if (budget <= 0) return text;
     auto bsz = static_cast<std::size_t>(budget);
     if (text.size() <= bsz) return text;
 
-    using Strat = tools::spec::ToolSpec::TruncStrategy;
+    using Strat = tools::OutputTruncation;
     switch (strategy) {
         case Strat::Head: {
             auto cut = utf8_safe_floor(text, bsz);
@@ -175,15 +175,13 @@ struct DynamicDispatch {
             result = td->execute(safe_args);
         } catch (const std::exception& e) {
             return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
+        } catch (...) {
+            return std::unexpected(ToolError::unknown("tool crashed with a non-standard exception"));
         }
-        if (result) {
-            if (const auto* sp = tools::spec::lookup(name)) {
-                if (sp->max_output_chars > 0) {
-                    result->text = detail::apply_output_budget(
-                        std::move(result->text), sp->max_output_chars,
-                        sp->trunc_strategy);
-                }
-            }
+        if (result && td->max_output_chars > 0) {
+            result->text = detail::apply_output_budget(
+                std::move(result->text), td->max_output_chars,
+                td->output_truncation);
         }
         return result;
     }
@@ -210,6 +208,8 @@ struct DynamicDispatch {
             result = td->execute(safe_args);
         } catch (const std::exception& e) {
             return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
+        } catch (...) {
+            return std::unexpected(ToolError::unknown("tool crashed with a non-standard exception"));
         }
         // Per-tool output budget. The catalog declares both a char cap
         // and a truncation strategy; this is the dispatcher-level
@@ -221,14 +221,10 @@ struct DynamicDispatch {
         // construction. Errors aren't truncated: typed ToolError detail
         // strings are short by design and the model needs the full text
         // to recover.
-        if (result) {
-            if (const auto* sp = tools::spec::lookup(name)) {
-                if (sp->max_output_chars > 0) {
-                    result->text = detail::apply_output_budget(
-                        std::move(result->text), sp->max_output_chars,
-                        sp->trunc_strategy);
-                }
-            }
+        if (result && td->max_output_chars > 0) {
+            result->text = detail::apply_output_budget(
+                std::move(result->text), td->max_output_chars,
+                td->output_truncation);
         }
         return result;
     }

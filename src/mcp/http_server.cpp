@@ -160,14 +160,49 @@ private:
         // POST on a worker thread: the calling thread is the engine's
         // request_raw, which immediately blocks on the response promise. If we
         // POSTed inline we'd never feed the response (the same thread is stuck).
-        std::thread([this, frame = std::move(frame)]() mutable {
-            post_and_feed(std::move(frame));
+        try {
+            std::thread([this, frame]() mutable {
+                try {
+                    post_and_feed(frame);
+                } catch (const std::exception& error) {
+                    fail_request(frame, error.what());
+                } catch (...) {
+                    fail_request(frame, "unknown transport exception");
+                }
+                std::lock_guard<std::mutex> lk(worker_mu_);
+                if (--inflight_ == 0) worker_done_.notify_all();
+            }).detach();
+        } catch (const std::exception& error) {
+            fail_request(frame, error.what());
             std::lock_guard<std::mutex> lk(worker_mu_);
             if (--inflight_ == 0) worker_done_.notify_all();
-        }).detach();
+        } catch (...) {
+            fail_request(frame, "could not start HTTP transport worker");
+            std::lock_guard<std::mutex> lk(worker_mu_);
+            if (--inflight_ == 0) worker_done_.notify_all();
+        }
     }
 
-    void post_and_feed(std::string frame) {
+    void fail_request(const std::string& frame, std::string_view reason) noexcept {
+        alive_.store(false, std::memory_order_release);
+        util::dbglog("mcp.http_transport.worker", reason);
+        try {
+            const auto parsed = json::parse(frame);
+            if (!is_request(parsed) || !engine_) return;
+            json err = {
+                {"jsonrpc", "2.0"},
+                {"id", parsed.value("id", json(nullptr))},
+                {"error", {{"code", -32003}, {"message",
+                    std::string{"http transport worker: "} + std::string{reason}}}},
+            };
+            feed(err.dump());
+        } catch (...) {
+            // The transport is already marked dead; the engine deadline is the
+            // final fallback if even constructing the error response fails.
+        }
+    }
+
+    void post_and_feed(const std::string& frame) {
         json parsed;
         bool expects_response = false;
         try { parsed = json::parse(frame); expects_response = is_request(parsed); }
@@ -416,21 +451,33 @@ private:
 // ── HttpServerProvider ─────────────────────────────────────────────────────
 class HttpServerProviderImpl final : public ::mcp::cap::ClientProvider {
 public:
-    HttpServerProviderImpl(const std::string& name, ParsedUrl url,
+    HttpServerProviderImpl(std::string name, ParsedUrl url,
                            std::vector<http::Header> headers,
                            ::mcp::Implementation client_info,
                            std::chrono::milliseconds handshake_timeout,
-                           std::chrono::milliseconds call_timeout) {
-        transport_ = std::make_unique<HttpTransport>(std::move(url), std::move(headers), call_timeout, name);
-        auto client = std::make_unique<::mcp::Client>(transport_->sink());
-        transport_->bind(&client->engine());
-        // After initialize the engine resolves; set the negotiated protocol
-        // version header for every subsequent request. We pin the version we
-        // sent (the SDK defaults to kProtocolVersion); a server that downgrades
-        // is handled by the engine decoding the lower version transparently.
-        transport_->set_protocol_version(std::string(::mcp::kProtocolVersion));
-        connect(name, std::move(client), std::move(client_info),
-                handshake_timeout, call_timeout);
+                           std::chrono::milliseconds call_timeout,
+                           ::mcp::cap::ClientProvider::Integration integration)
+        : name_(std::move(name)), url_(std::move(url)), headers_(std::move(headers)),
+          client_info_(std::move(client_info)), handshake_timeout_(handshake_timeout),
+          call_timeout_(call_timeout), integration_(std::move(integration)) {
+        start_();
+    }
+
+    [[nodiscard]] ::mcp::cap::Result execute(const ::mcp::cap::Request& request) override {
+        std::lock_guard<std::mutex> lock(reconnect_mu_);
+        if (!alive() || connection_poisoned()) {
+            if (transport_) transport_->stop();
+            reset_client();
+            transport_.reset();
+            try {
+                start_();
+                if (on_list_changed_) on_list_changed_();
+            } catch (const std::exception& error) {
+                return ::mcp::cap::Result::error(
+                    std::string{"HTTP MCP reconnect failed: "} + error.what());
+            }
+        }
+        return ClientProvider::execute(request);
     }
 
     ~HttpServerProviderImpl() override {
@@ -449,6 +496,23 @@ protected:
     }
 
 private:
+    void start_() {
+        transport_ = std::make_unique<HttpTransport>(url_, headers_, call_timeout_, name_);
+        auto client = std::make_unique<::mcp::Client>(transport_->sink());
+        transport_->bind(&client->engine());
+        transport_->set_protocol_version(std::string(::mcp::kProtocolVersion));
+        connect(name_, std::move(client), client_info_, handshake_timeout_,
+                call_timeout_, integration_);
+    }
+
+    std::string name_;
+    ParsedUrl url_;
+    std::vector<http::Header> headers_;
+    ::mcp::Implementation client_info_;
+    std::chrono::milliseconds handshake_timeout_;
+    std::chrono::milliseconds call_timeout_;
+    ::mcp::cap::ClientProvider::Integration integration_;
+    std::mutex reconnect_mu_;
     std::unique_ptr<HttpTransport> transport_;
 };
 
@@ -463,10 +527,18 @@ make_http_provider(const std::string& name, const HttpConfig& cfg, std::string& 
     for (const auto& [k, v] : cfg.headers) headers.push_back({k, v});
 
     ::mcp::Implementation client_info{"agentty", AGENTTY_VERSION};
+    ::mcp::cap::ClientProvider::Integration integration;
+    if (!cfg.workspace_root.empty()) {
+        std::string uri = "file://" + cfg.workspace_root;
+#ifdef _WIN32
+        if (cfg.workspace_root.size() > 1 && cfg.workspace_root[1] == ':') uri = "file:///" + cfg.workspace_root;
+#endif
+        integration.roots.push_back(::mcp::Root{std::move(uri), std::string{"workspace"}, nlohmann::json::object()});
+    }
     try {
         return std::make_shared<HttpServerProviderImpl>(
             name, std::move(url), std::move(headers), std::move(client_info),
-            cfg.handshake_timeout, cfg.call_timeout);
+            cfg.handshake_timeout, cfg.call_timeout, std::move(integration));
     } catch (const std::exception& e) {
         err = std::string{"http MCP server '"} + name + "' failed: " + e.what();
     } catch (...) {

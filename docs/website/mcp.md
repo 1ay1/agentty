@@ -16,7 +16,9 @@ agentty speaks the [Model Context Protocol](https://modelcontextprotocol.io) bot
 agentty mcp-serve
 ```
 
-The served tools are the same ones the TUI uses: file `read`/`write`/`edit`, shell `bash`, code search (`grep`/`glob`/`find_definition`), `web_fetch`/`web_search`, `diagnostics`, and the `git_*` family. Filesystem tools stay sandboxed to the [workspace boundary](/docs/workspace) and shell calls run inside the [OS sandbox](/docs/sandboxing), exactly as they do interactively.
+The served tools are the same native tools the TUI uses: file `read`/`write`/`edit`/`move`/`remove`, shell `bash`, long-running `process_*` sessions, focused `test`, code search (`grep`/`glob`/`find_definition`/`find_references`), web fetch/search, diagnostics, and the `git_*` family including `git_show` and `git_blame`. Filesystem tools stay sandboxed to the workspace boundary and shell/process calls run inside the OS sandbox, exactly as they do interactively.
+
+`mcp-serve` is deliberately **native-only**. A configured external MCP server is never re-exported implicitly, preventing credential leaks and recursive MCP proxy loops.
 
 ## Point a client at it
 
@@ -35,7 +37,9 @@ Any MCP client can launch agentty as a stdio server. For a client that reads a J
 
 ## Consuming other MCP servers
 
-The reverse also works: drop a `.agentty/mcp.json` in your project and agentty connects to those servers on startup, appending their tools to its own registry. The model can't tell an MCP tool from a native one — and `tools/list_changed` is honoured live, so a server that adds a tool mid-session becomes callable on the next turn.
+The reverse also works: drop a `.agentty/mcp.json` in your project and agentty connects to those servers on startup. External tools receive stable provenance names such as `mcp__playwright__browser_click`; they can never collide with or impersonate native tools. `tools/list_changed` is honoured live, including removals and schema replacements.
+
+To keep provider requests fast and tool choice accurate, agentty sends all native and pinned tools plus at most 16 MCP tools ranked for the current user request. The always-available `mcp_search_tools` and `mcp_call` broker exposes the long tail without injecting hundreds of schemas into every turn.
 
 ```json
 {
@@ -47,6 +51,35 @@ The reverse also works: drop a `.agentty/mcp.json` in your project and agentty c
   }
 }
 ```
+
+Per-server policy is explicit:
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp"],
+      "timeoutMs": 30000,
+      "connectTimeoutMs": 10000,
+      "maxOutputChars": 30000,
+      "trustAnnotations": false,
+      "tools": {
+        "include": ["browser_click", "browser_snapshot", "browser_navigate"],
+        "exclude": ["browser_install"],
+        "pin": ["browser_snapshot"]
+      }
+    }
+  }
+}
+```
+
+- `disabled:true` keeps a configured server off without deleting it.
+- `trustAnnotations` defaults to `false`: remote read-only hints cannot silently weaken permission checks. Enable it only for a server you trust.
+- `include`/`exclude` filter the advertised surface; `pin` keeps important tools in every turn.
+- Stdio and HTTP servers receive the workspace through MCP roots.
+- Calls stream MCP progress into the live tool card, propagate Esc cancellation, and reconnect a poisoned/crashed server on its next call.
+- Independent servers execute concurrently; each individual transport retains its own serialization.
 
 :::note
 MCP consumption is lazy and opt-in — with no `.agentty/mcp.json` present, startup is a single `stat()` that returns nothing, so there is zero overhead when you aren't using it.
@@ -93,6 +126,12 @@ A statically-configured `Authorization` header in `mcp.json` still wins, so you 
 { "mcpServers": { "acme": { "url": "https://mcp.acme.dev/mcp",
     "headers": { "Authorization": "Bearer sk-..." } } } }
 ```
+
+## External ACP agents
+
+When an external ACP agent is selected, trusted servers from the same MCP configuration are passed through `session/new.mcpServers`. The delegated agent owns those calls and agentty renders their ACP tool updates as observed activity; it does not execute them a second time. Workspace-local MCP configuration still requires `AGENTTY_MCP_ALLOW_PROJECT=1`.
+
+Agentty does not silently inject a nested unrestricted `agentty mcp-serve` into delegated agents. That would duplicate built-ins, bypass clear execution ownership, and make recursive `task` flows possible.
 
 ## Searching an MCP server's resources
 

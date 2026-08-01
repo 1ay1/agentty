@@ -27,6 +27,7 @@
 #include <mcp/codec.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -166,9 +167,36 @@ struct AgenttyHttpClient final : mt::HttpClient {
 //   through diff::compute to rebuild the full FileChange the diff-review
 //   UI consumes.
 
+ToolError decode_tool_error(std::string text) {
+    using K = ErrorKind;
+    static constexpr std::array kinds = {
+        std::pair{"invalid args", K::InvalidArgs},
+        std::pair{"not found", K::NotFound},
+        std::pair{"not a file", K::NotAFile},
+        std::pair{"not a directory", K::NotADirectory},
+        std::pair{"too large", K::TooLarge},
+        std::pair{"binary", K::Binary},
+        std::pair{"ambiguous", K::Ambiguous},
+        std::pair{"no match", K::NoMatch},
+        std::pair{"invalid regex", K::InvalidRegex},
+        std::pair{"network", K::Network},
+        std::pair{"spawn failed", K::Spawn},
+        std::pair{"subprocess failed", K::Subprocess},
+        std::pair{"io", K::Io},
+        std::pair{"out of workspace", K::OutOfWorkspace},
+        std::pair{"unknown", K::Unknown},
+    };
+    for (const auto& [label, kind] : kinds) {
+        const std::string prefix = "[" + std::string{label} + "] ";
+        if (text.starts_with(prefix))
+            return ToolError{kind, text.substr(prefix.size())};
+    }
+    return ToolError::unknown(std::move(text));
+}
+
 ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
     if (r.is_error)
-        return std::unexpected(ToolError::unknown(std::move(r.text)));
+        return std::unexpected(decode_tool_error(std::move(r.text)));
 
     ToolOutput out;
     out.text = std::move(r.text);
@@ -219,6 +247,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         def.name        = ToolName{spec.name};
         def.description  = spec.description.has_value() ? *spec.description : std::string{};
         def.input_schema = ::mcp::to_json(spec.inputSchema);
+        def.origin = ToolOrigin::Native;
         // Effects: agentty's spec catalog is the AUTHORITY for built-in
         // tools — the permission policy reads ToolDef::effects, the parallel
         // scheduler reads spec::lookup()->effects, and the catalog's
@@ -231,9 +260,19 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         // table only covers tools the catalog doesn't know.
         if (const auto* sp = tools::spec::lookup(spec.name)) {
             def.effects                = sp->effects;
+            def.scheduling_effects     = tools::spec::sched_effects(*sp);
             def.eager_input_streaming  = sp->eager_input_streaming;
+            def.max_output_chars       = sp->max_output_chars;
+            def.timeout                = std::chrono::duration_cast<std::chrono::milliseconds>(sp->max_seconds);
+            using NativeTrunc = tools::spec::ToolSpec::TruncStrategy;
+            def.output_truncation = sp->trunc_strategy == NativeTrunc::Head
+                ? OutputTruncation::Head
+                : sp->trunc_strategy == NativeTrunc::Tail
+                    ? OutputTruncation::Tail
+                    : OutputTruncation::HeadTail;
         } else {
             def.effects = EffectSet{mt::effects_for_builtin(spec.name).bits()};
+            def.scheduling_effects = def.effects;
         }
 
         std::string tool_name = spec.name;
@@ -247,6 +286,8 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             // tool runs.
             ::mcp::tools::util::progress::Scope mcp_progress{
                 [](std::string_view snap) { tools::progress::emit(snap); }};
+            ::mcp::tools::util::cancellation::Scope mcp_cancellation{
+                [] { return tools::cancellation::requested(); }};
             // LEARNING LOOP (win side): the agent ACTING on a file shortly
             // after search_docs surfaced a passage from it is the implicit
             // relevance signal — the passage pointed somewhere worth acting
@@ -274,10 +315,13 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // provider lists host-coupled shells first (registration order), so
     // without this the working tools sink to the bottom of the wire payload.
     static const std::vector<std::string_view> kOrder = {
-        "read", "edit", "write", "bash", "grep", "glob", "list_dir",
+        "read", "edit", "write", "move", "remove", "bash",
+        "process_start", "process_poll", "process_stop",
+        "grep", "glob", "list_dir",
         "repo_map",
-        "todo", "web_fetch", "web_search", "find_definition", "diagnostics",
-        "git_status", "git_diff", "git_log", "git_commit",
+        "todo", "web_fetch", "web_search", "find_definition", "find_references",
+        "diagnostics", "test",
+        "git_status", "git_diff", "git_log", "git_show", "git_blame", "git_commit",
         "remember", "forget", "wipe_memory", "task", "skill", "search_docs",
         "search_code",
     };

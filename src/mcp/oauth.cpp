@@ -639,10 +639,25 @@ int cmd_mcp_status() {
     std::fprintf(stderr, "MCP servers:\n");
     for (auto it = servers.begin(); it != servers.end(); ++it) {
         const std::string& name = it.key();
-        const std::string url = it.value().is_object() ? it.value().value("url", std::string{}) : std::string{};
-        const char* kind = url.empty() ? "stdio" : "http";
-        const char* auth = has_token(name) ? " [authorized]" : "";
-        std::fprintf(stderr, "  %-24s %s%s\n", name.c_str(), kind, auth);
+        const auto& spec = it.value();
+        const std::string url = spec.is_object() ? spec.value("url", std::string{}) : std::string{};
+        const std::string type = spec.is_object() ? spec.value("type", std::string{}) : std::string{};
+        const char* kind = (!url.empty() || type == "http" || type == "streamable-http")
+            ? "http" : type == "sse" ? "sse" : "stdio";
+        const bool disabled = spec.is_object() && spec.value("disabled", false);
+        const bool trusted = spec.is_object() && spec.value("trustAnnotations", false);
+        const int timeout = spec.is_object() ? spec.value("timeoutMs", 60'000) : 60'000;
+        std::size_t pinned = 0;
+        if (spec.is_object()) {
+            if (auto tools = spec.find("tools"); tools != spec.end() && tools->is_object()) {
+                if (auto pin = tools->find("pin"); pin != tools->end() && pin->is_array())
+                    pinned = pin->size();
+            }
+        }
+        const char* auth = has_token(name) ? " authorized" : "";
+        std::fprintf(stderr, "  %-24s %-5s %s timeout=%dms annotations=%s pinned=%zu%s\n",
+            name.c_str(), kind, disabled ? "disabled" : "enabled", timeout,
+            trusted ? "trusted" : "untrusted", pinned, auth);
     }
     return 0;
 }

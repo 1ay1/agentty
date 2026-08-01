@@ -20,6 +20,7 @@
 #include <mcp/cap/process.hpp>   // mcp::cap::ChildProcess (portable spawn)
 
 #include "agentty/domain/conversation.hpp"  // agentty::Message, Role
+#include "agentty/util/base64.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"  // read_file/write_file + path gates
 #include "agentty/tool/util/sandbox.hpp"     // sandbox::run_argv/run_shell_command
 #include "agentty/tool/util/subprocess.hpp"  // SubprocessResult
@@ -36,29 +37,44 @@ namespace {
 [[nodiscard]] acp::List<acp::ContentBlock> prompt_blocks_from(const Request& req) {
     acp::List<acp::ContentBlock> out;
 
+    auto has_image = [](const agentty::Message& m) {
+        return std::any_of(m.images.begin(), m.images.end(),
+                           [](const agentty::ImageContent& image) {
+                               return !image.bytes.empty();
+                           });
+    };
+
     std::size_t user_index = req.messages.size();
     for (std::size_t i = req.messages.size(); i-- > 0;) {
         const auto& m = req.messages[i];
         if (m.role == agentty::Role::User && !m.proactive_context
-            && !m.text.empty()) {
+            && (!m.text.empty() || has_image(m))) {
             user_index = i;
             break;
         }
     }
 
-    auto append_text = [&out](const std::string& text) {
-        if (text.empty()) return;
-        acp::TextContent t;
-        t.text = text;
-        out.emplace_back(std::move(t));
+    auto append_message = [&out](const agentty::Message& message) {
+        if (!message.text.empty()) {
+            acp::TextContent text;
+            text.text = message.text;
+            out.emplace_back(std::move(text));
+        }
+        for (const auto& image : message.images) {
+            if (image.bytes.empty()) continue;
+            acp::ImageContent block;
+            block.data = agentty::util::base64_encode(image.bytes);
+            block.mimeType = image.media_type.empty() ? "image/png" : image.media_type;
+            out.emplace_back(std::move(block));
+        }
     };
 
     if (user_index < req.messages.size()) {
-        append_text(req.messages[user_index].text);
+        append_message(req.messages[user_index]);
         for (std::size_t i = user_index + 1; i < req.messages.size(); ++i) {
             const auto& m = req.messages[i];
             if (m.role == agentty::Role::User && m.proactive_context)
-                append_text(m.text);
+                append_message(m);
         }
     }
 
@@ -337,6 +353,7 @@ ExternalAcpBackend::ensure_session_(const Request& req, std::optional<TurnError>
 
     acp::NewSessionParams np;
     np.cwd = opts_.cwd;
+    np.mcpServers = opts_.mcp_servers;
 
     try {
         auto fut = conn_->session_new(np);
@@ -537,11 +554,12 @@ struct AgentProcessHolder {
                    std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(10ms);
 
-            // 3. Force-kill a child that ignored the EOF. child->shutdown()
-            //    escalates to SIGTERM/TerminateProcess and reaps; either way it
-            //    closes the child's stdout, which is what unblocks the reader.
-            //    Idempotent, so the later child.reset() is a no-op on the proc.
-            if (child->alive()) child->shutdown();
+            // 3. Reap/terminate while deliberately retaining the parent read
+            //    stream object. The transport reader may currently be blocked
+            //    inside that stream; destroying it here races the reader. The
+            //    ChildProcess::terminate seam kills the child (closing its
+            //    stdout) but leaves the stream alive until after reader join.
+            child->terminate();
         }
 
         // 4. Reader-join is now guaranteed bounded: the child is dead (or
