@@ -113,6 +113,10 @@ struct ExternalAcpOptions {
     // don't persist, or for strict per-round isolation in tests).
     bool reuse_session = true;
 
+    // MCP servers delegated to the external agent through session/new. The
+    // delegated agent owns execution; agentty only observes its tool updates.
+    std::vector<acp::McpServer> mcp_servers;
+
     // Optional client-side capabilities the agent may call back into.
     AcpClientDelegate delegate;
 };
@@ -198,9 +202,25 @@ private:
 // it to tear the agent down (closes pipes, waits/kills the child).
 struct SpawnedAcpAgent {
     std::unique_ptr<acp::AgentConnection> connection;
-    // Opaque lifetime holder for the subprocess + transport threads. Kept type-
-    // erased so this header doesn't drag in the OS process headers.
+    // Opaque lifetime holder for the subprocess + transport threads. It is
+    // deliberately reset BEFORE connection: the reader calls into the
+    // connection engine and must be stopped/joined while that engine is alive.
     std::shared_ptr<void> process;
+
+    SpawnedAcpAgent() = default;
+    SpawnedAcpAgent(std::unique_ptr<acp::AgentConnection> conn,
+                    std::shared_ptr<void> holder)
+        : connection(std::move(conn)), process(std::move(holder)) {}
+    SpawnedAcpAgent(SpawnedAcpAgent&&) noexcept = default;
+    SpawnedAcpAgent& operator=(SpawnedAcpAgent&&) noexcept = default;
+    SpawnedAcpAgent(const SpawnedAcpAgent&) = delete;
+    SpawnedAcpAgent& operator=(const SpawnedAcpAgent&) = delete;
+    ~SpawnedAcpAgent() { reset(); }
+
+    void reset() noexcept {
+        process.reset();
+        connection.reset();
+    }
 
     [[nodiscard]] bool ok() const noexcept { return connection != nullptr; }
 };

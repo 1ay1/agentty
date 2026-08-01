@@ -4,6 +4,7 @@
 #include "agentty/tool/mcp_tools_bridge.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -92,178 +93,154 @@ namespace {
 // into ToolOutput. The host-coupled SHELLS (remember/forget/wipe/todo/skill/
 // search_docs/task) are backed by agentty adapters injected via HostServices.
 // mcp-cpp is the SOLE source of truth for tools — there is no native path.
-std::vector<ToolDef> build_registry() {
-    std::vector<ToolDef> r = build_mcp_tool_defs();
+std::vector<ToolDef> build_native_registry() {
+    return build_mcp_tool_defs();
+}
 
-    // ── MCP capability providers (essay §2/§10) ──────────────────────────
-    // Connect to any configured MCP servers and append their tools as plain
-    // ToolDefs — the model can't tell them from local tools. LAZY + OPT-IN:
-    // with no .agentty/mcp.json this is a single stat() returning {}, so a
-    // user who doesn't use MCP pays nothing at startup. The connection pool
-    // (spawned server processes + transports) must outlive every synthesized
-    // tool's execute() closure, so it's parked in a function-local static
-    // with the same lifetime as the registry itself.
-    if (mcp::mcp_config_present()) {
-        static mcp::PoolHandle s_pool;       // process-lifetime keep-alive
-        auto mcp_tools = mcp::mcp_tools(s_pool);
-        for (auto& t : mcp_tools) r.push_back(std::move(t));
-    }
-
-    return r;
+// Connect external MCP exactly once, on first catalog access. The returned
+// ToolDefs are not made part of the immutable native baseline: every later
+// generation is rebuilt from the MCP pool's current authoritative snapshot.
+std::vector<ToolDef> connect_initial_mcp() {
+    if (!mcp::mcp_config_present()) return {};
+    static mcp::PoolHandle s_pool;
+    return mcp::mcp_tools(s_pool);
 }
 
 } // namespace
 
-const std::vector<ToolDef>& registry() {
-    static const std::vector<ToolDef> r = build_registry();
+const std::vector<ToolDef>& native_registry() {
+    static const std::vector<ToolDef> r = build_native_registry();
     return r;
 }
 
-// Process-wide name → ToolDef* index, built once on first access.
-// Replaces the prior O(N) linear scan in `find()` with a hash-table
-// hit. With N=16 the absolute speedup is small (~50 ns vs ~5 ns), but
-// the dispatch path runs on every model tool call, every retry,
-// every permission prompt — keeping it constant-time is the right
-// shape for an agent loop. Stored alongside the registry so both
-// share the same lifetime + initialisation order.
-//
-// The map keys are `std::string` (owning) rather than `string_view`
-// to insulate the map from reallocations of the underlying vector.
-// In practice the vector never grows after init, but std::string keys
-// are the safer default and the lookup cost is identical (heterogeneous
-// `find` lets `string_view` callers query without allocating).
 namespace {
-const std::unordered_map<std::string, const ToolDef*>& index() {
-    static const std::unordered_map<std::string, const ToolDef*> m = []{
-        const auto& r = registry();
-        std::unordered_map<std::string, const ToolDef*> out;
-        out.reserve(r.size());
-        for (const auto& t : r) out.emplace(t.name.value, &t);
-        return out;
-    }();
-    return m;
-}
-} // namespace
-
-namespace detail { const ToolDef* find_live_mcp(std::string_view name); }
-
-const ToolDef* find(std::string_view name) {
-    const auto& m = index();
-    if (auto it = m.find(std::string{name}); it != m.end()) return it->second;
-    // Live fallback: an MCP server may have advertised a NEW tool after
-    // startup via tools/list_changed, so it isn't in the static index. The
-    // wire_tools() snapshot owns stable storage for those; search it.
-    if (const auto* td = detail::find_live_mcp(name)) return td;
-    return nullptr;
-}
-
-namespace {
-// Process-wide snapshot of (static registry ∪ live MCP tools), rebuilt only
-// when the MCP generation moves (a *_list_changed notification).
-//
-// ── Why snapshots are IMMORTAL ───────────────────────────────────────────
-// `find()` hands out a `const ToolDef*` into a snapshot, and `wire_tools()`
-// hands out a `const std::vector<ToolDef>&` — both with the cache mutex
-// DROPPED on return (it can't be held across a tool dispatch, which for an
-// MCP tool blocks on a network round-trip up to the call timeout). A naive
-// rebuild that `clear()`ed and refilled one vector would free the storage a
-// concurrent dispatch still points into → use-after-free.
-//
-// Instead each generation is an independent, never-mutated
-// `shared_ptr<const Snapshot>`. A rebuild constructs a NEW snapshot and
-// swaps `current` to point at it; the old snapshot stays alive in `retired`
-// for the process lifetime, so every pointer/reference ever handed out
-// remains valid forever. Tool snapshots are tiny (a few dozen ToolDefs) and
-// rebuilds happen at most once per `tools/list_changed`, so retaining them
-// costs negligible memory and buys lock-free, race-free lifetime for the
-// O(60 s) dispatch window.
+// Published snapshots are immutable and retained for process lifetime because
+// dispatch resolves a ToolDef pointer once, drops the cache lock, then may run
+// for minutes. Retention prevents a concurrent tools/list_changed refresh from
+// invalidating that pointer.
 struct Snapshot {
-    std::vector<ToolDef>                            tools;
+    std::vector<ToolDef> tools;
     std::unordered_map<std::string, const ToolDef*> idx;
-    bool                                            has_live = false;
 };
 
 struct WireCache {
-    std::mutex                              mu;
-    unsigned long                          gen   = static_cast<unsigned long>(-1);
-    bool                                   built = false;
-    std::shared_ptr<const Snapshot>        current;          // latest published
-    std::vector<std::shared_ptr<const Snapshot>> retired;    // keep-alive graveyard
+    std::mutex mu;
+    unsigned long generation = static_cast<unsigned long>(-1);
+    bool connected = false;
+    std::vector<ToolDef> initial_mcp;
+    std::shared_ptr<const Snapshot> current;
+    std::vector<std::shared_ptr<const Snapshot>> retired;
 };
+
 WireCache& wire_cache() { static WireCache c; return c; }
 
-// Rebuild the merged snapshot if MCP's generation moved. Returns the snapshot
-// to use (current), or nullptr when there are no live MCP tools (caller falls
-// back to the immortal static registry()). The returned shared_ptr keeps the
-// snapshot alive for as long as the caller holds it.
 std::shared_ptr<const Snapshot> refresh_wire_cache_locked(WireCache& c) {
-    const unsigned long g = mcp::mcp_generation();
-    if (c.built && c.gen == g) return c.current;
-    c.gen   = g;
-    c.built = true;
-
-    // Live MCP set (already namespaced, includes the generic resource/prompt
-    // tools). At generation 0 this equals what the static registry already
-    // captured, so there's nothing to merge — the registry IS the wire set.
-    auto live = (g == 0) ? std::vector<ToolDef>{} : mcp::mcp_tools_live();
-    if (live.empty()) {
-        // Retire whatever was current; publish "no live snapshot".
-        if (c.current) c.retired.push_back(c.current);
-        c.current.reset();
-        return nullptr;
+    if (!c.connected) {
+        c.initial_mcp = connect_initial_mcp();
+        c.connected = true;
     }
 
-    auto snap = std::make_shared<Snapshot>();
-    const auto& base = registry();
-    std::unordered_map<std::string, std::size_t> live_names;
-    for (std::size_t i = 0; i < live.size(); ++i) live_names.emplace(live[i].name.value, i);
-    // Carry over static tools; drop any superseded by a live MCP tool of the
-    // same name (so a re-listed server replaces, never duplicates).
-    for (const auto& t : base) {
-        if (live_names.contains(t.name.value)) continue;
-        snap->tools.push_back(t);
-    }
-    for (auto& t : live) snap->tools.push_back(std::move(t));
-    snap->idx.reserve(snap->tools.size());
-    for (const auto& t : snap->tools) snap->idx.emplace(t.name.value, &t);
-    snap->has_live = true;
+    const unsigned long generation = mcp::mcp_generation();
+    if (c.current && c.generation == generation) return c.current;
 
-    // Publish: retire the old snapshot (never freed — a dispatch may still
-    // hold a pointer into it) and swap current to the new one.
+    std::vector<ToolDef> external = generation == 0
+        ? c.initial_mcp
+        : mcp::mcp_tools_live();
+
+    auto next = std::make_shared<Snapshot>();
+    next->tools.reserve(native_registry().size() + external.size());
+    next->tools.insert(next->tools.end(), native_registry().begin(), native_registry().end());
+
+    // External names are stable and namespaced, but still reject duplicates
+    // defensively rather than sending ambiguous schemas to a model provider.
+    std::unordered_map<std::string, bool> names;
+    names.reserve(next->tools.capacity());
+    for (const auto& tool : next->tools) names.emplace(tool.name.value, true);
+    for (auto& tool : external) {
+        if (!names.emplace(tool.name.value, true).second) continue;
+        next->tools.push_back(std::move(tool));
+    }
+
+    next->idx.reserve(next->tools.size());
+    for (const auto& tool : next->tools)
+        next->idx.emplace(tool.name.value, &tool);
+
     if (c.current) c.retired.push_back(c.current);
-    c.current = snap;
+    c.current = std::move(next);
+    c.generation = generation;
     return c.current;
 }
 } // namespace
 
-namespace detail {
-const ToolDef* find_live_mcp(std::string_view name) {
-    auto& c = wire_cache();
-    std::shared_ptr<const Snapshot> snap;
+const std::vector<ToolDef>& registry() { return wire_tools(); }
+
+const ToolDef* find(std::string_view name) {
+    auto& cache = wire_cache();
+    std::shared_ptr<const Snapshot> snapshot;
     {
-        std::lock_guard<std::mutex> lk(c.mu);
-        snap = refresh_wire_cache_locked(c);
+        std::lock_guard<std::mutex> lock(cache.mu);
+        snapshot = refresh_wire_cache_locked(cache);
     }
-    if (!snap) return nullptr;
-    // snap is immortal; the returned pointer outlives any concurrent rebuild.
-    if (auto it = snap->idx.find(std::string{name}); it != snap->idx.end())
+    if (auto it = snapshot->idx.find(std::string{name}); it != snapshot->idx.end())
         return it->second;
     return nullptr;
 }
-} // namespace detail
 
 const std::vector<ToolDef>& wire_tools() {
-    auto& c = wire_cache();
-    std::shared_ptr<const Snapshot> snap;
+    auto& cache = wire_cache();
+    std::shared_ptr<const Snapshot> snapshot;
     {
-        std::lock_guard<std::mutex> lk(c.mu);
-        snap = refresh_wire_cache_locked(c);
+        std::lock_guard<std::mutex> lock(cache.mu);
+        snapshot = refresh_wire_cache_locked(cache);
     }
-    // The snapshot is immortal, so handing out a reference into its `tools`
-    // is safe even though the cache mutex is no longer held. Fall back to the
-    // immortal static registry() when there are no live MCP tools.
-    if (snap) return snap->tools;
-    return registry();
+    return snapshot->tools;
+}
+
+std::vector<const ToolDef*> select_wire_tools(
+    std::string_view query, std::size_t max_external) {
+    const auto& catalog = wire_tools();
+    std::vector<const ToolDef*> selected;
+    std::vector<std::pair<int, const ToolDef*>> candidates;
+    selected.reserve(catalog.size());
+
+    std::string q;
+    q.reserve(query.size());
+    for (unsigned char c : query)
+        q.push_back(std::isalnum(c) ? static_cast<char>(std::tolower(c)) : ' ');
+    std::vector<std::string> terms;
+    for (std::size_t pos = 0; pos < q.size();) {
+        while (pos < q.size() && q[pos] == ' ') ++pos;
+        const auto begin = pos;
+        while (pos < q.size() && q[pos] != ' ') ++pos;
+        if (pos - begin >= 2) terms.emplace_back(q.substr(begin, pos - begin));
+    }
+
+    for (const auto& tool : catalog) {
+        if (tool.origin == ToolOrigin::Native || tool.always_expose) {
+            selected.push_back(&tool);
+            continue;
+        }
+        std::string haystack = tool.name.value + " " + tool.origin_id + " " + tool.description;
+        std::ranges::transform(haystack, haystack.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        int score = 0;
+        for (const auto& term : terms) {
+            if (tool.name.value.find(term) != std::string::npos) score += 8;
+            if (tool.origin_id.find(term) != std::string::npos) score += 5;
+            if (haystack.find(term) != std::string::npos) score += 2;
+        }
+        candidates.emplace_back(score, &tool);
+    }
+
+    if (candidates.size() <= max_external) {
+        for (const auto& [_, tool] : candidates) selected.push_back(tool);
+        return selected;
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (std::size_t i = 0; i < max_external; ++i)
+        selected.push_back(candidates[i].second);
+    return selected;
 }
 
 unsigned long mcp_generation() noexcept {

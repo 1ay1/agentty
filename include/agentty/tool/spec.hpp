@@ -136,7 +136,12 @@ enum class Kind : std::uint8_t {
     Read,
     Edit,
     Write,
+    Move,
+    Remove,
     Bash,
+    ProcessStart,
+    ProcessPoll,
+    ProcessStop,
     Grep,
     Glob,
     ListDir,
@@ -144,10 +149,14 @@ enum class Kind : std::uint8_t {
     WebFetch,
     WebSearch,
     FindDefinition,
+    FindReferences,
     Diagnostics,
+    Test,
     GitStatus,
     GitDiff,
     GitLog,
+    GitShow,
+    GitBlame,
     GitCommit,
     Remember,
     Forget,
@@ -164,7 +173,12 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"read",            Kind::Read,           {Effect::ReadFs},                     false,   detail::sec{20},   80000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"edit",            Kind::Edit,           {Effect::ReadFs, Effect::WriteFs},    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
-    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only matches log-stream usage
+    ToolSpec{"move",            Kind::Move,           {Effect::ReadFs, Effect::WriteFs},    false,   detail::sec{20},   4000,   ToolSpec::TruncStrategy::Head},
+    ToolSpec{"remove",          Kind::Remove,         {Effect::ReadFs, Effect::WriteFs},    false,   detail::sec{20},   4000,   ToolSpec::TruncStrategy::Head},
+    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"process_start",   Kind::ProcessStart,   {Effect::Exec},                       false,   detail::sec{30},   4000,   ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"process_poll",    Kind::ProcessPoll,    {},                                   false,   detail::sec{5},    30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"process_stop",    Kind::ProcessStop,    {Effect::Exec},                       false,   detail::sec{10},   30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only matches log-stream usage
     ToolSpec{"grep",            Kind::Grep,           {Effect::ReadFs},                     false,   detail::sec{45},   30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"glob",            Kind::Glob,           {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"list_dir",        Kind::ListDir,        {Effect::ReadFs},                     false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::Head},
@@ -172,10 +186,14 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"web_fetch",       Kind::WebFetch,       {Effect::Net},                        false,   detail::sec{30},   30000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"web_search",      Kind::WebSearch,      {Effect::Net},                        false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::HeadTail},
-    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only
+    ToolSpec{"find_references", Kind::FindReferences, {Effect::ReadFs},                     false,   detail::sec{30},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"test",            Kind::Test,           {Effect::Exec},                       false,   detail::sec{0},    40000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only
     ToolSpec{"git_status",      Kind::GitStatus,      {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},  // diffs can be big; bigger budget
     ToolSpec{"git_log",         Kind::GitLog,         {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"git_show",        Kind::GitShow,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"git_blame",       Kind::GitBlame,       {Effect::ReadFs},                     false,   detail::sec{20},   40000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30},   0,      ToolSpec::TruncStrategy::Head},   // pre-commit hooks can be slow; output stays small
     // Memory tools — append/remove records in ~/.agentty/memory.jsonl (user)
     // or <workspace>/.agentty/memory.jsonl (project). Loaded back into the
@@ -325,11 +343,12 @@ static_assert(all_names_unique(), "tool catalog has duplicate names");
 // `name_of(kind)` is total.
 consteval bool kinds_bijective() {
     constexpr Kind kAll[] = {
-        Kind::Read, Kind::Edit, Kind::Write, Kind::Bash,
+        Kind::Read, Kind::Edit, Kind::Write, Kind::Move, Kind::Remove,
+        Kind::Bash, Kind::ProcessStart, Kind::ProcessPoll, Kind::ProcessStop,
         Kind::Grep, Kind::Glob, Kind::ListDir, Kind::Todo,
-        Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition,
-        Kind::Diagnostics, Kind::GitStatus, Kind::GitDiff,
-        Kind::GitLog, Kind::GitCommit,
+        Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition, Kind::FindReferences,
+        Kind::Diagnostics, Kind::Test, Kind::GitStatus, Kind::GitDiff,
+        Kind::GitLog, Kind::GitShow, Kind::GitBlame, Kind::GitCommit,
         Kind::Remember, Kind::Forget,
         Kind::Wipe,
         Kind::Task,
@@ -376,7 +395,9 @@ static_assert(lookup("nonexistent") == nullptr);
 consteval bool only_known_exec_tools() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Exec)) continue;
-        if (s.name != "bash" && s.name != "diagnostics" && s.name != "task")
+        if (s.name != "bash" && s.name != "diagnostics" && s.name != "test"
+            && s.name != "process_start" && s.name != "process_stop"
+            && s.name != "task")
             return false;
     }
     return true;
@@ -404,8 +425,8 @@ static_assert(lookup("todo")->effects.empty());
 // Read-side tools must NOT have WriteFs / Net / Exec.
 consteval bool readonly_invariants() {
     constexpr std::string_view kReadOnly[] = {
-        "read","grep","glob","list_dir","find_definition","repo_map",
-        "git_status","git_diff","git_log",
+        "read","grep","glob","list_dir","find_definition","find_references","repo_map",
+        "git_status","git_diff","git_log","git_show","git_blame",
     };
     for (auto n : kReadOnly) {
         auto* s = lookup(n);
@@ -458,7 +479,8 @@ consteval bool other_tools_have_bounded_timeout() {
         // bash/diagnostics own their subprocess timeout; `task` owns its
         // budget via a bounded sub-agent turn count (no single syscall to
         // watchdog). All three set max_seconds=0 deliberately.
-        if (s.name == "bash" || s.name == "diagnostics" || s.name == "task")
+        if (s.name == "bash" || s.name == "diagnostics" || s.name == "test"
+            || s.name == "task")
             continue;
         if (s.max_seconds < seconds{1} || s.max_seconds > seconds{300}) return false;
     }

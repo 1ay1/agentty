@@ -108,6 +108,41 @@ static void test_build_body() {
     CHECK(in[2]["output"] == "file1\nfile2");
 }
 
+static void test_build_body_with_images() {
+    provider::Request req;
+    req.model = "gpt-5.4";
+
+    Message with_text;
+    with_text.role = Role::User;
+    with_text.text = "what is this?";
+    with_text.images.push_back(ImageContent{
+        .media_type = "image/png",
+        .bytes = std::string{"\x89PNG", 4},
+    });
+    req.messages.push_back(std::move(with_text));
+
+    // Image-only messages must not be discarded just because text is empty.
+    Message image_only;
+    image_only.role = Role::User;
+    image_only.images.push_back(ImageContent{
+        .media_type = "image/jpeg",
+        .bytes = std::string{"\xff\xd8\xff", 3},
+    });
+    req.messages.push_back(std::move(image_only));
+
+    const json body = cc::build_body_for_test(req);
+    const auto& in = body["input"];
+    CHECK(in.size() == 2);
+    CHECK(in[0]["content"].size() == 2);
+    CHECK(in[0]["content"][0]["type"] == "input_text");
+    CHECK(in[0]["content"][0]["text"] == "what is this?");
+    CHECK(in[0]["content"][1]["type"] == "input_image");
+    CHECK(in[0]["content"][1]["image_url"] == "data:image/png;base64,iVBORw==");
+    CHECK(in[1]["content"].size() == 1);
+    CHECK(in[1]["content"][0]["type"] == "input_image");
+    CHECK(in[1]["content"][0]["image_url"] == "data:image/jpeg;base64,/9j/");
+}
+
 // ── 2. SSE → Msg mapping ─────────────────────────────────────────────────────
 static void test_sse_text_and_usage() {
     std::vector<std::string> sse = {
@@ -322,8 +357,20 @@ static void test_sse_error_type_is_retryable() {
     }
 }
 
+static void test_http_error_details() {
+    CHECK(cc::format_http_error_for_test(
+        400, R"({"error":{"type":"invalid_request_error","message":"input is too long"}})")
+        == "invalid_request_error: input is too long");
+    CHECK(cc::format_http_error_for_test(
+        400, "event: error\ndata: {\"error\":\"context window exceeded\"}\n\n")
+        == "context window exceeded");
+    CHECK(cc::format_http_error_for_test(400, "plain edge rejection\n")
+        == "Codex backend returned HTTP 400: plain edge rejection");
+}
+
 int main() {
     test_build_body();
+    test_build_body_with_images();
     test_sse_text_and_usage();
     test_sse_tool_call();
     test_sse_parallel_tool_calls_are_id_addressed();
@@ -333,6 +380,7 @@ int main() {
     test_build_input_replays_reasoning();
     test_sse_error();
     test_sse_error_type_is_retryable();
+    test_http_error_details();
     if (g_failures) { std::fprintf(stderr, "\n%d check(s) failed\n", g_failures); return 1; }
     std::puts("codex_responses_test: all checks passed");
     return 0;

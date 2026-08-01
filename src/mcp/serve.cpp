@@ -123,7 +123,7 @@ int serve_stdio() {
     // Register every native tool. The handler routes through the very same
     // DynamicDispatch the agent loop uses, so behaviour is identical.
     std::size_t n = 0;
-    for (const auto& def : tools::registry()) {
+    for (const auto& def : tools::native_registry()) {
         const std::string name = def.name.value;
         server.register_tool(spec_for(def),
             [name](const Json& args) -> ::mcp::CallToolResult {

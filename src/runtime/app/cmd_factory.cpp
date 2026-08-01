@@ -663,7 +663,15 @@ Cmd<Msg> launch_stream(Model& m) {
                     return n == "skill" || n == "remember"
                         || n == "forget" || n == "wipe_memory";
                 };
-                for (const auto& t : tools::wire_tools()) {
+                std::string_view newest_user;
+                for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+                    if (it->role == Role::User && !it->proactive_context) {
+                        newest_user = it->text;
+                        break;
+                    }
+                }
+                for (const auto* tool : tools::select_wire_tools(newest_user)) {
+                    const auto& t = *tool;
                     if (weak_model && weak_hidden(t.name.value)) continue;
                     req.tools.push_back({t.name.value, t.description, t.input_schema,
                                          t.eager_input_streaming});
@@ -701,7 +709,8 @@ Cmd<Msg> launch_stream(Model& m) {
     });
 }
 
-Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
+Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
+                  http::CancelTokenPtr cancel) {
     // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
     // mount, bash on a process that won't unblock) must not consume a slot
     // in the shared BG worker pool. With Cmd::task the pool's max workers
@@ -714,7 +723,8 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
     return Cmd<Msg>::task_isolated(
         [id = std::move(id),
          name = std::move(tool_name),
-         args = std::move(args)]
+         args = std::move(args),
+         cancel = std::move(cancel)]
         (std::function<void(Msg)> dispatch) {
             // Install a thread-local progress sink *before* dispatch so the
             // subprocess runner inside the tool can stream stdout+stderr to
@@ -725,6 +735,8 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args) {
                 [dispatch, id](std::string_view snapshot) {
                     dispatch(ToolExecProgress{id, std::string{snapshot}});
                 }};
+            agentty::tools::cancellation::Scope cancellation_scope{
+                [cancel] { return cancel && cancel->is_cancelled(); }};
             try {
                 auto result = tool::DynamicDispatch::execute(name.value, args);
                 if (result) {
@@ -776,6 +788,7 @@ namespace {
         }
     };
     take("path"); take("file_path"); take("filepath"); take("filename");
+    if (tc.name.value == "move") { take("source"); take("destination"); }
     const auto& n = tc.name.value;
     if (n == "grep" || n == "glob" || n == "list_dir") {
         take("dir"); take("directory"); take("root");
@@ -798,13 +811,12 @@ namespace {
 } // namespace
 
 SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
-    // Scheduling reads spec::sched_effects, NOT the raw permission effects:
-    // `task` gates as Exec (a subagent can run bash) but SCHEDULES as
-    // {ReadFs, Net} so a fan-out of subagents actually runs concurrently —
-    // the whole point of the tool. See spec.hpp::sched_effects.
+    // Scheduling metadata is carried by every ToolDef, including dynamic MCP
+    // tools. Resolve once against the generation-stable catalog; unknown tools
+    // still fail closed as Exec.
     auto effects_of = [](const ToolName& n) -> tools::EffectSet {
-        if (const auto* sp = tools::spec::lookup(n.value))
-            return tools::spec::sched_effects(*sp);
+        if (const auto* def = tools::find(n.value))
+            return def->scheduling_effects;
         return tools::EffectSet{{tools::Effect::Exec}};
     };
     tools::EffectSet active_effects;
@@ -1011,7 +1023,10 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // timer covers the full card lifetime (args streaming +
                 // execution). Preserve it as we move into Running.
                 tc.status = ToolUse::Running{tc.started_at(), {}};
-                cmds.push_back(run_tool(tc.id, tc.name, tc.args));
+                auto cancel = active_ctx(m.s.phase)
+                    ? active_ctx(m.s.phase)->cancel
+                    : http::CancelTokenPtr{};
+                cmds.push_back(run_tool(tc.id, tc.name, tc.args, std::move(cancel)));
 
                 // Tool wall-clock watchdog removed at user request.
                 // Tools now run for as long as their worker takes;

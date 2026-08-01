@@ -24,5 +24,14 @@ namespace {
 void set(Sink s)                       { g_sink = std::move(s); }
 void clear()                           { g_sink = nullptr; }
 void emit(std::string_view snapshot)   { if (g_sink) g_sink(snapshot); }
+Sink current()                         { return g_sink; }
 } // namespace progress
+
+namespace cancellation {
+namespace { thread_local Probe g_probe; }
+void set(Probe probe) { g_probe = std::move(probe); }
+void clear() { g_probe = nullptr; }
+Probe current() { return g_probe; }
+bool requested() { return g_probe && g_probe(); }
+} // namespace cancellation
 } // namespace agentty::tools

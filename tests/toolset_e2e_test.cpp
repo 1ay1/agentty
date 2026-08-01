@@ -31,6 +31,7 @@
 #include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
+#include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 
 namespace fs = std::filesystem;
@@ -119,6 +120,18 @@ int main() {
               "wire order: 'read' listed first");
     }
 
+    // The model can reach native and third-party MCP executors. No exception
+    // type is allowed to cross this noexcept process boundary.
+    {
+        tools::ToolDef throwing;
+        throwing.name.value = "throwing_test_tool";
+        throwing.execute = [](const json&) -> tools::ExecResult { throw 7; };
+        auto guarded = tool::DynamicDispatch::execute_with(
+            &throwing, throwing.name.value, json::object());
+        check(!guarded && guarded.error().kind == tools::ErrorKind::Unknown,
+              "dispatch: contains non-standard tool exceptions");
+    }
+
     const auto file = root / "src" / "hello.txt";
 
     // ── write → FileChange carried ──────────────────────────────────────
@@ -151,6 +164,24 @@ int main() {
               "edit: change landed on disk");
     }
 
+    // ── move / remove: safe shell-free filesystem mutations ─────────────
+    {
+        const auto renamed = root / "src" / "renamed.txt";
+        auto moved = run("move", {{"source", file.string()},
+                                  {"destination", renamed.string()}});
+        check(moved.has_value() && fs::exists(renamed) && !fs::exists(file),
+              "move: renames inside workspace");
+        auto restored = run("move", {{"source", renamed.string()},
+                                     {"destination", file.string()}});
+        check(restored.has_value() && fs::exists(file), "move: can restore path");
+        const auto disposable = root / "src" / "remove-me.txt";
+        write_file(disposable, "temporary\n");
+        auto removed = run("remove", {{"path", disposable.string()}});
+        check(removed.has_value() && !fs::exists(disposable), "remove: deletes a file");
+        auto root_remove = run("remove", {{"path", root.string()}, {"recursive", true}});
+        check(!root_remove.has_value(), "remove: refuses workspace root");
+    }
+
     // ── grep / glob / list_dir / find_definition ─────────────────────────
     write_file(root / "src" / "code.cpp",
                "int answer() { return 42; }\nint other() { return 7; }\n");
@@ -171,6 +202,12 @@ int main() {
         auto r = run("find_definition", {{"symbol", "answer"},
                                          {"path", root.string()}});
         check(has(r, "code.cpp"), "find_definition: locates the function");
+    }
+
+    {
+        auto r = run("find_references", {{"symbol", "answer"},
+                                         {"path", root.string()}});
+        check(has(r, "code.cpp"), "find_references: locates exact identifier uses");
     }
 
     // ── repo_map: ranked skeleton over the sandbox ────────────────────
@@ -213,6 +250,33 @@ int main() {
         check(body.find("[3;24r") == std::string::npos
                   && body.find(";24r") == std::string::npos,
               "bash: no stray CSI parameter bytes (the 'r r' glyphs)");
+    }
+
+    // ── focused tests + persistent process sessions ─────────────────────
+    {
+        auto tested = run("test", {{"command", "printf native-test-ok"}});
+        check(has(tested, "PASS") && has(tested, "native-test-ok"),
+              "test: runs an explicit focused command with pass status");
+
+        auto started = run("process_start", {{"command", "printf 'process-first\\n'; sleep 1; printf 'process-second\\n'; sleep 5"},
+                                              {"cwd", root.string()}});
+        check(started.has_value() && has(started, "proc-"), "process_start: returns session id");
+        if (started) {
+            const auto marker = started->text.find("proc-");
+            const auto end = started->text.find(' ', marker);
+            const std::string id = started->text.substr(marker, end - marker);
+            auto first = run("process_poll", {{"id", id}, {"wait_ms", 500}});
+            check(has(first, "process-first"), "process_poll: returns initial output");
+            auto second = run("process_poll", {{"id", id}, {"wait_ms", 2000}});
+            check(has(second, "process-second"), "process_poll: waits for new output");
+            check(second.has_value() && !has(second, "process-first"),
+                  "process_poll: does not repeat previously delivered output");
+            auto stopped = run("process_stop", {{"id", id}});
+            check(stopped.has_value(), "process_stop: terminates and reaps session");
+            check(stopped.has_value() && !has(stopped, "process-first")
+                                      && !has(stopped, "process-second"),
+                  "process_stop: does not replay output delivered by polls");
+        }
     }
 
     // ── workspace-root boundary: fs tools refuse escapes ─────────────────
@@ -420,6 +484,14 @@ int main() {
             " && git add -A && git commit -qm seed";
         check(std::system(setup.c_str()) == 0, "git: seed repo created");
 
+        // A narrowed workspace inside a parent repository must not let Git
+        // rediscover that parent and expose/commit sibling files.
+        tools::util::set_workspace_root(root / "src");
+        auto escaped = run("git_status", {{"path", (root / "src").string()}});
+        check(!escaped && escaped.error().kind == tools::ErrorKind::OutOfWorkspace,
+              "git_status: refuses repository rooted above workspace");
+        tools::util::set_workspace_root(root);
+
         write_file(root / "src" / "hello.txt", "changed content\n");
 
         auto st = run("git_status", {{"path", root.string()}});
@@ -435,6 +507,13 @@ int main() {
 
         auto lg = run("git_log", {{"path", root.string()}, {"count", 5}});
         check(has(lg, "e2e commit"), "git_log: shows the new commit");
+
+        auto shown = run("git_show", {{"ref", "HEAD"}, {"path", root.string()}});
+        check(has(shown, "e2e commit"), "git_show: shows commit metadata and patch");
+
+        auto blame = run("git_blame", {{"path", (root / "src" / "hello.txt").string()},
+                                        {"start_line", 1}, {"end_line", 1}});
+        check(has(blame, "changed content"), "git_blame: annotates a focused line range");
     } else {
         std::printf("skip: git not available — git_* section skipped\n");
     }
