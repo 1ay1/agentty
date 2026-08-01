@@ -347,7 +347,7 @@ Element provider_picker(const Model& m) {
         std::string note;
         maya::Color note_color = muted;
         if (p.id == "chatgpt") {
-            note = "ChatGPT (native OAuth)";
+            note = active ? "✓ accounts" : "ChatGPT (native OAuth)";
             note_color = success;
         } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
@@ -358,7 +358,7 @@ Element provider_picker(const Model& m) {
             // into deps().auth at startup + on every login. An empty header
             // means the user hasn't signed in — say so instead of lying "✓".
             if (!auth::is_empty(app::deps().auth)) {
-                note = "✓ signed in";
+                note = active ? "✓ signed in · accounts" : "✓ signed in";
                 note_color = success;
             } else {
                 note = "⚠ sign in";
@@ -426,6 +426,15 @@ Element provider_picker(const Model& m) {
         cfg.rows.push_back(std::move(row));
     }
 
+    const bool enter_opens_accounts = [&] {
+        if (picker->index < 0
+            || picker->index >= static_cast<int>(presets.size())) return false;
+        const auto& highlighted = presets[static_cast<std::size_t>(picker->index)];
+        return highlighted.id == active_id
+            && (highlighted.id == "chatgpt"
+                || highlighted.kind() == provider::Kind::Anthropic);
+    }();
+
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(h(
         text("✓", fg_of(success)), text(" ready  ", fg_dim(muted)),
@@ -433,7 +442,7 @@ Element provider_picker(const Model& m) {
     ).build());
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"Enter", "switch", 5},
+        {"Enter", enter_opens_accounts ? "accounts" : "switch", 5},
         {"^/", "models", 3},                       // cross-hint: model picker
         {"Esc", "close", 4},
     }));

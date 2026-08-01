@@ -351,13 +351,16 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             return done(std::move(m));
         },
         [&](ProviderPickerSelect) -> Step {
-            auto* p = pick::opened(m.ui.provider_picker);
+            // Capture the cursor before closing: assigning Closed destroys the
+            // OpenAt alternative, so keeping a pointer into it would dangle.
+            const auto* p = pick::opened(m.ui.provider_picker);
+            const int selected = p ? p->index : -1;
             m.ui.provider_picker = pick::Closed{};
-            if (!p || p->index < 0 || p->index >= n) return done(std::move(m));
+            if (selected < 0 || selected >= n) return done(std::move(m));
 
             // "Custom host…" row: hand off to the free-text endpoint modal
             // instead of selecting a preset.
-            if (p->index == custom_row) {
+            if (selected == custom_row) {
                 m.ui.login = ui::login::CustomHostInput{};
                 return done(std::move(m));
             }
@@ -365,12 +368,24 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             // An external ACP agent row: agentty drives the agent subprocess,
             // which does its OWN auth — no key resolution here. commit routes
             // the id through parse_selection → Kind::ExternalAcp.
-            if (const provider::AcpAgentSpec* agent = acp_row_at(p->index)) {
+            if (const provider::AcpAgentSpec* agent = acp_row_at(selected)) {
                 return commit_provider_switch(std::move(m), agent->id,
                                               auth::AuthHeader{}, agent->id);
             }
 
-            const auto& preset = presets[static_cast<std::size_t>(p->index)];
+            const auto& preset = presets[static_cast<std::size_t>(selected)];
+            const auto& active = provider::active();
+            const bool is_active_account_provider =
+                (preset.id == "chatgpt" && active.is_chatgpt())
+                || (preset.kind() == provider::Kind::Anthropic
+                    && active.kind == provider::Kind::Anthropic);
+            if (is_active_account_provider) {
+                // Enter on the active OAuth provider drills into its accounts.
+                // Account switching belongs to this provider-centric overlay,
+                // not the global command palette.
+                return agentty::app::update(std::move(m), Msg{OpenAccounts{}});
+            }
+
             const std::string spec{preset.id};
 
             // Resolve the new backend's credentials BEFORE committing the
