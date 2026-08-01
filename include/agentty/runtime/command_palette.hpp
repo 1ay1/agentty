@@ -29,7 +29,6 @@ enum class Command : std::uint8_t {
     CompactContext,
     RewindCheckpoint,
     OpenLogin,
-    SwitchAccount,
     SignOut,
     Quit,
 };
@@ -55,7 +54,6 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::CompactContext,"Compact context",    "Replace history with a structured summary"},
     CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn"},
     CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account"},
-    CommandDef{Command::SwitchAccount, "Switch account",       "Switch between saved accounts on the current provider"},
     CommandDef{Command::SignOut,       "Sign out",            "Remove saved credentials and re-open sign-in"},
     CommandDef{Command::Quit,          "Quit",               "Exit agentty"},
 };

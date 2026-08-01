@@ -459,7 +459,7 @@ struct UpdateTodos { std::vector<TodoItem> items; };
 
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
-// triggered explicitly from the command palette to switch accounts.
+// triggered explicitly in-app to sign in or add an account.
 // Same state-machine flavor as the other modals: closed → picking →
 // {oauth_code | api_key_input} → done. The async OAuth exchange runs
 // on a worker thread (Cmd::task) and reports back via LoginExchanged.
@@ -472,9 +472,11 @@ struct CloseLogin {};
 // palette ("Sign out"). Lets a user switch OAuth ↔ API key / accounts without
 // dropping to the CLI `agentty logout`.
 struct SignOut {};
-// Open the in-app account switcher for the ACTIVE provider. Lists every saved
-// account so the user can switch who they're signed in as without leaving
-// agentty. On first open with only a legacy single login, that login is
+// Open the in-app account switcher for the ACTIVE provider. Entering the
+// active Anthropic or ChatGPT row in the provider picker opens this list, so
+// provider and account selection stay in one provider-centric flow. It lists
+// every saved account so the user can switch who they're signed in as without
+// leaving agentty. On first open with only a legacy single login, that login is
 // auto-registered as "default" so it shows up as a switchable row.
 struct OpenAccounts {};
 // Move the highlight in the account switcher (wraps at both ends; the last
