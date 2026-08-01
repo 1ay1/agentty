@@ -18,8 +18,10 @@
 //      it gets to emit a real report on its last turn.
 //   D. a runtime stream works with empty request auth (ChatGPT/local providers).
 //   E. a silently empty completion is retried instead of accepted as success.
+//   F. cancellation interrupts provider retry backoff immediately.
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -96,6 +98,9 @@ void emit_tool_call(const provider::EventSink& sink, const std::string& id,
 void emit_finish(const provider::EventSink& sink,
                  StopReason r = StopReason::EndTurn) {
     sink(Msg{msg::StreamMsg{StreamFinished{r}}});
+}
+void emit_error(const provider::EventSink& sink, std::string message) {
+    sink(Msg{msg::StreamMsg{StreamError{.message = std::move(message)}}});
 }
 
 // Did the runner ever hand this completion a wrap-up nudge? The nudge is the
@@ -224,6 +229,25 @@ int main() {
         auto out = run_task("recover from a dropped response");
         check(!out.is_error && has(out.text, "RECOVERED_AFTER_EMPTY"),
               "E: silently empty completion is retried");
+    }
+
+    // ── F. Cancellation interrupts retry backoff. ────────────────────────
+    {
+        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        tools::cancellation::set([cancelled] { return cancelled->load(); });
+        install_scripted_stream([cancelled](int, const provider::Request&,
+                                            const provider::EventSink& sink) {
+            emit_error(sink, "temporary network failure");
+            cancelled->store(true);
+        });
+        const auto began = std::chrono::steady_clock::now();
+        auto out = run_task("cancel during retry backoff");
+        const auto elapsed = std::chrono::steady_clock::now() - began;
+        tools::cancellation::clear();
+        check(out.is_error && has(out.text, "cancelled while waiting to retry"),
+              "F: cancellation returns an actionable retry error");
+        check(elapsed < std::chrono::milliseconds(500),
+              "F: cancellation does not wait through retry backoff");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
