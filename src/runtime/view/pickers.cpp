@@ -347,8 +347,8 @@ Element provider_picker(const Model& m) {
         std::string note;
         maya::Color note_color = muted;
         if (p.id == "chatgpt") {
-            note = active ? "✓ accounts" : "ChatGPT (native OAuth)";
-            note_color = success;
+            note = active ? "manage accounts" : "ChatGPT (native OAuth)";
+            note_color = active ? info : muted;
         } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
             note_color = info;

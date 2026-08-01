@@ -30,7 +30,11 @@ namespace agentty::ui::login {
 
 struct Closed {};
 
-struct Picking {};
+// Optional provider context keeps an "add another account" flow scoped to
+// the provider it came from. Empty means the general first-run/sign-in menu.
+struct Picking {
+    std::string provider;
+};
 
 struct OAuthCode {
     agentty::auth::PkceVerifier verifier;
@@ -88,14 +92,14 @@ struct AccountRow {
 // provider so the user can switch who they're signed in as — or add a new
 // one / remove one — without ever leaving agentty. Selecting a row that
 // isn't the active one swaps that account's credential into the live store;
-// the last row is always "+ Add another account…" which drops into the
-// normal Picking flow, tagged so the resulting login is snapshotted under a
-// fresh name.
+// last row is always "+ Add another account…". ChatGPT launches its native
+// OAuth flow directly; Anthropic stays scoped to its API-key/OAuth choices.
 struct AccountList {
     std::string             provider;       // provider these rows belong to
     std::string             provider_label; // display name for the header
     std::vector<AccountRow> rows;           // saved accounts (+ synthesized add row is index == rows.size())
     int                     cursor = 0;      // 0..rows.size() (last = add-new)
+    std::string             confirm_remove; // label awaiting a second Del/d press
 };
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,

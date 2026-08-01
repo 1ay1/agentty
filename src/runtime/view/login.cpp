@@ -151,12 +151,18 @@ Element url_panel(std::string_view url) {
             | bcolor(code_path)).build();
 }
 
-Element panel_picking(bool failed, std::string_view fail_msg) {
+Element panel_picking(std::string_view provider,
+                      bool failed, std::string_view fail_msg) {
+    const bool anthropic_only = (provider == "anthropic");
     std::vector<Element> rows;
-    rows.push_back(text("Sign in to agentty", fg_bold(fg)));
+    rows.push_back(text(anthropic_only ? "Add an Anthropic account"
+                                       : "Sign in to agentty",
+                        fg_bold(fg)));
     rows.push_back(body_text(
-        "Bring your own model. Pick how you want to connect — you can "
-        "change this any time from the command palette.",
+        anthropic_only
+            ? "Choose how to authenticate this new Anthropic account."
+            : "Bring your own model. Pick how you want to connect — you can "
+              "change this any time from the provider picker.",
         fg_dim(muted)));
     rows.push_back(text(""));
     if (failed) {
@@ -188,21 +194,23 @@ Element panel_picking(bool failed, std::string_view fail_msg) {
                      body_text("use your Claude Pro / Max subscription",
                                fg_dim(muted))).build());
     rows.push_back(text(""));
-    rows.push_back(h(text("3) ", fg_bold(highlight)),
-                     text("Sign in with ChatGPT", fg_bold(fg))).build());
-    rows.push_back(h(text("   ", fg_of(fg)),
-                     body_text("use your ChatGPT Plus / Pro (GPT-5 Codex)",
-                               fg_dim(muted))).build());
-    rows.push_back(text(""));
-    // Other backends (OpenAI, Groq, OpenRouter, Ollama, …) authenticate via
-    // an env var, not this modal. Point first-run users who don't have a
-    // Claude account at the provider picker so they're never stuck here.
-    rows.push_back(body_text(
-        "Using OpenAI, Groq, OpenRouter or a local Ollama model instead? "
-        "Press Esc, then Ctrl-P to pick it — you can paste its key right there.",
-        fg_dim(muted)));
-    rows.push_back(text(""));
-    rows.push_back(key_hints({{"1/2/3", "choose"}, {"Esc", "close"}}));
+    if (!anthropic_only) {
+        rows.push_back(h(text("3) ", fg_bold(highlight)),
+                         text("Sign in with ChatGPT", fg_bold(fg))).build());
+        rows.push_back(h(text("   ", fg_of(fg)),
+                         body_text("use your ChatGPT Plus / Pro (GPT-5 Codex)",
+                                   fg_dim(muted))).build());
+        rows.push_back(text(""));
+        // Other backends authenticate from their provider row. Keep this
+        // cross-hint out of the scoped Anthropic add-account continuation.
+        rows.push_back(body_text(
+            "Using OpenAI, Groq, OpenRouter or a local Ollama model instead? "
+            "Press Esc, then Ctrl-P to pick it — you can paste its key right there.",
+            fg_dim(muted)));
+        rows.push_back(text(""));
+    }
+    rows.push_back(key_hints({{anthropic_only ? "1/2" : "1/2/3", "choose"},
+                              {"Esc", "close"}}));
     return v(std::move(rows)).build();
 }
 
@@ -328,11 +336,12 @@ Element panel_custom_host(const login::CustomHostInput& s) {
 // row is inverse-styled; the active account carries a ✓.
 Element panel_account_list(const login::AccountList& s) {
     std::vector<Element> rows;
-    rows.push_back(text("Switch " + s.provider_label + " account",
-                        fg_bold(fg)));
+    rows.push_back(text(s.provider_label + " accounts", fg_bold(fg)));
     rows.push_back(body_text(
-        "Pick who you're signed in as — switching is instant and never leaves "
-        "agentty. Delete removes a saved account.",
+        s.rows.empty()
+            ? "No saved accounts. Add one to sign in without leaving agentty."
+            : "The active account is marked ✓. Switching is instant; removing "
+              "an account requires confirmation.",
         fg_dim(muted)));
     rows.push_back(text(""));
 
@@ -340,9 +349,12 @@ Element panel_account_list(const login::AccountList& s) {
     for (int i = 0; i < add_row; ++i) {
         const auto& r = s.rows[static_cast<std::size_t>(i)];
         const bool sel = (i == s.cursor);
+        const bool confirming = (s.confirm_remove == r.label);
         std::string line = std::string(sel ? "› " : "  ")
                          + (r.active ? "✓ " : "  ") + r.label;
-        Style sty = sel ? Style{}.with_fg(fg).with_bold().with_inverse()
+        if (confirming) line += "  — press Del/d again to remove";
+        Style sty = confirming ? fg_bold(danger)
+                  : sel ? Style{}.with_fg(fg).with_bold().with_inverse()
                         : (r.active ? fg_bold(accent) : fg_of(fg));
         rows.push_back(text(line, sty));
     }
@@ -357,8 +369,9 @@ Element panel_account_list(const login::AccountList& s) {
     }
 
     rows.push_back(text(""));
-    rows.push_back(key_hints({{"↑↓", "move"}, {"Enter", "switch"},
-                              {"Del", "remove"}, {"Esc", "close"}}));
+    rows.push_back(key_hints({{"↑↓", "move"}, {"Enter", "select"},
+                              {"Del/d", s.confirm_remove.empty() ? "remove" : "confirm"},
+                              {"Esc", "close"}}));
     return v(std::move(rows)).build();
 }
 
@@ -372,7 +385,7 @@ Element login_modal(const Model& m) {
         if constexpr (std::same_as<T, login::Closed>) {
             return nothing();
         } else if constexpr (std::same_as<T, login::Picking>) {
-            return panel_picking(false, "");
+            return panel_picking(s.provider, false, "");
         } else if constexpr (std::same_as<T, login::OAuthCode>) {
             return panel_oauth_code(s);
         } else if constexpr (std::same_as<T, login::OAuthExchanging>) {
@@ -386,7 +399,7 @@ Element login_modal(const Model& m) {
         } else if constexpr (std::same_as<T, login::AccountList>) {
             return panel_account_list(s);
         } else if constexpr (std::same_as<T, login::Failed>) {
-            return panel_picking(true, s.message);
+            return panel_picking("", true, s.message);
         }
     }, m.ui.login);
 
