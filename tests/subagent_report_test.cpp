@@ -16,6 +16,8 @@
 //   B. writes prose at the end → report is exactly that final prose, clean.
 //   C. the wrap-up nudge fires before the cap so a model that DOES respond to
 //      it gets to emit a real report on its last turn.
+//   D. a runtime stream works with empty request auth (ChatGPT/local providers).
+//   E. a silently empty completion is retried instead of accepted as success.
 
 #include <atomic>
 #include <cstdio>
@@ -68,13 +70,10 @@ TaskOut run_task(const std::string& prompt) {
 using Script = std::function<void(int turn, const provider::Request&,
                                   const provider::EventSink&)>;
 
-void install_scripted_stream(Script script) {
+void install_scripted_stream(Script script, bool with_auth = true) {
     auto counter = std::make_shared<std::atomic<int>>(0);
     tools::subagent::Config cfg;
-    // Non-empty API key so available()/run() don't bail on empty auth. Any
-    // provider whose active().kind != Anthropic skips fresh_auth_header (which
-    // would touch disk); the scripted stream ignores req.auth entirely anyway.
-    cfg.auth  = auth::ApiKeyHeader{"sk-test-not-real"};
+    if (with_auth) cfg.auth = auth::ApiKeyHeader{"sk-test-not-real"};
     cfg.model = "test-model";
     cfg.stream = [counter, script](provider::Request req,
                                    provider::EventSink sink) {
@@ -195,6 +194,36 @@ int main() {
         (void)run_task("keep exploring forever");
         check(saw_nudge->load(),
               "C: a wrap-up nudge is delivered before the turn cap");
+    }
+
+    // ── D. Native/local provider streams do not require request auth. ──────
+    {
+        install_scripted_stream([](int, const provider::Request& req,
+                                   const provider::EventSink& sink) {
+            check(auth::is_empty(req.auth),
+                  "D: authless provider receives an empty request header");
+            emit_text(sink, "AUTHLESS_OK");
+            emit_finish(sink);
+        }, /*with_auth=*/false);
+        auto out = run_task("answer using the native provider");
+        check(!out.is_error && has(out.text, "AUTHLESS_OK"),
+              "D: task runs with native/local auth resolved by transport");
+    }
+
+    // ── E. Empty provider completion is retried. ─────────────────────────
+    {
+        install_scripted_stream([](int turn, const provider::Request&,
+                                   const provider::EventSink& sink) {
+            if (turn == 0) {
+                emit_finish(sink);  // no text, no tool, no StreamError
+            } else {
+                emit_text(sink, "RECOVERED_AFTER_EMPTY");
+                emit_finish(sink);
+            }
+        });
+        auto out = run_task("recover from a dropped response");
+        check(!out.is_error && has(out.text, "RECOVERED_AFTER_EMPTY"),
+              "E: silently empty completion is retried");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

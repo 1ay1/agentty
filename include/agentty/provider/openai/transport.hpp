@@ -153,11 +153,13 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // usage, [DONE]) without a network round-trip.
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
     std::string_view sse_bytes,
-    std::vector<std::string> known_tools = {});
+    std::vector<std::string> known_tools = {},
+    bool allow_memory_salvage = false);
 
 // Same, for the native Ollama /api/chat NDJSON path (feed_ndjson).
 [[nodiscard]] std::vector<Msg> parse_ndjson_for_test(
     std::string_view ndjson_bytes,
-    std::vector<std::string> known_tools = {});
+    std::vector<std::string> known_tools = {},
+    bool allow_memory_salvage = false);
 
 } // namespace agentty::provider::openai

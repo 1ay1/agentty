@@ -80,6 +80,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 [[nodiscard]] std::vector<Msg> parse_ndjson_for_test(
     std::string_view ndjson_bytes,
     std::vector<std::string> known_tools = {},
-    bool json_protocol = false);
+    bool json_protocol = false,
+    bool allow_memory_salvage = false);
 
 } // namespace agentty::provider::ollama

@@ -125,6 +125,13 @@ struct StreamCtx {
     bool        any_text_flushed = false;
     int         salvage_seq = 0;    // uniquifies synthesised salvage call ids
     std::vector<std::string> known_tools;  // tool names we may salvage to
+    // Memory tools are normally too destructive to infer from leaked JSON.
+    // The request setup enables only the operation the latest user explicitly
+    // asked for, so weak/local models can honor "remember this" without making
+    // unsolicited memory mutations possible.
+    bool allow_remember_salvage = false;
+    bool allow_forget_salvage = false;
+    bool allow_wipe_salvage = false;
 
     // Incremental JSON parse state for salvage.
     int  brace_depth = 0;           // nested {} depth in current JSON object
@@ -409,18 +416,15 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
     if (!known) return false;
 
-    // Tools we NEVER auto-run from a leaked-content guess. Weak local models
-    // reflexively emit these on greetings / small talk:
-    //   - remember/forget/wipe_memory: mutate the user's memory store; only
-    //     ever run on an EXPLICIT user request, never the model's initiative.
-    //   - skill: a meta-tool the model hallucinates from the catalog block in
-    //     its prompt (e.g. {"name":"skill","arguments":{"name":"greeting"}}),
-    //     which then fails "not found" and loops.
-    // Swallow the leaked JSON so no card is ever born (return true consumes it
-    // from the hold); surfacing it just to fail it flashes/loops (bad UX).
-    static constexpr std::string_view kNeverSalvage[] = {
-        "remember", "forget", "wipe_memory", "skill"};
-    for (auto t : kNeverSalvage) if (t == name) return true;
+    // Sensitive meta-tools are only salvaged when the latest user message
+    // explicitly requested that exact class of operation. This keeps the old
+    // greeting/small-talk safety gate while fixing weak models that can emit
+    // tools only as JSON-in-content: their explicit "remember this" calls used
+    // to be swallowed every time.
+    if (name == "remember" && !ctx.allow_remember_salvage) return true;
+    if (name == "forget" && !ctx.allow_forget_salvage) return true;
+    if (name == "wipe_memory" && !ctx.allow_wipe_salvage) return true;
+    if (name == "skill") return true;
 
     // arguments may be an object (qwen) or a JSON string (some templates).
     std::string args = "{}";
@@ -1373,6 +1377,30 @@ http::Headers build_request_headers(const AuthHeader& auth,
     return h;
 }
 
+// Infer only explicit memory-tool intent from the latest real user message.
+// This is a safety gate for JSON-in-content salvage, not a general NLP policy:
+// false negatives merely leave the call swallowed; false positives could mutate
+// memory, so keep the vocabulary narrow and action-specific.
+void set_memory_salvage_intent(StreamCtx& ctx, const Request& req) {
+    std::string text;
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == Role::User && !it->proactive_context) {
+            text = it->text;
+            break;
+        }
+    }
+    std::ranges::transform(text, text.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto has = [&](std::string_view s) { return text.find(s) != std::string::npos; };
+
+    ctx.allow_remember_salvage = has("remember") || has("don't forget")
+        || has("do not forget") || has("keep in mind") || has("from now on");
+    ctx.allow_forget_salvage = has("forget") || has("remove the memory")
+        || has("remove memory") || has("drop the memory");
+    ctx.allow_wipe_salvage = has("wipe memory") || has("wipe your memory")
+        || has("forget everything") || has("clean slate");
+}
+
 // ── Streaming entry point ────────────────────────────────────────────────────
 provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // Ollama and other local servers accept an empty key. Only error out when
@@ -1385,6 +1413,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
     StreamCtx ctx;
     ctx.sink = std::move(sink);
+    set_memory_salvage_intent(ctx, req);
     // Tools we advertised this turn — the salvage path only converts a
     // leaked-JSON "tool call" into a real one when it names one of these.
     ctx.known_tools.reserve(req.tools.size());
@@ -1831,10 +1860,14 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
 
 // ── Test harness ─────────────────────────────────────────────────────────────
 std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
-                                   std::vector<std::string> known_tools) {
+                                   std::vector<std::string> known_tools,
+                                   bool allow_memory_salvage) {
     std::vector<Msg> out;
     StreamCtx ctx;
     ctx.known_tools = std::move(known_tools);
+    ctx.allow_remember_salvage = allow_memory_salvage;
+    ctx.allow_forget_salvage = allow_memory_salvage;
+    ctx.allow_wipe_salvage = allow_memory_salvage;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     feed_sse(ctx, sse_bytes.data(), sse_bytes.size());
     // Mirror run_stream_sync's terminal guarantee: if [DONE] never arrived,
@@ -1852,10 +1885,14 @@ std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
 // run_stream_sync's terminal salvage/flush so a test observes the same Msg
 // sequence the live native path produces.
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
-                                       std::vector<std::string> known_tools) {
+                                       std::vector<std::string> known_tools,
+                                       bool allow_memory_salvage) {
     std::vector<Msg> out;
     StreamCtx ctx;
     ctx.known_tools = std::move(known_tools);
+    ctx.allow_remember_salvage = allow_memory_salvage;
+    ctx.allow_forget_salvage = allow_memory_salvage;
+    ctx.allow_wipe_salvage = allow_memory_salvage;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     feed_ndjson(ctx, ndjson_bytes.data(), ndjson_bytes.size());
     if (!ctx.terminated) {

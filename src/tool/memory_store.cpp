@@ -408,22 +408,21 @@ fs::path path_for(Scope s) {
         if (h.empty()) return {};
         return h / ".agentty" / "memory.jsonl";
     }
-    // Scope::Project — anchored on the workspace root so subprocess
-    // calls that cd around don't shift where memory lives.
-    //
-    // Degenerate-root guard: if workspace_root() couldn't resolve a
-    // real cwd at startup it falls back to fs::path{"/"}, and a
-    // remember call would then try to mkdir /.agentty — fails with
-    // EACCES for any non-root user and surfaces the unhelpful
-    // "failed to create directory '/.agentty': Permission denied"
-    // error. Treat root=="/" and other unwritable roots as if no
-    // project scope is available. append() then REFUSES the call with a
-    // guiding error rather than silently writing the fact to user scope —
-    // a silent promotion would leak a project fact into every OTHER
-    // workspace's system prompt (cross-workspace "memory bleed").
-    const auto& root = util::workspace_root();
-    if (root.empty()) return {};
-    if (root == fs::path{"/"}) return {};
+    // Scope::Project — normally anchored on the workspace root so subprocess
+    // calls that cd around don't shift where memory lives. `--workspace /` is
+    // the explicit "unrestricted tools" mode, though, not a claim that the
+    // user's project is the filesystem root. In that mode use agentty's own
+    // stable process cwd as the project identity. Without this distinction the
+    // remember tool advertised only user scope and every model-generated
+    // `scope:"project"` call failed, despite agentty being launched inside a
+    // perfectly writable repository.
+    fs::path root = util::workspace_root();
+    if (root == fs::path{"/"}) {
+        std::error_code ec;
+        auto cwd = fs::current_path(ec);
+        if (!ec) root = std::move(cwd);
+    }
+    if (root.empty() || root == fs::path{"/"}) return {};
     if (!dir_path_writable(root / ".agentty")) return {};
     return root / ".agentty" / "memory.jsonl";
 }
@@ -455,8 +454,8 @@ AppendResult append(Scope s, std::string_view text, AppendOptions opts) {
     auto p = path_for(s);
     Scope actual_scope = s;
     if (p.empty() && s == Scope::Project) {
-        // Project scope unavailable (workspace root == "/", unwritable, or
-        // unset). Do NOT silently fall back to user scope: a project fact
+        // Project scope unavailable (unresolvable/unwritable project cwd).
+        // Do NOT silently fall back to user scope: a project fact
         // promoted to user scope loads into EVERY other workspace's system
         // prompt — the cross-workspace "memory bleed" where a fact about
         // project A surfaces while you're working on project B. Refuse, and

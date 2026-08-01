@@ -780,6 +780,27 @@ static void test_sse_salvage_memory_tool_swallowed() {
     CHECK(joined_text(msgs).find('{') == std::string::npos);
 }
 
+// The same leaked-content shape is a legitimate tool call when the latest user
+// explicitly asked to remember something. Weak/local models often lack a
+// working structured tool channel; swallowing this path made remember fail
+// 100% of the time for them.
+static void test_sse_salvage_memory_tool_explicit_request() {
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"{\\\"name\\\": \\\"remember\\\", \\\"arguments\\\": "
+            "{\\\"text\\\": \\\"a fact\\\"}}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    auto msgs = oai::parse_sse_for_test(sse, {"remember", "read"},
+                                        /*allow_memory_salvage=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"text\":\"a fact\"}"});
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "remember");
+}
+
 // A leaked `skill` call (the meta-tool weak models hallucinate from the
 // catalog block on a greeting — {"name":"skill","arguments":{"name":...}})
 // must be SWALLOWED, never executed. Surfacing it spawns a "skill not found"
@@ -1021,6 +1042,7 @@ int main() {
     test_sse_salvage_two_sequential_calls();
     test_sse_salvage_function_key();
     test_sse_salvage_memory_tool_swallowed();
+    test_sse_salvage_memory_tool_explicit_request();
     test_sse_salvage_skill_swallowed();
 
     // Native Ollama /api/chat NDJSON path.

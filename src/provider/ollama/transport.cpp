@@ -112,6 +112,9 @@ struct StreamCtx {
     bool        any_structured_tool = false;
     int         salvage_seq     = 0;       // uniquifies salvaged call ids
     std::vector<std::string> known_tools;  // tool names we may salvage to
+    bool allow_remember_salvage = false;
+    bool allow_forget_salvage = false;
+    bool allow_wipe_salvage = false;
     std::string full_content;              // every content byte (rescue scan)
 
     // JSON-protocol mode (agent-zero style, very weak models). No native
@@ -375,10 +378,13 @@ void repair_arg_keys(const std::string& tool, json& args) {
     bool known = false;
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
     if (!known) return false;
-    // Never auto-run footgun tools from a leaked guess: swallow the JSON.
-    static constexpr std::string_view kNeverSalvage[] = {
-        "remember", "forget", "wipe_memory", "skill"};
-    for (auto t : kNeverSalvage) if (t == name) return true;
+    // Memory JSON is safe to salvage only for the exact operation the latest
+    // user explicitly requested. This preserves the unsolicited-mutation guard
+    // while making remember/forget work on models without native tool calls.
+    if (name == "remember" && !ctx.allow_remember_salvage) return true;
+    if (name == "forget" && !ctx.allow_forget_salvage) return true;
+    if (name == "wipe_memory" && !ctx.allow_wipe_salvage) return true;
+    if (name == "skill") return true;
 
     // Arguments under any of the accepted keys; default to {}.
     json args_obj = json::object();
@@ -1500,10 +1506,30 @@ std::string system_prompt() {
     return out;
 }
 
+void set_memory_salvage_intent(StreamCtx& ctx, const Request& req) {
+    std::string text;
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == Role::User && !it->proactive_context) {
+            text = it->text;
+            break;
+        }
+    }
+    std::ranges::transform(text, text.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto has = [&](std::string_view s) { return text.find(s) != std::string::npos; };
+    ctx.allow_remember_salvage = has("remember") || has("don't forget")
+        || has("do not forget") || has("keep in mind") || has("from now on");
+    ctx.allow_forget_salvage = has("forget") || has("remove the memory")
+        || has("remove memory") || has("drop the memory");
+    ctx.allow_wipe_salvage = has("wipe memory") || has("wipe your memory")
+        || has("forget everything") || has("clean slate");
+}
+
 // ── Streaming entry point ────────────────────────────────────────────────────
 provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     StreamCtx ctx;
     ctx.sink = std::move(sink);
+    set_memory_salvage_intent(ctx, req);
     // Salvage may only synthesise calls to tools we actually advertised.
     ctx.known_tools.reserve(req.tools.size());
     for (const auto& t : req.tools) ctx.known_tools.push_back(t.name);
@@ -1666,11 +1692,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
                                        std::vector<std::string> known_tools,
-                                       bool json_protocol) {
+                                       bool json_protocol,
+                                       bool allow_memory_salvage) {
     std::vector<Msg> out;
     StreamCtx ctx;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     ctx.known_tools = std::move(known_tools);
+    ctx.allow_remember_salvage = allow_memory_salvage;
+    ctx.allow_forget_salvage = allow_memory_salvage;
+    ctx.allow_wipe_salvage = allow_memory_salvage;
     ctx.json_protocol = json_protocol && !ctx.known_tools.empty();
     if (ctx.known_tools.empty()) { ctx.holding = false; ctx.salvage_eligible = false; }
     if (ctx.json_protocol) { ctx.holding = true; ctx.salvage_eligible = true; }
