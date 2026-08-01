@@ -523,18 +523,24 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
 
 class AgenttySubagentRunner final : public mt::SubagentRunner {
 public:
-    bool available() const override {
+    std::string unavailable_reason() const override {
         auto cfg = subagent::current();
+        if (!cfg.installed)
+            return "subagent runtime was not installed; restart agentty with the current executable";
+        if (cfg.model.empty())
+            return "no model is selected for the active provider";
         // Runtime dispatch is credential-aware itself: ChatGPT resolves its
         // native OAuth store per request and local providers need no auth at
         // all. Only the legacy direct-Anthropic fallback requires a non-empty
         // header here.
-        if (!cfg.installed || cfg.model.empty()
-            || (!cfg.stream && auth::is_empty(cfg.auth)))
-            return false;
+        if (!cfg.stream && auth::is_empty(cfg.auth))
+            return "no provider stream or fallback Anthropic credential is configured";
         if (subagent::current_depth() >= subagent::kMaxDepth)
-            return false;
-        return true;
+            return "subagent nesting depth limit reached (maximum "
+                 + std::to_string(subagent::kMaxDepth) + ")";
+        if (cancellation::requested())
+            return "cancelled before the subagent started";
+        return {};
     }
 
     std::string run(const mt::SubagentRequest& sreq, bool& is_error) override {
@@ -634,7 +640,17 @@ public:
                      + "/" + std::to_string(kMaxStreamRetries)
                      + " in " + std::to_string(wait_s) + "s (" + err + ")";
                 progress::emit(log);
-                std::this_thread::sleep_for(std::chrono::seconds(wait_s));
+                // Keep retry backoff responsive to Ctrl-C / turn cancellation
+                // instead of blocking the tool worker in one long sleep.
+                const auto retry_until = std::chrono::steady_clock::now()
+                                       + std::chrono::seconds(wait_s);
+                while (std::chrono::steady_clock::now() < retry_until) {
+                    if (cancellation::requested()) {
+                        is_error = true;
+                        return "subagent cancelled while waiting to retry: " + err;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
                 --turns;   // a retried completion doesn't consume budget
                 continue;
             }
