@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <unistd.h>   // getpid
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -56,8 +57,10 @@ int main() {
 
     // Write a temp mcp.json pointing at the example server, and aim the bridge
     // at it via AGENTTY_MCP_CONFIG.
-    auto tmp = fs::temp_directory_path() / "agentty_mcp_e2e";
-    std::error_code ec; fs::create_directories(tmp, ec);
+    // PID-unique so the suite stays hermetic under parallel CTest (-j).
+    auto tmp = fs::temp_directory_path() /
+               ("agentty_mcp_e2e_" + std::to_string(::getpid()));
+    std::error_code ec; fs::remove_all(tmp, ec); fs::create_directories(tmp, ec);
     auto cfg = tmp / "mcp.json";
     {
         std::ofstream f(cfg);
