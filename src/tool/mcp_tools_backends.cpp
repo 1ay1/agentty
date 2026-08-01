@@ -510,6 +510,13 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
     }
     pump(/*force=*/true);   // flush the throttled tail
 
+    // A transport can terminate without emitting StreamError (proxy closed the
+    // body, malformed SSE, native provider returned no usable events). Treat an
+    // entirely empty completion as retryable instead of accepting it as a
+    // successful one-turn subagent with no report.
+    if (err_out.empty() && asst.text.empty() && asst.tool_calls.empty())
+        err_out = "provider returned an empty completion";
+
     thread.messages.push_back(std::move(asst));
     return stop;
 }
@@ -518,7 +525,12 @@ class AgenttySubagentRunner final : public mt::SubagentRunner {
 public:
     bool available() const override {
         auto cfg = subagent::current();
-        if (!cfg.installed || cfg.model.empty() || auth::is_empty(cfg.auth))
+        // Runtime dispatch is credential-aware itself: ChatGPT resolves its
+        // native OAuth store per request and local providers need no auth at
+        // all. Only the legacy direct-Anthropic fallback requires a non-empty
+        // header here.
+        if (!cfg.installed || cfg.model.empty()
+            || (!cfg.stream && auth::is_empty(cfg.auth)))
             return false;
         if (subagent::current_depth() >= subagent::kMaxDepth)
             return false;
@@ -528,9 +540,10 @@ public:
     std::string run(const mt::SubagentRequest& sreq, bool& is_error) override {
         is_error = false;
         auto cfg = subagent::current();
-        if (!cfg.installed || cfg.model.empty() || auth::is_empty(cfg.auth)) {
+        if (!cfg.installed || cfg.model.empty()
+            || (!cfg.stream && auth::is_empty(cfg.auth))) {
             is_error = true;
-            return "subagents are unavailable in this context (no model/auth wired)";
+            return "subagents are unavailable in this context (no model/stream wired)";
         }
         if (subagent::current_depth() >= subagent::kMaxDepth) {
             is_error = true;

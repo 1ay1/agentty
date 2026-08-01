@@ -25,6 +25,12 @@ Config current() {
     return g_cfg;
 }
 
+void set_auth(auth::AuthHeader auth) {
+    std::lock_guard lk(g_mu);
+    if (!g_cfg.installed) return;
+    g_cfg.auth = std::move(auth);
+}
+
 void set_model(std::string model) {
     if (model.empty()) return;
     std::lock_guard lk(g_mu);

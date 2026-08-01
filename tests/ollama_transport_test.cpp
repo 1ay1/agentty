@@ -60,6 +60,8 @@ static std::string joined_text(const std::vector<Msg>& msgs) {
     return s;
 }
 
+static std::string joined_tool_args(const std::vector<Msg>& msgs);
+
 // ── 1. build_messages ────────────────────────────────────────────────────────
 static void test_build_messages_text() {
     std::vector<Message> msgs;
@@ -268,6 +270,21 @@ static void test_ndjson_footgun_tool_swallowed() {
     auto msgs = oll::parse_ndjson_for_test(nd, {"remember", "write"});
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);   // not run
     CHECK(joined_text(msgs).find("remember") == std::string::npos);  // not shown
+}
+
+static void test_ndjson_explicit_memory_tool_salvaged() {
+    std::string nd =
+        "{\"message\":{\"role\":\"assistant\",\"content\":"
+        "\"{\\\"name\\\":\\\"remember\\\",\\\"arguments\\\":"
+        "{\\\"text\\\":\\\"hi\\\"}}\"}}\n"
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
+        "\"done\":true,\"done_reason\":\"stop\"}\n";
+    auto msgs = oll::parse_ndjson_for_test(
+        nd, {"remember", "write"}, /*json_protocol=*/false,
+        /*allow_memory_salvage=*/true);
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"text\":\"hi\"}"});
 }
 
 static void test_ndjson_rescue_tool_from_prose() {
@@ -814,6 +831,7 @@ int main() {
     test_ndjson_content_salvage_to_tool();
     test_ndjson_no_tools_means_no_salvage();
     test_ndjson_footgun_tool_swallowed();
+    test_ndjson_explicit_memory_tool_salvaged();
     test_ndjson_rescue_tool_from_prose();
     test_ndjson_unknown_tool_in_prose_not_salvaged();
     test_ndjson_error_frame();

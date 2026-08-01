@@ -15,6 +15,7 @@
 // redirected to the temp dir BEFORE any agentty code runs, so remember/
 // forget/wipe_memory land in the sandbox, never in the user's real store.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/tool/registry.hpp"
@@ -321,8 +323,32 @@ int main() {
         check(has(r, "prove the tools"), "todo: echoes the plan");
     }
 
-    // ── memory: remember → forget(dry-run) → forget → wipe ───────────────
+    // ── memory: project fallback + remember → forget → wipe ────────────
     {
+        // `--workspace /` means unrestricted tools, not project-at-root.
+        // Project memory must still anchor to the process cwd.
+        const auto prior_cwd = fs::current_path();
+        fs::current_path(root);
+        tools::util::set_workspace_root("/");
+        check(tools::memory::path_for(tools::memory::Scope::Project)
+                  == root / ".agentty" / "memory.jsonl",
+              "remember: project scope uses cwd under --workspace /");
+        tools::util::set_workspace_root(root);
+        fs::current_path(prior_cwd);
+
+        const auto* remember_def = tools::find("remember");
+        const auto scope_enum = remember_def
+            ? remember_def->input_schema["properties"]["scope"]["enum"]
+            : json{};
+        const bool schema_has_project = scope_enum.is_array()
+            && std::find(scope_enum.begin(), scope_enum.end(), "project")
+                != scope_enum.end();
+        check(schema_has_project,
+              "remember: schema advertises available project scope");
+
+        auto defaulted = run("remember", {{"text", "default project sentinel"}});
+        check(defaulted.has_value(), "remember: default project scope appends");
+
         auto r = run("remember", {{"text", "e2e sentinel fact alpha"},
                                   {"scope", "user"}});
         check(r.has_value(), "remember: appends (user scope, sandboxed HOME)");

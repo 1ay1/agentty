@@ -16,7 +16,8 @@
 
 namespace agentty::tools::subagent {
 
-// Runtime-installed config for the subagent loop. Set once at startup.
+// Runtime-installed config for the subagent loop. Auth/model are refreshed as
+// the user switches providers, accounts, and models during the session.
 struct Config {
     auth::AuthHeader auth;       // wire credential for the sub-stream
     std::string      model;      // model id for sub-agent turns
@@ -35,6 +36,12 @@ struct Config {
 
 // Install the subagent config (call once at startup, after auth resolves).
 void install(Config cfg);
+
+// Update just the auth header the subagent loop uses. Called whenever login,
+// logout, account switching, or provider switching changes the runtime auth.
+// Empty is valid for local and native-OAuth providers whose transports resolve
+// credentials themselves.
+void set_auth(auth::AuthHeader auth);
 
 // Update just the model the subagent loop uses, without disturbing auth
 // or the installed flag. Called when the user switches models mid-session

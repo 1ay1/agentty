@@ -1,5 +1,7 @@
 #include "agentty/runtime/app/deps.hpp"
 
+#include "agentty/tool/subagent.hpp"
+
 #include <stdexcept>
 
 namespace agentty::app {
@@ -22,6 +24,7 @@ void install_deps(Deps d) {
 void update_auth(auth::AuthHeader auth) {
     if (!g_deps) return;
     g_deps->auth = std::move(auth);
+    tools::subagent::set_auth(g_deps->auth);
 }
 
 void switch_provider(auth::AuthHeader auth) {
@@ -32,6 +35,7 @@ void switch_provider(auth::AuthHeader auth) {
     // request authenticates correctly.
     if (!g_deps) return;
     g_deps->auth = std::move(auth);
+    tools::subagent::set_auth(g_deps->auth);
 }
 
 } // namespace agentty::app
