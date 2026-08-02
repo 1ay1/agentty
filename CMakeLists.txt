@@ -2159,6 +2159,7 @@ if(AGENTTY_BUILD_TESTS)
         keystore_test
         midrun_freeze_test
         midrun_seam_test
+        tool_timeline_adapter_test
         midrun_wire_test
         stream_liveness_test
         stream_md_lag_test

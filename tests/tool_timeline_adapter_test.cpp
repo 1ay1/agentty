@@ -64,14 +64,20 @@ int main() {
     };
 
     for (const char* name : native_tools) {
+        auto expect_header_only = [&](A::ToolUse tc, const char* state) {
+            const auto body = U::tool_body_preview_config(tc);
+            check(!visible(body) && !U::tool_display_name(name).empty(),
+                  std::string{name} + " " + state
+                      + " stays zero-row with a useful event header");
+        };
         auto expect_visible = [&](A::ToolUse tc, const char* state) {
             const auto body = U::tool_body_preview_config(tc);
             check(visible(body), std::string{name} + " " + state + " has a body");
         };
 
-        expect_visible(make_tool(name, A::ToolUse::Pending{}), "pending");
-        expect_visible(make_tool(name, A::ToolUse::Approved{}), "approved");
-        expect_visible(make_tool(name, A::ToolUse::Running{}), "silent running");
+        expect_header_only(make_tool(name, A::ToolUse::Pending{}), "pending");
+        expect_header_only(make_tool(name, A::ToolUse::Approved{}), "approved");
+        expect_header_only(make_tool(name, A::ToolUse::Running{}), "silent running");
 
         auto live = make_tool(name, A::ToolUse::Running{});
         std::get<A::ToolUse::Running>(live.status).progress_text = "live progress";
@@ -80,31 +86,33 @@ int main() {
                   && live_body.is_streaming,
               std::string{name} + " exposes live progress");
 
-        expect_visible(make_tool(name, A::ToolUse::Done{}), "empty success");
+        expect_header_only(make_tool(name, A::ToolUse::Done{}), "empty success");
         expect_visible(make_tool(name, A::ToolUse::Done{{}, {}, "result text"}),
                        "success output");
 
         const auto empty_failure = U::tool_body_preview_config(
             make_tool(name, A::ToolUse::Failed{}));
-        check(empty_failure.kind == Kind::Failure && !empty_failure.text.empty(),
-              std::string{name} + " explains empty failure");
+        check(!visible(empty_failure),
+              std::string{name} + " empty failure stays header-only");
 
         const auto failure = U::tool_body_preview_config(
             make_tool(name, A::ToolUse::Failed{{}, {}, "specific error"}));
         check(visible(failure) && failure.text.find("specific error") != std::string::npos,
               std::string{name} + " preserves failure output");
 
-        expect_visible(make_tool(name, A::ToolUse::Rejected{}), "rejected");
+        expect_header_only(make_tool(name, A::ToolUse::Rejected{}), "rejected");
         check(!U::tool_display_name(name).empty(),
               std::string{name} + " has a display name");
     }
 
     // Future native and MCP tools inherit the same fallback without needing
     // to be added to the dispatcher's name list.
-    auto external = make_tool("mcp__example__long_operation", A::ToolUse::Running{});
+    auto external = make_tool("mcp__example__long_operation", A::ToolUse::Running{},
+                              {{"display_description", "Long MCP operation"}});
     auto external_body = U::tool_body_preview_config(external);
-    check(external_body.kind == Kind::CodeBlock && !external_body.text.empty(),
-          "unknown MCP tool gets running fallback");
+    check(!visible(external_body)
+              && U::tool_timeline_detail(external) == "Long MCP operation",
+          "unknown silent MCP tool uses its stable event header");
     check(U::tool_display_name("mcp_search_tools") == "MCP Tool Search"
               && U::tool_timeline_detail(make_tool("mcp_search_tools",
                   A::ToolUse::Running{}, {{"query", "browser automation"}}))
@@ -116,24 +124,24 @@ int main() {
                   == "mcp__browser__click",
           "MCP call broker identifies its target");
 
-    auto invisible_live = make_tool("mcp__example__silent", A::ToolUse::Running{});
+    auto invisible_live = make_tool("mcp__example__silent", A::ToolUse::Running{},
+                                    {{"display_description", "Silent MCP wait"}});
     std::get<A::ToolUse::Running>(invisible_live.status).progress_text =
         "\x1b[2K\r\n\t";
     const auto invisible_live_body = U::tool_body_preview_config(invisible_live);
-    check(invisible_live_body.kind == Kind::CodeBlock
-              && invisible_live_body.text.find("Waiting") != std::string::npos,
-          "ANSI-only progress gets an explanatory running fallback");
+    check(!visible(invisible_live_body)
+              && U::tool_timeline_detail(invisible_live) == "Silent MCP wait",
+          "ANSI-only progress falls back to the stable event header");
 
     const auto whitespace_done = U::tool_body_preview_config(make_tool(
         "mcp__example__silent", A::ToolUse::Done{{}, {}, " \n\t"}));
-    check(whitespace_done.text.find("Completed successfully") != std::string::npos,
-          "whitespace-only success output gets an explanation");
+    check(!visible(whitespace_done),
+          "whitespace-only success stays header-only");
 
     const auto ansi_failure = U::tool_body_preview_config(make_tool(
         "mcp__example__silent", A::ToolUse::Failed{{}, {}, "\x1b[31m\x1b[0m"}));
-    check(ansi_failure.kind == Kind::Failure
-              && ansi_failure.text.find("without an error") != std::string::npos,
-          "ANSI-only failure output gets an explanation");
+    check(!visible(ansi_failure),
+          "ANSI-only failure stays header-only");
 
     // Structured renderers still win when they have meaningful content.
     auto read = make_tool("read", A::ToolUse::Done{{}, {}, "one\ntwo"},
@@ -184,7 +192,8 @@ int main() {
             make_tool("edit", A::ToolUse::Pending{}, malformed_edit_args),
             make_tool("edit", A::ToolUse::Running{}, malformed_edit_args),
             make_tool("edit", A::ToolUse::Done{{}, {}, "done"}, malformed_edit_args)}) {
-        check(visible(U::tool_body_preview_config(tc)),
+        const auto body = U::tool_body_preview_config(tc);
+        check(visible(body) || !U::tool_timeline_detail(tc).empty(),
               "malformed nested edit fields remain renderable");
     }
 
@@ -192,8 +201,8 @@ int main() {
         {{"content", nlohmann::json::array()}, {"status", nullptr}}
     }}};
     auto malformed_todo = make_tool("todo", A::ToolUse::Running{}, malformed_todo_args);
-    check(visible(U::tool_body_preview_config(malformed_todo))
-              && !U::tool_timeline_detail(malformed_todo).empty(),
+    check((visible(U::tool_body_preview_config(malformed_todo))
+               || !U::tool_timeline_detail(malformed_todo).empty()),
           "malformed nested todo fields remain renderable");
 
     auto huge_read = make_tool("read", A::ToolUse::Done{{}, {}, "line"},

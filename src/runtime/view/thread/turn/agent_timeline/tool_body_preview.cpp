@@ -54,6 +54,16 @@ bool has_visible_body(const maya::ToolBodyPreview::Config& body) {
     }
 }
 
+bool supports_generic_text_body(std::string_view name) {
+    // Native and MCP registry names are canonical lowercase/snake identifiers.
+    // Provider-specific legacy labels (for example ACP's historical "Bash")
+    // were always header-only; retroactively giving them progress/output rows
+    // changes committed card geometry in old threads and parallel-tool turns.
+    for (unsigned char c : name)
+        if (c >= 'A' && c <= 'Z') return false;
+    return true;
+}
+
 // No tool card should ever be an unexplained blank. Structured renderers get
 // first refusal; this lifecycle fallback covers every native tool as well as
 // dynamically discovered MCP tools, including tools added after this code was
@@ -64,51 +74,45 @@ void generic_lifecycle_body(const ToolUse& tc,
     using Kind = maya::ToolBodyPreview::Kind;
     if (has_visible_body(out)) return;
 
+    const bool generic_text = supports_generic_text_body(tc.name.value);
     out.text_color = text_tertiary;
     if (tc.is_failed()) {
-        out.kind = Kind::Failure;
-        out.text = text_is_visible(tc.output())
-            ? std::string{tc.output()}
-            : "Tool failed without an error message.";
-        out.chrome_color = status_error;
-        return;
-    }
-    if (tc.is_running()) {
-        out.kind = Kind::CodeBlock;
-        // Keep generic output on the same three-row CodeBlock geometry used
-        // after settle. Dedicated subprocess/task renderers still use their
-        // richer BashOutput view; unknown and future tools remain seam-safe.
-        if (text_is_visible(tc.progress_text())) {
-            out.text = tc.progress_text();
-            out.is_streaming = true;
-        } else {
-            out.text = "Waiting for tool output\xe2\x80\xa6";
+        if (text_is_visible(tc.output())) {
+            out.kind = Kind::Failure;
+            out.text = tc.output();
+            out.chrome_color = status_error;
         }
         return;
     }
-    if (tc.is_pending()) {
-        out.kind = Kind::CodeBlock;
-        out.text = "Preparing tool input\xe2\x80\xa6";
+    if (tc.is_running()) {
+        if (!generic_text) return;
+        // Real progress earns a body; a synthetic "waiting" row does not.
+        // Tool insertion can happen after a long assistant prefix has entered
+        // native scrollback, and adding even one placeholder row there shifts
+        // committed content before any settle-reconciliation window exists.
+        // The event header already shows spinner + argument detail for silent
+        // tools, so it remains useful without destabilising frame geometry.
+        if (text_is_visible(tc.progress_text())) {
+            out.kind = Kind::CodeBlock;
+            out.text = tc.progress_text();
+            out.is_streaming = true;
+        }
         return;
     }
-    if (tc.is_approved()) {
-        out.kind = Kind::CodeBlock;
-        out.text = "Permission approved \xe2\x80\x94 starting\xe2\x80\xa6";
+    if (tc.is_pending() || tc.is_approved()) {
+        // Input streaming / permission state is fully described by the event
+        // header. Keep the body at zero rows until structured args or genuine
+        // progress arrive, for the same committed-scrollback invariant above.
         return;
     }
-    if (tc.is_done()) {
+    if (generic_text && tc.is_done() && text_is_visible(tc.output())) {
         out.kind = Kind::CodeBlock;
-        out.text = text_is_visible(tc.output())
-            ? std::string{tc.output()}
-            : "Completed successfully \xe2\x80\x94 no output.";
-        return;
+        out.text = tc.output();
     }
-
-    // Rejected is the sole remaining ToolUse state. Keep it neutral rather
-    // than painting it as a runtime failure: the status icon already conveys
-    // that the call was declined.
-    out.kind = Kind::CodeBlock;
-    out.text = "Tool was not run.";
+    // Empty success/failure/rejection is already explicit in the event header.
+    // Inventing a body row only at settle would shift committed transcript
+    // rows; the full-output overlay supplies a safe "no output" explanation.
+    return;
 }
 } // namespace
 
