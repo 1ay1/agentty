@@ -1485,6 +1485,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         hreq.dial_port = ov.port;
     }
     hreq.headers = build_request_headers(req.auth, req.endpoint);
+    hreq.headers.push_back({"cache-control", "no-cache, no-transform"});
+    hreq.headers.push_back({"pragma", "no-cache"});
+    hreq.headers.push_back({"accept-encoding", "identity"});
     hreq.body    = std::move(body_str);
 
     int  http_status = 0;
@@ -1522,6 +1525,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             break;
         }
     };
+    handler.on_activity = [&] {
+        ctx.sink(StreamHeartbeat{.transport_only = true});
+    };
+    handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
         if (is_success) {
             if (native) feed_ndjson(ctx, chunk.data(), chunk.size());
@@ -1536,7 +1543,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(10'000);
-    tos.total   = std::chrono::milliseconds(0);   // streaming unbounded
+    tos.total   = std::chrono::minutes(30); // tolerate buffering, never wedge forever
     tos.ping    = std::chrono::milliseconds(15'000);
     tos.idle    = std::chrono::milliseconds(90'000);
 
@@ -1556,6 +1563,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .sink        = ctx.sink,
         .result_ok   = bool(result),
         .http_status = http_status,
+        .non_replayable = !result && result.error().non_replayable,
         .cancel      = cancel_for_end,
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {

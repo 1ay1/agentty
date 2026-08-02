@@ -660,9 +660,10 @@ public:
                                                        stream_result.http_status);
                 const bool empty_completion =
                     err == "provider returned an empty completion";
-                const bool retryable = empty_completion
-                    || error_class == provider::ErrorClass::Transient
-                    || error_class == provider::ErrorClass::RateLimit;
+                const bool retryable = !stream_result.non_replayable
+                    && (empty_completion
+                        || error_class == provider::ErrorClass::Transient
+                        || error_class == provider::ErrorClass::RateLimit);
                 // A partial assistant message can contain unpaired tool calls
                 // and must never be replayed on retry or reported as complete.
                 if (!thread.messages.empty()

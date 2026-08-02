@@ -662,11 +662,18 @@ http::Headers build_request_headers(const AuthHeader& auth,
                                     bool streaming = false,
                                     int retry_count = 0) {
     (void)timeout_seconds;
-    (void)streaming;
     (void)retry_count;
     http::Headers h;
-    h.push_back({"accept",         "application/json"});
+    h.push_back({"accept", streaming ? "text/event-stream"
+                                      : "application/json"});
     h.push_back({"content-type",   "application/json"});
+    if (streaming) {
+        // Corporate gateways commonly buffer/compress SSE until a large body
+        // accumulates. These standard directives preserve incremental frames.
+        h.push_back({"cache-control",   "no-cache, no-transform"});
+        h.push_back({"pragma",          "no-cache"});
+        h.push_back({"accept-encoding", "identity"});
+    }
     h.push_back({"user-agent",     headers::user_agent});
     h.push_back({"x-app",          headers::x_app});
     h.push_back({"anthropic-version", headers::anthropic_version});
@@ -1753,6 +1760,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             break;
         }
     };
+    handler.on_activity = [&] {
+        ctx.sink(StreamHeartbeat{.transport_only = true});
+    };
+    handler.on_buffered_wait = [&] { ctx.sink(StreamBufferedWait{}); };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
         if (is_success) {
             feed_sse(ctx, chunk.data(), chunk.size());
@@ -1767,7 +1778,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(10'000);
-    tos.total   = std::chrono::milliseconds(0);  // streaming phase unbounded
+    // A responsive corporate gateway can keep the transport alive while
+    // buffering every SSE frame. Give legitimate large turns ample time, but
+    // retain an absolute ceiling now that control-frame activity suppresses
+    // the short app-layer stall watchdog.
+    tos.total   = std::chrono::minutes(30);
     // A healthy Anthropic stream emits SSE `ping` heartbeats every 10-15 s
     // even during long thinking blocks. 90 s without a single byte means
     // the transport is dead (silent peer, proxy stall, half-open TCP).
@@ -1776,13 +1791,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // with backoff.
     //
     // The 90 s value is deliberately more patient than the historical
-    // 45 s: on heavily-loaded Anthropic edge pops we've observed
-    // legitimate 30-60 s ping intervals before the connection recovers,
-    // and an aggressive HTTP idle timer converted those brown-outs into
-    // user-visible "stream stalled" errors. The reducer has its own
-    // 120 s stall watchdog that catches the case where PING ACKs keep
-    // this clock happy but the application layer never advances — the
-    // two watchdogs together cover both failure modes without racing.
+    // 45 s: on heavily-loaded edge pops we've observed legitimate 30-60 s
+    // intervals. Inbound control bytes are forwarded as transport-only
+    // heartbeats, allowing buffered VPN paths to wait up to the total cap.
     //
     // 15 s PING probe interval keeps a half-open TCP from going
     // undetected for long; the PING ACK bumps last_rx so a healthy peer
@@ -1816,6 +1827,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .sink        = ctx.sink,
         .result_ok   = bool(result),
         .http_status = http_status,
+        .non_replayable = !result && result.error().non_replayable,
         .cancel      = cancel_for_end,
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {

@@ -191,6 +191,9 @@ struct HttpError {
     HttpErrorKind kind        = HttpErrorKind::Unknown;
     int           http_status = 0;       // valid iff kind == Status
     std::string   detail;                // human-readable
+    // True once a non-idempotent request received a successful response head.
+    // Automatic retry could duplicate accepted server-side work.
+    bool          non_replayable = false;
 
     // "[h2 timeout] no bytes for 45s" — the UI's default stringification
     // when it doesn't care to branch on kind. Layered errors call this
@@ -233,12 +236,16 @@ struct HttpError {
 using HttpResult       = std::expected<Response, HttpError>;
 using HttpStreamResult = std::expected<void,     HttpError>;
 
-// Callbacks for a streaming request. on_headers fires once when the :status
-// frame arrives; on_chunk fires for every DATA frame slab. Returning false
-// from on_chunk aborts the stream (equivalent to cancelling the token).
+// Streaming callbacks. on_headers fires once when response headers arrive;
+// on_chunk fires for every DATA/body slab. Returning false from on_chunk
+// aborts the stream. on_activity is a throttled liveness signal for actual
+// inbound wire bytes. on_buffered_wait reports the explicit bounded state
+// where an HTTP intermediary is alive but withholding response DATA.
 struct StreamHandler {
     std::function<void(int status, const Headers&)>     on_headers;
     std::function<bool(std::string_view body_chunk)>    on_chunk;
+    std::function<void()>                               on_activity;
+    std::function<void()>                               on_buffered_wait;
 };
 
 // ---------------------------------------------------------------------------
@@ -265,6 +272,9 @@ struct Timeouts {
     std::chrono::milliseconds total  {0};
     std::chrono::milliseconds idle   {0};
     std::chrono::milliseconds ping   {0};
+    // Internal end-to-end cap shared by connect, TLS, retries, and body read.
+    // Client::stream populates it from total; callers normally leave it empty.
+    std::optional<std::chrono::steady_clock::time_point> absolute_deadline;
 };
 
 // ---------------------------------------------------------------------------
@@ -339,5 +349,13 @@ private:
 // Process-wide default client — lazy, constructed on first access, shared
 // across all call sites. Equivalent to Zed's `GlobalHttpClient`.
 [[nodiscard]] Client& default_client();
+
+namespace test {
+// Pure incremental HTTP/1 chunk decoder seam used by framing regressions.
+[[nodiscard]] std::expected<std::string, std::string>
+decode_chunked(const std::vector<std::string>& fragments);
+[[nodiscard]] std::expected<bool, std::string>
+is_chunked(const Headers& headers);
+} // namespace test
 
 } // namespace agentty::http

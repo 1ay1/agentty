@@ -64,12 +64,14 @@ inline void finish_turn_once(
         std::optional<std::string> err = std::nullopt,
         std::optional<std::chrono::seconds> retry_after = std::nullopt,
         const std::function<void()>& before_finish = {},
-        int http_status = 0) {
+        int http_status = 0,
+        bool non_replayable = false) {
     if (terminated) return;
     terminated = true;
     if (err) {
         StreamError e{std::move(*err), retry_after};
         e.http_status = http_status;
+        e.non_replayable = non_replayable;
         sink(std::move(e));
     } else {
         if (before_finish) before_finish();
@@ -124,6 +126,7 @@ struct StreamResult {
     std::optional<std::string>            error;        // set iff the turn failed
     std::optional<std::chrono::seconds>   retry_after;  // server hint on 429/529
     int                                   http_status = 0;
+    bool                                  non_replayable = false;
 
     // Did the turn end successfully (clean close, or the body already finished
     // with a terminal we respect)? False for cancel / HTTP / transport error.
@@ -177,6 +180,7 @@ struct StreamOutcome {
     const EventSink&   sink;          // where the terminal Msg is emitted
     bool               result_ok;     // bool(result) of the http stream call
     int                http_status;   // observed status (0 = headers never came)
+    bool               non_replayable = false; // accepted POST; never auto-retry
     http::CancelTokenPtr cancel;      // caller's cancel token
     StopReason         stop = StopReason::EndTurn;   // stop for CleanClose
 
@@ -232,6 +236,7 @@ inline StreamResult finish_stream(StreamOutcome o) {
     tr.stop        = o.stop;
     tr.http_status = o.http_status;
     tr.retry_after = o.retry_after;
+    tr.non_replayable = o.non_replayable;
 
     if (end == StreamEnd::AlreadyTerminated) return tr;
     // All-paths cleanup (e.g. close an open tool block) before the terminal
@@ -257,7 +262,8 @@ inline StreamResult finish_stream(StreamOutcome o) {
             tr.error = o.transport_error_message
                            ? o.transport_error_message()
                            : std::string{"transport error"};
-            finish_turn_once(terminated, sink, o.stop, tr.error);
+            finish_turn_once(terminated, sink, o.stop, tr.error,
+                             std::nullopt, {}, 0, o.non_replayable);
             return tr;
         case StreamEnd::CleanClose:
             finish_turn_once(terminated, sink, o.stop, std::nullopt,

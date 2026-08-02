@@ -1151,26 +1151,29 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (e.output_tokens) m.s.tokens_out = e.output_tokens;
             return done(std::move(m));
         },
-        [&](StreamHeartbeat) -> Step {
-            // Wire-alive signal from the transport (SSE `ping` or
-            // `thinking_delta`). No payload, no UI effect — we just
-            // bump last_event_at so the stall watchdog knows the
-            // connection is healthy. Critical during extended-thinking
-            // passes where the model reasons silently for 60-120 s
-            // between visible deltas; without this the watchdog would
-            // fire on every non-trivial opus turn.
+        [&](StreamHeartbeat e) -> Step {
+            // No payload or UI effect. Both heartbeat classes refresh the
+            // stall clock. Only a real SSE/model heartbeat resets retries;
+            // HTTP control traffic proves the path is open, not that the
+            // upstream request made semantic progress.
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = std::chrono::steady_clock::now();
-                // A heartbeat proves the wire is alive even before any
-                // content delta. Reset the retry budget so a stream
-                // that connects, pings, then stalls before its first
-                // byte gets a fresh ladder instead of inheriting the
-                // connect-time attempts. This is the pre-delta analogue
-                // of the first-delta reset in StreamTextDelta and the
-                // primary fix for sessions that latched terminal after
-                // a run of healthy-but-stalled attempts.
-                a->transient_retries = 0;
+                if (e.transport_only) {
+                    a->transport_activity = true;
+                } else {
+                    a->transient_retries = 0;
+                }
             }
+            return done(std::move(m));
+        },
+        [&](StreamBufferedWait) -> Step {
+            if (auto* a = active_ctx(m.s.phase)) {
+                a->last_event_at = std::chrono::steady_clock::now();
+                a->transport_activity = true;
+            }
+            m.s.status = "network gateway is buffering output \xE2\x80\x94 waiting\xE2\x80\xA6";
+            m.s.status_until = std::chrono::steady_clock::now()
+                             + std::chrono::seconds{20};
             return done(std::move(m));
         },
         [&](StreamFinished e) -> Step {
@@ -1252,6 +1255,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     cctx
                     && (klass == provider::ErrorClass::Transient
                         || klass == provider::ErrorClass::RateLimit)
+                    && !e.non_replayable
                     && prior < provider::kMaxRetries;
 
                 if (can_retry_compact) {
@@ -1489,7 +1493,8 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             const bool mid_stream =
                 m.s.in_stall_fired()
                 || (err_ctx
-                    && err_ctx->first_delta_at.time_since_epoch().count() != 0);
+                    && (err_ctx->transport_activity
+                        || err_ctx->first_delta_at.time_since_epoch().count() != 0));
             const int retry_cap = provider::max_retries_for(klass, mid_stream);
 
             // For mid-stream failures, gate on `mid_stream_failures` rather
@@ -1507,6 +1512,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             bool can_retry = (klass == provider::ErrorClass::Transient
                            || klass == provider::ErrorClass::RateLimit)
                           && budget_left
+                          && !e.non_replayable
                           && !has_committed
                           && err_ctx;   // can't retry from Idle (no ctx)
 

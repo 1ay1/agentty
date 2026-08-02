@@ -1604,6 +1604,9 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     std::string error_body;
 
     http::StreamHandler handler;
+    handler.on_activity = [&] {
+        ctx.sink(StreamHeartbeat{.transport_only = true});
+    };
     handler.on_headers = [&](int status, const http::Headers&) {
         http_status = status;
         is_success  = (status >= 200 && status < 300);
@@ -1640,6 +1643,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .sink        = ctx.sink,
         .result_ok   = bool(result),
         .http_status = http_status,
+        .non_replayable = !result && result.error().non_replayable,
         .cancel      = cancel_for_end,
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {
