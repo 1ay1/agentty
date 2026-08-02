@@ -95,7 +95,7 @@ constexpr int kViewportH = 14;
 // on a short one the list shrinks (still scrollable to reach every item).
 constexpr int kPickerChromeRows = 7;
 
-[[nodiscard]] int picker_viewport_h() {
+[[nodiscard]] int picker_terminal_rows() {
     const auto sz = maya::platform::query_terminal_size(
         maya::platform::stdout_handle());
     // Prefer the real ioctl height. When it's unavailable (no tty: a pipe,
@@ -117,6 +117,11 @@ constexpr int kPickerChromeRows = 7;
         }
     }
     if (term_rows <= 0) term_rows = 40;
+    return term_rows;
+}
+
+[[nodiscard]] int picker_viewport_h() {
+    const int term_rows = picker_terminal_rows();
     // Leave the chrome plus a small breathing margin so the picker's top
     // border sits strictly below the viewport top with the base behind it.
     const int avail = term_rows - kPickerChromeRows - 1;
@@ -795,7 +800,10 @@ Element tool_output_viewer(const Model& m) {
     const int cur = std::clamp(o->index, 0, std::max(0, sz - 1));
 
     Picker::Config cfg;
-    cfg.min_width  = 60;
+    // Overlay stretch supplies all available columns. A large minimum used to
+    // force the picker past phone/SSH terminal bounds and clip its right side;
+    // keep only the border's structural floor and let row flex do the rest.
+    cfg.min_width  = 1;
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.tool_viewer_scroll;
 
@@ -809,13 +817,20 @@ Element tool_output_viewer(const Model& m) {
         cfg.title    = " Tool Outputs \xc2\xb7 " + std::to_string(sz) + " ";
         cfg.accent   = highlight;
         cfg.selected = sz == 0 ? -1 : cur;
+        // LIST chrome is border+padding (4) plus blank+hint footer (2).
+        // At truly tiny heights, drop the optional footer and devote every
+        // remaining row to selectable outputs.
+        const int list_term_rows = picker_terminal_rows();
+        const bool compact_list = list_term_rows < 7;
+        cfg.viewport_h = std::clamp(
+            list_term_rows - (compact_list ? 4 : 6), 1, kViewportH);
 
         // Badge column width: longest display name across the entries,
         // so every detail line starts at the same column and the badge
         // hues read as a vertical colour strip.
-        std::size_t badge_w = 0;
+        int badge_w = 0;
         for (const auto& e : o->entries)
-            badge_w = std::max(badge_w, e.title.size());
+            badge_w = std::max(badge_w, string_width(e.title));
 
         cfg.rows.reserve(o->entries.size());
         for (int i = 0; i < sz; ++i) {
@@ -828,8 +843,9 @@ Element tool_output_viewer(const Model& m) {
                 // the detail line carries the tool name so the row is still
                 // self-describing.
                 std::string badge = "\xe2\x97\x8f LIVE";
-                if (badge.size() < badge_w + 2)
-                    badge.append(badge_w + 2 - badge.size(), ' ');
+                const int live_w = string_width(badge);
+                if (live_w < badge_w)
+                    badge.append(static_cast<std::size_t>(badge_w - live_w), ' ');
                 row.badge          = std::move(badge);
                 row.badge_style    = fg_bold(cat_hue);
                 row.leading        = e.title + (e.detail.empty() ? "" : "  " + e.detail);
@@ -841,7 +857,9 @@ Element tool_output_viewer(const Model& m) {
                 continue;
             }
             row.badge = e.title;
-            row.badge.append(badge_w - e.title.size(), ' ');
+            const int title_w = string_width(e.title);
+            if (title_w < badge_w)
+                row.badge.append(static_cast<std::size_t>(badge_w - title_w), ' ');
             // Category hue — the same colour identity the transcript
             // card used, so "which tool was that?" is answered by hue
             // before the label is even read. Failures go red on the
@@ -856,13 +874,15 @@ Element tool_output_viewer(const Model& m) {
             row.selected       = (i == cur);
             cfg.rows.push_back(std::move(row));
         }
-        cfg.footer.push_back(text(""));
-        cfg.footer.push_back(key_hints({
-            {"\xe2\x86\x91\xe2\x86\x93", "move", 5},   // ↑↓
-            {"Enter", "view", 6},
-            {"y", "copy", 4},
-            {"Esc", "close", 3},
-        }));
+        if (!compact_list) {
+            cfg.footer.push_back(text(""));
+            cfg.footer.push_back(key_hints({
+                {"\xe2\x86\x91\xe2\x86\x93", "move", 5},   // ↑↓
+                {"Enter", "view", 6},
+                {"y", "copy", 4},
+                {"Esc", "close", 3},
+            }));
+        }
         return Picker{std::move(cfg)}.build();
     }
 
@@ -874,19 +894,33 @@ Element tool_output_viewer(const Model& m) {
                  + " \xc2\xb7 " + pos + " ";
     cfg.accent   = tool_hue;
     cfg.selected = -1;   // read-only — no cursor row; manual scroll rules
+    // Normal BODY chrome is 9 rows: border+padding (4), header+separator
+    // (2), blank+range+hints footer (3). Below 10 terminal rows there is
+    // room for none of that optional chrome, so the border title carries
+    // identity and every remaining row goes to output. This keeps the modal
+    // inside all viable terminal heights (5+ rows) instead of inheriting the
+    // shared picker's four-row viewport floor.
+    const int body_term_rows = picker_terminal_rows();
+    const bool compact_body = body_term_rows < 10;
+    cfg.viewport_h = std::clamp(
+        body_term_rows - (compact_body ? 4 : 9), 1, kViewportH);
 
     // Header: coloured tool name + detail, then the status line — the
     // user never loses track of WHICH output they're reading, and ←/→
     // visibly swaps this header as they hop entries. Full-width hstack
     // so the position indicator pins right even on narrow terminals.
-    cfg.header.push_back(
-        hstack().width(Dimension::percent(100))(
-            text(" " + e.title, fg_bold(tool_hue)),
-            text(e.detail.empty() ? "" : "  " + e.detail, fg_of(fg))
-                | clip | grow(1.0f) | shrink(1.0f),
-            text(e.trailing + " ", e.failed ? fg_of(danger) : fg_dim(muted))
-        ).build());
-    cfg.header.push_back(sep);
+    if (!compact_body) {
+        cfg.header.push_back(
+            hstack().width(Dimension::percent(100))(
+                text(" " + e.title, fg_bold(tool_hue))
+                    | clip | shrink(1.0f),
+                text(e.detail.empty() ? "" : "  " + e.detail, fg_of(fg))
+                    | clip | grow(1.0f) | shrink(3.0f),
+                text(e.trailing + " ", e.failed ? fg_of(danger) : fg_dim(muted))
+                    | clip | shrink(2.0f)
+            ).build());
+        cfg.header.push_back(sep);
+    }
 
     // Body rows — built ONCE per viewed entry, then windowed per frame.
     //
@@ -949,12 +983,29 @@ Element tool_output_viewer(const Model& m) {
             if (auto* box = maya::as_box(body);
                 box && box->layout.direction == maya::FlexDirection::Column
                 && !box->children.empty()) {
-                cache.rows = std::move(box->children);
+                cache.rows.reserve(box->children.size());
+                for (auto& child : box->children) {
+                    // Manual viewport accounting below is row-based. Keep
+                    // every structured preview child to exactly one visual
+                    // row just like the plain-text fallback; otherwise a
+                    // narrow FileWrite/Todo label can wrap while max_y still
+                    // counts it as one, making later rows unreachable.
+                    cache.rows.push_back(
+                        std::move(child)
+                        | height(1)
+                        | overflow(Overflow::Hidden));
+                }
             } else {
-                cache.rows.push_back(std::move(body));
+                cache.rows.push_back(
+                    std::move(body)
+                    | height(1)
+                    | overflow(Overflow::Hidden));
             }
         } else if (e.output.empty()) {
-            cache.rows.push_back(text("  (no output captured)", fg_italic(muted)));
+            cache.rows.push_back(
+                text("  (no output captured)", fg_italic(muted))
+                | height(1)
+                | overflow(Overflow::Hidden));
         } else {
             // Line-numbered fallback: right-aligned gutter + dim pipe in
             // the tool's category hue (red pipe on failure), then the
@@ -980,11 +1031,14 @@ Element tool_output_viewer(const Model& m) {
                 if (static_cast<int>(num.size()) < gutter_w)
                     num.insert(0, gutter_w - num.size(), ' ');
                 cache.rows.push_back(
-                    h(text("  " + num + " ", fg_dim(warn)),
+                    hstack().width(Dimension::percent(100))(
+                      text("  " + num + " ", fg_dim(warn)),
                       text("\xe2\x94\x82 ", fg_dim(pipe_hue)),   // │
                       text(std::string{lines[i]},
-                           e.failed ? fg_of(danger) : fg_of(muted)))
-                    .build());
+                           e.failed ? fg_of(danger) : fg_of(muted))
+                          | clip | grow(1.0f) | shrink(1.0f)
+                    ).build()
+                    | height(1) | overflow(Overflow::Hidden));
             }
         }
     }
@@ -1010,37 +1064,43 @@ Element tool_output_viewer(const Model& m) {
         cfg.items.push_back(cache.rows[static_cast<std::size_t>(i)]);
 
     if (total_rows == 0)
-        cfg.items.push_back(text("  waiting for output\xe2\x80\xa6", fg_italic(muted)));
+        cfg.items.push_back(
+            text("  waiting for output\xe2\x80\xa6", fg_italic(muted))
+            | height(1)
+            | overflow(Overflow::Hidden));
 
-    cfg.footer.push_back(text(""));
-    // Position line: which rows of the output are on screen — the manual
-    // window has no scrollbar, so this is the scroll affordance.
-    if (total_rows > vh) {
-        std::string pos_line =
-            "  " + std::to_string(first + 1) + "\xe2\x80\x93"      // –
-                 + std::to_string(last) + " / "
-                 + std::to_string(total_rows) + " rows";
-        if (e.is_live && m.ui.tool_viewer_tail) pos_line += "  \xc2\xb7 tailing";
-        cfg.footer.push_back(text(pos_line,
-            fg_dim(e.is_live && m.ui.tool_viewer_tail ? tool_hue : muted)));
+    if (!compact_body) {
+        cfg.footer.push_back(text(""));
+        // Position line: which rows of the output are on screen — the manual
+        // window has no scrollbar, so this is the scroll affordance.
+        if (total_rows > vh) {
+            std::string pos_line =
+                "  " + std::to_string(first + 1) + "\xe2\x80\x93"      // –
+                     + std::to_string(last) + " / "
+                     + std::to_string(total_rows) + " rows";
+            if (e.is_live && m.ui.tool_viewer_tail)
+                pos_line += "  \xc2\xb7 tailing";
+            cfg.footer.push_back(text(pos_line,
+                fg_dim(e.is_live && m.ui.tool_viewer_tail ? tool_hue : muted)));
+        }
+        std::vector<Hint> viewer_hints;
+        if (e.is_live) {
+            viewer_hints = {
+                {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
+                {"End", "tail", 4},
+                {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
+                {"Esc", "back", 3},
+            };
+        } else {
+            viewer_hints = {
+                {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
+                {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
+                {"y", "copy", 4},
+                {"Esc", "back", 3},
+            };
+        }
+        cfg.footer.push_back(key_hints(std::move(viewer_hints)));
     }
-    std::vector<Hint> viewer_hints;
-    if (e.is_live) {
-        viewer_hints = {
-            {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
-            {"End", "tail", 4},
-            {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
-            {"Esc", "back", 3},
-        };
-    } else {
-        viewer_hints = {
-            {"\xe2\x86\x91\xe2\x86\x93", "scroll", 5},        // ↑↓
-            {"\xe2\x86\x90\xe2\x86\x92", "prev/next", 4},     // ←→
-            {"y", "copy", 4},
-            {"Esc", "back", 3},
-        };
-    }
-    cfg.footer.push_back(key_hints(std::move(viewer_hints)));
     return Picker{std::move(cfg)}.build();
 }
 

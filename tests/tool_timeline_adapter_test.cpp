@@ -4,11 +4,15 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/runtime/model.hpp"
+#include "agentty/runtime/view/pickers.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "maya/widget/tool_body_preview.hpp"
@@ -197,6 +201,181 @@ int main() {
          {"offset", std::numeric_limits<std::uint64_t>::max()}});
     check(U::tool_body_preview_config(huge_read).start_line == 1,
           "out-of-range read offset safely uses default line");
+
+    // Exercise the real overlay adapter, not only the generic Picker. Its old
+    // 60-column floor overflowed phone/SSH terminals before flex could help.
+    A::Model viewer_model;
+    A::tool_viewer::Entry viewer_entry;
+    viewer_entry.name = "bash";
+    viewer_entry.title = "Diagnostics";
+    viewer_entry.detail = "cmake --build a-very-long-target-name";
+    viewer_entry.trailing = "running · 41.2s · 1 MB";
+    viewer_entry.output = "line one\nline two\nline three";
+    viewer_entry.is_live = true;
+    viewer_entry.call = make_tool("bash", A::ToolUse::Running{});
+    viewer_model.ui.tool_viewer = A::tool_viewer::Open{{viewer_entry}, 0, false};
+    int list_height = -1;
+    for (int width = 8; width <= 120; ++width) {
+        auto viewer = U::tool_output_viewer(viewer_model);
+        auto constrained = maya::dsl::vstack()
+            .width(maya::Dimension::fixed(width))(viewer);
+        auto measured = maya::measure_element(constrained, width);
+        check(measured.width.value <= width,
+              "tool viewer list fits width " + std::to_string(width));
+        if (list_height < 0) list_height = measured.height.value;
+        check(measured.height.value == list_height,
+              "tool viewer list never wraps at width " + std::to_string(width));
+    }
+    std::get<A::tool_viewer::Open>(viewer_model.ui.tool_viewer).viewing = true;
+    int body_height = -1;
+    for (int width = 8; width <= 120; ++width) {
+        auto viewer = U::tool_output_viewer(viewer_model);
+        auto constrained = maya::dsl::vstack()
+            .width(maya::Dimension::fixed(width))(viewer);
+        auto measured = maya::measure_element(constrained, width);
+        check(measured.width.value <= width,
+              "tool viewer body fits width " + std::to_string(width));
+        if (body_height < 0) body_height = measured.height.value;
+        check(measured.height.value == body_height,
+              "tool viewer body never wraps at width " + std::to_string(width));
+    }
+
+    std::vector<A::ToolUse> structured_calls;
+    structured_calls.push_back(make_tool("read",
+        A::ToolUse::Done{{}, {}, "first line\nsecond line\nthird line"},
+        {{"path", "very-long-file-name.cpp"}}));
+    structured_calls.push_back(make_tool("write", A::ToolUse::Done{},
+        {{"path", "generated.cpp"},
+         {"content", "a very long generated source line that must clip\nnext"}}));
+    structured_calls.push_back(make_tool("edit", A::ToolUse::Done{{}, {}, "done"},
+        {{"path", "edited.cpp"},
+         {"edits", {{{"old_text", "old long value"},
+                      {"new_text", "new long replacement value"}}}}}));
+    structured_calls.push_back(make_tool("git_diff",
+        A::ToolUse::Done{{}, {}, "@@ -1 +1 @@\n-old value\n+new value"}));
+    structured_calls.push_back(make_tool("todo", A::ToolUse::Done{},
+        {{"todos", {{{"content", "A long todo item that cannot wrap"},
+                     {"status", "completed"}}}}}));
+
+    static constexpr std::array<int, 7> viewer_widths = {8, 12, 20, 32, 48, 80, 120};
+    for (auto& call : structured_calls) {
+        A::tool_viewer::Entry entry;
+        entry.name = call.name.value;
+        entry.title = U::tool_display_name(entry.name);
+        entry.detail = "structured output";
+        entry.trailing = "ok · 1.0s";
+        entry.output = call.output();
+        entry.call = call;
+        A::Model structured_model;
+        structured_model.ui.tool_viewer =
+            A::tool_viewer::Open{{std::move(entry)}, 0, true};
+        int expected_height = -1;
+        for (int width : viewer_widths) {
+            auto viewer = U::tool_output_viewer(structured_model);
+            auto constrained = maya::dsl::vstack()
+                .width(maya::Dimension::fixed(width))(viewer);
+            auto measured = maya::measure_element(constrained, width);
+            if (expected_height < 0) expected_height = measured.height.value;
+            check(measured.width.value <= width
+                      && measured.height.value == expected_height,
+                  call.name.value + " structured body fits width "
+                      + std::to_string(width));
+        }
+    }
+
+    for (bool live : {false, true}) {
+        A::tool_viewer::Entry empty;
+        empty.name = "mcp__example__silent";
+        empty.title = "Silent MCP Operation";
+        empty.detail = "waiting for remote service";
+        empty.trailing = live ? "running" : "ok";
+        empty.is_live = live;
+        empty.call = live
+            ? make_tool(empty.name, A::ToolUse::Running{})
+            : make_tool(empty.name, A::ToolUse::Done{});
+        A::Model empty_model;
+        empty_model.ui.tool_viewer =
+            A::tool_viewer::Open{{std::move(empty)}, 0, true};
+        int expected_height = -1;
+        for (int width : viewer_widths) {
+            auto viewer = U::tool_output_viewer(empty_model);
+            auto constrained = maya::dsl::vstack()
+                .width(maya::Dimension::fixed(width))(viewer);
+            auto measured = maya::measure_element(constrained, width);
+            if (expected_height < 0) expected_height = measured.height.value;
+            check(measured.width.value <= width
+                      && measured.height.value == expected_height,
+                  std::string{live ? "live" : "settled"}
+                      + " empty body fits width " + std::to_string(width));
+        }
+    }
+
+    // Long bodies add a range-indicator footer at normal heights. Sweep short
+    // non-TTY terminals and ensure compact chrome keeps the complete border in
+    // bounds, including the old inherited four-row-floor failure at 10/11.
+    const char* old_lines_raw = std::getenv("LINES");
+    const std::string old_lines = old_lines_raw ? old_lines_raw : "";
+    A::tool_viewer::Entry long_entry;
+    long_entry.name = "bash";
+    long_entry.title = "Bash";
+    long_entry.detail = "long output";
+    long_entry.trailing = "ok · 20 rows";
+    for (int i = 0; i < 20; ++i)
+        long_entry.output += "output row " + std::to_string(i) + "\n";
+    long_entry.call = make_tool("bash",
+        A::ToolUse::Done{{}, {}, long_entry.output});
+    A::Model short_terminal_model;
+    short_terminal_model.ui.tool_viewer =
+        A::tool_viewer::Open{{std::move(long_entry)}, 0, true};
+    static constexpr std::array<int, 4> short_heights = {8, 10, 11, 12};
+    for (int height : short_heights) {
+        const auto height_text = std::to_string(height);
+#ifdef _WIN32
+        _putenv_s("LINES", height_text.c_str());
+#else
+        setenv("LINES", height_text.c_str(), 1);
+#endif
+        auto short_viewer = U::tool_output_viewer(short_terminal_model);
+        auto short_constrained = maya::dsl::vstack()
+            .width(maya::Dimension::fixed(40))(short_viewer);
+        const auto short_size = maya::measure_element(short_constrained, 40);
+        check(short_size.height.value <= height,
+              "long body fits a " + height_text + "-row terminal");
+    }
+
+    std::vector<A::tool_viewer::Entry> short_list_entries;
+    for (int i = 0; i < 4; ++i) {
+        A::tool_viewer::Entry entry;
+        entry.name = "bash";
+        entry.title = "Diagnostics";
+        entry.detail = "operation " + std::to_string(i);
+        entry.trailing = "ok";
+        entry.call = make_tool("bash", A::ToolUse::Done{});
+        short_list_entries.push_back(std::move(entry));
+    }
+    A::Model short_list_model;
+    short_list_model.ui.tool_viewer =
+        A::tool_viewer::Open{std::move(short_list_entries), 0, false};
+    for (int height : short_heights) {
+        const auto height_text = std::to_string(height);
+#ifdef _WIN32
+        _putenv_s("LINES", height_text.c_str());
+#else
+        setenv("LINES", height_text.c_str(), 1);
+#endif
+        auto short_list = U::tool_output_viewer(short_list_model);
+        auto constrained = maya::dsl::vstack()
+            .width(maya::Dimension::fixed(40))(short_list);
+        const auto size = maya::measure_element(constrained, 40);
+        check(size.height.value <= height,
+              "tool output list fits a " + height_text + "-row terminal");
+    }
+#ifdef _WIN32
+    _putenv_s("LINES", old_lines.c_str());
+#else
+    if (old_lines_raw) setenv("LINES", old_lines.c_str(), 1);
+    else unsetenv("LINES");
+#endif
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
