@@ -89,10 +89,21 @@ bool edit_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
             // (seamless handoff).
             out.is_streaming = streaming_now;
             out.hunks.reserve(it->size());
+            auto nested_string = [](const nlohmann::json& obj,
+                                    const char* preferred,
+                                    const char* legacy) -> std::string {
+                for (const char* key : {preferred, legacy}) {
+                    auto field = obj.find(key);
+                    if (field != obj.end() && field->is_string())
+                        return field->get<std::string>();
+                }
+                return {};
+            };
             for (const auto& e : *it) {
                 if (!e.is_object()) continue;
-                auto ot = e.value("old_text", e.value("old_string", std::string{}));
-                auto nt = e.value("new_text", e.value("new_string", std::string{}));
+                auto ot = nested_string(e, "old_text", "old_string");
+                auto nt = nested_string(e, "new_text", "new_string");
+                if (ot.empty() && nt.empty()) continue;
                 out.hunks.push_back({std::move(ot), std::move(nt)});
             }
             // WHILE STREAMING: maya's edit_diff_streaming renders one pinned

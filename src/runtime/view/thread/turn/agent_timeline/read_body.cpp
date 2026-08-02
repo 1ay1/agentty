@@ -17,6 +17,7 @@
 #include <string>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 namespace agentty::ui::detail {
 
@@ -39,12 +40,8 @@ bool read_body(const ToolUse& tc,
         // widget Config is already right.
         if (tc.args.is_object()) {
             for (auto k : {"start_line", "offset"}) {
-                if (auto it = tc.args.find(k);
-                    it != tc.args.end() && it->is_number_integer())
-                {
-                    int v = it->get<int>();
-                    if (v >= 1) { out.start_line = v; break; }
-                }
+                const int v = safe_int_arg(tc.args, k, 0);
+                if (v >= 1) { out.start_line = v; break; }
             }
         }
         if (grep_hits) {

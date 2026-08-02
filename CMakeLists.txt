@@ -1693,6 +1693,11 @@ if(AGENTTY_BUILD_TESTS)
     # native scrollback).
     agentty_add_full_test(midrun_seam_test)
 
+    # tool_timeline_adapter_test — every native/dynamic tool and every
+    # lifecycle state must produce a useful, non-blank card body. Also pins
+    # structured-body precedence and argument summaries for silent tools.
+    agentty_add_full_test(tool_timeline_adapter_test)
+
     # midrun_wire_test — WIRE-LEVEL scrollback-duplication regression.
     # Drives maya's REAL inline compose across the live->freeze handoff
     # and asserts no committed scrollback row is rewritten (the stranded

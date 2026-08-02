@@ -21,21 +21,38 @@ std::string tool_display_name(const std::string& n) {
     if (n == "read")            return "Read";
     if (n == "write")           return "Write";
     if (n == "edit")            return "Edit";
+    if (n == "move")            return "Move";
+    if (n == "remove")          return "Remove";
     if (n == "bash")            return "Bash";
+    if (n == "process_start")   return "Process Start";
+    if (n == "process_poll")    return "Process Poll";
+    if (n == "process_stop")    return "Process Stop";
     if (n == "grep")            return "Grep";
     if (n == "glob")            return "Glob";
     if (n == "list_dir")        return "List";
+    if (n == "repo_map")        return "Repo Map";
     if (n == "todo")            return "Todo";
     if (n == "web_fetch")       return "Fetch";
     if (n == "web_search")      return "Search";
     if (n == "find_definition") return "Definition";
-    if (n == "repo_map")        return "Repo Map";
-    if (n == "diagnostics")     return "Diag";
+    if (n == "find_references") return "References";
+    if (n == "diagnostics")     return "Diagnostics";
+    if (n == "test")            return "Test";
     if (n == "git_status")      return "Git Status";
     if (n == "git_diff")        return "Git Diff";
     if (n == "git_log")         return "Git Log";
+    if (n == "git_show")        return "Git Show";
+    if (n == "git_blame")       return "Git Blame";
     if (n == "git_commit")      return "Git Commit";
+    if (n == "remember")        return "Remember";
+    if (n == "forget")          return "Forget";
+    if (n == "wipe_memory")     return "Wipe Memory";
     if (n == "task")            return "Agent";
+    if (n == "skill")           return "Skill";
+    if (n == "search_docs")     return "Docs Search";
+    if (n == "search_code")     return "Code Search";
+    if (n == "mcp_search_tools") return "MCP Tool Search";
+    if (n == "mcp_call")         return "MCP Call";
     return n;
 }
 
@@ -58,8 +75,11 @@ std::string tool_display_name(const std::string& n) {
 //   vcs     (git_*)                               → role_info (blue, "context-shift")
 //   plan    (todo)                                → status_warn (yellow, planning)
 maya::Color tool_category_color(const std::string& n) {
-    if (n == "edit" || n == "write")  return role_brand;
-    if (n == "bash")                  return code_text;
+    if (n == "edit" || n == "write" || n == "move" || n == "remove")
+        return role_brand;
+    if (n == "bash" || n == "diagnostics" || n == "test"
+        || n.rfind("process_", 0) == 0)
+        return code_text;
     if (n == "todo")                  return status_warn;
     if (n == "task")                  return role_brand_alt;   // agent identity
     if (n.rfind("git_", 0) == 0)      return role_info;
@@ -67,8 +87,11 @@ maya::Color tool_category_color(const std::string& n) {
 }
 
 std::string_view tool_category_label(const std::string& n) {
-    if (n == "edit" || n == "write")  return "mutate";
-    if (n == "bash")                  return "execute";
+    if (n == "edit" || n == "write" || n == "move" || n == "remove")
+        return "mutate";
+    if (n == "bash" || n == "diagnostics" || n == "test"
+        || n.rfind("process_", 0) == 0)
+        return "execute";
     if (n == "todo")                  return "plan";
     if (n == "task")                  return "agent";
     if (n.rfind("git_", 0) == 0)      return "vcs";
@@ -90,6 +113,13 @@ maya::AgentEventStatus tool_event_status(const ToolUse& tc) {
 // ── Detail line ─────────────────────────────────────────────────────────
 
 namespace {
+
+[[nodiscard]] bool safe_bool_arg(const nlohmann::json& args,
+                                 const char* key, bool fallback = false) {
+    if (!args.is_object()) return fallback;
+    auto it = args.find(key);
+    return it != args.end() && it->is_boolean() ? it->get<bool>() : fallback;
+}
 
 std::string pretty_path(std::string p) {
     if (p.empty()) return p;
@@ -174,6 +204,18 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         // "edit i/N" band headers; nothing is lost.
         return path_pp;
     }
+    if (n == "move") {
+        auto src = pretty_path(safe("source"));
+        auto dst = pretty_path(safe("destination"));
+        if (src.empty() && dst.empty()) return "\xe2\x80\xa6";
+        return src + "  \xe2\x86\x92  " + dst;
+    }
+    if (n == "remove") {
+        auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        if (safe_bool_arg(tc.args, "recursive"))
+            detail += "  \xc2\xb7  recursive";
+        return detail;
+    }
     if (n == "bash" || n == "diagnostics") {
         auto cmd = safe("command");
         if (cmd.empty()) return "\xe2\x80\xa6";
@@ -184,6 +226,27 @@ std::string tool_timeline_detail(const ToolUse& tc) {
             if (rc != 0) cmd += "  \xc2\xb7  exit " + std::to_string(rc);
         }
         return cmd;
+    }
+    if (n == "process_start") {
+        auto cmd = safe("command");
+        if (cmd.empty()) return "\xe2\x80\xa6";
+        if (auto nl = cmd.find('\n'); nl != std::string::npos)
+            cmd = cmd.substr(0, nl) + " \xe2\x80\xa6";
+        return cmd;
+    }
+    if (n == "process_poll" || n == "process_stop") {
+        auto id = safe("id");
+        if (id.empty()) id = safe("session_id");
+        return id.empty() ? std::string{"\xe2\x80\xa6"} : "session " + id;
+    }
+    if (n == "test") {
+        auto detail = safe("command");
+        if (detail.empty()) detail = safe("filter");
+        if (detail.empty()) detail = safe("target");
+        if (detail.empty()) detail = "auto-detect";
+        if (auto nl = detail.find('\n'); nl != std::string::npos)
+            detail = detail.substr(0, nl) + " \xe2\x80\xa6";
+        return detail;
     }
     if (n == "grep") {
         auto pat = safe("pattern");
@@ -229,6 +292,16 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         }
         return detail;
     }
+    if (n == "find_references") {
+        auto symbol = safe("symbol");
+        if (symbol.empty()) symbol = "\xe2\x80\xa6";
+        return path_pp.empty() ? symbol : symbol + "  in  " + path_pp;
+    }
+    if (n == "repo_map") {
+        auto focus = safe("focus");
+        auto root = path_pp.empty() ? std::string{"."} : path_pp;
+        return focus.empty() ? root : focus + "  in  " + root;
+    }
     if (n == "web_fetch") {
         std::string detail = safe("url");
         if (tc.is_done()) {
@@ -255,6 +328,21 @@ std::string tool_timeline_detail(const ToolUse& tc) {
             }
             if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
                                  + (hits == 1 ? " result" : " results");
+        }
+        return detail;
+    }
+    if (n == "git_show") {
+        auto ref = safe("ref");
+        if (ref.empty()) ref = "HEAD";
+        return path_pp.empty() ? ref : ref + "  \xc2\xb7  " + path_pp;
+    }
+    if (n == "git_blame") {
+        std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        auto start = safe_int_arg(tc.args, "start_line", 0);
+        auto end = safe_int_arg(tc.args, "end_line", 0);
+        if (start > 0) {
+            detail += "  @" + std::to_string(start);
+            if (end > start) detail += "-" + std::to_string(end);
         }
         return detail;
     }
@@ -368,6 +456,27 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         }
         return detail;
     }
+    if (n == "wipe_memory") {
+        auto scope = safe("scope");
+        if (scope.empty()) scope = "project";
+        const bool confirm = safe_bool_arg(tc.args, "confirm");
+        return "[" + scope + "] " + (confirm ? "confirmed wipe" : "preview");
+    }
+    if (n == "skill") {
+        auto name = safe("name");
+        return name.empty() ? std::string{"\xe2\x80\xa6"} : name;
+    }
+    if (n == "search_docs" || n == "search_code" || n == "mcp_search_tools") {
+        auto query = safe("query");
+        if (query.empty()) return "\xe2\x80\xa6";
+        if (auto nl = query.find('\n'); nl != std::string::npos)
+            query = query.substr(0, nl) + " \xe2\x80\xa6";
+        return query;
+    }
+    if (n == "mcp_call") {
+        auto name = safe("name");
+        return name.empty() ? std::string{"\xe2\x80\xa6"} : name;
+    }
     if (n == "todo") {
         if (tc.args.is_object()) {
             auto it = tc.args.find("todos");
@@ -376,7 +485,9 @@ std::string tool_timeline_detail(const ToolUse& tc) {
                 for (const auto& td : *it) {
                     if (!td.is_object()) continue;
                     ++total;
-                    auto st = td.value("status", std::string{"pending"});
+                    auto status_it = td.find("status");
+                    auto st = status_it != td.end() && status_it->is_string()
+                        ? status_it->get<std::string>() : std::string{"pending"};
                     if (st == "completed")        ++done;
                     else if (st == "in_progress") ++in_progress;
                 }

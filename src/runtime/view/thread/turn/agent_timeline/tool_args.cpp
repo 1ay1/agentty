@@ -6,12 +6,16 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 #include <chrono>
+#include <cstdint>
+#include <limits>
 
 namespace agentty::ui {
 
 std::string safe_arg(const nlohmann::json& args, const char* key) {
     if (!args.is_object()) return {};
-    return args.value(key, "");
+    auto it = args.find(key);
+    return it != args.end() && it->is_string()
+        ? it->get<std::string>() : std::string{};
 }
 
 std::string pick_arg(const nlohmann::json& args,
@@ -27,8 +31,20 @@ std::string pick_arg(const nlohmann::json& args,
 }
 
 int safe_int_arg(const nlohmann::json& args, const char* key, int def) {
-    if (!args.is_object() || !args.contains(key)) return def;
-    return args.value(key, def);
+    if (!args.is_object()) return def;
+    auto it = args.find(key);
+    if (it == args.end()) return def;
+    if (it->is_number_unsigned()) {
+        const auto value = it->get<std::uint64_t>();
+        return value <= static_cast<std::uint64_t>(std::numeric_limits<int>::max())
+            ? static_cast<int>(value) : def;
+    }
+    if (!it->is_number_integer()) return def;
+    const auto value = it->get<std::int64_t>();
+    if (value < std::numeric_limits<int>::min()
+        || value > std::numeric_limits<int>::max())
+        return def;
+    return static_cast<int>(value);
 }
 
 int count_lines(const std::string& s) {
