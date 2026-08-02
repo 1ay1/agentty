@@ -99,6 +99,7 @@ void install_scripted_stream(Script script, bool with_auth = true) {
                         result.error = e.message;
                         result.retry_after = e.retry_after;
                         result.http_status = e.http_status;
+                        result.non_replayable = e.non_replayable;
                     }
                 }, *sm);
             }
@@ -124,8 +125,12 @@ void emit_finish(const provider::EventSink& sink,
                  StopReason r = StopReason::EndTurn) {
     sink(Msg{msg::StreamMsg{StreamFinished{r}}});
 }
-void emit_error(const provider::EventSink& sink, std::string message) {
-    sink(Msg{msg::StreamMsg{StreamError{.message = std::move(message)}}});
+void emit_error(const provider::EventSink& sink, std::string message,
+                bool non_replayable = false) {
+    sink(Msg{msg::StreamMsg{StreamError{
+        .message = std::move(message),
+        .non_replayable = non_replayable,
+    }}});
 }
 
 // Did the runner ever hand this completion a wrap-up nudge? The nudge is the
@@ -368,6 +373,22 @@ int main() {
         tools::cancellation::clear();
         check(request_cancelled->load() && out.is_error,
               "J: parent cancellation reaches provider and stops the task");
+    }
+
+    // ── K. An accepted non-idempotent request is never replayed. ─────────
+    {
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        install_scripted_stream([calls](int, const provider::Request&,
+                                        const provider::EventSink& sink) {
+            calls->fetch_add(1);
+            emit_error(sink, "connection closed after server accepted request",
+                       /*non_replayable=*/true);
+        });
+        auto out = run_task("do not duplicate this generation");
+        check(calls->load() == 1,
+              "K: accepted provider request is attempted exactly once");
+        check(out.is_error,
+              "K: accepted-request interruption surfaces instead of replaying");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

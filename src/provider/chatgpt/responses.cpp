@@ -526,6 +526,9 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
         {"authorization",     "Bearer " + creds->access_token},
         {"content-type",      "application/json"},
         {"accept",            "text/event-stream"},
+        {"cache-control",     "no-cache, no-transform"},
+        {"pragma",            "no-cache"},
+        {"accept-encoding",   "identity"},
         {"openai-beta",       "responses=experimental"},
         {"originator",        OAuthConfig::originator},
         {"session_id",        new_uuid_v4()},
@@ -582,6 +585,10 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
             break;
         }
     };
+    cbs.on_activity = [&] {
+        sink(StreamHeartbeat{.transport_only = true});
+    };
+    cbs.on_buffered_wait = [&] { sink(StreamBufferedWait{}); };
     cbs.on_chunk = [&](std::string_view chunk) -> bool {
         if (http_status >= 400) {
             // Cap the buffered error body so a misbehaving edge / proxy that
@@ -601,15 +608,15 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(15'000);
-    tos.total   = std::chrono::milliseconds(600'000);
+    tos.total   = std::chrono::minutes(30);
     // Idle/stall watchdog — parity with the Anthropic stream. A healthy
     // Responses stream emits SSE frames (deltas / heartbeats) continuously,
     // so 90 s without a single byte means the transport is dead (silent peer,
-    // proxy stall, half-open TCP). Without this, a mid-turn stall would hang
-    // on the 600 s `total` bound — the user stares at a frozen "thinking"
-    // spinner for up to 10 minutes instead of a fast Transient retry. The
-    // 15 s PING probe keeps a half-open TCP from going undetected; the reducer's
-    // own 120 s stall watchdog covers the app-layer-never-advances case.
+    // proxy stall, half-open TCP). Without this, a mid-turn stall would wait
+    // for the generous total cap instead of being retried promptly.
+    // 15 s PING probes keep a half-open TCP detectable and produce
+    // transport-only heartbeats when a corporate gateway is alive but
+    // withholding SSE DATA. The 30-minute total cap is the final bound.
     tos.ping    = std::chrono::milliseconds(15'000);
     tos.idle    = std::chrono::milliseconds(90'000);
 
@@ -627,6 +634,7 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
         .sink        = sink,
         .result_ok   = bool(result),
         .http_status = http_status,
+        .non_replayable = !result && result.error().non_replayable,
         .cancel      = req.cancel,
         .stop        = ctx.stop,
         .http_error_message = [&]() -> std::string {

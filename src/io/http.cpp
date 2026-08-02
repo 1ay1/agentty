@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -769,6 +770,8 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
     }
 
     auto deadline = clock_t_::now() + tos.connect;
+    if (tos.absolute_deadline && *tos.absolute_deadline < deadline)
+        deadline = *tos.absolute_deadline;
 
     // After a successful TCP connect, this finishes the dial: SOCKS5
     // negotiation if a proxy is configured (so the returned fd is a
@@ -890,6 +893,8 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
 std::expected<void, HttpError>
 tls_handshake(socket_t fd, tls::SSL* ssl, Timeouts tos, CancelToken* cancel) {
     auto deadline = clock_t_::now() + tos.connect;
+    if (tos.absolute_deadline && *tos.absolute_deadline < deadline)
+        deadline = *tos.absolute_deadline;
     while (true) {
         int r = SSL_connect(ssl);
         if (r == 1) return {};
@@ -1008,6 +1013,8 @@ Connection::pump_initial(Timeouts tos) {
     // is fully usable before we return it from dial_*.  Bounded by the
     // connect deadline passed in.
     auto deadline = clock_t_::now() + tos.connect;
+    if (tos.absolute_deadline && *tos.absolute_deadline < deadline)
+        deadline = *tos.absolute_deadline;
     std::string err;
     while (nghttp2_session_want_write(session_)) {
         auto s = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
@@ -1093,8 +1100,9 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
         WantWrite,   // TLS couldn't flush all outbound bytes; add POLLOUT
     };
 
-    std::optional<clock_t_::time_point> deadline;
-    if (tos.total.count() > 0) deadline = clock_t_::now() + tos.total;
+    std::optional<clock_t_::time_point> deadline = tos.absolute_deadline;
+    if (!deadline && tos.total.count() > 0)
+        deadline = clock_t_::now() + tos.total;
 
     // Liveness clocks. `last_rx` is refreshed whenever SSL_read returns
     // plaintext bytes (DATA, PING ACK, WINDOW_UPDATE — any frame counts as
@@ -1103,6 +1111,8 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     const auto start_at = clock_t_::now();
     auto last_rx   = start_at;
     auto last_ping = start_at;
+    auto last_activity_report = start_at - std::chrono::seconds{1};
+    auto last_buffered_report = start_at;
 
     std::string err;
 
@@ -1117,7 +1127,21 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
         size_t bytes_in = 0;
         auto in = pump_recv(ssl_, session_, &err, &bytes_in);
         if (in == PumpIn::Error)   return std::unexpected(HttpError::protocol(err));
-        if (bytes_in > 0) last_rx = clock_t_::now();
+        if (bytes_in > 0) {
+            last_rx = clock_t_::now();
+            if (sctx.handler && sctx.handler->on_activity
+                && last_rx - last_activity_report >= std::chrono::seconds{1}) {
+                last_activity_report = last_rx;
+                sctx.handler->on_activity();
+            }
+            if (sctx.handler && sctx.handler->on_buffered_wait
+                && !sctx.data_delivered
+                && last_rx - start_at >= std::chrono::seconds{30}
+                && last_rx - last_buffered_report >= std::chrono::seconds{15}) {
+                last_buffered_report = last_rx;
+                sctx.handler->on_buffered_wait();
+            }
+        }
         if (in == PumpIn::Closed) {
             // Peer closed the TLS session.  If the stream also closed,
             // we're done; otherwise surface as an error.
@@ -1554,12 +1578,50 @@ std::size_t plain_parse_head(std::string_view in, int& status, Headers& headers)
     return hdr_end + 4;
 }
 
-[[nodiscard]] bool headers_say_chunked(const Headers& h) {
-    for (const auto& e : h)
-        if (e.name == "transfer-encoding"
-            && e.value.find("chunked") != std::string::npos)
-            return true;
-    return false;
+enum class TransferFraming { Identity, Chunked, Invalid };
+
+[[nodiscard]] TransferFraming transfer_framing(const Headers& headers) {
+    bool saw = false;
+    for (const auto& h : headers) {
+        if (h.name != "transfer-encoding") continue;
+        if (saw) return TransferFraming::Invalid;
+        saw = true;
+        std::string_view value = h.value;
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+            value.remove_prefix(1);
+        while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+            value.remove_suffix(1);
+        // We requested identity and only implement the standard final chunked
+        // coding. Reject coding stacks instead of leaking encoded bytes into
+        // the SSE parser.
+        if (value.empty() || value.find(',') != std::string_view::npos)
+            return TransferFraming::Invalid;
+        std::string lower{value};
+        for (char& c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower != "chunked") return TransferFraming::Invalid;
+    }
+    return saw ? TransferFraming::Chunked : TransferFraming::Identity;
+}
+
+[[nodiscard]] bool parse_content_length(const Headers& headers,
+                                        std::optional<size_t>& out) {
+    out.reset();
+    for (const auto& h : headers) {
+        if (h.name != "content-length") continue;
+        if (h.value.empty()) return false;
+        size_t value = 0;
+        for (char c : h.value) {
+            if (c < '0' || c > '9'
+                || value > (std::numeric_limits<size_t>::max()
+                            - static_cast<size_t>(c - '0')) / 10)
+                return false;
+            value = value * 10 + static_cast<size_t>(c - '0');
+        }
+        if (out && *out != value) return false;
+        out = value;
+    }
+    return true;
 }
 
 // Incremental de-chunker. Feed it raw body bytes as they arrive; it appends
@@ -1567,42 +1629,70 @@ std::size_t plain_parse_head(std::string_view in, int& status, Headers& headers)
 // Returns false on a malformed chunk header. `done` is set when the
 // terminating 0-length chunk is seen.
 struct ChunkDecoder {
-    std::string pending;     // undecoded bytes carried across feeds
-    bool   done = false;
+    std::string pending;
+    bool awaiting_trailers = false;
+    bool done = false;
+
     bool feed(std::string_view bytes, std::string& out) {
+        if (done) return bytes.empty();
         pending.append(bytes);
-        size_t p = 0;
-        while (p < pending.size()) {
-            auto ln = pending.find("\r\n", p);
-            if (ln == std::string::npos) break;            // need more bytes
-            size_t sz = 0; bool any = false; bool overflow = false;
-            for (size_t k = p; k < ln; ++k) {
-                char c = pending[k];
-                int d = (c >= '0' && c <= '9') ? c - '0'
-                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                      : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-                if (d < 0) break;          // chunk-ext (";...") or CRLF — stop
-                // Guard the accumulation: a hostile/garbled size field must
-                // not overflow size_t (which would wrap the full-chunk bounds
-                // check below and corrupt the decode). Cap well under any real
-                // chunk size; >256 MiB is malformed for our use.
-                if (sz > (static_cast<size_t>(1) << 28)) { overflow = true; break; }
-                sz = sz * 16 + static_cast<size_t>(d); any = true;
+        for (;;) {
+            if (awaiting_trailers) {
+                // Empty trailer section is one CRLF; otherwise wait for the
+                // trailer block terminator. Cap it like response headers.
+                if (pending.starts_with("\r\n")) {
+                    pending.erase(0, 2);
+                    done = true;
+                    return pending.empty();
+                }
+                const auto end = pending.find("\r\n\r\n");
+                if (end == std::string::npos)
+                    return pending.size() <= 64 * 1024;
+                pending.erase(0, end + 4);
+                done = true;
+                return pending.empty();
             }
-            if (overflow) { done = true; return false; }    // malformed: abort
-            if (!any && ln == p) { p = ln + 2; continue; }  // stray CRLF
-            size_t data_start = ln + 2;
-            if (sz == 0) { done = true; return true; }       // last chunk
-            if (data_start + sz + 2 > pending.size()) break;  // need full chunk
+
+            const auto ln = pending.find("\r\n");
+            if (ln == std::string::npos)
+                return pending.size() <= 1024; // chunk-size line cap
+            const std::string_view line{pending.data(), ln};
+            const auto semi = line.find(';');
+            const std::string_view digits = line.substr(0, semi);
+            if (digits.empty()) return false;
+
+            size_t sz = 0;
+            for (char c : digits) {
+                const int d = (c >= '0' && c <= '9') ? c - '0'
+                            : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                            : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+                if (d < 0 || sz > (static_cast<size_t>(1) << 28))
+                    return false;
+                sz = sz * 16 + static_cast<size_t>(d);
+            }
+            const size_t data_start = ln + 2;
+            if (sz == 0) {
+                pending.erase(0, data_start);
+                awaiting_trailers = true;
+                continue;
+            }
+            if (sz > (static_cast<size_t>(1) << 28)) return false;
+            if (data_start > pending.size()
+                || sz > pending.size() - data_start
+                || pending.size() - data_start - sz < 2) {
+                return true; // incomplete chunk
+            }
+            const size_t data_end = data_start + sz;
+            if (pending[data_end] != '\r' || pending[data_end + 1] != '\n')
+                return false;
             out.append(pending, data_start, sz);
-            p = data_start + sz + 2;                          // skip data + CRLF
+            pending.erase(0, data_end + 2);
         }
-        if (p > 0) pending.erase(0, p);
-        return true;
     }
 };
 
 } // namespace
+
 
 // Cleartext HTTP/1.1 streaming SSE read. Mirrors what Client::stream does for
 // h2, but over a raw socket: dial, write the request, read until the head is
@@ -1610,7 +1700,8 @@ struct ChunkDecoder {
 // to on_chunk until the server closes or sends the terminal 0-chunk.
 std::expected<void, HttpError>
 plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
-             Timeouts tos, CancelToken* cancel) {
+             Timeouts tos, CancelToken* cancel, bool& accepted_post) {
+    accepted_post = false;
     auto fd_or = dial_tcp(ep, tos, cancel);
     if (!fd_or) return std::unexpected(std::move(fd_or).error());
     socket_t fd = *fd_or;
@@ -1619,6 +1710,8 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
     // Streaming: no total cap (tos.total==0 for chat). Use idle as the wedge
     // guard; fall back to a generous fixed write deadline.
     auto write_deadline = clock_t_::now() + std::chrono::milliseconds{30'000};
+    if (tos.absolute_deadline && *tos.absolute_deadline < write_deadline)
+        write_deadline = *tos.absolute_deadline;
     std::string head_wire = plain_build_request(ep, req, /*keep_alive=*/false);
     if (auto r = plain_send_all(fd, head_wire.data(), head_wire.size(),
                                write_deadline, cancel); !r) {
@@ -1630,14 +1723,22 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
     int  status = 0;
     Headers headers;
     bool chunked = false;
+    std::optional<size_t> content_length;
+    size_t body_received = 0;
     ChunkDecoder dechunk;
     bool delivered_any = false;
     auto last_rx = clock_t_::now();
+    auto last_activity_report = last_rx - std::chrono::seconds{1};
 
     char buf[64 * 1024];
     while (true) {
         if (cancel && cancel->is_cancelled()) {
             cleanup(); return std::unexpected(HttpError::cancelled("h1 plain stream"));
+        }
+        if (tos.absolute_deadline && clock_t_::now() >= *tos.absolute_deadline) {
+            cleanup();
+            return std::unexpected(HttpError::timeout(
+                "h1 plain stream operation deadline exceeded"));
         }
 #if defined(_WIN32)
         int r = ::recv(fd, buf, sizeof(buf), 0);
@@ -1646,22 +1747,57 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
 #endif
         if (r > 0) {
             last_rx = clock_t_::now();
+            if (handler.on_activity
+                && last_rx - last_activity_report >= std::chrono::seconds{1}) {
+                last_activity_report = last_rx;
+                handler.on_activity();
+            }
             if (!head_done) {
                 inbuf.append(buf, static_cast<size_t>(r));
                 auto body_at = plain_parse_head(inbuf, status, headers);
                 if (body_at != std::string_view::npos) {
                     head_done = true;
-                    chunked = headers_say_chunked(headers);
+                    const auto framing = transfer_framing(headers);
+                    chunked = framing == TransferFraming::Chunked;
+                    if (status == 0
+                        || framing == TransferFraming::Invalid
+                        || !parse_content_length(headers, content_length)
+                        || (chunked && content_length)) {
+                        cleanup();
+                        return std::unexpected(HttpError::protocol(
+                            "h1 plain invalid or ambiguous response framing"));
+                    }
                     if (handler.on_headers) handler.on_headers(status, headers);
+                    accepted_post = req.method == HttpMethod::Post
+                                 && status >= 200 && status < 300;
+                    if (!chunked && content_length && *content_length == 0) {
+                        cleanup();
+                        return {};
+                    }
                     std::string body0 = inbuf.substr(body_at);
                     inbuf.clear();
                     if (!body0.empty()) {
                         std::string payload;
-                        if (chunked) { dechunk.feed(body0, payload); }
-                        else payload = std::move(body0);
+                        if (chunked && !dechunk.feed(body0, payload)) {
+                            cleanup();
+                            return std::unexpected(HttpError::protocol(
+                                "h1 plain malformed chunk framing"));
+                        }
+                        if (!chunked) payload = std::move(body0);
+                        body_received += payload.size();
+                        if (content_length && body_received > *content_length) {
+                            cleanup();
+                            return std::unexpected(HttpError::protocol(
+                                "h1 plain body exceeds Content-Length"));
+                        }
                         if (!payload.empty() && handler.on_chunk) {
                             delivered_any = true;
                             if (!handler.on_chunk(payload)) { cleanup(); return {}; }
+                        }
+                        if (!chunked && content_length
+                            && body_received == *content_length) {
+                            cleanup();
+                            return {};
                         }
                         if (chunked && dechunk.done) { cleanup(); return {}; }
                     }
@@ -1669,18 +1805,42 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
                 continue;
             }
             std::string payload;
-            if (chunked) { dechunk.feed(std::string_view{buf, (size_t)r}, payload); }
-            else payload.assign(buf, static_cast<size_t>(r));
+            if (chunked && !dechunk.feed(
+                    std::string_view{buf, static_cast<size_t>(r)}, payload)) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 plain malformed chunk framing"));
+            }
+            if (!chunked) payload.assign(buf, static_cast<size_t>(r));
+            body_received += payload.size();
+            if (content_length && body_received > *content_length) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 plain body exceeds Content-Length"));
+            }
             if (!payload.empty() && handler.on_chunk) {
                 delivered_any = true;
                 if (!handler.on_chunk(payload)) { cleanup(); return {}; }
             }
+            if (!chunked && content_length
+                && body_received == *content_length) {
+                cleanup();
+                return {};
+            }
             if (chunked && dechunk.done) { cleanup(); return {}; }
             continue;
         }
-        if (r == 0) {   // peer closed — clean end of a Connection: close stream
+        if (r == 0) {
             cleanup();
-            if (!head_done && handler.on_headers) handler.on_headers(status, headers);
+            if (!head_done)
+                return std::unexpected(HttpError::protocol(
+                    "h1 plain peer closed before response headers"));
+            if (chunked && !dechunk.done)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 plain peer closed mid-chunked stream"));
+            if (!chunked && content_length && body_received != *content_length)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 plain peer closed before Content-Length body completed"));
             return {};
         }
         int e = sock_last_err();
@@ -1692,6 +1852,14 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
         }
         // would-block: poll with the idle guard.
         int rem = 200;
+        if (tos.absolute_deadline) {
+            rem = remaining_ms(tos.absolute_deadline, rem);
+            if (rem <= 0) {
+                cleanup();
+                return std::unexpected(HttpError::timeout(
+                    "h1 plain stream operation deadline exceeded"));
+            }
+        }
         if (tos.idle.count() > 0) {
             auto since = clock_t_::now() - last_rx;
             if (since >= tos.idle) {
@@ -1774,8 +1942,16 @@ plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
     if (body_at == std::string_view::npos)
         return std::unexpected(HttpError::protocol("h1 plain: no header terminator"));
     std::string body = in.substr(body_at);
-    if (headers_say_chunked(headers)) {
-        ChunkDecoder d; std::string decoded; d.feed(body, decoded);
+    const auto framing = transfer_framing(headers);
+    if (framing == TransferFraming::Invalid)
+        return std::unexpected(HttpError::protocol(
+            "h1 plain unsupported Transfer-Encoding"));
+    if (framing == TransferFraming::Chunked) {
+        ChunkDecoder d;
+        std::string decoded;
+        if (!d.feed(body, decoded) || !d.done)
+            return std::unexpected(HttpError::protocol(
+                "h1 plain malformed or truncated chunk framing"));
         body = std::move(decoded);
     }
     return Response{ status, std::move(headers), std::move(body) };
@@ -1784,10 +1960,9 @@ plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
 // -----------------------------------------------------------------------
 // HTTP/1.1 unary fallback.
 //
-// The core transport is h2-only: dial_new() hard-rejects any peer that
-// negotiates anything other than h2 via ALPN.  That's correct for the
-// streaming chat path (it relies on h2 flow-control + multiplexing) and for
-// a direct connection to Anthropic's edge, which always speaks h2.
+// The pooled core transport prefers h2 for flow control and multiplexing.
+// Unary and streaming requests both have a one-connection HTTP/1.1 fallback
+// for TLS intermediaries that remove h2 from ALPN.
 //
 // But an air-gapped host reaches the internet through a SOCKS/SSH tunnel,
 // and the far side of that tunnel is frequently a TLS-intercepting corporate
@@ -1798,12 +1973,9 @@ plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
 // and — because the failure is classified Tls, not Auth — the mid-session
 // refresh-retry never fires.
 //
-// This speaks HTTP/1.1 for *unary* requests only.  One request, one
-// response, `Connection: close` so the body ends at EOF (no need to parse
-// chunked transfer-encoding or trust Content-Length).  Streaming stays
-// h2-only.  TLS is still pinned on ep.host, so the intercepting proxy is
-// inside the user's own trust boundary (they configured the tunnel) and
-// can't reach anything we didn't already send it.
+// The unary fallback below buffers one complete response. The streaming
+// fallback later in this file incrementally de-chunks SSE and uses an absolute
+// deadline because HTTP/1.1 has no protocol-level PING.
 // True iff `e` is the specific "peer negotiated something other than h2"
 // failure raised in dial_new — the one case the h1 fallback is meant for.
 // Matched on the detail substring set at the single reject site below.
@@ -1947,38 +2119,278 @@ h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
         headers.push_back({ std::move(name), std::string{line.substr(vb)} });
     }
 
-    // If the server *did* send chunked despite Connection: close, decode it;
-    // otherwise the body is already the raw bytes after the headers.
-    for (const auto& h : headers) {
-        if (h.name == "transfer-encoding" && h.value.find("chunked") != std::string::npos) {
-            std::string decoded;
-            size_t p = 0;
-            while (p < body.size()) {
-                auto ln = body.find("\r\n", p);
-                if (ln == std::string::npos) break;
-                size_t sz = 0; bool overflow = false;
-                for (size_t k = p; k < ln; ++k) {
-                    char c = body[k];
-                    int d = (c >= '0' && c <= '9') ? c - '0'
-                          : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                          : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-                    if (d < 0) break;
-                    if (sz > (static_cast<size_t>(1) << 28)) { overflow = true; break; }
-                    sz = sz * 16 + static_cast<size_t>(d);
-                }
-                if (overflow) break;          // malformed size field
-                p = ln + 2;
-                if (sz == 0) break;
-                if (p + sz > body.size()) break;
-                decoded.append(body, p, sz);
-                p += sz + 2;  // skip chunk + trailing CRLF
-            }
-            body = std::move(decoded);
-            break;
+    const auto framing = transfer_framing(headers);
+    std::optional<size_t> content_length;
+    if (framing == TransferFraming::Invalid
+        || !parse_content_length(headers, content_length)
+        || (framing == TransferFraming::Chunked && content_length)) {
+        return std::unexpected(HttpError::protocol(
+            "h1 unary invalid or ambiguous response framing"));
+    }
+    if (framing == TransferFraming::Chunked) {
+        ChunkDecoder decoder;
+        std::string decoded;
+        if (!decoder.feed(body, decoded) || !decoder.done) {
+            return std::unexpected(HttpError::protocol(
+                "h1 unary malformed or truncated chunk framing"));
         }
+        body = std::move(decoded);
+    } else if (content_length && body.size() != *content_length) {
+        return std::unexpected(HttpError::peer_closed(
+            "h1 unary Content-Length body was truncated"));
     }
 
     return Response{ status, std::move(headers), std::move(body) };
+}
+
+// TLS HTTP/1.1 streaming fallback for corporate gateways that strip h2 from
+// ALPN. SSE does not require HTTP/2: chunked HTTP/1.1 preserves the same event
+// boundaries. Unlike the direct h2 path, an h1 intermediary cannot be probed
+// with PING frames and may intentionally buffer the body, so this path emits a
+// bounded waiting heartbeat while the socket remains open and relies on the
+// absolute request deadline as its final wedge guard.
+std::expected<void, HttpError>
+h1_tls_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
+              Timeouts tos, CancelToken* cancel, bool& accepted_post) {
+    accepted_post = false;
+    auto fd_or = dial_tcp(ep, tos, cancel);
+    if (!fd_or) return std::unexpected(std::move(fd_or).error());
+    socket_t fd = *fd_or;
+
+    tls::SSL* ssl = tls::wrap_client(static_cast<int>(fd), ep.host);
+    if (!ssl) {
+        sock_close(fd);
+        return std::unexpected(HttpError::tls("SSL_new failed"));
+    }
+    auto cleanup = [&] { tls::free_ssl(ssl); sock_close(fd); };
+    if (auto r = tls_handshake(fd, ssl, tos, cancel); !r) {
+        cleanup();
+        return std::unexpected(std::move(r).error());
+    }
+
+    const unsigned char* alpn = nullptr;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(ssl, &alpn, &alpn_len);
+    const bool h1 = alpn_len == 0
+        || (alpn_len == 8 && alpn
+            && std::memcmp(alpn, "http/1.1", 8) == 0);
+    if (!h1) {
+        cleanup();
+        return std::unexpected(HttpError::tls(
+            "HTTP/1.1 fallback negotiated an unexpected ALPN protocol"));
+    }
+
+    const auto deadline = tos.absolute_deadline.value_or(
+        clock_t_::now() + (tos.total.count() > 0 ? tos.total
+                                                 : std::chrono::minutes{30}));
+    std::string wire = plain_build_request(ep, req, /*keep_alive=*/false);
+    size_t off = 0;
+    while (off < wire.size()) {
+        if (cancel && cancel->is_cancelled()) {
+            cleanup();
+            return std::unexpected(HttpError::cancelled("h1 TLS stream write"));
+        }
+        const int n = SSL_write(ssl, wire.data() + off,
+            static_cast<int>(std::min<size_t>(wire.size() - off, 1 << 20)));
+        if (n > 0) {
+            off += static_cast<size_t>(n);
+            continue;
+        }
+        const int e = SSL_get_error(ssl, n);
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+            cleanup();
+            return std::unexpected(HttpError::tls(
+                "h1 TLS stream write: " + tls::last_error(ssl)));
+        }
+        const int rem = remaining_ms(deadline, 200);
+        if (rem <= 0) {
+            cleanup();
+            return std::unexpected(HttpError::timeout(
+                "h1 TLS stream write timed out"));
+        }
+        pollfd pfd{fd, e == SSL_ERROR_WANT_READ ? short(POLLIN)
+                                                : short(POLLOUT), 0};
+        const int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err())) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream write poll failed"));
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream write hangup"));
+        }
+    }
+
+    std::string inbuf;
+    bool head_done = false;
+    int status = 0;
+    Headers headers;
+    bool chunked = false;
+    std::optional<size_t> content_length;
+    size_t body_received = 0;
+    ChunkDecoder dechunk;
+    auto last_activity = clock_t_::now() - std::chrono::seconds{15};
+    char buf[64 * 1024];
+
+    for (;;) {
+        if (cancel && cancel->is_cancelled()) {
+            cleanup();
+            return std::unexpected(HttpError::cancelled("h1 TLS stream read"));
+        }
+        if (clock_t_::now() >= deadline) {
+            cleanup();
+            return std::unexpected(HttpError::timeout(
+                "h1 TLS stream reached its absolute deadline"));
+        }
+
+        const int n = SSL_read(ssl, buf, sizeof(buf));
+        if (n > 0) {
+            const auto now = clock_t_::now();
+            if (handler.on_activity
+                && now - last_activity >= std::chrono::seconds{1}) {
+                last_activity = now;
+                handler.on_activity();
+            }
+            if (!head_done) {
+                inbuf.append(buf, static_cast<size_t>(n));
+                if (inbuf.size() > 64 * 1024) {
+                    cleanup();
+                    return std::unexpected(HttpError::protocol(
+                        "h1 TLS response headers exceed 64 KiB"));
+                }
+                const auto body_at = plain_parse_head(inbuf, status, headers);
+                if (body_at == std::string_view::npos) continue;
+                head_done = true;
+                const auto framing = transfer_framing(headers);
+                chunked = framing == TransferFraming::Chunked;
+                if (status == 0
+                    || framing == TransferFraming::Invalid
+                    || !parse_content_length(headers, content_length)
+                    || (chunked && content_length)) {
+                    cleanup();
+                    return std::unexpected(HttpError::protocol(
+                        "h1 TLS invalid or ambiguous response framing"));
+                }
+                if (handler.on_headers) handler.on_headers(status, headers);
+                accepted_post = req.method == HttpMethod::Post
+                             && status >= 200 && status < 300;
+                if (!chunked && content_length && *content_length == 0) {
+                    cleanup();
+                    return {};
+                }
+                std::string initial = inbuf.substr(body_at);
+                inbuf.clear();
+                if (!initial.empty()) {
+                    std::string payload;
+                    if (chunked && !dechunk.feed(initial, payload)) {
+                        cleanup();
+                        return std::unexpected(HttpError::protocol(
+                            "h1 TLS malformed chunk framing"));
+                    }
+                    if (!chunked) payload = std::move(initial);
+                    body_received += payload.size();
+                    if (content_length && body_received > *content_length) {
+                        cleanup();
+                        return std::unexpected(HttpError::protocol(
+                            "h1 TLS body exceeds Content-Length"));
+                    }
+                    if (!payload.empty() && handler.on_chunk
+                        && !handler.on_chunk(payload)) {
+                        cleanup();
+                        return {};
+                    }
+                    if (!chunked && content_length
+                        && body_received == *content_length) {
+                        cleanup();
+                        return {};
+                    }
+                    if (chunked && dechunk.done) {
+                        cleanup();
+                        return {};
+                    }
+                }
+                continue;
+            }
+
+            std::string payload;
+            if (chunked && !dechunk.feed(
+                    std::string_view{buf, static_cast<size_t>(n)}, payload)) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 TLS malformed chunk framing"));
+            }
+            if (!chunked) payload.assign(buf, static_cast<size_t>(n));
+            body_received += payload.size();
+            if (content_length && body_received > *content_length) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 TLS body exceeds Content-Length"));
+            }
+            if (!payload.empty() && handler.on_chunk
+                && !handler.on_chunk(payload)) {
+                cleanup();
+                return {};
+            }
+            if (!chunked && content_length
+                && body_received == *content_length) {
+                cleanup();
+                return {};
+            }
+            if (chunked && dechunk.done) {
+                cleanup();
+                return {};
+            }
+            continue;
+        }
+
+        const int e = SSL_get_error(ssl, n);
+        if (e == SSL_ERROR_ZERO_RETURN || (e == SSL_ERROR_SYSCALL && n == 0)) {
+            cleanup();
+            if (!head_done)
+                return std::unexpected(HttpError::protocol(
+                    "h1 TLS peer closed before response headers"));
+            if (chunked && !dechunk.done)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 TLS peer closed mid-chunked stream"));
+            if (!chunked && content_length && body_received != *content_length)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 TLS peer closed before Content-Length body completed"));
+            return {};
+        }
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+            cleanup();
+            return std::unexpected(HttpError::tls(
+                "h1 TLS stream read: " + tls::last_error(ssl)));
+        }
+
+        const int rem = remaining_ms(deadline, 200);
+        pollfd pfd{fd, e == SSL_ERROR_WANT_WRITE ? short(POLLOUT)
+                                                 : short(POLLIN), 0};
+        const int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err())) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream read poll failed"));
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream read hangup"));
+        }
+
+        // HTTP/1 has no protocol PING. This does not claim wire activity: it
+        // reports an explicit bounded buffering state so the UI can explain
+        // why DATA may arrive only at completion while the absolute deadline
+        // remains the final guardrail.
+        const auto now = clock_t_::now();
+        if (handler.on_buffered_wait
+            && now - last_activity >= std::chrono::seconds{15}) {
+            last_activity = now;
+            handler.on_buffered_wait();
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -2109,6 +2521,28 @@ private:
 
 } // namespace
 
+namespace test {
+std::expected<std::string, std::string>
+decode_chunked(const std::vector<std::string>& fragments) {
+    ChunkDecoder decoder;
+    std::string output;
+    for (const auto& fragment : fragments) {
+        if (!decoder.feed(fragment, output))
+            return std::unexpected("malformed chunk framing");
+    }
+    if (!decoder.done)
+        return std::unexpected("truncated chunk framing");
+    return output;
+}
+
+std::expected<bool, std::string> is_chunked(const Headers& headers) {
+    const auto framing = transfer_framing(headers);
+    if (framing == TransferFraming::Invalid)
+        return std::unexpected("invalid transfer encoding");
+    return framing == TransferFraming::Chunked;
+}
+} // namespace test
+
 // ---------------------------------------------------------------------------
 // Client::Impl
 // ---------------------------------------------------------------------------
@@ -2231,10 +2665,9 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         if (is_cancelled(cancel)) break;
     }
 
-    // h2 unreachable because the peer (an intercepting proxy on an air-gapped
-    // tunnel) only offers http/1.1.  Unary requests have no h2 dependency, so
-    // retry once over HTTP/1.1.  Streaming (Client::stream) deliberately has
-    // no such fallback — it needs h2 multiplexing + flow-control.
+    // h2 unreachable because the peer only offers HTTP/1.1. Unary requests
+    // retry through the buffered h1 path here; Client::stream uses the
+    // incremental h1 TLS path below.
     if (is_alpn_h2_failure(last_err) && !is_cancelled(cancel)) {
         if (auto h1 = h1_unary_send(ep, req, tos, cancel.get()); h1)
             return std::move(*h1);
@@ -2249,11 +2682,38 @@ HttpStreamResult
 Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
                CancelTokenPtr cancel) {
     Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
+    std::optional<clock_t_::time_point> operation_deadline;
+    if (tos.total.count() > 0)
+        operation_deadline = clock_t_::now() + tos.total;
+    const auto remaining_timeouts = [&]() -> std::optional<Timeouts> {
+        Timeouts current = tos;
+        if (!operation_deadline) return current;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            *operation_deadline - clock_t_::now());
+        if (left.count() <= 0) return std::nullopt;
+        current.total = left;
+        current.connect = std::min(current.connect, left);
+        current.absolute_deadline = operation_deadline;
+        return current;
+    };
 
     // Cleartext local server (Ollama / llama.cpp) — plain HTTP/1.1 chunked
     // SSE over a raw socket. No TLS, no h2, no connection pool.
-    if (req.plaintext)
-        return plain_stream(ep, req, handler, tos, cancel.get());
+    if (req.plaintext) {
+        auto plain_tos = remaining_timeouts();
+        if (!plain_tos)
+            return std::unexpected(HttpError::timeout(
+                "stream operation deadline exceeded"));
+        bool accepted_post = false;
+        auto plain = plain_stream(ep, req, handler, *plain_tos, cancel.get(),
+                                  accepted_post);
+        if (!plain && accepted_post) {
+            plain.error().non_replayable = true;
+            plain.error().detail +=
+                " (server accepted request; not replayed automatically)";
+        }
+        return plain;
+    }
 
     HttpError last_err = HttpError::unknown("stream: no attempts made");
     // Persist across attempts so the synthesised on_headers (if we never got
@@ -2276,20 +2736,40 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         if (is_cancelled(cancel)) { last_err = HttpError::cancelled(); break; }
+        auto attempt_tos = remaining_timeouts();
+        if (!attempt_tos) {
+            last_err = HttpError::timeout("stream operation deadline exceeded");
+            break;
+        }
         if (!backoff_sleep(attempt, cancel)) { last_err = HttpError::cancelled(); break; }
+        attempt_tos = remaining_timeouts();
+        if (!attempt_tos) {
+            last_err = HttpError::timeout("stream operation deadline exceeded");
+            break;
+        }
 
         const bool from_pool = (attempt == 0 && stale_pool_redials == 0);
         auto conn_or = from_pool
-            ? acquire_or_dial(impl_->pool, ep, tos, cancel)
-            : dial_new(ep, tos, cancel);
-        if (!conn_or) { last_err = std::move(conn_or).error(); continue; }
+            ? acquire_or_dial(impl_->pool, ep, *attempt_tos, cancel)
+            : dial_new(ep, *attempt_tos, cancel);
+        if (!conn_or) {
+            last_err = std::move(conn_or).error();
+            // ALPN downgrade is stable across retries. SSE works over
+            // HTTP/1.1, so fall through to the TLS h1 streaming path below.
+            if (is_alpn_h2_failure(last_err)) break;
+            continue;
+        }
         auto conn = std::move(*conn_or);
         const bool was_reused = from_pool && conn->was_pooled();
 
         StreamCtx sctx{};
         sctx.handler = &handler;
-        auto ok = conn->run(req, sctx, tos, cancel);
-        if (sctx.data_delivered) committed = true;
+        auto ok = conn->run(req, sctx, *attempt_tos, cancel);
+        const bool accepted_non_idempotent =
+            req.method == HttpMethod::Post
+            && sctx.headers_delivered
+            && sctx.status >= 200 && sctx.status < 300;
+        if (sctx.data_delivered || accepted_non_idempotent) committed = true;
         last_status  = sctx.status;
         last_headers = std::move(sctx.headers);
         if (ok) {
@@ -2297,12 +2777,14 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
             return {};
         }
         last_err = std::move(ok).error();
+        if (accepted_non_idempotent) {
+            last_err.non_replayable = true;
+            last_err.detail += " (server accepted request; not replayed automatically)";
+        }
 
-        // Once a real SSE DATA chunk reached the caller, the stream is
-        // semantically committed — retrying would produce duplicate
-        // content_block events and a second pass at the reducer's
-        // tool_use state machine. Headers-only (no data) is still
-        // replay-safe, so we do NOT break merely on headers_delivered.
+        // Once DATA arrived, or a 2xx response proved a non-idempotent POST
+        // was accepted, replaying here could duplicate model work. Let the
+        // provider/runtime classify the interruption instead.
         if (committed) break;
         if (is_cancelled(cancel)) break;
 
@@ -2318,6 +2800,22 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
             ++stale_pool_redials;
             --attempt;   // don't consume a transport-budget slot
         }
+    }
+
+    if (is_alpn_h2_failure(last_err) && !is_cancelled(cancel)) {
+        if (auto h1_tos = remaining_timeouts()) {
+            bool accepted_post = false;
+            auto h1 = h1_tls_stream(ep, req, handler, *h1_tos, cancel.get(),
+                                    accepted_post);
+            if (!h1 && accepted_post) {
+                h1.error().non_replayable = true;
+                h1.error().detail +=
+                    " (server accepted request; not replayed automatically)";
+            }
+            return h1;
+        }
+        return std::unexpected(HttpError::timeout(
+            "stream operation deadline exceeded before HTTP/1.1 fallback"));
     }
 
     // If we never delivered data, synthesise an on_headers so the caller's

@@ -34,6 +34,16 @@ sudo cp corp-proxy-ca.crt /etc/pki/ca-trust/source/anchors/
 sudo update-ca-trust
 ```
 
+## Streaming through corporate VPNs
+
+Some endpoint-security gateways keep the connection open but buffer SSE model events, so short replies arrive in one burst and older agentty builds report `stream stalled — no events for 120s` on larger tasks. Current builds:
+
+- request `no-cache, no-transform` and uncompressed event streams,
+- treat HTTP/2 control traffic as transport liveness while retaining a hard deadline,
+- fall back to incremental TLS HTTP/1.1 streaming when a gateway removes `h2` from ALPN.
+
+Update agentty if you see the exact 120-second error. Streaming may still appear in bursts when company policy forces buffering—the client cannot make an intermediary reveal bytes it withholds—but the request will continue instead of being cancelled while the bounded connection remains alive.
+
 ## Last resort
 
 If you genuinely can't install the CA, you can disable peer verification:

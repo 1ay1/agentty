@@ -74,6 +74,11 @@ struct Active {
     std::chrono::steady_clock::time_point started{};
     std::chrono::steady_clock::time_point last_event_at{};
 
+    // Set when the socket/TLS layer is alive but no model/SSE frame has
+    // necessarily escaped an intermediary. This marks failures as mid-stream
+    // without treating proxy PING traffic as semantic model progress.
+    bool transport_activity = false;
+
     // Per-turn retry counters. truncation_retries: silent re-launches
     // when the stream EOFs mid-tool-args. transient_retries: 5xx /
     // network / overloaded / 429. Independent budgets.

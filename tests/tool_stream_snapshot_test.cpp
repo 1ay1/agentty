@@ -1,8 +1,11 @@
 // tool_stream_snapshot_test — canonical ID-addressed append/snapshot semantics.
 
+#include <chrono>
 #include <cstdio>
 #include <string>
+#include <utility>
 
+#include "agentty/io/http.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -28,11 +31,57 @@ static A::Model apply(A::Model m, A::msg::StreamMsg event) {
 }
 
 int main() {
+    {
+        auto decoded = A::http::test::decode_chunked({
+            "4\r\nWi", "ki\r\n5;ext=yes\r\nped", "ia\r\n0\r\n", "\r\n"});
+        check(decoded && *decoded == "Wikipedia",
+              "incremental chunk decoder accepts valid extensions and splits");
+        check(!A::http::test::decode_chunked({"1Z\r\nx\r\n0\r\n\r\n"}),
+              "chunk decoder rejects non-hex size suffixes");
+        check(!A::http::test::decode_chunked({"1\r\nxXX0\r\n\r\n"}),
+              "chunk decoder rejects missing data CRLF");
+        check(!A::http::test::decode_chunked({"5\r\nabc"}),
+              "chunk decoder rejects truncated streams");
+        auto upper = A::http::test::is_chunked({
+            {"transfer-encoding", "Chunked"}});
+        check(upper && *upper,
+              "transfer coding token is parsed case-insensitively");
+        check(!A::http::test::is_chunked({
+                  {"transfer-encoding", "gzip, chunked"}}),
+              "unsupported transfer coding stacks are rejected");
+    }
+
     A::Model m;
     A::Message assistant;
     assistant.role = A::Role::Assistant;
     m.d.current.messages.push_back(std::move(assistant));
-    m.s.phase = A::phase::Streaming{A::phase::Active{}};
+    A::phase::Active active;
+    active.transient_retries = 3;
+    active.last_event_at = std::chrono::steady_clock::now()
+                         - std::chrono::seconds{119};
+    m.s.phase = A::phase::Streaming{std::move(active)};
+
+    m = apply(std::move(m), A::StreamHeartbeat{.transport_only = true});
+    auto* transport_ctx = A::active_ctx(m.s.phase);
+    check(transport_ctx && transport_ctx->transport_activity,
+          "transport heartbeat records proxy/socket activity");
+    check(transport_ctx && transport_ctx->transient_retries == 3,
+          "transport heartbeat does not erase retry history");
+    check(transport_ctx && std::chrono::steady_clock::now()
+              - transport_ctx->last_event_at < std::chrono::seconds{2},
+          "transport heartbeat refreshes the stall clock");
+
+    m = apply(std::move(m), A::StreamBufferedWait{});
+    auto* buffered_ctx = A::active_ctx(m.s.phase);
+    check(buffered_ctx && buffered_ctx->transport_activity,
+          "buffered gateway wait is tracked as transport activity");
+    check(m.s.status.find("buffering output") != std::string::npos,
+          "buffered gateway wait explains burst delivery to the user");
+
+    m = apply(std::move(m), A::StreamHeartbeat{});
+    auto* model_ctx = A::active_ctx(m.s.phase);
+    check(model_ctx && model_ctx->transient_retries == 0,
+          "semantic model heartbeat resets transient retries");
 
     m = apply(std::move(m), A::StreamToolUseStart{
         A::ToolCallId{"call-a"}, A::ToolName{"edit"}});

@@ -247,6 +247,9 @@ struct StreamError {
     // string sniff. This is how the StreamResult's precision reaches the
     // reducer without changing the Msg-driven runtime seam.
     int http_status = 0;
+    // The server accepted a non-idempotent request before transport failure;
+    // retrying could duplicate model work/cost.
+    bool non_replayable = false;
     // True only for the SYNTHETIC StreamError the stall watchdog dispatches
     // after it trips the cancel token (see meta.cpp Tick). The handler must
     // treat a `from_stall` error as a recoverable upstream stall (reclassify
@@ -259,17 +262,17 @@ struct StreamError {
     // turns/retries that ran in between.
     bool from_stall = false;
 };
-// Wire-alive heartbeat. Emitted by the transport for SSE frames that
-// carry no reducer-visible payload but prove the connection is healthy
-// and the model is still working: SSE `ping` events (Anthropic's proxy
-// keepalive, every 10-15 s), and `thinking_delta` blocks (extended-
-// thinking models emit these while reasoning silently — no `text` /
-// `input_json` for seconds or minutes at a time). Without this Msg the
-// reducer's stall watchdog can't distinguish "model is thinking" from
-// "transport is wedged" and fires spurious "stream stalled" errors.
-// The handler does nothing but bump `last_event_at` — no render
-// churn, no state transitions, no visible UI effect.
-struct StreamHeartbeat {};
+// Wire-alive heartbeat. Model/SSE heartbeats reset transient retry history;
+// transport-only activity (for example HTTP/2 PING ACK bytes) merely prevents
+// the 120-second UI watchdog from misclassifying a buffering corporate
+// gateway as dead.
+struct StreamHeartbeat {
+    bool transport_only = false;
+};
+// A live intermediary is withholding response DATA. Unlike a generic
+// heartbeat this is user-visible: the reducer keeps the bounded request alive
+// and explains why output may arrive in one burst instead of incrementally.
+struct StreamBufferedWait {};
 // User-driven cancel of the in-flight stream (Esc while streaming). The
 // reducer trips the StreamState cancel token; the http layer notices within
 // ~200 ms and the worker thread eventually emits a StreamError("cancelled").
@@ -660,7 +663,7 @@ using StreamMsg = std::variant<
     StreamThinkingDelta,
     StreamReasoning,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
-    CancelStream, RetryStream, ProactiveContextReady>;
+    StreamBufferedWait, CancelStream, RetryStream, ProactiveContextReady>;
 
 using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
