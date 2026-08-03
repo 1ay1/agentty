@@ -37,6 +37,7 @@
 #include <simdjson.h>
 
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
@@ -130,75 +131,10 @@ struct StreamCtx {
 
 // Could `s` be the START of a leaked tool-call? This is only called at the
 // beginning of a response (salvage_eligible=true). Once prose is detected,
-// salvage is disabled permanently for this response.
-//
-// We detect these patterns that weak local models use:
-// 1. Bare JSON object: {"name": "...", "arguments": {...}}
-// 2. JSON array of objects: [{...}, {...}]
-// 3. <tool_call> tag wrapper: <tool_call>{...}</tool_call>
-// 4. ```json fence wrapper: ```json\n{...}\n```
-//
-// For robustness: if content starts with ANYTHING ELSE, it's prose.
-[[nodiscard]] bool could_be_tool_json(std::string_view s) noexcept {
-    // Skip leading whitespace.
-    std::size_t i = 0;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t'
-                            || s[i] == '\n' || s[i] == '\r')) ++i;
-    if (i >= s.size()) return true;  // only whitespace so far, still undecided
-    
-    std::string_view rest = s.substr(i);
-    
-    // Pattern 1: Bare JSON object starting with {
-    // Accept {, {whitespace, or {" — the brace may be followed by newlines
-    // before the first key (pretty-printed JSON from local models).
-    if (rest.front() == '{') {
-        if (rest.size() == 1) return true;  // just { so far
-        // Check what follows the {
-        std::string_view after_brace = rest.substr(1);
-        // Skip whitespace after {
-        std::size_t k = 0;
-        while (k < after_brace.size() && (after_brace[k] == ' ' || after_brace[k] == '\t'
-               || after_brace[k] == '\n' || after_brace[k] == '\r')) ++k;
-        // If only whitespace after {, keep waiting
-        if (k == after_brace.size()) return true;
-        // If next non-ws char is " (start of key) or } (empty object), valid JSON
-        if (after_brace[k] == '"' || after_brace[k] == '}') return true;
-        // Otherwise not valid JSON object start
-        return false;
-    }
-    
-    // Pattern 2: JSON array starting with [{ or [
-    if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
-    if (rest == "[" || rest == "[ ") return true;
-    
-    // Pattern 3: <tool_call> tag
-    if (rest.starts_with("<tool_call>")) return true;
-    // Incomplete prefix of <tool_call>
-    constexpr std::string_view kTag = "<tool_call>";
-    if (rest.size() < kTag.size() && rest.front() == '<') {
-        for (std::size_t j = 0; j < rest.size(); ++j) {
-            if (rest[j] != kTag[j]) return false;  // diverged
-        }
-        return true;  // exact prefix match
-    }
-    
-    // Pattern 4: ```json fence
-    if (rest.starts_with("```json")) return true;
-    if (rest.starts_with("```")) {
-        if (rest.size() <= 3) return true;  // just ``` so far
-        std::string_view after = rest.substr(3);
-        // Could still be ```json or ```\n{
-        if (after.empty() || after[0] == '\n' || after[0] == '\r' ||
-            after[0] == ' ' || after[0] == '\t' || after[0] == 'j') {
-            return true;
-        }
-        // It's ```cpp or similar - NOT a tool wrapper
-        return false;
-    }
-    
-    // Anything else is prose.
-    return false;
-}
+// salvage is disabled permanently for this response. Shared classifier — see
+// wire::could_be_tool_json (single source of truth; was duplicated here and in
+// the ollama transport).
+using wire::could_be_tool_json;
 
 [[nodiscard]] StopReason parse_openai_finish(std::string_view fr) noexcept {
     // OpenAI finish_reason: "stop" | "length" | "tool_calls" |
@@ -888,20 +824,10 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
     }
 
     // Usage can arrive on a final frame (when stream_options.include_usage
-    // is set) OR be attached to the last choices frame.
-    if (j.contains("usage") && j["usage"].is_object()) {
-        const auto& u = j["usage"];
-        StreamUsage su;
-        su.input_tokens  = u.value("prompt_tokens", 0);
-        su.output_tokens = u.value("completion_tokens", 0);
-        // OpenAI's prompt_tokens_details.cached_tokens ≈ Anthropic's
-        // cache_read. Surface it so the context gauge reflects cache hits.
-        if (u.contains("prompt_tokens_details")
-            && u["prompt_tokens_details"].is_object()) {
-            su.cache_read_input_tokens =
-                u["prompt_tokens_details"].value("cached_tokens", 0);
-        }
-        ctx.sink(su);
+    // is set) OR be attached to the last choices frame. Shared extractor — see
+    // usage::from_openai (single source of truth for the OpenAI-compat shape).
+    if (j.contains("usage")) {
+        if (auto su = usage::from_openai(j["usage"])) ctx.sink(*su);
     }
 
     if (!j.contains("choices") || !j["choices"].is_array()
@@ -1099,11 +1025,9 @@ void dispatch_native_line(StreamCtx& ctx, std::string_view line) {
     if (j.contains("message") && j["message"].is_object())
         handle_native_message(ctx, j["message"]);
     if (j.value("done", false)) {
-        // Final frame carries usage + done_reason.
-        StreamUsage su;
-        su.input_tokens  = j.value("prompt_eval_count", 0);
-        su.output_tokens = j.value("eval_count", 0);
-        if (su.input_tokens || su.output_tokens) ctx.sink(su);
+        // Final frame carries usage + done_reason. Shared extractor — see
+        // usage::from_ollama.
+        if (auto su = usage::from_ollama(j)) ctx.sink(*su);
         auto reason = j.value("done_reason", std::string{"stop"});
         if (ctx.stop_reason != StopReason::ToolUse)
             ctx.stop_reason = (reason == "length") ? StopReason::MaxTokens
@@ -1333,13 +1257,10 @@ http::Headers build_request_headers(const AuthHeader& auth,
     h.push_back({"accept", "application/json"});
     h.push_back({"content-type", "application/json"});
     h.push_back({"user-agent", "agentty/" AGENTTY_VERSION});
-    // Extract the key from either arm — both carry a plain string.
-    std::string key;
-    std::visit([&](const auto& a) {
-        using T = std::decay_t<decltype(a)>;
-        if constexpr (std::is_same_v<T, ApiKeyHeader>)      key = a.value;
-        else if constexpr (std::is_same_v<T, BearerHeader>) key = a.token;
-    }, auth);
+    // Both arms carry a plain secret; the OpenAI family sends it as a Bearer
+    // token (or a custom raw header). See auth::bearer_token — the single
+    // source of truth for OpenAI-family token extraction.
+    std::string key = auth::bearer_token(auth);
     if (key.empty()) return h;
     if (!endpoint.auth_header_name.empty()) {
         // Custom header name (--auth-header): key goes out raw, no "Bearer "
