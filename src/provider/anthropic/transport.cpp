@@ -1902,21 +1902,28 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     // request, so we don't surface the 1M variant there. The `[1m]` id both
     // widens context_window() to 1M and makes the transport send the
     // context-1m-2025-08-07 beta (via ModelCapabilities::extended_context_1m).
+    // The `[1m]` companion is inserted immediately AFTER its base model so the
+    // picker reads "Opus 4.8" / "Opus 4.8 (1M context)" adjacently instead of
+    // clumping every 1M row at the bottom.
     auto add_1m_variants = [is_oauth](std::vector<ModelInfo>& v) {
         if (!is_oauth) return;
-        std::vector<ModelInfo> extra;
-        for (const auto& mi : v) {
+        std::vector<ModelInfo> out;
+        out.reserve(v.size() * 2);
+        for (auto& mi : v) {
             const auto caps = ModelCapabilities::from_id(mi.id.value);
-            if (!caps.supports_1m_suffix()) continue;
-            // Skip if an explicit [1m] row is somehow already present.
-            if (mi.id.value.find("[1m]") != std::string::npos) continue;
-            ModelInfo one_m = mi;
-            one_m.id = ModelId{mi.id.value + "[1m]"};
-            one_m.display_name = mi.display_name + " (1M context)";
-            one_m.context_window = 1'000'000;
-            extra.push_back(std::move(one_m));
+            const bool eligible = caps.supports_1m_suffix()
+                && mi.id.value.find("[1m]") == std::string::npos;
+            ModelInfo one_m;
+            if (eligible) {
+                one_m = mi;
+                one_m.id = ModelId{mi.id.value + "[1m]"};
+                one_m.display_name = mi.display_name + " (1M context)";
+                one_m.context_window = 1'000'000;
+            }
+            out.push_back(std::move(mi));
+            if (eligible) out.push_back(std::move(one_m));
         }
-        for (auto& e : extra) v.push_back(std::move(e));
+        v = std::move(out);
     };
 
     // Built-in catalog. Anthropic's ids are stable and few, so unlike the
@@ -1977,7 +1984,37 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
                 .context_window = 200000,
             });
         }
-        // Surface a `[1m]` companion for every suffix-capable model (OAuth).
+        // Order the raw /v1/models list into a clean, predictable grouping
+        // before we interleave the 1M variants: by family (Opus → Sonnet →
+        // Haiku → flagship lane → other), then newest generation.revision
+        // first within a family. Anthropic's endpoint returns models in an
+        // arbitrary order, which made the picker read as a jumble
+        // (Opus 4.8, Opus 4.7, Sonnet 4.6, Opus 4.6, …).
+        auto family_rank = [](const ModelCapabilities& c) -> int {
+            switch (c.family) {
+                case ModelCapabilities::Family::Opus:   return 0;
+                case ModelCapabilities::Family::Sonnet: return 1;
+                case ModelCapabilities::Family::Haiku:  return 2;
+                case ModelCapabilities::Family::Fable:  return 3;
+                case ModelCapabilities::Family::Mythos: return 4;
+                default:                                return 5;
+            }
+        };
+        std::stable_sort(result.begin(), result.end(),
+            [&](const ModelInfo& a, const ModelInfo& b) {
+                const auto ca = ModelCapabilities::from_id(a.id.value);
+                const auto cb = ModelCapabilities::from_id(b.id.value);
+                const int fa = family_rank(ca), fb = family_rank(cb);
+                if (fa != fb) return fa < fb;
+                // Newest first within a family: generation, then revision.
+                if (ca.generation != cb.generation)
+                    return ca.generation > cb.generation;
+                if (ca.revision != cb.revision)
+                    return ca.revision > cb.revision;
+                return a.id.value < b.id.value;   // stable tie-break
+            });
+        // Surface a `[1m]` companion for every suffix-capable model (OAuth),
+        // inserted right after its base model so the pairing is adjacent.
         add_1m_variants(result);
     } catch (const std::exception& e) {
         util::dbglog("anthropic.list_models.parse", e.what());
