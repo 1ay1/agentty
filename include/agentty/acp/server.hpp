@@ -149,6 +149,19 @@ private:
     enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
     PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
 
+    // Live-terminal execution of a `bash` tool call via the client's ACP
+    // terminal (terminal/create → wait_for_exit → output → release), so the
+    // command streams into Zed's native terminal widget instead of running
+    // internally and returning static text. Only used when the client
+    // advertised `terminal` AND agentty's sandbox is NOT wrapping commands
+    // (otherwise internal execution keeps the sandbox contract). Emits the
+    // InProgress/Completed/Failed SU_ToolCallUpdate itself (with a terminal
+    // content block) and sets tc.status. Returns the outcome so run_tools can
+    // honour cancellation; std::nullopt means "not eligible — fall back to
+    // internal execution".
+    struct TerminalRun { bool ok; bool cancelled; std::string output; };
+    std::optional<TerminalRun> run_bash_via_terminal(Session& sess, ToolUse& tc);
+
     // Returns a shared_ptr so a worker thread that captured the session can
     // keep it alive even if the reader thread erases the map entry
     // (session/close|delete) mid-turn. Returning a raw Session* here was a
@@ -179,6 +192,14 @@ private:
     auth::AuthHeader          auth_;
     std::string               model_id_;
     Profile                   profile_;
+
+    // Did the client advertise `terminal` support at initialize? When true
+    // (and agentty's sandbox is NOT wrapping commands), a `bash` tool call is
+    // executed via the client's ACP terminal (terminal/create → wait → output)
+    // instead of internally, so Zed renders its native streaming terminal
+    // widget — the same UX as claude-code-acp. Set once in on_initialize
+    // (reader thread, before any prompt), read-only thereafter.
+    std::atomic<bool>         client_supports_terminal_{false};
 
     std::once_flag                  tools_once_;   // unused (kept for ABI sanity)
     bool                            wire_tools_built_ = false;
