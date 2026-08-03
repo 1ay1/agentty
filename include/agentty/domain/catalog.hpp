@@ -605,6 +605,43 @@ private:
     return best.empty() ? std::string{parent_model} : best;
 }
 
+// ── Model picker ordering: strength first, never a fixed family bucket ──────
+//
+// An id's FAMILY NAME must never dictate its position in the picker — an
+// earlier design bucketed "Opus, Sonnet, Haiku, Fable, Mythos" in that fixed
+// order, which sank Fable/Mythos to the very bottom even though they're the
+// NEWEST flagship-tier lane (same strength class as Opus, just a different
+// codename that happens to sort last alphabetically/positionally). Instead,
+// order by actual capability: tier() descending (Flagship models — Opus AND
+// Fable/Mythos — always lead), then newest generation.revision within a
+// tier, then a small family tie-break so same-generation peers still group
+// predictably instead of interleaving on id string alone.
+[[nodiscard]] inline bool model_picker_less(const ModelInfo& a,
+                                            const ModelInfo& b) noexcept {
+    const auto ca = ModelCapabilities::from_id(a.id.value);
+    const auto cb = ModelCapabilities::from_id(b.id.value);
+    const auto ta = ca.tier(), tb = cb.tier();
+    if (ta != tb) return ta > tb;                       // higher tier first
+    if (ca.generation != cb.generation)
+        return ca.generation > cb.generation;           // newest gen first
+    if (ca.revision != cb.revision)
+        return ca.revision > cb.revision;                // newest revision first
+    auto family_name_rank = [](ModelCapabilities::Family f) -> int {
+        switch (f) {
+            case ModelCapabilities::Family::Opus:   return 0;
+            case ModelCapabilities::Family::Fable:  return 1;
+            case ModelCapabilities::Family::Mythos: return 2;
+            case ModelCapabilities::Family::Sonnet: return 3;
+            case ModelCapabilities::Family::Haiku:  return 4;
+            default:                                return 5;
+        }
+    };
+    const int fa = family_name_rank(ca.family);
+    const int fb = family_name_rank(cb.family);
+    if (fa != fb) return fa < fb;
+    return a.id.value < b.id.value;   // final stable tie-break
+}
+
 // ============================================================================
 // Effort — user-selectable reasoning/spend tier (output_config.effort).
 // ============================================================================

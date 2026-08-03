@@ -1990,34 +1990,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
             });
         }
         // Order the raw /v1/models list into a clean, predictable grouping
-        // before we interleave the 1M variants: by family (Opus → Sonnet →
-        // Haiku → flagship lane → other), then newest generation.revision
-        // first within a family. Anthropic's endpoint returns models in an
-        // arbitrary order, which made the picker read as a jumble
-        // (Opus 4.8, Opus 4.7, Sonnet 4.6, Opus 4.6, …).
-        auto family_rank = [](const ModelCapabilities& c) -> int {
-            switch (c.family) {
-                case ModelCapabilities::Family::Opus:   return 0;
-                case ModelCapabilities::Family::Sonnet: return 1;
-                case ModelCapabilities::Family::Haiku:  return 2;
-                case ModelCapabilities::Family::Fable:  return 3;
-                case ModelCapabilities::Family::Mythos: return 4;
-                default:                                return 5;
-            }
-        };
-        std::stable_sort(result.begin(), result.end(),
-            [&](const ModelInfo& a, const ModelInfo& b) {
-                const auto ca = ModelCapabilities::from_id(a.id.value);
-                const auto cb = ModelCapabilities::from_id(b.id.value);
-                const int fa = family_rank(ca), fb = family_rank(cb);
-                if (fa != fb) return fa < fb;
-                // Newest first within a family: generation, then revision.
-                if (ca.generation != cb.generation)
-                    return ca.generation > cb.generation;
-                if (ca.revision != cb.revision)
-                    return ca.revision > cb.revision;
-                return a.id.value < b.id.value;   // stable tie-break
-            });
+        // before we interleave the 1M variants — see catalog.hpp's
+        // model_picker_less (single source of truth: strength-first, never a
+        // fixed family bucket, so Fable/Mythos never sinks below Opus/Sonnet/
+        // Haiku just because of alphabetical/positional bad luck).
+        std::stable_sort(result.begin(), result.end(), model_picker_less);
         // Surface a `[1m]` companion for every suffix-capable model (OAuth),
         // inserted right after its base model so the pairing is adjacent.
         add_1m_variants(result);

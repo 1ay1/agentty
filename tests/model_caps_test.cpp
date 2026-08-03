@@ -4,8 +4,11 @@
 // doom-loop guards. Lock the classification so a catalog edit can't silently
 // flip a hosted/strong model into degraded mode (or vice-versa).
 
+#include <algorithm>
 #include <cstdio>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "agentty/domain/catalog.hpp"
 
@@ -349,6 +352,56 @@ static void test_wire_model_id_strip() {
     CHECK(wire_model_id("") == "");
 }
 
+static void test_model_picker_ordering() {
+    using agentty::ModelInfo;
+    using agentty::ModelId;
+    using agentty::model_picker_less;
+
+    auto mi = [](std::string_view id) {
+        return ModelInfo{ModelId{std::string{id}}, std::string{id}, "anthropic"};
+    };
+
+    // Regression: Fable/Mythos are the NEWEST flagship-tier lane and must
+    // never sink below Opus/Sonnet/Haiku just because a fixed family-name
+    // bucket order happened to list them last. Feed the exact jumble Anthropic
+    // returns (arbitrary /v1/models order) and sort with the shared
+    // comparator.
+    std::vector<ModelInfo> v = {
+        mi("claude-opus-4-8"),   mi("claude-opus-4-7"),
+        mi("claude-sonnet-4-6"), mi("claude-opus-4-6"),
+        mi("claude-opus-4-5"),   mi("claude-haiku-4-5"),
+        mi("claude-sonnet-4-5"), mi("claude-fable-5"),
+    };
+    std::stable_sort(v.begin(), v.end(), model_picker_less);
+
+    // Fable 5 (flagship tier, generation 5) must lead every Opus (flagship
+    // tier, generation 4.x) — newest flagship wins, not last-in-bucket.
+    CHECK(v.front().id.value == "claude-fable-5");
+
+    // Every flagship-tier model (Opus + Fable) sorts before every Mid-tier
+    // model (Sonnet), which sorts before every Cheap-tier model (Haiku).
+    auto flagship_end = std::find_if(v.begin(), v.end(), [](const ModelInfo& m) {
+        return ModelCapabilities::from_id(m.id.value).tier()
+            != ModelCapabilities::Tier::Flagship;
+    });
+    auto sonnet_end = std::find_if(flagship_end, v.end(), [](const ModelInfo& m) {
+        return ModelCapabilities::from_id(m.id.value).tier()
+            != ModelCapabilities::Tier::Mid;
+    });
+    CHECK(std::distance(v.begin(), flagship_end) == 5);   // 4 Opus + 1 Fable
+    CHECK(std::distance(flagship_end, sonnet_end) == 2);  // 2 Sonnet
+    CHECK(sonnet_end == v.end() - 1);                     // 1 Haiku, trailing
+
+    // Within the flagship tier, newest generation leads (Fable 5 > Opus 4.8
+    // > Opus 4.7 > Opus 4.6 > Opus 4.5).
+    std::vector<std::string> flagship_order;
+    for (auto it = v.begin(); it != flagship_end; ++it)
+        flagship_order.push_back(it->id.value);
+    CHECK((flagship_order == std::vector<std::string>{
+        "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+        "claude-opus-4-6", "claude-opus-4-5"}));
+}
+
 int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
@@ -366,6 +419,7 @@ int main() {
     test_cheapest_capable_router();
     test_context_window_detection();
     test_wire_model_id_strip();
+    test_model_picker_ordering();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");
