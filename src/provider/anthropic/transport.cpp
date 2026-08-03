@@ -1608,7 +1608,12 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     const bool is_oauth = std::holds_alternative<BearerHeader>(req.auth);
 
     json body;
-    body["model"]      = req.model;
+    // The `[1m]` picker marker selects the 1M window + context beta but is NOT
+    // a real model id — strip it so the wire carries `claude-sonnet-5`, not
+    // `claude-sonnet-5[1m]` (which the API 404s). select_betas() below still
+    // sees the ORIGINAL req.model so it detects the marker and sends the
+    // context-1m beta.
+    body["model"]      = wire_model_id(req.model);
     body["max_tokens"] = req.max_tokens;
     body["stream"]     = true;
 

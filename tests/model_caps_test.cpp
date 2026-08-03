@@ -332,6 +332,23 @@ static void test_context_window_detection() {
     CHECK(win("some-random-model") == 0);
 }
 
+static void test_wire_model_id_strip() {
+    using agentty::wire_model_id;
+    // The `[1m]`/`[2m]` picker marker must NEVER reach the wire (the API 404s
+    // on `claude-sonnet-5[1m]`). wire_model_id strips it, mirroring Claude
+    // Code's Yu().
+    CHECK(wire_model_id("claude-sonnet-5[1m]") == "claude-sonnet-5");
+    CHECK(wire_model_id("claude-opus-4-8[1m]") == "claude-opus-4-8");
+    CHECK(wire_model_id("claude-sonnet-4-5[2m]") == "claude-sonnet-4-5");
+    // A bare id (no marker) is returned unchanged.
+    CHECK(wire_model_id("claude-opus-4-8") == "claude-opus-4-8");
+    CHECK(wire_model_id("gpt-5.6-sol") == "gpt-5.6-sol");
+    CHECK(wire_model_id("qwen2.5-coder:7b") == "qwen2.5-coder:7b");
+    // Marker mid-string (defensive) is still removed.
+    CHECK(wire_model_id("claude-opus-4-8[1m]-preview") == "claude-opus-4-8-preview");
+    CHECK(wire_model_id("") == "");
+}
+
 int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
@@ -348,6 +365,7 @@ int main() {
     test_router_hardening_nonchat_and_oseries();
     test_cheapest_capable_router();
     test_context_window_detection();
+    test_wire_model_id_strip();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");
