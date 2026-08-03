@@ -103,6 +103,12 @@ struct Request {
     // aliases) then turns that object into a real tool call. Set per-model
     // by launch_stream for weak Ollama models.
     bool json_protocol = false;
+    // Stable per-conversation identity (the thread id). Hosted OpenAI-family
+    // endpoints get it echoed as the `prompt_cache_key` body field so repeated
+    // turns of the same conversation route to the same automatic-prompt-cache
+    // node (higher cache-hit rate on the shared system+tools+history prefix).
+    // Empty / local (Ollama) endpoints omit it.
+    std::string session_key;
 };
 
 using EventSink = std::function<void(Msg)>;

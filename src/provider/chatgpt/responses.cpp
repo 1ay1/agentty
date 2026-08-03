@@ -122,6 +122,42 @@ std::string new_uuid_v4() {
     return std::string{buf};
 }
 
+// Stable per-conversation session id for the Responses backend.
+//
+// The Codex backend keys prompt caching off the `session_id` header: repeated
+// turns of the SAME conversation that carry the SAME id hit the cached prefix
+// (system instructions + tool schemas + prior turns), while a fresh id every
+// turn forces a full re-encode — exactly what a random uuid-per-request did,
+// silently defeating caching on every hosted ChatGPT turn. codex-rs keeps one
+// id for the whole session; we do the same by deriving a deterministic v4-
+// shaped uuid from the caller's stable session_key (the thread id). When no
+// session_key is supplied (no durable conversation identity) we fall back to a
+// random id — correctness first, caching only when we can be stable.
+std::string session_id_for(std::string_view session_key) {
+    if (session_key.empty()) return new_uuid_v4();
+    // FNV-1a over the key → 128 bits, then formatted as a v4 uuid so the
+    // backend accepts it. Deterministic: same conversation → same id every
+    // turn → cache continuity.
+    auto fnv = [](std::string_view s, std::uint64_t seed) {
+        std::uint64_t h = seed;
+        for (unsigned char c : s) { h ^= c; h *= 0x00000100000001B3ULL; }
+        return h;
+    };
+    std::uint64_t a = fnv(session_key, 0xcbf29ce484222325ULL);
+    std::uint64_t b = fnv(session_key, 0x84222325cbf29ce4ULL);
+    a = (a & 0xFFFFFFFFFFFF0FFFULL) | 0x0000000000004000ULL;   // version 4
+    b = (b & 0x3FFFFFFFFFFFFFFFULL) | 0x8000000000000000ULL;   // variant 1
+    char buf[37];
+    std::snprintf(buf, sizeof(buf),
+        "%08x-%04x-%04x-%04x-%012llx",
+        static_cast<unsigned>(a >> 32),
+        static_cast<unsigned>((a >> 16) & 0xFFFF),
+        static_cast<unsigned>(a & 0xFFFF),
+        static_cast<unsigned>(b >> 48),
+        static_cast<unsigned long long>(b & 0xFFFFFFFFFFFFULL));
+    return std::string{buf};
+}
+
 // ── agentty conversation → Responses `input[]` array ───────────────────────
 //
 // Rebuilds the whole turn history each call (the Codex backend runs
@@ -129,6 +165,18 @@ std::string new_uuid_v4() {
 // `function_call` item immediately followed by its `function_call_output`.
 json build_input(const provider::Request& req) {
     json input = json::array();
+    // Count terminal-carrying tool results so each can be assigned a recency
+    // rank (0 = newest) for the shared age-tiered wire budget. Without this a
+    // 500 KiB grep or a big-file `read` replays VERBATIM on every subsequent
+    // turn, bloating the prompt long before compaction — the same fix every
+    // other transport applies via wire::cap_tool_result_aged. Errors never
+    // fade (the model may need the full failure to recover), and results
+    // already under budget ship as-is.
+    int total_tool_results = 0;
+    for (const auto& m : req.messages)
+        for (const auto& tc : m.tool_calls)
+            if (tc.is_terminal()) ++total_tool_results;
+    int seen_tool_results = 0;
     for (const auto& m : req.messages) {
         if (m.role == Role::System) continue;   // folded into `instructions`
 
@@ -204,10 +252,19 @@ json build_input(const provider::Request& req) {
             // The result the host produced for this call (may be pending if
             // the turn is still in flight — then we skip, the model re-requests).
             if (tc.is_terminal()) {
+                // Age-tiered wire budget (shared with every other transport):
+                // newest results keep the full budget, stale successes fade to
+                // a tight head+tail so a big dump stops replaying every turn.
+                const int recency_rank =
+                    total_tool_results - 1 - seen_tool_results;
+                ++seen_tool_results;
+                const bool is_error = tc.is_failed() || tc.is_rejected();
+                std::string out = wire::cap_tool_result_aged(
+                    tc.output(), recency_rank, is_error);
                 input.push_back({
                     {"type", "function_call_output"},
                     {"call_id", tc.id.value},
-                    {"output", scrub_utf8(tc.output())},
+                    {"output", scrub_utf8(out)},
                 });
             }
         }
@@ -531,7 +588,7 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
         {"accept-encoding",   "identity"},
         {"openai-beta",       "responses=experimental"},
         {"originator",        OAuthConfig::originator},
-        {"session_id",        new_uuid_v4()},
+        {"session_id",        session_id_for(req.session_key)},
         {"user-agent",        std::string("codex_cli_rs/") + OAuthConfig::codex_client_version},
     };
     if (!creds->account_id.empty())
@@ -650,6 +707,10 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
 // ── Test seams ────────────────────────────────────────────────────
 nlohmann::json build_body_for_test(const provider::Request& req) {
     return build_body(req);
+}
+
+std::string session_id_for_test(std::string_view session_key) {
+    return session_id_for(session_key);
 }
 
 std::string format_http_error_for_test(int status, std::string_view body) {

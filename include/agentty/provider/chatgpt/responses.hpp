@@ -49,6 +49,10 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
 // ── Test seams (pure, no network) ──────────────────────────────────────────
 // The Request → Responses-API JSON body the transport would POST.
 [[nodiscard]] nlohmann::json build_body_for_test(const provider::Request& req);
+// Stable per-conversation session id derived from a session_key (the value
+// sent as the cache-routing `session_id` header). Deterministic for a given
+// key so repeated turns of one conversation hit the backend prompt cache.
+[[nodiscard]] std::string session_id_for_test(std::string_view session_key);
 // HTTP error response body → actionable user-facing diagnostic.
 [[nodiscard]] std::string format_http_error_for_test(int status, std::string_view body);
 // Scripted SSE `data:` payloads → the agentty Msg sequence the reducer sees.
