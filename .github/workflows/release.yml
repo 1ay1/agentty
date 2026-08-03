@@ -918,7 +918,37 @@ jobs:
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur; chmod 600 ~/.ssh/aur
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur"
-          git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur
+          # The AUR occasionally goes down for maintenance for HOURS to DAYS
+          # ("The AUR is down due to maintenance" on the git remote) — that is
+          # an upstream outage, not something a retry or a code change here can
+          # fix. Without tolerance for that, every release run during the
+          # outage window hard-fails this job for no actionable reason (the
+          # exact week-long red-X streak this comment is responding to).
+          # Retry a few times with backoff to ride out a brief blip, then if
+          # AUR is STILL unreachable, degrade to a warning instead of failing
+          # the job — reconcile-manifests' scheduled/auto-triggered run will
+          # pick this version back up the moment AUR returns, so nothing is
+          # silently lost, just delayed.
+          clone_ok=0
+          for attempt in 1 2 3 4 5; do
+            if git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur 2>clone.err; then
+              clone_ok=1; break
+            fi
+            echo "AUR clone attempt $attempt failed:"; cat clone.err
+            if grep -qi 'AUR is down\|maintenance\|Could not read from remote' clone.err; then
+              sleep $((attempt * 20))
+            else
+              break   # a non-outage error (bad key, revoked access) — don't burn time retrying
+            fi
+          done
+          if [ "$clone_ok" -ne 1 ]; then
+            if grep -qi 'AUR is down\|maintenance\|Could not read from remote' clone.err 2>/dev/null; then
+              echo "::warning::AUR appears to be down for maintenance after 5 retries — skipping this publish. reconcile-manifests will retry automatically once AUR is back."
+              exit 0
+            fi
+            echo "::error::AUR clone failed for a reason other than a known outage — see the error above"
+            exit 1
+          fi
           cp PKGBUILD aur/PKGBUILD
           cd aur
           # .SRCINFO must mirror the PKGBUILD; generate it via makepkg if the
@@ -932,7 +962,23 @@ jobs:
           git config user.name agentty-ci; git config user.email noreply@github.com
           git add PKGBUILD .SRCINFO
           git commit -m "agentty $V" || { echo "no change"; exit 0; }
-          git push origin HEAD:master
+          # The push itself can ALSO hit the outage window (clone succeeded on
+          # a lucky retry right as AUR flaps back up, then push fails again).
+          # Same retry-then-soft-skip treatment.
+          push_ok=0
+          for attempt in 1 2 3; do
+            if git push origin HEAD:master 2>push.err; then push_ok=1; break; fi
+            echo "AUR push attempt $attempt failed:"; cat push.err
+            grep -qi 'AUR is down\|maintenance' push.err && sleep $((attempt * 20)) || break
+          done
+          if [ "$push_ok" -ne 1 ]; then
+            if grep -qi 'AUR is down\|maintenance' push.err 2>/dev/null; then
+              echo "::warning::AUR push failed due to an apparent outage — skipping. reconcile-manifests will retry automatically."
+              exit 0
+            fi
+            echo "::error::AUR push failed for a reason other than a known outage — see the error above"
+            exit 1
+          fi
 
   # Submit the Windows .msi to the winget community repo. winget is the
   # zero-cost, no-SmartScreen-warning install path: `winget install agentty`.
@@ -1290,7 +1336,19 @@ jobs:
           echo "::group::aur"
           if [ -n "$AUR_SSH_KEY" ]; then
             pk=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=agentty-bin" 2>/dev/null || true)
-            if printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$"; then ok "AUR agentty-bin @ $V"; else bad "AUR agentty-bin not at $V"; fi
+            if printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$"; then
+              ok "AUR agentty-bin @ $V"
+            elif [ -z "$pk" ] || printf '%s\n' "$pk" | grep -qi 'AUR is down\|maintenance'; then
+              # cgit itself is unreachable/down for maintenance — an upstream
+              # outage, not a drifted package. publish-aur already soft-skips
+              # (warns, doesn't fail) in this exact case, so failing the
+              # release gate here too would just be a second, equally
+              # unactionable red X on top of the first. Warn instead; the
+              # scheduled reconcile-manifests run re-checks once AUR is back.
+              echo "::warning::AUR cgit unreachable (likely maintenance) — cannot verify pkgver, not treating as drift"
+            else
+              bad "AUR agentty-bin not at $V"
+            fi
           else skip "aur"; fi
           echo "::endgroup::"
 
