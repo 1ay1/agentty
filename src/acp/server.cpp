@@ -123,8 +123,10 @@ std::string display_path(std::string_view path, std::string_view cwd) {
     return std::string{path};
 }
 
-// Reconstruct a shell-ish command line from a ripgrep-style grep call so the
-// card reads like what a human would type, e.g. `grep -i "foo" *.cpp src/`.
+// Reconstruct a ripgrep-style command line from a grep call so the card reads
+// like what claude-code-acp shows: `grep -i --include="*.cpp" "pattern" path`.
+// Flags first, then --include for the glob, then the quoted pattern, then the
+// path — the exact order and quoting claude-code-acp's Grep case emits.
 std::string grep_command(const json& args) {
     auto s = [&](const char* k) -> std::string {
         return (args.contains(k) && args[k].is_string()) ? args[k].get<std::string>() : std::string{};
@@ -133,11 +135,14 @@ std::string grep_command(const json& args) {
         return args.contains(k) && args[k].is_boolean() && args[k].get<bool>();
     };
     std::string cmd = "grep";
-    if (b("case_sensitive")) cmd += " -s"; else cmd += " -i";
+    // Case-insensitive is the default; claude-code-acp only ever appends `-i`
+    // (for its case_insensitive flag) — there is no `-s` arm. agentty's flag is
+    // case_sensitive, so emit `-i` only when NOT case-sensitive.
+    if (!b("case_sensitive")) cmd += " -i";
+    const std::string glob = s("glob");
+    if (!glob.empty()) cmd += " --include=\"" + glob + "\"";
     const std::string pat = s("pattern");
     if (!pat.empty()) cmd += " \"" + pat + "\"";
-    const std::string glob = s("glob");
-    if (!glob.empty()) cmd += " " + glob;
     const std::string path = s("path");
     if (!path.empty()) cmd += " " + path;
     return cmd;
@@ -179,14 +184,19 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
     switch (kind) {
         case sp::Kind::Read: {
             std::string p = path_arg();
-            if (p.empty()) return "Read";
+            // claude-code-acp uses "File" as the no-path fallback, and formats
+            // the range as " (offset - offset+limit-1)" / " (from line N)".
             auto off = num("offset"); if (!off) off = num("start_line");
             auto lim = num("limit");
             auto end = num("end_line");
-            if (off && end) return "Read " + p + " (" + std::to_string(*off) + " - " + std::to_string(*end) + ")";
-            if (off && lim) return "Read " + p + " (" + std::to_string(*off) + " - " + std::to_string(*off + *lim - 1) + ")";
-            if (off)        return "Read " + p + " (from line " + std::to_string(*off) + ")";
-            return "Read " + p;
+            std::string label = p.empty() ? std::string{"File"} : p;
+            if (off && end) return "Read " + label + " (" + std::to_string(*off) + " - " + std::to_string(*end) + ")";
+            if (lim && *lim > 0) {
+                std::int64_t o = off ? *off : 1;
+                return "Read " + label + " (" + std::to_string(o) + " - " + std::to_string(o + *lim - 1) + ")";
+            }
+            if (off) return "Read " + label + " (from line " + std::to_string(*off) + ")";
+            return "Read " + label;
         }
         case sp::Kind::Edit: {
             std::string p = path_arg();
@@ -312,14 +322,22 @@ a::List<a::ToolCallLocation> tool_locations(const ToolUse& tc, std::string_view 
             return args[k].get<std::int64_t>();
         return std::nullopt;
     };
-    auto add = [&](std::initializer_list<const char*> keys) {
+    // claude-code-acp emits the RAW (absolute) path in locations — only the
+    // card *title* is display-pathed. Zed uses locations to open the file in
+    // the editor, which needs the real on-disk path, not a project-relative
+    // one. (void)cwd keeps the signature stable for callers.
+    (void)cwd;
+    auto add = [&](std::initializer_list<const char*> keys, bool default_line_one = false) {
         for (const char* key : keys) {
             if (args.contains(key) && args[key].is_string()) {
                 std::string p = args[key].get<std::string>();
                 if (p.empty()) continue;
                 a::ToolCallLocation loc;
-                loc.path = display_path(p, cwd);
+                loc.path = std::move(p);
                 auto ln = num("line"); if (!ln) ln = num("offset"); if (!ln) ln = num("start_line");
+                // claude-code-acp's Read emits `line: input.offset ?? 1`, so a
+                // Read with no offset still anchors the editor at line 1.
+                if (!ln && default_line_one) ln = 1;
                 if (ln) loc.line = a::Just<std::int64_t>(*ln);
                 locs.push_back(std::move(loc));
                 return;
@@ -331,6 +349,8 @@ a::List<a::ToolCallLocation> tool_locations(const ToolUse& tc, std::string_view 
     if (!spec) return locs;
     switch (spec->kind) {
         case sp::Kind::Read:
+            add({"path", "file_path", "filepath", "filename"}, /*default_line_one=*/true);
+            break;
         case sp::Kind::Edit:
         case sp::Kind::Write:
         case sp::Kind::ListDir:
@@ -396,8 +416,13 @@ std::optional<a::ToolCallContent> announce_diff(const ToolUse& tc, std::string_v
     std::string path = s("path"); if (path.empty()) path = s("file_path");
     if (path.empty()) return std::nullopt;
     a::TCC_Diff diff;
-    diff.path = display_path(path, cwd);
+    // Raw absolute path: Zed applies the diff to this exact on-disk file.
+    // claude-code-acp passes input.file_path unmodified here. (void)cwd.
+    (void)cwd;
+    diff.path = path;
     if (spec->kind == sp::Kind::Write) {
+        // oldText left null (TCC_Diff default) — a Write has no prior text;
+        // claude-code-acp sends `oldText: null` explicitly for this case.
         diff.newText = s("content");
         return a::ToolCallContent{std::move(diff)};
     }
@@ -438,6 +463,22 @@ std::optional<a::ToolCallContent> command_content(const ToolUse& tc) {
     if (cmd.empty()) return std::nullopt;
     std::string md = "```sh\n" + cmd + "\n```";
     return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+}
+
+// A plain-text content block for the Task tool, whose defining input is the
+// sub-agent prompt (prose, not a command or diff). claude-code-acp attaches
+// the sub-agent prompt as a content block so the full text is visible in the
+// card body even though the title is clipped. (WebFetch's input is a bare
+// `url` already shown in the title, so it needs no extra block.)
+std::optional<a::ToolCallContent> prompt_content(const ToolUse& tc) {
+    namespace sp = tools::spec;
+    const auto* spec = sp::lookup(tc.name.value);
+    if (!spec || spec->kind != sp::Kind::Task) return std::nullopt;
+    const auto& args = tc.args;
+    if (!args.contains("prompt") || !args["prompt"].is_string()) return std::nullopt;
+    std::string body = args["prompt"].get<std::string>();
+    if (body.empty()) return std::nullopt;
+    return a::ToolCallContent{a::TCC_Content{text_block(std::move(body)), json::object()}};
 }
 
 // An ACP plan (Zed's checklist widget) built from the `todo` tool's args.
@@ -1307,6 +1348,7 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                             a::List<a::ToolCallContent> c;
                             if (auto d = announce_diff(tc, scwd)) c.push_back(std::move(*d));
                             if (auto cc = command_content(tc))    c.push_back(std::move(*cc));
+                            if (auto pc = prompt_content(tc))     c.push_back(std::move(*pc));
                             if (!c.empty()) upd.content = a::Just(std::move(c));
                             send_update(sid, a::SU_ToolCallUpdate{std::move(upd)});
 
@@ -1558,11 +1600,11 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             if (result->change) {
                 const auto& ch = *result->change;
                 a::TCC_Diff diff;
-                // Display-relative path so Zed's diff card header matches the
-                // announce path and associates with the project file (claude-
-                // code-acp uses toDisplayPath too). The authoritative diff is
-                // the real on-disk before/after computed by the tool.
-                diff.path    = display_path(ch.path, sess.cwd);
+                // Raw absolute path — must match the announce diff's path so Zed
+                // associates the completion with the same card (claude-code-acp
+                // keys diffs by the raw file_path in both phases). The
+                // authoritative diff is the real on-disk before/after.
+                diff.path    = ch.path;
                 diff.newText = ch.new_contents;
                 if (!ch.original_contents.empty())
                     diff.oldText = a::Just<std::string>(ch.original_contents);
@@ -1574,13 +1616,13 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
                 a::List<a::ToolCallLocation> locs;
                 for (const auto& h : ch.hunks) {
                     a::ToolCallLocation loc;
-                    loc.path = display_path(ch.path, sess.cwd);
+                    loc.path = ch.path;
                     if (h.new_start > 0)
                         loc.line = a::Just<std::int64_t>(static_cast<std::int64_t>(h.new_start));
                     locs.push_back(std::move(loc));
                 }
                 if (locs.empty()) {
-                    a::ToolCallLocation loc; loc.path = display_path(ch.path, sess.cwd);
+                    a::ToolCallLocation loc; loc.path = ch.path;
                     locs.push_back(std::move(loc));
                 }
                 upd.locations = a::Just(std::move(locs));
@@ -1804,6 +1846,7 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
     a::List<a::ToolCallContent> c;
     if (auto d = announce_diff(tc, cwd))  c.push_back(std::move(*d));
     if (auto cc = command_content(tc))    c.push_back(std::move(*cc));
+    if (auto pc = prompt_content(tc))     c.push_back(std::move(*pc));
     if (!c.empty()) req.toolCall.content = a::Just(std::move(c));
     req.options = {
         a::PermissionOption{"allow_once",   "Allow",        a::PermissionOptionKind::AllowOnce,   json::object()},
