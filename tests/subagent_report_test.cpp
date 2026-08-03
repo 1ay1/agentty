@@ -391,6 +391,46 @@ int main() {
               "K: accepted-request interruption surfaces instead of replaying");
     }
 
+    // ── L. Subagent requests are economical: cached prefix + capped output.
+    // Every turn of one subagent must carry the SAME session_key (so the
+    // heavy system prompt + tool schemas + tool results prompt-cache across
+    // the loop instead of re-billing full price each turn), and max_tokens is
+    // capped well below the 32k it used to request (a report doesn't need it).
+    {
+        auto first_key   = std::make_shared<std::string>();
+        auto key_stable  = std::make_shared<std::atomic<bool>>(true);
+        auto cap_ok      = std::make_shared<std::atomic<bool>>(true);
+        auto key_nonempty= std::make_shared<std::atomic<bool>>(false);
+        install_scripted_stream([first_key, key_stable, cap_ok, key_nonempty](
+                                    int turn, const provider::Request& req,
+                                    const provider::EventSink& sink) {
+            if (req.max_tokens > 8192) cap_ok->store(false);
+            if (turn == 0) {
+                *first_key = req.session_key;
+                key_nonempty->store(!req.session_key.empty());
+            } else if (req.session_key != *first_key) {
+                key_stable->store(false);
+            }
+            if (turn < 2) {
+                emit_tool_call(sink, "t" + std::to_string(turn), "grep",
+                               json{{"pattern", "zzz_no_match_expected"}});
+                emit_finish(sink, StopReason::ToolUse);
+            } else {
+                emit_text(sink, "REPORT_OK");
+                emit_finish(sink, StopReason::EndTurn);
+            }
+        });
+        auto out = run_task("investigate the module layout");
+        check(key_nonempty->load(),
+              "L: subagent request carries a stable session_key for caching");
+        check(key_stable->load(),
+              "L: session_key is identical across the subagent's turns");
+        check(cap_ok->load(),
+              "L: subagent max_tokens is capped (<=8192), not the old 32k");
+        check(!out.is_error && has(out.text, "REPORT_OK"),
+              "L: the economical config still produces a clean report");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
