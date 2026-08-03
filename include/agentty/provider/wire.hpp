@@ -262,6 +262,14 @@ inline constexpr std::size_t kToolResultFullBudget  = 64u * 1024u;
 inline constexpr std::size_t kToolResultFadedBudget = 2u  * 1024u;
 inline constexpr int         kFullResultWindow      = 8;
 
+// Cache note: the fade cliff (rank >= kFullResultWindow) advances by one every
+// turn, but this is NOT a per-turn cache churn. Once a result crosses the
+// cliff it is capped to a DETERMINISTIC 2 KiB head+tail that depends only on
+// its raw bytes — so its wire form is byte-IDENTICAL at rank 8, 9, 10… The
+// only mutation is the single turn a given result first crosses 8→faded,
+// which re-caches that one block once. Everything before it (already faded)
+// and after it (still full) is unchanged, so the anchor's cached prefix holds.
+
 // Back up an index to the start of the UTF-8 code point it lands in. `i` is a
 // prospective cut point; if it falls inside a multi-byte sequence we walk left
 // until a lead byte (or 0). Bounded at 3 continuation bytes (max UTF-8

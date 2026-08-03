@@ -1903,6 +1903,13 @@ if(AGENTTY_BUILD_TESTS)
     # spliced, UTF-8 boundary respected) while small outputs ship verbatim.
     agentty_add_full_test(tool_result_budget_test)
 
+    # cache_anchor_test — SOTA prompt-cache breakpoint placement in
+    # messages_json_string. Locks in the stable 1-hour anchor breakpoint
+    # (deep in history, quantized so it doesn't move every turn) alongside
+    # the two rolling 5-minute pins, and that short/empty threads suppress
+    # the anchor. Drives the real serializer; no network.
+    agentty_add_full_test(cache_anchor_test)
+
     # toolset_e2e_test — drives EVERY built-in tool through the REAL
     # production dispatch path (registry() → mcp_tools_bridge → mcp-cpp
     # toolset → decode_result). Proves agentty's WIRING of the tools:
@@ -2180,6 +2187,7 @@ if(AGENTTY_BUILD_TESTS)
         reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test
+        cache_anchor_test
         toolset_e2e_test
         subagent_report_test
         tool_wedge_liveness_test
