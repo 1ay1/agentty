@@ -36,6 +36,7 @@
 
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -429,6 +430,27 @@ int main() {
               "L: subagent max_tokens is capped (<=8192), not the old 32k");
         check(!out.is_error && has(out.text, "REPORT_OK"),
               "L: the economical config still produces a clean report");
+    }
+
+    // ── M. The subagent system prompt is LEAN. The full parent prompt
+    // carries a large memory-tools protocol + skills catalog a subagent can
+    // never use (not in its allowlist, no fact persistence). Shipping them
+    // just inflates its billed, cached prefix. The lean variant must drop
+    // them while keeping the operational discipline it needs.
+    {
+        const std::string full = provider::anthropic::default_system_prompt(false);
+        const std::string lean = provider::anthropic::default_system_prompt(true);
+        auto has = [](const std::string& s, const char* n) {
+            return s.find(n) != std::string::npos;
+        };
+        check(lean.size() < full.size(),
+              "M: lean subagent prompt is smaller than the full parent prompt");
+        check(has(full, "<memory-tools>") && !has(lean, "<memory-tools>"),
+              "M: lean prompt drops the parent-only memory-tools protocol");
+        check(has(lean, "<file-editing>"),
+              "M: lean prompt keeps the operational file-editing discipline");
+        check(has(lean, "<environment>"),
+              "M: lean prompt keeps the environment block");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

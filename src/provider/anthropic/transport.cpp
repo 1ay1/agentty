@@ -1403,7 +1403,7 @@ namespace {
 
 } // namespace
 
-std::string default_system_prompt() {
+std::string default_system_prompt(bool lean) {
 #if defined(_WIN32)
     constexpr const char* os_name  = "Windows";
     constexpr const char* shell    = "cmd.exe (Windows Command Prompt)";
@@ -1561,8 +1561,15 @@ std::string default_system_prompt() {
     oss << "</environment>\n\n"
         << "<shell-notes>\n"
         << shell_hint << "\n"
-        << "</shell-notes>\n\n"
-        << "<memory-tools>\n"
+        << "</shell-notes>\n\n";
+    // SUBAGENT lean prompt: stop here. The memory-tools protocol, the
+    // user-authored CLAUDE.md tiers, and the skills catalog below are all
+    // parent-only concerns — a subagent can't call the memory tools and
+    // doesn't drive skills the same way, so shipping them just inflates its
+    // billed prefix on every cache miss. Everything above is the operational
+    // discipline a subagent genuinely needs to work well.
+    if (lean) return oss.str();
+    oss << "<memory-tools>\n"
         << "  - If the user asks you to remember something — \"remember "
         << "that...\", \"don't forget X\", \"keep in mind Y\", \"from now "
         << "on...\", \"always do Z\" — you MUST call the `remember` tool. "
