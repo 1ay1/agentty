@@ -17,7 +17,7 @@ Threads are written to `~/.agentty/threads/`, one JSON file per thread keyed by 
 ├── threads/
 │   ├── f24a29c6….json     # one file per conversation
 │   └── 86be6534….json
-├── settings.json          # provider, model, profile, favourites
+├── settings.json          # provider, model, profile, favourites, compaction depth
 └── memory.jsonl           # user-scope remembered facts
 ```
 

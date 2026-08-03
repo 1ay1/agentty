@@ -43,7 +43,8 @@ Inside a thread there are no typed `/command` literals — press `^K` (or `/` on
 | Command | What it does |
 |---|---|
 | New thread | Start a fresh conversation. |
-| Compact context | Replace history with a structured summary to reclaim the context window. |
+| Compact context | Replace history with a structured summary to reclaim the context window. Runs on the cheapest capable model on the active provider, not the flagship you're chatting with, so a compaction costs a fraction of a normal turn. |
+| Compaction depth | Cycle how full the context window gets before agentty auto-compacts in the background: 75% Aggressive → 90% Balanced → 95% Deep. Higher rides deeper into the window before summarizing — useful on a 1M-context model (see [Providers](/docs/providers#1m-context-models)). Persists across restarts. |
 | Review changes | Open the diff review pane (also `^R`). |
 | Accept all / Reject all changes | Apply or discard every pending hunk. |
 | Rewind to checkpoint | Jump to an earlier turn's worktree snapshot via a diff-preview picker (git repo + idle session; see [Checkpoints](/docs/threads#checkpoints)). |
