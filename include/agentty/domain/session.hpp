@@ -409,6 +409,14 @@ struct StreamState {
     int tokens_in   = 0;
     int tokens_out  = 0;
     int context_max = 200000;
+    // Auto-compaction trigger point as a PERCENT of `context_max` (loaded
+    // from Settings::autocompact_pct at init; 0 = use kDefaultAutocompactPct).
+    // The background compaction check fires once the CALIBRATED wire estimate
+    // crosses this fraction of the window. Higher = ride deeper into the
+    // window (fewer, bigger compactions); lower = compact sooner. See
+    // compaction_threshold() for how it combines with the output-reserve
+    // floor.
+    int autocompact_pct = 0;
     // Self-calibrating correction for the local byte-based token estimate.
     //
     // estimate_wire_tokens() is a crude bytes/3.5 guess used by the
@@ -427,6 +435,45 @@ struct StreamState {
     // turn so a single anomalous turn can't swing it. Clamped to a sane
     // band so a corrupt reading can't disable the safety trigger.
     double est_calibration = 1.0;
+
+    // Built-in default trigger percent when the user hasn't set one.
+    // 90 % rides comfortably deep while still leaving ~10 % of the window
+    // (never less than kMinOutputHeadroom) for the model's own output plus a
+    // safety margin before the hard ceiling. Chosen so the common 200 k
+    // window fires at 180 k — matching the previous fixed `-17k` behaviour —
+    // while a 1 M window now fires at 900 k instead of the old 983 k, i.e.
+    // large windows ride much deeper before the first compaction.
+    static constexpr int kDefaultAutocompactPct = 90;
+    // Absolute floor of output headroom, in tokens, that MUST stay free
+    // regardless of the percentage. On a small window a high pct could leave
+    // too few tokens for a full reply; on a huge window (1 M) a pct like 85 %
+    // already leaves 150 k, far more than any single output needs — so the
+    // effective threshold is the LARGER of "pct% of window" and
+    // "window - kMinOutputHeadroom", capped never to exceed the latter.
+    static constexpr int kMinOutputHeadroom = 20000;
+
+    // The token count at which background auto-compaction should fire.
+    //
+    // Two competing goals: (1) ride as deep into the window as the user
+    // wants (their `autocompact_pct`) so we don't compact needlessly when
+    // the model is happily handling 400 k; (2) never get so close to the
+    // hard ceiling that the next turn's OUTPUT has nowhere to go. We take
+    // the pct-based point but clamp it below `context_max - kMinOutputHeadroom`
+    // so there's always room to answer. Returns 0 (never fire) when the
+    // window is unknown.
+    [[nodiscard]] int compaction_threshold() const noexcept {
+        if (context_max <= 0) return 0;
+        int pct = autocompact_pct > 0 ? autocompact_pct : kDefaultAutocompactPct;
+        if (pct < 50) pct = 50;
+        if (pct > 95) pct = 95;
+        const long pct_point =
+            static_cast<long>(context_max) * pct / 100;
+        const long reserve_cap =
+            static_cast<long>(context_max) - kMinOutputHeadroom;
+        long thr = pct_point < reserve_cap ? pct_point : reserve_cap;
+        if (thr < 0) thr = 0;
+        return static_cast<int>(thr);
+    }
     // True while a compaction round is in flight: the request that
     // includes the synthesised "summarise per spec" prompt has been
     // dispatched and the assistant is streaming its summary into the
