@@ -27,6 +27,7 @@
 #include "agentty/provider/error_class.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/wire.hpp"
 
 #include "agentty/rag/rag_adapter.hpp"
 
@@ -330,7 +331,7 @@ const AgentType& resolve_agent_type(std::string_view t) {
 }
 
 std::string subagent_system_prompt(const AgentType& type) {
-    std::string base = provider::anthropic::default_system_prompt();
+    std::string base = provider::anthropic::default_system_prompt(/*lean=*/true);
     base += "\n\n<subagent>\n";
     base += std::string{type.role};
     base +=
@@ -769,7 +770,22 @@ public:
                     ran_a_tool = true;
                     auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
                     if (res) {
-                        tc.status = ToolUse::Done{now, now, std::move(res->text)};
+                        // ECONOMY: a subagent is a focused, read-heavy burst
+                        // (explorer/reviewer call read/grep/repo_map, whose
+                        // outputs run to tens of KiB each). Those results
+                        // accumulate in the subagent's OWN thread and replay
+                        // on every one of its up-to-24 turns. The parent's
+                        // 64 KiB newest-result budget is tuned for a long
+                        // interactive chat; for a subagent it's the dominant
+                        // cost (8 live results × 64 KiB replayed per turn).
+                        // Cap each result to a tight head+tail the instant we
+                        // store it, so the working set the model reasons over
+                        // stays lean without losing the WHAT of any result.
+                        // (Transport aging still applies on top for old ones.)
+                        constexpr std::size_t kSubagentToolBudget = 8u * 1024u;
+                        std::string capped = provider::wire::cap_tool_result(
+                            res->text, kSubagentToolBudget);
+                        tc.status = ToolUse::Done{now, now, std::move(capped)};
                         log += "\n    \xe2\x9c\x93 " + summarize_call(tc);
                     } else {
                         tc.status = ToolUse::Failed{now, now, res.error().render()};
