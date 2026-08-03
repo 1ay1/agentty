@@ -1255,6 +1255,15 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                         assistant.text += ev.text;
                         send_update(sid, a::SU_AgentMessageChunk{
                             text_block(ev.text), a::Just(a::MessageId{msg_id})});
+                    } else if constexpr (std::is_same_v<E, StreamThinkingDelta>) {
+                        // Adaptive/extended thinking (effort on): forward the
+                        // visible summary text as an ACP thought chunk so Zed
+                        // renders its collapsible "Thinking" section, matching
+                        // claude-code-acp. The opaque signature stays internal
+                        // (replayed to the provider, never shown to the client).
+                        if (!ev.text.empty())
+                            send_update(sid, a::SU_AgentThoughtChunk{
+                                text_block(ev.text), a::Just(a::MessageId{msg_id})});
                     } else if constexpr (std::is_same_v<E, StreamToolUseStart>) {
                         ToolUse tc;
                         tc.id = ev.id; tc.name = ev.name;
@@ -1549,13 +1558,38 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             if (result->change) {
                 const auto& ch = *result->change;
                 a::TCC_Diff diff;
-                diff.path    = ch.path;
+                // Display-relative path so Zed's diff card header matches the
+                // announce path and associates with the project file (claude-
+                // code-acp uses toDisplayPath too). The authoritative diff is
+                // the real on-disk before/after computed by the tool.
+                diff.path    = display_path(ch.path, sess.cwd);
                 diff.newText = ch.new_contents;
                 if (!ch.original_contents.empty())
                     diff.oldText = a::Just<std::string>(ch.original_contents);
                 content.push_back(a::ToolCallContent{std::move(diff)});
+
+                // Anchor the card at the first changed line so Zed can jump to
+                // it (per-hunk line numbers, like claude-code-acp's
+                // structuredPatch locations).
+                a::List<a::ToolCallLocation> locs;
+                for (const auto& h : ch.hunks) {
+                    a::ToolCallLocation loc;
+                    loc.path = display_path(ch.path, sess.cwd);
+                    if (h.new_start > 0)
+                        loc.line = a::Just<std::int64_t>(static_cast<std::int64_t>(h.new_start));
+                    locs.push_back(std::move(loc));
+                }
+                if (locs.empty()) {
+                    a::ToolCallLocation loc; loc.path = display_path(ch.path, sess.cwd);
+                    locs.push_back(std::move(loc));
+                }
+                upd.locations = a::Just(std::move(locs));
             }
-            if (!result->text.empty())
+            // When a diff card is shown, the diff IS the result — don't also
+            // repeat the "Edited (3+ 1-)" summary as a text block (that's noise
+            // in Zed; claude-code-acp returns no extra content for Edit/Write).
+            // The summary still rides in rawOutput for the model.
+            if (!result->change && !result->text.empty())
                 content.push_back(a::ToolCallContent{
                     a::TCC_Content{text_block(result->text), json::object()}});
 
