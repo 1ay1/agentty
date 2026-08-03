@@ -281,12 +281,14 @@ std::string utf8_encode(char32_t cp) {
 }
 
 int context_max_for_model(std::string_view model_id) noexcept {
-    // ModelCapabilities owns the model-id parsing; this just consumes
-    // the typed flag. If new models with different windows ship,
-    // extend ModelCapabilities or branch on caps.family/generation
-    // here rather than re-introducing substring sniffing.
-    return ModelCapabilities::from_id(model_id).extended_context_1m
-         ? 1'000'000 : 200'000;
+    // ModelCapabilities owns the model-id parsing; this consumes the typed
+    // window. Sonnet-4+ auto-detects the 1M window (the `context-1m` beta the
+    // transport already sends), Opus/Haiku stay 200k, and the `[1m]` suffix
+    // still forces 1M for any model. Unknown families (local / OpenAI-compat)
+    // report 0 here — the caller prefers a real probed window in that case, so
+    // fall back to the historical 200k default only when nothing is known.
+    const int w = ModelCapabilities::from_id(model_id).context_window();
+    return w > 0 ? w : 200'000;
 }
 
 int utf8_prev(std::string_view s, int byte_pos) noexcept {

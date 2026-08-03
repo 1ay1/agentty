@@ -228,9 +228,18 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     const int real = vis[static_cast<std::size_t>(p->index)];
                     m.d.model_id = m.d.available_models[static_cast<std::size_t>(real)].id;
                     // Update the per-model context cap so the status-bar ctx
-                    // % bar reflects the right denominator for the new model
-                    // (1 M for `[1m]` variants, 200 K otherwise).
+                    // % bar (and the auto-compaction threshold) uses the right
+                    // denominator. Prefer the window the provider actually
+                    // advertised for this model (list_models stamps 1M for the
+                    // Sonnet-4 line on OAuth; Ollama/OpenAI probe a real
+                    // window) and only fall back to the auth-blind id guess
+                    // when the loaded row carries no window.
                     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+                    for (const auto& mi : m.d.available_models)
+                        if (mi.id == m.d.model_id && mi.context_window > 0) {
+                            m.s.context_max = mi.context_window;
+                            break;
+                        }
                     // Degrade the effort tier to what the newly-picked model
                     // supports — picking a non-reasoning (or lower-ceiling)
                     // model while effort=Xhigh must not leave a stale chip that

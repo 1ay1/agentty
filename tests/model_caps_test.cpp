@@ -295,6 +295,43 @@ static void test_cheapest_capable_router() {
     CHECK(cheapest_capable_model("claude-opus-4-5", notools) == "claude-opus-4-5");
 }
 
+static void test_context_window_detection() {
+    using agentty::ModelCapabilities;
+    auto win = [](std::string_view id) {
+        return ModelCapabilities::from_id(id).context_window();
+    };
+    auto suffix = [](std::string_view id) {
+        return ModelCapabilities::from_id(id).supports_1m_suffix();
+    };
+
+    // supports_1m_suffix(): mirrors Claude Code's catalog `supports_1m_suffix`
+    // flag — the Sonnet-4 line, Opus-4 line, and Haiku 4.5 may be offered a
+    // `[1m]` variant; gen<=3 models may not.
+    CHECK(suffix("claude-sonnet-4-5"));
+    CHECK(suffix("claude-sonnet-4-5-20250101"));
+    CHECK(suffix("claude-sonnet-4"));
+    CHECK(suffix("claude-opus-4-5"));
+    CHECK(suffix("claude-haiku-4-5"));
+    CHECK(!suffix("claude-3-5-sonnet-20241022"));   // gen 3, no 1M variant
+    CHECK(!suffix("claude-3-opus"));
+    // Flagship next-gen lane (Fable/Mythos 5+).
+    CHECK(suffix("claude-fable-5"));
+    CHECK(suffix("claude-mythos-5"));
+
+    // context_window(): base 200k for every known Claude model; 1M ONLY when
+    // the explicit `[1m]` variant is picked (matches Claude Code, which keeps
+    // the base id at 200k and binds 1M to the `<id>[1m]` picker entry).
+    CHECK(win("claude-sonnet-4-5") == 200000);        // base id → 200k
+    CHECK(win("claude-sonnet-4-5[1m]") == 1000000);   // [1m] variant → 1M
+    CHECK(win("claude-opus-4-5") == 200000);
+    CHECK(win("claude-opus-4-5[1m]") == 1000000);
+    CHECK(win("claude-haiku-4-5") == 200000);
+    CHECK(win("claude-haiku-4-5[1m]") == 1000000);
+    // Unknown / local families report 0 so the caller prefers a probed window.
+    CHECK(win("qwen2.5-coder:7b") == 0);
+    CHECK(win("some-random-model") == 0);
+}
+
 int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
@@ -310,6 +347,7 @@ int main() {
     test_capability_tiers();
     test_router_hardening_nonchat_and_oseries();
     test_cheapest_capable_router();
+    test_context_window_detection();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");
