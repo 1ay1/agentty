@@ -1461,6 +1461,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
         if (!req.tools.empty())
             body["tools"] = build_tools(req.tools);
+
+        // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
+        // sending a stable prompt_cache_key pins a conversation's identical
+        // prefix (system + tools + history) to the same cache node across
+        // turns, lifting the cache-hit rate on the exact bytes that repeat.
+        // Only for hosted TLS endpoints — local Ollama/llama.cpp ignore or
+        // reject the field, and their KV cache is prefix-automatic anyway.
+        if (req.endpoint.use_tls && !req.session_key.empty())
+            body["prompt_cache_key"] = req.session_key;
     }
 
     std::string body_str;

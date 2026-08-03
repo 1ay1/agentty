@@ -368,9 +368,75 @@ static void test_http_error_details() {
         == "Codex backend returned HTTP 400: plain edge rejection");
 }
 
+static void test_session_id_is_stable_per_conversation() {
+    // Caching hinges on the same conversation carrying the SAME session_id
+    // every turn (a fresh random id each turn defeats the backend prompt
+    // cache). Derivation must be deterministic per key and differ across keys.
+    const std::string a1 = cc::session_id_for_test("thread-A");
+    const std::string a2 = cc::session_id_for_test("thread-A");
+    const std::string b1 = cc::session_id_for_test("thread-B");
+    CHECK(!a1.empty());
+    CHECK(a1 == a2);          // stable across turns of one conversation
+    CHECK(a1 != b1);          // distinct conversations don't collide
+    CHECK(a1.size() == 36);   // uuid-v4 shaped (backend accepts it)
+    CHECK(a1[14] == '4');     // version nibble
+    // No durable identity → non-empty random id (correctness over caching).
+    CHECK(!cc::session_id_for_test("").empty());
+}
+
+static void test_stale_tool_result_is_budget_capped() {
+    // A giant tool output from an OLD call must NOT ship verbatim every turn
+    // (it would replay on the wire and burn tokens). The newest result keeps
+    // the full budget; stale successful ones fade to a tight head+tail via
+    // the shared wire::cap_tool_result_aged path.
+    provider::Request req;
+    req.model = "gpt-5-codex";
+
+    const std::string big(200000, 'x');   // 200 KiB dump
+
+    // Oldest call: the big result, many turns back.
+    Message a1; a1.role = Role::Assistant;
+    ToolUse old_tc;
+    old_tc.id = ToolCallId{"call_old"};
+    old_tc.name = ToolName{"grep"};
+    old_tc.args = json::object();
+    old_tc.status = ToolUse::Done{.output = big};
+    a1.tool_calls.push_back(old_tc);
+    req.messages.push_back(a1);
+
+    // A run of newer tool calls so the old one ages past the full-result window.
+    for (int i = 0; i < 12; ++i) {
+        Message a; a.role = Role::Assistant;
+        ToolUse tc;
+        tc.id = ToolCallId{"call_" + std::to_string(i)};
+        tc.name = ToolName{"bash"};
+        tc.args = json::object();
+        tc.status = ToolUse::Done{.output = "ok"};
+        a.tool_calls.push_back(tc);
+        req.messages.push_back(a);
+    }
+
+    const json body = cc::build_body_for_test(req);
+    const auto& in = body["input"];
+    // Find the oldest function_call_output (call_old) and assert it was capped.
+    std::string old_output;
+    for (const auto& item : in) {
+        if (item["type"] == "function_call_output"
+            && item["call_id"] == "call_old") {
+            old_output = item["output"].get<std::string>();
+            break;
+        }
+    }
+    CHECK(!old_output.empty());
+    CHECK(old_output.size() < big.size());   // faded, not verbatim
+    CHECK(old_output.size() < 8192);         // tight head+tail budget
+}
+
 int main() {
     test_build_body();
     test_build_body_with_images();
+    test_session_id_is_stable_per_conversation();
+    test_stale_tool_result_is_budget_capped();
     test_sse_text_and_usage();
     test_sse_tool_call();
     test_sse_parallel_tool_calls_are_id_addressed();
