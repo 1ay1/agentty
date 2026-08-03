@@ -701,16 +701,22 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // so this trigger is purely a quality optimisation: summary >
     // truncation. If compaction fails (rate-limited, network drop)
     // the user still gets through their next turn via soft-trim.
+    // Threshold is now a PERCENT of the model's window
+    // (StreamState::compaction_threshold(), default 85 %) clamped so
+    // ~20k tokens of output headroom always stays free. This replaces
+    // the old fixed `context_max - 17k` absolute margin, which was far
+    // too eager on large windows: on a 1 M-token model that fired at
+    // 98.3 % (983k) yet on 200 k at 91.5 % — inconsistent, and it forced
+    // a compaction long before a model happily handling 400 k needed one.
+    // The pct is user-tunable via Settings::autocompact_pct so "ride
+    // deeper" is a one-knob change.
     if (m.s.is_idle()
         && !m.s.compacting
         && !m.s.autocompact_disabled
         && m.s.context_max > 0
         && m.ui.composer.queued.empty()
         && !m.d.current.messages.empty()) {
-        constexpr int kOutputReserve = 13000;
-        constexpr int kCompactSlack  = 4000;
-        const int threshold = std::max(0,
-            m.s.context_max - kOutputReserve - kCompactSlack);
+        const int threshold = m.s.compaction_threshold();
         // Calibrate the raw byte-estimate against the live correction
         // factor learned from prior turns' real token counts, so the
         // proactive trigger tracks the actual tokenizer instead of a
@@ -718,7 +724,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // (which used to fire compaction with ~60k+ headroom to spare).
         const int est = static_cast<int>(
             cmd::estimate_wire_tokens(m.d.current) * m.s.est_calibration);
-        if (std::max(m.s.tokens_in, est) > threshold) {
+        if (threshold > 0 && std::max(m.s.tokens_in, est) > threshold) {
             // Dispatch CompactContext as an async Msg so it goes
             // through the same reducer arm /compact uses; that arm
             // is the single source of truth for compaction kickoff

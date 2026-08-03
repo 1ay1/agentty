@@ -1561,6 +1561,17 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json)
     add_test(NAME model_caps_test COMMAND model_caps_test)
 
+    # compaction_threshold_test — StreamState::compaction_threshold(): the
+    # smart auto-compaction trigger (percent-of-window + output-headroom
+    # floor + pct clamp). Header-only (session.hpp); no link.
+    add_executable(compaction_threshold_test EXCLUDE_FROM_ALL
+        tests/compaction_threshold_test.cpp
+    )
+    target_include_directories(compaction_threshold_test PRIVATE include)
+    target_link_libraries(compaction_threshold_test PRIVATE
+        nlohmann_json::nlohmann_json maya::maya)
+    add_test(NAME compaction_threshold_test COMMAND compaction_threshold_test)
+
     # error_class_test — the retry classifier's status-preferring dispatch.
     # provider::classify_stream_error(message, http_status) prefers the typed,
     # compile-time-proven classify(HttpError) path when the transport stamped a
@@ -2136,6 +2147,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        compaction_threshold_test
         error_class_test
         wire_shared_test
         fsm_test
@@ -2153,6 +2165,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        compaction_threshold_test
         error_class_test
         wire_shared_test
         fsm_test
@@ -2166,6 +2179,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        compaction_threshold_test
         error_class_test
         fsm_test
         concurrency_primitives_test

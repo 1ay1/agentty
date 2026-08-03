@@ -792,6 +792,7 @@ store::Settings load_settings() {
         s.effort = j.value("effort", "");
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
+        s.autocompact_pct = j.value("autocompact_pct", 0);
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
     } catch (...) {
@@ -821,6 +822,7 @@ void save_settings(const store::Settings& s) {
     if (!s.effort.empty()) j["effort"] = s.effort;
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
+    if (s.autocompact_pct > 0) j["autocompact_pct"] = s.autocompact_pct;
     (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }
 

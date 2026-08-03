@@ -50,6 +50,16 @@ struct Settings {
     // clears the in-memory set for the session (tightening the profile
     // re-arms prompts), but the grants reload on next launch.
     std::vector<std::string> always_allow_tools;
+    // Auto-compaction trigger point, as a PERCENT of the model's context
+    // window (0 = use the built-in default). Background compaction fires at
+    // the post-turn idle boundary once the estimated wire size crosses this
+    // fraction of context_max. Higher = compact later = ride deeper into the
+    // window before summarising (fewer, larger compactions); lower = compact
+    // sooner (more, smaller ones). Clamped to [50, 95] when applied so we
+    // always leave headroom for the model's own output. Persisted so a user
+    // who knows their model is happy at 90 %+ doesn't get compacted early on
+    // every launch. See kDefaultAutocompactPct / effective_autocompact_pct.
+    int autocompact_pct = 0;
 };
 
 template <class S>
