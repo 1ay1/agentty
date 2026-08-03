@@ -26,6 +26,28 @@ struct ModelInfo {
     std::optional<bool> supports_tools;
 };
 
+// Canonical wire id: strip agentty's internal extended-context markers
+// (`[1m]` / `[2m]`) so the raw provider id goes on the wire. The suffix is a
+// PICKER-ONLY marker (it selects the 1M/2M window + the context beta); the
+// upstream API has never heard of it and 404s on `claude-sonnet-5[1m]`. This
+// mirrors Claude Code's `Yu()` (which strips /\[(1|2)m\]/gi). Every transport
+// MUST route req.model through this before putting it in the request body.
+[[nodiscard]] inline std::string wire_model_id(std::string_view id) {
+    std::string out;
+    out.reserve(id.size());
+    for (std::size_t i = 0; i < id.size();) {
+        if (id[i] == '[' && i + 3 < id.size() && id[i + 2] == 'm'
+            && id[i + 3] == ']'
+            && (id[i + 1] == '1' || id[i + 1] == '2')) {
+            i += 4;   // skip "[1m]" / "[2m]"
+            continue;
+        }
+        out.push_back(id[i]);
+        ++i;
+    }
+    return out;
+}
+
 // ============================================================================
 // ModelCapabilities — typed knowledge about a model derived from its id.
 // ============================================================================
