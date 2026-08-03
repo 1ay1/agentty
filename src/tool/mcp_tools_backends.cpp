@@ -389,9 +389,40 @@ provider::StreamResult run_one_completion(Thread& thread,
     req.auth          = provider::active().kind == provider::Kind::Anthropic
                       ? auth::fresh_auth_header(cfg.auth)
                       : cfg.auth;
-    req.max_tokens    = 32000;
+    // A subagent's job is to investigate and return a CONCISE standalone
+    // report — not to emit a 32k-token essay. The parent's default is 16k;
+    // 8k is ample for a report yet caps the per-turn output cost of a
+    // fan-out of parallel subagents (each turn otherwise billed at the full
+    // ceiling). The wrap-up nudge already forces a tight final report.
+    req.max_tokens    = 8192;
     req.messages      = thread.messages;
     req.cancel        = std::make_shared<http::CancelToken>();
+    // Stable per-subagent conversation identity so the shared prefix
+    // (heavy system prompt + tool schemas + accumulated tool results) is
+    // PROMPT-CACHED across this subagent's up-to-24 turns instead of being
+    // re-encoded from scratch every turn. Keyed on the agent role + the task
+    // prompt so each spawned subagent gets its own stable cache lane and a
+    // fan-out of parallel explorers doesn't collide. Without this the single
+    // biggest subagent cost — re-sending the same large prefix every turn —
+    // pays full price on every one of those turns.
+    {
+        std::string key = "subagent:";
+        key += type.name;
+        key += ':';
+        // A short stable digest of the task prompt (FNV-1a) keeps the key
+        // bounded and distinct per delegated task.
+        std::uint64_t h = 0xcbf29ce484222325ULL;
+        for (unsigned char c : thread.messages.empty()
+                                   ? std::string_view{}
+                                   : std::string_view{thread.messages.front().text}) {
+            h ^= c; h *= 0x00000100000001B3ULL;
+        }
+        char buf[17];
+        std::snprintf(buf, sizeof(buf), "%016llx",
+                      static_cast<unsigned long long>(h));
+        key += buf;
+        req.session_key = std::move(key);
+    }
 
     auto allowed = [&](const tools::ToolDef& t) -> bool {
         if (t.name.value == "task") return false;
