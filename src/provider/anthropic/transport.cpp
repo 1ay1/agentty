@@ -1889,24 +1889,54 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 }
 
 std::vector<ModelInfo> list_models(const AuthHeader& auth) {
+    const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
+
+    // Claude Code's model catalog offers a 1M-context window as a distinct
+    // picker VARIANT: for every model whose catalog entry has
+    // `supports_1m_suffix:true`, it surfaces a second `<id>[1m]` row (labelled
+    // "(1M context)") gated by the account's `context_1m_entitlement`. The
+    // base id stays 200k; the `[1m]` id is 1M. We mirror that: after building
+    // the base catalog, append a `[1m]` companion for each suffix-capable
+    // model. We use OAuth (Pro/Max) as the entitlement proxy — a raw API key
+    // on a lower usage tier can be capped at 200k and would 400 on a >200k
+    // request, so we don't surface the 1M variant there. The `[1m]` id both
+    // widens context_window() to 1M and makes the transport send the
+    // context-1m-2025-08-07 beta (via ModelCapabilities::extended_context_1m).
+    auto add_1m_variants = [is_oauth](std::vector<ModelInfo>& v) {
+        if (!is_oauth) return;
+        std::vector<ModelInfo> extra;
+        for (const auto& mi : v) {
+            const auto caps = ModelCapabilities::from_id(mi.id.value);
+            if (!caps.supports_1m_suffix()) continue;
+            // Skip if an explicit [1m] row is somehow already present.
+            if (mi.id.value.find("[1m]") != std::string::npos) continue;
+            ModelInfo one_m = mi;
+            one_m.id = ModelId{mi.id.value + "[1m]"};
+            one_m.display_name = mi.display_name + " (1M context)";
+            one_m.context_window = 1'000'000;
+            extra.push_back(std::move(one_m));
+        }
+        for (auto& e : extra) v.push_back(std::move(e));
+    };
+
     // Built-in catalog. Anthropic's ids are stable and few, so unlike the
     // OpenAI/Ollama path we always have a trustworthy fallback. Returned
     // only when the network probe genuinely yields nothing (offline, or a
     // transient non-200) so the picker is never stranded empty. With valid
     // creds the real /v1/models below returns the full upstream catalog —
     // the seed is just the floor, not the ceiling.
-    auto seed = [] {
-        return std::vector<ModelInfo>{
+    auto seed = [&] {
+        std::vector<ModelInfo> v{
             ModelInfo{ModelId{"claude-opus-4-5"},   "Claude Opus 4.5",   "anthropic", 200000, true},
             ModelInfo{ModelId{"claude-sonnet-4-5"}, "Claude Sonnet 4.5", "anthropic", 200000, true},
             ModelInfo{ModelId{"claude-haiku-4-5"},  "Claude Haiku 4.5",  "anthropic", 200000, false},
         };
+        add_1m_variants(v);
+        return v;
     };
 
     std::vector<ModelInfo> result;
     if (is_empty(auth)) return seed();
-
-    const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
     http::Request hreq;
     hreq.method  = http::HttpMethod::Get;
@@ -1944,8 +1974,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
                 .id = ModelId{id},
                 .display_name = name,
                 .provider = "anthropic",
+                .context_window = 200000,
             });
         }
+        // Surface a `[1m]` companion for every suffix-capable model (OAuth).
+        add_1m_variants(result);
     } catch (const std::exception& e) {
         util::dbglog("anthropic.list_models.parse", e.what());
     } catch (...) {

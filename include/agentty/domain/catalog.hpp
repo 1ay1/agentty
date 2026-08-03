@@ -150,6 +150,42 @@ struct ModelCapabilities {
             && (generation > 4 || (generation == 4 && revision >= 7));
     }
 
+    // ── Context-window detection (the 1M-window question) ────────────────
+    // Verified against the Claude Code binary's model catalog (each entry
+    // carries `context: {window:200000, supports_1m_beta, supports_1m_suffix}`).
+    // Claude Code does NOT auto-detect 1M from the account tier: the base
+    // window is ALWAYS 200k, and 1M is an explicit picker VARIANT the user
+    // selects — an id ending in `[1m]` (its `Yu()` strips /\[(1|2)m\]/gi, so
+    // a future `[2m]` is anticipated too). The variant is only offered when
+    // the model's catalog entry has `supports_1m_suffix:true` AND the account
+    // holds `context_1m_entitlement`. agentty mirrors this exactly: the
+    // `[1m]` suffix sets extended_context_1m (below, in from_id) which both
+    // sends the context-1m beta and widens context_window() to 1M.
+    //
+    // supports_1m_suffix(): may this model be offered a `[1m]` variant? Per
+    // Claude Code's catalog the Sonnet-4 line, Opus-4 line, and Haiku 4.5 all
+    // carry supports_1m_suffix:true; older (gen<=3) models do not. The
+    // flagship next-gen lane (Fable/Mythos 5+) is treated as 1M-capable too.
+    [[nodiscard]] constexpr bool supports_1m_suffix() const noexcept {
+        if (family == Family::Sonnet) return generation >= 4;
+        if (family == Family::Opus)   return generation >= 4;
+        if (family == Family::Haiku)  return generation >= 4;
+        if (family == Family::Fable || family == Family::Mythos)
+            return generation >= 5;
+        return false;
+    }
+
+    // The model's context window in TOKENS — the ctx-% and auto-compaction
+    // denominator. Matches Claude Code: base 200k for every known Claude
+    // model, widened to 1M ONLY when the explicit `[1m]` suffix set
+    // extended_context_1m. Unknown families report 0 so the caller prefers a
+    // real probed window (Ollama /api/show, OpenAI /v1/models).
+    [[nodiscard]] constexpr int context_window() const noexcept {
+        if (extended_context_1m) return 1'000'000;   // explicit [1m] variant
+        if (is_known_family()) return 200'000;
+        return 0;   // unknown: caller falls back to a probed window
+    }
+
     // ── Capability tier: a provider-RELATIVE strength ordinal ────────────
     //
     // No provider ships a "power" number; /v1/models returns ids, not a
