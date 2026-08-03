@@ -202,9 +202,25 @@ struct ModelCapabilities {
             }
             return false;
         };
-        if (has("mini") || has("nano") || has("small") || has("lite")
-            || has("flash") || has("turbo"))
-            return Tier::Cheap;
+        const bool cheap_hint =
+            has("mini") || has("nano") || has("small") || has("lite")
+            || has("flash") || has("turbo");
+        // OpenAI o-series reasoning models (o1/o3/o4): the base o* variant is a
+        // pricey, slow reasoning model — NOT a cheap workhorse — so it must
+        // never be picked as a "cheaper Mid". Only the -mini/-nano o-series
+        // variants are genuinely cheap. Detect an `o<digit>` token so `o1`,
+        // `o3-pro` rank Flagship while `o1-mini`, `o3-mini` fall to Cheap.
+        auto is_o_series = [&]() {
+            for (std::size_t i = 0; i + 1 < id.size(); ++i) {
+                const bool at_start = (i == 0) || id[i - 1] == '-' || id[i - 1] == '/';
+                if (at_start && (id[i] == 'o' || id[i] == 'O')
+                    && id[i + 1] >= '1' && id[i + 1] <= '9')
+                    return true;
+            }
+            return false;
+        };
+        if (is_o_series()) return cheap_hint ? Tier::Cheap : Tier::Flagship;
+        if (cheap_hint) return Tier::Cheap;
         return base;
     }
 
@@ -431,6 +447,47 @@ private:
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
 }
 
+// Is this id a chat/completions model an agent can actually DRIVE (stream text
+// + call tools), as opposed to an embedding / image / audio / moderation /
+// realtime endpoint that a raw provider `/v1/models` dump also lists?
+//
+// The subagent router picks the cheapest CAPABLE candidate; without this gate
+// it would happily pick `text-embedding-3-small` or `dall-e-3` as "cheapest
+// Mid" and route a whole subagent to a model that can't chat — breaking the
+// task outright. OpenAI's /v1/models is the worst offender (it returns every
+// asset the key can touch); Anthropic/ChatGPT/Ollama lists are chat-only, so
+// this is a no-op there. Deny-list by well-known non-chat id fragments — a
+// deny-list (not an allow-list) so a new chat model is never wrongly excluded.
+[[nodiscard]] inline bool is_dispatchable_model(std::string_view id) noexcept {
+    auto has = [&](std::string_view n) {
+        if (n.size() > id.size()) return false;
+        for (std::size_t i = 0; i + n.size() <= id.size(); ++i) {
+            bool eq = true;
+            for (std::size_t j = 0; j < n.size(); ++j) {
+                char a = id[i + j], b = n[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (a != b) { eq = false; break; }
+            }
+            if (eq) return true;
+        }
+        return false;
+    };
+    // Non-chat asset families that appear in a raw /v1/models listing.
+    if (has("embedding") || has("embed")     ||   // text-embedding-3-*, *-embed
+        has("dall-e")    || has("dalle")     ||   // image generation
+        has("whisper")                       ||   // speech-to-text
+        has("tts")                           ||   // text-to-speech
+        has("audio")     || has("realtime")  ||   // audio / realtime sockets
+        has("moderation")                    ||   // omni-moderation-*
+        has("image")                         ||   // *-image-* generation
+        has("transcribe")                    ||   // gpt-4o-transcribe
+        has("search")                        ||   // *-search-preview retrieval
+        has("rerank")    || has("reranker")  ||   // rerankers (cohere/voyage)
+        has("guard"))                             // llama-guard safety filters
+        return false;
+    return true;
+}
+
 // ── Model router: pick the cheapest capable model for a delegated role ──────
 //
 // Read-only subagent roles (explorer/reviewer) do grunt work — read, grep,
@@ -462,16 +519,28 @@ private:
 
     std::string best;
     Tier best_tier = Tier::Flagship;
+    int  best_ctx  = -1;
     for (const auto& mi : candidates) {
+        const std::string_view id = mi.id.value;
         // A probe that reported no tool support disqualifies the model — a
         // subagent's whole job is tool use.
         if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
-        const Tier t = ModelCapabilities::tier_for(mi.id.value);
+        // Never route to a non-chat asset (embedding/image/audio/moderation)
+        // that a raw /v1/models dump also lists — it can't run an agent turn.
+        if (!is_dispatchable_model(id)) continue;
+        const Tier t = ModelCapabilities::tier_for(id);
+        if (t == Tier::Weak) continue;              // unreliable at tools, ever
         if (t < min_tier) continue;                 // below the role's floor
         if (t >= parent_tier) continue;             // not cheaper than parent
-        if (best.empty() || t < best_tier) {        // prefer the cheapest
+        // Prefer the cheapest tier; within a tier prefer the LARGER context
+        // window (a real chat model over a 4k stub / preview variant).
+        const int ctx = mi.context_window;
+        const bool better = best.empty() || t < best_tier
+                          || (t == best_tier && ctx > best_ctx);
+        if (better) {
             best = mi.id.value;
             best_tier = t;
+            best_ctx  = ctx;
         }
     }
     // Nothing strictly cheaper-and-capable → keep the parent (no regression).

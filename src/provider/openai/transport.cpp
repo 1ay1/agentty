@@ -1859,6 +1859,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
             for (const auto& m : j.value("data", json::array())) {
                 auto id = m.value("id", "");
                 if (id.empty()) continue;
+                // A raw /v1/models dump lists every asset the key can touch —
+                // embeddings, image/audio/moderation endpoints, rerankers —
+                // none of which an agent can drive. Drop them so they never
+                // pollute the picker OR get chosen by the subagent router.
+                if (!is_dispatchable_model(id)) continue;
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},
                     .display_name = id,

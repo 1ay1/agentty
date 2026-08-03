@@ -232,6 +232,46 @@ static ModelInfo mi(std::string_view id) {
     return m;
 }
 
+static void test_router_hardening_nonchat_and_oseries() {
+    using T = ModelCapabilities::Tier;
+    // Non-chat assets a raw OpenAI /v1/models dump lists must NEVER be picked.
+    for (const char* asset : {"text-embedding-3-small", "text-embedding-3-large",
+                              "dall-e-3", "whisper-1", "tts-1", "tts-1-hd",
+                              "omni-moderation-latest", "gpt-4o-transcribe",
+                              "gpt-4o-realtime-preview", "gpt-image-1"}) {
+        CHECK(!is_dispatchable_model(asset));
+    }
+    // Real chat models stay dispatchable.
+    for (const char* chat : {"gpt-5", "gpt-5-mini", "claude-haiku-4-5",
+                             "claude-opus-4-5", "o1", "o3-mini", "gpt-4o"}) {
+        CHECK(is_dispatchable_model(chat));
+    }
+    // o-series: base o1/o3 are pricey reasoning models (Flagship, never picked
+    // as "cheap"); the -mini variants are genuinely cheap.
+    CHECK(ModelCapabilities::tier_for("o1")      == T::Flagship);
+    CHECK(ModelCapabilities::tier_for("o3")      == T::Flagship);
+    CHECK(ModelCapabilities::tier_for("o1-mini") == T::Cheap);
+    CHECK(ModelCapabilities::tier_for("o3-mini") == T::Cheap);
+
+    // End-to-end: a realistic raw OpenAI listing. The router must skip every
+    // asset + o1 and land on the genuinely-cheap gpt-5-mini, not an embedding.
+    std::vector<ModelInfo> raw = {
+        mi("gpt-5"), mi("gpt-5-mini"), mi("o1"),
+        mi("text-embedding-3-small"), mi("dall-e-3"), mi("whisper-1"),
+        mi("gpt-4o-realtime-preview")};
+    for (auto& m : raw)
+        if (m.id.value.rfind("gpt-5", 0) == 0) m.context_window = 272000;
+    const std::string picked = cheapest_capable_model("gpt-5", raw);
+    CHECK(picked == "gpt-5-mini");
+    CHECK(is_dispatchable_model(picked));
+
+    // If the ONLY cheaper candidates are non-chat assets, keep the parent
+    // (no regression, never route to an embedding model).
+    std::vector<ModelInfo> assets_only = {
+        mi("gpt-5"), mi("text-embedding-3-large"), mi("dall-e-3")};
+    CHECK(cheapest_capable_model("gpt-5", assets_only) == "gpt-5");
+}
+
 static void test_cheapest_capable_router() {
     // Typical Anthropic pool: parent Opus, cheaper Sonnet + Haiku available.
     std::vector<ModelInfo> pool = {
@@ -268,6 +308,7 @@ int main() {
     test_flagship_lane_caps();
     test_gpt5_codex_caps();
     test_capability_tiers();
+    test_router_hardening_nonchat_and_oseries();
     test_cheapest_capable_router();
 
     if (g_failures == 0) {
