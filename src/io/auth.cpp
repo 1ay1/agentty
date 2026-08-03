@@ -131,6 +131,14 @@ bool is_empty(const AuthHeader& h) noexcept {
     }, h);
 }
 
+std::string bearer_token(const AuthHeader& h) {
+    return std::visit([](const auto& a) -> std::string {
+        using T = std::decay_t<decltype(a)>;
+        if constexpr (std::same_as<T, ApiKeyHeader>) return a.value;
+        else /* BearerHeader */                      return a.token;
+    }, h);
+}
+
 std::string_view persist_tag(const Credentials& c) noexcept {
     return std::visit([](const auto& v) noexcept -> std::string_view {
         using T = std::decay_t<decltype(v)>;

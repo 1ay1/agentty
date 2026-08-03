@@ -27,6 +27,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
@@ -36,8 +37,6 @@ namespace agentty::provider::ollama {
 
 using json = nlohmann::json;
 using auth::AuthHeader;
-using auth::ApiKeyHeader;
-using auth::BearerHeader;
 
 namespace {
 
@@ -55,17 +54,10 @@ http::Headers build_request_headers(const AuthHeader& auth) {
     h.push_back({"content-type", "application/json"});
     h.push_back({"user-agent", "agentty/" AGENTTY_VERSION});
     // Ollama needs no auth by default, but a remote / proxied instance may
-    // sit behind a bearer key — emit it the same way the OpenAI family does.
-    std::visit([&](const auto& a) {
-        using T = std::decay_t<decltype(a)>;
-        if constexpr (std::is_same_v<T, ApiKeyHeader>) {
-            if (!a.value.empty())
-                h.push_back({"authorization", "Bearer " + a.value});
-        } else if constexpr (std::is_same_v<T, BearerHeader>) {
-            if (!a.token.empty())
-                h.push_back({"authorization", "Bearer " + a.token});
-        }
-    }, auth);
+    // sit behind a bearer key — emit it the same way the OpenAI family does
+    // (auth::bearer_token is the single source of truth for extraction).
+    if (std::string tok = auth::bearer_token(auth); !tok.empty())
+        h.push_back({"authorization", "Bearer " + tok});
     return h;
 }
 
@@ -200,43 +192,10 @@ void repair_arg_keys(const std::string& tool, json& args) {
 }
 
 // Could `s` be the START of a leaked tool-call? Only meaningful at the start
-// of a response (salvage_eligible). Detects: bare `{`, `[{`, `<tool_call>`,
-// or a ```json fence. Anything else is prose.
-[[nodiscard]] bool could_be_tool_json(std::string_view s) noexcept {
-    std::size_t i = 0;
-    while (i < s.size() && (s[i]==' '||s[i]=='\t'||s[i]=='\n'||s[i]=='\r')) ++i;
-    if (i >= s.size()) return true;            // only whitespace — undecided
-    std::string_view rest = s.substr(i);
-
-    if (rest.front() == '{') {
-        if (rest.size() == 1) return true;
-        std::string_view after = rest.substr(1);
-        std::size_t k = 0;
-        while (k < after.size() && (after[k]==' '||after[k]=='\t'
-               ||after[k]=='\n'||after[k]=='\r')) ++k;
-        if (k == after.size()) return true;
-        return after[k] == '"' || after[k] == '}';
-    }
-    if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
-    if (rest == "[" || rest == "[ ") return true;
-
-    if (rest.starts_with("<tool_call>")) return true;
-    constexpr std::string_view kTag = "<tool_call>";
-    if (rest.size() < kTag.size() && rest.front() == '<') {
-        for (std::size_t j = 0; j < rest.size(); ++j)
-            if (rest[j] != kTag[j]) return false;
-        return true;
-    }
-
-    if (rest.starts_with("```json")) return true;
-    if (rest.starts_with("```")) {
-        if (rest.size() <= 3) return true;
-        std::string_view after = rest.substr(3);
-        return after.empty() || after[0]=='\n' || after[0]=='\r'
-            || after[0]==' ' || after[0]=='\t' || after[0]=='j';
-    }
-    return false;
-}
+// of a response (salvage_eligible). Shared classifier — see
+// wire::could_be_tool_json (single source of truth; was duplicated here and in
+// the openai transport).
+using wire::could_be_tool_json;
 
 // Strip <tool_call>…</tool_call> and ```json…``` wrappers + surrounding ws.
 [[nodiscard]] std::string_view strip_tool_call_wrappers(std::string_view sv) noexcept {
@@ -1011,10 +970,7 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
                 if (ctx.stop_reason != StopReason::ToolUse)
                     ctx.stop_reason = StopReason::EndTurn;
             }
-            StreamUsage su;
-            su.input_tokens  = j.value("prompt_eval_count", 0);
-            su.output_tokens = j.value("eval_count", 0);
-            if (su.input_tokens || su.output_tokens) ctx.sink(su);
+            if (auto su = usage::from_ollama(j)) ctx.sink(*su);
             flush_unhandled_content(ctx);
             return;
         }
@@ -1041,10 +997,7 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         // Never-blank-turn net: if nothing was emitted, surface the model's
         // content (or an explicit `(empty response)`).
         flush_unhandled_content(ctx);
-        StreamUsage su;
-        su.input_tokens  = j.value("prompt_eval_count", 0);
-        su.output_tokens = j.value("eval_count", 0);
-        if (su.input_tokens || su.output_tokens) ctx.sink(su);
+        if (auto su = usage::from_ollama(j)) ctx.sink(*su);
         auto reason = j.value("done_reason", std::string{"stop"});
         if (ctx.stop_reason != StopReason::ToolUse)
             ctx.stop_reason = (reason == "length") ? StopReason::MaxTokens

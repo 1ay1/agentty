@@ -18,6 +18,7 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/chatgpt/oauth.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
@@ -346,14 +347,9 @@ void close_all_tools(StreamCtx& ctx) {
 }
 
 void emit_usage(StreamCtx& ctx, const json& usage) {
-    if (!usage.is_object()) return;
-    StreamUsage su;
-    su.input_tokens  = usage.value("input_tokens", 0);
-    su.output_tokens = usage.value("output_tokens", 0);
-    if (usage.contains("input_tokens_details"))
-        su.cache_read_input_tokens =
-            usage["input_tokens_details"].value("cached_tokens", 0);
-    ctx.sink(su);
+    // Shared extractor — see usage::from_responses (single source of truth for
+    // the Responses/Codex usage shape).
+    if (auto su = usage::from_responses(usage)) ctx.sink(*su);
 }
 
 void dispatch(StreamCtx& ctx, std::string_view data) {

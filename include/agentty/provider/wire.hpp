@@ -418,4 +418,75 @@ inline constexpr int         kFullResultWindow      = 8;
     return cap_tool_result(raw, faded_tool_budget(recency_rank, is_error));
 }
 
+// ── Leaked-tool-call sniffer ─────────────────────────────────────────────────
+// Weak local models (served over the OpenAI-compat and Ollama-native paths)
+// frequently emit a tool call as PLAIN TEXT instead of using the native
+// tool_calls channel: a bare `{"name":...}` object, a `[{...}]` array, a
+// `<tool_call>…` XML tag, or a ```json fence. Both transports hold streamed
+// text back (instead of showing it as prose) as long as it COULD still be
+// resolving into one of those shapes, then salvage the completed blob into a
+// real tool call at end-of-turn.
+//
+// This is the shared "is the held text still a plausible tool-call prefix?"
+// predicate that drives that hold. It is conservative on the OPEN side: it
+// returns true while a prefix is still ambiguous (only whitespace seen, a bare
+// `{` with nothing after it yet, an incomplete `<tool_call>` tag, a lone
+// ```` ``` ````) so the transport keeps waiting rather than flushing a
+// half-formed call as prose. It returns false the moment the text commits to
+// being prose (`{` followed by a non-key char, a ```` ```cpp ```` fence, any
+// other leading character).
+//
+// It was copy-pasted — identical logic, drifted whitespace — in both the
+// openai and ollama transports; a fix to one (e.g. a new wrapper shape) had to
+// be mirrored by hand. This is the single source of truth. Pure
+// string_view→bool: no StreamCtx, no JSON, no allocation.
+[[nodiscard]] inline bool could_be_tool_json(std::string_view s) noexcept {
+    // Skip leading whitespace.
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t'
+                            || s[i] == '\n' || s[i] == '\r')) ++i;
+    if (i >= s.size()) return true;  // only whitespace so far, still undecided
+
+    std::string_view rest = s.substr(i);
+
+    // Pattern 1: bare JSON object starting with `{`. The brace may be followed
+    // by whitespace/newlines before the first key (pretty-printed JSON from
+    // local models), so accept `{`, `{<ws>`, `{"` (key) and `{}` (empty).
+    if (rest.front() == '{') {
+        if (rest.size() == 1) return true;  // just `{` so far
+        std::string_view after = rest.substr(1);
+        std::size_t k = 0;
+        while (k < after.size() && (after[k] == ' ' || after[k] == '\t'
+               || after[k] == '\n' || after[k] == '\r')) ++k;
+        if (k == after.size()) return true;       // only whitespace after `{`
+        return after[k] == '"' || after[k] == '}'; // key start or empty object
+    }
+
+    // Pattern 2: JSON array starting with `[{` (or a lone `[` still resolving).
+    if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
+    if (rest == "[" || rest == "[ ") return true;
+
+    // Pattern 3: <tool_call> XML tag (and any incomplete prefix of it).
+    if (rest.starts_with("<tool_call>")) return true;
+    constexpr std::string_view kTag = "<tool_call>";
+    if (rest.size() < kTag.size() && rest.front() == '<') {
+        for (std::size_t j = 0; j < rest.size(); ++j)
+            if (rest[j] != kTag[j]) return false;  // diverged
+        return true;                                // exact prefix match
+    }
+
+    // Pattern 4: ```json fence (or a lone ``` still resolving — but NOT a
+    // committed non-json fence like ```cpp).
+    if (rest.starts_with("```json")) return true;
+    if (rest.starts_with("```")) {
+        if (rest.size() <= 3) return true;  // just ``` so far
+        std::string_view after = rest.substr(3);
+        return after.empty() || after[0] == '\n' || after[0] == '\r'
+            || after[0] == ' ' || after[0] == '\t' || after[0] == 'j';
+    }
+
+    // Anything else is committed prose.
+    return false;
+}
+
 } // namespace agentty::provider::wire

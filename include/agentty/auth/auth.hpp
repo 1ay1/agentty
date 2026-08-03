@@ -101,6 +101,16 @@ using AuthHeader = std::variant<ApiKeyHeader, BearerHeader>;
 // `auth_header.empty()` check.
 [[nodiscard]] bool is_empty(const AuthHeader& h) noexcept;
 
+// The raw secret string carried by EITHER arm, as a plain token — the value
+// that goes out under `Authorization: Bearer <token>` for the whole OpenAI
+// family (OpenAI/Groq/OpenRouter/Ollama-behind-a-proxy). Extracting it used to
+// be a copy-pasted `std::visit` in every OpenAI-family transport's
+// build_request_headers; those copies could drift on a new arm. This is the
+// single source of truth. NOTE: Anthropic deliberately does NOT use this — it
+// must route an ApiKeyHeader to `x-api-key:` (never Bearer), so it keeps its
+// own arm-typed visit.
+[[nodiscard]] std::string bearer_token(const AuthHeader& h);
+
 // Free helpers — the variant is the truth, these are derived views.
 [[nodiscard]] bool        is_valid(const Credentials& c) noexcept;
 [[nodiscard]] bool        is_expired(const Credentials& c) noexcept;
