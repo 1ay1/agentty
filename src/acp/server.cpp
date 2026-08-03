@@ -35,6 +35,7 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
+#include "agentty/tool/util/sandbox.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/isolated_thread.hpp"
 
@@ -51,6 +52,14 @@ namespace a = ::acp;
 // Construct a text ContentBlock.
 a::ContentBlock text_block(std::string s) {
     return a::ContentBlock{a::TextContent{std::move(s), a::Nothing, json::object()}};
+}
+
+// The first line of `s`, trailing CR stripped — for one-line card titles
+// built from a possibly-multiline command/body.
+std::string first_line(std::string s) {
+    if (auto nl = s.find('\n'); nl != std::string::npos) s.resize(nl);
+    if (!s.empty() && s.back() == '\r') s.pop_back();
+    return s;
 }
 
 // agentty spec::Kind → acp::ToolKind.
@@ -200,8 +209,13 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
         case sp::Kind::Diagnostics:
         case sp::Kind::Test:
         case sp::Kind::ProcessStart: {
-            std::string c = str("command");
-            if (!c.empty()) return clip(c, 96);
+            // Match claude-code-acp: the command itself IS the title, shown
+            // in full (the client single-line-clamps for display, and the
+            // whole command also rides in the card's content block via
+            // command_content). Only the first line — a heredoc/multiline
+            // body would otherwise blow up the one-line card. No 96-char clip.
+            std::string c = first_line(str("command"));
+            if (!c.empty()) return c;
             std::string d = str("display_description");
             return d.empty() ? (kind == sp::Kind::Test ? "Run tests" : "Terminal") : d;
         }
@@ -397,6 +411,67 @@ std::optional<a::ToolCallContent> announce_diff(const ToolUse& tc, std::string_v
     return std::nullopt;
 }
 
+// The FULL command text for a terminal-kind tool call, wrapped as a fenced
+// code block so Zed renders it verbatim in the (expandable) card body. The
+// card *title* is deliberately clipped to one short line (tool_title →
+// clip(...96)), and Zed further single-line-clamps long titles — so without
+// this the full `command` only lived in rawInput, which Zed doesn't surface
+// in the card. Emitting it as content means the untruncated command is always
+// visible. Only for command-carrying kinds; nullopt otherwise.
+std::optional<a::ToolCallContent> command_content(const ToolUse& tc) {
+    namespace sp = tools::spec;
+    const auto* spec = sp::lookup(tc.name.value);
+    if (!spec) return std::nullopt;
+    switch (spec->kind) {
+        case sp::Kind::Bash:
+        case sp::Kind::Diagnostics:
+        case sp::Kind::Test:
+        case sp::Kind::ProcessStart:
+            break;
+        default:
+            return std::nullopt;
+    }
+    const auto& args = tc.args;
+    if (!args.contains("command") || !args["command"].is_string())
+        return std::nullopt;
+    std::string cmd = args["command"].get<std::string>();
+    if (cmd.empty()) return std::nullopt;
+    std::string md = "```sh\n" + cmd + "\n```";
+    return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+}
+
+// An ACP plan (Zed's checklist widget) built from the `todo` tool's args.
+// claude-code-acp maps TodoWrite → plan entries the same way; this gives Zed
+// the native plan UI instead of an opaque "Update TODOs" tool card. Returns
+// nullopt when the call isn't a todo write or carries no usable list.
+std::optional<a::SU_Plan> plan_from_todos(const ToolUse& tc) {
+    namespace sp = tools::spec;
+    const auto* spec = sp::lookup(tc.name.value);
+    if (!spec || spec->kind != sp::Kind::Todo) return std::nullopt;
+    const auto& args = tc.args;
+    if (!args.contains("todos") || !args["todos"].is_array()) return std::nullopt;
+
+    auto status_of = [](std::string_view s) {
+        if (s == "in_progress") return a::PlanEntryStatus::InProgress;
+        if (s == "completed")   return a::PlanEntryStatus::Completed;
+        return a::PlanEntryStatus::Pending;
+    };
+
+    a::SU_Plan plan;
+    for (const auto& t : args["todos"]) {
+        if (!t.is_object()) continue;
+        std::string content = t.value("content", std::string{});
+        if (content.empty()) continue;
+        a::PlanEntry e;
+        e.content  = std::move(content);
+        e.priority = a::PlanEntryPriority::Medium;   // agentty todos carry no priority
+        e.status   = status_of(t.value("status", std::string{"pending"}));
+        plan.entries.push_back(std::move(e));
+    }
+    if (plan.entries.empty()) return std::nullopt;
+    return plan;
+}
+
 // Helper: a ToolCall (announcement) from a pending ToolUse.
 a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
                            std::string_view cwd = {}) {
@@ -407,11 +482,10 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
     out.status     = status;
     if (!tc.args.is_null()) out.rawInput = a::Just<json>(tc.args);
     out.locations  = tool_locations(tc, cwd);
-    if (auto d = announce_diff(tc, cwd)) {
-        a::List<a::ToolCallContent> content;
-        content.push_back(std::move(*d));
-        out.content = std::move(content);
-    }
+    a::List<a::ToolCallContent> content;
+    if (auto d = announce_diff(tc, cwd)) content.push_back(std::move(*d));
+    if (auto c = command_content(tc))    content.push_back(std::move(*c));
+    if (!content.empty()) out.content = std::move(content);
     return out;
 }
 
@@ -601,6 +675,11 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
 
 a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     a::InitializeResult r;
+    // Remember whether the client can host terminals for us. Zed advertises
+    // this; a bare/test client may not. Gates the live-terminal execution of
+    // `bash` in run_tools (see client_supports_terminal_).
+    client_supports_terminal_.store(p.clientCapabilities.terminal,
+                                    std::memory_order_relaxed);
     // Negotiate to min(what we support, what the client offered). We advertise
     // up to kMaxProtocolVersion (v1 by default; v2 only if the acp-cpp build
     // opted into the Draft via -DACP_ENABLE_V2_DRAFT). A v1-only client still
@@ -1213,13 +1292,21 @@ StopReason AgentServer::stream_completion(Session& sess, bool& out_cancelled,
                             upd.locations  = a::Just(tool_locations(tc, scwd));
                             // Now that args have fully streamed in, an
                             // edit/write can show a speculative diff card
-                            // immediately (before permission/execution).
-                            if (auto d = announce_diff(tc, scwd)) {
-                                a::List<a::ToolCallContent> c;
-                                c.push_back(std::move(*d));
-                                upd.content = a::Just(std::move(c));
-                            }
+                            // immediately (before permission/execution), and a
+                            // terminal call can show its FULL command (the
+                            // title is clipped to one line).
+                            a::List<a::ToolCallContent> c;
+                            if (auto d = announce_diff(tc, scwd)) c.push_back(std::move(*d));
+                            if (auto cc = command_content(tc))    c.push_back(std::move(*cc));
+                            if (!c.empty()) upd.content = a::Just(std::move(c));
                             send_update(sid, a::SU_ToolCallUpdate{std::move(upd)});
+
+                            // A `todo` write drives Zed's native plan/checklist
+                            // widget (claude-code-acp parity) — emit the plan the
+                            // moment the list is known, in addition to the tool
+                            // card above.
+                            if (auto plan = plan_from_todos(tc))
+                                send_update(sid, std::move(*plan));
                         }
                     } else if constexpr (std::is_same_v<E, StreamFinished>) {
                         stop = ev.stop_reason;
@@ -1369,6 +1456,17 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         running.status     = a::Just(a::ToolCallStatus::InProgress);
         send_update(sess.id, a::SU_ToolCallUpdate{std::move(running)});
 
+        // Live-terminal fast path: when the client hosts terminals and our
+        // sandbox isn't wrapping commands, run `bash` through the client's ACP
+        // terminal so Zed streams stdout into its native terminal widget (the
+        // claude-code-acp UX) instead of us capturing static text. Emits its
+        // own completion update + sets tc.status; nullopt means "not eligible,
+        // use internal execution below".
+        if (auto tr = run_bash_via_terminal(sess, tc)) {
+            if (tr->cancelled) { out_cancelled = true; return false; }
+            continue;
+        }
+
         // Run the tool on a worker so a session/cancel that lands mid-tool
         // (on the engine's reader thread) makes THIS turn loop return
         // promptly instead of blocking until a long bash/web_fetch finishes.
@@ -1468,10 +1566,17 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;
+            // Fence the error so Zed renders it as a distinct code block rather
+            // than blending it into prose (claude-code-acp does the same for
+            // error results). Skip the fence if the detail already looks fenced.
+            std::string shown = detail.find("```") == std::string::npos
+                              ? "```\n" + detail + "\n```"
+                              : detail;
             content.push_back(a::ToolCallContent{
-                a::TCC_Content{text_block(detail), json::object()}});
-            upd.status  = a::Just(a::ToolCallStatus::Failed);
-            upd.content = a::Just(std::move(content));
+                a::TCC_Content{text_block(std::move(shown)), json::object()}});
+            upd.status    = a::Just(a::ToolCallStatus::Failed);
+            upd.content   = a::Just(std::move(content));
+            upd.rawOutput = a::Just<json>(json{{"text", detail}, {"error", true}});
             set_status(tc, ToolUse::Failed{{}, {}, detail});
         }
 
@@ -1479,6 +1584,175 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
     }
 
     return true;
+}
+
+// Live-terminal execution of a `bash` call. See header for the contract.
+std::optional<AgentServer::TerminalRun>
+AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
+    namespace sp = tools::spec;
+
+    // Eligibility: the `bash` tool only; the client must host terminals; and
+    // our sandbox must NOT be wrapping commands (a wrapped command must run
+    // through agentty's own bwrap/sandbox-exec, which the client terminal
+    // knows nothing about). When any of these fail we return nullopt so the
+    // caller falls back to internal execution.
+    const auto* spec = sp::lookup(tc.name.value);
+    if (!spec || spec->kind != sp::Kind::Bash) return std::nullopt;
+    if (!client_supports_terminal_.load(std::memory_order_relaxed)) return std::nullopt;
+    if (tools::util::sandbox::is_active()) return std::nullopt;
+
+    const auto& args = tc.args;
+    auto str = [&](const char* k) -> std::string {
+        return (args.contains(k) && args[k].is_string()) ? args[k].get<std::string>() : std::string{};
+    };
+    std::string command = str("command");
+    if (command.empty()) command = str("cmd");
+    if (command.empty()) command = str("shell_command");
+    if (command.empty()) return std::nullopt;   // nothing to run; let internal path report the error
+
+    // Resolve the working directory the same way the bash tool would: an
+    // explicit `cd`/alias, else the session cwd. Passed to the client so its
+    // terminal starts where the user expects.
+    std::string cd = str("cd");
+    if (cd.empty()) cd = str("cwd");
+    if (cd.empty()) cd = str("workdir");
+    const std::string& run_cwd = cd.empty() ? sess.cwd : cd;
+
+    auto is_cancelled = [&] { return sess.cancel && sess.cancel->is_cancelled(); };
+    auto set_status = [&](ToolUse::Status st) {
+        util::RankedLock tlk(*sess.thread_mtx);
+        tc.status = std::move(st);
+    };
+    auto fail = [&](const std::string& detail) -> TerminalRun {
+        set_status(ToolUse::Failed{{}, {}, detail});
+        a::ToolCallUpdate f;
+        f.toolCallId = a::ToolCallId{tc.id.value};
+        f.status     = a::Just(a::ToolCallStatus::Failed);
+        a::List<a::ToolCallContent> c;
+        c.push_back(a::ToolCallContent{a::TCC_Content{text_block(detail), json::object()}});
+        f.content = a::Just(std::move(c));
+        send_update(sess.id, a::SU_ToolCallUpdate{std::move(f)});
+        return TerminalRun{false, false, detail};
+    };
+
+    // 1) Ask the client to spawn the process in its own terminal.
+    a::CreateTerminalParams cp;
+    cp.sessionId = a::SessionId{sess.id};
+    // Run through a shell so pipes/redirects/globs behave like the bash tool.
+#ifdef _WIN32
+    cp.command = "cmd.exe";
+    cp.args    = {"/S", "/C", command};
+#else
+    cp.command = "/bin/sh";
+    cp.args    = {"-c", command};
+#endif
+    if (!run_cwd.empty()) cp.cwd = a::Just<std::string>(run_cwd);
+    // Cap captured output to the bash tool's wire budget so the model sees a
+    // comparable amount of text regardless of execution path.
+    cp.outputByteLimit = a::Just<std::int64_t>(static_cast<std::int64_t>(spec->max_output_chars));
+
+    std::string terminal_id;
+    try {
+        terminal_id = conn_.terminal_create(cp).get().terminalId;
+    } catch (const std::exception& e) {
+        // Client couldn't create the terminal after advertising the cap: fall
+        // back to internal execution rather than failing the tool.
+        util::dbglog("acp.terminal.create", e.what());
+        return std::nullopt;
+    }
+    if (terminal_id.empty()) return std::nullopt;
+
+    // Ensure the terminal is always released, even on an early return/throw.
+    struct Releaser {
+        AgentServer* self; std::string sid, tid; bool armed = true;
+        void disarm() { armed = false; }
+        ~Releaser() {
+            if (!armed) return;
+            try {
+                a::TerminalRef r; r.sessionId = a::SessionId{sid}; r.terminalId = tid;
+                self->conn_.terminal_release(r).get();
+            } catch (...) { /* client gone; nothing to clean up */ }
+        }
+    } releaser{this, sess.id, terminal_id};
+
+    a::TerminalRef ref; ref.sessionId = a::SessionId{sess.id}; ref.terminalId = terminal_id;
+
+    // 2) Show the live terminal in the tool card. Zed renders the streaming
+    //    output itself from this content block keyed to the terminal id.
+    {
+        a::ToolCallUpdate u;
+        u.toolCallId = a::ToolCallId{tc.id.value};
+        a::List<a::ToolCallContent> c;
+        c.push_back(a::ToolCallContent{a::TCC_Terminal{terminal_id, json::object()}});
+        u.content = a::Just(std::move(c));
+        send_update(sess.id, a::SU_ToolCallUpdate{std::move(u)});
+    }
+
+    // 3) Wait for the process to exit, honouring cancellation. terminal/kill
+    //    stops a running process; the reader thread services the responses.
+    a::TerminalExitStatus exit{};
+    {
+        auto exit_fut = conn_.terminal_wait_for_exit(ref);
+        for (;;) {
+            if (exit_fut.wait_for(std::chrono::milliseconds(50)) == std::future_status::ready) {
+                try { exit = exit_fut.get(); }
+                catch (const std::exception& e) { return fail(std::string{"terminal wait failed: "} + e.what()); }
+                break;
+            }
+            if (is_cancelled()) {
+                try { a::TerminalKillParams k; k.sessionId = ref.sessionId; k.terminalId = ref.terminalId;
+                      conn_.terminal_kill(k).get(); } catch (...) {}
+                set_status(ToolUse::Failed{{}, {}, "cancelled"});
+                a::ToolCallUpdate c;
+                c.toolCallId = a::ToolCallId{tc.id.value};
+                c.status     = a::Just(a::ToolCallStatus::Failed);
+                send_update(sess.id, a::SU_ToolCallUpdate{std::move(c)});
+                return TerminalRun{false, true, {}};
+            }
+        }
+    }
+
+    // 4) Pull the final captured output.
+    std::string output;
+    bool truncated = false;
+    try {
+        a::TerminalOutputParams op; op.sessionId = ref.sessionId; op.terminalId = ref.terminalId;
+        auto out = conn_.terminal_output(op).get();
+        output    = std::move(out.output);
+        truncated = out.truncated;
+    } catch (const std::exception& e) {
+        return fail(std::string{"terminal output failed: "} + e.what());
+    }
+
+    const std::int64_t code = exit.exitCode.has_value() ? *exit.exitCode : 0;
+    const bool ok = !exit.signal.has_value() && code == 0;
+
+    // Build the model-visible result text, mirroring the bash tool's shape:
+    // the captured output, plus an exit annotation on non-zero/ signal.
+    std::string model_text = output;
+    if (truncated) model_text += "\n[output truncated]";
+    if (exit.signal.has_value())
+        model_text += "\n[terminated by signal " + *exit.signal + "]";
+    else if (code != 0)
+        model_text += "\n[exit code " + std::to_string(code) + "]";
+
+    // 5) Final card update: keep the terminal content block (Zed keeps the
+    //    scrollback), attach rawOutput for the model, set terminal status.
+    a::ToolCallUpdate upd;
+    upd.toolCallId = a::ToolCallId{tc.id.value};
+    upd.status     = a::Just(ok ? a::ToolCallStatus::Completed : a::ToolCallStatus::Failed);
+    a::List<a::ToolCallContent> content;
+    content.push_back(a::ToolCallContent{a::TCC_Terminal{terminal_id, json::object()}});
+    upd.content   = a::Just(std::move(content));
+    upd.rawOutput = a::Just<json>(json{{"text", model_text},
+                                       {"exitCode", code},
+                                       {"truncated", truncated}});
+    send_update(sess.id, a::SU_ToolCallUpdate{std::move(upd)});
+
+    if (ok) set_status(ToolUse::Done{{}, {}, model_text});
+    else    set_status(ToolUse::Failed{{}, {}, model_text});
+
+    return TerminalRun{ok, false, std::move(model_text)};
 }
 
 AgentServer::PermissionOutcome
@@ -1493,11 +1767,10 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
     req.toolCall.kind       = a::Just(acp_tool_kind(tc.name.value));
     if (!tc.args.is_null()) req.toolCall.rawInput = a::Just<json>(tc.args);
     req.toolCall.locations  = a::Just(tool_locations(tc, cwd));
-    if (auto d = announce_diff(tc, cwd)) {
-        a::List<a::ToolCallContent> c;
-        c.push_back(std::move(*d));
-        req.toolCall.content = a::Just(std::move(c));
-    }
+    a::List<a::ToolCallContent> c;
+    if (auto d = announce_diff(tc, cwd))  c.push_back(std::move(*d));
+    if (auto cc = command_content(tc))    c.push_back(std::move(*cc));
+    if (!c.empty()) req.toolCall.content = a::Just(std::move(c));
     req.options = {
         a::PermissionOption{"allow_once",   "Allow",        a::PermissionOptionKind::AllowOnce,   json::object()},
         a::PermissionOption{"allow_always", "Always allow", a::PermissionOptionKind::AllowAlways, json::object()},
