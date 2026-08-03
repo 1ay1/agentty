@@ -104,6 +104,19 @@ Anything that streams a chat completion satisfies it — the real Anthropic
 and OpenAI-compatible transports in production, a deterministic in-memory
 script in tests.
 
+The four transports (Anthropic, OpenAI-compat, Ollama-native, ChatGPT/Codex
+Responses) each own their provider-specific streaming/salvage logic, but every
+ingress concern that is genuinely SHARED lives in exactly one place so a fix
+can't drift into three copies of itself: `provider::finish_stream` +
+`wire::SseFramer`/`LineFramer` (byte-level framing + terminal-event epilogue),
+`provider::parse_retry_after` (Retry-After backoff), `wire::scrub_utf8`
+(strict UTF-8 validation), `wire::could_be_tool_json` (the leaked-tool-call
+prefix sniffer weak local models need), `provider::usage::{from_openai,
+from_responses,from_ollama}` (the three token-usage wire shapes), and
+`auth::bearer_token` (OpenAI-family auth header emission — Anthropic keeps its
+own arm-typed visit since an API key must route to `x-api-key`, never
+`Bearer`).
+
 ---
 
 ## 4. Msg: a closed sum, split for compile speed
@@ -166,11 +179,13 @@ strategies:
 - **HeadTail** — keep both ends with a middle elision marker; right for tools
   where both ends carry signal (grep, web_*, git diff/log/status).
 
-The shipped tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`,
-`list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`,
-`diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`,
-`forget`, `wipe_memory`, `task` (subagent dispatch), `skill` (load a skill
-body on demand).
+The shipped tools: `read`, `write`, `edit`, `move`, `remove`, `bash`,
+`process_start`/`process_poll`/`process_stop`, `grep`, `glob`, `list_dir`,
+`repo_map`, `find_definition`, `find_references`, `web_fetch`, `web_search`,
+`todo`, `diagnostics`, `test`, `git_status`, `git_diff`, `git_log`,
+`git_show`, `git_blame`, `git_commit`, `remember`, `forget`, `wipe_memory`,
+`search_docs`, `search_code`, `task` (subagent dispatch), `skill` (load a
+skill body on demand).
 
 ---
 
@@ -257,6 +272,51 @@ Reliability rides on two independent pieces:
   whenever the wire proves healthy (first content delta, or an SSE ping /
   thinking delta), so a connect-ping-stall sequence gets a fresh budget each
   attempt instead of latching the session terminal.
+
+---
+
+## 8.5. Context management: smart compaction, not a fixed cliff
+
+A long thread eventually has to be summarized so it fits the model's context
+window. Two things make this cheap AND rarely-needed instead of a recurring
+tax:
+
+- **The trigger scales with the window, not a fixed token count.**
+  `StreamState::compaction_threshold()` (`domain/session.hpp`) fires
+  auto-compaction at `autocompact_pct`% of `context_max` (default 90%, user-
+  tunable via the *Compaction depth* command: 75/90/95%), clamped so at least
+  `kMinOutputHeadroom` (20K) tokens of the window always stay free for the
+  reply. A fixed absolute margin (the old design) was 98% on a 1M window but
+  only 91% on a 200K one — inconsistent, and it forced a summarization pass
+  long before a big-window model actually needed one.
+- **The summarization request itself runs on the cheapest capable model on
+  the active provider** (the same `cheapest_capable_model` router subagents
+  use — see §8.5.1), not the flagship model you're chatting with.
+  Compacting used to mean sending the ENTIRE conversation prefix plus a
+  verbose summarize prompt to Opus/Sonnet at full input price on every trigger
+  — the single biggest hidden cost in a long session. Now it costs a
+  Haiku-class summary.
+- **The 1M context window is an explicit, entitlement-gated model variant**,
+  not an auto-detected tier probe — matching Claude Code's own model catalog
+  (verified against its shipped binary). Anthropic's `/v1/models` list is
+  augmented with a `<model>[1m]` companion row per 1M-capable model on the
+  OAuth (Pro/Max) path; the `[1m]` marker is a **picker-only** signal
+  (`ModelCapabilities::extended_context_1m`) that widens `context_window()`
+  and requests the `context-1m-2025-08-07` beta — it is stripped
+  (`wire_model_id()`) before the model field ever reaches the wire.
+
+### 8.5.1 The subagent cost router
+
+`task` subagents already avoid the same trap: read-only roles (`explorer`,
+`reviewer`) route to the cheapest model on the active provider that still
+passes a capability floor (tool support, non-embedding/image/audio asset,
+non-Weak tier); `tester`/`coder`/`general` keep the parent model since they
+mutate the workspace. `ModelCapabilities::tier()` derives strength
+provider-RELATIVELY from the id (family lane + weak-tool-use signal) since no
+vendor ships a comparable power number — it only orders models WITHIN one
+provider, never across. The router never routes up and keeps the parent
+model when nothing cheaper qualifies, so a single-model or Opus-only account
+sees no behavior change.
 
 ---
 

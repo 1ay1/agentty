@@ -24,6 +24,10 @@ agentty -m claude-opus-4-5                 # Claude (API key or Pro/Max OAuth)
 
 Inside a thread, press `^P` to switch provider and `^/` to switch model — no restart, no re-auth. Both are also reachable from the command palette (`^K`). The next turn uses the new backend.
 
+## 1M-context models
+
+Signed in with Claude Pro/Max OAuth, the model picker offers a **"(1M context)"** row right below the base model for every Sonnet/Opus/Haiku 4+ model — e.g. `Claude Opus 4.8` followed by `Claude Opus 4.8 (1M context)`. Picking the 1M row widens the context window agentty tracks for that model from 200K to 1M tokens: the status bar's context gauge and auto-compaction both use the wider ceiling, so a long session with a large codebase can grow much further before agentty needs to summarize it. The 1M variant sends Anthropic's extended-context beta on your behalf; nothing else changes about how you use the model. A raw API key isn't offered the 1M row (the beta is account-tier gated and a lower tier would 400 on a request over 200K) — it's available on the OAuth path.
+
 ## Supported providers
 
 | ID | Backend | Key |
