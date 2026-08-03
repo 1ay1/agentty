@@ -409,6 +409,24 @@ struct StreamState {
     int tokens_in   = 0;
     int tokens_out  = 0;
     int context_max = 200000;
+    // Self-calibrating correction for the local byte-based token estimate.
+    //
+    // estimate_wire_tokens() is a crude bytes/3.5 guess used by the
+    // proactive auto-compaction trigger. On tool-heavy transcripts it
+    // OVERSHOOTS badly (JSON envelopes + tool output tokenize far denser
+    // than 3.5 bytes/token), which used to fire compaction with tens of
+    // thousands of tokens of headroom still free — the estimate said
+    // "183k" while the model reported the real prefix was only ~120k.
+    //
+    // After every real turn we know BOTH the ground-truth prefix size
+    // (`tokens_in` from StreamUsage) and what the estimator would have
+    // said for that same wire view. Their ratio (true / estimated) is a
+    // live correction factor: the trigger multiplies the raw estimate by
+    // it so the proactive check tracks the actual tokenizer instead of a
+    // fixed constant. Seeded at 1.0 (raw estimate) and EMA-smoothed each
+    // turn so a single anomalous turn can't swing it. Clamped to a sane
+    // band so a corrupt reading can't disable the safety trigger.
+    double est_calibration = 1.0;
     // True while a compaction round is in flight: the request that
     // includes the synthesised "summarise per spec" prompt has been
     // dispatched and the assistant is streaming its summary into the

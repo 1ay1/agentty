@@ -711,7 +711,13 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         constexpr int kCompactSlack  = 4000;
         const int threshold = std::max(0,
             m.s.context_max - kOutputReserve - kCompactSlack);
-        const int est = cmd::estimate_wire_tokens(m.d.current);
+        // Calibrate the raw byte-estimate against the live correction
+        // factor learned from prior turns' real token counts, so the
+        // proactive trigger tracks the actual tokenizer instead of a
+        // fixed bytes/3.5 guess that overshoots on tool-heavy threads
+        // (which used to fire compaction with ~60k+ headroom to spare).
+        const int est = static_cast<int>(
+            cmd::estimate_wire_tokens(m.d.current) * m.s.est_calibration);
         if (std::max(m.s.tokens_in, est) > threshold) {
             // Dispatch CompactContext as an async Msg so it goes
             // through the same reducer arm /compact uses; that arm
@@ -1147,6 +1153,22 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 m.s.tokens_in = e.input_tokens
                                    + e.cache_read_input_tokens
                                    + e.cache_creation_input_tokens;
+                // Recalibrate the local byte-estimator against ground
+                // truth. The wire prefix the model just priced is the
+                // same transcript estimate_wire_tokens() would score, so
+                // (true / estimated) is the correction factor. EMA-smooth
+                // it (weight the new sample 0.35) so one odd turn can't
+                // swing it, and clamp to [0.5, 1.5] so a corrupt reading
+                // can never blind the proactive compaction trigger.
+                const int est_now = cmd::estimate_wire_tokens(m.d.current);
+                if (est_now > 1000 && m.s.tokens_in > 1000) {
+                    const double sample =
+                        static_cast<double>(m.s.tokens_in) / est_now;
+                    double next = 0.65 * m.s.est_calibration + 0.35 * sample;
+                    if (next < 0.5) next = 0.5;
+                    if (next > 1.5) next = 1.5;
+                    m.s.est_calibration = next;
+                }
             }
             if (e.output_tokens) m.s.tokens_out = e.output_tokens;
             return done(std::move(m));
