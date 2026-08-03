@@ -150,6 +150,64 @@ struct ModelCapabilities {
             && (generation > 4 || (generation == 4 && revision >= 7));
     }
 
+    // ── Capability tier: a provider-RELATIVE strength ordinal ────────────
+    //
+    // No provider ships a "power" number; /v1/models returns ids, not a
+    // strength metric. So we derive a coarse tier from the fields already
+    // decoded from the id — the vendor's OWN naming is the ordering (Haiku <
+    // Sonnet < Opus <= Fable/Mythos; gpt-5-mini < gpt-5 < gpt-5.6; local models
+    // by parameter count). Meaningful for comparing models WITHIN one provider
+    // (the model router picks the cheapest capable model the active provider
+    // offers); NOT an absolute cross-vendor score.
+    //
+    //   0  weak / tiny / unreliable at tools     — never route work here
+    //   1  small-but-capable "cheap lane"         — Haiku, *-mini/nano, 7–13B
+    //   2  mid / workhorse                        — Sonnet, plain gpt-5.x, 14–69B
+    //   3  flagship                               — Opus/Fable/Mythos, gpt-5.6+, 70B+
+    enum class Tier : std::uint8_t { Weak = 0, Cheap = 1, Mid = 2, Flagship = 3 };
+
+    [[nodiscard]] constexpr Tier tier() const noexcept {
+        if (weak_tool_use) return Tier::Weak;
+        // Flagship lane: Opus/Fable/Mythos, or a gpt-5.x that takes `max`.
+        if (is_flagship()) return Tier::Flagship;
+        if (is_gpt() && supports_effort_max()) return Tier::Flagship;
+        // Cheap lane: Haiku is the canonical small hosted Claude.
+        if (is_haiku()) return Tier::Cheap;
+        // Mid lane: Sonnet and the plain gpt-5.x workhorse line.
+        if (is_sonnet() || is_gpt()) return Tier::Mid;
+        // Unknown family (local Ollama / OpenAI-compat): fall back to the
+        // params-in-B signal the weak-model inference already computes. A
+        // non-weak unknown with no size hint is assumed mid-capable.
+        return Tier::Mid;
+    }
+
+    // Same tier, but also honouring the `mini`/`nano`/`small`/`lite` id hints
+    // that mark a provider's explicitly-cheaper variant (gpt-5-mini,
+    // gpt-4o-mini, *-nano). Those decode into the same family as their full
+    // sibling, so the id string is the only distinguishing signal; a router
+    // holding the id passes it here to demote them to the Cheap lane.
+    [[nodiscard]] static constexpr Tier tier_for(std::string_view id) noexcept {
+        const Tier base = from_id(id).tier();
+        if (base == Tier::Weak) return base;
+        auto has = [&](std::string_view n) {
+            if (n.size() > id.size()) return false;
+            for (std::size_t i = 0; i + n.size() <= id.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < n.size(); ++j) {
+                    char a = id[i + j], b = n[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+        if (has("mini") || has("nano") || has("small") || has("lite")
+            || has("flash") || has("turbo"))
+            return Tier::Cheap;
+        return base;
+    }
+
     // Decode an id string. Pure / noexcept / branchless on the hot path.
     // No allocations — the tokeniser uses string_view splits in place.
     [[nodiscard]] static constexpr ModelCapabilities from_id(std::string_view id) noexcept {
@@ -371,6 +429,53 @@ private:
 // Used by the provider/runtime paths that only hold the id, not the caps.
 [[nodiscard]] inline bool is_weak_model(std::string_view model_id) noexcept {
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
+}
+
+// ── Model router: pick the cheapest capable model for a delegated role ──────
+//
+// Read-only subagent roles (explorer/reviewer) do grunt work — read, grep,
+// map, summarise — that a small model handles as well as a flagship at a
+// fraction of the cost. Routing them to a cheaper model is the single biggest
+// subagent economy lever, but it must NEVER silently downgrade quality on a
+// provider that has nothing cheaper, and must stay within the SAME provider
+// (cross-vendor auth/caching don't transfer).
+//
+// Strategy (all signals are already-decoded, no network):
+//   • Only consider models the active provider actually offers (`candidates`,
+//     i.e. m.d.available_models — already provider-scoped).
+//   • Rank by ModelCapabilities::tier_for(id): reject Weak (tier 0, unreliable
+//     at tools) and anything a probe marked no-tools.
+//   • Pick the LOWEST tier that is still >= `min_tier` (the capability floor
+//     for the role) — that's the cheapest capable model on this provider.
+//   • Never route UP: if the cheapest capable candidate isn't cheaper than the
+//     parent, keep the parent model (return it unchanged). So a user on only
+//     Opus, or only one model, sees no change and no regression.
+//
+// `parent_model` is what the main turn uses; `candidates` is the provider's
+// model list. Returns the id to run the role on.
+[[nodiscard]] inline std::string cheapest_capable_model(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        ModelCapabilities::Tier min_tier = ModelCapabilities::Tier::Cheap) {
+    using Tier = ModelCapabilities::Tier;
+    const Tier parent_tier = ModelCapabilities::tier_for(parent_model);
+
+    std::string best;
+    Tier best_tier = Tier::Flagship;
+    for (const auto& mi : candidates) {
+        // A probe that reported no tool support disqualifies the model — a
+        // subagent's whole job is tool use.
+        if (mi.supports_tools.has_value() && !*mi.supports_tools) continue;
+        const Tier t = ModelCapabilities::tier_for(mi.id.value);
+        if (t < min_tier) continue;                 // below the role's floor
+        if (t >= parent_tier) continue;             // not cheaper than parent
+        if (best.empty() || t < best_tier) {        // prefer the cheapest
+            best = mi.id.value;
+            best_tier = t;
+        }
+    }
+    // Nothing strictly cheaper-and-capable → keep the parent (no regression).
+    return best.empty() ? std::string{parent_model} : best;
 }
 
 // ============================================================================

@@ -38,6 +38,12 @@ void set_model(std::string model) {
     g_cfg.model = std::move(model);
 }
 
+void set_candidates(std::vector<ModelInfo> candidates) {
+    std::lock_guard lk(g_mu);
+    if (!g_cfg.installed) return;
+    g_cfg.candidates = std::move(candidates);
+}
+
 int current_depth() noexcept { return g_depth; }
 void push_depth() noexcept { ++g_depth; }
 void pop_depth() noexcept { if (g_depth > 0) --g_depth; }

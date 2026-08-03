@@ -205,6 +205,56 @@ static void test_gpt5_codex_caps() {
     }
 }
 
+static void test_capability_tiers() {
+    using T = ModelCapabilities::Tier;
+    auto tier = [](std::string_view id) { return ModelCapabilities::tier_for(id); };
+    // Anthropic lane ordering matches the vendor's own naming.
+    CHECK(tier("claude-haiku-4-5")        == T::Cheap);
+    CHECK(tier("claude-3-5-haiku-20241022") == T::Cheap);
+    CHECK(tier("claude-sonnet-4-5-20250101") == T::Mid);
+    CHECK(tier("claude-opus-4-5")         == T::Flagship);
+    // OpenAI: mini/nano demote to the cheap lane; full gpt-5.x is flagship/mid.
+    CHECK(tier("gpt-5-mini")   == T::Cheap);
+    CHECK(tier("gpt-4o-mini")  == T::Cheap);
+    CHECK(tier("gpt-5-nano")   == T::Cheap);
+    CHECK(tier("gpt-5.6")      == T::Flagship);
+    // Weak local models never rank above Weak even with a cheap-ish id.
+    CHECK(tier("qwen2.5-coder:7b") == T::Weak);
+    // Ordering is a real total order.
+    CHECK(T::Weak < T::Cheap);
+    CHECK(T::Cheap < T::Mid);
+    CHECK(T::Mid < T::Flagship);
+}
+
+static ModelInfo mi(std::string_view id) {
+    ModelInfo m;
+    m.id = ModelId{std::string{id}};
+    return m;
+}
+
+static void test_cheapest_capable_router() {
+    // Typical Anthropic pool: parent Opus, cheaper Sonnet + Haiku available.
+    std::vector<ModelInfo> pool = {
+        mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
+    // Read-only role floor defaults to Cheap → picks the CHEAPEST capable one.
+    CHECK(cheapest_capable_model("claude-opus-4-5", pool) == "claude-haiku-4-5");
+    // Parent already cheap → nothing strictly cheaper → keep the parent.
+    CHECK(cheapest_capable_model("claude-haiku-4-5", pool) == "claude-haiku-4-5");
+    // Single-model provider → no change, no regression.
+    std::vector<ModelInfo> solo = {mi("claude-opus-4-5")};
+    CHECK(cheapest_capable_model("claude-opus-4-5", solo) == "claude-opus-4-5");
+    // Empty pool → keep parent.
+    CHECK(cheapest_capable_model("claude-opus-4-5", {}) == "claude-opus-4-5");
+    // A weak local model in the pool is never chosen.
+    std::vector<ModelInfo> mixed = {
+        mi("claude-opus-4-5"), mi("qwen2.5-coder:7b"), mi("claude-sonnet-4-5")};
+    CHECK(cheapest_capable_model("claude-opus-4-5", mixed) == "claude-sonnet-4-5");
+    // A probe that reported no tool support disqualifies a candidate.
+    std::vector<ModelInfo> notools = {mi("claude-opus-4-5"), mi("claude-haiku-4-5")};
+    notools[1].supports_tools = false;
+    CHECK(cheapest_capable_model("claude-opus-4-5", notools) == "claude-opus-4-5");
+}
+
 int main() {
     test_claude_never_weak();
     test_small_local_coder_weak();
@@ -217,6 +267,8 @@ int main() {
     test_max_output_tokens();
     test_flagship_lane_caps();
     test_gpt5_codex_caps();
+    test_capability_tiers();
+    test_cheapest_capable_router();
 
     if (g_failures == 0) {
         std::printf("model_caps_test: all checks passed\n");

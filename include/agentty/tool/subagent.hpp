@@ -12,6 +12,7 @@
 #include <string>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"
 #include "agentty/provider/provider.hpp"
 
 namespace agentty::tools::subagent {
@@ -22,6 +23,14 @@ struct Config {
     auth::AuthHeader auth;       // wire credential for the sub-stream
     std::string      model;      // model id for sub-agent turns
     bool             installed = false;
+
+    // The active provider's available models, refreshed alongside `model`.
+    // The subagent runner routes READ-ONLY roles (explorer/reviewer) to the
+    // cheapest capable model in this list (catalog::cheapest_capable_model),
+    // since those roles do grunt work a small model handles as well as a
+    // flagship. Empty (or nothing cheaper) ⇒ the role runs on `model`, so a
+    // single-model provider sees no change. Never routes cross-provider.
+    std::vector<ModelInfo> candidates;
 
     // Provider-agnostic stream seam — the SAME dispatch main.cpp installs
     // into Deps::stream (routes on provider::active() at call time:
@@ -49,6 +58,11 @@ void set_auth(auth::AuthHeader auth);
 // (model picker) so subagents track the live model instead of the stale
 // startup default. No-op if the config was never installed.
 void set_model(std::string model);
+
+// Update the provider's available-models list the router picks cheap roles
+// from. Called alongside set_model whenever the model list is (re)loaded or
+// the provider changes, so routing always reflects the live provider.
+void set_candidates(std::vector<ModelInfo> candidates);
 
 // Snapshot the installed config. `installed == false` until install() runs.
 [[nodiscard]] Config current();

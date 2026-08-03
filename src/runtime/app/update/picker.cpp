@@ -98,6 +98,11 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     if (mi.id == fav) mi.favorite = true;
                 m.d.available_models.push_back(std::move(mi));
             }
+            // Refresh the subagent router's candidate pool so read-only roles
+            // route to the cheapest capable model THIS provider offers. Done
+            // on every load (startup, provider switch, refetch) so routing
+            // never uses a stale provider's list.
+            tools::subagent::set_candidates(m.d.available_models);
             // If the active model isn't offered by this provider (e.g. just
             // switched to Ollama with no recall, or a stale saved id), fall
             // back to the first available model so the user is never pointed
