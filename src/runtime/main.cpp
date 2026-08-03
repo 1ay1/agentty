@@ -475,7 +475,10 @@ int main(int argc, char** argv) {
           : !sa_settings.model_id.empty() ? sa_settings.model_id.value
           :                                 std::string{"claude-opus-4-5"};
         tools::subagent::install(tools::subagent::Config{
-            provider_auth, std::move(sa_model), true, stream_fn});
+            .auth = provider_auth,
+            .model = std::move(sa_model),
+            .installed = true,
+            .stream = stream_fn});
     }
 
     // ── MCP server mode: serve agentty's native tools over MCP (stdio) ──

@@ -385,7 +385,16 @@ provider::StreamResult run_one_completion(Thread& thread,
     // other backend it would CLOBBER the provider's key with Anthropic
     // credentials, so gate it on the active provider kind.
     provider::Request req;
-    req.model         = cfg.model;
+    // Model routing: read-only roles (explorer/reviewer) do grunt work —
+    // read/grep/map/summarise — a small model handles as well as a flagship
+    // for a fraction of the cost, so route them to the cheapest capable model
+    // the ACTIVE provider offers. Write-capable roles (coder/general) keep the
+    // parent model — their edits must match the parent's quality. The router
+    // never routes up and never crosses providers, so a single-model or
+    // Opus-only provider sees no change (returns cfg.model unchanged).
+    req.model         = type.read_only
+                          ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)
+                          : cfg.model;
     req.system_prompt = subagent_system_prompt(type);
     req.auth          = provider::active().kind == provider::Kind::Anthropic
                       ? auth::fresh_auth_header(cfg.auth)
