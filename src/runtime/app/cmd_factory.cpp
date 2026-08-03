@@ -542,11 +542,27 @@ Cmd<Msg> launch_stream(Model& m) {
         }
     }
 
+    // Compaction runs on the CHEAPEST capable model this provider offers, not
+    // the flagship the user is chatting with. Summarising a transcript is a
+    // Haiku-class job; sending the whole prefix + the verbose summarisation
+    // prompt to Opus/Sonnet on every compaction was the single biggest hidden
+    // cost (each compaction billed a full flagship-priced input at ~context-max
+    // size, with tools omitted so no cache hit). This mirrors Zed, which routes
+    // compaction to a dedicated `compaction_model` (its default_fast_model).
+    // `cheapest_capable_model` never routes UP and keeps the parent when
+    // nothing cheaper exists, so an Opus-only / single-model user is unaffected.
+    // Only used when `compacting` (summarisation is text-only, so the cheaper
+    // model's weaker tool-use is irrelevant here).
+    std::string compaction_model =
+        cheapest_capable_model(model_id, m.d.available_models,
+                               ModelCapabilities::Tier::Cheap);
+
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, context_max, retry_count,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
+         compaction_model = std::move(compaction_model),
          effort = std::move(effort),
          model_supports_tools,
          model_context_window,
@@ -555,7 +571,8 @@ Cmd<Msg> launch_stream(Model& m) {
         (std::function<void(Msg)> dispatch) mutable {
         // Build wire payload off the UI thread.
         provider::Request req;
-        req.model         = std::move(model_id);
+        req.model         = compacting ? std::move(compaction_model)
+                                       : std::move(model_id);
         // Per-model output-token ceiling. The default (kSafeMaxTokens=16384)
         // is shared across reasoning + tool JSON for the whole turn; a large
         // `edit` (verbatim old_text + new_text) can overrun it and arrive
@@ -589,7 +606,10 @@ Cmd<Msg> launch_stream(Model& m) {
         req.retry_count   = retry_count;
         // Reasoning effort (already clamped above). Empty = no thinking; the
         // Anthropic transport turns a non-empty value into adaptive thinking.
-        req.effort        = std::move(effort);
+        // Compaction never needs reasoning — summarising is a mechanical text
+        // task — and the cheap compaction model may not even support the
+        // parent's effort tier, so force it OFF (no wasted thinking tokens).
+        req.effort        = compacting ? std::string{} : std::move(effort);
         req.session_key   = std::move(session_key);
 
         // Ollama capability gate: if /api/show reported the model does NOT
