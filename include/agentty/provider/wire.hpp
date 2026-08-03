@@ -270,6 +270,79 @@ inline constexpr int         kFullResultWindow      = 8;
 // which re-caches that one block once. Everything before it (already faded)
 // and after it (still full) is unchanged, so the anchor's cached prefix holds.
 
+// ── UTF-8 validation & scrubbing ────────────────────────────────────────────
+//
+// Streamed model output can carry an invalid UTF-8 byte sequence — a
+// multi-byte code point split across two SSE frames and mis-stitched, an
+// overlong encoding, or a lone surrogate. Serialising that straight into a
+// JSON request body makes the NEXT request 400 ("invalid UTF-8"), wedging the
+// whole conversation. Every transport must scrub text before it goes on the
+// wire. All three used to carry their OWN copy, and they diverged: two
+// (OpenAI, Ollama) only checked continuation-byte shape and silently accepted
+// overlong sequences and surrogates; only Anthropic's rejected them. This is
+// the single, strict source of truth — it validates min-codepoint (no
+// overlong), the 0x10FFFF ceiling, and the D800..DFFF surrogate hole.
+[[nodiscard]] inline bool is_valid_utf8(std::string_view in) noexcept {
+    const auto* p = reinterpret_cast<const unsigned char*>(in.data());
+    const auto* end = p + in.size();
+    while (p < end) {
+        unsigned char c = *p;
+        if (c < 0x80) { ++p; continue; }
+        int extra; unsigned char mask; std::uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else return false;
+        if (p + extra >= end) return false;
+        std::uint32_t cp = c & mask;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = p[k];
+            if ((d & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+            return false;
+        p += extra + 1;
+    }
+    return true;
+}
+
+// Return `in` unchanged if already valid UTF-8 (the common case, zero-copy on
+// the fast path); otherwise replace every ill-formed byte/sequence with U+FFFD
+// (\uFFFD, the Unicode replacement character). Strict: overlong encodings and
+// surrogate code points are treated as invalid and replaced.
+[[nodiscard]] inline std::string scrub_utf8(std::string_view in) {
+    if (is_valid_utf8(in)) return std::string{in};
+
+    std::string out;
+    out.reserve(in.size());
+    auto repl = [&] { out.append("\xEF\xBF\xBD"); };
+    std::size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c < 0x80) { out.push_back(static_cast<char>(c)); ++i; continue; }
+        int extra; unsigned char mask; std::uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else { repl(); ++i; continue; }
+        if (i + static_cast<std::size_t>(extra) >= in.size()) { repl(); ++i; continue; }
+        std::uint32_t cp = c & mask;
+        bool ok = true;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = static_cast<unsigned char>(in[i + static_cast<std::size_t>(k)]);
+            if ((d & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (!ok || cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            repl(); ++i; continue;
+        }
+        out.append(in.data() + i, static_cast<std::size_t>(extra + 1));
+        i += static_cast<std::size_t>(extra) + 1;
+    }
+    return out;
+}
+
 // Back up an index to the start of the UTF-8 code point it lands in. `i` is a
 // prospective cut point; if it falls inside a multi-byte sequence we walk left
 // until a lead byte (or 0). Bounded at 3 continuation bytes (max UTF-8

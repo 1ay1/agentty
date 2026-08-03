@@ -1903,6 +1903,14 @@ if(AGENTTY_BUILD_TESTS)
     # spliced, UTF-8 boundary respected) while small outputs ship verbatim.
     agentty_add_full_test(tool_result_budget_test)
 
+    # wire_shared_test — the single-source-of-truth transport helpers that
+    # every provider used to hand-roll and had DRIFTED on: provider::
+    # parse_retry_after (Ollama's copy was missing — ignored server backoff)
+    # and wire::scrub_utf8 / is_valid_utf8 (OpenAI+Ollama carried a WEAKER
+    # copy that accepted overlong encodings + surrogates). Locks the strict,
+    # shared behaviour so a future edit can't re-diverge. Pure logic, no I/O.
+    agentty_add_full_test(wire_shared_test)
+
     # cache_anchor_test — SOTA prompt-cache breakpoint placement in
     # messages_json_string. Locks in the stable 1-hour anchor breakpoint
     # (deep in history, quantized so it doesn't move every turn) alongside
@@ -2129,6 +2137,7 @@ if(AGENTTY_BUILD_TESTS)
         param_tag_repair_test
         model_caps_test
         error_class_test
+        wire_shared_test
         fsm_test
         concurrency_primitives_test
         skills_engine_test
@@ -2145,6 +2154,7 @@ if(AGENTTY_BUILD_TESTS)
         param_tag_repair_test
         model_caps_test
         error_class_test
+        wire_shared_test
         fsm_test
         concurrency_primitives_test
         skills_engine_test
@@ -2187,6 +2197,7 @@ if(AGENTTY_BUILD_TESTS)
         reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test
+        wire_shared_test
         cache_anchor_test
         toolset_e2e_test
         subagent_report_test

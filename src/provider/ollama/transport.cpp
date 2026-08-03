@@ -43,27 +43,11 @@ namespace {
 
 // ── UTF-8 scrub ─────────────────────────────────────────────────────────────
 // A tool output or pasted blob can carry invalid UTF-8; nlohmann's dump()
-// throws on it. Replace every malformed byte with U+FFFD.
-std::string scrub_utf8(std::string_view in) {
-    std::string out;
-    out.reserve(in.size());
-    const auto* p = reinterpret_cast<const unsigned char*>(in.data());
-    const auto* end = p + in.size();
-    auto push_replacement = [&] { out.append("\xEF\xBF\xBD"); };
-    while (p < end) {
-        unsigned char c = *p;
-        if (c < 0x80) { out.push_back(static_cast<char>(c)); ++p; continue; }
-        int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : -1;
-        if (extra < 0 || p + extra >= end) { push_replacement(); ++p; continue; }
-        bool ok = true;
-        for (int k = 1; k <= extra; ++k)
-            if ((p[k] & 0xC0) != 0x80) { ok = false; break; }
-        if (!ok) { push_replacement(); ++p; continue; }
-        out.append(reinterpret_cast<const char*>(p), extra + 1);
-        p += extra + 1;
-    }
-    return out;
-}
+// throws on it. Replace every malformed byte with U+FFFD so the request
+// builds instead of the turn dying with a json type_error. Shared strict
+// implementation (rejects overlong encodings + surrogates) — see
+// wire::scrub_utf8.
+using wire::scrub_utf8;
 
 http::Headers build_request_headers(const AuthHeader& auth) {
     http::Headers h;
@@ -1602,14 +1586,21 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     int  http_status = 0;
     bool is_success  = false;
     std::string error_body;
+    std::optional<std::chrono::seconds> retry_after_hint;
 
     http::StreamHandler handler;
     handler.on_activity = [&] {
         ctx.sink(StreamHeartbeat{.transport_only = true});
     };
-    handler.on_headers = [&](int status, const http::Headers&) {
+    handler.on_headers = [&](int status, const http::Headers& hh) {
         http_status = status;
         is_success  = (status >= 200 && status < 300);
+        if (is_success) return;
+        // Honour a server backoff hint like every other transport — this was
+        // silently dropped before (unnamed Headers param), so a 429 from a
+        // gateway-fronted Ollama ignored Retry-After and hammered the default
+        // schedule.
+        retry_after_hint = provider::parse_retry_after(hh);
     };
     handler.on_chunk = [&](std::string_view chunk) -> bool {
         if (is_success) {
@@ -1661,6 +1652,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
                 msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
             return msg;
         },
+        .retry_after = retry_after_hint,
         .transport_error_message = [&]() -> std::string {
             std::string msg = std::string{"http: "} + result.error().render();
             msg += "  (is Ollama running? start it with 'ollama serve', or check "

@@ -45,72 +45,11 @@ namespace {
 // (e.g. error suffix + partial output) where a byte boundary could split a
 // UTF-8 sequence. Replaces invalid byte runs with U+FFFD.
 //
-// Fast path: validate in a single pass with no allocation. Almost all
-// strings reaching this function are already valid UTF-8 (model output,
-// user typed input, well-behaved tool stdout), so the slow rewriter only
-// ever runs when there's actually something to fix. On a 100-message
-// conversation this turns an O(N) per-byte rewrite into an O(N) validate
-// — same big-O, but no per-byte std::string append and no allocation
-// per message in the request build.
-#if defined(__GNUC__) || defined(__clang__)
-[[gnu::hot]]
-#endif
-inline bool is_valid_utf8(std::string_view in) noexcept {
-    const auto* p = reinterpret_cast<const unsigned char*>(in.data());
-    const auto* end = p + in.size();
-    while (p < end) {
-        unsigned char c = *p;
-        if (c < 0x80) { ++p; continue; }
-        int extra; unsigned char mask; std::uint32_t min_cp;
-        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
-        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
-        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
-        else return false;
-        if (p + extra >= end) return false;
-        std::uint32_t cp = c & mask;
-        for (int k = 1; k <= extra; ++k) {
-            unsigned char d = p[k];
-            if ((d & 0xC0) != 0x80) return false;
-            cp = (cp << 6) | (d & 0x3F);
-        }
-        if (cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
-            return false;
-        p += extra + 1;
-    }
-    return true;
-}
-
-std::string scrub_utf8(std::string_view in) {
-    if (is_valid_utf8(in)) return std::string{in};
-
-    std::string out;
-    out.reserve(in.size());
-    auto repl = [&]{ out.append("\xEF\xBF\xBD"); };
-    size_t i = 0;
-    while (i < in.size()) {
-        unsigned char c = (unsigned char)in[i];
-        if (c < 0x80) { out.push_back((char)c); ++i; continue; }
-        int extra; unsigned char mask; uint32_t min_cp;
-        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
-        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
-        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
-        else { repl(); ++i; continue; }
-        if (i + (size_t)extra >= in.size()) { repl(); ++i; continue; }
-        uint32_t cp = c & mask;
-        bool ok = true;
-        for (int k = 1; k <= extra; ++k) {
-            unsigned char d = (unsigned char)in[i + (size_t)k];
-            if ((d & 0xC0) != 0x80) { ok = false; break; }
-            cp = (cp << 6) | (d & 0x3F);
-        }
-        if (!ok || cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
-            repl(); ++i; continue;
-        }
-        out.append(in.data() + i, (size_t)(extra + 1));
-        i += (size_t)extra + 1;
-    }
-    return out;
-}
+// UTF-8 validation + scrubbing are the shared, strict source of truth in the
+// wire header — every transport scrubs identically (rejects overlong encodings
+// and surrogates before they 400 the next request). See wire::scrub_utf8.
+using wire::is_valid_utf8;
+using wire::scrub_utf8;
 
 // Back up an index to the start of the UTF-8 code point it lands in.
 // The UTF-8 boundary helpers + the tool-result byte-budget cap now live in
@@ -1842,37 +1781,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         http_status = status;
         is_success  = (status >= 200 && status < 300);
         if (is_success) return;
-        // ASCII case-fold compare for HTTP/2 (header names are already
-        // lowercase per protocol, but be defensive against proxies).
-        auto eq_ci = [](std::string_view a, std::string_view b) noexcept {
-            if (a.size() != b.size()) return false;
-            for (std::size_t i = 0; i < a.size(); ++i) {
-                char x = a[i], y = b[i];
-                if (x >= 'A' && x <= 'Z') x = static_cast<char>(x + 32);
-                if (y >= 'A' && y <= 'Z') y = static_cast<char>(y + 32);
-                if (x != y) return false;
-            }
-            return true;
-        };
-        for (const auto& h : hh) {
-            if (!eq_ci(h.name, "retry-after")) continue;
-            // Anthropic always emits whole seconds; reject anything else
-            // (the spec also allows HTTP-date, but Anthropic doesn't use
-            // it and we'd rather fall back to our schedule than parse it
-            // wrong). std::from_chars would be lighter; std::stoul is
-            // fine on a header value bounded at a few digits.
-            try {
-                size_t consumed = 0;
-                auto v = std::stoul(h.value, &consumed);
-                if (consumed == h.value.size() && v > 0) {
-                    retry_after_hint = std::chrono::seconds(v);
-                }
-            } catch (...) {
-                // ignored — leave hint unset, runtime falls back to its
-                // own schedule.
-            }
-            break;
-        }
+        retry_after_hint = provider::parse_retry_after(hh);
     };
     handler.on_activity = [&] {
         ctx.sink(StreamHeartbeat{.transport_only = true});
