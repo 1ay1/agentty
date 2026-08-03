@@ -169,10 +169,41 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(STATUS "agentty: LTO disabled on macOS+GCC "
                    "(Apple ld can't consume GCC LTO IR — would only bloat the binary)")
 endif()
+# Whole-tree sanitizer builds (-DAGENTTY_SANITIZE_ALL=...) must also disable
+# LTO here, BEFORE add_subdirectory(maya) below compiles maya's objects.
+# AGENTTY_SANITIZE_ALL is read early on purpose: a `-D` on the cmake command
+# line (which is how CI and every documented sanitizer invocation set it) is
+# visible from the very start of script evaluation, long before its own
+# `set(... CACHE STRING ...)` declaration later in this file runs — so this
+# check is not a forward reference, it sees the real value. Without this
+# guard, maya compiled here with IPO=TRUE produces GCC slim-LTO bytecode
+# objects in libmaya.a; the sanitizer flags added later apply `-fno-lto` at
+# LINK time only (with no matching `-flto`), so the linker can't consume
+# those bytecode objects: "plugin needed to handle lto object". LTO buys
+# sanitizer builds nothing anyway (they're a correctness gate, not a
+# release artifact), so turning it off here is strictly a win.
+if(AGENTTY_SANITIZE_ALL)
+    set(AGENTTY_IPO_OK FALSE)
+    message(STATUS "agentty: LTO disabled for sanitizer build "
+                   "(AGENTTY_SANITIZE_ALL=${AGENTTY_SANITIZE_ALL} — avoids an "
+                   "LTO-bytecode/-fno-lto link mismatch in libmaya.a)")
+endif()
 if(AGENTTY_IPO_OK AND (CMAKE_BUILD_TYPE STREQUAL "Release"
                      OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"
                      OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+elseif(AGENTTY_SANITIZE_ALL)
+    # Set a DEFINED false value, not just "leave it unset". maya/CMakeLists.txt
+    # has its own `if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION) set(...
+    # ON)` fallback (so a bare `add_subdirectory(maya)` from an external
+    # project still gets LTO) — if we only skip the TRUE branch above without
+    # ever defining the variable, that fallback fires inside
+    # add_subdirectory(maya) below and silently re-enables LTO out from under
+    # this sanitizer build, producing GCC slim-LTO bytecode objects in
+    # libmaya.a that the later `-fno-lto`-only link flags can't consume
+    # ("plugin needed to handle lto object"). Defining it FALSE here is the
+    # actual override maya's guard is designed to respect.
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
 include(FetchContent)
