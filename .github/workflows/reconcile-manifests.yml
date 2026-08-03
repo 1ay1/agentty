@@ -185,7 +185,34 @@ jobs:
           printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur; chmod 600 ~/.ssh/aur
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur"
-          git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur
+          # AUR can be down for maintenance for hours-to-days. This job runs
+          # after every release.yml completion AND weekly, so an outage
+          # otherwise means a standing red-X streak for the whole outage
+          # window with nothing actionable to do about it. Retry with backoff
+          # to ride out a brief blip; if AUR is still down after that, warn
+          # and exit 0 instead of failing — the next scheduled/triggered run
+          # picks it back up automatically once AUR returns, so nothing is
+          # silently lost.
+          clone_ok=0
+          for attempt in 1 2 3 4 5; do
+            if git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur 2>clone.err; then
+              clone_ok=1; break
+            fi
+            echo "AUR clone attempt $attempt failed:"; cat clone.err
+            if grep -qi 'AUR is down\|maintenance\|Could not read from remote' clone.err; then
+              sleep $((attempt * 20))
+            else
+              break
+            fi
+          done
+          if [ "$clone_ok" -ne 1 ]; then
+            if grep -qi 'AUR is down\|maintenance\|Could not read from remote' clone.err 2>/dev/null; then
+              echo "::warning::AUR appears to be down for maintenance after 5 retries — skipping this reconcile. The next scheduled/triggered run will retry automatically."
+              exit 0
+            fi
+            echo "::error::AUR clone failed for a reason other than a known outage — see the error above"
+            exit 1
+          fi
           cp PKGBUILD aur/PKGBUILD
           cd aur
           printf 'pkgbase = agentty-bin\n\tpkgdesc = Blazing-fast Claude in your terminal\n\tpkgver = %s\n\tpkgrel = 1\n\turl = https://github.com/1ay1/agentty\n\tarch = x86_64\n\tarch = aarch64\n\tlicense = MIT\n\tprovides = agentty\n\tconflicts = agentty\n\tsource_x86_64 = agentty-%s-x86_64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-x86_64\n\tsha256sums_x86_64 = %s\n\tsource_aarch64 = agentty-%s-aarch64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-aarch64\n\tsha256sums_aarch64 = %s\n\npkgname = agentty-bin\n' \
@@ -193,4 +220,17 @@ jobs:
           git config user.name agentty-ci; git config user.email noreply@github.com
           git add PKGBUILD .SRCINFO
           git commit -m "reconcile agentty $V" || { echo "already in sync"; exit 0; }
-          git push origin HEAD:master
+          push_ok=0
+          for attempt in 1 2 3; do
+            if git push origin HEAD:master 2>push.err; then push_ok=1; break; fi
+            echo "AUR push attempt $attempt failed:"; cat push.err
+            grep -qi 'AUR is down\|maintenance' push.err && sleep $((attempt * 20)) || break
+          done
+          if [ "$push_ok" -ne 1 ]; then
+            if grep -qi 'AUR is down\|maintenance' push.err 2>/dev/null; then
+              echo "::warning::AUR push failed due to an apparent outage — skipping. The next scheduled/triggered run will retry automatically."
+              exit 0
+            fi
+            echo "::error::AUR push failed for a reason other than a known outage — see the error above"
+            exit 1
+          fi
