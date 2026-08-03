@@ -183,6 +183,18 @@ namespace headers {
     inline constexpr const char* beta_context_1m             = "context-1m-2025-08-07";
     inline constexpr const char* beta_context_management     = "context-management-2025-06-27";
     inline constexpr const char* beta_prompt_cache_scope     = "prompt-caching-scope-2026-01-05";
+    // Extended cache TTL (1-hour) opt-in. WITHOUT this beta in the header set,
+    // sending `cache_control:{ttl:"1h"}` makes Anthropic's edge SILENTLY DROP
+    // the whole breakpoint (cache miss every turn + throttled tier). WITH it,
+    // the stable prefix breakpoints (system / tools / conversation anchor)
+    // survive a 1-hour idle window instead of the 5-minute default — so a
+    // pause to read, think, or step away no longer forces a full-price
+    // cache-creation re-write of the entire prompt prefix on the next turn.
+    // This is Claude Code's `Dt6` extended-TTL path. We keep the ROLLING
+    // breakpoint on the newest message at the 5-minute default (it changes
+    // every turn, so a long TTL there buys nothing) and spend the 1-hour TTL
+    // only where the content is stable across turns.
+    inline constexpr const char* beta_extended_cache_ttl     = "extended-cache-ttl-2025-04-11";
     // Per-tool `eager_input_streaming: true` is honored without a beta header
     // on Claude 4.6 (GA there). For older models (haiku-4-5, claude-3.x) the
     // edge requires this header — sending it on 4.6+ is a no-op so we always
@@ -635,6 +647,11 @@ std::string select_betas(std::string_view model, bool is_oauth,
     if (caps.extended_context_1m)      b.emplace_back(headers::beta_context_1m);           // AL(H)
     if (caps.generation_4_or_later)    b.emplace_back(headers::beta_context_management);   // eU(provider) && CR4(H)
     b.emplace_back(headers::beta_prompt_cache_scope);                                      // _ (fa() — always true firstParty)
+    // 1-hour extended cache TTL. Always on: agentty pins the stable prefix
+    // (system / tools / conversation anchor) with ttl:"1h" so a long idle
+    // window doesn't force a full-price re-cache. Harmless when no breakpoint
+    // uses the long TTL (the edge just ignores an unused capability).
+    b.emplace_back(headers::beta_extended_cache_ttl);
     if (any_eager_streaming)           b.emplace_back(headers::beta_fine_grained_streaming);
 
     std::string out;
@@ -861,16 +878,38 @@ void json_write_bool_field(std::string& out, std::string_view key,
     json_write_raw_field(out, key, v ? "true" : "false", first);
 }
 
-// Cache-control marker for prompt caching. Compile-time string so we
-// don't pay re-serialization on every breakpoint.
-constexpr std::string_view kCacheCtlJsonRaw = R"({"type":"ephemeral"})";
+// Cache-control markers for prompt caching. Compile-time strings so we
+// don't pay re-serialization on every breakpoint. Two TTLs:
+//   • kCacheCtlJsonRaw    — default 5-minute ephemeral. Used on the ROLLING
+//     breakpoint (the newest message), which changes every turn anyway.
+//   • kCacheCtl1hJsonRaw  — 1-hour ephemeral (needs beta_extended_cache_ttl).
+//     Used on STABLE breakpoints (the conversation-prefix anchor) so a long
+//     idle window doesn't force a full-price re-cache of the whole prefix.
+constexpr std::string_view kCacheCtlJsonRaw   = R"({"type":"ephemeral"})";
+constexpr std::string_view kCacheCtl1hJsonRaw = R"({"type":"ephemeral","ttl":"1h"})";
 
-void write_text_block(std::string& out, std::string_view text, bool pin_cache) {
+// Cache TTL choice for a breakpoint. NotPinned = no cache_control at all.
+enum class CachePin : std::uint8_t { NotPinned, Ttl5m, Ttl1h };
+
+[[nodiscard]] constexpr std::string_view cache_ctl_for(CachePin p) noexcept {
+    switch (p) {
+        case CachePin::Ttl1h: return kCacheCtl1hJsonRaw;
+        case CachePin::Ttl5m: return kCacheCtlJsonRaw;
+        default:              return {};
+    }
+}
+
+void json_write_cache_control(std::string& out, CachePin pin, bool& first) {
+    if (pin == CachePin::NotPinned) return;
+    json_write_raw_field(out, "cache_control", cache_ctl_for(pin), first);
+}
+
+void write_text_block(std::string& out, std::string_view text, CachePin pin) {
     out.push_back('{');
     bool first = true;
     json_write_field(out, "type", "text", first);
     json_write_field(out, "text", text, first);
-    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    json_write_cache_control(out, pin, first);
     out.push_back('}');
 }
 
@@ -881,7 +920,7 @@ void write_text_block(std::string& out, std::string_view text, bool pin_cache) {
 // bytes once at write time — keeping them raw in `ImageContent.bytes`
 // avoids the +33% memory overhead in the running model state.
 void write_image_block(std::string& out, const ImageContent& img,
-                       bool pin_cache) {
+                       CachePin pin) {
     out.push_back('{');
     bool first = true;
     json_write_field(out, "type", "image", first);
@@ -895,11 +934,11 @@ void write_image_block(std::string& out, const ImageContent& img,
     out.append(R"(,"data":)");
     json_write_escaped_string(out, util::base64_encode(img.bytes));
     out.push_back('}');
-    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    json_write_cache_control(out, pin, first);
     out.push_back('}');
 }
 
-void write_tool_use_block(std::string& out, const ToolUse& tc, bool pin_cache) {
+void write_tool_use_block(std::string& out, const ToolUse& tc, CachePin pin) {
     out.push_back('{');
     bool first = true;
     json_write_field(out, "type", "tool_use", first);
@@ -916,7 +955,7 @@ void write_tool_use_block(std::string& out, const ToolUse& tc, bool pin_cache) {
         dump = fallback;
     }
     json_write_raw_field(out, "input", dump, first);
-    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    json_write_cache_control(out, pin, first);
     out.push_back('}');
 }
 
@@ -928,7 +967,7 @@ void write_tool_use_block(std::string& out, const ToolUse& tc, bool pin_cache) {
 // all three transports). `recency_rank` is 0 for the newest terminal tool
 // result in the thread and grows toward the oldest.
 void write_tool_result_block(std::string& out, const ToolUse& tc,
-                             bool pin_cache, int recency_rank) {
+                             CachePin pin, int recency_rank) {
     out.push_back('{');
     bool first = true;
     json_write_field(out, "type", "tool_result", first);
@@ -962,7 +1001,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         json_write_field(out, "content", scrubbed, first);
     }
     json_write_bool_field(out, "is_error", is_error, first);
-    if (pin_cache) json_write_raw_field(out, "cache_control", kCacheCtlJsonRaw, first);
+    json_write_cache_control(out, pin, first);
     out.push_back('}');
 }
 
@@ -998,6 +1037,42 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
     const int pin_last       = total_msgs - 1;
     const int pin_second_last = total_msgs - 2;
 
+    // ── Stable 1-hour anchor breakpoint ─────────────────────────────────
+    // The last / second-to-last pins ROLL every turn: turn N's last block
+    // becomes turn N+1's second-to-last, so those two breakpoints only ever
+    // cache the two newest messages. Everything BEFORE them is a cache HIT
+    // only if some earlier turn's breakpoint still covers it — and under the
+    // 5-minute default TTL that coverage evaporates the moment the user
+    // pauses. The result: a long session re-pays full-price cache-creation
+    // for the entire history tail after every idle gap.
+    //
+    // Fix (Claude Code's `Dt6` shape): plant a THIRD breakpoint at a STABLE
+    // position deep in history and give it the 1-HOUR ttl. Because it barely
+    // moves, the whole prefix up to it stays a cache hit across turns AND
+    // across long idle windows. To keep it from moving every turn (which
+    // would defeat the purpose), we QUANTIZE its position to a multiple of
+    // kAnchorStep messages — it only advances once every kAnchorStep new
+    // messages, and each advance re-caches at most kAnchorStep messages once.
+    //
+    // The anchor must land strictly before pin_second_last so the three
+    // breakpoints are distinct (Anthropic allows up to 4 cache_control blocks
+    // total: system + tools + these); when history is too short to fit a
+    // distinct anchor we simply don't emit one (the rolling pair already
+    // covers everything).
+    constexpr int kAnchorStep = 20;
+    const int pin_anchor = [&]() -> int {
+        if (total_msgs < 2 * kAnchorStep) return -1;   // too short: no distinct anchor
+        // Anchor at the largest multiple of kAnchorStep that leaves at least a
+        // full step of headroom before the rolling pair. Keying off
+        // (total_msgs - kAnchorStep) rather than (total_msgs - 2) means the
+        // floored value only advances once per FULL step of growth — appending
+        // one turn never moves it, so the cached prefix up to the anchor holds
+        // across those turns. When it does advance, it re-caches one step once.
+        int a = ((total_msgs - kAnchorStep) / kAnchorStep) * kAnchorStep;
+        if (a <= 0 || a >= pin_second_last) return -1;
+        return a;
+    }();
+
     std::string out;
     // Conservative reserve: typical sessions are ~64 KiB; a write turn
     // can push past 1 MiB. Either way, let the std::string growth
@@ -1014,8 +1089,34 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         if (emitted > 0) out.push_back(',');
         ++emitted;
     };
-    auto pinning_for = [&](int idx) {
-        return idx == pin_last || idx == pin_second_last;
+    // Anthropic allows a MAXIMUM of 4 cache_control breakpoints per request;
+    // extras are silently dropped from the FRONT (oldest first), which would
+    // sacrifice our most valuable pin — the system prompt. The full body
+    // already spends 2 of the 4 slots on the stable prefix (system + tools),
+    // leaving 2 for the messages array. So:
+    //   • anchor present  → anchor (1h) + last (5m)   [2 slots — drop the
+    //     second-to-last rolling pin; the anchor already covers everything
+    //     up to it, so that pin bought almost nothing]
+    //   • no anchor       → last + second-to-last (5m) [the classic rolling
+    //     pair, still 2 slots]
+    // Either branch keeps the messages array at ≤ 2 breakpoints → ≤ 4 total.
+    const bool have_anchor = (pin_anchor >= 0);
+    auto pinning_for = [&](int idx) -> CachePin {
+        // The anchor is the STABLE, long-lived breakpoint → 1-hour TTL.
+        if (idx == pin_anchor)  return CachePin::Ttl1h;
+        // Newest message: always a rolling 5-minute pin.
+        if (idx == pin_last)    return CachePin::Ttl5m;
+        // Second-to-last rolling pin only when there is NO anchor (otherwise
+        // it would push the request to 5 breakpoints and evict the system
+        // prompt from the cache).
+        if (!have_anchor && idx == pin_second_last) return CachePin::Ttl5m;
+        return CachePin::NotPinned;
+    };
+    // A block that is NOT the last block of a pinned message must stay
+    // unpinned; helper folds the "only the message's last block carries the
+    // marker" rule together with the per-message TTL choice.
+    auto pin_if_last = [](CachePin msg_pin, bool last_block) -> CachePin {
+        return last_block ? msg_pin : CachePin::NotPinned;
     };
 
     for (const auto& m : t.messages) {
@@ -1035,7 +1136,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                                && (has_text || has_tools);
         if (has_text || has_images || has_tools) {
             const int my_idx   = emitted;
-            const bool do_pin  = pinning_for(my_idx);
+            const CachePin do_pin = pinning_for(my_idx);
             emit_msg_open();
             out.push_back('{');
             out.append(R"("role":)");
@@ -1078,7 +1179,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                     if (img.bytes.empty()) continue;
                     if (block_emitted++ > 0) out.push_back(',');
                     const bool last_block = (block_emitted == blocks);
-                    write_image_block(out, img, do_pin && last_block);
+                    write_image_block(out, img, pin_if_last(do_pin, last_block));
                 }
             }
             if (has_text) {
@@ -1094,13 +1195,13 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                 std::string wire_text = m.attachments.empty()
                     ? m.text
                     : attachment::expand(m.text, m.attachments);
-                write_text_block(out, scrub_utf8(wire_text), do_pin && last_block);
+                write_text_block(out, scrub_utf8(wire_text), pin_if_last(do_pin, last_block));
             }
             if (has_tools) {
                 for (const auto& tc : m.tool_calls) {
                     if (block_emitted++ > 0) out.push_back(',');
                     const bool last_block = (block_emitted == blocks);
-                    write_tool_use_block(out, tc, do_pin && last_block);
+                    write_tool_use_block(out, tc, pin_if_last(do_pin, last_block));
                 }
             }
             out.append("]}");
@@ -1114,7 +1215,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         // exactly what triggered the HTTP 400 loop.
         if (is_assistant_with_results(m)) {
             const int my_idx   = emitted;
-            const bool do_pin  = pinning_for(my_idx);
+            const CachePin do_pin = pinning_for(my_idx);
             emit_msg_open();
             out.append(R"({"role":"user","content":[)");
             const int total_results = static_cast<int>(m.tool_calls.size());
@@ -1125,7 +1226,7 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                 const int recency_rank =
                     total_tool_results - 1 - tool_results_emitted;
                 ++tool_results_emitted;
-                write_tool_result_block(out, tc, do_pin && last_block,
+                write_tool_result_block(out, tc, pin_if_last(do_pin, last_block),
                                         recency_rank);
             }
             out.append("]}");
@@ -1565,14 +1666,17 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     body["max_tokens"] = req.max_tokens;
     body["stream"]     = true;
 
-    // GA-stable ephemeral cache breakpoint — no `ttl` (defaults to 5 min) and
-    // no `scope` (defaults to per-organization). Claude Code's `Dt6` adds
-    // `ttl:"1h"` when `extended-cache-ttl-2025-04-11` is in its beta header
-    // set; we don't ride that beta, and sending `ttl:"1h"` without the gate
-    // makes Anthropic's edge silently drop the breakpoint — every turn becomes
-    // a cache miss and the stream gets routed through a throttled tier (~1-2
-    // tok/s on opus). The 5 min default is plenty for a back-to-back REPL.
-    const json kCacheCtl = {{"type", "ephemeral"}};
+    // Stable-prefix cache breakpoint with the 1-HOUR extended TTL. The
+    // system prompt is the single most stable thing in the request — it only
+    // changes when the user edits CLAUDE.md or a `remember`/`forget` fires —
+    // so it is the ideal place to spend the long TTL. We send the
+    // `extended-cache-ttl-2025-04-11` beta unconditionally (see select_betas),
+    // which is what makes `ttl:"1h"` stick instead of being silently dropped.
+    // This is Claude Code's `Dt6` extended-cache path. Result: a pause of up
+    // to an hour no longer forces a full-price re-cache of the whole system
+    // prefix on the next turn. The rolling message breakpoints keep the 5 min
+    // default (messages_json_string), since they change every turn anyway.
+    const json kCacheCtl1h = {{"type", "ephemeral"}, {"ttl", "1h"}};
 
     // System is always sent as a content-block array so we can attach
     // cache_control regardless of auth style. OAuth additionally prepends
@@ -1598,7 +1702,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         sys.push_back({
             {"type", "text"},
             {"text", scrub_utf8(req.system_prompt)},
-            {"cache_control", kCacheCtl}
+            {"cache_control", kCacheCtl1h}
         });
         body["system"] = std::move(sys);
     }
@@ -1624,7 +1728,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         // serialized in order and Anthropic's edge caches the prefix up to
         // and including the marked block. Matches cli.js where the tool list
         // is built once per session and the last entry carries cache_control.
-        tools_j.back()["cache_control"] = kCacheCtl;
+        // Tools are session-stable (same catalog every turn), so they get the
+        // 1-hour TTL alongside the system prompt — together they form the
+        // long-lived prefix that survives idle gaps.
+        tools_j.back()["cache_control"] = kCacheCtl1h;
         body["tools"] = std::move(tools_j);
     }
     body["metadata"] = json{{"user_id", make_user_id()}};
