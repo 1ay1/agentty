@@ -273,4 +273,42 @@ inline StreamResult finish_stream(StreamOutcome o) {
     return tr;
 }
 
+// ── Shared Retry-After header parser ────────────────────────────────────────
+//
+// Every transport's on_headers callback used to hand-roll the SAME loop to
+// pull a server backoff hint out of the response headers — scan for
+// `retry-after` (case-insensitive), parse whole seconds, reject anything that
+// isn't a clean positive integer (HTTP-date form is deliberately NOT honoured;
+// we'd rather fall back to our own schedule than mis-parse a date). The copies
+// drifted: the Ollama transport silently omitted it entirely and ignored
+// server backoff. This is the single source of truth — every transport calls
+// it from on_headers and feeds the result to finish_stream's `retry_after`.
+[[nodiscard]] inline std::optional<std::chrono::seconds>
+parse_retry_after(const http::Headers& headers) noexcept {
+    auto eq_ci = [](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            char x = a[i], y = b[i];
+            if (x >= 'A' && x <= 'Z') x = static_cast<char>(x + 32);
+            if (y >= 'A' && y <= 'Z') y = static_cast<char>(y + 32);
+            if (x != y) return false;
+        }
+        return true;
+    };
+    for (const auto& h : headers) {
+        if (!eq_ci(h.name, "retry-after")) continue;
+        try {
+            std::size_t consumed = 0;
+            const unsigned long v = std::stoul(h.value, &consumed);
+            if (consumed == h.value.size() && v > 0)
+                return std::chrono::seconds(v);
+        } catch (...) {
+            // Non-integer (or HTTP-date) — leave unset; the runtime falls back
+            // to its own backoff schedule.
+        }
+        return std::nullopt;   // matched the header; don't scan further
+    }
+    return std::nullopt;
+}
+
 } // namespace agentty::provider

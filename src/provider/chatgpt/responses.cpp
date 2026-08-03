@@ -616,31 +616,7 @@ provider::StreamResult stream_responses(provider::Request req, provider::EventSi
     cbs.on_headers = [&](int status, const http::Headers& hh) {
         http_status = status;
         if (status < 400) return;   // only care about the error path
-        auto eq_ci = [](std::string_view a, std::string_view b) noexcept {
-            if (a.size() != b.size()) return false;
-            for (std::size_t i = 0; i < a.size(); ++i) {
-                char x = a[i], y = b[i];
-                if (x >= 'A' && x <= 'Z') x = static_cast<char>(x + 32);
-                if (y >= 'A' && y <= 'Z') y = static_cast<char>(y + 32);
-                if (x != y) return false;
-            }
-            return true;
-        };
-        for (const auto& h : hh) {
-            if (!eq_ci(h.name, "retry-after")) continue;
-            try {
-                size_t consumed = 0;
-                auto v = std::stoul(h.value, &consumed);
-                if (consumed == h.value.size() && v > 0)
-                    retry_after_hint = std::chrono::seconds(v);
-            } catch (...) {
-                // Leave the hint unset — the runtime falls back to its own
-                // backoff schedule. (Responses emits whole seconds; an
-                // HTTP-date Retry-After is not parsed, same as the other
-                // transports.)
-            }
-            break;
-        }
+        retry_after_hint = provider::parse_retry_after(hh);
     };
     cbs.on_activity = [&] {
         sink(StreamHeartbeat{.transport_only = true});
