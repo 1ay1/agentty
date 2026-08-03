@@ -26,6 +26,7 @@ If you already like Claude Code's workflow but want it faster, dependency-free, 
 | **Platforms** | Linux, macOS, Windows (x86_64 + aarch64), Termux/Android | macOS, Linux, Windows (WSL) |
 | **License** | MIT (open source) | Proprietary |
 | **MCP tools** | Yes | Yes |
+| **Compaction cost** | Background summarization runs on the cheapest capable model on your provider | Not publicly documented |
 
 ## Where agentty is different
 
@@ -40,6 +41,10 @@ agentty is model-agnostic — run it with an API key for **OpenAI, Groq, OpenRou
 ### Sandboxed by default, not as an afterthought
 
 Every shell and build command agentty runs is wrapped in an OS-native sandbox — `bwrap` on Linux, `sandbox-exec` on macOS. Your workspace is read-write, system libraries are read-only, and `~/.ssh`, `/etc`, and other projects are blocked. It's the default, not an opt-in. See [Sandboxing](/docs/sandboxing).
+
+### Cost-aware by design
+
+Background context compaction — the summarization pass that fires when a long thread nears the context window — runs on the **cheapest capable model on your active provider**, not the flagship model you're chatting with, so a compaction costs a fraction of a normal turn. The trigger itself scales with the model's real window (tunable 75/90/95% via the *Compaction depth* command) instead of a fixed token margin, so a big-window model rides much further before it needs to summarize at all. Read-only subagent fan-out (`explorer`, `reviewer`) gets the same treatment. The 1M-context window is an explicit, entitlement-gated model variant you opt into from the picker, never a silent auto-upgrade.
 
 ### Runs on air-gapped hosts
 

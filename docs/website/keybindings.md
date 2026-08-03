@@ -35,4 +35,4 @@ Typing while a turn streams queues the message rather than interrupting. Press [
 
 ## Palette-only actions
 
-Some actions have no dedicated key — reach them from the command palette ([[Ctrl+K]]). Notably **Rewind to checkpoint** opens a diff-preview picker over every checkpointed turn (git repo + idle session); see [Checkpoints & rewind](/docs/threads#checkpoints).
+Some actions have no dedicated key — reach them from the command palette ([[Ctrl+K]]). Notably **Rewind to checkpoint** opens a diff-preview picker over every checkpointed turn (git repo + idle session); see [Checkpoints & rewind](/docs/threads#checkpoints). **Compaction depth** cycles how full the context window gets before agentty auto-compacts in the background (75/90/95%) — see [Providers & Models](/docs/providers#1m-context-models).

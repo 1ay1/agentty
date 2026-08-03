@@ -12,6 +12,8 @@ agentty's filesystem tools refuse any path outside the workspace root. The agent
 
 By default, the directory you launch in is the root. Every `read`, `write`, `edit`, `glob`, and `list_dir` call is checked against it — a path that escapes is rejected before the tool runs.
 
+`repo_map`'s codebase walk applies an extra rule on top: it stops at any nested repository boundary — a subdirectory carrying its own `.git`/`.hg`/`.svn`/`.jj` (including a submodule's gitlink *file*, not just a directory). A submodule or vendored checkout living inside your workspace root passes the path check but is still excluded, so the ranked skeleton never mixes in a different project's source.
+
 ```bash
 cd ~/code/my-app
 agentty                          # root = ~/code/my-app
