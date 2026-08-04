@@ -131,15 +131,16 @@ int main() {
         check(r.warm(), "index reports warm after a build");
 
         // Full-power features engage: the mode string advertises the rich
-        // pipeline (mmr/stitch/reranked) and CRAG produced a confidence.
+        // pipeline as a readable FUNNEL (fusion method + per-stage counts) and
+        // CRAG produced a confidence.
         {
             auto q = r.retrieve("how do I log in / authenticate", 5);
-            check(q.mode.find("reranked") != std::string::npos,
-                  "mode advertises reranking (full pipeline engaged)");
-            check(q.mode.find("mmr") != std::string::npos,
-                  "mode advertises MMR diversity (default-on)");
-            check(q.mode.find("stitch") != std::string::npos,
-                  "mode advertises parent-stitch (default-on)");
+            check(q.mode.find("convex-fusion") != std::string::npos,
+                  "mode advertises convex (TM2C2) fusion (rag-cpp default)");
+            check(q.mode.find("funnel:") != std::string::npos,
+                  "mode renders the retrieval funnel (engine workings are shown)");
+            check(q.mode.find("confidence") != std::string::npos,
+                  "mode reports a confidence signal");
             check(q.confidence >= 0.0 && q.confidence <= 1.0,
                   "confidence is a well-formed [0,1] signal");
         }
