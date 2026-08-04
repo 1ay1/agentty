@@ -69,8 +69,26 @@ int main() {
     // ── Scripted provider ──────────────────────────────────────────────────
     std::atomic<int> completions{0};
     std::atomic<bool> read_mode{false};
+    std::atomic<bool> bash_mode{false};
     auto stream = [&](ag::provider::Request req, ag::provider::EventSink sink) {
         int n = completions.fetch_add(1);
+        if (bash_mode.load() && n % 2 == 0) {
+            // Bash-turn first completion: stream a `bash` tool call, so we can
+            // assert the fenced command-output card body (the "bash shows no
+            // output" fix). No terminal capability in this harness, so it runs
+            // the internal path and the result lands as fenced text.
+            std::string tcid = "tc_bash_" + std::to_string(n);
+            const ag::ToolCallId call_id{tcid};
+            sink(ag::Msg{ag::StreamStarted{}});
+            sink(ag::Msg{ag::StreamTextDelta{"Running. "}});
+            sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"bash"}}});
+            sink(ag::Msg{ag::StreamToolUseDelta{call_id,
+                "{\"command\":\"printf 'hello-stdout\\\\n'\"}"}});
+            sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
+            sink(ag::Msg{ag::StreamUsage{1100, 30, 0, 0}});
+            sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
+            return;
+        }
         if (read_mode.load() && n % 2 == 0) {
             // Read-turn first completion: stream a `read` tool call on the
             // file, so we can assert the line-numbered result content shape.
@@ -108,10 +126,12 @@ int main() {
             // a write (tc_write_) or, in read_mode, a read (tc_read_).
             std::string want_w = "tc_write_" + std::to_string(n - 1);
             std::string want_r = "tc_read_"  + std::to_string(n - 1);
+            std::string want_b = "tc_bash_"  + std::to_string(n - 1);
             bool saw_tool_result = false;
             for (const auto& m : req.messages)
                 for (const auto& tc : m.tool_calls)
-                    if (tc.id.value == want_w || tc.id.value == want_r)
+                    if (tc.id.value == want_w || tc.id.value == want_r
+                        || tc.id.value == want_b)
                         saw_tool_result = true;
             CHECK(saw_tool_result);
             sink(ag::Msg{ag::StreamTextDelta{"Done."}});
@@ -387,6 +407,24 @@ int main() {
       CHECK(last_tool_text.rfind("```", 0) == 0);
       CHECK(last_tool_text.find("1\talpha") != std::string::npos);
       CHECK(last_tool_text.find("2\tbeta")  != std::string::npos); }
+
+    // ── Turn 4: a `bash` result must show its OUTPUT in the card body as a
+    //    fenced block (the "bash shows no output" fix). No terminal capability
+    //    here, so it runs the internal path; the completion must carry the
+    //    captured stdout, fenced. ───────────────────────────────────────
+    read_mode.store(false);
+    bash_mode.store(true);
+    last_tool_text.clear();
+
+    PromptParams pp4;
+    pp4.sessionId = ns.sessionId;
+    pp4.prompt.push_back(TextContent{"run it", Nothing, Json::object()});
+    auto pr4 = agent.session_prompt(pp4).get();
+    CHECK(pr4.stopReason == StopReason::EndTurn);
+    { std::lock_guard lk(transcript_mu);
+      // The bash card body is fenced and contains the command's stdout.
+      CHECK(last_tool_text.find("```")          != std::string::npos);
+      CHECK(last_tool_text.find("hello-stdout") != std::string::npos); }
 
     // close round-trip.
     agent.session_close(CloseSessionParams{ns.sessionId, Json::object()}).get();
