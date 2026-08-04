@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Kill-to-end-of-line in the composer works again, now on `Alt+K`.** The readline-standard `Ctrl+K` kill-to-end binding was dead: `Ctrl+K` is claimed app-wide for the command palette *before* the composer sees the key, so the composer's kill-to-end arm was unreachable. Rebound to `Alt+K`, which pairs with `Ctrl+U` (kill-to-start) the same way `Alt+D` (delete word forward) pairs with `Ctrl+W` (delete word back). (`src/runtime/app/subscribe.cpp`; new reducer tests in `composer_edit_test`, 20/20 green. Full composer keymap now documented in the README and the [keybindings](/docs/keybindings) page.)
+
 ## [0.2.12] - 2026-08-04
 
 ### Fixed

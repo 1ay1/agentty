@@ -25,6 +25,7 @@ using agentty::ComposerUndo;
 using agentty::ComposerCharInput;
 using agentty::ComposerCursorWordLeft;
 using agentty::ComposerCursorWordRight;
+using agentty::ComposerKillToEndOfLine;
 
 namespace {
 int failures = 0, total = 0;
@@ -178,6 +179,26 @@ int main() {
         check("typing while peeking drops queue_peek_idx",
               m.ui.composer.queue_peek_idx == -1,
               std::to_string(m.ui.composer.queue_peek_idx));
+    }
+
+    // ── Kill-to-end-of-line (Alt+K — reachable again after the Ctrl+K
+    //    global-palette clash). ───────────────────────────────────────
+    {
+        auto m = step(with_text("foo bar baz", 4), ComposerKillToEndOfLine{});
+        check("kill-to-end deletes from cursor to EOL",
+              m.ui.composer.text == "foo ", m.ui.composer.text);
+    }
+    {
+        // Multi-line: kill-to-end stops at the newline, keeping it.
+        auto m = step(with_text("foo\nbar", 1), ComposerKillToEndOfLine{});
+        check("kill-to-end stops at newline", m.ui.composer.text == "f\nbar",
+              m.ui.composer.text);
+    }
+    {
+        // At EOL already — no-op.
+        auto m = step(with_text("foo", 3), ComposerKillToEndOfLine{});
+        check("kill-to-end at EOL is a no-op", m.ui.composer.text == "foo",
+              m.ui.composer.text);
     }
 
     std::printf("\n%d/%d checks passed\n", total - failures, total);

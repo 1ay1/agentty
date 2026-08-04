@@ -67,6 +67,7 @@ as [[Alt+←/→]]).
 | [[Ctrl+W]] | Delete the word before the cursor (readline *unix-word-rubout*) |
 | [[Alt+D]] | Delete the word after the cursor (readline *kill-word*) |
 | [[Ctrl+U]] | Kill to beginning of line |
+| [[Alt+K]] | Kill to end of line |
 | [[Ctrl+Z]] | Undo — rewinds word-by-word, not keystroke-by-keystroke |
 | [[Ctrl+Y]] / [[Ctrl+Shift+Z]] | Redo |
 | [[Ctrl+V]] / [[Alt+V]] | Paste an image from the clipboard as an attachment chip |
@@ -76,10 +77,12 @@ non-typing edit), so one [[Ctrl+Z]] after a paste reaches the pre-paste state.
 [[Ctrl+V]] is intercepted by some terminals (Windows Terminal binds it to its
 own paste); [[Alt+V]] is the fallback that every terminal passes through.
 
-> [[Ctrl+U]] doubles as “expand/collapse the newest retrieved-context card”
-> **when the composer is empty** and such a card is on screen; with text in the
-> box it always means kill-to-line-start. There is no composer *kill-to-end*
-> key — [[Ctrl+K]] is reserved globally for the command palette.
+> Kill-to-end is [[Alt+K]], not the readline-standard [[Ctrl+K]] — [[Ctrl+K]] is
+> reserved app-wide for the command palette. It pairs with [[Ctrl+U]]
+> (kill-to-start) the same way [[Alt+D]] (delete word forward) pairs with
+> [[Ctrl+W]] (delete word back). [[Ctrl+U]] also doubles as “expand/collapse the
+> newest retrieved-context card” **when the composer is empty** and such a card
+> is on screen; with text in the box it always means kill-to-line-start.
 
 ### History & queue
 
