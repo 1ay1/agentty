@@ -169,11 +169,22 @@ rescore, ~2.5×). Full write-up:
 
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|
-| `Enter` | Send | `^K` | Command palette |
+| `Enter` | Send / queue | `^K` | Command palette |
 | `Esc` | Cancel / reject | `^J` | Thread list |
 | `S-Tab` | Cycle profile | `^P` | Model picker |
 | `Alt+Enter` | Newline | `^N` | New thread |
 | `^G` | Run code block | `^←/→` or `Alt+←/→` | Cycle threads |
+
+The composer is a full readline-style editor:
+
+| Key | Action | Key | Action |
+|-----|--------|-----|--------|
+| `^←/→` | Move by word | `^W` / `Alt+D` | Delete word back / forward |
+| `^K` / `^U` | Kill to line end / start | `^Z` / `^Y` | Undo / redo |
+| `^V` / `Alt+V` | Paste image | `/` `@` `#` | Command / file / symbol picker |
+| `↑` | Recall queue / history | `Alt+↑/↓` | Edit queued messages one at a time |
+
+Full keymap: [docs/website/keybindings.md](docs/website/keybindings.md).
 
 ## More
 
