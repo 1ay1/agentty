@@ -296,8 +296,16 @@ int main() {
                 return last;
             };
 
-            auto first = poll_until("process-first", 10000);
-            check(has(first, "process-first"), "process_poll: returns initial output");
+            // process_start waits ~300ms and drains any banner the child
+            // already printed INTO the start response (so the first poll isn't
+            // wasted on the startup line). The immediate "process-first" line
+            // may therefore arrive at START rather than on a poll — assert it
+            // shows up in EITHER place, testing the semantic (initial output is
+            // delivered exactly once) not which call carries it.
+            const bool first_at_start = has(started, "process-first");
+            auto first = first_at_start ? started : poll_until("process-first", 10000);
+            check(has(first, "process-first"),
+                  "process_start/poll: initial output is delivered");
             auto second = poll_until("process-second", 10000);
             check(has(second, "process-second"), "process_poll: waits for new output");
             check(second.has_value() && !has(second, "process-first"),
