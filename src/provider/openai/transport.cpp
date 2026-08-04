@@ -1603,7 +1603,9 @@ std::string local_model_system_prompt() {
 
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "
-           "Use fenced code blocks for code. Keep tables small.\n\n";
+           "Use fenced code blocks for code. Keep tables small. LaTeX math "
+           "renders too: `$…$` inline, `$$…$$` or a ```math fence for "
+           "display (fractions, roots, sums, matrices).\n\n";
 
     out += "ENVIRONMENT\n";
     out += "- os: "; out += os_name; out += "\n";

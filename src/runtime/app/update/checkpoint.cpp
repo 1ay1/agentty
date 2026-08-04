@@ -146,7 +146,7 @@ Step checkpoint_update(Model m, msg::CheckpointMsg cm) {
             const int last = static_cast<int>(entries.size()) - 1;
             auto diffs = load_all_diffs(entries);
             m.ui.checkpoints = cp::Open{std::move(entries), last};
-            m.ui.checkpoints_scroll = maya::ScrollState{.auto_dispatch = false};
+            m.ui.checkpoints_scroll = Model::UI::routed_scroll();
             return {std::move(m), std::move(diffs)};
         },
         [&](CloseCheckpointPicker) -> Step {
