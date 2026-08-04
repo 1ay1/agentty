@@ -379,6 +379,18 @@ Config Config::from_env() {
     c.mmr         = truthy_default_on("AGENTTY_RAG_MMR");
     c.mmr_lambda  = env_float("AGENTTY_RAG_MMR_LAMBDA", 0.65f);
     c.stitch      = truthy_default_on("AGENTTY_RAG_STITCH");
+    c.dedup       = truthy_default_on("AGENTTY_RAG_DEDUP");
+    c.dedup_threshold = env_float("AGENTTY_RAG_DEDUP_THRESHOLD", 0.92f);
+    c.autocut     = truthy_default_on("AGENTTY_RAG_AUTOCUT");
+    c.autocut_sensitivity = env_float("AGENTTY_RAG_AUTOCUT_SENSITIVITY", 2.0f);
+    if (const char* f = std::getenv("AGENTTY_RAG_FUSION"); f && f[0]) {
+        std::string fv{f};
+        for (char& ch : fv) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        // Accept only the two modes we implement; anything else keeps the
+        // convex default rather than silently disabling fusion.
+        if (fv == "rrf" || fv == "convex") c.fusion = fv;
+    }
+    c.adaptive_fusion = truthy_default_on("AGENTTY_RAG_ADAPTIVE");
     c.prf         = truthy_default_off("AGENTTY_RAG_PRF");
     c.corrective  = truthy_default_off("AGENTTY_RAG_CORRECT");
     c.graph       = truthy_default_off("AGENTTY_RAG_GRAPH");
@@ -389,7 +401,10 @@ Config Config::from_env() {
     if (const char* g = std::getenv("AGENTTY_RAG_GEN_MODEL"); g && g[0]) c.gen_model = g;
     c.persist     = truthy_default_on("AGENTTY_RAG_PERSIST");
     c.learn       = truthy_default_off("AGENTTY_RAG_LEARN");
-    c.trace       = truthy_default_off("AGENTTY_RAG_TRACE");
+    // The per-stage retrieval trace is the engine's "show your work": it powers
+    // the funnel the tool card renders, so it is ON by default. AGENTTY_RAG_TRACE=0
+    // suppresses it (compact one-line mode header only).
+    c.trace       = truthy_default_on("AGENTTY_RAG_TRACE");
     c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
     c.bm25_weight  = env_float("AGENTTY_RAG_BM25_WEIGHT", 1.0f);
     return c;
@@ -505,21 +520,33 @@ struct Retriever::Impl {
         return cc;
     }
 
-    // Compose the FULL-POWER retrieval pipeline agentty drives, per Config:
-    //   [PRF expand] → hybrid(convex fusion) → filter → feature-rerank
-    //   → [MMR diversity] → [parent stitch] → top-k
-    // Every optional stage is measured in rag-cpp's own benchmarks; the convex
-    // (TM2C2) fusion is rag-cpp's default because it beats RRF on NDCG.
+    // Compose the FULL-POWER retrieval pipeline agentty drives, per Config.
+    // This mirrors rag-cpp's own Pipeline::best() funnel, adapted to agentty's
+    // per-stage toggles:
+    //   [PRF expand] → hybrid(adaptive-convex fusion) → filter
+    //   → feature-rerank → [dedup] → [MMR diversity] → [parent stitch]
+    //   → [autocut] → top-k
+    // Convex (TM2C2) fusion is rag-cpp's measured-better default over RRF; the
+    // adaptive variant additionally re-weights per query toward whichever
+    // retriever is more confident. dedup folds near-duplicate passages and
+    // autocut trims the low-relevance tail — both straight from best().
     void apply_pipeline(::rag::Engine& eng) {
         namespace pl = ::rag::pipeline;
         pl::HybridRetrieveConfig hy;
         hy.candidate_k  = 60;
-        // Weighted RRF honors the public BM25/dense weights. The convex path
-        // uses a separate alpha when exactly two lists are present, which made
-        // AGENTTY_RAG_*_WEIGHT silently ineffective.
-        hy.fusion       = pl::HybridRetrieveConfig::Fusion::rrf;
         hy.bm25_weight  = std::max(0.0f, cfg.bm25_weight);
         hy.dense_weight = std::max(0.0f, cfg.dense_weight);
+        if (cfg.fusion == "rrf") {
+            // Weighted reciprocal-rank fusion — the ONLY mode that honours the
+            // public bm25/dense weights (convex ignores them by design).
+            hy.fusion = pl::HybridRetrieveConfig::Fusion::rrf;
+        } else {
+            // Convex (TM2C2) is the default: preserves score distributions RRF
+            // discards. Adaptive shifts alpha per query toward the retriever
+            // with the sharper (more confident) score curve.
+            hy.fusion            = pl::HybridRetrieveConfig::Fusion::convex;
+            hy.convex.adaptive   = cfg.adaptive_fusion;
+        }
 
         pl::Pipeline p;
         if (cfg.prf)
@@ -529,10 +556,25 @@ struct Retriever::Impl {
         // The exact accuracy-preserving feature reranker the built-in
         // standard()/quality()/context() pipelines use (deterministic, no model).
         p.add(pl::make_feature_rerank_stage());
+        // Fold near-duplicate passages BEFORE diversity/stitch so an LLM context
+        // window isn't spent re-reading paraphrased copies of the same content.
+        if (cfg.dedup) {
+            ::rag::rerank::DedupConfig dc;
+            dc.threshold = cfg.dedup_threshold;
+            p.add(::rag::rerank::make_dedup_stage(dc));
+        }
         if (cfg.mmr)
             p.add(::rag::rerank::make_mmr_stage(cfg.mmr_lambda));
         if (cfg.stitch)
             p.add(std::make_shared<pl::ParentStitchStage>(1));
+        // Autocut runs on the FINAL relevance order, right before top-k: it
+        // trims the low-relevance tail at the score knee so a query with three
+        // strong answers returns three, not k padded with weak matches.
+        if (cfg.autocut) {
+            ::rag::rerank::AutocutConfig ac;
+            ac.sensitivity = cfg.autocut_sensitivity;
+            p.add(::rag::rerank::make_autocut_stage(ac));
+        }
         p.add(std::make_shared<pl::TopKStage>());
         eng.with_pipeline(std::move(p));
     }
@@ -1239,23 +1281,50 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         // Prefer CRAG's calibrated confidence when available; else top score.
         out.confidence = crag_conf >= 0.0 ? crag_conf : top;
 
-        // Human-readable provenance for the tool-shell header.
-        std::string m = retriever_mode;
-        m += ", reranked";
-        if (impl_->cfg.mmr)    m += "+mmr";
-        if (impl_->cfg.stitch) m += "+stitch";
-        if (learned)           m += "+learned";
-        if (!root.empty() && !skip_docs) m += ", docs=" + root.string();
+        // ── The retrieval funnel: show the engine's actual working ──────
+        // `mode` is what the tool card renders. We build a compact one-line
+        // headline (retriever + fusion + confidence) followed by an OPTIONAL
+        // multi-line "funnel" that walks the candidate set through every stage
+        // it actually passed through, with the counts rag-cpp itself recorded.
+        // The funnel is the UX centrepiece: a user (and the model) can SEE that
+        // 47 candidates were retrieved, reranked to 30, deduped to 24, and
+        // autocut to 8 — instead of trusting an opaque black box.
+        std::string headline = retriever_mode;
+        headline += impl_->cfg.fusion == "rrf"
+                      ? ", rrf-fusion"
+                      : (impl_->cfg.adaptive_fusion ? ", convex-fusion(adaptive)"
+                                                    : ", convex-fusion");
+        if (learned) headline += ", learned-boost";
+        if (!root.empty() && !skip_docs)
+            headline += ", docs=" + root.filename().string();
         char buf[48];
         std::snprintf(buf, sizeof buf, ", confidence %.2f", out.confidence);
-        m += buf;
+        headline += buf;
+
+        std::string m = headline;
         if (impl_->cfg.trace && !trace.empty()) {
-            m += " [";
-            for (std::size_t i = 0; i < trace.size(); ++i) {
-                if (i) m += " → ";
-                m += trace[i];
+            // rag-cpp emits two kinds of trace line: diagnostic lines that
+            // carry counts ("hybrid: 47 candidates", "dedup 30 -> 24") and bare
+            // stage markers ("→ dedup") that just echo the stage name. Keep the
+            // former — they show the funnel narrowing — and drop the latter,
+            // which are noise once the diagnostics are present.
+            std::vector<std::string> steps;
+            steps.reserve(trace.size());
+            for (const auto& t : trace) {
+                if (t.empty()) continue;
+                // Bare "→ stagename" markers begin with the arrow; skip them.
+                if (t.rfind("→ ", 0) == 0 || t.rfind("-> ", 0) == 0) continue;
+                steps.push_back(t);
             }
-            m += "]";
+            if (!steps.empty()) {
+                // Render as an indented funnel the card shows verbatim. Each
+                // rung is one stage; the arrow prefix reads top-to-bottom as
+                // the query flowing down the pipeline.
+                m += "\n  funnel:";
+                for (const auto& s : steps)
+                    m += "\n    ↳ " + s;
+                m += "\n    ↳ top-" + std::to_string(out.passages.size());
+            }
         }
         out.mode = std::move(m);
     } catch (const std::exception& e) {
@@ -1366,7 +1435,10 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             return out;
         }
 
-        auto res = impl_->code_engine.search(query, static_cast<std::size_t>(kk));
+        std::vector<std::string> code_trace;
+        std::vector<std::string>* code_tracep = impl_->cfg.trace ? &code_trace : nullptr;
+        auto res = impl_->code_engine.search(query, static_cast<std::size_t>(kk),
+                                             {}, code_tracep);
         if (!res) { out.error = "search_code failed"; return out; }
         double top = 0.0;
         const std::size_t total_budget = retrieval_output_budget();
@@ -1390,9 +1462,32 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             out.passages.push_back(std::move(p));
         }
         out.confidence = top;
-        out.mode = std::string(impl_->code_embedder_ready ? "hybrid, " : "bm25, ")
-                 + std::to_string(impl_->code_engine.corpus().chunk_count())
-                 + " chunks from " + root.string();
+        std::string cm = std::string(impl_->code_embedder_ready ? "code:hybrid" : "code:bm25")
+                       + (impl_->cfg.fusion == "rrf" ? ", rrf-fusion"
+                          : (impl_->cfg.adaptive_fusion ? ", convex-fusion(adaptive)"
+                                                        : ", convex-fusion"))
+                       + ", " + std::to_string(impl_->code_engine.corpus().chunk_count())
+                       + " chunks from " + root.filename().string();
+        {
+            char cbuf[48];
+            std::snprintf(cbuf, sizeof cbuf, ", confidence %.2f", out.confidence);
+            cm += cbuf;
+        }
+        if (impl_->cfg.trace && !code_trace.empty()) {
+            std::vector<std::string> steps;
+            steps.reserve(code_trace.size());
+            for (const auto& t : code_trace) {
+                if (t.empty()) continue;
+                if (t.rfind("→ ", 0) == 0 || t.rfind("-> ", 0) == 0) continue;
+                steps.push_back(t);
+            }
+            if (!steps.empty()) {
+                cm += "\n  funnel:";
+                for (const auto& s : steps) cm += "\n    ↳ " + s;
+                cm += "\n    ↳ top-" + std::to_string(out.passages.size());
+            }
+        }
+        out.mode = std::move(cm);
     } catch (const std::exception& e) {
         out.error = std::string("search_code failed: ") + e.what();
     } catch (...) {

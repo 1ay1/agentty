@@ -68,6 +68,16 @@ struct Config {
     bool     mmr        = true;   // diversity over the final candidate pool
     float    mmr_lambda = 0.65f;
     bool     stitch     = true;
+    // Near-duplicate dedup + relevance autocut — the refinement stages from
+    // rag-cpp's Pipeline::best(). dedup folds paraphrase/boilerplate copies so
+    // an LLM context window isn't spent re-reading the same passage; autocut
+    // trims the low-relevance tail at the score knee. Both are cheap and win
+    // for grounded generation, but can shorten the result below k, so on by
+    // default yet individually toggleable.
+    bool     dedup      = true;   // AGENTTY_RAG_DEDUP
+    float    dedup_threshold = 0.92f;
+    bool     autocut    = true;   // AGENTTY_RAG_AUTOCUT
+    float    autocut_sensitivity = 2.0f;
     bool     prf        = false;  // can drift queries; opt in after benchmarking
     bool     corrective = false; // lexical proxy rejects semantic matches
     bool     graph      = false; // quadratic graph build; explicit power mode
@@ -84,7 +94,15 @@ struct Config {
     bool     learn      = false;  // implicit file-open feedback is opt-in until
                                   // every source type has an attributable signal
     bool     trace      = false;  // AGENTTY_RAG_TRACE — fold per-stage trace into mode
-    // Weighted RRF; both public weights directly affect fusion.
+    // Fusion. rag-cpp measures convex (TM2C2) combination as beating RRF on
+    // NDCG, so it is agentty's default; the ADAPTIVE variant additionally
+    // shifts the per-query weight toward whichever retriever is more confident
+    // on THAT query (a sharp, top-heavy score curve). Set AGENTTY_RAG_FUSION=rrf
+    // to fall back to weighted reciprocal-rank fusion, which is the only mode
+    // that honours the bm25/dense weights below (convex ignores them).
+    std::string fusion = "convex";   // AGENTTY_RAG_FUSION: convex | rrf
+    bool     adaptive_fusion = true; // AGENTTY_RAG_ADAPTIVE (convex only)
+    // Weighted RRF; both public weights directly affect fusion (rrf mode only).
     float    dense_weight = 1.0f;
     float    bm25_weight  = 1.0f;
 

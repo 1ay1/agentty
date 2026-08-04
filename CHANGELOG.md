@@ -4,6 +4,12 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **The RAG engine now shows its work — a retrieval “funnel” in every `search_docs`/`search_code` result.** Retrieval used to be an opaque black box: the model (and you) got a ranked list and a terse `(mode: hybrid+ctx, reranked)` label, with the per-stage trace hidden behind an env var nobody set. Now every result is headed by a readable **funnel** that walks the candidate set through each stage it actually passed, with the real counts the engine recorded — e.g. `hybrid: 47 candidates ↳ reranked top 30 ↳ dedup 30→24 ↳ stitch: merged 3 adjacent ↳ autocut 24→8 ↳ top-8` — plus a one-line headline naming the retriever, the fusion method, and the confidence. You can see *why* eight passages came back instead of trusting a label. (`AGENTTY_RAG_TRACE=0` restores the compact one-line header.)
+
+### Changed
+- **Retrieval quality upgraded to rag-cpp's measured-best pipeline.** agentty's hybrid search now defaults to **adaptive convex (TM2C2) fusion** instead of plain reciprocal-rank fusion — rag-cpp benchmarks it as beating RRF on NDCG because it preserves the score distribution RRF discards, and the *adaptive* variant additionally shifts per-query weight toward whichever retriever (lexical vs. dense) is more confident on that query. Two new refinement stages from rag-cpp's `Pipeline::best()` are wired in: **near-duplicate dedup** (folds paraphrase/boilerplate copies so an LLM context window isn't spent re-reading the same passage) and **relevance autocut** (trims the low-relevance tail at the score knee, so a query with three strong answers returns three, not `k` padded with weak matches). All are on by default and individually toggleable (`AGENTTY_RAG_FUSION=rrf`, `AGENTTY_RAG_ADAPTIVE`, `AGENTTY_RAG_DEDUP`, `AGENTTY_RAG_AUTOCUT`). Also picks up rag-cpp's BlockMax-WAND BM25, robust (winsorized) fusion, AVX-512/VNNI kernels, and a cache-backed rerank stage under the hood.
+
 ## [0.2.11] - 2026-08-03
 
 ### Fixed
