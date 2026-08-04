@@ -95,17 +95,63 @@ When a small number of docs changes, agentty removes and reindexes only those do
 
 ## Token economy
 
-Retrieval output has an aggregate body budget of approximately 12 KiB by default—roughly 3,000 tokens, depending on content. Configure it with:
+Retrieval is the one place agentty spends model-context tokens on your behalf, so the output path is aggressively budgeted. Five independent levers keep the spend proportional to how useful the retrieval actually is. All are on by default and env-tunable, and none of them change ranking—they only shape how many tokens the *already-ranked* passages consume.
+
+### Aggregate output budget
+
+Retrieval output has an aggregate body budget of approximately 12 KiB by default—roughly 3,000 tokens, depending on content:
 
 ```bash
-export AGENTTY_RAG_OUTPUT_BYTES=12288
+export AGENTTY_RAG_OUTPUT_BYTES=12288   # clamped 2 KiB – 64 KiB
 ```
 
-Accepted values are clamped between 2 KiB and 64 KiB.
+The budget applies across all returned passage bodies, not independently to each result.
 
-When a passage is too large, agentty selects the line window with the strongest query-term evidence and includes nearby context. It does not blindly retain the beginning of a giant file. The budget applies across all returned passage bodies, not independently to each result.
+### Relevance floor
+
+The low-confidence tail of a retrieval is what the model ignores anyway, so paying flagship input price to inject it is waste. A passage survives only if its score is within a fraction of the top hit's score; the best hit is always kept.
+
+```bash
+export AGENTTY_RAG_RELEVANCE_FLOOR=0.30   # 0 keeps every hit
+```
+
+### Score-proportional (water-filling) budget
+
+Instead of splitting the budget evenly by passage count—which handed a rank-8 hit at confidence 0.11 the same allowance as the rank-1 hit at 0.88—agentty splits bytes in proportion to score^gamma, with a per-passage floor so a kept tail hit still reads legibly. Confident passages get room to be complete; marginal ones get a tight excerpt.
+
+```bash
+export AGENTTY_RAG_BUDGET_GAMMA=1.5   # higher concentrates budget on the head
+```
+
+### Confidence-scaled total budget
+
+A retrieval that barely clears the relevance bar should not reserve the same ~3,000 tokens as a slam-dunk. The *total* budget ramps linearly with retrieval confidence, from a floor fraction at low confidence to 100% at full confidence. Ungraded paths keep the full budget.
+
+```bash
+export AGENTTY_RAG_CONF_BUDGET_FLOOR=0.45   # min fraction of budget at low confidence
+```
+
+### Extractive passage compression
+
+When a passage is too large, agentty compresses rather than truncates. For prose it runs a model-free, LLMLingua-style extractive pass: each sentence is scored by rare-term-weighted query overlap, the highest-scoring sentences are kept within budget, and they are re-emitted in original order with `…` gap markers. This drops irrelevant filler *between* relevant sentences—something a contiguous window cannot. Source code and config keep a contiguous line-window with the strongest query-term evidence, because inter-line contiguity is load-bearing for readability.
+
+```bash
+export AGENTTY_RAG_EXTRACTIVE=0   # disable extraction, force line-window
+```
 
 The requested `k` is still honored when enough distinct passages exist. Optional corrective grading no longer silently collapses a broad `k=10` request to three strips.
+
+### Unprompted (proactive) spend
+
+When proactive injection is enabled, the block is spent without the user asking, so it is capped independently and more tightly than the on-demand tool budget—about 6 KiB (~1,500 tokens) by default:
+
+```bash
+export AGENTTY_RAG_PROACTIVE_BYTES=6144   # clamped 1 KiB – 32 KiB
+```
+
+### Measured effect
+
+On a realistic 161-file corpus, these levers together cut retrieval output from ~1,845 to ~1,605 estimated tokens per query (**−13%**) with **identical** ranking metrics (recall@10 1.000, MRR 0.968, nDCG@10 0.976). Savings scale with passage size: a corpus of small chunks that already fit under budget sees little change, because compression never fires. Retrieval is a fraction of a coding turn's total tokens—the stable system, tools, and history prefix dominate and is already discounted heavily by prompt caching—so treat this as a real but modest slice of the overall bill. Measure it on your own corpus (see below) rather than assuming.
 
 ## Proactive retrieval
 
@@ -150,6 +196,21 @@ agentty rag-bench docs
 ```
 
 The benchmark reports indexing time and a deterministic ladder of recall@k, MRR, nDCG@10, and milliseconds/query. A metric drop after adding a stage is evidence to leave that stage disabled or tune it.
+
+To measure **token cost** rather than ranking quality, add `AGENTTY_RAG_MEASURE=1`. This runs the benchmark's queries through the real retrieval output path—the one that applies the relevance floor, water-filling, confidence-scaled budget, and extractive compression—and reports the bytes and estimated tokens actually injected per query, plus a machine-readable `MEASURE` line:
+
+```bash
+AGENTTY_RAG_MEASURE=1 agentty rag-bench docs
+```
+
+To quantify any single lever, run it twice with the lever toggled and diff the `tokens=` field. For example, to isolate extractive compression:
+
+```bash
+AGENTTY_RAG_MEASURE=1 AGENTTY_RAG_EXTRACTIVE=0 agentty rag-bench docs   # off
+AGENTTY_RAG_MEASURE=1                          agentty rag-bench docs   # on
+```
+
+Because every lever is env-tunable, no rebuild is needed to measure a configuration on your own corpus.
 
 Known-item queries measure retrieval mechanics and are intentionally lexical. For product accuracy, supplement them with a small labeled set of real questions, paraphrases, broad surveys, and expected source paths.
 

@@ -1085,6 +1085,27 @@ run_proactive_funnel_(const std::string& query, int k, double min_conf) {
     block += "</retrieved-context>";
 
     if (n == 0) return std::nullopt;   // everything deduped away
+
+    // Independent ceiling on UNPROMPTED spend. The user didn't ask for this
+    // block, so it must stay cheap even when the retriever returns rich
+    // passages. Cap the whole assembled block; default ~6KiB (~1.5k tok),
+    // roughly half the on-demand tool budget. Tunable via
+    // AGENTTY_RAG_PROACTIVE_BYTES.
+    {
+        std::size_t cap = 6 * 1024;
+        if (const char* v = std::getenv("AGENTTY_RAG_PROACTIVE_BYTES"); v && v[0]) {
+            try { cap = std::clamp<std::size_t>(std::stoull(v), 1024, 32 * 1024); }
+            catch (...) {}
+        }
+        if (block.size() > cap) {
+            std::size_t cut = cap;
+            // Trim to a UTF-8 boundary, then re-close the fence cleanly.
+            while (cut > 0 && (static_cast<unsigned char>(block[cut]) & 0xc0) == 0x80)
+                --cut;
+            block.resize(cut);
+            block += "\n…\n</retrieved-context>";
+        }
+    }
     return ProactiveHit{std::move(block), conf, n, std::move(keys)};
   } catch (...) {
     return std::nullopt;   // proactive retrieval is best-effort, never fatal
