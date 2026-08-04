@@ -481,8 +481,96 @@ std::optional<a::ToolCallContent> prompt_content(const ToolUse& tc) {
     return a::ToolCallContent{a::TCC_Content{text_block(std::move(body)), json::object()}};
 }
 
+// Escape the markdown metacharacters Zed's card renderer would otherwise
+// interpret, so raw file/grep text with `*`, backticks, `#`, `_`, `[`, `<`
+// renders literally instead of turning into bold/headers/links/HTML. Mirrors
+// claude-code-acp's markdownEscape() applied to tool-result text.
+std::string markdown_escape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + s.size() / 8);
+    for (char c : s) {
+        switch (c) {
+            case '\\': case '`': case '*': case '_': case '{': case '}':
+            case '[':  case ']': case '<': case '>': case '#': case '+':
+            case '-':  case '.': case '!': case '|':
+                out.push_back('\\');
+                [[fallthrough]];
+            default:
+                out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// Render a completed tool's result text into the ACP content block Zed shows
+// in the card body, matching claude-code-acp's per-tool result shaping:
+//
+//   • Read → rebuild a line-numbered view (`<n>\t<line>`) starting at the
+//     read's offset, so Zed renders a clean gutter-numbered excerpt instead of
+//     a raw blob. The body is fenced as a plain code block so the tab-numbered
+//     lines and any markdown metacharacters in the file render verbatim.
+//   • Everything else → the text as-is, but markdown-escaped so stray `*`/`#`/
+//     backticks in output don't get parsed as formatting.
+//
+// Returns a TCC_Content ready to push onto the completion update. `text` is the
+// tool's model-facing output; `tc` supplies the tool identity + args (offset).
+a::ToolCallContent result_content_block(const ToolUse& tc, const std::string& text) {
+    namespace sp = tools::spec;
+    const auto* spec = sp::lookup(tc.name.value);
+    const sp::Kind kind = spec ? spec->kind : sp::Kind::Read;
+
+    if (kind == sp::Kind::Read && !text.empty()) {
+        // Starting line = the read's offset (1-based), matching claude-code-acp
+        // (`structuredRead.file.startLine ?? input.offset ?? 1`). agentty's
+        // read tool prepends an optional `display_description` line and appends
+        // a trailing `[showing lines X-Y of N]` hint; both are model-facing
+        // scaffolding, not file bytes, so strip a leading description line and
+        // a trailing bracket hint before numbering so the gutter stays aligned
+        // with real file lines.
+        std::int64_t start = 1;
+        const auto& args = tc.args;
+        for (const char* k : {"offset", "start_line"}) {
+            if (args.contains(k) && args[k].is_number_integer()) {
+                start = args[k].get<std::int64_t>();
+                break;
+            }
+        }
+        if (start < 1) start = 1;
+
+        std::string_view body{text};
+        // Drop the trailing "\n[showing lines ...]" hint if present.
+        if (auto hint = body.rfind("\n[showing lines ");
+            hint != std::string_view::npos)
+            body = body.substr(0, hint);
+
+        std::string numbered;
+        numbered.reserve(body.size() + body.size() / 8);
+        std::int64_t ln = start;
+        std::size_t pos = 0;
+        while (pos <= body.size()) {
+            std::size_t nl = body.find('\n', pos);
+            std::string_view line = (nl == std::string_view::npos)
+                ? body.substr(pos)
+                : body.substr(pos, nl - pos);
+            numbered += std::to_string(ln);
+            numbered += '\t';
+            numbered.append(line);
+            numbered += '\n';
+            ++ln;
+            if (nl == std::string_view::npos) break;
+            pos = nl + 1;
+        }
+        // Fence so the tab layout and any markdown chars render verbatim.
+        std::string md = "```\n" + numbered + "```";
+        return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+    }
+
+    // Non-Read results: escape markdown so raw output renders literally.
+    return a::ToolCallContent{
+        a::TCC_Content{text_block(markdown_escape(text)), json::object()}};
+}
+
 // An ACP plan (Zed's checklist widget) built from the `todo` tool's args.
-// claude-code-acp maps TodoWrite → plan entries the same way; this gives Zed
 // the native plan UI instead of an opaque "Update TODOs" tool card. Returns
 // nullopt when the call isn't a todo write or carries no usable list.
 std::optional<a::SU_Plan> plan_from_todos(const ToolUse& tc) {
@@ -704,7 +792,17 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
                 const std::string out = tc.output();
                 if (!out.empty()) {
                     a::List<a::ToolCallContent> content;
-                    content.push_back(a::ToolCallContent{a::TCC_Content{text_block(out), json::object()}});
+                    // Match the live path's per-tool result shaping (Read →
+                    // line-numbered; others markdown-escaped) so a replayed
+                    // session's cards look identical to when they first ran.
+                    if (status == a::ToolCallStatus::Failed) {
+                        std::string shown = out.find("```") == std::string::npos
+                                          ? "```\n" + out + "\n```" : out;
+                        content.push_back(a::ToolCallContent{
+                            a::TCC_Content{text_block(std::move(shown)), json::object()}});
+                    } else {
+                        content.push_back(result_content_block(tc, out));
+                    }
                     upd.content   = a::Just(std::move(content));
                     upd.rawOutput = a::Just<json>(json{{"text", out}});
                 }
@@ -1632,8 +1730,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             // in Zed; claude-code-acp returns no extra content for Edit/Write).
             // The summary still rides in rawOutput for the model.
             if (!result->change && !result->text.empty())
-                content.push_back(a::ToolCallContent{
-                    a::TCC_Content{text_block(result->text), json::object()}});
+                content.push_back(result_content_block(tc, result->text));
 
             upd.status    = a::Just(a::ToolCallStatus::Completed);
             upd.content   = a::Just(std::move(content));
