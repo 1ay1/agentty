@@ -158,6 +158,34 @@ maya::Composer::Config composer_config(const Model& m) {
     cfg.profile         = {.label = std::string{profile_label(m.d.profile)},
                            .color = profile_color(m.d.profile)};
     cfg.expanded        = m.ui.composer.expanded;
+
+    // ── Ambient counters over the REAL payload ──────────────────────
+    //
+    // cfg.text is the chip-rendered display string: a long paste or
+    // @file collapses to a short caption, so counting words / tokens /
+    // lines off it undercounts massively whenever an attachment
+    // exists. Expand the attachment bodies back in (the same pass the
+    // transport runs at submit time) and count off THAT so the live
+    // meter reflects what actually goes to the model. Skip the expand
+    // entirely when there are no attachments — the visible text is the
+    // payload, and -1 lets the widget derive counts itself.
+    if (!m.ui.composer.attachments.empty() && !m.ui.composer.text.empty()) {
+        std::string full = attachment::expand(m.ui.composer.text,
+                                               m.ui.composer.attachments);
+        int words = 0;
+        bool in_word = false;
+        int lines = 1;
+        for (char c : full) {
+            const bool ws = (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+            if (!ws && !in_word) { ++words; in_word = true; }
+            else if (ws)         { in_word = false; }
+            if (c == '\n') ++lines;
+        }
+        cfg.word_estimate  = words;
+        cfg.token_estimate = static_cast<int>((full.size() + 3) / 4);
+        cfg.line_estimate  = lines;
+    }
+
     // Pin to 2 rows so transient height changes (empty↔first-char,
     // 1-line→42-line wrap, placeholder swap on phase change) cannot
     // reshape the outer AppLayout vstack mid-stream. With the floor at
@@ -198,6 +226,12 @@ maya::Composer::Config composer_config(const Model& m) {
         .add(cfg.profile.color)
         .add(static_cast<std::uint64_t>(cfg.expanded ? 1 : 0))
         .add(static_cast<std::uint64_t>(cfg.min_body_rows))
+        .add(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(cfg.token_estimate)))
+        .add(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(cfg.word_estimate)))
+        .add(static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(cfg.line_estimate)))
         .build();
     return cfg;
 }

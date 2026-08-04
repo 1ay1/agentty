@@ -75,6 +75,12 @@ struct ComposerState {
     };
     std::vector<Snapshot> undo_stack;
     std::vector<Snapshot> redo_stack;
+    /// True while a run of consecutive self-inserting keystrokes is
+    /// being coalesced into ONE undo unit (see push_undo). Any
+    /// non-typing op (paste, delete, cursor move, chip insert, submit,
+    /// undo/redo) sets this false so the next typing run starts a
+    /// fresh snapshot — Ctrl+Z then rewinds word-runs, not characters.
+    bool undo_coalescing = false;
 
     /// History walking over previous USER messages in the current
     /// thread.

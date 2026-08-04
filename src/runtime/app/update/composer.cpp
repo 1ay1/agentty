@@ -41,7 +41,21 @@ constexpr std::size_t kUndoDepth = 64;
 // but leaves the Attachment object in the vector — orphans are GC'd
 // on composer clear), so storing only the vector's *size* at snapshot
 // time is enough to restore on undo.
-void push_undo(ComposerState& cs) {
+//
+// `coalesce`: when true (a run of ordinary self-inserting typing) and
+// the previous op was ALSO a coalescible typing edit, we skip pushing
+// a fresh snapshot so one Ctrl+Z rewinds the whole word/run rather
+// than a single character. A non-coalescing op (paste, delete, chip
+// insert, cursor jump, submit) always breaks the run so structural
+// edits stay individually undoable — standard editor semantics.
+void push_undo(ComposerState& cs, bool coalesce = false) {
+    if (coalesce && cs.undo_coalescing && !cs.undo_stack.empty()) {
+        // Continue the current typing run: the snapshot already on top
+        // of the stack is the pre-run state we want to restore to.
+        // Just keep the redo stack cleared (this is still a new edit).
+        cs.redo_stack.clear();
+        return;
+    }
     if (cs.undo_stack.size() >= kUndoDepth) {
         // Drop the oldest snapshot. erase from begin is O(N) on a
         // vector but N == 64 here so the cost is negligible compared
@@ -54,6 +68,7 @@ void push_undo(ComposerState& cs) {
     s.attachments = cs.attachments;
     cs.undo_stack.push_back(std::move(s));
     cs.redo_stack.clear();
+    cs.undo_coalescing = coalesce;
 }
 
 // History walking is "current draft" until the user mutates; any text
@@ -66,9 +81,34 @@ void reset_history(ComposerState& cs) {
     cs.draft_save_attachments.clear();
 }
 
+// A text-mutating edit that arrives while the composer is showing a
+// PEEKED queue slot (Alt+↑) is normal editing of that slot — but once
+// the user is just typing, the "press Enter re-queues the peeked slot,
+// removing its original" contract in submit_message no longer matches
+// their mental model: they think they're composing a fresh message.
+// History has the same hazard and is cleared in reset_history; do the
+// same for queue peek so a stray edit can't silently delete the wrong
+// queue entry on submit. The edited bytes simply become the live draft.
+void reset_queue_peek(ComposerState& cs) {
+    cs.queue_peek_idx = -1;
+    cs.draft_save.reset();
+    cs.draft_save_attachments.clear();
+}
+
+// begin_edit for STRUCTURAL edits (paste, delete, chip insert): pushes
+// a standalone undo snapshot that never coalesces with neighbours.
 void begin_edit(ComposerState& cs) {
     push_undo(cs);
     reset_history(cs);
+    reset_queue_peek(cs);
+}
+
+// begin_edit for a self-inserting keystroke: coalesces consecutive
+// typing into a single undo unit (see push_undo).
+void begin_typing_edit(ComposerState& cs) {
+    push_undo(cs, /*coalesce=*/true);
+    reset_history(cs);
+    reset_queue_peek(cs);
 }
 
 // Word-boundary cursor walks. Boundaries are runs of whitespace; chip
@@ -91,9 +131,16 @@ int word_left(std::string_view s, int pos) noexcept {
     while (p > 0 && std::isspace(static_cast<unsigned char>(s[p - 1]))) --p;
     // Skip a run of word chars.
     while (p > 0 && is_word_char(static_cast<unsigned char>(s[p - 1]))) --p;
-    // If we didn't move past anything word-like, skip one punctuation
-    // char so the cursor still advances.
-    if (p == pos && p > 0) --p;
+    // If we didn't move past anything word-like, skip a RUN of
+    // punctuation ("))))" is one unit, matching how word/whitespace
+    // runs are consumed) so the cursor advances by a coherent token.
+    if (p == pos) {
+        while (p > 0
+               && !is_word_char(static_cast<unsigned char>(s[p - 1]))
+               && !std::isspace(static_cast<unsigned char>(s[p - 1]))
+               && static_cast<unsigned char>(s[p - 1]) != 0x01)
+            --p;
+    }
     return p;
 }
 
@@ -107,7 +154,15 @@ int word_right(std::string_view s, int pos) noexcept {
     int p = pos;
     while (p < n && is_word_char(static_cast<unsigned char>(s[p]))) ++p;
     while (p < n && std::isspace(static_cast<unsigned char>(s[p]))) ++p;
-    if (p == pos && p < n) ++p;
+    // No word/whitespace consumed — skip a RUN of punctuation as one
+    // unit (symmetric with word_left).
+    if (p == pos) {
+        while (p < n
+               && !is_word_char(static_cast<unsigned char>(s[p]))
+               && !std::isspace(static_cast<unsigned char>(s[p]))
+               && static_cast<unsigned char>(s[p]) != 0x01)
+            ++p;
+    }
     return p;
 }
 
@@ -371,19 +426,27 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     m.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
     return std::visit(overload{
         [&](ComposerCharInput e) -> Step {
-            // '/' on a fully-empty composer opens the command palette
-            // instead of being typed as text — Claude Code / Cursor /
-            // every chat-shell muscle memory. The empty-buffer guard
-            // (text + attachments + cursor) keeps mid-prose slashes
-            // (URLs, regexes, formula divides) from hijacking input.
-            // Once the palette is open, subscribe routes subsequent
-            // keystrokes to on_command_palette so the slash itself is
-            // not consumed twice; the open-palette starts with an
-            // empty query.
-            if (e.ch == U'/'
-                && m.ui.composer.text.empty()
-                && m.ui.composer.attachments.empty()
-                && m.ui.composer.cursor == 0) {
+            // '/' opens the command palette when it's LINE-LEADING —
+            // the cursor sits at the start of the buffer or right
+            // after a newline, with no attachment placeholder
+            // immediately before it. This matches how real shells /
+            // Claude Code treat slash-commands (line-leading) and is
+            // symmetric with the '@'/'#' word-boundary rule below,
+            // rather than the older "only on a totally empty buffer"
+            // gate that silently swallowed '/' at the start of an
+            // existing draft. Mid-prose slashes (URLs, regexes,
+            // formula divides) still type literally because they're
+            // never line-leading. Once the palette is open, subscribe
+            // routes subsequent keystrokes to on_command_palette so
+            // the slash itself is not consumed twice; the open-palette
+            // starts with an empty query.
+            auto at_line_start = [&]{
+                if (m.ui.composer.cursor == 0) return true;
+                char prev = m.ui.composer.text[
+                    static_cast<std::size_t>(m.ui.composer.cursor) - 1];
+                return prev == '\n';
+            };
+            if (e.ch == U'/' && at_line_start()) {
                 m.ui.command_palette = palette::Open{};
                 return done(std::move(m));
             }
@@ -415,7 +478,13 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.symbol_palette = std::move(o);
                 return done(std::move(m));
             }
-            begin_edit(m.ui.composer);
+            // Coalesce consecutive typing into one undo unit, but
+            // break the run on whitespace so Ctrl+Z rewinds word by
+            // word (not the whole paragraph at once). A space starts a
+            // fresh snapshot; the following word coalesces onto it.
+            const bool is_ws = (e.ch == U' ' || e.ch == U'\t');
+            if (is_ws) begin_edit(m.ui.composer);
+            else       begin_typing_edit(m.ui.composer);
             auto utf8 = ui::utf8_encode(e.ch);
             m.ui.composer.text.insert(m.ui.composer.cursor, utf8);
             m.ui.composer.cursor += static_cast<int>(utf8.size());
@@ -453,26 +522,32 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             return done(std::move(m));
         },
         [&](ComposerCursorLeft) -> Step {
+            m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_prev(m.ui.composer.text, m.ui.composer.cursor);
             return done(std::move(m));
         },
         [&](ComposerCursorRight) -> Step {
+            m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_next(m.ui.composer.text, m.ui.composer.cursor);
             return done(std::move(m));
         },
         [&](ComposerCursorHome) -> Step {
+            m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = 0;
             return done(std::move(m));
         },
         [&](ComposerCursorEnd) -> Step {
+            m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
             return done(std::move(m));
         },
         [&](ComposerCursorWordLeft) -> Step {
+            m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = word_left(m.ui.composer.text, m.ui.composer.cursor);
             return done(std::move(m));
         },
         [&](ComposerCursorWordRight) -> Step {
+            m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = word_right(m.ui.composer.text, m.ui.composer.cursor);
             return done(std::move(m));
         },
@@ -547,7 +622,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.text        = std::move(prev.text);
             m.ui.composer.cursor      = prev.cursor;
             m.ui.composer.attachments = std::move(prev.attachments);
+            m.ui.composer.undo_coalescing = false;
             reset_history(m.ui.composer);
+            reset_queue_peek(m.ui.composer);
             return done(std::move(m));
         },
         [&](ComposerRedo) -> Step {
@@ -564,7 +641,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.text        = std::move(next.text);
             m.ui.composer.cursor      = next.cursor;
             m.ui.composer.attachments = std::move(next.attachments);
+            m.ui.composer.undo_coalescing = false;
             reset_history(m.ui.composer);
+            reset_queue_peek(m.ui.composer);
             return done(std::move(m));
         },
         [&](ComposerHistoryPrev) -> Step {
@@ -579,6 +658,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.draft_save = m.ui.composer.text;
             }
             m.ui.composer.history_idx = next_idx;
+            m.ui.composer.undo_coalescing = false;
             apply_history_entry(m.ui.composer, texts[
                 static_cast<std::size_t>(next_idx)]);
             // History walk does NOT push undo: ↑↓ alone are
@@ -589,6 +669,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
         },
         [&](ComposerHistoryNext) -> Step {
             if (m.ui.composer.history_idx < 0) return done(std::move(m));
+            m.ui.composer.undo_coalescing = false;
             auto texts = previous_user_texts(m);
             int next_idx = m.ui.composer.history_idx - 1;
             if (next_idx < 0) {
@@ -825,6 +906,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // usually wants when correcting a typo in their last
             // queued message.
             if (m.ui.composer.queued.empty()) return done(std::move(m));
+            m.ui.composer.undo_coalescing = false;
             // Mutually exclusive with history walking — abandon any
             // history pick. (The composer text on screen WAS the
             // history pick; saving it would conflate it with the
@@ -874,6 +956,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // Alt+↓ — walk back OUT of the queue toward the live draft.
             // No-op when not peeking.
             if (m.ui.composer.queue_peek_idx < 0) return done(std::move(m));
+            m.ui.composer.undo_coalescing = false;
             int n = static_cast<int>(m.ui.composer.queued.size());
             // Commit the current edit back into its slot first.
             if (m.ui.composer.queue_peek_idx < n) {
