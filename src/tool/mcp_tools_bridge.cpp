@@ -51,6 +51,84 @@ namespace mt = ::mcp::tools;
 struct AgenttyHttpClient final : mt::HttpClient {
     static constexpr int kMaxRedirects = 5;
 
+    // SSRF guard applied to EVERY hop (initial URL AND each redirect target).
+    // mcp-cpp's web shell validates only the first URL it's handed; because
+    // this adapter follows 3xx itself, a public URL that redirects to
+    // 169.254.169.254 (cloud metadata), 127.0.0.1, or an RFC1918 host would
+    // otherwise sail straight through. Mirrors mcp's is_blocked_host: folds
+    // the many legal IPv4 spellings (decimal/hex/octal/short-form) to a
+    // dotted quad before range-checking, plus loopback/link-local/ULA IPv6.
+    static bool host_blocked(std::string_view host) {
+        if (host.size() >= 2 && host.front() == '[' && host.back() == ']')
+            host = host.substr(1, host.size() - 2);
+        std::string h{host};
+        for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (h.empty()) return true;
+        if (h == "localhost" || h.ends_with(".localhost")) return true;
+        if (h == "metadata" || h == "metadata.google.internal") return true;
+        if (h == "0") return true;
+        if (h == "::1" || h == "::") return true;
+        if (h.starts_with("fc") || h.starts_with("fd")) return true;   // ULA
+        if (h.starts_with("fe8") || h.starts_with("fe9")
+            || h.starts_with("fea") || h.starts_with("feb")) return true; // link-local
+
+        // Fold the IPv4 spellings inet_aton/getaddrinfo accept into one u32.
+        auto parse_part = [](std::string_view p, unsigned long& v) -> bool {
+            if (p.empty()) return false;
+            int base = 10;
+            if (p.size() >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+                base = 16; p.remove_prefix(2);
+                if (p.empty()) return false;
+            } else if (p.size() >= 2 && p[0] == '0') { base = 8; p.remove_prefix(1); }
+            v = 0;
+            for (char ch : p) {
+                unsigned dig;
+                if (ch >= '0' && ch <= '9') dig = static_cast<unsigned>(ch - '0');
+                else if (base == 16 && ch >= 'a' && ch <= 'f') dig = static_cast<unsigned>(ch - 'a' + 10);
+                else return false;
+                if (dig >= static_cast<unsigned>(base)) return false;
+                v = v * static_cast<unsigned long>(base) + dig;
+                if (v > 0xffffffffUL) return false;
+            }
+            return true;
+        };
+        std::vector<unsigned long> parts;
+        std::size_t start = 0;
+        bool numeric = true;
+        for (std::size_t i = 0; i <= h.size() && numeric; ++i) {
+            if (i == h.size() || h[i] == '.') {
+                unsigned long v;
+                if (!parse_part(std::string_view{h}.substr(start, i - start), v)) { numeric = false; break; }
+                parts.push_back(v);
+                start = i + 1;
+            }
+        }
+        if (numeric && !parts.empty() && parts.size() <= 4) {
+            std::uint32_t ip = 0;
+            bool ok = true;
+            switch (parts.size()) {
+                case 1: ip = static_cast<std::uint32_t>(parts[0]); break;
+                case 2: if (parts[0] > 0xff || parts[1] > 0xffffff) { ok = false; break; }
+                        ip = static_cast<std::uint32_t>((parts[0] << 24) | parts[1]); break;
+                case 3: if (parts[0] > 0xff || parts[1] > 0xff || parts[2] > 0xffff) { ok = false; break; }
+                        ip = static_cast<std::uint32_t>((parts[0] << 24) | (parts[1] << 16) | parts[2]); break;
+                case 4: if (parts[0] > 0xff || parts[1] > 0xff || parts[2] > 0xff || parts[3] > 0xff) { ok = false; break; }
+                        ip = static_cast<std::uint32_t>((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]); break;
+            }
+            if (ok) {
+                unsigned a = (ip >> 24) & 0xff, b = (ip >> 16) & 0xff;
+                if (a == 127 || a == 0 || a == 10) return true;
+                if (a == 169 && b == 254) return true;
+                if (a == 172 && b >= 16 && b <= 31) return true;
+                if (a == 192 && b == 168) return true;
+                if (a == 100 && b >= 64 && b <= 127) return true;
+                if (a >= 224) return true;
+                return false;   // numeric but public
+            }
+        }
+        return false;
+    }
+
     struct Parsed { std::string host; uint16_t port = 443; std::string path = "/"; bool ok = false; };
 
     static Parsed parse(std::string_view url) {
@@ -100,6 +178,11 @@ struct AgenttyHttpClient final : mt::HttpClient {
         for (int hop = 0; hop <= kMaxRedirects; ++hop) {
             auto p = parse(url);
             if (!p.ok) { out.status = 0; out.error = "could not parse url: " + url; return out; }
+            if (host_blocked(p.host)) {
+                out.status = 0;
+                out.error  = "blocked host (SSRF guard): " + p.host;
+                return out;
+            }
 
             http::Request req;
             req.method = (in.method == "POST") ? http::HttpMethod::Post
