@@ -446,23 +446,45 @@ std::optional<a::ToolCallContent> announce_diff(const ToolUse& tc, std::string_v
 std::optional<a::ToolCallContent> command_content(const ToolUse& tc) {
     namespace sp = tools::spec;
     const auto* spec = sp::lookup(tc.name.value);
-    if (!spec) return std::nullopt;
+    const auto& args = tc.args;
+
+    // Unknown / MCP tools: claude-code-acp's `Other` case pretty-prints the raw
+    // input as a ```json block so EVERY tool card has a legible body instead of
+    // an empty one. Do the same so an MCP tool surfaced to Zed shows its
+    // arguments rather than a bare title.
+    if (!spec) {
+        if (args.is_null()) return std::nullopt;
+        std::string dump = args.dump(2);
+        if (dump == "null" || dump.empty()) return std::nullopt;
+        std::string md = "```json\n" + dump + "\n```";
+        return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+    }
+
     switch (spec->kind) {
         case sp::Kind::Bash:
         case sp::Kind::Diagnostics:
         case sp::Kind::Test:
-        case sp::Kind::ProcessStart:
-            break;
+        case sp::Kind::ProcessStart: {
+            if (!args.contains("command") || !args["command"].is_string())
+                return std::nullopt;
+            std::string cmd = args["command"].get<std::string>();
+            if (cmd.empty()) return std::nullopt;
+            std::string md = "```sh\n" + cmd + "\n```";
+            return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+        }
+        case sp::Kind::WebFetch: {
+            // claude-code-acp attaches WebFetch's `prompt` as body content (the
+            // url is already in the title). Mirror it so the fetch intent shows
+            // in the card.
+            if (!args.contains("prompt") || !args["prompt"].is_string())
+                return std::nullopt;
+            std::string body = args["prompt"].get<std::string>();
+            if (body.empty()) return std::nullopt;
+            return a::ToolCallContent{a::TCC_Content{text_block(std::move(body)), json::object()}};
+        }
         default:
             return std::nullopt;
     }
-    const auto& args = tc.args;
-    if (!args.contains("command") || !args["command"].is_string())
-        return std::nullopt;
-    std::string cmd = args["command"].get<std::string>();
-    if (cmd.empty()) return std::nullopt;
-    std::string md = "```sh\n" + cmd + "\n```";
-    return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
 }
 
 // A plain-text content block for the Task tool, whose defining input is the
@@ -614,6 +636,7 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
     a::List<a::ToolCallContent> content;
     if (auto d = announce_diff(tc, cwd)) content.push_back(std::move(*d));
     if (auto c = command_content(tc))    content.push_back(std::move(*c));
+    if (auto pc = prompt_content(tc))    content.push_back(std::move(*pc));
     if (!content.empty()) out.content = std::move(content);
     return out;
 }
