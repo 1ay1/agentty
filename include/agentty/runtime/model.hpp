@@ -337,16 +337,27 @@ struct Model {
         // times before it registers once"). Scroll position here is a
         // pure function of the selected index, so the raw-key dispatch
         // is interference, not input.
-        mutable maya::ScrollState model_picker_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState provider_picker_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState thread_list_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState command_palette_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState mention_palette_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState symbol_palette_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState code_blocks_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState checkpoints_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState todo_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState tool_viewer_scroll{.auto_dispatch = false};
+        //
+        // NB: maya's ScrollState gained a user-declared destructor (the
+        // UAF fix that unregisters it from the live-state registry), so
+        // it is no longer an aggregate and `{.auto_dispatch = false}`
+        // designated init no longer compiles. routed_scroll() builds one
+        // with auto_dispatch cleared without touching aggregate-ness.
+        static maya::ScrollState routed_scroll() noexcept {
+            maya::ScrollState s;
+            s.auto_dispatch = false;
+            return s;
+        }
+        mutable maya::ScrollState model_picker_scroll     = routed_scroll();
+        mutable maya::ScrollState provider_picker_scroll  = routed_scroll();
+        mutable maya::ScrollState thread_list_scroll      = routed_scroll();
+        mutable maya::ScrollState command_palette_scroll  = routed_scroll();
+        mutable maya::ScrollState mention_palette_scroll  = routed_scroll();
+        mutable maya::ScrollState symbol_palette_scroll   = routed_scroll();
+        mutable maya::ScrollState code_blocks_scroll      = routed_scroll();
+        mutable maya::ScrollState checkpoints_scroll      = routed_scroll();
+        mutable maya::ScrollState todo_scroll             = routed_scroll();
+        mutable maya::ScrollState tool_viewer_scroll      = routed_scroll();
     };
 
     Domain      d;
