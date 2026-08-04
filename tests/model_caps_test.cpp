@@ -296,6 +296,21 @@ static void test_cheapest_capable_router() {
     std::vector<ModelInfo> notools = {mi("claude-opus-4-5"), mi("claude-haiku-4-5")};
     notools[1].supports_tools = false;
     CHECK(cheapest_capable_model("claude-opus-4-5", notools) == "claude-opus-4-5");
+
+    // REGRESSION: the routed id must NEVER carry the `[1m]`/`[2m]` extended-
+    // context picker marker. That marker makes the transport send the
+    // `context-1m` beta, which 400s the whole subagent request on a
+    // subscription that isn't entitled to the long-context beta
+    // ("long context beta is not yet available for this subscription"). A
+    // subagent never needs a 1M window, so the router strips it — both when a
+    // cheaper candidate is chosen and when the `[1m]` parent is kept as-is.
+    std::vector<ModelInfo> pool_1m = {
+        mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
+    CHECK(cheapest_capable_model("claude-opus-4-5[1m]", pool_1m) == "claude-haiku-4-5");
+    // Parent-kept path (nothing strictly cheaper) still drops the marker.
+    std::vector<ModelInfo> solo_1m = {mi("claude-opus-4-5[1m]")};
+    CHECK(cheapest_capable_model("claude-opus-4-5[1m]", solo_1m) == "claude-opus-4-5");
+    CHECK(cheapest_capable_model("claude-opus-4-5[1m]", {}) == "claude-opus-4-5");
 }
 
 // A subagent must NEVER carry the picker-only `[1m]`/`[2m]` extended-context
