@@ -107,6 +107,84 @@ std::size_t retrieval_output_budget() {
     return value;
 }
 
+// Fraction of the TOP score below which a tail passage is dropped rather than
+// compressed into the context. The low-confidence tail is what the model
+// ignores anyway, so paying flagship input price for it is pure waste. A hit at
+// score s survives only if s >= floor_frac * top_score. 0 disables the floor
+// (keep every hit); the default trims the obvious tail without touching the
+// meat of a good retrieval. Tunable via AGENTTY_RAG_RELEVANCE_FLOOR.
+float relevance_floor_frac() {
+    float f = 0.30f;
+    if (const char* v = std::getenv("AGENTTY_RAG_RELEVANCE_FLOOR"); v && v[0]) {
+        try { f = std::clamp(std::stof(v), 0.0f, 0.95f); } catch (...) {}
+    }
+    return f;
+}
+
+// Water-filling budget allocator: split `total` bytes across passages in
+// proportion to their score^gamma (gamma>1 concentrates budget on the
+// confident head), but never below `floor` per passage so even a kept tail hit
+// stays a legible excerpt. This replaces the flat total/n split, which handed a
+// rank-8 hit at confidence 0.11 the same byte allowance as the rank-1 hit at
+// 0.88 — i.e. spent the same tokens on signal and noise. Returns one allowance
+// per input score, summing to <= total. Tunable via AGENTTY_RAG_BUDGET_GAMMA.
+std::vector<std::size_t> allocate_budget(const std::vector<double>& scores,
+                                         std::size_t total,
+                                         std::size_t floor = 768) {
+    const std::size_t n = scores.size();
+    std::vector<std::size_t> out(n, 0);
+    if (n == 0 || total == 0) return out;
+    float gamma = 1.5f;
+    if (const char* v = std::getenv("AGENTTY_RAG_BUDGET_GAMMA"); v && v[0]) {
+        try { gamma = std::clamp(std::stof(v), 0.5f, 4.0f); } catch (...) {}
+    }
+    // If every passage can't get the floor, fall back to an even split so we
+    // don't starve later passages to overfeed the first.
+    if (total < floor * n) {
+        std::size_t each = total / n;
+        for (auto& a : out) a = each;
+        return out;
+    }
+    std::vector<double> weight(n);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        double s = std::clamp(scores[i], 0.0, 1.0);
+        weight[i] = std::pow(s + 1e-3, static_cast<double>(gamma));
+        sum += weight[i];
+    }
+    if (sum <= 0.0) { for (auto& w : weight) w = 1.0; sum = static_cast<double>(n); }
+    // Reserve the floor for everyone, distribute the remainder by weight.
+    const std::size_t reserved = floor * n;
+    const std::size_t extra = total - reserved;
+    for (std::size_t i = 0; i < n; ++i)
+        out[i] = floor + static_cast<std::size_t>(
+                             (weight[i] / sum) * static_cast<double>(extra));
+    return out;
+}
+
+// Scale the TOTAL byte budget by retrieval confidence. A retrieval that barely
+// clears the relevance bar (conf ~0.3) shouldn't reserve the same ~3k tokens as
+// a slam-dunk (conf ~0.9) — the marginal passages it would spend that budget on
+// are exactly the ones the model is least likely to use. We linearly ramp the
+// budget from a floor fraction at conf=floor_conf to 100% at conf=1.0, so weak
+// retrievals inject a tight, cheap block and strong ones get full room. conf<0
+// (unknown) keeps the full budget — we don't penalise a path that never graded.
+// Tunable via AGENTTY_RAG_CONF_BUDGET_FLOOR (min fraction, default 0.45).
+std::size_t confidence_scaled_budget(std::size_t total, double conf) {
+    if (conf < 0.0) return total;                 // ungraded → full budget
+    float floor_frac = 0.45f;
+    if (const char* v = std::getenv("AGENTTY_RAG_CONF_BUDGET_FLOOR"); v && v[0]) {
+        try { floor_frac = std::clamp(std::stof(v), 0.1f, 1.0f); } catch (...) {}
+    }
+    const double c = std::clamp(conf, 0.0, 1.0);
+    // frac = floor + (1-floor) * c, clamped to [floor, 1].
+    const double frac = std::clamp(
+        static_cast<double>(floor_frac) + (1.0 - floor_frac) * c,
+        static_cast<double>(floor_frac), 1.0);
+    return std::max<std::size_t>(2048,
+        static_cast<std::size_t>(static_cast<double>(total) * frac));
+}
+
 std::vector<std::string> query_terms(std::string_view query) {
     std::vector<std::string> terms;
     std::string word;
@@ -135,6 +213,119 @@ std::string compress_passage(std::string_view query, std::string_view text,
                              std::size_t budget) {
     if (text.size() <= budget) return std::string{text};
     const auto terms = query_terms(query);
+
+    // Extractive sentence selection (model-free LLMLingua-style) for PROSE.
+    // Score each sentence by rare-term-weighted query overlap, greedily keep
+    // the highest-scoring ones until the budget fills, then emit them in
+    // original order. This drops irrelevant filler BETWEEN relevant sentences
+    // — something the contiguous line-window below cannot do — so the same
+    // budget carries more answer-bearing text. We only take this path for
+    // natural-language passages (few newlines relative to length); code and
+    // config keep the contiguous window path, where inter-line contiguity is
+    // load-bearing for readability. Disable via AGENTTY_RAG_EXTRACTIVE=0.
+    auto extractive_enabled = [] {
+        const char* v = std::getenv("AGENTTY_RAG_EXTRACTIVE");
+        return !(v && (v[0] == '0' || v[0] == 'f' || v[0] == 'F'));
+    };
+    const std::size_t newline_count =
+        static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n'));
+    const bool prose_shaped =
+        !terms.empty() && text.size() > 0
+        && newline_count * 40 < text.size();   // avg line > 40 chars ⇒ prose
+    if (extractive_enabled() && prose_shaped) {
+        // Split into sentences on ., !, ? and hard newlines. Keep the
+        // delimiter with its sentence so reassembly reads naturally.
+        struct Sent { std::size_t begin, end; };
+        std::vector<Sent> sents;
+        std::size_t s = 0;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            char c = text[i];
+            const bool boundary =
+                (c == '.' || c == '!' || c == '?' || c == '\n')
+                && (i + 1 >= text.size()
+                    || text[i + 1] == ' ' || text[i + 1] == '\n'
+                    || text[i + 1] == '\t');
+            if (boundary) { sents.push_back({s, i + 1}); s = i + 1; }
+        }
+        if (s < text.size()) sents.push_back({s, text.size()});
+
+        if (sents.size() > 2) {
+            // Rarer query terms are more discriminative: weight a term by
+            // 1/(1+corpus-frequency-in-this-passage). Cheap in-passage IDF
+            // proxy — no global stats needed, and it stops a common term
+            // ('the', 'code') from dominating the score.
+            std::vector<std::size_t> tf(terms.size(), 0);
+            std::string lowered{text};
+            for (char& c : lowered)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+                std::size_t at = 0;
+                while ((at = lowered.find(terms[ti], at)) != std::string::npos) {
+                    ++tf[ti]; at += terms[ti].size();
+                }
+            }
+            auto sent_score = [&](const Sent& se) -> double {
+                double sc = 0.0;
+                std::string_view seg = text.substr(se.begin, se.end - se.begin);
+                std::string low{seg};
+                for (char& c : low)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                for (std::size_t ti = 0; ti < terms.size(); ++ti)
+                    if (low.find(terms[ti]) != std::string::npos)
+                        sc += 1.0 / (1.0 + static_cast<double>(tf[ti]));
+                // Length-normalise lightly so a long sentence doesn't win on
+                // surface area alone, but don't over-penalise (sqrt).
+                return sc / std::sqrt(static_cast<double>(seg.size()) + 1.0);
+            };
+            std::vector<std::size_t> order(sents.size());
+            for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::stable_sort(order.begin(), order.end(),
+                [&](std::size_t a, std::size_t b) {
+                    return sent_score(sents[a]) > sent_score(sents[b]);
+                });
+            // Greedily admit top sentences until the budget fills. If the very
+            // top sentence scores 0 (no query overlap anywhere), bail to the
+            // contiguous path — extraction has no signal to work with.
+            if (sent_score(sents[order[0]]) > 0.0) {
+                std::vector<char> keep(sents.size(), false);
+                std::size_t used = 0;
+                const std::size_t sep = 1;   // newline between kept sentences
+                for (std::size_t k = 0; k < order.size(); ++k) {
+                    const auto& se = sents[order[k]];
+                    std::size_t len = se.end - se.begin;
+                    if (used + len + sep > budget) {
+                        if (used == 0) break;   // first is already over budget
+                        continue;               // skip, try a smaller one
+                    }
+                    keep[order[k]] = true;
+                    used += len + sep;
+                }
+                std::string out;
+                out.reserve(used + 8);
+                bool gap = false;
+                for (std::size_t i = 0; i < sents.size(); ++i) {
+                    if (!keep[i]) { gap = true; continue; }
+                    if (!out.empty()) {
+                        if (gap) { out += " … "; gap = false; }
+                        else if (out.back() != '\n' && out.back() != ' ')
+                            out += ' ';
+                    }
+                    std::string_view seg = text.substr(sents[i].begin,
+                                                        sents[i].end - sents[i].begin);
+                    // Trim a leading space the split may have left attached.
+                    while (!seg.empty() && (seg.front() == ' ' || seg.front() == '\n'))
+                        seg.remove_prefix(1);
+                    out.append(seg);
+                }
+                if (!out.empty()) {
+                    if (out.size() > budget) out.resize(utf8_boundary(out, budget));
+                    return out;
+                }
+            }
+        }
+    }
+
+    // ── Contiguous line-window fallback (code / config / no-signal prose) ──
     std::vector<std::pair<std::size_t, std::size_t>> lines;
     for (std::size_t start = 0; start < text.size();) {
         auto end = text.find('\n', start);
@@ -1251,9 +1442,42 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
         double top = 0.0;
         std::vector<std::string> surfaced;
         surfaced.reserve(hits.size());
-        const std::size_t total_budget = retrieval_output_budget();
+
+        // Relevance floor: drop the low-confidence tail before spending any
+        // tokens on it. The top hit always survives; a later hit survives only
+        // if it scores within floor_frac of the top. This is where the token
+        // saving comes from — the model ignores 0.1-confidence passages, so we
+        // don't pay to inject them.
+        {
+            double hi = 0.0;
+            for (const auto& r : hits) hi = std::max(hi, static_cast<double>(r.score.value));
+            const double floor = hi * relevance_floor_frac();
+            if (hi > 0.0 && floor > 0.0) {
+                std::size_t keep = 1; // always keep the best
+                while (keep < hits.size()
+                       && static_cast<double>(hits[keep].score.value) >= floor)
+                    ++keep;
+                if (keep < hits.size()) hits.resize(keep);
+            }
+        }
+
+        // Score-proportional (water-filling) budget: confident passages get
+        // room to be complete; kept tail passages get a tight excerpt — instead
+        // of the old flat total/n split that spent equal tokens on signal and
+        // noise. The TOTAL is first scaled down by CRAG confidence so a
+        // barely-passing retrieval injects a cheap block, not the full ~3k tok.
+        const std::size_t total_budget =
+            confidence_scaled_budget(retrieval_output_budget(), crag_conf);
+        std::vector<double> pre_scores;
+        pre_scores.reserve(hits.size());
+        for (const auto& r : hits) {
+            double s = std::clamp(static_cast<double>(r.score.value), 0.0, 1.0);
+            pre_scores.push_back(s);
+        }
+        const std::vector<std::size_t> allowances =
+            allocate_budget(pre_scores, total_budget);
         std::size_t remaining_budget = total_budget;
-        const std::size_t per_passage = std::max<std::size_t>(768, total_budget / hits.size());
+        std::size_t idx = 0;
         for (const auto& r : hits) {
             auto [src, path] = split_uri(r.uri);
             Passage p;
@@ -1266,7 +1490,9 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
             if (s > 1.0) s = 1.0;
             p.score      = s;
             std::string raw = r.context.empty() ? r.text : (r.context + "\n" + r.text);
-            const std::size_t allowance = std::min(per_passage, remaining_budget);
+            std::size_t want_bytes = idx < allowances.size() ? allowances[idx] : 768;
+            const std::size_t allowance = std::min(want_bytes, remaining_budget);
+            ++idx;
             if (allowance < 256) break;
             p.text = compress_passage(query, raw, allowance);
             remaining_budget -= std::min(remaining_budget, p.text.size());
@@ -1441,11 +1667,36 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
                                              {}, code_tracep);
         if (!res) { out.error = "search_code failed"; return out; }
         double top = 0.0;
-        const std::size_t total_budget = retrieval_output_budget();
+        // Relevance floor + score-proportional budget (same rationale as the
+        // docs path): don't pay tokens for the low-confidence tail, and give
+        // the confident head room to be complete.
+        std::vector<::rag::SearchResult> ranked(res->begin(), res->end());
+        {
+            double hi = 0.0;
+            for (const auto& r : ranked) hi = std::max(hi, static_cast<double>(r.score.value));
+            const double floor = hi * relevance_floor_frac();
+            if (hi > 0.0 && floor > 0.0 && !ranked.empty()) {
+                std::size_t keep = 1;
+                while (keep < ranked.size()
+                       && static_cast<double>(ranked[keep].score.value) >= floor)
+                    ++keep;
+                if (keep < ranked.size()) ranked.resize(keep);
+            }
+        }
+        const std::size_t total_budget = confidence_scaled_budget(
+            retrieval_output_budget(),
+            ranked.empty() ? -1.0
+                           : std::clamp(static_cast<double>(ranked.front().score.value),
+                                        0.0, 1.0));
+        std::vector<double> pre_scores;
+        pre_scores.reserve(ranked.size());
+        for (const auto& r : ranked)
+            pre_scores.push_back(std::clamp(static_cast<double>(r.score.value), 0.0, 1.0));
+        const std::vector<std::size_t> allowances =
+            allocate_budget(pre_scores, total_budget);
         std::size_t remaining_budget = total_budget;
-        const std::size_t per_passage = std::max<std::size_t>(768,
-            total_budget / std::max<std::size_t>(res->size(), 1));
-        for (const auto& r : *res) {
+        std::size_t idx = 0;
+        for (const auto& r : ranked) {
             auto [src, path] = split_uri(r.uri);
             (void)src;
             Passage p;
@@ -1454,7 +1705,9 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             p.line_start = static_cast<int>(r.start_line);
             p.line_end   = static_cast<int>(r.end_line);
             p.score      = static_cast<double>(r.score.value);
-            const std::size_t allowance = std::min(per_passage, remaining_budget);
+            std::size_t want_bytes = idx < allowances.size() ? allowances[idx] : 768;
+            const std::size_t allowance = std::min(want_bytes, remaining_budget);
+            ++idx;
             if (allowance < 256) break;
             p.text = compress_passage(query, r.text, allowance);
             remaining_budget -= std::min(remaining_budget, p.text.size());
@@ -1747,6 +2000,50 @@ int run(const std::string& root) {
         std::printf("\n  %zu known-item queries over %zu chunks. "
                     "A metric that DROPS at a rung is the stage to tune.\n",
                     queries.size(), nchunks);
+
+        // 4. TOKEN-COST measurement (opt-in via AGENTTY_RAG_MEASURE=1). Runs the
+        //    synthesized queries through the REAL Retriever::retrieve() output
+        //    path — the one that applies the relevance floor, water-fill,
+        //    confidence-scaled budget and extractive compression — and tallies
+        //    the bytes/tokens actually injected into a model turn. Run the
+        //    binary twice (levers on vs off via env) and diff to see the real
+        //    saving. Token estimate: bytes/4 (Claude/GPT English heuristic).
+        if (const char* mv = std::getenv("AGENTTY_RAG_MEASURE"); mv && mv[0] == '1') {
+            Retriever ret;
+            std::size_t total_bytes = 0, total_passages = 0, empty = 0;
+            std::size_t sampled = 0;
+            const std::size_t kMax = std::min<std::size_t>(queries.size(), 80);
+            const std::size_t qstride = queries.size() > kMax ? queries.size() / kMax : 1;
+            auto q0 = std::chrono::steady_clock::now();
+            for (std::size_t i = 0; i < queries.size(); i += qstride) {
+                auto rr = ret.retrieve(queries[i].text, /*k=*/8, /*skip_docs=*/false);
+                ++sampled;
+                if (rr.passages.empty()) { ++empty; continue; }
+                total_passages += rr.passages.size();
+                for (const auto& p : rr.passages) total_bytes += p.text.size();
+            }
+            auto q1 = std::chrono::steady_clock::now();
+            double per_ms = std::chrono::duration_cast<std::chrono::microseconds>(q1 - q0).count()
+                            / 1000.0 / static_cast<double>(std::max<std::size_t>(sampled, 1));
+            const double est_tokens = static_cast<double>(total_bytes) / 4.0;
+            std::printf("\n  ── TOKEN COST (real retrieve() output path) ──\n");
+            std::printf("  queries measured : %zu (%zu returned nothing)\n", sampled, empty);
+            std::printf("  passages injected: %zu total, %.2f avg/query\n",
+                        total_passages,
+                        static_cast<double>(total_passages)
+                            / static_cast<double>(std::max<std::size_t>(sampled, 1)));
+            std::printf("  output bytes     : %zu total, %.0f avg/query\n",
+                        total_bytes,
+                        static_cast<double>(total_bytes)
+                            / static_cast<double>(std::max<std::size_t>(sampled, 1)));
+            std::printf("  est. tokens      : %.0f total, %.0f avg/query (bytes/4)\n",
+                        est_tokens,
+                        est_tokens / static_cast<double>(std::max<std::size_t>(sampled, 1)));
+            std::printf("  retrieve latency : %.2f ms/query\n", per_ms);
+            // Emit a machine-readable line for scripted before/after diffing.
+            std::printf("  MEASURE\ttokens=%.0f\tbytes=%zu\tpassages=%zu\tqueries=%zu\n",
+                        est_tokens, total_bytes, total_passages, sampled);
+        }
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "rag-bench: %s\n", e.what());
