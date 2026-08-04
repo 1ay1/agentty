@@ -651,7 +651,6 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             // with mods.ctrl=true. Normalise.
             if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
             switch (c) {
-                case U'k': return ComposerKillToEndOfLine{};
                 case U'u': return ComposerKillToBeginningOfLine{};
                 case U'w':
                     // Ctrl+W — delete word backward (readline
@@ -693,6 +692,15 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             // Symmetric to Ctrl+W; arrives as ESC d → CharKey{'d'}+alt.
             if (c == U'd' || c == U'D')
                 return ComposerDeleteWordForward{};
+            // Alt+K — kill to END of line. Readline's kill-to-end is
+            // Ctrl+K, but that's reserved app-wide for the command
+            // palette (on_global claims every Ctrl+K before the
+            // composer sees it), so kill-to-end moves to the meta
+            // variant. Pairs with Ctrl+U (kill-to-start), the same way
+            // Alt+D (kill word forward) pairs with Ctrl+W (kill word
+            // back).
+            if (c == U'k' || c == U'K')
+                return ComposerKillToEndOfLine{};
         }
         if (ck->codepoint >= 0x20) return ComposerCharInput{ck->codepoint};
     }
