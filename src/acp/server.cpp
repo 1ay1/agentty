@@ -421,8 +421,13 @@ std::optional<a::ToolCallContent> announce_diff(const ToolUse& tc, std::string_v
     (void)cwd;
     diff.path = path;
     if (spec->kind == sp::Kind::Write) {
-        // oldText left null (TCC_Diff default) — a Write has no prior text;
-        // claude-code-acp sends `oldText: null` explicitly for this case.
+        // A Write replaces the whole file. Announce oldText as an empty string
+        // (not null) so Zed renders it as a normal diff card — the same widget
+        // shape as Edit — rather than a special "new file" affordance that
+        // looks different from an edit. The completion update carries the
+        // authoritative on-disk before/after (which fills in real prior text
+        // when the file already existed).
+        diff.oldText = a::Just<std::string>(std::string{});
         diff.newText = s("content");
         return a::ToolCallContent{std::move(diff)};
     }
@@ -584,6 +589,22 @@ a::ToolCallContent result_content_block(const ToolUse& tc, const std::string& te
         }
         // Fence so the tab layout and any markdown chars render verbatim.
         std::string md = "```\n" + numbered + "```";
+        return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+    }
+
+    // Command output (bash/test/diagnostics/process/git): fence as a code
+    // block so terminal output renders as a monospace log — exactly what a Zed
+    // user expects from a shell card — instead of markdown-escaped prose. This
+    // is the static fallback for when the live-terminal path isn't taken.
+    if ((kind == sp::Kind::Bash || kind == sp::Kind::Test
+         || kind == sp::Kind::Diagnostics || kind == sp::Kind::ProcessStart
+         || kind == sp::Kind::ProcessPoll || kind == sp::Kind::ProcessStop
+         || kind == sp::Kind::GitCommit)
+        && !text.empty()) {
+        std::string body{text};
+        std::string md = body.find("```") == std::string::npos
+                       ? "```\n" + body + "\n```"
+                       : std::move(body);
         return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
     }
 
@@ -2071,6 +2092,21 @@ AgentServer::run_bash_via_terminal(Session& sess, ToolUse& tc) {
     upd.status     = a::Just(ok ? a::ToolCallStatus::Completed : a::ToolCallStatus::Failed);
     a::List<a::ToolCallContent> content;
     content.push_back(a::ToolCallContent{a::TCC_Terminal{terminal_id, json::object()}});
+    // ALSO attach the captured output as a fenced text block. The terminal is
+    // released the moment this function returns (the Releaser), and Zed drops a
+    // released terminal's live widget — so without a static text copy the
+    // completed card would show NOTHING. The fenced block is the durable
+    // scrollback the user (and a reopened session) always sees. Empty output
+    // (e.g. a silent successful command) still gets a minimal note so the card
+    // isn't blank.
+    {
+        std::string shown = model_text.empty() ? std::string{"(no output)"} : model_text;
+        std::string md = shown.find("```") == std::string::npos
+                       ? "```\n" + shown + "\n```"
+                       : std::move(shown);
+        content.push_back(a::ToolCallContent{
+            a::TCC_Content{text_block(std::move(md)), json::object()}});
+    }
     upd.content   = a::Just(std::move(content));
     upd.rawOutput = a::Just<json>(json{{"text", model_text},
                                        {"exitCode", code},
