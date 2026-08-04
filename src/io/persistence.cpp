@@ -578,25 +578,157 @@ load_thread_file(const std::filesystem::path& p) {
     return parse_thread(j);
 }
 
+// ── Thread metadata index sidecar ────────────────────────────────────
+//
+// The picker only needs id + title + created_at + updated_at, but those
+// keys live AFTER the multi-MB `compactions` / `messages` arrays in each
+// thread file, so the metadata-only SAX walk still streams every byte of
+// every file to reach them — ~1 s for a 247-thread / 281 MB history.
+//
+// `index.json` caches that metadata in one small file: a map of
+// id → {title, created_at, updated_at, mtime}. On load we read the index
+// and trust an entry whose recorded mtime still matches the thread
+// file's on-disk mtime; only files that are new or changed since the
+// index was written get the full per-file SAX parse (and refresh the
+// index). Delete index.json and everything self-heals via the cold
+// path. This turns the warm startup into one small read + N stat()s.
+namespace {
+
+fs::path thread_index_path() { return threads_dir() / "index.json"; }
+
+struct IndexEntry {
+    std::string title;
+    long long   created_at = 0;   // unix seconds
+    long long   updated_at = 0;   // unix seconds
+    long long   mtime      = 0;   // file last_write_time, ns since clock epoch
+};
+
+long long file_mtime_ns(const fs::path& p) {
+    std::error_code ec;
+    auto t = fs::last_write_time(p, ec);
+    if (ec) return 0;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               t.time_since_epoch()).count();
+}
+
+std::unordered_map<std::string, IndexEntry> read_thread_index() {
+    std::unordered_map<std::string, IndexEntry> out;
+    std::ifstream ifs(thread_index_path());
+    if (!ifs) return out;
+    try {
+        json j; ifs >> j;
+        if (!j.is_object()) return out;
+        auto& threads = j.contains("threads") ? j["threads"] : j;
+        if (!threads.is_object()) return out;
+        for (auto& [id, e] : threads.items()) {
+            if (!e.is_object()) continue;
+            IndexEntry ie;
+            ie.title      = e.value("title", std::string{});
+            ie.created_at = e.value("created_at", 0LL);
+            ie.updated_at = e.value("updated_at", 0LL);
+            ie.mtime      = e.value("mtime", 0LL);
+            out.emplace(id, std::move(ie));
+        }
+    } catch (const std::exception&) {
+        // Corrupt index — treat as empty; the cold path rebuilds it.
+        out.clear();
+    }
+    return out;
+}
+
+void write_thread_index(const std::unordered_map<std::string, IndexEntry>& idx) {
+    json threads = json::object();
+    for (const auto& [id, e] : idx) {
+        json ej;
+        ej["title"]      = e.title;
+        ej["created_at"] = e.created_at;
+        ej["updated_at"] = e.updated_at;
+        ej["mtime"]      = e.mtime;
+        threads[id] = std::move(ej);
+    }
+    json j;
+    j["version"] = 1;
+    j["threads"] = std::move(threads);
+    try { (void)write_json_atomic(thread_index_path(), j.dump()); }
+    catch (const std::exception&) { /* best-effort cache */ }
+}
+
+Thread thread_from_index(const std::string& id, const IndexEntry& e) {
+    Thread t;
+    t.id    = ThreadId{id};
+    t.title = e.title;
+    t.created_at = std::chrono::system_clock::time_point{
+        std::chrono::seconds{e.created_at}};
+    t.updated_at = std::chrono::system_clock::time_point{
+        std::chrono::seconds{e.updated_at}};
+    return t;
+}
+
+// Refresh a single thread's index entry after its file is (re)written,
+// stamping the NEW on-disk mtime so the next startup takes the fast
+// path for this thread instead of re-parsing it. Best-effort: a failed
+// index update just means one slow parse next launch, then self-heals.
+void reindex_thread(const Thread& t) {
+    auto idx = read_thread_index();
+    IndexEntry ie;
+    ie.title      = t.title;
+    ie.created_at = std::chrono::duration_cast<std::chrono::seconds>(
+                        t.created_at.time_since_epoch()).count();
+    ie.updated_at = std::chrono::duration_cast<std::chrono::seconds>(
+                        t.updated_at.time_since_epoch()).count();
+    ie.mtime      = file_mtime_ns(threads_dir() / (t.id.value + ".json"));
+    idx[t.id.value] = std::move(ie);
+    write_thread_index(idx);
+}
+
+} // namespace
+
 std::vector<Thread> load_all_threads() {
-    // Metadata-only directory walk — leaves Thread::messages empty. The
-    // previous full-parse loaded all 649 files into Message/ToolUse trees
-    // (376 MB on disk → ~1.2 GB live) at startup, even though the picker
-    // only ever reads title + updated_at. Bodies are now lazy-loaded on
-    // ThreadListSelect via load_thread_file.
+    // Metadata-only directory walk, index-accelerated (see the index
+    // sidecar note above). A cached entry whose mtime still matches the
+    // file's on-disk mtime is used verbatim — no open/parse. Only new or
+    // changed files get the full SAX meta parse, and the index is
+    // rewritten if anything changed so the next startup is warm again.
     std::vector<Thread> out;
     std::error_code ec;
     if (!fs::exists(threads_dir(), ec)) return out;
+
+    auto index = read_thread_index();
+    std::unordered_map<std::string, IndexEntry> fresh;
+    fresh.reserve(index.size() + 8);
+    bool index_dirty = false;
+
     for (const auto& e : fs::directory_iterator(threads_dir(), ec)) {
         if (e.path().extension() != ".json") continue;
         // acp_sessions.json is the ACP server's sidecar session index
-        // (sessionId → {cwd, title, updatedAt}), not a thread file. It
-        // lives in threads_dir() but has a different shape, so the meta
-        // SAX parser fails it — skip it instead of logging a spurious
-        // "metadata sax parse failed" on every startup.
-        if (e.path().filename() == "acp_sessions.json") continue;
+        // (sessionId → {cwd, title, updatedAt}), not a thread file; and
+        // index.json is our own cache. Neither is a thread — skip both.
+        const auto fname = e.path().filename();
+        if (fname == "acp_sessions.json" || fname == "index.json") continue;
+
+        const std::string id = e.path().stem().string();
+        const long long   mt = file_mtime_ns(e.path());
+
+        // Fast path: index entry with a matching mtime — no parse.
+        if (auto it = index.find(id);
+            it != index.end() && it->second.mtime == mt && mt != 0) {
+            out.push_back(thread_from_index(id, it->second));
+            fresh.emplace(id, it->second);
+            continue;
+        }
+
+        // Slow path: new or changed file — SAX-parse metadata + reindex.
         auto loaded = load_thread_meta_file(e.path());
         if (loaded) {
+            IndexEntry ie;
+            ie.title      = loaded->title;
+            ie.created_at = std::chrono::duration_cast<std::chrono::seconds>(
+                                loaded->created_at.time_since_epoch()).count();
+            ie.updated_at = std::chrono::duration_cast<std::chrono::seconds>(
+                                loaded->updated_at.time_since_epoch()).count();
+            ie.mtime      = mt;
+            fresh.emplace(id, std::move(ie));
+            index_dirty = true;
             out.push_back(std::move(*loaded));
         } else {
             // Log and skip — corrupt or schema-incompatible files don't
@@ -609,6 +741,12 @@ std::vector<Thread> load_all_threads() {
                 loaded.error().render().c_str());
         }
     }
+
+    // Prune entries whose files vanished (deleted threads) and persist
+    // the refreshed index for the next warm startup.
+    if (fresh.size() != index.size()) index_dirty = true;
+    if (index_dirty) write_thread_index(fresh);
+
     std::sort(out.begin(), out.end(), [](const Thread& a, const Thread& b){
         return a.updated_at > b.updated_at;
     });
@@ -660,6 +798,9 @@ static void save_thread_sync(const Thread& t) {
     // a silently-skipped save beats a process-terminating uncaught throw.
     try {
         (void)write_json_atomic(threads_dir() / (t.id.value + ".json"), j.dump(2));
+        // Keep the metadata index in lock-step with the file we just
+        // wrote so the next startup's fast path picks it up.
+        reindex_thread(t);
     } catch (const nlohmann::json::exception&) {
         // caller can't react; best-effort persistence is acceptable here.
     }
@@ -768,6 +909,10 @@ void flush_pending_saves() {
 void delete_thread(const ThreadId& id) {
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
+    // Drop the metadata index entry too so the picker list doesn't show
+    // a ghost row until the next full walk prunes it.
+    auto idx = read_thread_index();
+    if (idx.erase(id.value) > 0) write_thread_index(idx);
 }
 
 store::Settings load_settings() {

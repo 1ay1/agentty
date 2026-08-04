@@ -5,6 +5,7 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Thread list is ready instantly at startup (was ~1 s on a large history).** The thread picker only needs each thread's title + timestamps, but those keys sit *after* the multi-MB `compactions`/`messages` arrays in every thread file, so the metadata-only load still had to stream every byte of every file to reach them — ~1 s for a 247-thread / 281 MB history, during which opening the picker (`Ctrl+J`) or cycling threads stalled. A small `threads/index.json` sidecar now caches that metadata (id → title/created/updated + file mtime); startup reads that one ~30 KB file and only re-parses threads whose on-disk mtime changed, cutting the warm load from **~1000 ms to <1 ms** (~1400×). The index is refreshed on every save/delete and self-heals if missing or corrupt (delete it to force a cold rebuild). (`src/io/persistence.cpp`.)
 - **Kill-to-end-of-line in the composer works again, now on `Alt+K`.** The readline-standard `Ctrl+K` kill-to-end binding was dead: `Ctrl+K` is claimed app-wide for the command palette *before* the composer sees the key, so the composer's kill-to-end arm was unreachable. Rebound to `Alt+K`, which pairs with `Ctrl+U` (kill-to-start) the same way `Alt+D` (delete word forward) pairs with `Ctrl+W` (delete word back). (`src/runtime/app/subscribe.cpp`; new reducer tests in `composer_edit_test`, 20/20 green. Full composer keymap now documented in the README and the [keybindings](/docs/keybindings) page.)
 
 ## [0.2.12] - 2026-08-04
