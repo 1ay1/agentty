@@ -618,6 +618,75 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
     return out;
 }
 
+// ── Shell parity with Zed's native agent ────────────────────────────────────
+// The slash-command menu Zed renders in its composer. claude-code-acp exposes
+// its own set here; agentty exposes the ones that map to real turn actions plus
+// every installed, model-invocable skill as `/<name>`. Sent on session new/load
+// so Zed's `/` menu is populated the same way it is for the native agent.
+a::List<a::AvailableCommand> available_commands() {
+    a::List<a::AvailableCommand> cmds;
+    auto add = [&](std::string name, std::string desc, const char* hint) {
+        a::AvailableCommand c;
+        c.name        = std::move(name);
+        c.description = std::move(desc);
+        if (hint)
+            c.input = a::Just<a::AvailableCommandInput>(
+                a::AvailableCommandInput{a::UnstructuredCommandInput{hint}});
+        cmds.push_back(std::move(c));
+    };
+    add("compact", "Summarize the conversation to reclaim context window", nullptr);
+    add("new",     "Start a fresh conversation, clearing prior context", nullptr);
+    // Every installed, model-invocable skill becomes a first-class /command.
+    for (const auto& sk : tools::skills::all()) {
+        if (sk.user_only) continue;   // hidden from the model-facing catalog
+        if (sk.name.empty()) continue;
+        add(sk.name,
+            sk.description.empty() ? std::string{"Run the "} + sk.name + " skill"
+                                   : sk.description,
+            "optional arguments");
+    }
+    return cmds;
+}
+
+// The `model` config option Zed renders as a dropdown, populated with the
+// provider's model catalog. `current` is the session's active model id. When
+// `auth` has no credentials we still emit the static seed list so the dropdown
+// isn't empty before sign-in. Mirrors how the native agent advertises its
+// model picker. Kept off the hot path (built on session new/load only).
+std::optional<a::ConfigOption> model_config_option(const std::string& current) {
+    std::vector<ModelInfo> models;
+    try {
+        const auto sel  = provider::active();
+        // list_models_for falls back to the provider's static seed when auth is
+        // empty or the network is unreachable, so this never blocks on I/O in
+        // the common case and is always non-empty for hosted providers.
+        models = provider::list_models_for(sel, {});
+    } catch (...) { /* leave empty → no option advertised */ }
+    if (models.empty()) return std::nullopt;
+
+    a::List<a::ConfigSelectOption> opts;
+    opts.reserve(models.size());
+    bool current_present = false;
+    for (const auto& m : models) {
+        a::ConfigSelectOption o;
+        o.value = m.id.value;
+        o.name  = m.display_name.empty() ? m.id.value : m.display_name;
+        if (o.value == current) current_present = true;
+        opts.push_back(std::move(o));
+    }
+    a::ConfigOption opt;
+    opt.id           = "model";
+    opt.name         = "Model";
+    opt.category     = a::Just<std::string>("model");
+    opt.type         = "select";
+    // If the active model isn't in the catalog (custom -m), fall back to the
+    // first option so Zed's dropdown has a valid selection.
+    opt.currentValue = current_present ? current
+                     : (opts.empty() ? std::string{} : opts.front().value);
+    opt.options      = a::ConfigSelectOptions{a::CSO_Ungrouped{std::move(opts)}};
+    return opt;
+}
+
 } // namespace
 
 AgentServer::AgentServer(a::FdTransport& transport,
@@ -743,6 +812,24 @@ void AgentServer::send_update(const std::string& session_id, a::SessionUpdate up
     conn_.session_update(msg);
 }
 
+void AgentServer::emit_session_config(const std::string& session_id,
+                                      const std::string& model_id) {
+    // Slash-command menu (Zed's `/` composer menu).
+    {
+        a::SU_AvailableCommands ac;
+        ac.availableCommands = available_commands();
+        if (!ac.availableCommands.empty())
+            send_update(session_id, std::move(ac));
+    }
+    // Model dropdown (Zed's per-session model picker). Best-effort: if the
+    // catalog can't be built we simply don't advertise the option.
+    if (auto opt = model_config_option(model_id)) {
+        a::SU_ConfigOptions co;
+        co.configOptions.push_back(std::move(*opt));
+        send_update(session_id, std::move(co));
+    }
+}
+
 void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
     // Project-relative display paths in replayed tool cards, matching a live
     // turn. The session cwd is already set by the time replay runs.
@@ -841,33 +928,59 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     // capabilities there. A client that sees this may cancel an in-flight
     // request by its id; we honour it for session/prompt requests.
     caps.meta["cancelRequest"] = true;
+
+    // Advertise how to sign in when we have no credentials, so Zed renders a
+    // proper "Sign in" affordance in the panel instead of erroring on the
+    // first prompt. The method is informational — agentty's real login runs
+    // out-of-band (`agentty login`) — but surfacing it matches the native
+    // agent's sign-in UX. When already authenticated we advertise nothing, so
+    // Zed shows the agent as ready.
+    if (auth::is_empty(auth_)) {
+        a::AuthMethod m;
+        m.id          = "agentty-login";
+        m.name        = "Sign in to agentty";
+        m.description = a::Just<std::string>(
+            "Run `agentty login` in a terminal to authenticate your provider, "
+            "then reconnect.");
+        r.authMethods.push_back(std::move(m));
+    }
     return r;
 }
 
 a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
-    util::RankedLock lk(session_mtx_);
-    // Skill activations belong to the previous session's context. The
-    // tracker is process-wide, so this is best-effort under concurrent
-    // sessions — worst case a re-activation re-injects (token cost only).
-    tools::skills::reset_activations();
-    ThreadId tid = persistence::new_id();
-    std::string sid = tid.value;
-    Session s;
-    s.id  = sid;
-    s.cwd = p.cwd;
-    s.profile = profile_;
-    s.thread.id = tid;
-    s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
-                                   : std::string{"ACP "} + p.cwd;
-    auto ptr = std::make_shared<Session>(std::move(s));
-    sessions_.emplace(sid, ptr);
-    const Session& stored = *ptr;
-    persist(stored);
-    index_session(stored);
+    std::string sid;
+    Profile session_profile = profile_;
+    {
+        util::RankedLock lk(session_mtx_);
+        // Skill activations belong to the previous session's context. The
+        // tracker is process-wide, so this is best-effort under concurrent
+        // sessions — worst case a re-activation re-injects (token cost only).
+        tools::skills::reset_activations();
+        ThreadId tid = persistence::new_id();
+        sid = tid.value;
+        Session s;
+        s.id  = sid;
+        s.cwd = p.cwd;
+        s.profile = profile_;
+        s.thread.id = tid;
+        s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
+                                       : std::string{"ACP "} + p.cwd;
+        auto ptr = std::make_shared<Session>(std::move(s));
+        sessions_.emplace(sid, ptr);
+        const Session& stored = *ptr;
+        session_profile = stored.profile;
+        persist(stored);
+        index_session(stored);
+    }
 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
-    r.modes     = a::Just(mode_state(stored.profile));
+    r.modes     = a::Just(mode_state(session_profile));
+    // Populate Zed's slash-command menu and model dropdown for this session,
+    // same as the native agent. Sent as session/update notifications right
+    // after the result (outside the session lock). Model id defaults to the
+    // server's launch model.
+    emit_session_config(sid, model_id_);
     return r;
 }
 
@@ -910,6 +1023,13 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     }
 
     replay_history(sid, thread);
+    // Re-advertise the slash-command menu + model picker for the restored
+    // session, and push its title so Zed's sidebar entry is populated the same
+    // as the native agent.
+    emit_session_config(sid, model_id_);
+    if (!thread.title.empty())
+        send_update(sid, a::SU_SessionInfo{
+            a::Just<std::string>(thread.title), a::Nothing, json::object()});
 }
 
 void AgentServer::on_cancel(const a::CancelParams& p) {
@@ -1110,6 +1230,7 @@ void AgentServer::on_delete_session(const a::DeleteSessionParams& p) {
 void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     std::string sid  = p.sessionId.value;
     std::string text = prompt_text_from_blocks(p.prompt);
+    std::string pending_title;   // title to push to Zed's sidebar (first msg only)
 
     {
         util::RankedLock lk(session_mtx_);
@@ -1132,8 +1253,10 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         Message um;
         um.role = Role::User;
         um.text = std::move(text);
-        if (it->second->thread.messages.empty() && !um.text.empty())
+        bool first_message = it->second->thread.messages.empty();
+        if (first_message && !um.text.empty())
             it->second->thread.title = persistence::title_from_first_message(um.text);
+        std::string new_title = first_message ? it->second->thread.title : std::string{};
         {
             // Structural mutation — also take the per-session thread mutex so
             // the worker's snapshot/read sites (which do NOT hold
@@ -1147,7 +1270,16 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         // targeting it can find and cancel the right session's turn. Same
         // lock as sessions_; erased when the turn settles (run_turn).
         prompt_reqid_to_session_[resp.id().dump()] = sid;
+        // Push the derived title so Zed's thread sidebar shows a meaningful
+        // name the moment the first message lands, matching the native agent
+        // (which titles a thread from its opening turn). Emitted after the
+        // lock scope below.
+        if (!new_title.empty()) pending_title = std::move(new_title);
     }
+
+    if (!pending_title.empty())
+        send_update(sid, a::SU_SessionInfo{
+            a::Just<std::string>(pending_title), a::Nothing, json::object()});
 
     // Capture the request id before `resp` is moved into the worker; run_turn
     // uses it to drop the reqid→session mapping when the turn settles.

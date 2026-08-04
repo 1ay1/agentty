@@ -161,6 +161,12 @@ int main() {
     std::atomic<bool> perm_announce_diff{false};
     std::atomic<int> usage_updates{0};
     std::atomic<int> perm_requests{0};
+    std::atomic<int> avail_cmds{0};
+    std::atomic<int> config_opts{0};
+    std::atomic<int> session_infos{0};
+    std::atomic<bool> saw_model_option{false};
+    std::atomic<bool> saw_skill_or_compact_cmd{false};
+    std::string last_session_title;
     std::string transcript;
     std::mutex transcript_mu;
 
@@ -207,6 +213,24 @@ int main() {
                             }, [&](const auto&){});
             },
             [&](const SU_Usage&) { ++usage_updates; },
+            [&](const SU_AvailableCommands& ac) {
+                ++avail_cmds;
+                for (const auto& c : ac.availableCommands)
+                    if (c.name == "compact" || c.name == "new")
+                        saw_skill_or_compact_cmd.store(true);
+            },
+            [&](const SU_ConfigOptions& co) {
+                ++config_opts;
+                for (const auto& o : co.configOptions)
+                    if (o.id == "model") saw_model_option.store(true);
+            },
+            [&](const SU_SessionInfo& si) {
+                ++session_infos;
+                if (si.title) {
+                    std::lock_guard lk(transcript_mu);
+                    last_session_title = *si.title;
+                }
+            },
             [&](const auto&) {});
     };
     std::atomic<bool> reject_mode{false};
@@ -269,6 +293,14 @@ int main() {
     CHECK(ns.modes->currentModeId.value == "ask");
     CHECK(ns.modes->availableModes.size() == 3);
 
+    // Shell parity with Zed's native agent: session/new advertises the
+    // slash-command menu (compact/new + skills) and the model-picker config
+    // option, as session/update notifications.
+    CHECK(avail_cmds.load() >= 1);
+    CHECK(saw_skill_or_compact_cmd.load());
+    CHECK(config_opts.load() >= 1);
+    CHECK(saw_model_option.load());
+
     // set_mode round-trip (switch to minimal then back to ask). Keep the
     // session in Ask before the prompt so the `write` tool gates on the user.
     agent.session_set_mode(SetModeParams{ns.sessionId, SessionModeId{"minimal"}, Json::object()}).get();
@@ -281,6 +313,10 @@ int main() {
 
     CHECK(pr.stopReason == StopReason::EndTurn);
     CHECK(completions.load() == 2);             // two model completions ran
+    // The first prompt pushed a live session title to Zed's sidebar.
+    CHECK(session_infos.load() >= 1);
+    { std::lock_guard lk(transcript_mu);
+      CHECK(!last_session_title.empty()); }
     CHECK(perm_requests.load() == 1);           // write asked once
     CHECK(tool_calls.load() == 1);
     if (tool_completed.load() != 1) {
