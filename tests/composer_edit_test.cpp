@@ -22,6 +22,9 @@ namespace msg = agentty::msg;
 using agentty::ComposerDeleteWordBack;
 using agentty::ComposerDeleteWordForward;
 using agentty::ComposerUndo;
+using agentty::ComposerCharInput;
+using agentty::ComposerCursorWordLeft;
+using agentty::ComposerCursorWordRight;
 
 namespace {
 int failures = 0, total = 0;
@@ -116,12 +119,65 @@ int main() {
         check("ctrl-w removes whole chip token", chip_gone, m.ui.composer.text);
     }
 
-    // ── Undo integrates: Ctrl+W is a mutating edit, so Ctrl+Z restores. ─
+    // ── Undo restores ctrl-w. ─────────────────────────────────────────
     {
         auto m = step(with_text("foo bar baz", 11), ComposerDeleteWordBack{});
         m = step(std::move(m), ComposerUndo{});
         check("undo restores ctrl-w", m.ui.composer.text == "foo bar baz",
               m.ui.composer.text);
+    }
+
+    // ── Undo coalescing: a run of typed chars is ONE undo unit; the
+    //    first whitespace starts a fresh unit so undo rewinds word by
+    //    word, not char by char. ───────────────────────────────────────
+    {
+        Model m;  // start empty
+        for (char c : std::string("hello"))
+            m = step(std::move(m), ComposerCharInput{static_cast<char32_t>(c)});
+        check("typed run present", m.ui.composer.text == "hello",
+              m.ui.composer.text);
+        // One undo should wipe the WHOLE coalesced word, back to empty.
+        m = step(std::move(m), ComposerUndo{});
+        check("one undo rewinds the whole typed word",
+              m.ui.composer.text.empty(), m.ui.composer.text);
+    }
+    {
+        // "foo bar": space breaks the run, so undo peels "bar", leaving
+        // "foo " (the space snapshot).
+        Model m;
+        for (char c : std::string("foo bar"))
+            m = step(std::move(m), ComposerCharInput{static_cast<char32_t>(c)});
+        m = step(std::move(m), ComposerUndo{});
+        check("undo peels one word across a space boundary",
+              m.ui.composer.text == "foo ", m.ui.composer.text);
+    }
+
+    // ── Word motion consumes a RUN of punctuation as one unit. ─────────
+    {
+        // cursor after "))))" → word-left jumps the whole run at once.
+        auto m = step(with_text("a))))", 5), ComposerCursorWordLeft{});
+        check("word-left eats punctuation run", m.ui.composer.cursor == 1,
+              std::to_string(m.ui.composer.cursor));
+    }
+    {
+        // cursor before "((((" → word-right jumps the whole run.
+        auto m = step(with_text("((((a", 0), ComposerCursorWordRight{});
+        check("word-right eats punctuation run", m.ui.composer.cursor == 4,
+              std::to_string(m.ui.composer.cursor));
+    }
+
+    // ── Queue-peek reset: editing while peeking a queued slot must drop
+    //    the peek so submit doesn't delete the wrong queue entry. ───────
+    {
+        Model m;
+        m.ui.composer.queued.push_back({"queued msg", {}});
+        m.ui.composer.queue_peek_idx = 0;      // pretend we Alt+↑'d
+        m.ui.composer.text = "queued msg";
+        m.ui.composer.cursor = 10;
+        m = step(std::move(m), ComposerCharInput{U'!'});
+        check("typing while peeking drops queue_peek_idx",
+              m.ui.composer.queue_peek_idx == -1,
+              std::to_string(m.ui.composer.queue_peek_idx));
     }
 
     std::printf("\n%d/%d checks passed\n", total - failures, total);
