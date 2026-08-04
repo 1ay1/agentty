@@ -68,8 +68,24 @@ int main() {
 
     // ── Scripted provider ──────────────────────────────────────────────────
     std::atomic<int> completions{0};
+    std::atomic<bool> read_mode{false};
     auto stream = [&](ag::provider::Request req, ag::provider::EventSink sink) {
         int n = completions.fetch_add(1);
+        if (read_mode.load() && n % 2 == 0) {
+            // Read-turn first completion: stream a `read` tool call on the
+            // file, so we can assert the line-numbered result content shape.
+            std::string tcid = "tc_read_" + std::to_string(n);
+            const ag::ToolCallId call_id{tcid};
+            sink(ag::Msg{ag::StreamStarted{}});
+            sink(ag::Msg{ag::StreamTextDelta{"Reading. "}});
+            sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"read"}}});
+            std::string args = std::string("{\"path\":\"") + target.string() + "\"}";
+            sink(ag::Msg{ag::StreamToolUseDelta{call_id, args}});
+            sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
+            sink(ag::Msg{ag::StreamUsage{1200, 40, 0, 0}});
+            sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
+            return;
+        }
         if (n % 2 == 0) {
             // First completion of a turn: stream text + a `write` tool call.
             std::string tcid = "tc_write_" + std::to_string(n);
@@ -87,11 +103,16 @@ int main() {
         } else {
             // Second completion: the tool result for the prior call must be in
             // history (whether it succeeded or was rejected).
-            std::string want = "tc_write_" + std::to_string(n - 1);
+            // Second completion: the tool result for the prior call must be in
+            // history (whether it succeeded or was rejected). The prior call is
+            // a write (tc_write_) or, in read_mode, a read (tc_read_).
+            std::string want_w = "tc_write_" + std::to_string(n - 1);
+            std::string want_r = "tc_read_"  + std::to_string(n - 1);
             bool saw_tool_result = false;
             for (const auto& m : req.messages)
                 for (const auto& tc : m.tool_calls)
-                    if (tc.id.value == want) saw_tool_result = true;
+                    if (tc.id.value == want_w || tc.id.value == want_r)
+                        saw_tool_result = true;
             CHECK(saw_tool_result);
             sink(ag::Msg{ag::StreamTextDelta{"Done."}});
             sink(ag::Msg{ag::StreamUsage{1300, 10, 0, 0}});
@@ -309,6 +330,27 @@ int main() {
     CHECK(perm_requests.load() == perms_before + 1);   // asked again
     CHECK(tool_failed.load()   == failed_before + 1);   // rejected → failed
     CHECK(!fs::exists(target));                          // never written
+
+    // ── Turn 3: a `read` result must come back LINE-NUMBERED and fenced,
+    //    matching claude-code-acp's card body (the "tool UI looks different"
+    //    fix). Scripted provider emits a read of the file we wrote in turn 1,
+    //    then ends the turn. ──────────────────────────────────────────────────
+    // Re-create the file (turn 2 rejected/removed it).
+    { std::ofstream f(target); f << "alpha\nbeta *star* line\ngamma\n"; }
+    reject_mode.store(false);
+    read_mode.store(true);
+    last_tool_text.clear();
+
+    PromptParams pp3;
+    pp3.sessionId = ns.sessionId;
+    pp3.prompt.push_back(TextContent{"read it", Nothing, Json::object()});
+    auto pr3 = agent.session_prompt(pp3).get();
+    CHECK(pr3.stopReason == StopReason::EndTurn);
+    { std::lock_guard lk(transcript_mu);
+      // The Read card body is a fenced, tab-numbered excerpt: "```\n1\talpha…".
+      CHECK(last_tool_text.rfind("```", 0) == 0);
+      CHECK(last_tool_text.find("1\talpha") != std::string::npos);
+      CHECK(last_tool_text.find("2\tbeta")  != std::string::npos); }
 
     // close round-trip.
     agent.session_close(CloseSessionParams{ns.sessionId, Json::object()}).get();
