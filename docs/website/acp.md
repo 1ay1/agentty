@@ -49,7 +49,11 @@ Set the model per-subprocess in the `args`. In ACP mode `-m` is an *ephemeral* o
 ## What works over ACP
 
 - **Streaming text** — the model's reply renders token-by-token in Zed's panel.
-- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a Zed tool card with the right icon, the raw arguments, and live status (pending → running → done/failed).
+- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a Zed tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). Result bodies are shaped to match Zed's native agent: a `read` renders as a gutter-numbered file excerpt, and all other output is markdown-escaped so file contents render verbatim instead of being reparsed as formatting.
+- **Slash-command menu** — agentty populates Zed's composer `/` menu (`available_commands_update`) with `/compact`, `/new`, and every installed skill as `/<skill-name>`, the same way the native agent exposes its commands.
+- **Model picker** — agentty advertises a `model` config option (`config_option_update`) listing the provider's model catalog, so you can switch models from Zed's per-session dropdown instead of relaunching with `-m`.
+- **Sign-in affordance** — when agentty has no credentials it advertises an `authMethod` at `initialize`, so Zed shows a proper "Sign in" prompt instead of erroring on the first turn.
+- **Live thread titles** — the first message pushes a `session_info_update` with a derived title, so Zed's thread sidebar shows a meaningful name immediately (and restored sessions re-announce their title on load).
 - **Inline diffs** — `write` and `edit` emit ACP `diff` content, so Zed renders the file change inline and lets you review it in place.
 - **Follow-along** — read/edit/write/grep tool calls carry the file path as an ACP `location`, so Zed can open and highlight the file the agent is touching in real time.
 - **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger Zed's native allow/reject dialog before they run; `--profile` tunes exactly which tools prompt.

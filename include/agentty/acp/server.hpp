@@ -146,6 +146,12 @@ private:
     // ── Helpers ──────────────────────────────────────────────────────────
     void send_update(const std::string& session_id, ::acp::SessionUpdate update);
 
+    // Emit the slash-command menu + model-picker config option for a session,
+    // so Zed's composer `/` menu and model dropdown match the native agent.
+    // Sent as session/update notifications; call outside the session lock.
+    void emit_session_config(const std::string& session_id,
+                             const std::string& model_id);
+
     enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
     PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
 
