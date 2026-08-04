@@ -180,7 +180,7 @@ The composer is a full readline-style editor:
 | Key | Action | Key | Action |
 |-----|--------|-----|--------|
 | `^←/→` | Move by word | `^W` / `Alt+D` | Delete word back / forward |
-| `^K` / `^U` | Kill to line end / start | `^Z` / `^Y` | Undo / redo |
+| `^U` | Kill to line start | `^Z` / `^Y` | Undo / redo |
 | `^V` / `Alt+V` | Paste image | `/` `@` `#` | Command / file / symbol picker |
 | `↑` | Recall queue / history | `Alt+↑/↓` | Edit queued messages one at a time |
 

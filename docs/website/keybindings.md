@@ -55,6 +55,10 @@ they do.
 | [[Ctrl+←]] / [[Ctrl+→]] | Move one word (a run of punctuation counts as one unit) |
 | [[Home]] / [[End]] | Jump to start / end of the buffer |
 
+[[Ctrl+←]] / [[Ctrl+→]] switch to word-motion only when the composer has text;
+on an **empty** composer with an idle session they cycle threads instead (same
+as [[Alt+←/→]]).
+
 ### Editing
 
 | Key | Action |
@@ -62,8 +66,7 @@ they do.
 | [[Backspace]] | Delete the character (or whole chip) before the cursor |
 | [[Ctrl+W]] | Delete the word before the cursor (readline *unix-word-rubout*) |
 | [[Alt+D]] | Delete the word after the cursor (readline *kill-word*) |
-| [[Ctrl+K]] | Kill to end of line |
-| [[Ctrl+U]] | Kill to beginning of line (while the composer has text) |
+| [[Ctrl+U]] | Kill to beginning of line |
 | [[Ctrl+Z]] | Undo — rewinds word-by-word, not keystroke-by-keystroke |
 | [[Ctrl+Y]] / [[Ctrl+Shift+Z]] | Redo |
 | [[Ctrl+V]] / [[Alt+V]] | Paste an image from the clipboard as an attachment chip |
@@ -72,6 +75,11 @@ Undo coalesces a run of typing into one step (broken on whitespace and on any
 non-typing edit), so one [[Ctrl+Z]] after a paste reaches the pre-paste state.
 [[Ctrl+V]] is intercepted by some terminals (Windows Terminal binds it to its
 own paste); [[Alt+V]] is the fallback that every terminal passes through.
+
+> [[Ctrl+U]] doubles as “expand/collapse the newest retrieved-context card”
+> **when the composer is empty** and such a card is on screen; with text in the
+> box it always means kill-to-line-start. There is no composer *kill-to-end*
+> key — [[Ctrl+K]] is reserved globally for the command palette.
 
 ### History & queue
 
