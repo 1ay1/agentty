@@ -601,8 +601,18 @@ private:
             best_ctx  = ctx;
         }
     }
-    // Nothing strictly cheaper-and-capable → keep the parent (no regression).
-    return best.empty() ? std::string{parent_model} : best;
+    // Whichever id we route to, DROP the `[1m]`/`[2m]` extended-context
+    // picker marker. That marker is a parent-chat-only signal: it widens the
+    // window AND makes the transport send the `context-1m` beta header. A
+    // subagent never needs it — read-only roles run on a tight output budget
+    // with age-faded tool results and never approach even a 200K window, let
+    // alone 1M. Worse, sending `context-1m` on a subscription that isn't
+    // entitled to the long-context beta 400s the whole subagent request
+    // ("long context beta is not yet available for this subscription"),
+    // which is exactly the failure this strip prevents. When nothing is
+    // strictly cheaper we still fall through here, so a parent that picked a
+    // `[1m]` variant hands its subagents the plain, always-accepted id.
+    return wire_model_id(best.empty() ? parent_model : std::string_view{best});
 }
 
 // ── Model picker ordering: strength first, never a fixed family bucket ──────
