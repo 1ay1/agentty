@@ -395,6 +395,19 @@ provider::StreamResult run_one_completion(Thread& thread,
     req.model         = type.read_only
                           ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)
                           : cfg.model;
+    // A subagent NEVER needs the 1M/2M extended-context window: it does a
+    // bounded burst (8k output, tool results capped to 8 KiB, up to 24 turns)
+    // that comfortably fits the base 200K window. Carrying the parent's
+    // picker-only `[1m]`/`[2m]` marker here would make the transport send the
+    // entitlement-gated `context-1m-2025-08-07` beta, which 400s with
+    // "long context beta is not yet available for this ..." on accounts
+    // without the entitlement (or when the flagship parent's cheaper subagent
+    // model isn't 1M-eligible) — killing the whole fan-out. Strip the marker
+    // unconditionally: robust (never trips the beta) and economical (subagents
+    // pay for the window they actually use). cheapest_capable_model already
+    // returns a clean id when it finds a cheaper model; this also covers the
+    // "kept the parent" fallback and the write-role (cfg.model) path.
+    req.model         = agentty::wire_model_id(req.model);
     req.system_prompt = subagent_system_prompt(type);
     req.auth          = provider::active().kind == provider::Kind::Anthropic
                       ? auth::fresh_auth_header(cfg.auth)
