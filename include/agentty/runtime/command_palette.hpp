@@ -4,6 +4,7 @@
 // one-file change (extend the enum, append a row to `kCommands`, then wire
 // the selection in update.cpp's CommandPaletteSelect handler).
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -38,26 +39,27 @@ struct CommandDef {
     Command     id;
     const char* label;
     const char* description;
+    const char* shortcut;   // direct global keybinding, or "" if palette-only
 };
 
 inline constexpr std::array kCommands = std::array{
-    CommandDef{Command::NewThread,     "New thread",         "Start a fresh conversation"},
-    CommandDef{Command::ReviewChanges, "Review changes",     "Open diff review pane"},
-    CommandDef{Command::AcceptAll,     "Accept all changes", "Apply every pending hunk"},
-    CommandDef{Command::RejectAll,     "Reject all changes", "Discard every pending hunk"},
-    CommandDef{Command::CycleProfile,  "Cycle profile",      "Write \u2192 Ask \u2192 Minimal"},
-    CommandDef{Command::OpenModels,    "Open model picker",  "Switch the active model"},
-    CommandDef{Command::OpenProviders, "Switch provider",     "Choose the LLM backend (Anthropic, OpenAI, …)"},
-    CommandDef{Command::OpenThreads,   "Open threads",        "Browse saved conversations"},
-    CommandDef{Command::OpenPlan,      "Open plan",          "View task progress"},
-    CommandDef{Command::RunCodeBlock,  "Run code block",     "Run a fenced block from the last reply (Ctrl+G)"},
-    CommandDef{Command::InspectToolOutputs, "Inspect tool outputs", "Read tool outputs — the running tool is the live top row (Ctrl+O)"},
-    CommandDef{Command::CompactContext,"Compact context",    "Replace history with a structured summary"},
-    CommandDef{Command::CompactDepth,  "Compaction depth",    "How deep to fill the context window before auto-compacting (75% → 90% → 95%)"},
-    CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn"},
-    CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account"},
-    CommandDef{Command::SignOut,       "Sign out",            "Remove saved credentials and re-open sign-in"},
-    CommandDef{Command::Quit,          "Quit",               "Exit agentty"},
+    CommandDef{Command::NewThread,     "New thread",         "Start a fresh conversation", "Ctrl+N"},
+    CommandDef{Command::ReviewChanges, "Review changes",     "Open the diff review pane", "Ctrl+R"},
+    CommandDef{Command::AcceptAll,     "Accept all changes", "Apply every pending hunk", ""},
+    CommandDef{Command::RejectAll,     "Reject all changes", "Discard every pending hunk", ""},
+    CommandDef{Command::CycleProfile,  "Cycle profile",      "Write → Ask → Minimal", "Shift+Tab"},
+    CommandDef{Command::OpenModels,    "Open model picker",  "Switch the active model", "Ctrl+/"},
+    CommandDef{Command::OpenProviders, "Switch provider",    "Choose the LLM backend (Anthropic, OpenAI, …)", "Ctrl+P"},
+    CommandDef{Command::OpenThreads,   "Open threads",       "Browse saved conversations", "Ctrl+J"},
+    CommandDef{Command::OpenPlan,      "Open plan",          "View task progress", "Ctrl+T"},
+    CommandDef{Command::RunCodeBlock,  "Run code block",     "Run a fenced block from the last reply", "Ctrl+G"},
+    CommandDef{Command::InspectToolOutputs, "Inspect tool outputs", "Read tool outputs — the running tool is the live top row", "Ctrl+O"},
+    CommandDef{Command::CompactContext,"Compact context",    "Replace history with a structured summary", ""},
+    CommandDef{Command::CompactDepth,  "Compaction depth",   "How deep to fill the context window before auto-compacting (75% → 90% → 95%)", ""},
+    CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn", ""},
+    CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account", ""},
+    CommandDef{Command::SignOut,       "Sign out",           "Remove saved credentials and re-open sign-in", ""},
+    CommandDef{Command::Quit,          "Quit",               "Exit agentty", "Ctrl+C"},
 };
 
 // Case-insensitive substring filter over kCommands. Returns the matching
@@ -84,13 +86,27 @@ filtered_commands(std::string_view query) {
     out.reserve(kCommands.size());
     for (const auto& cmd : kCommands) {
         if (needle.empty()) { out.push_back(&cmd); continue; }
+        // Match against label + description + shortcut so discovery works by
+        // intent, not just the exact command name: "diff" finds "Review
+        // changes", "api" finds "Switch provider", "ctrl+g" finds "Run code
+        // block". Label matches still rank first (see the two-pass sort below).
         std::string hay;
-        std::string_view label{cmd.label};
-        hay.reserve(label.size());
-        for (char c : label) hay.push_back(lower(static_cast<unsigned char>(c)));
+        for (const char* field : {cmd.label, cmd.description, cmd.shortcut})
+            for (const char* p = field; p && *p; ++p)
+                hay.push_back(lower(static_cast<unsigned char>(*p)));
         if (hay.find(needle) != std::string::npos)
             out.push_back(&cmd);
     }
+    // Rank label hits above description/shortcut-only hits so typing a command
+    // name surfaces it at the top even when the same substring appears in some
+    // other row's description. Stable within each group (catalog order).
+    std::stable_partition(out.begin(), out.end(),
+        [&](const CommandDef* c) {
+            std::string lab;
+            for (const char* p = c->label; p && *p; ++p)
+                lab.push_back(lower(static_cast<unsigned char>(*p)));
+            return lab.find(needle) != std::string::npos;
+        });
     return out;
 }
 

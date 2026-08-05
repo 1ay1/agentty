@@ -542,12 +542,29 @@ Element command_palette(const Model& m) {
             Picker::Config::Row row;
             row.leading        = std::string{cmd.label};
             row.leading_style  = fg_of(muted);
-            row.trailing       = std::string{cmd.description};
+            // Trailing carries the one-line description and — for commands
+            // that have a direct global keybinding — the shortcut, so the
+            // palette teaches the fast path instead of hiding it. Rows with
+            // no shortcut (palette-only actions) just show the description.
+            std::string trailing{cmd.description};
+            if (cmd.shortcut && *cmd.shortcut) {
+                trailing += "  \xc2\xb7  ";
+                trailing += cmd.shortcut;
+            }
+            row.trailing       = std::move(trailing);
             row.trailing_style = fg_dim(muted);
             row.selected = (i == o->index);
             cfg.rows.push_back(std::move(row));
         }
     }
+
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},   // ↑↓
+        {"type", "filter", 3},
+        {"Enter", "run", 6},
+        {"Esc", "close", 3},
+    }));
 
     return Picker{std::move(cfg)}.build();
 }
