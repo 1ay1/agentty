@@ -158,6 +158,7 @@ enum class Kind : std::uint8_t {
     GitShow,
     GitBlame,
     GitCommit,
+    GitBranch,
     Remember,
     Forget,
     Wipe,
@@ -195,6 +196,7 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"git_show",        Kind::GitShow,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_blame",       Kind::GitBlame,       {Effect::ReadFs},                     false,   detail::sec{20},   40000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30},   0,      ToolSpec::TruncStrategy::Head},   // pre-commit hooks can be slow; output stays small
+    ToolSpec{"git_branch",      Kind::GitBranch,      {Effect::WriteFs},                    false,   detail::sec{20},   20000,  ToolSpec::TruncStrategy::Head},   // list/create/switch/delete; output stays small
     // Memory tools — append/remove records in ~/.agentty/memory.jsonl (user)
     // or <workspace>/.agentty/memory.jsonl (project). Loaded back into the
     // system prompt under <learned-memory> on every turn. Tiny IO footprint,
@@ -349,6 +351,7 @@ consteval bool kinds_bijective() {
         Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition, Kind::FindReferences,
         Kind::Diagnostics, Kind::Test, Kind::GitStatus, Kind::GitDiff,
         Kind::GitLog, Kind::GitShow, Kind::GitBlame, Kind::GitCommit,
+        Kind::GitBranch,
         Kind::Remember, Kind::Forget,
         Kind::Wipe,
         Kind::Task,
