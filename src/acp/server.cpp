@@ -80,6 +80,7 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Diagnostics:    return a::ToolKind::Execute;
         case sp::Kind::Test:           return a::ToolKind::Execute;
         case sp::Kind::GitCommit:      return a::ToolKind::Execute;
+        case sp::Kind::GitBranch:      return a::ToolKind::Execute;
         case sp::Kind::Grep:           return a::ToolKind::Search;
         case sp::Kind::Glob:           return a::ToolKind::Search;
         case sp::Kind::FindDefinition: return a::ToolKind::Search;
@@ -274,6 +275,13 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
         case sp::Kind::GitLog:    return "git log";
         case sp::Kind::GitShow:   return "git show";
         case sp::Kind::GitBlame:  return "git blame";
+        case sp::Kind::GitBranch: {
+            std::string action = str("action");
+            if (action.empty()) action = "list";
+            std::string name = str("name");
+            std::string t = "git branch " + action;
+            return name.empty() ? t : t + " " + name;
+        }
         case sp::Kind::WebFetch: {
             std::string u = str("url");
             return u.empty() ? "Fetch" : "Fetch " + u;
