@@ -298,6 +298,44 @@ static void test_cheapest_capable_router() {
     CHECK(cheapest_capable_model("claude-opus-4-5", notools) == "claude-opus-4-5");
 }
 
+// A subagent must NEVER carry the picker-only `[1m]`/`[2m]` extended-context
+// marker: it would make the transport send the entitlement-gated context-1m
+// beta, which 400s ("long context beta is not yet available") and kills the
+// whole fan-out. run_one_completion derives req.model as
+// `wire_model_id(<cheapest-or-parent>)`; this locks that the marker is gone in
+// every branch (cheaper-found, kept-parent, write-role, single-model).
+static void test_subagent_model_never_1m() {
+    using agentty::wire_model_id;
+    auto has_1m = [](std::string_view s) {
+        return s.find("[1m]") != std::string_view::npos
+            || s.find("[2m]") != std::string_view::npos;
+    };
+
+    // Parent on a 1M variant, cheaper NON-1M model available (read-only role):
+    // router picks the cheaper clean id, wire_model_id is a further no-op.
+    std::vector<ModelInfo> pool = {
+        mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
+    auto ro = wire_model_id(cheapest_capable_model("claude-opus-4-5[1m]", pool));
+    CHECK(!has_1m(ro));
+    CHECK(ro == "claude-haiku-4-5");
+
+    // Single-model provider on a 1M variant: router KEEPS the parent (with the
+    // marker) — wire_model_id is what strips it. This is the exact case that
+    // used to 400.
+    std::vector<ModelInfo> solo = {mi("claude-opus-4-5")};
+    auto kept = wire_model_id(cheapest_capable_model("claude-opus-4-5[1m]", solo));
+    CHECK(!has_1m(kept));
+    CHECK(kept == "claude-opus-4-5");
+
+    // Write-role path (req.model = cfg.model, no router): still stripped.
+    CHECK(!has_1m(wire_model_id(std::string{"claude-sonnet-4-5[1m]"})));
+    CHECK(wire_model_id(std::string{"claude-sonnet-4-5[1m]"}) == "claude-sonnet-4-5");
+
+    // A plain (non-1M) parent is unaffected end-to-end.
+    CHECK(wire_model_id(cheapest_capable_model("claude-sonnet-4-5", pool))
+          == "claude-haiku-4-5");
+}
+
 static void test_context_window_detection() {
     using agentty::ModelCapabilities;
     auto win = [](std::string_view id) {
@@ -417,6 +455,7 @@ int main() {
     test_capability_tiers();
     test_router_hardening_nonchat_and_oseries();
     test_cheapest_capable_router();
+    test_subagent_model_never_1m();
     test_context_window_detection();
     test_wire_model_id_strip();
     test_model_picker_ordering();
