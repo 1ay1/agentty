@@ -11,7 +11,7 @@
 #include <vector>
 
 #if !defined(_WIN32)
-#  include <unistd.h>   // getpid (Kitty clipboard temp path)
+#  include <unistd.h>   // getpid (Kitty clipboard temp path), access/X_OK (tool_in_path)
 #endif
 
 #if defined(_WIN32)
@@ -102,11 +102,37 @@ CaptureResult popen_capture(const char* cmd, std::size_t cap) {
 // these would trip -Wunused-function.
 #if !defined(_WIN32)
 
+// Is `name` an executable on PATH?
+//
+// This used to be `std::system("command -v " + name)`, which is a shell
+// sink: every caller today passes a string literal (wl-paste, xclip,
+// pngpaste, …) so it was never live, but it sat one careless caller away
+// from command injection — a name containing `;` or `$(…)` would execute.
+// Walking PATH with access(X_OK) removes the shell entirely, and as a
+// bonus skips a fork+exec of /bin/sh per probe. A name containing a
+// slash is rejected outright: PATH lookup is not meaningful for it, and
+// accepting one would let a relative path escape the intended search.
 bool tool_in_path(const char* name) {
-    std::string cmd = "command -v ";
-    cmd += name;
-    cmd += " >/dev/null 2>&1";
-    return std::system(cmd.c_str()) == 0;
+    if (!name || !*name) return false;
+    const std::string_view n{name};
+    if (n.find('/') != std::string_view::npos) return false;
+
+    const char* path = std::getenv("PATH");
+    if (!path || !*path) return false;
+
+    std::string_view rest{path};
+    while (!rest.empty()) {
+        const auto colon = rest.find(':');
+        std::string_view dir = rest.substr(0, colon);
+        rest = (colon == std::string_view::npos)
+                 ? std::string_view{} : rest.substr(colon + 1);
+        // A literal empty entry in PATH means "." by POSIX convention.
+        std::string cand{dir.empty() ? std::string_view{"."} : dir};
+        if (cand.back() != '/') cand += '/';
+        cand += n;
+        if (::access(cand.c_str(), X_OK) == 0) return true;
+    }
+    return false;
 }
 
 // Pick the best image-class MIME type from a newline-separated
