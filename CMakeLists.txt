@@ -2024,6 +2024,17 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(codex_login_flow_test)
     set_tests_properties(codex_login_flow_test PROPERTIES TIMEOUT 30)
 
+    # command_palette_test — the Ctrl+K palette catalog + filter UX. Pure
+    # header logic (kCommands + filtered_commands): pins the enum⇄row
+    # bijection (no dead palette entries), that every row has a label +
+    # description, and the filter's multi-field matching (label/description/
+    # shortcut) with label-first ranking. Standalone: header-only, no deps.
+    add_executable(command_palette_test EXCLUDE_FROM_ALL
+        tests/command_palette_test.cpp)
+    target_include_directories(command_palette_test PRIVATE include)
+    add_test(NAME command_palette_test COMMAND command_palette_test)
+    set_tests_properties(command_palette_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2251,6 +2262,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_stream_snapshot_test
         persistence_proactive_test
         codex_login_flow_test
+        command_palette_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test

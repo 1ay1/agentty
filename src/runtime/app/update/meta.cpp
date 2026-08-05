@@ -17,6 +17,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mem.hpp"
+#include "agentty/runtime/view/helpers.hpp"   // ui::profile_label
 #include "agentty/store/store.hpp"
 #include "agentty/workspace/checkpoint.hpp"
 
@@ -31,8 +32,15 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // Refuse if a turn is already in flight or compaction is
             // already running — the next CompactContext lands cleanly
             // on Idle. Refuse on an empty thread (nothing to compact).
-            if (!m.s.is_idle() || m.s.compacting) return done(std::move(m));
-            if (m.d.current.messages.empty()) return done(std::move(m));
+            // Toast in both cases: a manual compaction that silently does
+            // nothing reads as a broken keybind.
+            if (!m.s.is_idle() || m.s.compacting)
+                return {std::move(m),
+                        set_status_toast(m,
+                            "can't compact while the agent is working")};
+            if (m.d.current.messages.empty())
+                return {std::move(m),
+                        set_status_toast(m, "nothing to compact yet")};
 
             // Compaction is wire-only: we never mutate the transcript.
             // The summarisation prompt is built and trimmed on the fly
@@ -73,7 +81,18 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // actually re-arms the prompts the user expects.
             m.d.session_grants.clear();
             persist_settings(m);
-            return done(std::move(m));
+            // Confirm the switch — a profile change is invisible otherwise
+            // (the composer chip updates, but a keyboard-driven cycle needs a
+            // beat of feedback naming the new mode + what it does).
+            const char* gist =
+                  m.d.profile == Profile::Write   ? "auto-approves every tool"
+                : m.d.profile == Profile::Ask     ? "asks before writes & commands"
+                                                  : "asks before every tool";
+            auto toast = set_status_toast(
+                m, "profile: " + std::string{ui::profile_label(m.d.profile)}
+                     + " \xc2\xb7 " + gist,
+                std::chrono::seconds{4});
+            return {std::move(m), std::move(toast)};
         },
         [&](RestoreCheckpoint& e) -> Step {
             // Rewind = destructive double restore: worktree files AND the
