@@ -596,11 +596,27 @@ namespace {
 
 fs::path thread_index_path() { return threads_dir() / "index.json"; }
 
+// index.json is read-modify-written from TWO threads: the AsyncWriter
+// worker (reindex_thread, after each save) and the UI/reducer thread
+// (delete_thread, load_all_threads). Without a lock the two interleave
+// as a classic lost update — both read the same map, both write their
+// own stale copy, and whichever lands second silently drops the other's
+// entry. write_json_atomic's rename means the file never CORRUPTS, so
+// the damage shows up as a ghost row in the picker (a deleted thread
+// that reappears) or a stale title, and it persists until the next cold
+// rebuild. One process-wide mutex held across the whole read-modify-
+// write closes it. Contention is nil: these are startup + per-save.
+std::mutex& thread_index_mu() {
+    static std::mutex m;
+    return m;
+}
+
 struct IndexEntry {
     std::string title;
     long long   created_at = 0;   // unix seconds
     long long   updated_at = 0;   // unix seconds
     long long   mtime      = 0;   // file last_write_time, ns since clock epoch
+    long long   size       = -1;  // file size in bytes; -1 == unknown (pre-v2)
 };
 
 long long file_mtime_ns(const fs::path& p) {
@@ -611,7 +627,26 @@ long long file_mtime_ns(const fs::path& p) {
                t.time_since_epoch()).count();
 }
 
-std::unordered_map<std::string, IndexEntry> read_thread_index() {
+// Companion to file_mtime_ns for the freshness check. mtime alone is not
+// sufficient: mtime granularity is filesystem-dependent (FAT 2 s, HFS+
+// 1 s), so a thread rewritten within the same tick as its recorded stamp
+// compares equal and the cache serves the OLD title/updated_at forever —
+// nothing else ever invalidates it. Pairing mtime with size catches every
+// same-tick edit that changes the file's length, which for a JSON
+// transcript that just grew a message is essentially all of them. This
+// mirrors the mtime+size rule fs_helpers.cpp already uses for its
+// StaleVerdict check. Returns -1 on error so it can't alias a real size.
+long long file_size_bytes(const fs::path& p) {
+    std::error_code ec;
+    auto s = fs::file_size(p, ec);
+    if (ec) return -1;
+    return static_cast<long long>(s);
+}
+
+// Raw index read. PRECONDITION: caller holds thread_index_mu(). The
+// read and the matching write must sit inside ONE critical section or
+// the lost-update race described above reopens.
+std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
     std::unordered_map<std::string, IndexEntry> out;
     std::ifstream ifs(thread_index_path());
     if (!ifs) return out;
@@ -627,6 +662,10 @@ std::unordered_map<std::string, IndexEntry> read_thread_index() {
             ie.created_at = e.value("created_at", 0LL);
             ie.updated_at = e.value("updated_at", 0LL);
             ie.mtime      = e.value("mtime", 0LL);
+            // Absent in v1 indexes — -1 means "unknown", which the
+            // freshness check treats as a miss so the entry gets
+            // re-parsed once and upgraded to a v2 entry with a size.
+            ie.size       = e.value("size", -1LL);
             out.emplace(id, std::move(ie));
         }
     } catch (const std::exception&) {
@@ -636,7 +675,8 @@ std::unordered_map<std::string, IndexEntry> read_thread_index() {
     return out;
 }
 
-void write_thread_index(const std::unordered_map<std::string, IndexEntry>& idx) {
+// Raw index write. PRECONDITION: caller holds thread_index_mu().
+void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>& idx) {
     json threads = json::object();
     for (const auto& [id, e] : idx) {
         json ej;
@@ -644,10 +684,11 @@ void write_thread_index(const std::unordered_map<std::string, IndexEntry>& idx) 
         ej["created_at"] = e.created_at;
         ej["updated_at"] = e.updated_at;
         ej["mtime"]      = e.mtime;
+        ej["size"]       = e.size;
         threads[id] = std::move(ej);
     }
     json j;
-    j["version"] = 1;
+    j["version"] = 2;
     j["threads"] = std::move(threads);
     try { (void)write_json_atomic(thread_index_path(), j.dump()); }
     catch (const std::exception&) { /* best-effort cache */ }
@@ -669,16 +710,23 @@ Thread thread_from_index(const std::string& id, const IndexEntry& e) {
 // path for this thread instead of re-parsing it. Best-effort: a failed
 // index update just means one slow parse next launch, then self-heals.
 void reindex_thread(const Thread& t) {
-    auto idx = read_thread_index();
+    const auto file = threads_dir() / (t.id.value + ".json");
+    // Stat OUTSIDE the lock, then read-modify-write inside it, so the
+    // whole update is atomic with respect to delete_thread().
+    const long long mt = file_mtime_ns(file);
+    const long long sz = file_size_bytes(file);
+    std::lock_guard<std::mutex> lk(thread_index_mu());
+    auto idx = read_thread_index_locked();
     IndexEntry ie;
     ie.title      = t.title;
     ie.created_at = std::chrono::duration_cast<std::chrono::seconds>(
                         t.created_at.time_since_epoch()).count();
     ie.updated_at = std::chrono::duration_cast<std::chrono::seconds>(
                         t.updated_at.time_since_epoch()).count();
-    ie.mtime      = file_mtime_ns(threads_dir() / (t.id.value + ".json"));
+    ie.mtime      = mt;
+    ie.size       = sz;
     idx[t.id.value] = std::move(ie);
-    write_thread_index(idx);
+    write_thread_index_locked(idx);
 }
 
 } // namespace
@@ -693,7 +741,11 @@ std::vector<Thread> load_all_threads() {
     std::error_code ec;
     if (!fs::exists(threads_dir(), ec)) return out;
 
-    auto index = read_thread_index();
+    // Held across the whole walk: the read at the top and the refresh at
+    // the bottom are one read-modify-write, and a save landing in the
+    // middle must not have its entry clobbered by our `fresh` snapshot.
+    std::lock_guard<std::mutex> lk(thread_index_mu());
+    auto index = read_thread_index_locked();
     std::unordered_map<std::string, IndexEntry> fresh;
     fresh.reserve(index.size() + 8);
     bool index_dirty = false;
@@ -708,10 +760,14 @@ std::vector<Thread> load_all_threads() {
 
         const std::string id = e.path().stem().string();
         const long long   mt = file_mtime_ns(e.path());
+        const long long   sz = file_size_bytes(e.path());
 
-        // Fast path: index entry with a matching mtime — no parse.
+        // Fast path: index entry whose mtime AND size both still match —
+        // no open/parse. size == -1 (a v1 entry, or a failed stat) never
+        // matches a real size, so those fall through and get upgraded.
         if (auto it = index.find(id);
-            it != index.end() && it->second.mtime == mt && mt != 0) {
+            it != index.end() && it->second.mtime == mt && mt != 0
+            && it->second.size == sz && sz >= 0) {
             out.push_back(thread_from_index(id, it->second));
             fresh.emplace(id, it->second);
             continue;
@@ -727,6 +783,7 @@ std::vector<Thread> load_all_threads() {
             ie.updated_at = std::chrono::duration_cast<std::chrono::seconds>(
                                 loaded->updated_at.time_since_epoch()).count();
             ie.mtime      = mt;
+            ie.size       = sz;
             fresh.emplace(id, std::move(ie));
             index_dirty = true;
             out.push_back(std::move(*loaded));
@@ -745,7 +802,7 @@ std::vector<Thread> load_all_threads() {
     // Prune entries whose files vanished (deleted threads) and persist
     // the refreshed index for the next warm startup.
     if (fresh.size() != index.size()) index_dirty = true;
-    if (index_dirty) write_thread_index(fresh);
+    if (index_dirty) write_thread_index_locked(fresh);
 
     std::sort(out.begin(), out.end(), [](const Thread& a, const Thread& b){
         return a.updated_at > b.updated_at;
@@ -910,9 +967,12 @@ void delete_thread(const ThreadId& id) {
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
     // Drop the metadata index entry too so the picker list doesn't show
-    // a ghost row until the next full walk prunes it.
-    auto idx = read_thread_index();
-    if (idx.erase(id.value) > 0) write_thread_index(idx);
+    // a ghost row until the next full walk prunes it. Under the index
+    // lock: a concurrent reindex_thread() on the AsyncWriter worker
+    // would otherwise resurrect this id from its stale in-memory copy.
+    std::lock_guard<std::mutex> lk(thread_index_mu());
+    auto idx = read_thread_index_locked();
+    if (idx.erase(id.value) > 0) write_thread_index_locked(idx);
 }
 
 store::Settings load_settings() {

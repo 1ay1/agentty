@@ -2965,6 +2965,14 @@ DialOverride parse_dial_env(const char* var_name) {
 }
 } // namespace
 
+// The three overrides below parse their env var EXACTLY ONCE, into a
+// function-local static, and cache the result for the process lifetime.
+// This is deliberate, not an oversight: a dial target that changed
+// mid-session would silently re-route in-flight connection reuse (the
+// pool is keyed on the logical host, not the dialed one), which is far
+// harder to debug than a value that is simply fixed at startup. Set
+// these before launching agentty; changing them afterwards has no
+// effect until restart. Initialization is thread-safe per [stmt.dcl]/4.
 const DialOverride& agentty_api_host_override() {
     static const DialOverride cached =
         parse_dial_env(util::env::name<util::env::Var::ApiHost>().data());
