@@ -573,6 +573,18 @@ Cmd<Msg> launch_stream(Model& m) {
         provider::Request req;
         req.model         = compacting ? std::move(compaction_model)
                                        : std::move(model_id);
+        // Compaction NEVER needs the 1M/2M extended-context window: it
+        // summarises a transcript trimmed to ~65% of the BASE window into a
+        // short text reply (no tools). If the parent is on a 1M variant and no
+        // cheaper model exists, cheapest_capable_model returns that parent id
+        // verbatim — keeping the picker-only `[1m]` marker, which makes the
+        // transport send the entitlement-gated context-1m-2025-08-07 beta and
+        // 400s ("long context beta is not yet available for this
+        // subscription"), aborting the compaction. Strip the marker on the
+        // compaction path so it always runs on the plain 200K window (same fix
+        // the subagent path uses). The NORMAL turn keeps its marker — the user
+        // explicitly chose the 1M window there.
+        if (compacting) req.model = wire_model_id(req.model);
         // Per-model output-token ceiling. The default (kSafeMaxTokens=16384)
         // is shared across reasoning + tool JSON for the whole turn; a large
         // `edit` (verbatim old_text + new_text) can overrun it and arrive
@@ -656,7 +668,15 @@ Cmd<Msg> launch_stream(Model& m) {
         };
 
         if (compacting) {
-            req.messages = wire_messages_for_compaction(thread, context_max);
+            // We stripped the `[1m]` marker from req.model above, so the wire
+            // window is the model's BASE (200K), not the 1M the parent picked.
+            // Trim the compaction payload to that base window — trimming to 65%
+            // of 1M (650K) would then overflow the 200K request and fail.
+            int compaction_ctx = context_max;
+            if (int base = ui::context_max_for_model(req.model);
+                base > 0 && (compaction_ctx <= 0 || base < compaction_ctx))
+                compaction_ctx = base;
+            req.messages = wire_messages_for_compaction(thread, compaction_ctx);
             drop_stale_proactive(req.messages);
             // req.tools left empty — summarisation is text-only.
         } else {

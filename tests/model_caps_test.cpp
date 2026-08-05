@@ -371,6 +371,20 @@ static void test_context_window_detection() {
     // Unknown / local families report 0 so the caller prefers a probed window.
     CHECK(win("qwen2.5-coder:7b") == 0);
     CHECK(win("some-random-model") == 0);
+
+    // COMPACTION INVARIANT: the compaction path strips the `[1m]` marker
+    // (wire_model_id) so the wire window is the BASE, then trims the payload
+    // to that base — NOT to 65% of 1M, which would overflow the 200K request.
+    // context_max_for_model composes these; assert the pure equivalent here:
+    // the window of the STRIPPED id is always the 200K base, never 1M.
+    {
+        using agentty::wire_model_id;
+        CHECK(win(wire_model_id("claude-opus-4-5[1m]")) == 200000
+              && "compaction runs on the base window, not the parent's 1M");
+        CHECK(win(wire_model_id("claude-sonnet-4-5[1m]")) == 200000);
+        // A non-1M parent is unchanged.
+        CHECK(win(wire_model_id("claude-opus-4-5")) == 200000);
+    }
 }
 
 static void test_wire_model_id_strip() {
