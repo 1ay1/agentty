@@ -45,6 +45,9 @@ std::string tool_display_name(const std::string& n) {
     if (n == "git_blame")       return "Git Blame";
     if (n == "git_commit")      return "Git Commit";
     if (n == "git_branch")      return "Git Branch";
+    if (n == "git_stash")       return "Git Stash";
+    if (n == "git_rebase")      return "Git Rebase";
+    if (n == "git_cherry_pick") return "Git Cherry-Pick";
     if (n == "remember")        return "Remember";
     if (n == "forget")          return "Forget";
     if (n == "wipe_memory")     return "Wipe Memory";
