@@ -81,6 +81,9 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Test:           return a::ToolKind::Execute;
         case sp::Kind::GitCommit:      return a::ToolKind::Execute;
         case sp::Kind::GitBranch:      return a::ToolKind::Execute;
+        case sp::Kind::GitStash:       return a::ToolKind::Execute;
+        case sp::Kind::GitRebase:      return a::ToolKind::Execute;
+        case sp::Kind::GitCherryPick:  return a::ToolKind::Execute;
         case sp::Kind::Grep:           return a::ToolKind::Search;
         case sp::Kind::Glob:           return a::ToolKind::Search;
         case sp::Kind::FindDefinition: return a::ToolKind::Search;
@@ -281,6 +284,22 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
             std::string name = str("name");
             std::string t = "git branch " + action;
             return name.empty() ? t : t + " " + name;
+        }
+        case sp::Kind::GitStash: {
+            std::string action = str("action");
+            if (action.empty()) action = "list";
+            return "git stash " + action;
+        }
+        case sp::Kind::GitRebase: {
+            std::string action = str("action");
+            std::string up = str("upstream");
+            if (action == "onto" && !up.empty()) return "git rebase onto " + up;
+            return action.empty() ? "git rebase" : "git rebase " + action;
+        }
+        case sp::Kind::GitCherryPick: {
+            std::string action = str("action");
+            if (action.empty()) action = "pick";
+            return "git cherry-pick " + action;
         }
         case sp::Kind::WebFetch: {
             std::string u = str("url");

@@ -204,6 +204,9 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
         case K::GitShow:
         case K::GitBranch:   // `name` requirement is action-dependent; the
                              // tool's own parser gives the richer error.
+        case K::GitStash:    // action-gated; parser validates per-action.
+        case K::GitRebase:   // upstream required only for action=onto.
+        case K::GitCherryPick: // commits required only for action=pick.
         case K::Test:
         case K::WebSearch:
         case K::RepoMap:

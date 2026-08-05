@@ -405,6 +405,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         "todo", "web_fetch", "web_search", "find_definition", "find_references",
         "diagnostics", "test",
         "git_status", "git_diff", "git_log", "git_show", "git_blame", "git_commit",
+        "git_branch", "git_stash", "git_rebase", "git_cherry_pick",
         "remember", "forget", "wipe_memory", "task", "skill", "search_docs",
         "search_code",
     };
