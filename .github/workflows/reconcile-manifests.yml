@@ -192,25 +192,31 @@ jobs:
           # to ride out a brief blip; if AUR is still down after that, warn
           # and exit 0 instead of failing — the next scheduled/triggered run
           # picks it back up automatically once AUR returns, so nothing is
-          # silently lost.
+          # silently lost. CRITICAL: only a GENUINE maintenance banner soft-
+          # skips. A bare "Could not read from remote" / "Permission denied"
+          # with no banner is an SSH AUTH failure (bad/unregistered
+          # AUR_SSH_KEY) — that must fail LOUD, not masquerade as an outage
+          # (silently classifying it as maintenance left the package stale
+          # across multiple releases while every run reported green).
+          is_outage() { grep -qi 'AUR is down\|due to maintenance' "$1"; }
           clone_ok=0
           for attempt in 1 2 3 4 5; do
             if git clone ssh://aur@aur.archlinux.org/agentty-bin.git aur 2>clone.err; then
               clone_ok=1; break
             fi
             echo "AUR clone attempt $attempt failed:"; cat clone.err
-            if grep -qi 'AUR is down\|maintenance\|Could not read from remote' clone.err; then
+            if is_outage clone.err; then
               sleep $((attempt * 20))
             else
               break
             fi
           done
           if [ "$clone_ok" -ne 1 ]; then
-            if grep -qi 'AUR is down\|maintenance\|Could not read from remote' clone.err 2>/dev/null; then
-              echo "::warning::AUR appears to be down for maintenance after 5 retries — skipping this reconcile. The next scheduled/triggered run will retry automatically."
+            if is_outage clone.err 2>/dev/null; then
+              echo "::warning::AUR is down for maintenance after 5 retries — skipping this reconcile. The next scheduled/triggered run will retry automatically."
               exit 0
             fi
-            echo "::error::AUR clone failed for a reason other than a known outage — see the error above"
+            echo "::error::AUR clone failed and AUR is NOT reporting maintenance — almost certainly an SSH auth failure (AUR_SSH_KEY not registered on the maintainer account, or malformed). Fix the key; do not ignore."
             exit 1
           fi
           cp PKGBUILD aur/PKGBUILD
@@ -224,13 +230,13 @@ jobs:
           for attempt in 1 2 3; do
             if git push origin HEAD:master 2>push.err; then push_ok=1; break; fi
             echo "AUR push attempt $attempt failed:"; cat push.err
-            grep -qi 'AUR is down\|maintenance' push.err && sleep $((attempt * 20)) || break
+            is_outage push.err && sleep $((attempt * 20)) || break
           done
           if [ "$push_ok" -ne 1 ]; then
-            if grep -qi 'AUR is down\|maintenance' push.err 2>/dev/null; then
-              echo "::warning::AUR push failed due to an apparent outage — skipping. The next scheduled/triggered run will retry automatically."
+            if is_outage push.err 2>/dev/null; then
+              echo "::warning::AUR push failed due to a maintenance outage — skipping. The next scheduled/triggered run will retry automatically."
               exit 0
             fi
-            echo "::error::AUR push failed for a reason other than a known outage — see the error above"
+            echo "::error::AUR push failed and AUR is NOT reporting maintenance — likely an SSH auth problem (AUR_SSH_KEY) or the account lost write access to agentty-bin. Fix it; do not ignore."
             exit 1
           fi
