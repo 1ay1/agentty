@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -577,11 +578,35 @@ load_thread_meta_file(const fs::path& p) {
 
 std::expected<Thread, DeserializeError>
 load_thread_file(const std::filesystem::path& p) {
-    std::ifstream ifs(p);
+    std::ifstream ifs(p, std::ios::binary);
     if (!ifs) return std::unexpected(DeserializeError{
         DeserializeErrorKind::Io, "", "open failed: " + p.string()});
+    // Slurp the whole file into one string, then parse from contiguous
+    // memory. nlohmann's istream_iterator path reads the DOM one char at
+    // a time through the stream's locale/sentry machinery — measurably
+    // slower on multi-MB transcripts (a 12 MB thread parsed ~110 ms that
+    // way, blocking the reducer on thread-switch). A single sized read +
+    // json::parse over the contiguous buffer roughly halves it.
+    std::string buf;
+    {
+        std::error_code ec;
+        auto sz = fs::file_size(p, ec);
+        if (!ec && sz > 0) {
+            buf.resize(static_cast<std::size_t>(sz));
+            ifs.read(buf.data(), static_cast<std::streamsize>(sz));
+            // A short read (file shrank between stat and read) leaves the
+            // tail uninitialised — trim to what we actually got so we
+            // never hand json::parse stale bytes.
+            buf.resize(static_cast<std::size_t>(ifs.gcount()));
+        } else {
+            // size_t unknown (pipe/procfs/stat error) — fall back to a
+            // streaming slurp.
+            buf.assign(std::istreambuf_iterator<char>(ifs),
+                       std::istreambuf_iterator<char>());
+        }
+    }
     json j;
-    try { ifs >> j; }
+    try { j = json::parse(buf); }
     catch (const std::exception& e) {
         return std::unexpected(DeserializeError{
             DeserializeErrorKind::JsonParse, "",
