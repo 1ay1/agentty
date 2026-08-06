@@ -16,6 +16,7 @@
 #ifdef _WIN32
 #  include <io.h>
 #else
+#  include <fcntl.h>
 #  include <unistd.h>
 #endif
 
@@ -66,6 +67,17 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
         std::error_code ec2; fs::remove(tmp, ec2);
         return false;
     }
+    // fsync the parent directory so the rename's dentry itself survives a
+    // crash/power-loss. Without this the file content is durable (we fsync'd
+    // the fd above) but the directory entry that publishes it at `target`
+    // may not be — the file can vanish after recovery. Mirrors the hardened
+    // atomic write in tool/util/fs_helpers.cpp.
+#ifndef _WIN32
+    if (fs::path parent = target.parent_path(); !parent.empty()) {
+        int dfd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dfd >= 0) { (void)::fsync(dfd); ::close(dfd); }
+    }
+#endif
     return true;
 }
 
