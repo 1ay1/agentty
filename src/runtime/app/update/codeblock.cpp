@@ -55,6 +55,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/code_block_picker.hpp"
+#include "agentty/io/clipboard.hpp"
 #include "agentty/runtime/win_shell_encode.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
@@ -570,6 +571,12 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
                 return done(std::move(m));
             std::string body = o->blocks[static_cast<std::size_t>(idx)].body;
             m.ui.code_blocks = cbp::Closed{};
+            // Write via native tooling (pbcopy/wl-copy/xclip) synchronously
+            // AND emit the OSC 52 Cmd. OSC 52 is opt-in in Terminal.app /
+            // iTerm2 so it silently no-ops there; the native write is what
+            // actually lands the copy locally. OSC 52 still carries it across
+            // an SSH/tmux hop to a remote clipboard.
+            (void)write_clipboard_text(body);
             auto toast = set_status_toast(m, "copied clean block to clipboard");
             return {std::move(m),
                     maya::Cmd<Msg>::batch(
@@ -623,6 +630,7 @@ Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
             if (!r) return done(std::move(m));
             std::string body = std::move(r->output);
             m.ui.code_blocks = cbp::Closed{};
+            (void)write_clipboard_text(body);   // native pbcopy/wl-copy/xclip
             auto toast = set_status_toast(m, "output copied to clipboard");
             return {std::move(m),
                     maya::Cmd<Msg>::batch(
