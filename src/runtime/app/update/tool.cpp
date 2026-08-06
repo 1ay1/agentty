@@ -6,6 +6,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/io/clipboard.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -606,6 +607,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 return done(std::move(m));
             std::string body =
                 o->entries[static_cast<std::size_t>(o->index)].output;
+            (void)write_clipboard_text(body);   // native pbcopy/wl-copy/xclip
             auto toast = set_status_toast(m, "tool output copied to clipboard");
             return {std::move(m), maya::Cmd<Msg>::batch(
                 maya::Cmd<Msg>::write_clipboard(std::move(body)),

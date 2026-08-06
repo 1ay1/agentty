@@ -666,4 +666,84 @@ std::optional<std::string> read_clipboard_text(std::string* error_out) {
 #endif
 }
 
+// ===========================================================================
+// write_clipboard_text — native clipboard WRITE (OSC-52-independent)
+// ===========================================================================
+//
+// Pipes the payload into a platform clipboard tool's stdin. Uses popen in
+// write mode; the payload is delivered as raw bytes (no shell quoting of
+// the content — only the fixed tool command is a string literal, so there
+// is no injection surface from `text`).
+
+namespace {
+
+// popen a command for WRITING and feed it `data` on stdin. Returns true
+// iff the child exited 0. status==-1 (popen failed) or a non-zero exit
+// both report false. Windows maps popen()→_popen via the macros above.
+bool popen_write(const char* cmd, std::string_view data) {
+#if defined(_WIN32)
+    FILE* fp = ::_popen(cmd, "wb");
+#else
+    FILE* fp = ::popen(cmd, "w");
+#endif
+    if (!fp) return false;
+    bool wrote_ok = true;
+    if (!data.empty()) {
+        const std::size_t n =
+            std::fwrite(data.data(), 1, data.size(), fp);
+        wrote_ok = (n == data.size());
+    }
+#if defined(_WIN32)
+    const int status = ::_pclose(fp);
+#else
+    const int status = ::pclose(fp);
+#endif
+    // pclose returns the child wait-status; 0 means clean exit 0.
+    return wrote_ok && status == 0;
+}
+
+} // namespace
+
+bool write_clipboard_text(std::string_view text, std::string* error_out) {
+    auto fail = [&](const char* msg) -> bool {
+        if (error_out) *error_out = msg;
+        return false;
+    };
+
+#if defined(__APPLE__)
+    if (popen_write("pbcopy", text)) return true;
+    return fail("pbcopy failed (is it on PATH?)");
+
+#elif defined(__linux__)
+    bool wayland = false;
+    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
+        wayland = std::string_view{st} == "wayland";
+    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+
+    if (wayland && tool_in_path("wl-copy")) {
+        if (popen_write("wl-copy 2>/dev/null", text)) return true;
+    }
+    if (tool_in_path("xclip")) {
+        if (popen_write("xclip -selection clipboard 2>/dev/null", text))
+            return true;
+    }
+    if (tool_in_path("xsel")) {
+        if (popen_write("xsel --clipboard --input 2>/dev/null", text))
+            return true;
+    }
+    return fail("no clipboard tool — install wl-clipboard or xclip");
+
+#elif defined(_WIN32)
+    // clip.exe reads stdin and sets CF_UNICODETEXT/CF_TEXT. It expects
+    // the active codepage; agentty text is UTF-8, which clip.exe on
+    // modern Windows accepts for the common ASCII/Latin range. Good
+    // enough for code blocks; OSC 52 covers the rest via the batch call.
+    if (popen_write("clip.exe", text)) return true;
+    return fail("clip.exe failed");
+
+#else
+    return fail("clipboard text write not implemented on this platform");
+#endif
+}
+
 } // namespace agentty

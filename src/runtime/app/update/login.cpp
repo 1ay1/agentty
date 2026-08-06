@@ -19,6 +19,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/accounts.hpp"
+#include "agentty/io/clipboard.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -544,6 +545,7 @@ Step login_copy_auth_url(Model m) {
     auto* oc = std::get_if<login::OAuthCode>(&m.ui.login);
     if (!oc || oc->authorize_url.empty()) return done(std::move(m));
     auto url = oc->authorize_url;
+    (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
     auto write_cmd = Cmd<Msg>::write_clipboard(url);
     auto toast = set_status_toast(m,
         "authorize URL copied to clipboard",
