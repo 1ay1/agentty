@@ -527,10 +527,33 @@ if(NOT TARGET nghttp2::nghttp2 AND NOT AGENTTY_FULLY_STATIC)
         endif()
     endif()
 endif()
-# mimalloc — Microsoft's general-purpose allocator. FetchContent tracks the
-# upstream main branch and runs its update step on every configure, so builds
-# use the current upstream revision without storing mimalloc in this repository.
-# This is not header-only: its C sources are compiled into a static library.
+# mimalloc — Microsoft's general-purpose allocator. Pinned to a STABLE release
+# tag (below), fetched by CMake and compiled from its C sources into a static
+# library. This is not header-only.
+#
+# DISABLED ON APPLE (macOS): mimalloc's malloc override on macOS works by
+# interposing the system malloc ZONE. On macOS 26 / Apple clang 21 this is
+# broken — startup emits `mimalloc: warning: unable to allocate aligned OS
+# memory directly` and then the process aborts with `pointer being freed was
+# not allocated`: some allocations go through mimalloc while the matching
+# operator delete routes to the SYSTEM allocator, corrupting the heap. It
+# reproduced 25/25 on a normal Release build (and 25/25 even after pinning
+# to the v3.4.5 release, so it is NOT a HEAD-only regression — the zone
+# interposition itself is unusable here), and was pinpointed under ASan to a
+# std::string grow inside fs::path::operator/= in auth.cpp at startup.
+# Disabling mimalloc fixed it 25/25. The allocator only ever bought us page
+# reclamation via mi_collect(); on Apple we fall back to the system
+# allocator (release_to_kernel() is a no-op on macOS anyway — see mem.hpp).
+#
+# The tag is pinned rather than tracking `main`/HEAD so a random upstream
+# commit can't brick every build on the platforms where mimalloc IS enabled.
+set(AGENTTY_MIMALLOC_TAG "v3.4.5" CACHE STRING
+    "mimalloc git tag to fetch. Pin to a stable release; do NOT track main/HEAD.")
+if(APPLE AND AGENTTY_USE_MIMALLOC)
+    message(STATUS "agentty: mimalloc DISABLED on Apple — its macOS malloc-zone "
+                   "override corrupts the heap; using the system allocator.")
+    set(AGENTTY_USE_MIMALLOC OFF CACHE BOOL "" FORCE)
+endif()
 set(AGENTTY_HAS_MIMALLOC FALSE)
 if(AGENTTY_USE_MIMALLOC)
     set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
@@ -543,13 +566,13 @@ if(AGENTTY_USE_MIMALLOC)
     if(AGENTTY_STANDALONE)
         set(MI_NO_OPT_ARCH ON CACHE BOOL "" FORCE)
     endif()
-    # Explicitly keep updates connected even if a parent project changes the
-    # general FetchContent policy. GIT_TAG main intentionally follows HEAD.
-    set(FETCHCONTENT_UPDATES_DISCONNECTED_MIMALLOC OFF CACHE BOOL "" FORCE)
+    # We pin to a tag, so it never needs re-fetching; keep FetchContent from
+    # re-running the git update step on every configure.
+    set(FETCHCONTENT_UPDATES_DISCONNECTED_MIMALLOC ON CACHE BOOL "" FORCE)
     FetchContent_Declare(
         mimalloc
         GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
-        GIT_TAG        main
+        GIT_TAG        ${AGENTTY_MIMALLOC_TAG}
         GIT_SHALLOW    TRUE
         GIT_PROGRESS   TRUE
     )
