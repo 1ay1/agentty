@@ -1013,6 +1013,72 @@ void test_ndjson_empty_object_response() {
     CHECK(!found_unparseable);
 }
 
+// ── Byte-identity guards ────────────────────────────────────────────────
+// Pin the EXACT output of build_messages() and the exact Msg sequence of
+// parse_sse_for_test() over feature-rich inputs, so the OpenAI transport can
+// be refactored (e.g. split into modules) with a proven no-drift guarantee —
+// same discipline as the Anthropic wire_golden / anthropic_sse_golden tests.
+static std::uint64_t fnv1a(const std::string& s) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+
+static void test_wire_body_golden() {
+    namespace oai = agentty::provider::openai;
+    using agentty::Message; using agentty::Role; using agentty::Thread;
+    using agentty::ThreadId; using agentty::ToolCallId; using agentty::ToolName;
+    using agentty::ToolUse;
+
+    auto done = [](const char* id, const char* name, nlohmann::json args,
+                   const std::string& out) {
+        ToolUse tc; tc.id = ToolCallId{id}; tc.name = ToolName{name};
+        tc.args = std::move(args); tc.status = ToolUse::Done{{}, {}, out};
+        return tc;
+    };
+
+    std::vector<Message> msgs;
+    Message u; u.role = Role::User; u.text = "do the thing"; msgs.push_back(u);
+    // read foo.cpp (superseded by the later edit)
+    { Message a; a.role = Role::Assistant; a.text = "reading";
+      a.tool_calls.push_back(done("call_r1", "read",
+          nlohmann::json{{"path", "src/foo.cpp"}},
+          std::string("FIRST_") + std::string(4096, 'a')));
+      msgs.push_back(std::move(a)); }
+    // big grep (faded once old enough)
+    { Message a; a.role = Role::Assistant; a.text = "grepping";
+      a.tool_calls.push_back(done("call_g1", "grep",
+          nlohmann::json{{"pattern", "x"}},
+          std::string("GHEAD_") + std::string(80 * 1024, 'g')));
+      msgs.push_back(std::move(a)); }
+    // edit foo.cpp (supersedes call_r1)
+    { Message a; a.role = Role::Assistant; a.text = "editing";
+      a.tool_calls.push_back(done("call_e1", "edit",
+          nlohmann::json{{"path", "src/foo.cpp"}}, "ok"));
+      msgs.push_back(std::move(a)); }
+    // newest: re-read foo.cpp (live copy)
+    { Message a; a.role = Role::Assistant; a.text = "re-reading";
+      a.tool_calls.push_back(done("call_r2", "read",
+          nlohmann::json{{"path", "src/foo.cpp"}},
+          std::string("SECOND_") + std::string(4096, 'b')));
+      msgs.push_back(std::move(a)); }
+
+    Thread t{ThreadId{"g"}, "", std::move(msgs), {}, {}};
+    const std::string wire = oai::build_messages(t).dump();
+
+    CHECK(wire.find("FIRST_") == std::string::npos);      // superseded read collapsed
+    CHECK(wire.find("superseded") != std::string::npos);  // pointer text present
+    CHECK(wire.find("SECOND_") != std::string::npos);     // live read full
+
+    constexpr std::uint64_t kGolden = 0x60773f1adaf86e13ull;
+    const std::uint64_t got = fnv1a(wire);
+    if (kGolden == 0)
+        std::fprintf(stderr, "OPENAI wire golden = 0x%016llxull (len=%zu)\n",
+                     static_cast<unsigned long long>(got), wire.size());
+    else
+        CHECK(got == kGolden);
+}
+
 int main() {
     test_build_tools();
     test_build_messages_basic();
@@ -1059,6 +1125,9 @@ int main() {
     // test_ndjson_fenced_tool_call_streaming();
 
     test_ndjson_empty_object_response();
+
+    // Byte-identity guard for the request serializer.
+    test_wire_body_golden();
 
     if (g_failures == 0) {
         std::printf("openai_transport_test: all checks passed\n");

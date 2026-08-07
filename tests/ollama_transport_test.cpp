@@ -821,6 +821,59 @@ static void test_prose_starting_with_brace_not_dropped() {
     CHECK(joined_text(msgs).find("42") != std::string::npos);
 }
 
+// ── Byte-identity guard ─────────────────────────────────────────────────
+// Pin the EXACT build_messages() output over a feature-rich message list so
+// the Ollama transport can be refactored with a no-drift guarantee (same
+// discipline as the Anthropic/OpenAI golden guards).
+static std::uint64_t oll_fnv1a(const std::string& s) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
+
+static void test_wire_body_golden() {
+    auto done = [](const char* id, const char* name, nlohmann::json args,
+                   const std::string& out) {
+        ToolUse tc; tc.id = ToolCallId{id}; tc.name = ToolName{name};
+        tc.args = std::move(args); tc.status = ToolUse::Done{{}, {}, out};
+        return tc;
+    };
+    std::vector<Message> msgs;
+    Message u; u.role = Role::User; u.text = "do it"; msgs.push_back(u);
+    { Message a; a.role = Role::Assistant; a.text = "reading";
+      a.tool_calls.push_back(done("call_r1", "read",
+          nlohmann::json{{"path", "src/foo.cpp"}},
+          std::string("FIRST_") + std::string(4096, 'a')));
+      msgs.push_back(std::move(a)); }
+    { Message a; a.role = Role::Assistant; a.text = "grepping";
+      a.tool_calls.push_back(done("call_g1", "grep",
+          nlohmann::json{{"pattern", "x"}},
+          std::string("GHEAD_") + std::string(80 * 1024, 'g')));
+      msgs.push_back(std::move(a)); }
+    { Message a; a.role = Role::Assistant; a.text = "editing";
+      a.tool_calls.push_back(done("call_e1", "edit",
+          nlohmann::json{{"path", "src/foo.cpp"}}, "ok"));
+      msgs.push_back(std::move(a)); }
+    { Message a; a.role = Role::Assistant; a.text = "re-reading";
+      a.tool_calls.push_back(done("call_r2", "read",
+          nlohmann::json{{"path", "src/foo.cpp"}},
+          std::string("SECOND_") + std::string(4096, 'b')));
+      msgs.push_back(std::move(a)); }
+
+    const std::string wire = oll::build_messages(msgs, /*json_protocol=*/false).dump();
+    CHECK(wire.find("FIRST_") == std::string::npos);      // superseded read collapsed
+    CHECK(wire.find("superseded") != std::string::npos);
+    CHECK(wire.find("SECOND_") != std::string::npos);     // live read full
+
+    constexpr std::uint64_t kGolden = 0xd4bc14dd8fc53bb8ull;
+    const std::uint64_t got = oll_fnv1a(wire);
+    if (kGolden == 0)
+        std::fprintf(stderr, "OLLAMA wire golden = 0x%016llxull (len=%zu)\n",
+                     static_cast<unsigned long long>(got), wire.size());
+    else
+        CHECK(got == kGolden);
+}
+
 int main() {
     test_build_messages_text();
     test_build_messages_tool_calls();
@@ -863,6 +916,9 @@ int main() {
     test_jp_response_empty_text_falls_back_to_thoughts();
     test_jp_truly_empty_shows_placeholder();
     test_prose_starting_with_brace_not_dropped();
+
+    // Byte-identity guard for the request serializer.
+    test_wire_body_golden();
 
     if (g_failures == 0) {
         std::printf("ollama_transport_test: all checks passed\n");
