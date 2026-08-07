@@ -5,6 +5,7 @@
 
 #include "agentty/provider/anthropic/prompt.hpp"
 
+#include "agentty/provider/msg_shared.hpp"   // wire::home_dir / read_capped_file
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/skills.hpp"
@@ -24,25 +25,11 @@ namespace agentty::provider::anthropic {
 namespace {
 
 // Read a text file, swallowing any I/O error — returns empty string on
-// missing file or unreadable. Capped at 64 KiB to keep one rogue
-// 200 MB CLAUDE.md from poisoning the system prompt on every turn.
+// missing file or unreadable. Capped at 64 KiB (shared wire::read_capped_file,
+// which also trims trailing whitespace so the wrapper tag isn't jammed against
+// a blank line).
 [[nodiscard]] std::string read_optional_memory(const std::filesystem::path& p) noexcept {
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(p, ec) || ec) return {};
-    auto sz = std::filesystem::file_size(p, ec);
-    if (ec || sz == 0 || sz > 64u * 1024u) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string out(static_cast<std::size_t>(sz), '\0');
-    f.read(out.data(), static_cast<std::streamsize>(sz));
-    out.resize(static_cast<std::size_t>(f.gcount()));
-    // Trim trailing whitespace so the wrapper tag doesn't get a blank
-    // line jammed against `</user-memory>`.
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'
-                            || out.back() == ' ' || out.back() == '\t')) {
-        out.pop_back();
-    }
-    return out;
+    return wire::read_capped_file(p);
 }
 
 // mtime-keyed cache wrapper around read_optional_memory. The CLAUDE.md
@@ -104,14 +91,9 @@ namespace {
     return body;
 }
 
-// Resolve the user's home directory portably. Tries HOME (POSIX) first,
-// USERPROFILE (Windows) second; returns empty path on neither set.
+// Resolve the user's home directory portably — shared wire::home_dir.
 [[nodiscard]] std::filesystem::path home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return std::filesystem::path{h};
-#if defined(_WIN32)
-    if (auto* h = std::getenv("USERPROFILE"); h && *h) return std::filesystem::path{h};
-#endif
-    return {};
+    return wire::home_dir();
 }
 
 // CLAUDE.md memory hierarchy — mirrors Claude Code's resolution
