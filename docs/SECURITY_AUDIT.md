@@ -109,7 +109,7 @@ OS keystore: disabled (set AGENTTY_USE_KEYSTORE=1 to enable)
 
 | Subsystem | Verdict |
 |-----------|---------|
-| **Workspace boundary** (`src/tool/util/fs_helpers.cpp`) | Component-wise containment via `weakly_canonical` — symlink-aware, no naive prefix-string bug. File tools refuse paths outside cwd. |
+| **Workspace boundary** (`src/tool/util/fs_helpers.cpp`) | Component-wise containment via `weakly_canonical` — symlink-aware, no naive prefix-string bug. File tools refuse any path outside the **access boundary** (`workspace_root()`, the launch dir or `--workspace DIR`). Relative paths anchor to the **active project** (`project_root()` = cwd clamped inside the boundary) and are then containment-checked, so widening the boundary can never let a relative path escape it. |
 | **Subprocess spawner** (`src/tool/util/subprocess.cpp`) | `posix_spawn`, stdin ← `/dev/null`, argv form bypasses the shell (no injection), idle-deadline watchdog, correct fd/close hygiene, byte caps. |
 | **Permission model** (`include/agentty/tool/policy.hpp`, `effects.hpp`) | 4-bit `EffectSet` → constexpr Profile×Effect matrix, **exhaustively `static_assert`-proven at build time**. The same set drives parallel-scheduling exclusivity. |
 | **Credential crypto core** (`src/io/cred_crypt.cpp`) | AES-256-GCM, HKDF-SHA256, random salt+nonce via `RAND_bytes`, GCM tag set before `DecryptFinal` (fails closed), keys `OPENSSL_cleanse`d. |

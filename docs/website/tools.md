@@ -17,7 +17,7 @@ Each tool gets a purpose-built widget: diffs render as diffs, search results gro
 | `remove` | Write | Delete a file or directory (recursive requires an explicit flag). |
 | `bash` | Shell | Run a shell command inside the sandbox; shows exit code + output. |
 | `process_start` / `process_poll` / `process_stop` | Shell | Start, poll, and stop a long-running background process (dev servers, watchers) without blocking the turn. |
-| `grep` | Read | Regex search across files, grouped by file with line numbers. |
+| `grep` | Read | Regex search across files, grouped by file with line numbers. Prefers ripgrep when installed; both backends skip generated trees (`build*`, `_deps`, `node_modules`, `vendor`, `.git`, …) so build artifacts never pollute the hits. |
 | `glob` | Read | Find files by glob pattern. |
 | `list_dir` | Read | List a directory with type, size, and name. |
 | `repo_map` | Read | Token-budgeted, PageRank-ranked skeleton of the codebase — top files with definition signatures, personalizable with `focus`. The walk stops at any nested repo/submodule boundary and never leaves the workspace, so sibling projects can't leak into the map. THE tool to call first in a large or unfamiliar repo. |
