@@ -120,7 +120,7 @@ const std::vector<SymbolEntry>& list_workspace_symbols(std::size_t cap) {
     static std::once_flag once;
     static std::vector<SymbolEntry> cached;
     std::call_once(once, [cap]{
-        const auto& root = tools::util::workspace_root();
+        const auto root = tools::util::project_root();
         if (root.empty()) return;
         std::error_code ec;
         std::size_t files_scanned = 0;

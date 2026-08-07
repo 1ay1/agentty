@@ -263,7 +263,7 @@ std::vector<std::string> list_workspace_files(std::size_t cap) {
     static std::vector<std::string> cached;
     std::call_once(once, [cap]{
         cached.reserve(std::min<std::size_t>(cap, 1024));
-        const auto& root = tools::util::workspace_root();
+        const auto root = tools::util::project_root();
         if (root.empty()) return;
 
         std::error_code ec;
