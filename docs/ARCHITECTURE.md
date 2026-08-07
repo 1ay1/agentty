@@ -187,6 +187,17 @@ The shipped tools: `read`, `write`, `edit`, `move`, `remove`, `bash`,
 `search_docs`, `search_code`, `task` (subagent dispatch), `skill` (load a
 skill body on demand).
 
+The tree-walking tools (`grep`, `glob`, `list_dir`, `repo_map`,
+`find_definition`, the @-file picker, the symbol index) share one directory
+skip-list (`should_skip_dir`: `.git`, `node_modules`, `build*`,
+`cmake-build*`, `_deps`, `target`, `vendor`, `.venv`, …) so generated and
+fetched trees never flood results. `grep`/`find_definition` prefer ripgrep
+when present and pass that same skip-list as `-g '!…'` excludes, so both the
+ripgrep and built-in backends prune identically — a cold-cache win (rg no
+longer stat + gitignore-checks tens of thousands of build files) and a
+quality win in repos with no `.gitignore` (build artifacts stop polluting
+hits).
+
 ---
 
 ## 6. Permission policy: a constexpr matrix
@@ -322,8 +333,24 @@ sees no behavior change.
 
 ## 9. Safety boundaries
 
-- **Workspace boundary.** Filesystem tools refuse any path outside the launch
-  directory (or `--workspace DIR`). `--workspace /` opts out.
+- **Two roots: access boundary vs active project.** agentty keeps these
+  distinct. The **access boundary** (`util::workspace_root()`) is the security
+  gate: filesystem tools refuse any path outside it. It defaults to the launch
+  directory and is *widenable* — `--workspace DIR` moves it, and `--workspace /`
+  opts out entirely (whole-disk power). The **active project**
+  (`util::project_root()`) is the process cwd (agentty never `chdir`s away from
+  the launch dir) *clamped inside the boundary*. Relative tool paths and
+  repo/project-scoped defaults resolve against the **project**, not the
+  boundary, so under `--workspace /` a model's `read src/foo.cpp` still lands in
+  the launched project rather than at `/src/foo.cpp`. By default the two are the
+  same directory, so ordinary launches see no difference; the split only matters
+  when the boundary is widened past the project. Everything that means "the
+  project" — `normalize_path` (relative-path anchor), `grep`/`glob`/`list_dir`
+  defaults, `repo_map`, `find_definition`, `diagnostics`/`test` (build dir +
+  manifest), git tools (`default_git_start`), checkpoints, the @-file picker,
+  the symbol index, and project-scoped `remember` — routes through
+  `project_root()`; everything that means "the security gate" (containment
+  checks, sandbox bind-mounts, refuse-delete-root) uses `workspace_root()`.
 - **Sandbox.** `bash` and `diagnostics` run inside `bwrap` (Linux) or
   `sandbox-exec` (macOS) by default. Workspace + system libs + network are
   reachable; `~/.ssh`, `/etc`, and other projects are read-only. An approved
