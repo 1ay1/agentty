@@ -408,20 +408,16 @@ fs::path path_for(Scope s) {
         if (h.empty()) return {};
         return h / ".agentty" / "memory.jsonl";
     }
-    // Scope::Project — normally anchored on the workspace root so subprocess
-    // calls that cd around don't shift where memory lives. `--workspace /` is
-    // the explicit "unrestricted tools" mode, though, not a claim that the
-    // user's project is the filesystem root. In that mode use agentty's own
-    // stable process cwd as the project identity. Without this distinction the
+    // Scope::Project — anchored on the ACTIVE PROJECT (cwd clamped inside the
+    // access boundary) so subprocess calls that cd around don't shift where
+    // memory lives, AND `--workspace /` (explicit "unrestricted tools" mode,
+    // not a claim that the project IS the filesystem root) stores memory in
+    // agentty's stable process cwd rather than /.agentty. project_root()
+    // centralises exactly this cwd-vs-boundary resolution. Without it the
     // remember tool advertised only user scope and every model-generated
     // `scope:"project"` call failed, despite agentty being launched inside a
     // perfectly writable repository.
-    fs::path root = util::workspace_root();
-    if (root == fs::path{"/"}) {
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        if (!ec) root = std::move(cwd);
-    }
+    fs::path root = util::project_root();
     if (root.empty() || root == fs::path{"/"}) return {};
     if (!dir_path_writable(root / ".agentty")) return {};
     return root / ".agentty" / "memory.jsonl";
