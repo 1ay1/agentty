@@ -98,4 +98,13 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // as the streaming path.
 [[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth);
 
+// TEST SEAM: drive the SSE event parser directly. Feeds each (event, data)
+// pair through the same dispatch_event() the live on_chunk path uses and
+// returns the exact Msg sequence the reducer would see. Lets a golden test
+// pin the SSE→Msg behavior so the parser can be refactored (e.g. split into
+// its own module) with a byte/shape guarantee — mirrors the ChatGPT /
+// OpenAI providers' parse_sse_for_test.
+[[nodiscard]] std::vector<Msg> parse_sse_for_test(
+    const std::vector<std::pair<std::string, std::string>>& events);
+
 } // namespace agentty::provider::anthropic
