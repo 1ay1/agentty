@@ -1994,6 +1994,12 @@ if(AGENTTY_BUILD_TESTS)
     # preserving. Update kGoldenHash ONLY after confirming an intended change.
     agentty_add_full_test(wire_golden_test)
 
+    # anthropic_sse_golden_test — SHAPE-IDENTITY guard for the SSE event
+    # parser (dispatch_event/feed_sse). Scripts a realistic Anthropic stream
+    # through parse_sse_for_test and pins the emitted Msg sequence, so the
+    # pending SSE-parser module split is provably behavior-preserving.
+    agentty_add_full_test(anthropic_sse_golden_test)
+
     # toolset_e2e_test — drives EVERY built-in tool through the REAL
     # production dispatch path (registry() → mcp_tools_bridge → mcp-cpp
     # toolset → decode_result). Proves agentty's WIRING of the tools:
@@ -2290,6 +2296,7 @@ if(AGENTTY_BUILD_TESTS)
         wire_shared_test
         cache_anchor_test
         wire_golden_test
+        anthropic_sse_golden_test
         toolset_e2e_test
         subagent_report_test
         tool_wedge_liveness_test

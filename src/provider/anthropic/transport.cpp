@@ -1020,6 +1020,28 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     });
 }
 
+std::vector<Msg> parse_sse_for_test(
+    const std::vector<std::pair<std::string, std::string>>& events) {
+    std::vector<Msg> out;
+    StreamCtx ctx;
+    ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
+    // Reconstruct the exact SSE wire form (`event: <name>\ndata: <json>\n\n`)
+    // and push it through feed_sse — the SAME framer + dispatch_event path the
+    // live on_chunk uses — so the emitted Msg sequence is identical to a real
+    // stream carrying these frames.
+    for (const auto& [name, data] : events) {
+        std::string frame;
+        frame.reserve(name.size() + data.size() + 16);
+        frame += "event: ";
+        frame += name;
+        frame += "\ndata: ";
+        frame += data;
+        frame += "\n\n";
+        feed_sse(ctx, frame.data(), frame.size());
+    }
+    return out;
+}
+
 std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
