@@ -1984,6 +1984,15 @@ if(AGENTTY_BUILD_TESTS)
     # the anchor. Drives the real serializer; no network.
     agentty_add_full_test(cache_anchor_test)
 
+    # wire_golden_test — BYTE-IDENTITY guard for the Anthropic wire body.
+    # Pins the exact serialized output of messages_json_string() over a
+    # feature-rich thread (text, terminal + failed tool calls, a faded big
+    # result, a compaction summary substitution, and a superseded read that
+    # collapses). Any refactor that changes even one wire byte trips this,
+    # making the ongoing transport.cpp module split provably behavior-
+    # preserving. Update kGoldenHash ONLY after confirming an intended change.
+    agentty_add_full_test(wire_golden_test)
+
     # toolset_e2e_test — drives EVERY built-in tool through the REAL
     # production dispatch path (registry() → mcp_tools_bridge → mcp-cpp
     # toolset → decode_result). Proves agentty's WIRING of the tools:
@@ -2279,6 +2288,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_result_budget_test
         wire_shared_test
         cache_anchor_test
+        wire_golden_test
         toolset_e2e_test
         subagent_report_test
         tool_wedge_liveness_test
