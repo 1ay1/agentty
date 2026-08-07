@@ -20,6 +20,7 @@
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
 
@@ -178,6 +179,7 @@ json build_input(const provider::Request& req) {
         for (const auto& tc : m.tool_calls)
             if (tc.is_terminal()) ++total_tool_results;
     int seen_tool_results = 0;
+    const auto superseded = wire::superseded_read_ids(req.messages);
     for (const auto& m : req.messages) {
         if (m.role == Role::System) continue;   // folded into `instructions`
 
@@ -260,8 +262,10 @@ json build_input(const provider::Request& req) {
                     total_tool_results - 1 - seen_tool_results;
                 ++seen_tool_results;
                 const bool is_error = tc.is_failed() || tc.is_rejected();
-                std::string out = wire::cap_tool_result_aged(
-                    tc.output(), recency_rank, is_error);
+                std::string out = (!is_error && superseded.count(tc.id.value))
+                    ? std::string{wire::kSupersededReadPointer}
+                    : wire::cap_tool_result_aged(
+                          tc.output(), recency_rank, is_error);
                 input.push_back({
                     {"type", "function_call_output"},
                     {"call_id", tc.id.value},

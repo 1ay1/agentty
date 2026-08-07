@@ -305,6 +305,80 @@ int main() {
               "small old result ships verbatim (no marker, no fade)");
     }
 
+    // ── 8. Superseded read collapse: an earlier read of a file whose
+    //       contents a LATER turn re-read or edited is collapsed to a
+    //       one-line pointer NOW, not left to age-fade. ──
+    {
+        using json = nlohmann::json;
+        std::string big;
+        big += "FILE_HEAD_AAAA\n";
+        big.append(60 * 1024, 'r');
+        big += "\nFILE_TAIL_ZZZZ";
+
+        auto read_tc = [&](const char* id, const char* path,
+                           const std::string& out) {
+            ToolUse tc;
+            tc.id = ToolCallId{id};
+            tc.name = ToolName{"read"};
+            tc.args = json{{"path", path}};
+            tc.status = ToolUse::Done{
+                std::chrono::steady_clock::now(),
+                std::chrono::steady_clock::now(), out};
+            return tc;
+        };
+        auto edit_tc = [&](const char* id, const char* path) {
+            ToolUse tc;
+            tc.id = ToolCallId{id};
+            tc.name = ToolName{"edit"};
+            tc.args = json{{"path", path}};
+            tc.status = ToolUse::Done{
+                std::chrono::steady_clock::now(),
+                std::chrono::steady_clock::now(), "edited"};
+            return tc;
+        };
+
+        std::vector<Message> msgs;
+        Message user; user.role = Role::User; user.text = "work"; msgs.push_back(user);
+
+        // turn 1: read foo.cpp (this one gets superseded by the turn-3 edit)
+        { Message a; a.role = Role::Assistant; a.text = "read foo";
+          a.tool_calls.push_back(read_tc("toolu_r_foo1", "src/foo.cpp", big));
+          msgs.push_back(std::move(a)); }
+        // turn 2: read bar.cpp (NEVER touched again — must stay full)
+        { Message a; a.role = Role::Assistant; a.text = "read bar";
+          a.tool_calls.push_back(read_tc("toolu_r_bar", "src/bar.cpp", big));
+          msgs.push_back(std::move(a)); }
+        // turn 3: edit foo.cpp (supersedes the turn-1 read of foo)
+        { Message a; a.role = Role::Assistant; a.text = "edit foo";
+          a.tool_calls.push_back(edit_tc("toolu_e_foo", "src/foo.cpp"));
+          msgs.push_back(std::move(a)); }
+        // turn 4: read foo.cpp again (the LIVE read of foo — must stay full)
+        { Message a; a.role = Role::Assistant; a.text = "re-read foo";
+          a.tool_calls.push_back(read_tc("toolu_r_foo2", "src/foo.cpp", big));
+          msgs.push_back(std::move(a)); }
+
+        Thread t{ThreadId{"t"}, "", std::move(msgs), {}, {}};
+        std::string wire = ap::messages_json_string(t);
+
+        std::string foo1 = tool_result_content(wire, "toolu_r_foo1");
+        std::string bar  = tool_result_content(wire, "toolu_r_bar");
+        std::string foo2 = tool_result_content(wire, "toolu_r_foo2");
+
+        // The superseded turn-1 read collapses to the short pointer.
+        check(foo1.size() < 512,
+              "superseded earlier read is collapsed to a one-line pointer");
+        check(foo1.find("superseded") != std::string::npos,
+              "collapsed read carries the superseded pointer text");
+        check(foo1.find("FILE_HEAD_AAAA") == std::string::npos,
+              "collapsed read does NOT ship the original body");
+        // The never-touched-again read stays full (it's recent + unique).
+        check(bar.size() > 40 * 1024,
+              "a read whose file is never touched again stays full");
+        // The most-recent read of foo is the live copy — never collapsed.
+        check(foo2.size() > 40 * 1024,
+              "the newest read of a file is never collapsed");
+    }
+
     if (g_fails == 0) std::fprintf(stderr, "\nALL PASS\n");
     else              std::fprintf(stderr, "\n%d FAILURE(S)\n", g_fails);
     return g_fails == 0 ? 0 : 1;
