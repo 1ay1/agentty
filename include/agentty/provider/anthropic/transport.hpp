@@ -14,6 +14,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/provider/anthropic/prompt.hpp"  // default_system_prompt / default_tools (split out)
 #include "agentty/provider/provider.hpp"   // provider::ToolSpec, provider::Request, lower_shared
 #include "agentty/runtime/msg.hpp"
 
@@ -87,18 +88,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 [[nodiscard]] std::string messages_json_string(const Thread& t,
                                                bool include_thinking = false);
 
-// Standard system prompt with env info.
-//
-// `lean` builds a trimmed variant for SUBAGENTS: it keeps the operational
-// discipline (file-editing, shell, context-economy, big-codebases,
-// in-house-languages, environment) but OMITS the memory-tools protocol and the
-// on-demand skills catalog — a subagent never calls remember/forget/wipe (not
-// in its allowlist) and doesn't persist facts, so that large block is pure
-// billed dead-weight on its prefix. Default (false) is the full parent prompt.
-[[nodiscard]] std::string default_system_prompt(bool lean = false);
-
-// Tool specs corresponding to our local tool implementations.
-[[nodiscard]] std::vector<ToolSpec> default_tools();
+// default_system_prompt() + default_tools() now live in prompt.hpp (impl in
+// prompt.cpp). Re-included here so every existing `transport.hpp` consumer
+// still sees the same public surface — the split is internal.
+// (see agentty/provider/anthropic/prompt.hpp)
 
 // Fetch available models from Anthropic API. Takes the typed AuthHeader
 // so the model-list endpoint shares the same header-vs-token discipline
