@@ -75,6 +75,16 @@ void set_workspace_root(fs::path root);
 
 [[nodiscard]] const fs::path& workspace_root();
 
+// The ACTIVE PROJECT directory: the process cwd (the dir agentty was
+// launched in), clamped inside the access boundary. Distinct from
+// workspace_root(), the widenable ACCESS BOUNDARY (`--workspace /`).
+// Relative tool paths and repo-scoped defaults resolve from HERE so that
+// `read src/foo.cpp` under `--workspace /` lands in the launched project,
+// not at `/src/foo.cpp`. By default project_root() == workspace_root().
+// Mirrors mcp-cpp's util::project_root(); the two stay in sync via the
+// shared set_workspace_root() plumbing.
+[[nodiscard]] fs::path project_root();
+
 // True if `target` is at-or-under the workspace root after canonicalising
 // both sides. Symlink escape is blocked: a link inside the workspace that
 // points to /etc would resolve to /etc and fail the prefix check. Uses

@@ -286,9 +286,19 @@ fs::path normalize_path(std::string_view s) {
         }
     }
     fs::path p{s};
-    std::error_code ec;
-    if (!p.is_absolute()) p = fs::absolute(p, ec);
-    return p;
+    if (!p.is_absolute()) {
+        // Resolve relative to the ACTIVE PROJECT (cwd clamped inside the
+        // access boundary), NOT the tool thread's cwd via fs::absolute()
+        // and NOT the raw boundary. fs::absolute() anchored to whatever
+        // cwd the worker thread happened to have, which could fail the
+        // workspace-containment check for a path the model reasonably
+        // expected to be in-bounds; the raw boundary would turn
+        // `src/foo.cpp` into `/src/foo.cpp` under `--workspace /`.
+        // project_root() is the right anchor and, by default, equals the
+        // boundary so common launches are unchanged.
+        p = project_root() / p;
+    }
+    return p.lexically_normal();
 }
 
 namespace {
@@ -322,6 +332,15 @@ void set_workspace_root(fs::path root) {
 
 const fs::path& workspace_root() {
     return mutable_workspace_root();
+}
+
+fs::path project_root() {
+    // Delegate to mcp-cpp's implementation: set_workspace_root() mirrors the
+    // boundary into mcp's util layer, so its project_root() sees the same
+    // boundary and the same process cwd. Delegating (rather than duplicating
+    // the cwd-clamp logic) guarantees agentty-native and mcp-served tools
+    // resolve relative paths to the identical directory.
+    return ::mcp::tools::util::project_root();
 }
 
 bool is_within_workspace(const fs::path& target) {
@@ -472,8 +491,16 @@ bool should_skip_dir(std::string_view name) noexcept {
         ".cache", "vendor", "dist", "out", ".next", ".venv",
         "cmake-build-debug", "cmake-build-release", ".idea", ".vscode",
         "_deps", "third_party", "thirdparty", "3rdparty", "external",
+        ".mypy_cache", ".pytest_cache", ".tox", ".gradle", "Pods",
+        "bazel-bin", "bazel-out", "DerivedData", ".terraform",
     };
     for (auto s : skip) if (name == s) return true;
+    // Prefix families: out-of-source CMake build trees (build/, build-*,
+    // cmake-build-*) are full of generated + fetched (_deps) files that
+    // would otherwise flood the @-file picker / symbol index. Kept in sync
+    // with mcp-cpp's should_skip_dir.
+    if (name.starts_with("build-") || name.starts_with("cmake-build"))
+        return true;
     return false;
 }
 

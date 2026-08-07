@@ -68,9 +68,12 @@ std::string chomp(std::string s) {
 const RepoInfo& repo() {
     static const RepoInfo info = [] {
         RepoInfo r;
-        std::error_code ec;
-        std::string ws = fs::current_path(ec).string();
-        if (ec || ws.empty()) ws = util::workspace_root().string();
+        // The ACTIVE PROJECT (cwd clamped inside the access boundary), not
+        // the raw boundary: `-w /` must not make the checkpoint layer think
+        // the project is `/`. project_root() centralises this cwd-vs-boundary
+        // resolution (shared with git tools + normalize_path).
+        std::string ws = util::project_root().string();
+        if (ws.empty()) ws = util::workspace_root().string();
         auto top = util::run_argv_s(
             {"git", "-C", ws, "rev-parse", "--show-toplevel"}, 8192,
             std::chrono::seconds{10});
