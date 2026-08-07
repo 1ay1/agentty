@@ -265,7 +265,7 @@ int tokens_from(std::size_t bytes, int images) {
          + images * kTokensPerImage;
 }
 
-int estimate_messages_tokens(const std::vector<Message>& v) {
+[[maybe_unused]] int estimate_messages_tokens(const std::vector<Message>& v) {
     std::size_t bytes = 0;
     int images = 0;
     for (const auto& m : v) {
@@ -275,6 +275,7 @@ int estimate_messages_tokens(const std::vector<Message>& v) {
     }
     return tokens_from(bytes, images);
 }
+
 
 // Single-pass front-trim: given a wire vector, return the number of
 // entries to drop starting at index `keep_head` (1 = preserve the
@@ -456,13 +457,46 @@ std::vector<Message> wire_messages_for(const Thread& t) {
 
 int estimate_wire_tokens(const Thread& t) {
     // Same bytes/3.5 + ~1500-per-image approximation as
-    // estimate_prefix_tokens(Thread), but against the wire view so
-    // any compaction summary substitution is accounted for. Auto-
-    // compaction triggers MUST use this; using the raw-transcript
-    // estimate would re-fire compaction immediately after every
-    // round because the user-visible transcript never shrinks.
-    auto wire = wire_messages_for_impl(t);
-    return estimate_messages_tokens(wire);
+    // estimate_prefix_tokens(Thread), but against the WIRE view so any
+    // compaction summary substitution is accounted for. Auto-compaction
+    // triggers MUST use this; using the raw-transcript estimate would
+    // re-fire compaction immediately after every round because the
+    // user-visible transcript never shrinks.
+    //
+    // Byte-count the wire view WITHOUT materialising it. The old body did
+    // `wire_messages_for_impl(t)` — a full deep-copy/transform of every
+    // message — purely to sum bytes and throw the vector away. This runs on
+    // the REDUCER thread twice per turn (the proactive-compaction trigger at
+    // finalize_turn and the est-calibration on StreamUsage), so on a large
+    // context it was allocating and freeing a multi-MB transcript clone on
+    // the UI thread every turn — exactly the per-turn cost that makes big
+    // contexts feel sluggish. Walk the messages in place instead: sum the
+    // same MsgWeight the materialised path would, applying the identical
+    // compaction-substitution rule, with zero allocation beyond the one-off
+    // wrapped-summary weight.
+    const bool has_compaction =
+        !t.compactions.empty()
+        && t.compactions.back().up_to_index != 0
+        && t.compactions.back().up_to_index <= t.messages.size();
+
+    std::size_t bytes = 0;
+    int images = 0;
+    std::size_t start = 0;
+    if (has_compaction) {
+        // The covered prefix [0, up_to_index) is replaced on the wire by a
+        // single synthetic User summary message. Price only that summary's
+        // text (matching wire_messages_for_impl's summary_msg), then the raw
+        // tail from up_to_index on.
+        const auto& rec = t.compactions.back();
+        bytes += wrap_summary_as_user_text(rec.summary).size();
+        start = rec.up_to_index;
+    }
+    for (std::size_t i = start; i < t.messages.size(); ++i) {
+        const auto w = message_weight(t.messages[i]);
+        bytes  += w.bytes;
+        images += w.images;
+    }
+    return tokens_from(bytes, images);
 }
 
 Cmd<Msg> launch_stream(Model& m) {
