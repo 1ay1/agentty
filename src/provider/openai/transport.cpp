@@ -38,6 +38,7 @@
 
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
+#include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -878,7 +879,7 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
 // True iff an assistant message carries any tool_calls (whose results must
 // follow as `role:"tool"` messages in OpenAI's format).
 [[nodiscard]] bool is_assistant_with_results(const Message& m) noexcept {
-    return m.role == Role::Assistant && !m.tool_calls.empty();
+    return wire::is_assistant_with_results(m);
 }
 
 // ── Ollama native /api/chat protocol ────────────────────────────────────────
@@ -1510,47 +1511,17 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 
 namespace {
 
-[[nodiscard]] std::filesystem::path lm_home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return std::filesystem::path{h};
-#if defined(_WIN32)
-    if (auto* h = std::getenv("USERPROFILE"); h && *h)
-        return std::filesystem::path{h};
-#endif
-    return {};
-}
-
-[[nodiscard]] std::string lm_read_file(const std::filesystem::path& p) {
-    std::error_code ec;
-    if (p.empty() || !std::filesystem::exists(p, ec)) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string s((std::istreambuf_iterator<char>(f)),
-                   std::istreambuf_iterator<char>());
-    if (s.size() > 64 * 1024) s.resize(64 * 1024);
-    return s;
-}
-
 // CLAUDE.md tiers only. The Anthropic prompt also injects agent-authored
 // learned-memory (load_recent_*) and the skills catalog, but those can run to
 // thousands of tokens and demonstrably confuse small local models on simple
 // prompts (a 14b answered "hi" with "I didn't understand" once the learned
 // facts were present). Local models get the concise user-authored CLAUDE.md
-// guidance and nothing else.
+// guidance and nothing else. The user/project/local wrapper is the shared
+// wire::claude_md_blocks (also used by the Ollama transport).
 [[nodiscard]] std::string local_memory_blocks() {
-    std::string user    = lm_read_file(lm_home_dir() / "CLAUDE.md");
-    std::string project = lm_read_file(std::filesystem::path{"CLAUDE.md"});
-    std::string local   = lm_read_file(std::filesystem::path{"CLAUDE.local.md"});
-
-    if (user.empty() && project.empty() && local.empty()) return {};
-
-    std::string m = "\n\n<memory>\n"
+    return wire::claude_md_blocks(
         "Project-specific guidance the user has authored. Treat these as "
-        "persistent context for THIS workspace and user.\n";
-    if (!user.empty())    m += "<user-memory>\n"    + user    + "\n</user-memory>\n";
-    if (!project.empty()) m += "<project-memory>\n" + project + "\n</project-memory>\n";
-    if (!local.empty())   m += "<local-memory>\n"   + local   + "\n</local-memory>\n";
-    m += "</memory>";
-    return m;
+        "persistent context for THIS workspace and user.");
 }
 
 } // namespace

@@ -12,6 +12,7 @@
 #include "agentty/provider/anthropic/transport.hpp"
 
 #include "agentty/provider/wire.hpp"            // wire::scrub_utf8 / cap_tool_result_aged
+#include "agentty/provider/msg_shared.hpp"      // wire::is_assistant_with_results
 #include "agentty/provider/wire_supersede.hpp"  // wire::superseded_read_ids / kSupersededReadPointer
 #include "agentty/runtime/composer_attachment.hpp"  // attachment::expand
 #include "agentty/util/base64.hpp"
@@ -66,7 +67,7 @@ namespace {
 // branches get a synthesized placeholder result downstream so the wire
 // stays valid; the in-memory ToolUse status is left untouched.
 [[nodiscard]] inline bool is_assistant_with_results(const Message& m) noexcept {
-    return m.role == Role::Assistant && !m.tool_calls.empty();
+    return wire::is_assistant_with_results(m);
 }
 
 // True iff the message carries at least one image with non-empty bytes.

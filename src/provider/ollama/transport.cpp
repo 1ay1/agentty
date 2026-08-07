@@ -28,6 +28,7 @@
 
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
+#include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -63,7 +64,7 @@ http::Headers build_request_headers(const AuthHeader& auth) {
 }
 
 bool is_assistant_with_results(const Message& m) {
-    return m.role == Role::Assistant && !m.tool_calls.empty();
+    return wire::is_assistant_with_results(m);
 }
 
 // ── Stream state ─────────────────────────────────────────────────────────────
@@ -1013,40 +1014,10 @@ void feed_ndjson(StreamCtx& ctx, const char* data, std::size_t len) {
 }
 
 // ── CLAUDE.md memory tiers (user-authored, concise) ─────────────────────────
-std::filesystem::path home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return std::filesystem::path{h};
-#if defined(_WIN32)
-    if (auto* h = std::getenv("USERPROFILE"); h && *h)
-        return std::filesystem::path{h};
-#endif
-    return {};
-}
-
-std::string read_file(const std::filesystem::path& p) {
-    std::error_code ec;
-    if (p.empty() || !std::filesystem::exists(p, ec)) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string s((std::istreambuf_iterator<char>(f)),
-                   std::istreambuf_iterator<char>());
-    if (s.size() > 64 * 1024) s.resize(64 * 1024);
-    return s;
-}
-
 std::string memory_blocks() {
-    std::string user    = read_file(home_dir() / "CLAUDE.md");
-    std::string project = read_file(std::filesystem::path{"CLAUDE.md"});
-    std::string local   = read_file(std::filesystem::path{"CLAUDE.local.md"});
-    if (user.empty() && project.empty() && local.empty()) return {};
-
-    std::string m = "\n\n<memory>\n"
+    return wire::claude_md_blocks(
         "Project-specific guidance the user has authored. Treat these as "
-        "persistent context for THIS workspace and user.\n";
-    if (!user.empty())    m += "<user-memory>\n"    + user    + "\n</user-memory>\n";
-    if (!project.empty()) m += "<project-memory>\n" + project + "\n</project-memory>\n";
-    if (!local.empty())   m += "<local-memory>\n"   + local   + "\n</local-memory>\n";
-    m += "</memory>";
-    return m;
+        "persistent context for THIS workspace and user.");
 }
 
 } // namespace
