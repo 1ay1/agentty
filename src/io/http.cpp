@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <random>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2608,11 +2609,34 @@ static bool is_cancelled(const CancelTokenPtr& c) {
 }
 
 // Backoff between attempts. Attempt 0 → no wait (fastest path for the common
-// stale-pool case). Attempt N → 100*N ms. Cancellable: returns false if the
-// token trips during the wait so the caller bails without another attempt.
+// stale-pool case). Attempt N → a randomised wait in [0, base·2^(N-1)] with
+// base = 100 ms, i.e. FULL JITTER over an exponentially growing window
+// (attempt 1 → [0,100] ms, attempt 2 → [0,200] ms). Jitter is not cosmetic:
+// agentty fans out parallel subagent streams and multiple instances hit the
+// same edge, so a fixed backoff makes every retrier re-dial in lockstep and
+// re-synchronise the very overload/RST that triggered the retry (thundering
+// herd). Randomising each waiter's delay decorrelates them. The window stays
+// small (≤ 200 ms at kMaxAttempts=3) so worst-case added latency is bounded.
+// Cancellable: returns false if the token trips during the wait so the caller
+// bails without another attempt.
 static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
     if (attempt <= 0) return true;
-    auto budget = std::chrono::milliseconds(100 * attempt);
+    // Exponentially growing ceiling: 100·2^(attempt-1) ms, capped so a future
+    // bump to kMaxAttempts can't blow the latency budget.
+    constexpr long kBaseMs = 100;
+    constexpr long kCapMs  = 2'000;
+    long ceiling = kBaseMs << (attempt - 1);   // 100, 200, 400, ...
+    if (ceiling > kCapMs || ceiling <= 0) ceiling = kCapMs;
+    // Full jitter: uniform in [0, ceiling]. thread_local RNG so parallel
+    // stream/send loops don't contend on a shared generator or a global lock.
+    thread_local std::mt19937_64 rng{[] {
+        std::random_device rd;
+        return (static_cast<std::uint64_t>(rd()) << 32) ^ rd()
+             ^ static_cast<std::uint64_t>(
+                 std::chrono::steady_clock::now().time_since_epoch().count());
+    }()};
+    std::uniform_int_distribution<long> dist(0, ceiling);
+    auto budget = std::chrono::milliseconds(dist(rng));
     auto end = clock_t_::now() + budget;
     while (clock_t_::now() < end) {
         if (is_cancelled(cancel)) return false;
