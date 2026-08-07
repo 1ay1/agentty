@@ -39,6 +39,7 @@
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
@@ -902,6 +903,7 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
         if (is_assistant_with_results(m))
             total_tool_results += static_cast<int>(m.tool_calls.size());
     int tool_results_emitted = 0;
+    const auto superseded = wire::superseded_read_ids(msgs);
     for (const auto& m : msgs) {
         const bool has_text  = !m.text.empty();
         const bool has_tools = is_assistant_with_results(m);
@@ -948,6 +950,8 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
                 if (out.empty()) {
                     if (tc.is_rejected())       out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else if (!is_error && superseded.count(tc.id.value)) {
+                    out = std::string{wire::kSupersededReadPointer};
                 } else {
                     out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
@@ -1145,6 +1149,9 @@ json build_messages(const Thread& t) {
         if (is_assistant_with_results(m))
             total_tool_results += static_cast<int>(m.tool_calls.size());
     int tool_results_emitted = 0;
+    // Earlier reads whose file a later turn re-read/edited are collapsed to a
+    // one-line pointer instead of their full body — see wire::superseded_read_ids.
+    const auto superseded = wire::superseded_read_ids(t);
     for (const auto& m : t.messages) {
         const bool has_text   = !m.text.empty();
         // Skip empty-bytes images (a drained draft attachment that leaked
@@ -1220,6 +1227,8 @@ json build_messages(const Thread& t) {
                 if (out.empty()) {
                     if (tc.is_rejected())      out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else if (!is_error && superseded.count(tc.id.value)) {
+                    out = std::string{wire::kSupersededReadPointer};
                 } else {
                     out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }

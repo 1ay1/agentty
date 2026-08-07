@@ -14,6 +14,7 @@
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -27,6 +28,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/util/base64.hpp"
@@ -906,7 +908,8 @@ void write_tool_use_block(std::string& out, const ToolUse& tc, CachePin pin) {
 // all three transports). `recency_rank` is 0 for the newest terminal tool
 // result in the thread and grows toward the oldest.
 void write_tool_result_block(std::string& out, const ToolUse& tc,
-                             CachePin pin, int recency_rank) {
+                             CachePin pin, int recency_rank,
+                             bool superseded) {
     out.push_back('{');
     bool first = true;
     json_write_field(out, "type", "tool_result", first);
@@ -930,6 +933,17 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
             first);
     } else if (raw_output.empty()) {
         json_write_field(out, "content", "(no output)", first);
+    } else if (superseded) {
+        // A LATER turn read/edited/wrote this same file, so this earlier
+        // read's body is stale — the model already has fresher state for it.
+        // Collapse it to a deterministic one-line pointer NOW instead of
+        // waiting for age-fading (kFullResultWindow turns) to shrink it. In a
+        // read-heavy coding loop the same files get touched repeatedly, so
+        // this reclaims the single largest source of dead wire weight. The
+        // pointer text is FIXED (no byte counts / positions) so a given
+        // superseded read always serialises identically — no cache churn.
+        json_write_field(out, "content",
+            std::string{wire::kSupersededReadPointer}, first);
     } else {
         // Pick the wire budget from recency. Recent results (and ALL error
         // results, at any age) keep the full budget so the model can act on
@@ -948,6 +962,12 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
 
 [[nodiscard]] std::string messages_json_string(const Thread& t,
                                                bool include_thinking) {
+    // Read-collapse analysis: earlier reads whose file a later turn touched
+    // again are stale on the wire and get a one-line pointer instead of their
+    // full body (see wire::superseded_read_ids). Deterministic, so it never
+    // churns the prompt cache.
+    const auto superseded = wire::superseded_read_ids(t);
+
     // First pass: figure out where the cache breakpoints land. cli.js
     // pins BOTH the last and second-to-last *emitted* messages' last
     // content blocks (rolling cache reuse — turn N's last becomes turn
@@ -1165,8 +1185,9 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                 const int recency_rank =
                     total_tool_results - 1 - tool_results_emitted;
                 ++tool_results_emitted;
+                const bool is_superseded = superseded.count(tc.id.value) != 0;
                 write_tool_result_block(out, tc, pin_if_last(do_pin, last_block),
-                                        recency_rank);
+                                        recency_rank, is_superseded);
             }
             out.append("]}");
         }
