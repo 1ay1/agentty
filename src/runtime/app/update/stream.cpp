@@ -784,6 +784,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
     return std::visit(overload{
         [&](StreamStarted) -> Step {
             auto now = std::chrono::steady_clock::now();
+            // Stamp the last-request clock for the idle cache-lapse
+            // pre-compaction trigger (StreamState::should_compact_on_idle).
+            // NOT gated on !compacting: a compaction request re-warms the
+            // (soon-to-be-small) prefix too, so it legitimately resets the
+            // idle timer.
+            m.s.last_wire_at = now;
             // The phase variant guarantees a non-null ctx when active;
             // StreamStarted only fires after submit_message / retry has
             // already moved us into Streaming.

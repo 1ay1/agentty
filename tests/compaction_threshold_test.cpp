@@ -97,6 +97,41 @@ int main() {
         std::puts("threshold: unknown/zero window never triggers");
     }
 
+    // ── idle cache-lapse pre-compaction ──────────────────────────────────
+    // The safety net for the ONE case deep-ride would spike price: sitting
+    // idle past the cache TTL with a huge prefix. It fires only when BOTH
+    // the prefix is large and the idle gap is near the TTL, and never before
+    // the first request of the session.
+    {
+        using namespace std::chrono;
+        StreamState s;
+        const auto t0 = steady_clock::time_point{} + hours{5};  // arbitrary base
+
+        // No request sent yet → never fires, regardless of size/idle.
+        assert(!s.should_compact_on_idle(t0 + hours{2}, 500000));
+
+        s.last_wire_at = t0;
+
+        // Large prefix + long idle (48+ min) → FIRES.
+        assert(s.should_compact_on_idle(t0 + StreamState::kIdleCompactAfter,
+                                        300000));
+        assert(s.should_compact_on_idle(t0 + minutes{55}, 300000));
+
+        // Large prefix but still ACTIVELY working (short idle) → does NOT
+        // fire — no early compaction during a live session.
+        assert(!s.should_compact_on_idle(t0 + minutes{5}, 900000));
+        assert(!s.should_compact_on_idle(t0 + minutes{30}, 900000));
+
+        // Long idle but SMALL prefix → not worth a summary round.
+        assert(!s.should_compact_on_idle(t0 + hours{2},
+                                         StreamState::kIdleCompactMinTokens - 1));
+
+        // Exactly at the min-tokens boundary + past the idle gap → fires.
+        assert(s.should_compact_on_idle(t0 + hours{2},
+                                        StreamState::kIdleCompactMinTokens));
+        std::puts("idle-compaction: fires only on large prefix + near-TTL idle");
+    }
+
     std::puts("ALL COMPACTION-THRESHOLD TESTS PASSED");
     return 0;
 }

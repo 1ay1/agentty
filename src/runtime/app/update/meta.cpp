@@ -607,6 +607,34 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 return {std::move(m), std::move(midrun_trim)};
             if (!settle_freeze_trim.is_none())
                 return {std::move(m), std::move(settle_freeze_trim)};
+
+            // ── Idle cache-lapse pre-compaction ───────────────────────────
+            // Deep-ride (95 %) is cheap only while the prompt cache holds the
+            // prefix. If we've sat idle long enough that the cache is about
+            // to lapse AND the prefix is large, the user's NEXT message would
+            // re-price the whole thing at full input rate. Pre-empt it: fire
+            // a compaction NOW while the prefix is still a warm cache hit, so
+            // they come back to a small warm context. This is the ONLY
+            // proactive early-compaction path; it is bounded to genuinely
+            // large + near-TTL-idle states so ordinary pauses never trip it.
+            if (m.s.is_idle()
+                && !m.s.compacting
+                && !m.s.autocompact_disabled
+                && !m.d.current.messages.empty()) {
+                const int est = static_cast<int>(
+                    cmd::estimate_wire_tokens(m.d.current) * m.s.est_calibration);
+                if (m.s.should_compact_on_idle(now, est)) {
+                    // Clear last_wire_at so we don't re-fire every Tick while
+                    // the compaction request is being dispatched; StreamStarted
+                    // re-stamps it when the summary request actually goes out.
+                    m.s.last_wire_at = {};
+                    auto compact_cmd = Cmd<Msg>::task(
+                        [](std::function<void(Msg)> dispatch) {
+                            dispatch(CompactContext{});
+                        });
+                    return {std::move(m), std::move(compact_cmd)};
+                }
+            }
             return done(std::move(m));
         },
         [&](Quit) -> Step {
