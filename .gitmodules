@@ -1,14 +1,14 @@
 [submodule "maya"]
 	path = maya
-	url = git@github.com:1ay1/maya.git
+	url = https://github.com/1ay1/maya.git
 	branch = master
 [submodule "acp-cpp"]
 	path = acp-cpp
-	url = git@github.com:1ay1/acp-cpp.git
+	url = https://github.com/1ay1/acp-cpp.git
 [submodule "mcp-cpp"]
 	path = mcp-cpp
 	url = https://github.com/1ay1/mcp-cpp.git
 [submodule "rag-cpp"]
 	path = rag-cpp
-	url = git@github.com:1ay1/rag-cpp.git
+	url = https://github.com/1ay1/rag-cpp.git
 	branch = main
