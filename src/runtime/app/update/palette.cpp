@@ -85,32 +85,6 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::RunCodeBlock:  return agentty::app::update(std::move(m), Msg{OpenCodeBlockPicker{}});
                 case Command::InspectToolOutputs: return agentty::app::update(std::move(m), Msg{OpenToolOutputViewer{}});
                 case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
-                case Command::CompactDepth: {
-                    // Cycle the auto-compaction depth through three presets and
-                    // persist. Higher = ride deeper into the context window
-                    // before summarising (fewer, larger compactions), which is
-                    // what a user on a big-window model wants when the model
-                    // handles 400k+ comfortably. The effective trigger is
-                    // StreamState::compaction_threshold() (clamped so output
-                    // headroom always stays free).
-                    //   75 % Aggressive → 90 % Balanced → 95 % Deep → …
-                    int cur = m.s.autocompact_pct > 0
-                                  ? m.s.autocompact_pct
-                                  : StreamState::kDefaultAutocompactPct;
-                    int next;
-                    const char* label;
-                    if (cur < 90)      { next = 90; label = "Balanced"; }
-                    else if (cur < 95) { next = 95; label = "Deep"; }
-                    else               { next = 75; label = "Aggressive"; }
-                    m.s.autocompact_pct = next;
-                    persist_settings(m);
-                    auto toast = set_status_toast(
-                        m,
-                        "compaction depth: " + std::string{label} + " ("
-                            + std::to_string(next) + "% of window)",
-                        std::chrono::seconds{3});
-                    return {std::move(m), std::move(toast)};
-                }
                 case Command::RewindCheckpoint:
                     // Open the checkpoint picker so ANY earlier turn is a
                     // rewind target (with a per-turn diff preview), not just

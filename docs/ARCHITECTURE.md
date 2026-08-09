@@ -292,14 +292,27 @@ A long thread eventually has to be summarized so it fits the model's context
 window. Two things make this cheap AND rarely-needed instead of a recurring
 tax:
 
-- **The trigger scales with the window, not a fixed token count.**
-  `StreamState::compaction_threshold()` (`domain/session.hpp`) fires
-  auto-compaction at `autocompact_pct`% of `context_max` (default 90%, user-
-  tunable via the *Compaction depth* command: 75/90/95%), clamped so at least
-  `kMinOutputHeadroom` (20K) tokens of the window always stay free for the
-  reply. A fixed absolute margin (the old design) was 98% on a 1M window but
-  only 91% on a 200K one — inconsistent, and it forced a summarization pass
-  long before a big-window model actually needed one.
+- **The trigger rides DEEP — 95 % of the window — and compaction is the
+  expensive event, so we fire seldom.** `StreamState::compaction_threshold()`
+  (`domain/session.hpp`) fires at `min(kSoftFillPct% of context_max,
+  context_max - kMinOutputHeadroom)` = `min(95 %, window - 20K)`. A 200K
+  window fires at 180K (the 20K reply floor binds); a 1M window rides all the
+  way to **950K**. Counter-intuitively this is also the *cheapest* policy:
+  the repeated conversation prefix is a prompt-cache HIT across turns (the
+  1-hour Anthropic anchor breakpoint in `wire_body.cpp`, the pinned OpenAI
+  `prompt_cache_key`), so a large live prefix costs ~10 % of fresh input per
+  turn — while each **compaction** runs a summary request AND resets the
+  cache (the next turn is a full miss). Firing at 95 % instead of early means
+  ~4× fewer of those expensive events on a big window → lower total token
+  burn. There is **no user knob** (the old *Compaction depth* command is
+  gone); the policy is chosen to give maximum context and minimum burn
+  automatically.
+- **The summarised slice is bounded** so the summary request stays cheap even
+  on a huge window. `wire_messages_for_compaction` (`cmd_factory.cpp`) hands
+  the summariser the smaller of ~65 % of the window and `kCompactionSliceCap`
+  (~150K) of the most recent transcript, keeping the first user turn so the
+  original task framing survives. A cheap model compresses 150K of recent
+  history far better — and cheaper — than 650K in one shot.
 - **The summarization request itself runs on the cheapest capable model on
   the active provider** (the same `cheapest_capable_model` router subagents
   use — see §8.5.1), not the flagship model you're chatting with.

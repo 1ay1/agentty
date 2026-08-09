@@ -422,16 +422,26 @@ std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_m
     // compactions don't double-count the summarised prefix.
     std::vector<Message> base = wire_messages_for_impl(t);
 
-    // Trim from the front until we fit ~65% of context_max. Prices every
-    // message once and drops the computed prefix in one bulk erase (the
-    // shared front_drop_count kernel) instead of the old re-sum-per-erase
-    // O(N²) loop.
+    // Trim from the front until the slice we ask the model to summarise fits
+    // a BOUNDED size. Two caps, whichever is smaller:
+    //   • ~65% of context_max — leaves room for the summary prompt + reply on
+    //     small windows;
+    //   • kCompactionSliceCap (absolute) — the load-bearing cap. Summarising
+    //     is a compression task, and a cheap/Haiku-class model summarises
+    //     ~150k of recent transcript far better than 650k (65% of a 1M
+    //     window) in one shot: less to lose, tighter output, lower cost. So
+    //     even on a huge window we only ever hand the summariser the most
+    //     recent bounded slab of history.
+    // The trim keeps the first real User turn (keep_head=1) so the original
+    // task framing survives into the summary instead of being dropped.
     if (context_max > 0) {
-        const int ceiling = static_cast<int>(static_cast<double>(context_max) * 0.65);
-        const std::size_t drop = front_drop_count(base, ceiling, /*keep_head=*/0);
+        constexpr int kCompactionSliceCap = 150000;
+        int ceiling = static_cast<int>(static_cast<double>(context_max) * 0.65);
+        if (ceiling > kCompactionSliceCap) ceiling = kCompactionSliceCap;
+        const std::size_t drop = front_drop_count(base, ceiling, /*keep_head=*/1);
         if (drop > 0)
-            base.erase(base.begin(),
-                       base.begin() + static_cast<std::ptrdiff_t>(drop));
+            base.erase(base.begin() + 1,
+                       base.begin() + 1 + static_cast<std::ptrdiff_t>(drop));
         // Drop any leading Assistants exposed by the trim — Anthropic
         // requires the wire to start with a User.
         std::size_t lead = 0;

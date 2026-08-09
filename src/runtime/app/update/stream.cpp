@@ -296,8 +296,18 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // one, it counts toward the breaker; otherwise the streak
         // resets. Crossing `kRapidRefillCount` flips the disable
         // flag so the auto-trigger in modal.cpp stops firing.
-        constexpr int kRapidRefillTurns = 3;
-        constexpr int kRapidRefillCount = 3;
+        //
+        // With the absolute working-set trigger (kWorkingSetCap ~260k)
+        // and the bounded summary slice (~150k), a healthy session
+        // compacts to WELL under the threshold, so genuine thrash only
+        // happens when a single tool output is itself larger than the
+        // post-compaction budget — the case the breaker exists for. The
+        // disable is TEMPORARY: finalize re-enables after ~10 quiet
+        // turns (see the turns_since_last_compact re-arm below), so a
+        // one-off huge output doesn't wedge auto-compaction for the
+        // rest of the session.
+        constexpr int kRapidRefillTurns = 2;
+        constexpr int kRapidRefillCount = 4;
         if (m.s.turns_since_last_compact <= kRapidRefillTurns) {
             ++m.s.recent_compacts;
         } else {
@@ -701,15 +711,16 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // so this trigger is purely a quality optimisation: summary >
     // truncation. If compaction fails (rate-limited, network drop)
     // the user still gets through their next turn via soft-trim.
-    // Threshold is now a PERCENT of the model's window
-    // (StreamState::compaction_threshold(), default 85 %) clamped so
-    // ~20k tokens of output headroom always stays free. This replaces
-    // the old fixed `context_max - 17k` absolute margin, which was far
-    // too eager on large windows: on a 1 M-token model that fired at
-    // 98.3 % (983k) yet on 200 k at 91.5 % — inconsistent, and it forced
-    // a compaction long before a model happily handling 400 k needed one.
-    // The pct is user-tunable via Settings::autocompact_pct so "ride
-    // deeper" is a one-knob change.
+    // Threshold is StreamState::compaction_threshold() = min(95 % of the
+    // window, window - 20k). We ride DEEP on purpose: keep maximum live
+    // context and compact as rarely as possible. That's also the cheap
+    // choice — the repeated prefix is a prompt-cache HIT across turns (the
+    // 1-hour Anthropic anchor / OpenAI prompt_cache_key), so a big live
+    // prefix costs little, while each COMPACTION is expensive (summary
+    // request + cache reset on the next turn). Firing seldom (95 %, not
+    // early) minimises total token burn. The summarised slice is separately
+    // bounded in wire_messages_for_compaction so the summary request itself
+    // stays cheap even on a 1 M window.
     if (m.s.is_idle()
         && !m.s.compacting
         && !m.s.autocompact_disabled

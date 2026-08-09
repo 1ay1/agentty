@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// compaction_threshold_test.cpp — the smart auto-compaction trigger math.
+// compaction_threshold_test.cpp — the auto-compaction trigger math.
 //
-// StreamState::compaction_threshold() turns the model's context window +
-// the user's `autocompact_pct` knob into the token count at which background
-// compaction fires. The invariants this locks:
-//   • percent-of-window (not a fixed absolute margin) so behaviour is
-//     consistent across a 200k and a 1M window;
-//   • an output-headroom FLOOR (kMinOutputHeadroom) that the threshold can
-//     never exceed, so the next turn always has room to answer;
-//   • the pct is clamped to [50, 95] and 0 means "use the default";
-//   • a 1M-window model rides far deeper than a 200k one before compacting
-//     (the exact "goes to 400k without a problem" case).
+// StreamState::compaction_threshold() turns the model's context window into
+// the token count at which background compaction fires. The design: ride
+// DEEP (kSoftFillPct = 95%) so we keep maximum live context and compact as
+// rarely as possible — each compaction is the expensive event (it runs a
+// summary request AND resets the prompt cache), so firing seldom is what
+// keeps total token burn low. The only clamp is an output-headroom FLOOR
+// (kMinOutputHeadroom) so the next turn's reply always has room.
+//
+// Invariants locked here:
+//   • threshold = min(95% of window, window - 20k);
+//   • a 200k window fires at 190k, a 1M window at 950k (deep — not early);
+//   • the output-headroom floor is never violated;
+//   • bigger window ⇒ higher (never earlier) absolute trigger;
+//   • 0 means "window unknown, never fire".
 
 #include "agentty/domain/session.hpp"
 
@@ -22,69 +26,74 @@ using agentty::StreamState;
 
 namespace {
 
-int threshold_for(int context_max, int pct) {
+int threshold_for(int context_max) {
     StreamState s;
     s.context_max = context_max;
-    s.autocompact_pct = pct;
     return s.compaction_threshold();
 }
 
 } // namespace
 
 int main() {
-    constexpr int kDef = StreamState::kDefaultAutocompactPct;   // 90
-    constexpr int kFloor = StreamState::kMinOutputHeadroom;     // 20000
+    constexpr int kFloor = StreamState::kMinOutputHeadroom;  // 20000
+    constexpr int kPct   = StreamState::kSoftFillPct;        // 95
 
-    // ── default (pct == 0) uses kDefaultAutocompactPct ────────────────────
+    // ── 200k window: 95% = 190k, reserve = 180k → 190k < 180k? no ─────────
+    // 95% of 200k = 190000; window - floor = 180000; min = 180000.
+    // (On this size the headroom floor binds, giving 180k.)
     {
-        // 200k window at 90% = 180k, and 200k - 20k = 180k → floor not binding.
-        assert(threshold_for(200000, 0) == 200000 * kDef / 100);
-        assert(threshold_for(200000, 0) == 180000);
-        std::puts("threshold: default pct on 200k window = 180k");
+        assert(threshold_for(200000) == 180000);
+        std::puts("threshold: 200k window fires at 180k (headroom-floor bound)");
     }
 
-    // ── 1M window rides MUCH deeper (the 400k-is-fine case) ───────────────
+    // ── 400k window: 95% = 380k, reserve = 380k → 380k ───────────────────
     {
-        const int t = threshold_for(1000000, 0);   // 90% = 900k
-        assert(t == 900000);
-        // Crucially, a conversation at 400k is nowhere near the trigger — no
-        // premature compaction on a big-window model.
-        assert(400000 < t);
-        std::puts("threshold: 1M window fires at 900k — 400k never compacts");
+        // 95% of 400k = 380000; window - 20k = 380000; min = 380000.
+        assert(threshold_for(400000) == 380000);
+        std::puts("threshold: 400k window fires at 380k (95%)");
     }
 
-    // ── the pct knob: higher = deeper ─────────────────────────────────────
+    // ── 1M window: rides DEEP to 950k, NOT compacting early ──────────────
     {
-        assert(threshold_for(1000000, 75) == 750000);
-        assert(threshold_for(1000000, 90) == 900000);
-        // 95% of 1M = 950k, and 1M - 20k floor = 980k → pct wins.
-        assert(threshold_for(1000000, 95) == 950000);
-        assert(threshold_for(1000000, 75) < threshold_for(1000000, 95));
-        std::puts("threshold: higher pct rides deeper (75<90<95)");
+        // 95% of 1M = 950000; window - 20k = 980000; min = 950000.
+        assert(threshold_for(1000000) == 950000);
+        // Sanity: this is deep — well past halfway, near the ceiling.
+        assert(threshold_for(1000000) > 900000);
+        std::puts("threshold: 1M window rides deep to 950k (95%)");
     }
 
-    // ── output-headroom FLOOR caps the threshold on small windows ─────────
+    // ── 2M window: 95% = 1.9M ────────────────────────────────────────────
     {
-        // 40k window at 95% = 38k, but 40k - 20k floor = 20k → floor wins,
-        // so we never leave less than kMinOutputHeadroom for the reply.
-        const int t = threshold_for(40000, 95);
-        assert(t == 40000 - kFloor);
-        assert(t == 20000);
-        std::puts("threshold: output-headroom floor caps a high pct on a small window");
+        assert(threshold_for(2000000) == 1900000);
+        std::puts("threshold: 2M window fires at 1.9M (95%)");
     }
 
-    // ── pct is clamped to [50, 95] ────────────────────────────────────────
+    // ── output-headroom floor is always respected ────────────────────────
     {
-        // 40 clamps up to 50; 99 clamps down to 95.
-        assert(threshold_for(1000000, 40) == threshold_for(1000000, 50));
-        assert(threshold_for(1000000, 99) == threshold_for(1000000, 95));
-        std::puts("threshold: pct clamped to [50, 95]");
+        // The threshold never leaves less than kFloor of the window free.
+        for (int w : {50000, 100000, 200000, 500000, 1000000, 2000000}) {
+            assert(threshold_for(w) <= w - kFloor);
+        }
+        // On a small window the floor binds: 100k → 95% = 95k, reserve = 80k.
+        assert(threshold_for(100000) == 100000 - kFloor);
+        std::puts("threshold: output-headroom floor always respected");
     }
 
-    // ── unknown window never fires ────────────────────────────────────────
+    // ── monotonic: a bigger window never fires SOONER (absolute tokens) ──
     {
-        assert(threshold_for(0, 90) == 0);
-        assert(threshold_for(-5, 90) == 0);
+        int prev = -1;
+        for (int w : {100000, 200000, 400000, 1000000, 2000000}) {
+            const int t = threshold_for(w);
+            assert(t >= prev);
+            prev = t;
+        }
+        std::puts("threshold: monotonic non-decreasing in window size");
+    }
+
+    // ── unknown window never fires ───────────────────────────────────────
+    {
+        assert(threshold_for(0) == 0);
+        assert(threshold_for(-5) == 0);
         std::puts("threshold: unknown/zero window never triggers");
     }
 
