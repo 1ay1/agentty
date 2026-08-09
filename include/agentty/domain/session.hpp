@@ -406,6 +406,15 @@ static_assert( is_legal_transition(PhaseKind::ExecutingTool,      PhaseKind::Idl
 struct StreamState {
     Phase phase = phase::Idle{};
     std::chrono::steady_clock::time_point last_tick{};
+    // Wall-clock (steady) of the most recent request we sent to the model —
+    // stamped when a stream starts. Drives the idle cache-lapse compaction
+    // trigger (see should_compact_on_idle): the prompt cache that makes a
+    // deep prefix cheap only survives ~kCacheTtl of idle, so once we've been
+    // idle nearly that long AND the prefix is large, we compact NOW (while
+    // the summary is still a cheap cache hit) rather than let the next user
+    // message re-price the whole prefix at fresh input rate after the cache
+    // has lapsed. Zero until the first request of the session.
+    std::chrono::steady_clock::time_point last_wire_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
     int context_max = 200000;
@@ -467,6 +476,43 @@ struct StreamState {
         long thr = soft < reserve_cap ? soft : reserve_cap;
         if (thr < 0) thr = 0;
         return static_cast<int>(thr);
+    }
+
+    // ── Idle cache-lapse pre-compaction ──────────────────────────────────
+    // The one case where riding deep (95 %) WOULD spike the price: the
+    // prompt cache that makes a large live prefix cheap only survives a
+    // bounded idle window (Anthropic's extended TTL is 1 hour; OpenAI's
+    // prompt-cache reuse similarly decays). Ride to 950 k, walk away past
+    // the TTL, and your next message re-prices all 950 k at FULL input rate
+    // — exactly the "price went up" the user never wants.
+    //
+    // Fix: while idle, if the prefix is large enough that a cold re-price
+    // would hurt AND we're approaching the cache TTL, compact PRE-EMPTIVELY.
+    // The summary request runs now, while the prefix is STILL a warm cache
+    // hit (cheap), and the user returns to a small warm context instead of a
+    // huge cold one. Net: the expensive cold re-price never happens.
+    //
+    // Bounded so it never fires early during ACTIVE work (that path is the
+    // 95 % threshold): it needs both a genuinely large prefix
+    // (kIdleCompactMinTokens) and a near-TTL idle gap.
+    static constexpr int kIdleCompactMinTokens = 200000;
+    static constexpr std::chrono::seconds kCacheTtl{3600};       // 1 h
+    // Fire at 80 % of the TTL so the summary request completes and re-warms
+    // the (now small) prefix before the old cache would have lapsed.
+    static constexpr std::chrono::seconds kIdleCompactAfter{2880}; // 48 min
+
+    // Should we pre-emptively compact because we've gone idle long enough
+    // that the prefix cache is about to lapse and a cold re-price looms?
+    // `est_prefix_tokens` is the calibrated wire estimate of the current
+    // transcript. Returns false when idle-timing is unknown (no request yet)
+    // or the prefix is small (a cold re-price of < 200 k is not worth a
+    // summary round).
+    [[nodiscard]] bool should_compact_on_idle(
+        std::chrono::steady_clock::time_point now,
+        int est_prefix_tokens) const noexcept {
+        if (last_wire_at.time_since_epoch().count() == 0) return false;
+        if (est_prefix_tokens < kIdleCompactMinTokens) return false;
+        return (now - last_wire_at) >= kIdleCompactAfter;
     }
     // True while a compaction round is in flight: the request that
     // includes the synthesised "summarise per spec" prompt has been

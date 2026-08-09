@@ -313,6 +313,18 @@ tax:
   (~150K) of the most recent transcript, keeping the first user turn so the
   original task framing survives. A cheap model compresses 150K of recent
   history far better — and cheaper — than 650K in one shot.
+- **Idle cache-lapse pre-compaction — the one guard against a price spike.**
+  Deep-ride is cheap *only while the prompt cache holds the prefix*. The one
+  case it would cost you: ride to 950K, walk away past the cache TTL (~1h),
+  and your next message re-prices all 950K at full input rate. So the `Tick`
+  handler (`update/meta.cpp`) watches for it: `should_compact_on_idle()`
+  (`domain/session.hpp`) fires a compaction PRE-EMPTIVELY once the session
+  has been idle ~48 min (`kIdleCompactAfter`, 80 % of the TTL) AND the prefix
+  is large (≥ `kIdleCompactMinTokens`, 200K). The summary runs while the
+  prefix is still a warm cache hit (cheap), so you return to a small warm
+  context instead of eating a cold re-price. It is bounded to large +
+  near-TTL-idle states, so ordinary pauses never trip it — this is the *only*
+  proactive early-compaction path.
 - **The summarization request itself runs on the cheapest capable model on
   the active provider** (the same `cheapest_capable_model` router subagents
   use — see §8.5.1), not the flagship model you're chatting with.
