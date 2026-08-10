@@ -81,13 +81,20 @@ static std::vector<Section> make_doc() {
 
 // Count CONTENT cells (alphanumeric/punct — excludes box-drawing border
 // chrome, which legitimately appears whole when a block's frame renders).
-static int content_cells(const Canvas& c) {
+// CONCEAL-AWARE: a reveal ghost cell keeps its real glyph in the Canvas but
+// renders INVISIBLE to the terminal (emit substitutes a space for SGR-8
+// conceal). Counting the raw Canvas character would count ghosted-but-
+// invisible text as visible, defeating the whole point of the measurement,
+// so resolve the style and skip concealed cells — this is what the user sees.
+static int content_cells(const Canvas& c, const StylePool& pool) {
     int n = 0;
     const int mr = c.max_content_row();
     for (int y = 0; y <= mr; ++y)
         for (int x = 0; x < kWidth; ++x) {
-            char32_t ch = c.get(x, y).character;
+            Cell cell = c.get(x, y);
+            char32_t ch = cell.character;
             if (ch == 0 || ch == U' ') continue;
+            if (pool.get(cell.style_id).conceal) continue;  // invisible
             // Box-drawing / block elements = structural chrome.
             if (ch >= 0x2500 && ch <= 0x259F) continue;
             ++n;
@@ -140,7 +147,7 @@ int main() {
         fed += n;
         maya::testing::advance_anim_clock_ms(kFrameMs);
         Canvas c = paint();
-        int cells = content_cells(c);
+        int cells = content_cells(c, pool);
         int rows  = content_rows(c);
         if (rows < prev_rows) ++shrink_events;
         stats.push_back({section_of(fed > 0 ? fed - 1 : 0), cells - prev_cells, rows});
@@ -155,7 +162,7 @@ int main() {
         md.request_finalize(200);
         maya::testing::advance_anim_clock_ms(kFrameMs);
         Canvas c = paint();
-        int cells = content_cells(c);
+        int cells = content_cells(c, pool);
         int rows  = content_rows(c);
         if (rows < prev_rows) ++shrink_events;
         stats.push_back({drain_section, cells - prev_cells, rows});
@@ -166,7 +173,7 @@ int main() {
     {
         maya::testing::advance_anim_clock_ms(kFrameMs);
         Canvas c = paint();
-        int cells = content_cells(c);
+        int cells = content_cells(c, pool);
         stats.push_back({drain_section, cells - prev_cells, content_rows(c)});
         prev_cells = cells;
     }
@@ -216,27 +223,40 @@ int main() {
     //
     // (1) No height shrink at any frame: the monotonicity invariant that
     //     keeps committed scrollback rows immutable.
-    // (2) No single frame reveals more than kBurstCap content cells. The
-    //     pre-gate regression (block commits outrunning the reveal cursor)
-    //     popped whole blocks: code +196, lists +191, tables +103 per
-    //     frame vs prose's ~2-6. Healthy post-gate maxima sit ≤ ~22
-    //     (settle-ramp acceleration on the final paragraph). 60 gives
-    //     noise headroom while still catching the +100-class pop.
+    // (2) STREAMING SMOOTHNESS: while the wire is still delivering, every
+    //     block type must glide — no frame reveals more than kStreamCap
+    //     visible content cells. Post-conceal, real streaming frames sit at
+    //     mean ~3–5 with maxima ~12–14 (structured blocks reveal a cell at a
+    //     time behind their fully-present chrome; prose reveals per-glyph via
+    //     the conceal band). kStreamCap=24 catches any regression to the old
+    //     whole-block pop (code +196, list +191, table +103) or the wrap-
+    //     boundary word-pop (prose +21) with margin, while tolerating a
+    //     wide CJK/emoji cell landing.
+    // (3) SETTLE ALLOWANCE: the FINAL paragraph lands under the finalize
+    //     ramp, which deliberately accelerates to ~2× cruise so the turn
+    //     completes promptly rather than trickling. That last section (and
+    //     the drain phase) may briefly exceed the streaming cap as the
+    //     residual backlog glides out; it is bounded by kSettleCap.
+    const int last_section = static_cast<int>(doc.size()) - 1;
+    constexpr int kStreamCap = 24;
+    constexpr int kSettleCap = 60;
     int fails = 0;
     if (shrink_events != 0) {
         std::printf("FAIL: %d height-shrink event(s) — reveal must be "
                     "monotonic\n", shrink_events);
         ++fails;
     }
-    constexpr int kBurstCap = 60;
     for (std::size_t i = 0; i < stats.size(); ++i) {
-        if (stats[i].delta_cells > kBurstCap) {
-            const char* name = stats[i].section < static_cast<int>(doc.size())
-                ? doc[static_cast<std::size_t>(stats[i].section)].name : "drain";
+        const int sec = stats[i].section;
+        const bool settling = (sec == last_section || sec == drain_section);
+        const int cap = settling ? kSettleCap : kStreamCap;
+        if (stats[i].delta_cells > cap) {
+            const char* name = sec < static_cast<int>(doc.size())
+                ? doc[static_cast<std::size_t>(sec)].name : "drain";
             std::printf("FAIL: frame %zu (section %s) revealed %d content "
                         "cells in one frame (cap %d) — a block popped whole "
                         "instead of gliding\n",
-                        i, name, stats[i].delta_cells, kBurstCap);
+                        i, name, stats[i].delta_cells, cap);
             ++fails;
         }
     }
