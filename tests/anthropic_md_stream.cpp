@@ -42,6 +42,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"  // complete provider::StreamResult
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/runtime/msg.hpp"
 
@@ -139,8 +140,12 @@ int do_capture(const std::string& out_path,
     };
 
     std::println(stderr, "→ capturing from api.anthropic.com (model={}) ...", req.model);
-    (void)sink;
-    die("capture path disabled in this build; use `det` or `replay` on a fixture", 6);
+    const provider::StreamResult sr =
+        provider::anthropic::run_stream_sync(std::move(req), sink, /*cancel=*/{});
+    if (!sr.ok() && !failed) {
+        failed = true;
+        if (sr.error) err_msg = *sr.error;
+    }
     std::println(stderr, "");
 
     if (failed) {
