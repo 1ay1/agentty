@@ -711,24 +711,43 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 // have fired) and re-arms idempotently when it did.
                 cache.streaming->request_finalize(/*ramp_ms=*/160);
             } else {
-                // Exit (glide done / cap hit / bail-out): run the trio
-                // NOW. If we had been deferring, this is phase 1 of the
-                // two-phase exit — the finish() mutations paint on a
-                // frame where the panel is STILL hidden (mutation-only,
-                // diff-repaintable); the panel unhides next frame as a
-                // pure grow. If we never deferred (e.g. permission card
-                // pending on arrival), show immediately — the original
-                // single-frame behavior.
+                // Exit (glide done / cap hit / bail-out). Instead of an
+                // INSTANT snap+finish (which pasted the whole typed-but-
+                // unrevealed backlog in one frame at the tool boundary — the
+                // "first char sticks then it all appears with the next tool"
+                // burst), arm a BOUNDED GLIDE: the reveal sprints to the edge
+                // over ~150 ms (fast but visible), and finish() runs on a
+                // LATER frame once the cursor lands, via the same phase-1/
+                // phase-2 deferred-exit path below. 150 ms is short enough to
+                // stay scrollback-safe (a growing card can't strand a lagged
+                // row before the ramp lands) yet reads as "catching up to
+                // land" rather than a paste.
+                //
+                // Two cases still finish IMMEDIATELY (no glide): the cursor is
+                // already at the edge (reveal_in_progress false — nothing to
+                // glide, the common already-caught-up case), or we never
+                // entered a live reveal (no backlog). Those keep the original
+                // single-frame behaviour, which is imperceptible.
                 const bool was_deferring = cache.defer_tool_panel;
-                cache.streaming->snap_reveal_to_edge();
-                cache.streaming->set_reveal_fx(false);
-                cache.streaming->finish();
-                cache.card_defer_since_ms = 0;
-                if (was_deferring) {
-                    cache.defer_exit_finished = true;   // unhide next frame
+                const bool has_backlog =
+                    cache.streaming->reveal_in_progress();
+                if (has_backlog) {
+                    // Bounded glide, then defer the finish to the exit path.
+                    cache.streaming->snap_reveal_to_edge(/*glide_ms=*/150);
+                    cache.defer_tool_panel    = true;
+                    cache.defer_exit_finished = false;
                     ::maya::request_animation_frame();
                 } else {
-                    cache.defer_tool_panel = false;
+                    cache.streaming->snap_reveal_to_edge();   // no-op / instant
+                    cache.streaming->set_reveal_fx(false);
+                    cache.streaming->finish();
+                    cache.card_defer_since_ms = 0;
+                    if (was_deferring) {
+                        cache.defer_exit_finished = true;   // unhide next frame
+                        ::maya::request_animation_frame();
+                    } else {
+                        cache.defer_tool_panel = false;
+                    }
                 }
             }
         } else if (has_cards && !settled && cache.defer_tool_panel) {

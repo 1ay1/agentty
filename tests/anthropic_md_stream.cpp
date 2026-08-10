@@ -354,7 +354,7 @@ int do_replay(const std::string& in_path,
 // visible are all consistent — no producer-thread race, no wall-clock jitter.
 // This is what tells us, on REAL recorded bytes, whether the reveal glides.
 int do_det(const std::string& in_path, int width, double floor_cps,
-           double drain_secs, bool fx_on, int snap_at_frame) {
+           double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms) {
     std::vector<Delta> deltas = load_fixture(in_path);
     if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
 
@@ -417,9 +417,9 @@ int do_det(const std::string& in_path, int width, double floor_cps,
         // turns ("first char sticks, then it all appears with the next
         // tool") that a pure-text replay never triggers.
         if (snap_at_frame >= 0 && frame == snap_at_frame) {
-            md.snap_reveal_to_edge();
-            std::println(stderr, "  >>> snap_reveal_to_edge() at frame {} "
-                                 "(simulated tool boundary)", frame);
+            md.snap_reveal_to_edge(snap_glide_ms);
+            std::println(stderr, "  >>> snap_reveal_to_edge({}) at frame {} "
+                                 "(simulated tool boundary)", snap_glide_ms, frame);
         }
         const std::size_t vis = visible_of(md.build());
         const long long d = static_cast<long long>(vis)
@@ -490,6 +490,7 @@ int main(int argc, char** argv) {
         double drain_secs = 0.15;   // production default
         bool   fx_on      = true;
         int    snap_at    = -1;     // frame to fire a simulated tool-boundary snap
+        int    snap_glide = 0;      // 0 = instant snap; >0 = bounded glide ms
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--no-fx")  fx_on = false;
@@ -497,9 +498,10 @@ int main(int argc, char** argv) {
             else if (a == "--cps"   && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
             else if (a == "--drain" && i + 1 < argc) drain_secs = std::atof(argv[++i]);
             else if (a == "--snap-at" && i + 1 < argc) snap_at = std::atoi(argv[++i]);
+            else if (a == "--snap-glide" && i + 1 < argc) snap_glide = std::atoi(argv[++i]);
             else { usage(); return 1; }
         }
-        return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at);
+        return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at, snap_glide);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;
