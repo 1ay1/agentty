@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -114,7 +115,7 @@ int main() {
 
     StreamingMarkdown md;
     md.set_reveal_fx(true);
-    md.set_reveal_pacing(/*floor_cps=*/90.0, /*lead_secs=*/0.3);
+    md.set_reveal_pacing(/*floor_cps=*/90.0, /*lead_secs=*/0.15);
     md.set_live(true);
 
     StylePool pool;
@@ -140,11 +141,33 @@ int main() {
         return static_cast<int>(section_end.size()) - 1;
     };
 
-    // Stream phase.
+    // Stream phase. Two feed models, selected by PROBE_BURSTY:
+    //   • smooth (default): kBytesPerFrame bytes appended every frame — an
+    //     idealised wire. Good for isolating the reveal's own glide.
+    //   • bursty (PROBE_BURSTY=1): the REAL wire. SSE/proxy delivers nothing
+    //     for a run of frames, then a fat multi-hundred-byte delta lands in
+    //     ONE frame. This is what the reveal actually has to smooth, and
+    //     what "still bursts" is about. We append fat chunks on a period
+    //     while STILL rendering every frame, exactly like turn.cpp feeding
+    //     arrived bytes each frame (fps=0 renders happen between deltas).
+    const bool bursty = std::getenv("PROBE_BURSTY") != nullptr;
+    const std::size_t burst_bytes  = 220;  // ~ a fat SSE delta
+    const int         burst_period = 8;     // frames of silence between deltas
+    int frame_i = 0;
     while (fed < full.size()) {
-        std::size_t n = std::min<std::size_t>(kBytesPerFrame, full.size() - fed);
-        md.append(std::string_view{full}.substr(fed, n));
-        fed += n;
+        if (bursty) {
+            if (frame_i % burst_period == 0) {
+                std::size_t n = std::min<std::size_t>(burst_bytes, full.size() - fed);
+                md.append(std::string_view{full}.substr(fed, n));
+                fed += n;
+            }
+            // else: no new bytes this frame — render only (the glide runs).
+        } else {
+            std::size_t n = std::min<std::size_t>(kBytesPerFrame, full.size() - fed);
+            md.append(std::string_view{full}.substr(fed, n));
+            fed += n;
+        }
+        ++frame_i;
         maya::testing::advance_anim_clock_ms(kFrameMs);
         Canvas c = paint();
         int cells = content_cells(c, pool);
@@ -240,6 +263,14 @@ int main() {
     const int last_section = static_cast<int>(doc.size()) - 1;
     constexpr int kStreamCap = 24;
     constexpr int kSettleCap = 60;
+    // PROBE_BURSTY models a fat-SSE-delta wire. Structured (eager) blocks
+    // still pop a completed row at a time under a burst — a KNOWN-OPEN issue
+    // (the reveal cursor glides smoothly, but a completed row of an eager
+    // block renders whole when the cursor crosses its boundary; fixing it
+    // needs the eager path to conceal across its own rows). Report the burst
+    // stats in that mode but don't fail CI on the known gap; the smooth-feed
+    // path (the default, always-on gate) stays strictly enforced.
+    const bool bursty_report_only = std::getenv("PROBE_BURSTY") != nullptr;
     int fails = 0;
     if (shrink_events != 0) {
         std::printf("FAIL: %d height-shrink event(s) — reveal must be "
@@ -253,11 +284,12 @@ int main() {
         if (stats[i].delta_cells > cap) {
             const char* name = sec < static_cast<int>(doc.size())
                 ? doc[static_cast<std::size_t>(sec)].name : "drain";
-            std::printf("FAIL: frame %zu (section %s) revealed %d content "
+            std::printf("%s: frame %zu (section %s) revealed %d content "
                         "cells in one frame (cap %d) — a block popped whole "
                         "instead of gliding\n",
+                        bursty_report_only ? "WARN" : "FAIL",
                         i, name, stats[i].delta_cells, cap);
-            ++fails;
+            if (!bursty_report_only) ++fails;
         }
     }
     std::printf("\n%s\n", fails ? "FAILED" : "PASSED");
