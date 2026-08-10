@@ -366,9 +366,30 @@ int do_det(const std::string& in_path, int width, double floor_cps,
 
     auto visible_of = [&](const maya::Element& el) -> std::size_t {
         std::string s = maya::render_to_string(el, width);
+        // Count real CONTENT codepoints only: skip newlines, spaces, and
+        // (crucially) box-drawing / block-element chrome (U+2500..U+259F —
+        // heading underline rules, table borders). Those are decoration the
+        // renderer adds whole when a block exists; counting them as "visible"
+        // would report a heading's full-width underline as a content burst.
         std::size_t v = 0;
-        for (unsigned char c : s)
-            if (c != '\n' && c != ' ' && (c & 0xC0) != 0x80) ++v;
+        for (std::size_t i = 0; i < s.size(); ) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            if ((c & 0x80) == 0) {            // ASCII
+                if (c != '\n' && c != ' ') ++v;
+                ++i;
+            } else if ((c & 0xE0) == 0xC0) {  // 2-byte
+                ++v; i += 2;
+            } else if ((c & 0xF0) == 0xE0) {  // 3-byte
+                // Decode to test the box-drawing/block range.
+                char32_t cp = (c & 0x0F) << 12;
+                if (i + 1 < s.size()) cp |= (static_cast<unsigned char>(s[i+1]) & 0x3F) << 6;
+                if (i + 2 < s.size()) cp |= (static_cast<unsigned char>(s[i+2]) & 0x3F);
+                if (!(cp >= 0x2500 && cp <= 0x259F)) ++v;   // skip chrome
+                i += 3;
+            } else {                          // 4-byte (emoji etc.)
+                ++v; i += 4;
+            }
+        }
         return v;
     };
 
@@ -396,7 +417,10 @@ int do_det(const std::string& in_path, int width, double floor_cps,
         if (d > 24) ++over24;
         if (d != 0 || (frame % 30 == 0))
             std::println(stderr,
-                "[{:>6} ms] f={:>4} vis={:>5} d={:+5}", t, frame, vis, d);
+                "[{:>6} ms] f={:>4} vis={:>5} d={:+5} src={} clip={} cur={:.0f} cmt={} live={}",
+                t, frame, vis, d,
+                md.debug_source_size(), md.debug_reveal_byte_clip(),
+                md.debug_reveal_cp(), md.debug_committed(), (int)md.is_live());
         prev_vis = vis;
         ++frame;
         maya::testing::advance_anim_clock_ms(kFrameMs);
