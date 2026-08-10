@@ -6,7 +6,10 @@ maya owns every Element, every chrome glyph, every layout decision,
 every breathing animation. The host app constructs no Elements.
 
 Read this alongside [`UI.md`](UI.md), which catalogs the maya DSL
-primitives that the widgets are built on top of.
+primitives that the widgets are built on top of, and
+[`STREAMING_REVEAL.md`](STREAMING_REVEAL.md), which covers the live
+typewriter reveal animation — its bugs, fixes, and the profiling method for
+debugging new burst/stutter complaints.
 
 ---
 
