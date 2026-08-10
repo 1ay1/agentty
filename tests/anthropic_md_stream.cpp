@@ -354,7 +354,8 @@ int do_replay(const std::string& in_path,
 // visible are all consistent — no producer-thread race, no wall-clock jitter.
 // This is what tells us, on REAL recorded bytes, whether the reveal glides.
 int do_det(const std::string& in_path, int width, double floor_cps,
-           double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms) {
+           double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms,
+           long long assert_max_delta) {
     std::vector<Delta> deltas = load_fixture(in_path);
     if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
 
@@ -398,7 +399,7 @@ int do_det(const std::string& in_path, int width, double floor_cps,
     const std::int64_t end_t  = last_t + 4000;   // drain tail
 
     std::size_t di = 0, prev_vis = 0;
-    long long max_delta = 0, worst_t = 0;
+    long long max_delta = 0, worst_t = 0, max_delta_all = 0;
     int frame = 0, over24 = 0;
     std::println(stderr,
         "→ det replay {} deltas (w={}, cps={}, drain={}s, fx={})",
@@ -424,8 +425,14 @@ int do_det(const std::string& in_path, int width, double floor_cps,
         const std::size_t vis = visible_of(md.build());
         const long long d = static_cast<long long>(vis)
                           - static_cast<long long>(prev_vis);
-        if (d > max_delta) { max_delta = d; worst_t = t; }
-        if (d > 24) ++over24;
+        // Track the burst maximum over the STREAMING body only. Finalizing
+        // frames are the deliberate end-of-turn / tool-boundary glide that is
+        // allowed to move faster to land the tail; counting them would flag
+        // the intended settle as a burst. (max_delta_all still reported for
+        // visibility.)
+        if (d > max_delta_all) { max_delta_all = d; }
+        if (!md.is_finalizing() && d > max_delta) { max_delta = d; worst_t = t; }
+        if (!md.is_finalizing() && d > 24) ++over24;
         if (d != 0 || (frame % 30 == 0))
             std::println(stderr,
                 "[{:>6} ms] f={:>4} vis={:>5} d={:+5} src={} clip={} cur={:.0f} cmt={} live={}",
@@ -439,8 +446,19 @@ int do_det(const std::string& in_path, int width, double floor_cps,
     }
     maya::testing::unfreeze_anim_clock();
     std::println(stderr,
-        "→ det done: frames={} max_frame_delta={} (@ {} ms) frames_over_24={}",
-        frame, max_delta, worst_t, over24);
+        "→ det done: frames={} max_frame_delta={} (@ {} ms) frames_over_24={} "
+        "(incl-settle max={})",
+        frame, max_delta, worst_t, over24, max_delta_all);
+    // Regression gate: a burst is a single frame that reveals more than
+    // assert_max_delta content cells. Ignored during the settle/finalize tail
+    // (finalizing frames are the deliberate land-the-tail glide, allowed to
+    // move faster). 0 = no assertion (interactive / measurement use).
+    if (assert_max_delta > 0 && max_delta > assert_max_delta) {
+        std::println(stderr,
+            "FAIL: max_frame_delta {} exceeds cap {} \u2014 the reveal burst "
+            "instead of gliding", max_delta, assert_max_delta);
+        return 1;
+    }
     return 0;
 }
 
@@ -491,6 +509,7 @@ int main(int argc, char** argv) {
         bool   fx_on      = true;
         int    snap_at    = -1;     // frame to fire a simulated tool-boundary snap
         int    snap_glide = 0;      // 0 = instant snap; >0 = bounded glide ms
+        long long assert_max = 0;   // >0 = fail if a streaming frame bursts past it
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--no-fx")  fx_on = false;
@@ -499,9 +518,11 @@ int main(int argc, char** argv) {
             else if (a == "--drain" && i + 1 < argc) drain_secs = std::atof(argv[++i]);
             else if (a == "--snap-at" && i + 1 < argc) snap_at = std::atoi(argv[++i]);
             else if (a == "--snap-glide" && i + 1 < argc) snap_glide = std::atoi(argv[++i]);
+            else if (a == "--assert-max-delta" && i + 1 < argc) assert_max = std::atoll(argv[++i]);
             else { usage(); return 1; }
         }
-        return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at, snap_glide);
+        return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at,
+                      snap_glide, assert_max);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;
