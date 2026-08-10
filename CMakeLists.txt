@@ -2210,6 +2210,20 @@ if(AGENTTY_BUILD_TESTS)
     # credentials required), or replays a captured fixture through
     # maya's StreamingMarkdown reveal-fx path.
     agentty_add_full_test(anthropic_md_stream NO_TEST)
+
+    # reveal_stream_gate — REGRESSION GATE on the live reveal glide, run on a
+    # real recorded Anthropic stream (deterministic `det` mode). Fails if any
+    # streaming (non-finalizing) frame reveals more than the cap in one frame,
+    # i.e. the reveal bursts/pastes instead of gliding. This is the guard that
+    # would have caught every reveal burst bug (in-progress-line paste,
+    # mid-stream settle-relive, tool-boundary paste). See docs/STREAMING_REVEAL.md.
+    # Cap 40: normal gliding frames sit ≤12; 40 leaves headroom for a wide
+    # CJK/emoji cell landing while still catching the +100-class paste.
+    add_test(NAME reveal_stream_gate
+             COMMAND anthropic_md_stream det
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic_md_smoke.jsonl
+                     --assert-max-delta 40)
+    set_tests_properties(reveal_stream_gate PROPERTIES TIMEOUT 120)
     # Aggregate target so CI can build every ctest-registered binary in one
     # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
     # default `cmake --build` so a plain build stays lean), which means
@@ -2259,6 +2273,7 @@ if(AGENTTY_BUILD_TESTS)
 
     add_custom_target(tests DEPENDS
         long_session_bench
+        anthropic_md_stream
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
