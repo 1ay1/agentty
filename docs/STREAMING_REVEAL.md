@@ -146,13 +146,40 @@ byte-identical to the eventual committed render. This is why:
 `reveal_scrollback_test`, `scrollback_oracle_test`, and `scrollback_wire_fuzz`
 guard this. If you change reveal pacing or clipping, run them.
 
+## Robustness features (added after the core fixes)
+
+- **Adaptive floor** (`RateCursor::set_adaptive`, enabled in `turn.cpp`): the
+  reveal estimates the wire's actual delivery rate (EMA over wall time, so
+  idle gaps pull it down) and auto-tunes its floor to match, clamped to a
+  readable band (25..180 cps). This makes the glide smooth across models of
+  very different throughput without a hand-picked constant. The fixed
+  45 cps / 0.40 s is now only the cold-start seed. A/B with `det --adaptive`.
+- **Speed-scaled shimmer**: the scramble/gradient trail's time constants scale
+  inversely with the glide rate (`RateCursor::effective_rate()`), so the shimmer
+  covers a consistent *spatial* window whether text flies or crawls. The
+  finalize settle gate is widened by the max scale so a slow-wire scramble
+  can't freeze glyphs on settled text.
+- **CI gate** (`reveal_stream_gate` ctest): `anthropic_md_stream det
+  --assert-max-delta N` fails if any streaming (non-finalizing) frame reveals
+  more than N cells — the guard that would have caught every burst bug.
+  Finalizing frames (the deliberate land-the-tail glide) are excluded.
+- **Capture** (`anthropic_md_stream capture <out.jsonl>`): records a fresh
+  real fixture (live billed API call — manual dev action).
+
 ## Known-remaining
 
 Structured/eager blocks (tables, lists, quotes) reveal **row-granular** under
-a fat burst — their rows are lazy width-aware components, so a completed row
-appears as a unit rather than cell-by-cell. Prose, headings, and code reveal
-per-glyph. Making eager blocks reveal per-cell needs the eager render path to
-conceal across its own rows. Reproduce with
+a fat burst — their rows are lazy width-aware components
+(`Component→Component→Box-of-rows`) that only materialise at paint, and the
+overlay only decorates the *rightmost* block, so a completed non-tail table
+renders whole. Prose, headings, and code reveal per-glyph. A per-cell eager
+reveal was attempted (multi-row conceal on the materialised tree, unwrapping
+nested components at the real paint width) but each variant that fixed the
+bursty case **regressed the smooth-feed case** (the eager render path resists
+post-hoc conceal) — so it was reverted rather than ship a regression. Doing it
+properly needs the eager render path to conceal across its own rows as a
+first-class streaming mode, or a global document-order conceal over the whole
+live body (which currently fights the width/caret/memo paths). Reproduce with
 `PROBE_BURSTY=1 ./build/reveal_smoothness_probe` (report-only for eager
 sections) and `det --snap-at`.
 
