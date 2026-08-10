@@ -109,22 +109,23 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         //     a brisk readable minimum.
         //   • drain_secs = the target LAG: how far behind the live edge the
         //     cursor rides, in seconds. rate = backlog / drain_secs holds the
-        //     reveal ~drain_secs behind the wire at the wire's own speed, so
-        //     the STEADY-STATE backlog ≈ wire_cps × drain_secs. That backlog
-        //     is exactly what gets dumped when the ToolUse guard hard-snaps
-        //     the reveal to the edge (snap_reveal_to_edge is mandatory for
-        //     scrollback safety — a growing tool card strands any lagged
-        //     inline line; proven by scrollback_oracle_test, which fails on
-        //     ANY glide at ANY ramp). So the ONLY safe lever on the
-        //     "first char sticks then bursts with the next tool" symptom is
-        //     to keep this lag small: at 0.15s a 1200 cps reply carries only
-        //     ~180 chars of backlog at the boundary (half the old 0.3s
-        //     burst), while 0.15s is still ~9 frames of jitter smoothing —
-        //     a chunky SSE delta still slides in over several frames rather
-        //     than teleporting. Tighter than this starts to feel per-token
-        //     rather than smoothed.
-        cache.streaming->set_reveal_pacing(/*floor_cps=*/90.0,
-                                           /*lead_secs=*/0.15);
+        //     reveal ~drain_secs behind the wire at the wire's own speed.
+        //
+        // Retuned to 45 cps / 0.40 s (was 90 / 0.15). Real models stream in
+        // BURSTS with idle gaps (profiled: ~57% of frames had the cursor
+        // frozen AT the edge under 90/0.15 — it drained each fat delta then
+        // sat idle until the next, a visible stop-and-go). A lower floor +
+        // larger lag keeps a continuous buffer so the cursor GLIDES through
+        // the idle gaps instead of freezing (same profile: <1% idle frames at
+        // 45/0.40). The old rationale for a TINY lag was that the tool-
+        // boundary hard-snapped the whole backlog to the edge (a paste), so
+        // less lag meant a smaller paste. That is obsolete: the tool boundary
+        // now uses snap_reveal_to_edge(glide_ms=150) \u2014 a bounded VISIBLE
+        // glide, not a paste \u2014 so a larger steady-state backlog is drained
+        // smoothly there too, and scrollback safety is preserved by the
+        // glide landing within ~150 ms (scrollback_oracle_test green).
+        cache.streaming->set_reveal_pacing(/*floor_cps=*/45.0,
+                                           /*lead_secs=*/0.40);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
@@ -576,9 +577,21 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // and never touches scrollback (still no card). Gated on the same
         // since_grow window the RAF logic uses so it never fights active
         // streaming.
+        // Only drain when the WIRE HAS STOPPED streaming (is_streaming()
+        // false), not on a mid-stream inter-delta gap. A slowly-streaming
+        // model routinely pauses > kTextQuietMs BETWEEN deltas while still
+        // mid-message; draining then request_finalize()s, the ramp completes
+        // and flips the widget live_ off, and the NEXT delta re-lives it and
+        // PASTES the whole delta in one frame (profiled: live=0 idle frames
+        // immediately precede every +100-cell burst). The drain's real job is
+        // the text→tool seam, where the wire genuinely goes quiet before the
+        // tool_use streams; gating on !wire_streaming_here restricts it to
+        // exactly that case. text_block_closed (an explicit end-of-text wire
+        // event) still drains unconditionally.
         constexpr std::int64_t kTextQuietMs = 120;
         const bool text_gone_quiet =
-            !settled && !has_cards && cache.streaming->is_live()
+            !settled && !has_cards && !wire_streaming_here
+            && cache.streaming->is_live()
             && cache.streaming->reveal_in_progress()
             && cache.last_grow_tick_ms != 0
             && since_grow_ms >= kTextQuietMs;
@@ -853,11 +866,27 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         static std::FILE* out =
             std::fopen("/tmp/agentty-stream-prof.log", "a");
         if (out) {
+            // Real reveal cursor (the byte the typewriter has reached) and
+            // the per-call jump in it — the number that shows a BURST. A
+            // smooth glide moves the clip a few bytes per frame; a paste
+            // (tool-boundary snap, in-progress-line reveal) jumps it by
+            // hundreds in one call. dclip is the honest burst signal.
+            const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
+            static std::size_t prev_clip = 0;
+            const long long dclip =
+                static_cast<long long>(clip == static_cast<std::size_t>(-1)
+                                           ? source.size() : clip)
+              - static_cast<long long>(prev_clip);
+            prev_clip = (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
             std::fprintf(out,
-                "[stream] src=%zu revealed=%zu settled=%d fastpath=%d "
-                "build_us=%lld\n",
-                source.size(), cache.revealed_size, settled ? 1 : 0,
-                already_settled_into_cache ? 1 : 0,
+                "[stream] src=%zu clip=%zu dclip=%+lld live=%d finalizing=%d "
+                "settled=%d fastpath=%d build_us=%lld\n",
+                source.size(),
+                clip == static_cast<std::size_t>(-1) ? source.size() : clip,
+                dclip,
+                cache.streaming->is_live() ? 1 : 0,
+                cache.streaming->is_finalizing() ? 1 : 0,
+                settled ? 1 : 0, already_settled_into_cache ? 1 : 0,
                 static_cast<long long>(us));
             std::fflush(out);
         }
