@@ -126,6 +126,13 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // glide landing within ~150 ms (scrollback_oracle_test green).
         cache.streaming->set_reveal_pacing(/*floor_cps=*/45.0,
                                            /*lead_secs=*/0.40);
+        // Adaptive floor: auto-tune the reveal speed to the wire's observed
+        // rate (clamped 25..180 cps) so the glide is smooth across models of
+        // very different throughput without a hand-picked constant — a slow
+        // local model won't freeze (cursor outrunning the wire) and a fast
+        // hosted one won't lag. 45/0.40 above is the cold-start seed until
+        // the estimate warms up; drain_secs (the lag buffer) still applies.
+        cache.streaming->set_reveal_adaptive(true, /*min*/25.0, /*max*/180.0);
     }
 
     // Pick the source bytes for THIS frame. The reveal cursor must see
