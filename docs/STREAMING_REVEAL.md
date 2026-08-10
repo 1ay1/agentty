@@ -166,22 +166,42 @@ guard this. If you change reveal pacing or clipping, run them.
 - **Capture** (`anthropic_md_stream capture <out.jsonl>`): records a fresh
   real fixture (live billed API call — manual dev action).
 
-## Known-remaining
+## Known-remaining (one unified root cause)
 
-Structured/eager blocks (tables, lists, quotes) reveal **row-granular** under
-a fat burst — their rows are lazy width-aware components
-(`Component→Component→Box-of-rows`) that only materialise at paint, and the
-overlay only decorates the *rightmost* block, so a completed non-tail table
-renders whole. Prose, headings, and code reveal per-glyph. A per-cell eager
-reveal was attempted (multi-row conceal on the materialised tree, unwrapping
-nested components at the real paint width) but each variant that fixed the
-bursty case **regressed the smooth-feed case** (the eager render path resists
-post-hoc conceal) — so it was reverted rather than ship a regression. Doing it
-properly needs the eager render path to conceal across its own rows as a
-first-class streaming mode, or a global document-order conceal over the whole
-live body (which currently fights the width/caret/memo paths). Reproduce with
-`PROBE_BURSTY=1 ./build/reveal_smoothness_probe` (report-only for eager
-sections) and `det --snap-at`.
+There is a single architectural limitation behind the two remaining
+block-boundary pops:
+
+**The overlay decorates only the TAIL (rightmost) leaf of the live body.**
+When the reveal cursor is still mid-way through content but the wire delivers a
+delta that crosses a *block boundary*, the block that was being concealed is no
+longer the tail leaf, so it un-conceals and renders whole in one frame:
+
+- **Eager blocks** (tables, lists, quotes): when a burst completes a table and
+  begins the next block, the table is no longer the tail; its cell content
+  (which had been concealing cell-by-cell — verified with a table-as-tail
+  reproduction: `concealed` drops smoothly 24→1) appears whole. Its border /
+  padding structure legitimately appears whole regardless (structure can't
+  glide a cell at a time).
+- **Prose across a paragraph→blockquote boundary**: a fat delta that both
+  completes a long wrapping paragraph (`.\n\n`) and starts a `>` quote makes the
+  finished paragraph un-conceal in one frame (the ~+170 mid-body pop in the
+  tour fixture, `det`).
+
+The correct fix is a **global document-order conceal over the whole live
+body** (not just the tail leaf): count content cp top-to-bottom and conceal
+every cell past the reveal front, uniformly for every block. This was
+attempted several times and each variant either regressed the smooth-feed case
+or fought the eager render path's lazy width-aware components / the caret / the
+overlay memo. It needs to be done as a first-class pass that materialises
+components at the real paint width and threads through the caret + memo paths —
+a focused piece of work, not an overlay patch. The prior per-block attempts
+were reverted rather than ship a regression.
+
+This is bounded and low-severity: it's one frame at a block boundary, the
+reveal is otherwise a smooth glide, and per-glyph reveal within the tail block
+(the common case, and all of prose/headings/code) works. Reproduce with
+`PROBE_BURSTY=1 ./build/reveal_smoothness_probe` and
+`det tests/fixtures/anthropic_md_tour.jsonl` (the +170 frame).
 
 ## Quick reference — debugging a new reveal complaint
 
