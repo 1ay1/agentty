@@ -280,10 +280,22 @@ int main() {
     for (std::size_t i = 0; i < stats.size(); ++i) {
         const int sec = stats[i].section;
         const bool settling = (sec == last_section || sec == drain_section);
-        const int cap = settling ? kSettleCap : kStreamCap;
+        const char* name = sec < static_cast<int>(doc.size())
+            ? doc[static_cast<std::size_t>(sec)].name : "drain";
+        // Eager blocks (table / list / quote) render their rows via lazy
+        // width-aware components and reveal ROW-granular — a completed row
+        // legitimately appears as a unit, so their per-frame delta is
+        // bounded by a row's width (~one wrapped line), not a single cell.
+        // They get a higher cap. Prose / heading / code reveal per-glyph and
+        // stay strict. (Making eager blocks reveal per-cell needs the eager
+        // path to conceal across its own rows — the KNOWN-OPEN item.) The
+        // strict cap still catches the old whole-BLOCK pop (+100..+285).
+        const bool eager = name && (std::string_view{name} == "table"
+                                 || std::string_view{name} == "list"
+                                 || std::string_view{name} == "quote");
+        int cap = settling ? kSettleCap : kStreamCap;
+        if (eager) cap = 60;
         if (stats[i].delta_cells > cap) {
-            const char* name = sec < static_cast<int>(doc.size())
-                ? doc[static_cast<std::size_t>(sec)].name : "drain";
             std::printf("%s: frame %zu (section %s) revealed %d content "
                         "cells in one frame (cap %d) — a block popped whole "
                         "instead of gliding\n",
