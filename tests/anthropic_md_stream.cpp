@@ -355,7 +355,7 @@ int do_replay(const std::string& in_path,
 // This is what tells us, on REAL recorded bytes, whether the reveal glides.
 int do_det(const std::string& in_path, int width, double floor_cps,
            double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms,
-           long long assert_max_delta) {
+           long long assert_max_delta, bool adaptive) {
     std::vector<Delta> deltas = load_fixture(in_path);
     if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
 
@@ -364,6 +364,7 @@ int do_det(const std::string& in_path, int width, double floor_cps,
     md.set_live(true);
     md.set_reveal_fx(fx_on);
     md.set_reveal_pacing(floor_cps, drain_secs);
+    if (adaptive) md.set_reveal_adaptive(true);
 
     auto visible_of = [&](const maya::Element& el) -> std::size_t {
         std::string s = maya::render_to_string(el, width);
@@ -510,6 +511,7 @@ int main(int argc, char** argv) {
         int    snap_at    = -1;     // frame to fire a simulated tool-boundary snap
         int    snap_glide = 0;      // 0 = instant snap; >0 = bounded glide ms
         long long assert_max = 0;   // >0 = fail if a streaming frame bursts past it
+        bool   adaptive   = false;  // auto-tune floor to wire rate
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--no-fx")  fx_on = false;
@@ -519,10 +521,11 @@ int main(int argc, char** argv) {
             else if (a == "--snap-at" && i + 1 < argc) snap_at = std::atoi(argv[++i]);
             else if (a == "--snap-glide" && i + 1 < argc) snap_glide = std::atoi(argv[++i]);
             else if (a == "--assert-max-delta" && i + 1 < argc) assert_max = std::atoll(argv[++i]);
+            else if (a == "--adaptive") adaptive = true;
             else { usage(); return 1; }
         }
         return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at,
-                      snap_glide, assert_max);
+                      snap_glide, assert_max, adaptive);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;
