@@ -429,6 +429,14 @@ int do_det(const std::string& in_path, int width, double floor_cps,
                                  "(simulated tool boundary)", snap_glide_ms, frame);
         }
         const std::size_t vis = visible_of(md.build());
+        if (const char* df = std::getenv("DET_DUMP_FRAME");
+            df && frame == std::atoi(df)) {
+            std::println(stderr, "===== DUMP frame {} (src={} clip={} tailclip={} cur={:.0f} cmt={}) =====",
+                frame, md.debug_source_size(), md.debug_reveal_byte_clip(),
+                md.debug_tail_clip(), md.debug_reveal_cp(), md.debug_committed());
+            std::string s = maya::render_to_string(md.build(), width);
+            std::println(stderr, "---- rendered ({} bytes) ----\n{}\n---- end ----", s.size(), s);
+        }
         const long long d = static_cast<long long>(vis)
                           - static_cast<long long>(prev_vis);
         // Track the burst maximum over the STREAMING body only. Finalizing
