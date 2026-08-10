@@ -139,7 +139,8 @@ int do_capture(const std::string& out_path,
     };
 
     std::println(stderr, "→ capturing from api.anthropic.com (model={}) ...", req.model);
-    provider::anthropic::run_stream_sync(std::move(req), sink, /*cancel=*/{});
+    (void)sink;
+    die("capture path disabled in this build; use `det` or `replay` on a fixture", 6);
     std::println(stderr, "");
 
     if (failed) {
@@ -345,6 +346,69 @@ int do_replay(const std::string& in_path,
     return 0;
 }
 
+// ── deterministic replay (the trustworthy measurement) ─────────────────────
+// Single-threaded, frozen anim clock. Walks a virtual timeline in fixed
+// frame steps; appends each recorded delta when its t_ms has passed; renders
+// every frame and measures the per-frame VISIBLE-character delta. Because
+// everything runs on one thread at a frozen clock, source / clip / cursor /
+// visible are all consistent — no producer-thread race, no wall-clock jitter.
+// This is what tells us, on REAL recorded bytes, whether the reveal glides.
+int do_det(const std::string& in_path, int width, double floor_cps,
+           double drain_secs, bool fx_on) {
+    std::vector<Delta> deltas = load_fixture(in_path);
+    if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
+
+    maya::testing::freeze_anim_clock(0);
+    maya::StreamingMarkdown md;
+    md.set_live(true);
+    md.set_reveal_fx(fx_on);
+    md.set_reveal_pacing(floor_cps, drain_secs);
+
+    auto visible_of = [&](const maya::Element& el) -> std::size_t {
+        std::string s = maya::render_to_string(el, width);
+        std::size_t v = 0;
+        for (unsigned char c : s)
+            if (c != '\n' && c != ' ' && (c & 0xC0) != 0x80) ++v;
+        return v;
+    };
+
+    constexpr std::int64_t kFrameMs = 16;
+    const std::int64_t last_t = deltas.back().t_ms;
+    const std::int64_t end_t  = last_t + 4000;   // drain tail
+
+    std::size_t di = 0, prev_vis = 0;
+    long long max_delta = 0, worst_t = 0;
+    int frame = 0, over24 = 0;
+    std::println(stderr,
+        "→ det replay {} deltas (w={}, cps={}, drain={}s, fx={})",
+        deltas.size(), width, floor_cps, drain_secs, fx_on);
+
+    for (std::int64_t t = 0; t <= end_t; t += kFrameMs) {
+        while (di < deltas.size() && deltas[di].t_ms <= t) {
+            md.append(deltas[di].text);
+            ++di;
+        }
+        if (di >= deltas.size()) md.request_finalize(200);
+        const std::size_t vis = visible_of(md.build());
+        const long long d = static_cast<long long>(vis)
+                          - static_cast<long long>(prev_vis);
+        if (d > max_delta) { max_delta = d; worst_t = t; }
+        if (d > 24) ++over24;
+        if (d != 0 || (frame % 30 == 0))
+            std::println(stderr,
+                "[{:>6} ms] f={:>4} vis={:>5} d={:+5}", t, frame, vis, d);
+        prev_vis = vis;
+        ++frame;
+        maya::testing::advance_anim_clock_ms(kFrameMs);
+        if (di >= deltas.size() && !md.is_live() && !md.is_finalizing()) break;
+    }
+    maya::testing::unfreeze_anim_clock();
+    std::println(stderr,
+        "→ det done: frames={} max_frame_delta={} (@ {} ms) frames_over_24={}",
+        frame, max_delta, worst_t, over24);
+    return 0;
+}
+
 void usage() {
     std::println(stderr,
         "anthropic_md_stream — capture/replay real Anthropic SSE for maya md tests\n"
@@ -384,6 +448,21 @@ int main(int argc, char** argv) {
             else { usage(); return 1; }
         }
         return do_capture(path, prompt, model);
+    }
+    if (mode == "det") {
+        int    width      = 100;
+        double floor_cps  = 90.0;   // production default
+        double drain_secs = 0.15;   // production default
+        bool   fx_on      = true;
+        for (int i = 3; i < argc; ++i) {
+            std::string a = argv[i];
+            if      (a == "--no-fx")  fx_on = false;
+            else if (a == "--width" && i + 1 < argc) width = std::atoi(argv[++i]);
+            else if (a == "--cps"   && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
+            else if (a == "--drain" && i + 1 < argc) drain_secs = std::atof(argv[++i]);
+            else { usage(); return 1; }
+        }
+        return do_det(path, width, floor_cps, drain_secs, fx_on);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;
