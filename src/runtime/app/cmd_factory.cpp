@@ -1463,7 +1463,7 @@ Cmd<Msg> refresh_oauth(std::string refresh_token) {
         [refresh_token = std::move(refresh_token)]
         (std::function<void(Msg)> dispatch) {
             try {
-                auto r = auth::refresh_access_token(
+                auto r = auth::refresh_access_token_locked(
                     auth::RefreshToken{refresh_token});
                 dispatch(TokenRefreshed{std::move(r)});
             } catch (const std::exception& e) {

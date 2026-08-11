@@ -31,6 +31,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/auth/cred_crypt.hpp"
+#include "agentty/auth/auth.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/base64.hpp"
 
@@ -766,6 +767,25 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     if (!loaded) return std::nullopt;
     if (!loaded->expired(/*skew_ms=*/60'000)) return loaded;
     if (loaded->refresh_token.empty()) return loaded;
+
+    // Cross-process serialization + double-checked re-read: block every
+    // agentty instance on one refresh at a time, then re-load so the losers
+    // adopt the winner's freshly-saved token instead of each firing a
+    // redundant refresh (ChatGPT/Codex also rotates refresh tokens, so
+    // concurrent refreshes mutually invalidate and spin the refresh loop).
+    auth::CrossProcessFileLock xlock(codex_credentials_path());
+    if (xlock.held()) {
+        std::optional<CodexCredentials> disk;
+        {
+            std::scoped_lock store_lock{store_mutex()};
+            disk = load_codex_credentials_unlocked();
+            source_generation = store_generation();
+        }
+        if (!disk) return loaded;
+        if (!disk->expired(/*skew_ms=*/60'000)) return disk;  // a peer refreshed
+        if (disk->refresh_token.empty()) return disk;
+        loaded = std::move(disk);   // refresh with the freshest on-disk token
+    }
 
     auto refreshed = codex_refresh(*loaded);
     if (!refreshed) return loaded;

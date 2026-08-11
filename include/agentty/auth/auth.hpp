@@ -170,6 +170,19 @@ using TokenResult = std::expected<OAuthToken, OAuthError>;
                                         const OAuthState& state);
 [[nodiscard]] TokenResult refresh_access_token(const RefreshToken& refresh_token);
 
+// Cross-process-serialized refresh (thundering-herd safe). Wraps
+// refresh_access_token with an advisory lock on credentials.json + a
+// double-checked re-read: if a peer agentty instance already refreshed while
+// we waited on the lock, this returns THAT token as success instead of firing
+// a redundant refresh (which, because Anthropic rotates refresh tokens, would
+// mutually invalidate the instances and spin the multi-instance refresh loop).
+// On a successful mint it also persists the new creds to disk. Use this from
+// any refresh path that can run concurrently across processes (startup refresh,
+// 401 recovery); the reducer's TokenRefreshed handler still installs the
+// result into Deps. The freshest on-disk refresh token wins after the lock is
+// taken, so a rotated token from a peer is never re-used stale.
+[[nodiscard]] TokenResult refresh_access_token_locked(const RefreshToken& refresh_token);
+
 // Build the claude.ai authorize URL the user must visit to grant agentty
 // access. Pure: same inputs, same URL — no side effects, safe to call
 // from the reducer. The in-app login modal calls this once when it
@@ -223,6 +236,32 @@ void open_browser(const std::string& url);
 // just a single-producer / single-consumer mailbox.
 void set_pending_refresh(std::string refresh_token);
 [[nodiscard]] std::optional<std::string> take_pending_refresh();
+
+// ── Cross-process advisory file lock (thundering-herd guard) ─────────────
+// RAII exclusive lock on `<path>.lock` (POSIX flock / Windows LockFileEx).
+// Blocking on construction; released on destruction. Best-effort: if the
+// lock file can't be created/locked, held() is false and the caller should
+// proceed unlocked (no worse than no lock). Used to serialize OAuth token
+// refresh across separate agentty processes so N instances that all see the
+// same expired token don't each fire a refresh — with rotating refresh
+// tokens that mutually invalidates them and spins a refresh loop. Pair it
+// with a re-read of the credential file after held() to adopt a peer's
+// freshly-minted token instead of refreshing again.
+class CrossProcessFileLock {
+public:
+    explicit CrossProcessFileLock(const std::filesystem::path& guarded_file);
+    ~CrossProcessFileLock();
+    CrossProcessFileLock(const CrossProcessFileLock&) = delete;
+    CrossProcessFileLock& operator=(const CrossProcessFileLock&) = delete;
+    [[nodiscard]] bool held() const noexcept { return held_; }
+private:
+#ifdef _WIN32
+    void* h_ = reinterpret_cast<void*>(-1);
+#else
+    int fd_ = -1;
+#endif
+    bool held_ = false;
+};
 
 // ── Interactive CLI flows (blocking, stdout/stdin — NOT in TUI) ──────────
 int cmd_login();
