@@ -167,6 +167,22 @@ void RoutingMemory::note_regret(const std::string& signature, int direction) {
     d.append("regret", signature, delta);
 }
 
+std::size_t RoutingMemory::learned_count() {
+    auto& d = impl();
+    std::lock_guard<std::mutex> lk(d.mu);
+    d.ensure_loaded();
+    return d.counts.size();
+}
+
+void RoutingMemory::reset() {
+    auto& d = impl();
+    std::lock_guard<std::mutex> lk(d.mu);
+    d.ensure_loaded();
+    auto p = d.tsv_path();
+    if (!p.empty()) { std::error_code ec; fs::remove(p, ec); }
+    d.counts.clear();
+}
+
 void RoutingMemory::set_root_for_test(std::string root) {
     auto& d = impl();
     std::lock_guard<std::mutex> lk(d.mu);

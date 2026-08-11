@@ -13,6 +13,8 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/picker.hpp"
+#include "agentty/domain/routing_memory.hpp"
+#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
 namespace agentty::app::detail {
@@ -87,6 +89,12 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::InspectToolOutputs: return agentty::app::update(std::move(m), Msg{OpenToolOutputViewer{}});
                 case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
                 case Command::SmartMode:     return agentty::app::update(std::move(m), Msg{OpenSmartMode{}});
+                case Command::ResetSmartLearning: {
+                    smart::RoutingMemory::instance().reset();
+                    smart::DecompositionMemory::instance().reset();
+                    return {std::move(m),
+                        set_status_toast(m, "Smart Mode learning reset for this workspace")};
+                }
                 case Command::RewindCheckpoint:
                     // Open the checkpoint picker so ANY earlier turn is a
                     // rewind target (with a per-turn diff preview), not just

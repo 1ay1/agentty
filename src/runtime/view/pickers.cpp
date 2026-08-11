@@ -14,6 +14,8 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/domain/routing_memory.hpp"
+#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
@@ -584,9 +586,16 @@ Element smart_mode_overlay(const Model& m) {
     }
 
     cfg.footer.push_back(text(""));
-    cfg.footer.push_back(text(
-        "  Learning layers get better at THIS repo over time \xc2\xb7 all learn "
-        "from your own runs", fg_dim(muted)));
+    {
+        // Telemetry: make the learning legible — how much this workspace has
+        // taught the router. Reset via the palette's "Reset Smart Mode learning".
+        const auto rp = smart::RoutingMemory::instance().learned_count();
+        const auto dp = smart::DecompositionMemory::instance().learned_count();
+        cfg.footer.push_back(text(
+            "  Learned " + std::to_string(rp) + " routing pattern"
+            + (rp == 1 ? "" : "s") + " \xc2\xb7 " + std::to_string(dp)
+            + " plan" + (dp == 1 ? "" : "s") + " in this repo", fg_dim(muted)));
+    }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"Enter", o->index < 8 ? "toggle" : "set model", 4},
