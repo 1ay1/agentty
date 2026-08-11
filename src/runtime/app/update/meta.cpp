@@ -94,6 +94,48 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 std::chrono::seconds{4});
             return {std::move(m), std::move(toast)};
         },
+        [&](OpenSmartMode) -> Step {
+            m.ui.smart_mode = ui::pick::OpenAt{0};
+            return done(std::move(m));
+        },
+        [&](CloseSmartMode) -> Step {
+            m.ui.smart_mode = ui::pick::Closed{};
+            return done(std::move(m));
+        },
+        [&](SmartModeMove& e) -> Step {
+            if (auto* o = ui::pick::opened(m.ui.smart_mode)) {
+                const int rows = 4;   // Enabled + Strategic + Impl + Utility
+                o->index = (o->index + e.delta % rows + rows) % rows;
+            }
+            return done(std::move(m));
+        },
+        [&](SmartModeSelect) -> Step {
+            auto* o = ui::pick::opened(m.ui.smart_mode);
+            if (!o) return done(std::move(m));
+            if (o->index == 0) {
+                // Master toggle.
+                m.d.smart.enabled = !m.d.smart.enabled;
+                persist_settings(m);
+                return {std::move(m), set_status_toast(m,
+                    m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off")};
+            }
+            // A slot row → open the model picker in slot-assign mode. Close
+            // the overlay first; ModelPickerSelect writes the pinned model.
+            m.ui.smart_assign_slot = o->index - 1;   // 0=Strategic 1=Impl 2=Utility
+            m.ui.smart_mode = ui::pick::Closed{};
+            return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
+        },
+        [&](SmartModeClearSlot) -> Step {
+            auto* o = ui::pick::opened(m.ui.smart_mode);
+            if (!o || o->index == 0) return done(std::move(m));
+            smart::SlotOverride* slot =
+                  o->index == 1 ? &m.d.smart.strategic
+                : o->index == 2 ? &m.d.smart.implementation
+                                : &m.d.smart.utility;
+            *slot = smart::SlotOverride{};   // reset to auto (empty + unset)
+            persist_settings(m);
+            return {std::move(m), set_status_toast(m, "slot reset to auto")};
+        },
         [&](RestoreCheckpoint& e) -> Step {
             // Rewind = destructive double restore: worktree files AND the
             // transcript both return to the instant before the checkpointed

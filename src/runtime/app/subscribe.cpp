@@ -357,6 +357,24 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+std::optional<Msg> on_smart_mode(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Escape: return CloseSmartMode{};
+            case SpecialKey::Up:     return SmartModeMove{-1};
+            case SpecialKey::Down:   return SmartModeMove{+1};
+            case SpecialKey::Enter:  return SmartModeSelect{};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        // 'x' resets the selected slot to auto; space/'t' toggles the row.
+        if (ck->codepoint == 'x' || ck->codepoint == 'X') return SmartModeClearSlot{};
+        if (ck->codepoint == ' ') return SmartModeSelect{};
+    }
+    return std::nullopt;
+}
+
 std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -581,6 +599,7 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
                 case U'e': case U'E': return ComposerToggleExpand{};
                 case U'g': case U'G': return OpenCodeBlockPicker{};
                 case U'o': case U'O': return OpenToolOutputViewer{};
+                case U's': case U'S': return OpenSmartMode{};
                 default: break;
             }
         }
@@ -772,6 +791,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
     const bool in_threads = pick::is_open(m.ui.thread_list);
+    const bool in_smart   = pick::is_open(m.ui.smart_mode);
     const bool in_diff    = pick::is_open(m.ui.diff_review);
     const bool in_todo    = pick::is_open(m.ui.todo.open);
     const bool in_login   = ui::login::is_open(m.ui.login);
@@ -824,6 +844,7 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_models)  return on_model_picker(ev);
             if (in_providers) return on_provider_picker(ev);
             if (in_threads) return on_thread_list(ev);
+            if (in_smart)   return on_smart_mode(ev);
             if (in_diff)    return on_diff_review(ev);
             if (in_todo)    if (auto r = on_todo_modal(ev)) return r;
             // Esc during a live stream cancels the request rather than

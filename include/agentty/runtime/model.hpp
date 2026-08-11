@@ -199,6 +199,7 @@ struct Model {
         int                 smart_assign_slot = -1;   // -1 | 0=Strategic 1=Impl 2=Utility
         ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
         ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
+        ui::pick::OneAxis   smart_mode;        // Closed | OpenAt{row} — Smart Mode config overlay
         CommandPaletteState command_palette;
         MentionPaletteState mention_palette;  // Closed | Open{query, index, files}
         SymbolPaletteState  symbol_palette;   // Closed | Open{query, index, entries}

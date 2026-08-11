@@ -520,6 +520,68 @@ Element thread_list(const Model& m) {
     return Picker{std::move(cfg)}.build();
 }
 
+// Smart Mode config overlay: a master Enabled toggle + the three role slots,
+// each showing its RESOLVED model (pinned, or the auto-fill). See
+// docs/design/smart-mode.md.
+Element smart_mode_overlay(const Model& m) {
+    auto* o = pick::opened(m.ui.smart_mode);
+    if (!o) return nothing();
+
+    const auto& sm = m.d.smart;
+    const std::string parent = m.d.model_id.value;
+
+    // Resolve each role for DISPLAY (what would actually run right now).
+    auto shown = [&](smart::ModelRole role) -> std::string {
+        auto rp = smart::resolve_role(role, parent, m.d.effort,
+                                      m.d.available_models, sm);
+        std::string label = pretty_model_label(rp.model);
+        return label.empty() ? rp.model : label;
+    };
+    auto slot_suffix = [&](const smart::SlotOverride& ov) -> std::string {
+        return (sm.enabled && ov.set) ? "  \xc2\xb7 pinned" : "  \xc2\xb7 auto";
+    };
+
+    Picker::Config cfg;
+    cfg.title      = " Smart Mode ";
+    cfg.accent     = success;
+    cfg.min_width  = 60;
+    cfg.viewport_h = picker_viewport_h();
+    cfg.selected   = o->index;
+
+    const bool on = sm.enabled;
+    struct Row { std::string lead, trail; };
+    std::vector<Row> rows = {
+        {std::string{on ? "\xe2\x97\x8f Enabled" : "\xe2\x97\x8b Enabled"},
+         on ? "on" : "off"},
+        {"  Strategic",      on ? shown(smart::ModelRole::Strategic)      + slot_suffix(sm.strategic)      : std::string{"\xe2\x80\x94"}},
+        {"  Implementation", on ? shown(smart::ModelRole::Implementation) + slot_suffix(sm.implementation) : std::string{"\xe2\x80\x94"}},
+        {"  Utility",        on ? shown(smart::ModelRole::Utility)        + slot_suffix(sm.utility)        : std::string{"\xe2\x80\x94"}},
+    };
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        Picker::Config::Row r;
+        r.leading        = rows[static_cast<std::size_t>(i)].lead;
+        r.leading_style  = (i == 0)
+            ? (on ? Style{}.with_fg(success).with_bold() : fg_dim(muted))
+            : (on ? fg_of(fg) : fg_dim(muted));
+        r.trailing       = rows[static_cast<std::size_t>(i)].trail;
+        r.trailing_style = fg_dim(muted);
+        r.selected       = (i == o->index);
+        cfg.rows.push_back(std::move(r));
+    }
+
+    cfg.footer.push_back(text(""));
+    cfg.footer.push_back(text(
+        "  Strategic = your main model \xc2\xb7 Utility = cheap grunt work "
+        "(compaction, retrieval)", fg_dim(muted)));
+    cfg.footer.push_back(key_hints({
+        {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
+        {"Enter", o->index == 0 ? "toggle" : "set model", 4},
+        {"x", "auto", 3},
+        {"Esc", "close", 4},
+    }));
+    return Picker{std::move(cfg)}.build();
+}
+
 Element command_palette(const Model& m) {
     auto* o = opened(m.ui.command_palette);
     if (!o) return nothing();
