@@ -435,13 +435,21 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
             .detail          = std::move(detail),
-            // Live elapsed for running/pending too — keeps the row's
-            // right-edge duration cell present from the moment the
-            // event renders, so the row doesn't horizontally snap
-            // when the tool flips to terminal. tool_elapsed() uses
-            // steady_clock::now() when finished_at is unset, which
-            // is exactly the live counter we want.
-            .elapsed_seconds = tool_elapsed(tc),
+            // Elapsed on the event's HEADER row. For a TERMINAL tool this is
+            // final and immutable (finished_at is set) — safe on a committed
+            // row. For a NON-TERMINAL tool tool_elapsed() reads
+            // steady_clock::now(), so it TICKS every wall-second — and the
+            // running tool's header row sits ABOVE its growing progress body,
+            // so once that row crosses into native scrollback the ticking
+            // seconds rewrite a committed row → maya's gate HardResets
+            // (scrollback_oracle t*-r*-run* recoveries). Same seam-immutability
+            // rule as the title/border/spinner just below: a live panel's
+            // header rows must be byte-stable. Emit 0 (no duration cell) while
+            // non-terminal; the live duration lives in the FOOTER's
+            // total_elapsed, which is a bottom append below the seam. The row
+            // doesn't horizontally snap on the terminal flip because the
+            // footer already carried the running total.
+            .elapsed_seconds = tc.is_terminal() ? tool_elapsed(tc) : 0.0f,
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
             // Terminal tools: body lives in body_shared (maya's terminal
