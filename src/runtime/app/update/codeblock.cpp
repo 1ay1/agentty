@@ -84,7 +84,32 @@ namespace {
     return {};
 }
 
-// Fire the selected block. POSIX: suspend the TUI and run the child on
+// Blocks available RIGHT NOW from a still-streaming reply. The live text
+// lands in `streaming_text` (settled prose moves to `text` only at turn end),
+// so mid-turn we read whichever the live assistant message carries and use
+// the CLOSED-only extractor: a block whose ``` fence hasn't arrived yet is
+// still being typed and must not be offered (running a half-line is unsafe).
+// `saw_open` reports that a block is mid-fence, so the caller can say "still
+// streaming" instead of "no blocks".
+[[nodiscard]] std::vector<CodeBlock>
+streaming_reply_closed_blocks(const Model& m, bool& saw_open) {
+    saw_open = false;
+    for (auto it = m.d.current.messages.rbegin();
+         it != m.d.current.messages.rend(); ++it) {
+        if (it->role != Role::Assistant) continue;
+        // Prefer the live streaming buffer; fall back to settled text (the
+        // finalize may have already moved it while the phase lag clears).
+        std::string_view live = !it->streaming_text.empty()
+                                    ? std::string_view{it->streaming_text}
+                                    : std::string_view{it->text};
+        if (live.empty()) continue;
+        bool open_here = false;
+        auto blocks = cbp::extract_closed_code_blocks(live, &open_here);
+        saw_open = saw_open || open_here;
+        if (!blocks.empty()) return blocks;
+    }
+    return {};
+}
 // the real terminal with a stdout/stderr tee — fully interactive, output
 // captured. Windows: non-interactive captured runner (subprocess), same
 // as the bash tool.
@@ -512,16 +537,30 @@ namespace runner_ui {
 Step codeblock_update(Model m, msg::CodeBlockMsg cm) {
     return std::visit(overload{
         [&](OpenCodeBlockPicker) -> Step {
+            // Mid-stream is allowed: the network stream runs on a background
+            // worker (StreamDelta posts back to the UI thread), so suspending
+            // the TUI to run a block does NOT pause the reply — deltas keep
+            // arriving and land when you return. While streaming we offer the
+            // blocks whose ``` fence has ALREADY closed in the live reply; a
+            // block still being typed is withheld until its fence lands.
+            std::vector<CodeBlock> blocks;
             if (m.s.active()) {
-                auto cmd = set_status_toast(m,
-                    "wait for the reply to finish before grabbing blocks");
-                return {std::move(m), std::move(cmd)};
-            }
-            auto blocks = latest_assistant_blocks(m);
-            if (blocks.empty()) {
-                auto cmd = set_status_toast(m,
-                    "no code blocks in the last reply");
-                return {std::move(m), std::move(cmd)};
+                bool saw_open = false;
+                blocks = streaming_reply_closed_blocks(m, saw_open);
+                if (blocks.empty()) {
+                    auto cmd = set_status_toast(m,
+                        saw_open
+                          ? "a code block is still streaming \xe2\x80\x94 try again in a moment"
+                          : "no complete code blocks yet");
+                    return {std::move(m), std::move(cmd)};
+                }
+            } else {
+                blocks = latest_assistant_blocks(m);
+                if (blocks.empty()) {
+                    auto cmd = set_status_toast(m,
+                        "no code blocks in the last reply");
+                    return {std::move(m), std::move(cmd)};
+                }
             }
             m.ui.code_blocks = cbp::Open{std::move(blocks), 0};
             m.ui.code_blocks_scroll.y = 0;

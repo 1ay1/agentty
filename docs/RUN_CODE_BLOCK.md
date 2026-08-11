@@ -20,6 +20,13 @@ blocks in it, a toast nudges you — *▶ 2 runnable code blocks — Ctrl+G to
 run*. Replies without runnable blocks stay quiet, so the nudge keeps its
 meaning.
 
+**You don't have to wait for the reply to finish.** Ctrl+G works *while the
+reply is still streaming* — it offers every block whose closing ` ``` ` has
+already arrived (a block still being typed is withheld until its fence lands,
+so you never run a half-line). The network stream runs on a background
+worker, so suspending the UI to run a block doesn't pause it: the rest of the
+reply keeps arriving and is waiting for you when the run returns.
+
 ## The flow
 
 ```
