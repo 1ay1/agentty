@@ -214,6 +214,62 @@ constexpr std::string_view kCompactionSummaryPrompt =
     "the summary text. Wrap the summary in <summary></summary> "
     "tags.";
 
+// Alternate summary styles for the fork picker. Every one still ends with
+// the <summary></summary> contract and the no-tools directive so the same
+// finalize path parses them identically — only the shape of the requested
+// prose differs.
+constexpr std::string_view kSummaryTail =
+    " Do not call any tools; just write the summary text. Wrap the "
+    "summary in <summary></summary> tags.";
+
+constexpr std::string_view kBriefPrompt =
+    "Summarize everything above as a single concise paragraph — a TL;DR "
+    "a teammate could read in ten seconds to know what this session is "
+    "about, what was done, and what's left.";
+
+constexpr std::string_view kBulletsPrompt =
+    "Summarize everything above as a tight bullet outline. Group under "
+    "short headers (Goal, Done, Findings, Next) and keep each bullet to "
+    "one line. Preserve file paths, decisions, and open questions.";
+
+constexpr std::string_view kDecisionsPrompt =
+    "Summarize everything above focusing on the DECISIONS made and the "
+    "reasoning behind them — the why, not the mechanics. List each decision, "
+    "the alternatives considered, and why the chosen path won. Note any "
+    "decision still open.";
+
+constexpr std::string_view kHandoffPrompt =
+    "Write a handoff for a fresh agent picking up this task cold. Skip the "
+    "history; give ONLY what's needed to continue: the concrete next steps "
+    "in priority order, the files and commands involved, any blockers, and "
+    "the success criteria. Actionable and imperative.";
+
+constexpr std::string_view kNarrativePrompt =
+    "Write a flowing prose recap of this whole session as a short story of "
+    "the work: what the user wanted, how the approach evolved, what was "
+    "discovered, and where things stand now. Readable, not a checklist.";
+
+// Map a CompactionStyle to its summarisation prompt. Recoverable is the full
+// structured prompt above (already self-contained); the rest append the
+// shared <summary>-contract tail so finalize parses them uniformly.
+std::string compaction_prompt_for(CompactionStyle style) {
+    switch (style) {
+        case CompactionStyle::Recoverable:
+            return std::string{kCompactionSummaryPrompt};
+        case CompactionStyle::Brief:
+            return std::string{kBriefPrompt}     + std::string{kSummaryTail};
+        case CompactionStyle::Bullets:
+            return std::string{kBulletsPrompt}   + std::string{kSummaryTail};
+        case CompactionStyle::Decisions:
+            return std::string{kDecisionsPrompt} + std::string{kSummaryTail};
+        case CompactionStyle::Handoff:
+            return std::string{kHandoffPrompt}   + std::string{kSummaryTail};
+        case CompactionStyle::Narrative:
+            return std::string{kNarrativePrompt} + std::string{kSummaryTail};
+    }
+    return std::string{kCompactionSummaryPrompt};
+}
+
 // Body prefix wrapping the model's summary text into a synthetic User
 // message that goes on the wire in place of [0, up_to_index). The
 // trailing "Continue…" directive (CC trick, binary near offset
@@ -417,7 +473,8 @@ std::vector<Message> wire_messages_for_impl(Thread&& t) {
 // (preserving the leading User-wire-shape, never trimming a synthetic
 // summary already at the head) until the estimate fits ~65% of the
 // window, leaving headroom for the prompt + the summary response.
-std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_max) {
+std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_max,
+                                                  CompactionStyle style) {
     // Start from the already-compaction-substituted view so stacked
     // compactions don't double-count the summarised prefix.
     std::vector<Message> base = wire_messages_for_impl(t);
@@ -451,10 +508,11 @@ std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_m
                        base.begin() + static_cast<std::ptrdiff_t>(lead));
     }
 
-    // Append the synthetic summarisation prompt as the trailing User.
+    // Append the synthetic summarisation prompt as the trailing User. The
+    // prompt text is chosen by the requested style (fork picker / compaction).
     Message synth;
     synth.role = Role::User;
-    synth.text = std::string{kCompactionSummaryPrompt};
+    synth.text = compaction_prompt_for(style);
     base.push_back(std::move(synth));
     return base;
 }
@@ -558,6 +616,7 @@ Cmd<Msg> launch_stream(Model& m) {
     Thread thread_snapshot = m.d.current;
     std::string session_key = thread_snapshot.id.value;
     const bool compacting  = m.s.compacting;
+    const CompactionStyle compaction_style = m.s.compaction_style;
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
@@ -603,7 +662,7 @@ Cmd<Msg> launch_stream(Model& m) {
 
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
-         compacting, context_max, retry_count,
+         compacting, compaction_style, context_max, retry_count,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -720,7 +779,7 @@ Cmd<Msg> launch_stream(Model& m) {
             if (int base = ui::context_max_for_model(req.model);
                 base > 0 && (compaction_ctx <= 0 || base < compaction_ctx))
                 compaction_ctx = base;
-            req.messages = wire_messages_for_compaction(thread, compaction_ctx);
+            req.messages = wire_messages_for_compaction(thread, compaction_ctx, compaction_style);
             drop_stale_proactive(req.messages);
             // req.tools left empty — summarisation is text-only.
         } else {

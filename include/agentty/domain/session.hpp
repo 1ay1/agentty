@@ -17,6 +17,8 @@
 #include <maya/core/animation.hpp>
 #include <maya/widget/spinner.hpp>
 
+#include "agentty/domain/compaction_style.hpp"
+
 namespace agentty::http { class CancelToken; }
 
 namespace agentty {
@@ -526,6 +528,10 @@ struct StreamState {
     // only ever true when phase != Idle (the transition is paired
     // with the launch of the compaction stream).
     bool compacting = false;
+    // Which summary shape the in-flight compaction is producing. Set at
+    // CompactContext / fork kickoff, read by the wire builder to choose the
+    // summarisation prompt. Defaults to Recoverable (the original behaviour).
+    CompactionStyle compaction_style = CompactionStyle::Recoverable;
     // Snapshot of `messages.size()` taken at CompactContext kickoff.
     // The compaction-finalize handler stamps this onto the new
     // Thread::CompactionRecord as `up_to_index` so wire payloads for

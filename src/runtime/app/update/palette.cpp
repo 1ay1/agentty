@@ -92,6 +92,10 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                     // not-a-repo / agent-busy cases with a friendly toast.
                     return agentty::app::update(std::move(m),
                         Msg{OpenCheckpointPicker{}});
+                case Command::OpenRagSettings:
+                    return agentty::app::update(std::move(m), Msg{OpenRagSettings{}});
+                case Command::ForkThread:
+                    return agentty::app::update(std::move(m), Msg{OpenForkPicker{}});
                 case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});
                 case Command::SignOut:       return agentty::app::update(std::move(m), Msg{SignOut{}});
                 case Command::Quit:          return agentty::app::update(std::move(m), Msg{Quit{}});

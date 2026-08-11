@@ -461,6 +461,14 @@ struct Thread {
     ThreadId    id;
     std::string title;
     std::vector<Message> messages;
+    // Provenance: if this thread was forked (branched) from another, the
+    // parent thread's id. Empty for a normal thread. Persisted so the thread
+    // list can show a "forked from …" hint and the history stays traceable.
+    std::string forked_from;
+    // Per-thread proactive-RAG override. -1 = inherit the global RAG mode;
+    // otherwise a store::RagMode value (0 On, 1 FirstTurnOnly, 2 Off). Set by
+    // the fork picker so a fork can carry its own RAG behaviour. Persisted.
+    int rag_mode_override = -1;
     std::chrono::system_clock::time_point created_at = std::chrono::system_clock::now();
     std::chrono::system_clock::time_point updated_at = std::chrono::system_clock::now();
 
