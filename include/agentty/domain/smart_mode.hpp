@@ -176,4 +176,23 @@ namespace detail {
     return pass;
 }
 
+// Convenience for the INTERNAL utility calls (compaction summary, commit
+// messages, HyDE query expansion, fork/thread retrieval). These already
+// default to the cheapest capable model even with Smart Mode OFF — so this
+// preserves that default and ONLY overrides it when the user has explicitly
+// pinned a Utility slot in Smart Mode. That way turning Smart Mode on can
+// steer these onto a specific cheap model, but turning it OFF never regresses
+// them back up to the flagship. Returns a WIRE model id.
+[[nodiscard]] inline std::string utility_model(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        const RoleConfig& cfg) {
+    if (cfg.enabled) {
+        if (const auto& ov = cfg.utility; ov.set && !ov.model.empty())
+            return wire_model_id(std::string_view{ov.model});
+    }
+    return cheapest_capable_model(wire_model_id(parent_model), candidates,
+                                  ModelCapabilities::Tier::Cheap);
+}
+
 } // namespace agentty::smart

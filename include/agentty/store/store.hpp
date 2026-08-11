@@ -125,6 +125,16 @@ struct Settings {
     // User-configured RAG behaviour (the RAG settings picker). Defaults to
     // configured=false ⇒ the adapter keeps its env-derived config.
     RagConfig rag;
+
+    // Smart Mode (role-based execution routing, docs/design/smart-mode.md).
+    // Off by default. The three slot fields are WIRE model ids the user
+    // pinned for each role; empty = auto-fill from the catalog. Effort
+    // strings mirror the `effort` field's grammar (""/"low"/"medium"/…).
+    // Reloaded into Model::Domain::smart at startup.
+    bool                 smart_enabled = false;
+    std::string          smart_strategic_model,      smart_strategic_effort;
+    std::string          smart_impl_model,           smart_impl_effort;
+    std::string          smart_utility_model,        smart_utility_effort;
 };
 
 template <class S>

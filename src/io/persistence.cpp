@@ -1066,6 +1066,16 @@ store::Settings load_settings() {
             c.learn             = r.value("learn", c.learn);
             c.trace             = r.value("trace", c.trace);
         }
+        if (j.contains("smart") && j["smart"].is_object()) {
+            const auto& sm = j["smart"];
+            s.smart_enabled          = sm.value("enabled", false);
+            s.smart_strategic_model  = sm.value("strategic_model", "");
+            s.smart_strategic_effort = sm.value("strategic_effort", "");
+            s.smart_impl_model       = sm.value("impl_model", "");
+            s.smart_impl_effort      = sm.value("impl_effort", "");
+            s.smart_utility_model    = sm.value("utility_model", "");
+            s.smart_utility_effort   = sm.value("utility_effort", "");
+        }
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
     } catch (...) {
@@ -1124,6 +1134,20 @@ void save_settings(const store::Settings& s) {
             {"learn",              c.learn},
             {"trace",              c.trace},
         };
+    }
+    // Smart Mode: persist only when meaningfully configured (enabled, or any
+    // slot pinned) so a fresh config stays clean.
+    if (s.smart_enabled || !s.smart_strategic_model.empty()
+        || !s.smart_impl_model.empty() || !s.smart_utility_model.empty()) {
+        nlohmann::json sm;
+        sm["enabled"] = s.smart_enabled;
+        if (!s.smart_strategic_model.empty())  sm["strategic_model"]  = s.smart_strategic_model;
+        if (!s.smart_strategic_effort.empty()) sm["strategic_effort"] = s.smart_strategic_effort;
+        if (!s.smart_impl_model.empty())       sm["impl_model"]       = s.smart_impl_model;
+        if (!s.smart_impl_effort.empty())      sm["impl_effort"]      = s.smart_impl_effort;
+        if (!s.smart_utility_model.empty())    sm["utility_model"]    = s.smart_utility_model;
+        if (!s.smart_utility_effort.empty())   sm["utility_effort"]   = s.smart_utility_effort;
+        j["smart"] = std::move(sm);
     }
     (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }

@@ -16,6 +16,7 @@
 #include <maya/render/scrollback_ledger.hpp>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/smart_mode.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/diff/diff.hpp"
 #include "agentty/domain/id.hpp"
@@ -169,6 +170,12 @@ struct Model {
         // Claude provider send adaptive thinking + output_config.effort.
         // Persisted in Settings; gated per-model at request-build time.
         Effort                 effort = Effort::None;
+
+        // Smart Mode: role-based execution routing (docs/design/smart-mode.md).
+        // `enabled` off by default — the whole feature is opt-in and a no-op
+        // when off (internal utility calls keep their existing cheapest-model
+        // default). Persisted in Settings.
+        smart::RoleConfig      smart;
 
         std::vector<FileChange>          pending_changes;
         std::optional<PendingPermission> pending_permission;
