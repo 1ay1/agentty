@@ -4,6 +4,7 @@
 // No I/O, no wire. Verifies zero-config auto-fill, overrides, the off
 // pass-through, and the single-tier no-regression guarantee.
 #include "agentty/domain/smart_mode.hpp"
+#include "agentty/domain/catalog.hpp"   // ModelCapabilities
 
 #include <cstdio>
 
@@ -11,6 +12,7 @@ namespace sm = agentty::smart;
 using agentty::Effort;
 using agentty::ModelInfo;
 using agentty::ModelId;
+using agentty::ModelCapabilities;
 
 static int g_fail = 0;
 #define CHECK(cond, msg)                                                       \
