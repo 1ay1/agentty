@@ -2102,6 +2102,14 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME code_block_extract_test COMMAND code_block_extract_test)
     set_tests_properties(code_block_extract_test PROPERTIES TIMEOUT 30)
 
+    # smart_mode_test — the role resolver (Smart Mode Step 1): role +
+    # parent-model + effort + catalog + config → (model, effort) profile.
+    # Zero-config auto-fill, overrides, off pass-through, single-tier
+    # no-regression. Pulls catalog.hpp (→ nlohmann/json via id.hpp), so it
+    # links the shared object set for the include dirs.
+    agentty_add_full_test(smart_mode_test)
+    set_tests_properties(smart_mode_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2349,6 +2357,7 @@ if(AGENTTY_BUILD_TESTS)
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
+        smart_mode_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test
