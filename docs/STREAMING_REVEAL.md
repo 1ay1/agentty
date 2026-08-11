@@ -166,83 +166,71 @@ guard this. If you change reveal pacing or clipping, run them.
 - **Capture** (`anthropic_md_stream capture <out.jsonl>`): records a fresh
   real fixture (live billed API call — manual dev action).
 
-## Known-remaining (one unified root cause)
+## The block-boundary pop — FIXED (maya 4c47249)
 
-There is a single architectural limitation behind the two remaining
-block-boundary pops:
+For a while a completed block popped into view whole in one frame at a block
+boundary (the ~+170 mid-body pop in the tour fixture, plus eager table/quote
+rows under a burst). The prior analysis blamed "the overlay decorates only the
+tail leaf" and sketched an invasive per-block source-provenance side-table.
+That was the WRONG root cause. The real cause was one line in `build()`.
 
-**The overlay decorates only the TAIL (rightmost) leaf of the live body.**
-When the reveal cursor is still mid-way through content but the wire delivers a
-delta that crosses a *block boundary*, the block that was being concealed is no
-longer the tail leaf, so it un-conceals and renders whole in one frame:
+**Root cause: build() rounded the reveal clip up to end-of-line.** The clip
+that gates the rendered tail was rounded UP to the next `\n` whenever that line
+was complete ("a completed line renders whole for scrollback safety"). But
+Markdown prose is **one source line per paragraph** that soft-WRAPS at render
+time — and `build()` has no width, so it cannot know where the wraps fall.
+`find('\n')` on a cursor sitting mid-paragraph returns the paragraph's
+TERMINATING newline, hundreds of bytes ahead. Rounding to it dumped the ENTIRE
+remaining paragraph the instant its closing `\n` arrived (a fat delta). The
+reveal cursor gated nothing. Worse, the now-"settled" multi-line block went
+through `render_tail`'s component path, so `find_last_text` bailed and the
+overlay's eager arm (`line_bounded`) showed every wrapped row above the cursor
+whole — exactly the pop.
 
-- **Eager blocks** (tables, lists, quotes): when a burst completes a table and
-  begins the next block, the table is no longer the tail; its cell content
-  (which had been concealing cell-by-cell — verified with a table-as-tail
-  reproduction: `concealed` drops smoothly 24→1) appears whole. Its border /
-  padding structure legitimately appears whole regardless (structure can't
-  glide a cell at a time).
-- **Prose across a paragraph→blockquote boundary**: a fat delta that both
-  completes a long wrapping paragraph (`.\n\n`) and starts a `>` quote makes the
-  finished paragraph un-conceal in one frame (the ~+170 mid-body pop in the
-  tour fixture, `det`).
+**Fix: gate the rendered tail EXACTLY at the reveal cursor** — never round a
+settled-but-uncommitted line whole (`build.cpp`). This is scrollback-safe
+because the tail slice `[committed_, clip)` is entirely uncommitted and
+redrawn in place each frame; only `commit_range` (reveal-paced, block-aligned)
+freezes bytes into scrollback, and by then the cursor is past the block. A
+block-boundary cap (`bcap`) additionally prevents the clip / monotonic clamp
+from crossing a blank-line (`\n\n`) boundary the cursor hasn't reached, so a
+completed block always stays the tail's last leaf where the overlay conceal
+can reach it.
 
-The correct fix is a **global document-order conceal over the whole live
-body** (not just the tail leaf): count content cp top-to-bottom and conceal
-every cell past the reveal front, uniformly for every block. This was
-attempted several times and each variant either regressed the smooth-feed case
-or fought the eager render path's lazy width-aware components / the caret / the
-overlay memo. It needs to be done as a first-class pass that materialises
-components at the real paint width and threads through the caret + memo paths —
-a focused piece of work, not an overlay patch. The prior per-block attempts
-were reverted rather than ship a regression.
+**Measured** (`anthropic_md_stream det ... --adaptive`):
 
-This is bounded and low-severity: it's one frame at a block boundary, the
-reveal is otherwise a smooth glide, and per-glyph reveal within the tail block
-(the common case, and all of prose/headings/code) works. Reproduce with
-`PROBE_BURSTY=1 ./build/reveal_smoothness_probe` and
-`det tests/fixtures/anthropic_md_tour.jsonl` (the +170 frame).
+| fixture | before | after | gate (--assert-max-delta 24) |
+|---------|--------|-------|------------------------------|
+| tour    | 172    | 22    | pass |
+| smoke   | 27     | 6     | pass |
 
-### The correct fix (chosen design: source provenance, per-block)
+Smooth-feed probe PASS; bursty probe (`PROBE_BURSTY=1`) PASS (worst +26, was
++285); `reveal_stream_gate` PASS; `reveal_scrollback_test` (10970 checks) and
+`scrollback_wire_fuzz` (20384 checks) green. Reproduce/inspect a frame with
+`DET_DUMP_FRAME=N ./build/anthropic_md_stream det tests/fixtures/anthropic_md_tour.jsonl --adaptive`.
 
-The fix is **correct-by-construction, not a patch**: the boundary-pop exists
-because a rendered leaf/block does not know its source range, so the global
-conceal is forced to map source-cp → rendered-cp by a fraction that is wrong
-at every block boundary (rendered content ≠ source: headings add rules, tables
-add borders, lists add markers). Give each rendered **tail block** its source
-`[offset, end)` and the conceal becomes an exact byte comparison — no fraction,
-and the whole "off by a variable amount at a boundary" class becomes
-unrepresentable.
+### Why the per-block-provenance side-table was NOT needed
 
-Threads are NOT the fix: profiling shows build cost is ~12 µs median / 351 µs
-max against a 16 000 µs frame budget — there is no bottleneck, and the
-paint-time width materialisation can't move off the render thread anyway. The
-defect is correctness (a missing type invariant), not performance.
+The abandoned plan (publish each tail block's `[offset,end)` from
+`render_tail`, walk every leaf, byte-compare against the cursor) would have
+worked but was far more invasive than the defect warranted, with real
+scrollback-corruption blast radius in the 2400-line `render_tail.cpp`. Once
+the clip stops rounding, the in-progress block stays a flat `TextElement` that
+the existing prose ghost band glides through per-glyph — no provenance table,
+no leaf walk, no `render_tail` change. Threads were also never the fix
+(profiling: build ~12 µs median / 351 µs max vs a 16 000 µs frame budget — no
+bottleneck; the defect was correctness).
 
-Granularity: per **block**, not per cell. The pop is a whole completed block
-un-concealing when the tail holds two blocks (a finished paragraph + the next
-block) and the overlay decorates only the last leaf. Block-level provenance
-already exists: `BlockMeta::source_offset/source_end` for committed blocks, and
-`render_eager_slice` parses the tail from a known offset.
+## Pre-existing failure: scrollback_oracle_test (NOT this path)
 
-Implementation sketch (each step gated on the smooth probe + scrollback/oracle
-tests, do NOT touch `ComponentElement`'s cache identity):
-1. Publish the tail's block source boundaries into a small overlay-read member
-   (a `std::vector<std::pair<size_t,size_t>>`) from `render_tail` /
-   `render_eager_slice`, where the offsets are known — a SIDE TABLE, not a
-   field on the Element type.
-2. In `render_live_overlay_`, walk EVERY content leaf of the tail (not just
-   `find_last_text`), and conceal a whole leaf/block whose source range is
-   entirely past `reveal_byte_clip_`. The block STRADDLING the cursor keeps the
-   existing per-leaf tail decoration (which is already correct within one
-   block). Committed blocks are always behind `committed_` ≤ cursor, so they
-   never conceal.
-3. Delete the fraction-mapping global pass attempts; the byte comparison is
-   exact.
-
-This deserves its own focused pass — `render_tail.cpp` is a ~2400-line
-heavily-optimised file and reveal changes here have a real scrollback-
-corruption blast radius (guarded by `scrollback_oracle_test`).
+`scrollback_oracle_test` (ctest #60) fails with ~58 "gate recovery"
+corruptions on clean HEAD — a long-standing failure that predates the whole
+reveal-gate series (verified back through maya `d2d80a8`). The failures are on
+tool-turn Running-progress-grow frames (`t1-r1-runNN`, "committed-row mutation
+slipped past the type guards") in the TOOL-PANEL commit path, not the prose
+reveal path. The clip-gating fix actually improves the count (58 → 36). This
+tool-panel corruption is a separate, unfixed defect; do not conflate a red
+oracle with a broken reveal.
 
 ## Quick reference — debugging a new reveal complaint
 
