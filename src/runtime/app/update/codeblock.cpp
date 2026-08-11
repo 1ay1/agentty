@@ -169,12 +169,34 @@ namespace runner_ui {
         s += "\x1b[" + std::to_string(rows - 1) + ";1H";
         emit(s);
     }
+    // Hand the child a clean screen. maya's inline-mode suspend only emits
+    // "\r\n" on teardown — it moves the cursor onto a fresh line but leaves
+    // the whole last TUI frame (transcript, composer, picker) still painted
+    // ABOVE it. The run header + child output then scroll up INTO that stale
+    // frame and overlap it ("text already there that overlaps when you
+    // type"). Clear the visible viewport and home the cursor so the child
+    // starts on a blank screen.
+    //
+    // ED2 (\x1b[2J) clears the VIEWPORT only; scrollback is untouched (that
+    // needs ED3 / \x1b[3J, which we deliberately do NOT send) so the
+    // conversation history the user scrolled through stays in native
+    // scrollback. TTY-gated, so piped/captured output never sees it.
+    inline void reset_screen() {
+        if (!tty()) return;
+        emit("\x1b[2J\x1b[H");   // ED2 clear viewport + cursor home
+    }
 }
 
 [[nodiscard]] CodeBlockRunFinished run_on_real_tty(const std::string& command) {
     namespace ui = runner_ui;
     CodeBlockRunFinished fin;
     fin.command = command;
+
+    // Hand the child a CLEAN screen. maya's inline suspend leaves the last
+    // TUI frame painted above the cursor; without this the header and child
+    // output scroll up into it and overlap. reset_screen() clears the
+    // viewport (scrollback preserved) and homes the cursor.
+    ui::reset_screen();
 
     // Framed run header: a clearly-delimited banner so the user can see at
     // a glance WHERE the run started (the TUI just tore down, so a bare
@@ -184,7 +206,8 @@ namespace runner_ui {
     {
         std::string header;
         header += ui::dim();
-        header += "\n╭─ running ─ Ctrl-C to stop ─────────────────────────────────";
+        // No leading \n — reset_screen() already homed the cursor to row 1.
+        header += "\xe2\x95\xad\xe2\x94\x80 running \xe2\x94\x80 Ctrl-C to stop \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80";
         header += ui::reset();
         header += "\n";
         header += ui::cyan();
