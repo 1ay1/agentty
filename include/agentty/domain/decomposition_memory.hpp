@@ -45,6 +45,12 @@ public:
     [[nodiscard]] std::vector<Decomposition> recall(const std::string& signature,
                                                     std::size_t k = 1);
 
+    // Number of captured decompositions in this workspace — telemetry.
+    [[nodiscard]] std::size_t learned_count();
+
+    // Wipe this workspace's captured decompositions (file + cache).
+    void reset();
+
     // Test seam: force the workspace root and clear cache.
     void set_root_for_test(std::string root);
 

@@ -55,6 +55,14 @@ public:
     // over-rated (thought hard, delegated nothing, trivial reply).
     void note_regret(const std::string& signature, int direction);
 
+    // Number of distinct turn signatures with evidence in this workspace —
+    // for the "learned N patterns" telemetry in the overlay.
+    [[nodiscard]] std::size_t learned_count();
+
+    // Wipe this workspace's learned prior (file + cache). For the overlay's
+    // reset affordance.
+    void reset();
+
     // Test seam: force the workspace root (bypasses cwd) and clear cache.
     void set_root_for_test(std::string root);
 

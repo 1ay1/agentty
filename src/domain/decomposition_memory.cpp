@@ -137,6 +137,22 @@ std::vector<Decomposition> DecompositionMemory::recall(const std::string& signat
     return out;
 }
 
+std::size_t DecompositionMemory::learned_count() {
+    auto& d = impl();
+    std::lock_guard<std::mutex> lk(d.mu);
+    d.ensure_loaded();
+    return d.recs.size();
+}
+
+void DecompositionMemory::reset() {
+    auto& d = impl();
+    std::lock_guard<std::mutex> lk(d.mu);
+    d.ensure_loaded();
+    auto p = d.path();
+    if (!p.empty()) { std::error_code ec; fs::remove(p, ec); }
+    d.recs.clear();
+}
+
 void DecompositionMemory::set_root_for_test(std::string root) {
     auto& d = impl();
     std::lock_guard<std::mutex> lk(d.mu);

@@ -1,6 +1,34 @@
 # Smart Mode — role-based execution routing
 
-**Status:** design proposal (v2 refinements below; core design unchanged)
+**Status:** SHIPPED (master `832688a4..0d79d510`). The original three-role
+vision below is the foundation; the shipped feature grew past it into a full
+self-supervised orchestrator. See §0 for what actually landed.
+
+## 0. What shipped (the map)
+
+Smart Mode is one master toggle plus eight independently-selectable layers,
+all in the `Ctrl+S` overlay, all gated by the master switch, **off = a
+byte-for-byte no-op**:
+
+| Layer | What it does | Where |
+|-------|--------------|-------|
+| Internal routing | utility engine calls (compaction) → cheapest model | `smart::utility_model` |
+| Orchestration | main turn on Strategic + `<smart-mode>` delegation directive | `cmd_factory` `launch_stream` |
+| Subagent routing | each `task` worker's model by its role | `mcp_tools_backends` `run_one_completion` |
+| Complexity-scaled effort | classify turn → scale Strategic effort | `smart::classify_complexity` + `effort_for_complexity` |
+| Cascade feedback | session bias self-corrects from delegation behaviour | `stream.cpp` `finalize_turn` |
+| Learned routing | per-workspace Beta-smoothed effort prior | `smart::RoutingMemory` |
+| Outcome feedback | build-fail / next-turn correction → regret | `finalize_turn` + `submit_message` |
+| Speculative | detached retrieval prewarm on Complex turns | `tools::smart_speculative_prewarm` |
+| Plan recall | retrieve past successful decompositions into the prompt | `smart::DecompositionMemory` |
+
+The per-turn routing decision renders as a first-class 🧠 card; delegations
+render as ordinary `task` tool cards. Config persists to `settings.json`
+(`"smart"` object) and the two learning stores persist per-workspace under
+`.agentty/` (`routing_memory.tsv`, `decompositions.jsonl`). The design below
+is retained as the rationale for the core routing decision.
+
+---
 **Author:** agentty
 **Scope:** cost reduction without quality regression, via a three-model role hierarchy
 
