@@ -89,6 +89,21 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
     m.d.effort  = effort_from_wire(settings.effort);
+
+    // Smart Mode: rehydrate role config from settings. A slot counts as
+    // "set" once the user pinned a model for it.
+    m.d.smart.enabled = settings.smart_enabled;
+    auto load_slot = [](smart::SlotOverride& slot,
+                        const std::string& model, const std::string& eff) {
+        if (!model.empty()) {
+            slot.model  = model;
+            slot.effort = effort_from_wire(eff);
+            slot.set    = true;
+        }
+    };
+    load_slot(m.d.smart.strategic,      settings.smart_strategic_model, settings.smart_strategic_effort);
+    load_slot(m.d.smart.implementation, settings.smart_impl_model,      settings.smart_impl_effort);
+    load_slot(m.d.smart.utility,        settings.smart_utility_model,   settings.smart_utility_effort);
     // Rehydrate persisted "always allow" tool grants (Zed's always_allow
     // rules). PermissionApproveAlways appends to this list; loading it here
     // means a grant given last week still suppresses the prompt today.

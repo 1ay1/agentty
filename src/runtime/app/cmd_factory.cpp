@@ -655,10 +655,12 @@ Cmd<Msg> launch_stream(Model& m) {
     // `cheapest_capable_model` never routes UP and keeps the parent when
     // nothing cheaper exists, so an Opus-only / single-model user is unaffected.
     // Only used when `compacting` (summarisation is text-only, so the cheaper
-    // model's weaker tool-use is irrelevant here).
+    // model's weaker tool-use is irrelevant here). Smart Mode: if the user has
+    // pinned a Utility slot, use it; otherwise this is exactly the existing
+    // cheapest-capable default (turning Smart Mode off never regresses
+    // compaction back up to the flagship).
     std::string compaction_model =
-        cheapest_capable_model(model_id, m.d.available_models,
-                               ModelCapabilities::Tier::Cheap);
+        smart::utility_model(model_id, m.d.available_models, m.d.smart);
 
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
