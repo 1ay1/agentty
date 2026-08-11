@@ -8,6 +8,7 @@
 #include "agentty/runtime/app/update.hpp"
 
 #include <cctype>
+#include <algorithm>
 #include <chrono>
 #include <optional>
 #include <utility>
@@ -249,12 +250,32 @@ Step submit_message(Model m) {
     // settles; do not race a synchronous hedge against a duplicate fallback.
     std::string proactive_probe;
     {
-        auto proactive_on = [] {
-            const char* v = std::getenv("AGENTTY_RAG_PROACTIVE");
-            if (!v || !v[0]) return false;  // explicit opt-in
-            std::string s{v};
-            return s != "0" && s != "false" && s != "FALSE" && s != "False";
-        };
+        // Effective proactive gate = per-thread override (set by the fork
+        // picker) if present, else the global RAG mode. FirstTurnOnly injects
+        // only when the thread has no prior assistant turn yet (this user
+        // message is the first). Off never injects; On always. A shell
+        // AGENTTY_RAG_PROACTIVE override still wins inside proactive_enabled().
+        bool proactive_on = false;
+        {
+            const int ov = m.d.current.rag_mode_override;   // -1 = inherit global
+            const bool first_turn = std::none_of(
+                m.d.current.messages.begin(), m.d.current.messages.end(),
+                [](const Message& mm) {
+                    return mm.role == Role::Assistant && !mm.text.empty();
+                });
+            if (ov == static_cast<int>(store::RagMode::Off)) {
+                proactive_on = false;
+            } else if (ov == static_cast<int>(store::RagMode::On)) {
+                proactive_on = true;
+            } else if (ov == static_cast<int>(store::RagMode::FirstTurnOnly)) {
+                proactive_on = first_turn;
+            } else {
+                // Inherit the global mode (via the live retriever config).
+                proactive_on = tools::proactive_enabled();
+                if (proactive_on && tools::proactive_first_turn_only())
+                    proactive_on = first_turn;
+            }
+        }
         // Human-readable view of the query: strip chip placeholders so the
         // retriever probes real words, not sentinel bytes. Skip when the
         // turn is a slash-command / skill activation (already handled) or a
@@ -298,7 +319,7 @@ Step submit_message(Model m) {
             return false;
         };
         const bool slash = !user.text.empty() && user.text.front() == '/';
-        if (proactive_on() && !slash && !probe.empty()
+        if (proactive_on && !slash && !probe.empty()
             && word_count(probe) >= 3 && !looks_imperative(probe)) {
             proactive_probe = std::move(probe);
         }

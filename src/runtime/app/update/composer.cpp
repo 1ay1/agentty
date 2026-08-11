@@ -314,7 +314,12 @@ std::vector<HistoryEntryRef> previous_user_texts(const Model& m) {
     out.reserve(m.d.current.messages.size() / 2);
     for (auto it = m.d.current.messages.rbegin();
          it != m.d.current.messages.rend(); ++it) {
-        if (it->role == Role::User && !it->text.empty())
+        // Proactive <retrieved-context> blocks are synthetic User messages
+        // (Role::User + proactive_context) the model treats as reference, not
+        // the user's words. They must NEVER surface in the composer's ↑/↓
+        // history recall — recalling one would paste the raw fenced block as
+        // if the user had typed it.
+        if (it->role == Role::User && !it->proactive_context && !it->text.empty())
             out.push_back({&it->text, &it->attachments});
     }
     return out;

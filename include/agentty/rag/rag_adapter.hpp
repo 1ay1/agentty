@@ -106,6 +106,16 @@ struct Config {
     float    dense_weight = 1.0f;
     float    bm25_weight  = 1.0f;
 
+    // Proactive / "fork" behaviour — the pre-turn active-RAG path (read by the
+    // tools backend, not the retrieve funnel). `proactive` gates the whole
+    // pre-turn injection; proactive_min_conf is the CRAG bar to clear (a value
+    // > 1.0 is a legitimate "never inject" switch); proactive_bytes caps the
+    // injected <retrieved-context> block. Defaults mirror the env reads
+    // (AGENTTY_RAG_PROACTIVE / _MIN / _BYTES).
+    bool     proactive          = true;
+    double   proactive_min_conf = 0.35;
+    int      proactive_bytes    = 6144;
+
     [[nodiscard]] static Config from_env();
 };
 
@@ -147,6 +157,15 @@ public:
     // Kick a detached background index build so a future turn is warm.
     // Single-flight; returns immediately.
     void warm_async();
+
+    // Replace the live configuration. Sources/pipeline/fusion changes that
+    // alter the corpus or persisted-index identity force a rebuild on the next
+    // retrieve(); pure ranking toggles take effect immediately. Thread-safe;
+    // never throws. Backs the RAG settings picker's "apply" path.
+    void apply_config(const Config& cfg);
+
+    // The currently-live config (for the picker's initial state / round-trip).
+    [[nodiscard]] Config snapshot_config() const;
 
 private:
     struct Impl;

@@ -15,12 +15,27 @@
 #include <optional>
 #include <string>
 
+namespace agentty::store { struct RagConfig; }
+
 namespace agentty::tools {
 
 // Populate svc.memory / svc.skills / svc.retriever / svc.subagent with the
 // agentty backends. Leaves svc.todo null (the mcp todo shell needs no host
 // state) and svc.http untouched (the bridge installs the HttpClient).
 void install_host_backends(::mcp::tools::HostServices& svc);
+
+// Live-apply user RAG configuration (the RAG settings picker's commit path)
+// to the process-wide retriever. Rebuilds indexes lazily. Never throws.
+void rag_apply_settings(const store::RagConfig& cfg);
+
+// Whether the proactive pre-turn injection is enabled, per the live config
+// (persisted RAG picker), with AGENTTY_RAG_PROACTIVE as a shell override.
+[[nodiscard]] bool proactive_enabled();
+
+// Whether the GLOBAL RAG mode is "first turn only" (proactive injection only
+// on a thread's first turn). Consulted by the per-turn gate when a thread has
+// no per-thread override.
+[[nodiscard]] bool proactive_first_turn_only();
 
 // ── Proactive retrieval (explicit opt-in) ────────────────────────────
 // Run the RAG pipeline outside the model's tool loop. The app invokes the
