@@ -101,17 +101,25 @@ through the bash tool's sandboxed, non-interactive runner. Instead:
 
 1. maya **suspends the TUI**: raw mode off, alternate keyboard protocols off,
    mouse reporting off, the writer's non-blocking mode off. You're back on a
-   cooked tty, exactly as if agentty had exited.
+   cooked tty, exactly as if agentty had exited. The visible screen is then
+   **cleared** and the cursor homed before anything prints — inline-mode
+   suspend leaves the last TUI frame painted on screen, and without the clear
+   the run header and the child's output (and your typing) would overlap that
+   stale frame. Only the *viewport* is cleared; your conversation history
+   stays in native scrollback.
 2. The block runs via `/bin/sh -c` with **stdin inherited from the real
    terminal** — password reads, line editing, and anything that opens
    `/dev/tty` (sudo does) behave exactly as in your shell.
 3. stdout + stderr flow through a **tee pipe**: every byte is written straight
    to your screen *live* and simultaneously appended to a capture buffer.
-4. A `$ command` banner is echoed first and an
-   `[exit N — returning to agentty]` banner last, so the transcript reads
-   like a shell session.
-5. On exit the TUI restores. The run's output stays in your terminal's
-   native scrollback **above** the restored UI, like shell history.
+4. A framed `╭─ running ─ Ctrl-C to stop` banner with the `$ command` is echoed
+   first and a colour-coded `╰─ ✓ done` / `✗ failed` / `■ stopped` footer with
+   the exit code and elapsed time last, so the transcript reads like a shell
+   session and it's obvious the run is interruptible.
+5. On exit, a **press-any-key** prompt holds the output on screen so a fast
+   command isn't repainted away before you can read it; then the TUI restores.
+   The run's output stays in your terminal's native scrollback **above** the
+   restored UI, like shell history.
 
 Signal semantics are classic `system()`: while the child runs, agentty
 ignores `SIGINT`/`SIGQUIT` and the child gets the default dispositions —
