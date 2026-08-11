@@ -54,10 +54,15 @@ Three beats, each one a decision point:
 one with the commands) and lists them in document order — block 1 is the
 topmost on screen, so the numbers read naturally against the reply.
 
-Each row shows the block's first line, its language tag, and its line count.
-Non-shell blocks (python, js, …) are dimmed: they can be edited or copied but
-not run — `sh -c` on a python script fails confusingly, so Run shows a toast
-instead of executing garbage.
+Each row leads with a **run-affordance badge** — a bright `▶` in the accent
+hue when the block is runnable on this platform, or the language tag in muted
+when it is edit/copy-only — followed by the block's first non-blank line, and
+trails with the language dialect and line count. The badge is a stable colour
+anchor (it is *not* dimmed on the selected row), so "which of these actually
+runs" reads at a glance. Non-shell blocks (python, js, …) show their dimmed
+tag instead of a `▶`: they can be edited or copied but not run — `sh -c` on a
+python script fails confusingly, so Run shows a toast instead of executing
+garbage.
 
 | Key | Action |
 |-----|--------|
@@ -137,19 +142,28 @@ signal (the shell convention — Ctrl+C shows as `exit 130`).
 ## The Result card
 
 When the run exits, agentty shows a summary card — green accent on exit 0,
-red on failure or timeout:
+red on failure or timeout. The full capture below the header is **line-
+numbered** (a right-aligned gutter + a `│` pipe that turns red on a failed or
+timed-out run), so "it broke on line 42" is something you can actually point
+at, and it reads the same as the Ctrl+O tool-output viewer. A scroll-position
+readout (`12–30 / 214 lines`) in the footer tells you there is more above or
+below:
 
 ```
-┌ Run Result ───────────────────────────────┐
+┌ Run Result ──────────────────────────┐
 │ $ sudo mkfs.vfat -F 32 -n USB /dev/sdb1   │
 │   exit 0 · 14 lines · 1 KB                │
-│ ──────────────────────────────────────────│
-│   mkfs.fat 4.2 (2021-01-31)               │
-│   …full capture, scrollable…              │
+│ ──────────────────────────│
+│   1 │ mkfs.fat 4.2 (2021-01-31)          │
+│   2 │ …full capture, scrollable…         │
 │                                           │
+│  1–14 / 14 lines                          │
 │  a attach to composer   y copy   Esc discard │
-└───────────────────────────────────────────┘
+└───────────────────────────┘
 ```
+
+The body is windowed to the viewport (only the visible slice is rendered each
+frame), so paging through a multi-megabyte capture stays instant.
 
 | Key | Action |
 |-----|--------|
