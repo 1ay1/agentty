@@ -1710,6 +1710,16 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME cred_crypt_test COMMAND cred_crypt_test)
     set_tests_properties(cred_crypt_test PROPERTIES TIMEOUT 60)
 
+    # cross_process_lock_test — auth::CrossProcessFileLock mutual exclusion
+    # across PROCESSES. Forks a child that races the parent for the same lock
+    # and asserts it blocks until the parent releases. Guards the OAuth
+    # refresh thundering-herd fix: N agentty instances that all see the same
+    # expired token must serialize their refresh (rotating refresh tokens make
+    # concurrent refreshes mutually invalidate → the refresh loop the user
+    # hit). Full-stack link (CrossProcessFileLock lives in the io object lib).
+    agentty_add_full_test(cross_process_lock_test)
+    set_tests_properties(cross_process_lock_test PROPERTIES TIMEOUT 30)
+
     # accounts_registry_test — the named per-provider account store
     # (list/upsert/get/remove/set_active/active_label) that backs the in-app
     # account switcher. Runs against a sandboxed XDG_CONFIG_HOME so it never
@@ -2284,6 +2294,7 @@ if(AGENTTY_BUILD_TESTS)
         model_label_test
         skills_engine_test
         cred_crypt_test
+        cross_process_lock_test
         accounts_registry_test
         keystore_test
         midrun_freeze_test

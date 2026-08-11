@@ -41,6 +41,7 @@
 #  include <shellapi.h>
 #else
 #  include <fcntl.h>
+#  include <sys/file.h>
 #  include <sys/stat.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
@@ -188,6 +189,59 @@ fs::path config_dir() {
 }
 
 fs::path credentials_path() { return config_dir() / "credentials.json"; }
+
+// ---------------------------------------------------------------------------
+// Cross-process refresh lock (thundering-herd guard) — impl of the
+// CrossProcessFileLock declared in auth.hpp.
+//
+// A process-local mutex serializes refreshes across threads WITHIN one
+// agentty, but N separate agentty instances that all see the same expired
+// OAuth token will each fire their own refresh POST. Anthropic's OAuth uses
+// ROTATING refresh tokens: the first refresh invalidates the old refresh
+// token, so the losers refresh against a now-revoked token, fail, and (worse)
+// can clobber the credential file — every instance then keeps seeing a token
+// it didn't mint and refreshes again: the refresh loop. This advisory file
+// lock serializes the refresh critical section ACROSS processes; combined with
+// a re-read after the lock is held, the losers adopt the winner's freshly-
+// saved token. Best-effort: if the lock can't be taken, held() is false and
+// the caller proceeds unlocked (no worse than before).
+CrossProcessFileLock::CrossProcessFileLock(const fs::path& guarded_file) {
+    fs::path lp = guarded_file;
+    lp += ".lock";
+#ifdef _WIN32
+    h_ = ::CreateFileA(lp.string().c_str(), GENERIC_READ | GENERIC_WRITE,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h_ != INVALID_HANDLE_VALUE) {
+        OVERLAPPED ov{};
+        if (::LockFileEx(h_, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov))
+            held_ = true;
+    }
+#else
+    // 0600 — the lock file lives next to the credentials and shouldn't be
+    // more permissive than they are.
+    fd_ = ::open(lp.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd_ >= 0) {
+        int rc;
+        do { rc = ::flock(fd_, LOCK_EX); } while (rc < 0 && errno == EINTR);
+        held_ = (rc == 0);
+    }
+#endif
+}
+
+CrossProcessFileLock::~CrossProcessFileLock() {
+#ifdef _WIN32
+    if (h_ != INVALID_HANDLE_VALUE) {
+        if (held_) { OVERLAPPED ov{}; ::UnlockFileEx(h_, 0, 1, 0, &ov); }
+        ::CloseHandle(h_);
+    }
+#else
+    if (fd_ >= 0) {
+        if (held_) ::flock(fd_, LOCK_UN);
+        ::close(fd_);
+    }
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Pre-warm: open TCP+TLS+h2 to api.anthropic.com while the user is still
@@ -684,6 +738,57 @@ TokenResult refresh_access_token(const RefreshToken& refresh_token) {
     return parse_token_json(r.body, r.status);
 }
 
+namespace {
+// A stale-check on an OAuth cred with the 60s early-refresh skew.
+bool oauth_is_stale(const cred::OAuth& o) {
+    return o.expires_at_ms != 0 && now_ms() >= o.expires_at_ms - 60'000;
+}
+// Build a TokenResult success from an already-valid on-disk OAuth cred, so a
+// caller that lost the cross-process race gets the winner's token as success.
+TokenResult token_result_from(const cred::OAuth& o) {
+    OAuthToken tr;
+    tr.access_token  = o.access_token;
+    tr.refresh_token = o.refresh_token;
+    tr.expires_in_s  = o.expires_at_ms
+                     ? std::max<std::int64_t>(0, (o.expires_at_ms - now_ms()) / 1000)
+                     : 0;
+    return tr;
+}
+} // namespace
+
+TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
+    // Cross-process serialization + double-checked re-read. Blocking on the
+    // file lock funnels every agentty instance through one refresh at a time.
+    // After the lock is held we re-read credentials.json: if a peer already
+    // refreshed (token no longer stale), return THAT token as success instead
+    // of firing our own — Anthropic rotates refresh tokens, so a redundant
+    // refresh would invalidate the peer's token and spin the refresh loop.
+    CrossProcessFileLock xlock(credentials_path());
+    std::string rt = refresh_token.value;
+    if (xlock.held()) {
+        if (auto loaded = load_credentials()) {
+            if (auto* o = std::get_if<cred::OAuth>(&*loaded)) {
+                if (!oauth_is_stale(*o) && !o->access_token.empty())
+                    return token_result_from(*o);   // peer already refreshed
+                if (!o->refresh_token.empty())
+                    rt = o->refresh_token;          // use the freshest on-disk token
+            }
+        }
+    }
+
+    auto tr = refresh_access_token(RefreshToken{rt});
+    if (!tr) return tr;
+
+    // Persist under the lock so the next instance's re-read sees it.
+    Credentials refreshed{cred::OAuth{
+        tr->access_token,
+        tr->refresh_token.empty() ? rt : tr->refresh_token,
+        tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0,
+    }};
+    save_credentials(refreshed);   // best-effort
+    return tr;
+}
+
 // ---------------------------------------------------------------------------
 // Resolve on startup
 // ---------------------------------------------------------------------------
@@ -780,12 +885,19 @@ AuthHeader fresh_auth_header(const AuthHeader& fallback) {
 
     // Refresh a bit early (60s skew) so a token that expires mid-request
     // doesn't 401. No expiry info (expires_at_ms == 0) → trust it as-is.
-    const bool stale = oauth->expires_at_ms != 0
-                    && now_ms() >= oauth->expires_at_ms - 60'000;
-    if (!stale || oauth->refresh_token.empty())
+    auto is_stale = [](const cred::OAuth& o) {
+        return o.expires_at_ms != 0 && now_ms() >= o.expires_at_ms - 60'000;
+    };
+    if (!is_stale(*oauth) || oauth->refresh_token.empty())
         return make_auth_header(*loaded);
 
-    auto tr = refresh_access_token(RefreshToken{oauth->refresh_token});
+    // Cross-process serialization + double-checked re-read lives in
+    // refresh_access_token_locked: it funnels every agentty instance through
+    // one refresh at a time and adopts a peer's freshly-saved token instead of
+    // firing a redundant (refresh-token-rotating, hence mutually-invalidating)
+    // refresh — the multi-instance refresh loop this guards against. It also
+    // persists the new creds to disk.
+    auto tr = refresh_access_token_locked(RefreshToken{oauth->refresh_token});
     if (!tr) {
         // Refresh failed (network / revoked). Return whatever we have; the
         // transport will surface the eventual 401 with the login hint.
@@ -798,7 +910,6 @@ AuthHeader fresh_auth_header(const AuthHeader& fallback) {
                                   : std::move(tr->refresh_token),
         tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0,
     }};
-    save_credentials(refreshed);   // best-effort; the in-memory copy is authoritative
     return make_auth_header(refreshed);
 }
 
