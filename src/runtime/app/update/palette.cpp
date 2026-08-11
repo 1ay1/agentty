@@ -86,31 +86,7 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 case Command::RunCodeBlock:  return agentty::app::update(std::move(m), Msg{OpenCodeBlockPicker{}});
                 case Command::InspectToolOutputs: return agentty::app::update(std::move(m), Msg{OpenToolOutputViewer{}});
                 case Command::CompactContext:return agentty::app::update(std::move(m), Msg{CompactContext{}});
-                case Command::SmartMode: {
-                    // Toggle Smart Mode. Zero-config: turning it ON with no
-                    // slots pinned just flips the flag — resolve_role /
-                    // utility_model then auto-fill from the live catalog
-                    // (Utility = cheapest capable). The user can pin specific
-                    // models by editing settings.json; the flag is the switch.
-                    m.d.smart.enabled = !m.d.smart.enabled;
-                    persist_settings(m);
-                    auto toast = set_status_toast(m,
-                        m.d.smart.enabled
-                          ? "Smart Mode ON \xe2\x80\x94 grunt work routes to a cheaper model"
-                          : "Smart Mode off");
-                    return {std::move(m), std::move(toast)};
-                }
-                case Command::SmartSetStrategic:
-                case Command::SmartSetImpl:
-                case Command::SmartSetUtility: {
-                    // Open the model picker in slot-assign mode: the chosen
-                    // model fills the role slot (ModelPickerSelect reads
-                    // smart_assign_slot) instead of switching the active model.
-                    m.ui.smart_assign_slot =
-                        sel == Command::SmartSetStrategic ? 0 :
-                        sel == Command::SmartSetImpl      ? 1 : 2;
-                    return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
-                }
+                case Command::SmartMode:     return agentty::app::update(std::move(m), Msg{OpenSmartMode{}});
                 case Command::RewindCheckpoint:
                     // Open the checkpoint picker so ANY earlier turn is a
                     // rewind target (with a per-turn diff preview), not just

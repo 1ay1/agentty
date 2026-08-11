@@ -461,6 +461,18 @@ struct OpenTodoModal {};
 struct CloseTodoModal {};
 struct UpdateTodos { std::vector<TodoItem> items; };
 
+// ── Smart Mode overlay ───────────────────────────────────────────────────
+// A dedicated config overlay for role-based routing (docs/design/smart-mode.md).
+// A picker-style modal: row 0 is the master Enabled toggle, rows 1-3 are the
+// Strategic / Implementation / Utility slots. Enter on row 0 flips enabled;
+// Enter on a slot row opens the model picker in slot-assign mode. All changes
+// persist to settings.json.
+struct OpenSmartMode {};
+struct CloseSmartMode {};
+struct SmartModeMove { int delta; };
+struct SmartModeSelect {};        // Enter: toggle (row 0) or open model chooser (rows 1-3)
+struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
+
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
 // triggered explicitly in-app to sign in or add an account.
@@ -754,6 +766,8 @@ using DiffReviewMsg = std::variant<
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
     ScrollThread, ToggleToolExpanded, ToggleRetrievedExpanded,
+    OpenSmartMode, CloseSmartMode, SmartModeMove, SmartModeSelect,
+    SmartModeClearSlot,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen>;
 
 } // namespace msg
