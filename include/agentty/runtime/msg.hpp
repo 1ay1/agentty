@@ -35,6 +35,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/runtime/fork_picker.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/registry.hpp"
 
@@ -554,6 +555,26 @@ struct TokenRefreshed   { agentty::auth::TokenResult result; };
 // turn's grounding is deferred by one turn instead of being dropped.
 struct ProactiveContextReady { std::string block; double confidence = -1.0; };
 
+// ── RAG mode picker ────────────────────────────────────────────────
+// One decision: how proactive (pre-turn) retrieval behaves — On / First turn
+// only / Off. Selecting commits the mode (persist + live-apply) and closes.
+struct OpenRagSettings {};
+struct CloseRagSettings {};
+struct RagSettingsMove   { int delta; };   // move the row cursor
+struct RagSettingsAdjust {};               // select the highlighted mode
+struct RagSettingsReset  {};               // back to default (On)
+
+// ── Fork picker ───────────────────────────────────────────────────────
+// Branch the current thread into a new one and choose how the carried-over
+// history is summarized (verbatim, or any CompactionStyle). ForkThread does
+// the branch; the summary, if any, runs as a compaction on the new thread.
+struct OpenForkPicker  {};
+struct CloseForkPicker {};
+struct ForkPickerMove  { int delta; };
+// Fork with the CURRENTLY-highlighted choice (the reducer reads the picker's
+// cursor). A leaf with no payload keeps the key handler from needing Model.
+struct ForkThread      {};
+
 // ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
 struct CloseDiffReview {};
@@ -707,6 +728,13 @@ using CheckpointMsg = std::variant<
     OpenCheckpointPicker, CloseCheckpointPicker, CheckpointPickerMove,
     CheckpointPickerSelect, CheckpointDiffLoaded>;
 
+using RagSettingsMsg = std::variant<
+    OpenRagSettings, CloseRagSettings, RagSettingsMove,
+    RagSettingsAdjust, RagSettingsReset>;
+
+using ForkMsg = std::variant<
+    OpenForkPicker, CloseForkPicker, ForkPickerMove, ForkThread>;
+
 using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal, UpdateTodos>;
 
@@ -753,6 +781,8 @@ using Msg = std::variant<
     msg::SymbolPaletteMsg,
     msg::CodeBlockMsg,
     msg::CheckpointMsg,
+    msg::RagSettingsMsg,
+    msg::ForkMsg,
     msg::TodoMsg,
     msg::LoginMsg,
     msg::DiffReviewMsg,
@@ -794,6 +824,8 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::SymbolPaletteMsg>}
          + int{in_variant_v<L, msg::CodeBlockMsg>}
          + int{in_variant_v<L, msg::CheckpointMsg>}
+         + int{in_variant_v<L, msg::RagSettingsMsg>}
+         + int{in_variant_v<L, msg::ForkMsg>}
          + int{in_variant_v<L, msg::TodoMsg>}
          + int{in_variant_v<L, msg::LoginMsg>}
          + int{in_variant_v<L, msg::DiffReviewMsg>}
@@ -829,6 +861,10 @@ static_assert(leaf_domain_count<CodeBlockPickerSelect>()     == 1,
               "CodeBlockPickerSelect must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<CheckpointPickerSelect>()    == 1,
               "CheckpointPickerSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenRagSettings>()           == 1,
+              "OpenRagSettings must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<ForkThread>()                == 1,
+              "ForkThread must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<UpdateTodos>()               == 1,
               "UpdateTodos must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<LoginSubmit>()               == 1,
@@ -842,7 +878,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 15,
+static_assert(std::variant_size_v<Msg> == 17,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

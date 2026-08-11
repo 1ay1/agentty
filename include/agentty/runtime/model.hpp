@@ -25,6 +25,8 @@
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/code_block_picker.hpp"
 #include "agentty/runtime/checkpoint_picker.hpp"
+#include "agentty/runtime/rag_settings.hpp"
+#include "agentty/runtime/fork_picker.hpp"
 #include "agentty/runtime/tool_output_viewer.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
@@ -190,6 +192,8 @@ struct Model {
         SymbolPaletteState  symbol_palette;   // Closed | Open{query, index, entries}
         CodeBlockPickerState code_blocks;      // Closed | Open{blocks, index}
         CheckpointPickerState checkpoints;     // Closed | Open{entries, index}
+        RagSettingsState    rag_settings;      // Closed | Open{cfg, index}
+        ForkPickerState     fork_picker;       // Closed | Open{index}
         ToolViewerState     tool_viewer;       // Closed | Open{entries, index, viewing}
         // Tail-follow toggle for the tool viewer's LIVE row (row 0). True =
         // the body auto-scrolls to the newest streamed output (tail -f);
@@ -362,6 +366,8 @@ struct Model {
         mutable maya::ScrollState symbol_palette_scroll   = routed_scroll();
         mutable maya::ScrollState code_blocks_scroll      = routed_scroll();
         mutable maya::ScrollState checkpoints_scroll      = routed_scroll();
+        mutable maya::ScrollState rag_settings_scroll     = routed_scroll();
+        mutable maya::ScrollState fork_scroll              = routed_scroll();
         mutable maya::ScrollState todo_scroll             = routed_scroll();
         mutable maya::ScrollState tool_viewer_scroll      = routed_scroll();
     };

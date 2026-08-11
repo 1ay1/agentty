@@ -425,6 +425,8 @@ parse_thread_meta_only(const json& j) {
             "thread JSON has no `id` field"});
     t.id = ThreadId{std::move(id_str)};
     t.title = j.value("title", "");
+    t.forked_from = j.value("forked_from", "");
+    t.rag_mode_override = j.value("rag_mode_override", -1);
     if (j.contains("created_at"))
         t.created_at = std::chrono::system_clock::time_point{
             std::chrono::seconds{j["created_at"].get<long long>()}};
@@ -859,6 +861,8 @@ static void save_thread_sync(const Thread& t) {
     json j;
     j["id"] = t.id;
     j["title"] = t.title;
+    if (!t.forked_from.empty()) j["forked_from"] = t.forked_from;
+    if (t.rag_mode_override >= 0) j["rag_mode_override"] = t.rag_mode_override;
     j["created_at"] = std::chrono::duration_cast<std::chrono::seconds>(
         t.created_at.time_since_epoch()).count();
     j["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1034,6 +1038,34 @@ store::Settings load_settings() {
         s.effort = j.value("effort", "");
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
+        if (j.contains("rag") && j["rag"].is_object()) {
+            const auto& r = j["rag"];
+            auto& c = s.rag;
+            c.configured        = r.value("configured", true); // present ⇒ user-set
+            c.mode              = static_cast<store::RagMode>(
+                                      r.value("mode", static_cast<int>(c.mode)));
+            c.skills            = r.value("skills", c.skills);
+            c.memory            = r.value("memory", c.memory);
+            c.mcp_resources     = r.value("mcp_resources", c.mcp_resources);
+            c.contextual        = r.value("contextual", c.contextual);
+            c.dedup             = r.value("dedup", c.dedup);
+            c.mmr               = r.value("mmr", c.mmr);
+            c.stitch            = r.value("stitch", c.stitch);
+            c.autocut           = r.value("autocut", c.autocut);
+            c.prf               = r.value("prf", c.prf);
+            c.corrective        = r.value("corrective", c.corrective);
+            c.graph             = r.value("graph", c.graph);
+            c.expand            = r.value("expand", c.expand);
+            c.hyde              = r.value("hyde", c.hyde);
+            c.fusion            = r.value("fusion", c.fusion);
+            c.adaptive_fusion   = r.value("adaptive_fusion", c.adaptive_fusion);
+            c.proactive         = r.value("proactive", c.proactive);
+            c.proactive_min_conf= r.value("proactive_min_conf", c.proactive_min_conf);
+            c.proactive_bytes   = r.value("proactive_bytes", c.proactive_bytes);
+            c.persist           = r.value("persist", c.persist);
+            c.learn             = r.value("learn", c.learn);
+            c.trace             = r.value("trace", c.trace);
+        }
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
     } catch (...) {
@@ -1063,6 +1095,36 @@ void save_settings(const store::Settings& s) {
     if (!s.effort.empty()) j["effort"] = s.effort;
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
+    if (s.rag.configured) {
+        const auto& c = s.rag;
+        // The picker only sets `mode`; the rest are internal defaults, still
+        // round-tripped so an env/power-user override survives a save.
+        j["rag"] = {
+            {"configured",         true},
+            {"mode",               static_cast<int>(c.mode)},
+            {"skills",             c.skills},
+            {"memory",             c.memory},
+            {"mcp_resources",      c.mcp_resources},
+            {"contextual",         c.contextual},
+            {"dedup",              c.dedup},
+            {"mmr",                c.mmr},
+            {"stitch",             c.stitch},
+            {"autocut",            c.autocut},
+            {"prf",                c.prf},
+            {"corrective",         c.corrective},
+            {"graph",              c.graph},
+            {"expand",             c.expand},
+            {"hyde",               c.hyde},
+            {"fusion",             c.fusion},
+            {"adaptive_fusion",    c.adaptive_fusion},
+            {"proactive",          c.proactive},
+            {"proactive_min_conf", c.proactive_min_conf},
+            {"proactive_bytes",    c.proactive_bytes},
+            {"persist",            c.persist},
+            {"learn",              c.learn},
+            {"trace",              c.trace},
+        };
+    }
     (void)write_json_atomic(data_dir() / "settings.json", j.dump(2));
 }
 
