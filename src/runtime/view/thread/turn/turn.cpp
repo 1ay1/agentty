@@ -1137,9 +1137,22 @@ void append_assistant_body_slots(maya::Turn::Config& cfg,
         // a fresh tool card. Read via non-migrating peek() — the slot may
         // be PINNED (live), and message_md() here would migrate it out
         // of the pinned set. See the decision site for the mechanism.
-        if (const auto* mc = m.ui.view_cache.peek(m.d.current.id, msg.id);
-            mc && mc->defer_tool_panel)
-            return;
+        //
+        // BUT never defer once a tool is actually EXECUTING. Deferral only
+        // exists to smooth the brief prose-glide vs. fresh-*Pending*-card
+        // window; a Running/Done tool's card must show immediately. Without
+        // this, if the defer-exit machine misses a follow-up frame (the
+        // stream goes quiet, no animation frame fires) defer_tool_panel
+        // stays true and the running card stays invisible — the "tool shows
+        // running but I don't see its card" report.
+        const bool any_executing = std::any_of(
+            tool_calls.begin(), tool_calls.end(),
+            [](const ToolUse& tc){ return !tc.is_pending(); });
+        if (!any_executing) {
+            if (const auto* mc = m.ui.view_cache.peek(m.d.current.id, msg.id);
+                mc && mc->defer_tool_panel)
+                return;
+        }
     }
     append_assistant_tool_panel(cfg, msg, tool_calls, m, style);
 }
@@ -1682,6 +1695,15 @@ maya::Turn::Config turn_config_for_assistant_run(
             // without perturbing the partition.
             if (const auto* mc = m.ui.view_cache.peek(m.d.current.id, m_i.id))
                 defer_panel = mc->defer_tool_panel;
+            // Never defer once a tool is actually EXECUTING — same guard as
+            // append_assistant_body_slots. Deferral only smooths the brief
+            // prose-glide vs. fresh-*Pending*-card window; a Running/Done
+            // card must show immediately, even if the defer-exit machine
+            // misses a follow-up frame ("tool shows running but no card").
+            if (defer_panel
+                && std::any_of(m_i.tool_calls.begin(), m_i.tool_calls.end(),
+                               [](const ToolUse& tc){ return !tc.is_pending(); }))
+                defer_panel = false;
         }
         if (!m_i.tool_calls.empty() && !defer_panel) {
             append_assistant_tool_panel(
