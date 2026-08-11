@@ -23,6 +23,15 @@ namespace agentty::app::cmd {
 // token to abort the in-flight stream.
 [[nodiscard]] maya::Cmd<Msg> launch_stream(Model& m);
 
+// Build the Smart Mode ROUTING CARD for the turn about to launch, or
+// std::nullopt when orchestration is off (nothing to show). A synthetic,
+// wire-inert Message (smart_routing=true) the caller inserts into the
+// transcript just before the assistant placeholder so the user sees, as a
+// first-class thread event, which model + effort the turn was routed to, the
+// classified complexity that scaled it, and which layers are active. Pure;
+// mints a fresh MessageId.
+[[nodiscard]] std::optional<Message> build_smart_routing_card(const Model& m);
+
 // What the model actually sees on the next request: applies any
 // Thread::CompactionRecord substitution (latest record's summary
 // replaces messages[0..up_to_index) on the wire). Mirrors what

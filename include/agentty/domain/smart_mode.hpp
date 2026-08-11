@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/complexity.hpp"
 
 namespace agentty::smart {
 
@@ -137,6 +138,35 @@ namespace detail {
 }
 
 } // namespace detail
+
+// Scale a base reasoning effort by the turn's complexity, then clamp to what
+// the model supports. The research lever "scale effort to query complexity":
+// a Complex turn thinks one step HARDER than the user's baseline, a Trivial
+// turn thinks NONE, a Simple turn drops one step. Standard is unchanged. Bias
+// is upward on ambiguity — under-thinking a hard turn costs more than a little
+// wasted budget on an easy one.
+[[nodiscard]] inline Effort effort_for_complexity(
+        Effort base, Complexity c, const ModelCapabilities& caps) {
+    using E = Effort;
+    auto step_up = [](E e) {
+        switch (e) {
+            case E::None:   return E::Low;
+            case E::Low:    return E::Medium;
+            case E::Medium: return E::High;
+            case E::High:   return E::Xhigh;
+            case E::Xhigh:  return E::Max;
+            case E::Max:    return E::Max;
+        }
+        return e;
+    };
+    switch (c) {
+        case Complexity::Trivial:  return E::None;
+        case Complexity::Simple:   return detail::effort_step_down(base, caps);
+        case Complexity::Standard: return clamp_effort(base, caps);
+        case Complexity::Complex:  return clamp_effort(step_up(base), caps);
+    }
+    return clamp_effort(base, caps);
+}
 
 // Resolve a role to the (model, effort) it should run on.
 //

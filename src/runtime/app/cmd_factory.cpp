@@ -567,6 +567,44 @@ int estimate_wire_tokens(const Thread& t) {
     return tokens_from(bytes, images);
 }
 
+std::optional<Message> build_smart_routing_card(const Model& m) {
+    // Only emit the card when orchestration is actually driving the turn.
+    // (Internal/subagent routing without orchestration doesn't change the
+    // MAIN turn's model, so there's no per-turn decision worth surfacing.)
+    if (!m.d.smart.orchestration()) return std::nullopt;
+
+    const std::string& model_id = m.d.model_id.value;
+    smart::RoleProfile prof =
+        smart::resolve_role(smart::ModelRole::Strategic, model_id,
+                            m.d.effort, m.d.available_models, m.d.smart);
+    // Classify the newest real user turn (same logic launch_stream uses) so
+    // the card's effort matches what the wire will actually carry.
+    std::string_view newest_user;
+    for (auto it = m.d.current.messages.rbegin();
+         it != m.d.current.messages.rend(); ++it)
+        if (it->role == Role::User && !it->proactive_context) {
+            newest_user = it->text; break;
+        }
+    const smart::Complexity cx = smart::classify_complexity(newest_user);
+    const auto caps = ModelCapabilities::from_id(prof.model);
+    const Effort scaled = smart::effort_for_complexity(prof.effort, cx, caps);
+
+    Message card;
+    // Message.id auto-inits via new_message_id().
+    // User role → renders as a STANDALONE single-message turn (like the
+    // proactive card), not grouped into the assistant run. It is wire-inert
+    // (stripped in drop_stale_proactive) and skipped by every loop/wire walk
+    // via the smart_routing flag, so the role is a pure rendering choice.
+    card.role          = Role::User;
+    card.smart_routing = true;
+    card.smart_route_model      = prof.model;
+    card.smart_route_effort     = std::string{effort_label(scaled)};
+    card.smart_route_complexity = std::string{smart::to_string(cx)};
+    card.smart_route_orchestrate = m.d.smart.orchestration();
+    card.smart_route_subagents   = m.d.smart.subagent_routing();
+    return card;
+}
+
 Cmd<Msg> launch_stream(Model& m) {
     // Defer the wire-payload build to the worker. The UI thread used
     // to spend ~5-50 ms here on long threads (full t.messages deep
@@ -671,11 +709,28 @@ Cmd<Msg> launch_stream(Model& m) {
     smart::RoleProfile strategic_profile =
         smart::resolve_role(smart::ModelRole::Strategic, model_id,
                             m.d.effort, m.d.available_models, m.d.smart);
+    // SOTA effort scaling (Anthropic multi-agent: "scale effort to query
+    // complexity"). Classify the newest user turn and bump/drop the Strategic
+    // model's reasoning effort accordingly, clamped to what the model supports.
+    // Conservative: Standard leaves it unchanged, ambiguity biases upward.
+    smart::Complexity turn_complexity = smart::Complexity::Standard;
+    if (orchestrate) {
+        std::string_view newest_user;
+        for (auto it = m.d.current.messages.rbegin();
+             it != m.d.current.messages.rend(); ++it)
+            if (it->role == Role::User && !it->proactive_context) {
+                newest_user = it->text; break;
+            }
+        turn_complexity = smart::classify_complexity(newest_user);
+        const auto caps = ModelCapabilities::from_id(strategic_profile.model);
+        strategic_profile.effort =
+            smart::effort_for_complexity(strategic_profile.effort, turn_complexity, caps);
+    }
 
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, context_max, retry_count,
-         orchestrate, strategic_profile,
+         orchestrate, strategic_profile, turn_complexity,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -722,17 +777,40 @@ Cmd<Msg> launch_stream(Model& m) {
         // orchestrator-workers pattern. Only on the main turn (never on the
         // text-only compaction pass).
         if (orchestrate && !compacting) {
+            // SOTA orchestrator-workers directive (Anthropic, "How we built our
+            // multi-agent research system"): teach the lead to (1) THINK first
+            // to plan the decomposition, (2) DELEGATE bounded work with a full
+            // brief — objective + output format + tool/scope guidance + clear
+            // boundaries (vague briefs cause duplicated/gapped work), (3) SCALE
+            // the number of workers to the task's complexity, and (4) start
+            // wide then narrow. The effort budget line is keyed to the
+            // classified turn complexity so simple turns don't over-spawn.
+            const char* budget =
+                turn_complexity == smart::Complexity::Trivial  ? "This turn is trivial — just do it directly; do NOT spawn subagents."
+              : turn_complexity == smart::Complexity::Simple   ? "This turn is simple — handle it yourself or use at most one explorer; keep it lean."
+              : turn_complexity == smart::Complexity::Complex   ? "This turn is complex — plan the decomposition first, then run SEVERAL subagents in parallel (aim 3+ for independent sub-tasks), and synthesise their reports."
+              : "Delegate the clearly-separable sub-tasks; keep the decisions.";
             req.system_prompt +=
-                "\n\n<smart-mode>\nYou are the STRATEGIC model in a role-routed"
-                " team. Do the high-value thinking yourself — architecture,"
-                " decisions, review, decomposition. DELEGATE bounded, well-"
-                "specified mechanical work to subagents via the `task` tool:"
-                " send searching/reading/summarising to"
-                " task(agent_type:\"explorer\"), and code execution / edits to"
-                " task(agent_type:\"coder\"). Pass a crisp brief (objective +"
-                " constraints + relevant file:line refs), not your reasoning"
-                " transcript; keep only the decisions. Prefer delegation for"
-                " any sub-task a cheaper model can do correctly.\n</smart-mode>";
+                "\n\n<smart-mode>\n"
+                "You are the STRATEGIC lead in a role-routed team. Do the high-"
+                "value thinking yourself — architecture, decisions, review, "
+                "decomposition — and DELEGATE bounded, well-specified mechanical "
+                "work to cheaper worker models via the `task` tool.\n"
+                "When you delegate, give each worker a COMPLETE brief: the "
+                "objective, the exact output format you need back, which tools/"
+                "paths are in scope, and clear boundaries (what NOT to do). A "
+                "vague brief makes workers duplicate effort or miss the point. "
+                "Pass a crisp brief — objective + constraints + relevant file:line "
+                "refs — not your reasoning transcript.\n"
+                "Routing: send searching / reading / summarising to "
+                "task(agent_type:\"explorer\"); code execution and edits to "
+                "task(agent_type:\"coder\"); repro/diagnose runs to "
+                "task(agent_type:\"tester\"); critical review to "
+                "task(agent_type:\"reviewer\"). Run independent workers in "
+                "PARALLEL. Start wide (broad exploration), then narrow to the "
+                "specifics.\n"
+                + std::string{budget} +
+                "\n</smart-mode>";
         }
         const bool openai_provider = sel_now.kind == provider::Kind::OpenAI;
         // Weak models (small local / coder ids) still hide a few footgun
@@ -785,6 +863,12 @@ Cmd<Msg> launch_stream(Model& m) {
         // user message to replay on every later request. Keep only context
         // attached after the newest real user message.
         auto drop_stale_proactive = [](std::vector<Message>& messages) {
+            // Also strip Smart Mode routing cards — they are view-only
+            // telemetry (no wire content), never sent to the model.
+            messages.erase(
+                std::remove_if(messages.begin(), messages.end(),
+                    [](const Message& mm){ return mm.smart_routing; }),
+                messages.end());
             std::size_t newest_user = 0;
             bool have_user = false;
             for (std::size_t i = 0; i < messages.size(); ++i)

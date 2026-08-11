@@ -363,6 +363,12 @@ Step submit_message(Model m) {
     // on the next Tick.
     m.ui.pending_settle_freeze = false;
 
+    // Smart Mode: surface the per-turn routing DECISION as a first-class
+    // thread card (🧠), right before the assistant reply, so the user sees in
+    // detail what orchestration did. Wire-inert; std::nullopt when off.
+    if (auto card = cmd::build_smart_routing_card(m))
+        m.d.current.messages.push_back(std::move(*card));
+
     Message placeholder;
     placeholder.role = Role::Assistant;
     m.d.current.messages.push_back(std::move(placeholder));

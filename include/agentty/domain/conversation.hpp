@@ -404,6 +404,22 @@ struct Message {
     // it invalidates the cached Element.
     bool proactive_expanded = false;
 
+    // Smart Mode routing telemetry (view-only, wire-inert, not persisted).
+    // When `smart_routing` is set, this is a synthetic zero-text card that
+    // renders the per-turn ROUTING DECISION as a first-class thread event
+    // (🧠 "Smart Mode"): which model + effort the turn was routed to, the
+    // classified complexity that scaled it, and which layers are active. It
+    // is NOT a real user/assistant turn — skipped by every wire/loop walk
+    // exactly like proactive_context. The actual subagent delegations render
+    // as ordinary `task` tool cards; this card is the DECISION, they are the
+    // execution.
+    bool        smart_routing        = false;
+    std::string smart_route_model;    // wire id the Strategic turn ran on
+    std::string smart_route_effort;   // effort label ("off"/"high"/…)
+    std::string smart_route_complexity; // "trivial"/"simple"/"standard"/"complex"
+    bool        smart_route_orchestrate = false;  // delegation directive active
+    bool        smart_route_subagents   = false;  // per-role subagent routing
+
     // FNV-1a over the fields that turn_element / turn_config consume
     // when building the rendered Element. The view cache stamps the
     // built Element with this key at insert time and re-checks it on
@@ -448,6 +464,14 @@ struct Message {
         mix(is_compact_summary ? 1ULL : 0ULL);
         mix(proactive_context ? 2ULL : 0ULL);
         mix(proactive_expanded ? 4ULL : 0ULL);
+        if (smart_routing) {
+            mix(8ULL);
+            mix(smart_route_model.size());
+            mix(smart_route_effort.size());
+            mix(smart_route_complexity.size());
+            mix((smart_route_orchestrate ? 16ULL : 0ULL)
+                | (smart_route_subagents ? 32ULL : 0ULL));
+        }
         // Quantize confidence to a bar-relevant bucket so a card whose
         // confidence changed (re-injection) invalidates the cache, without
         // churning on float noise. Only proactive messages carry it.

@@ -681,6 +681,7 @@ set(AGENTTY_IO_SOURCES
     src/io/clipboard.cpp
     src/util/base64.cpp
     src/util/dbglog.cpp
+    src/domain/complexity.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES
@@ -2110,6 +2111,12 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(smart_mode_test)
     set_tests_properties(smart_mode_test PROPERTIES TIMEOUT 30)
 
+    # complexity_test — the turn-complexity classifier
+    # (smart::classify_complexity): the conservative Trivial/Simple/Standard/
+    # Complex calibration that drives Smart-Mode effort scaling. Pure, no I/O.
+    agentty_add_full_test(complexity_test)
+    set_tests_properties(complexity_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2358,6 +2365,7 @@ if(AGENTTY_BUILD_TESTS)
         command_palette_test
         code_block_extract_test
         smart_mode_test
+        complexity_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test

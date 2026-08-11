@@ -1221,6 +1221,76 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         return cfg;
     }
 
+    // Smart Mode ROUTING card: a synthetic, wire-inert event surfacing the
+    // per-turn routing DECISION (which model + effort the turn ran on, the
+    // classified complexity that scaled it, and which layers are active).
+    // Its own identity — a brain glyph, purple rail, "Smart Mode" label —
+    // marks it as an orchestration event, not a real turn. The actual
+    // subagent delegations render as ordinary `task` tool cards.
+    if (msg.smart_routing) {
+        using namespace maya::dsl;
+        cfg.glyph      = "\xf0\x9f\xa7\xa0";          // 🧠
+        cfg.label      = "Smart Mode";
+        cfg.rail_color = accent;                       // purple/accent axis
+        cfg.meta       = timestamp_hh_mm(msg.timestamp);
+
+        // Complexity → status hue: complex=warn, standard=info, simple/trivial=muted.
+        auto cx_color = [&](const std::string& c) -> maya::Color {
+            if (c == "complex")  return status_warn;
+            if (c == "standard") return status_info;
+            return muted;
+        };
+
+        // Line 1: "routed → <model>  · effort <e>  · <complexity>" as one
+        // truncating node so it can never wrap.
+        {
+            std::string content;
+            std::vector<maya::StyledRun> runs;
+            auto push = [&](std::string_view part, maya::Style st) {
+                if (part.empty()) return;
+                runs.push_back(maya::StyledRun{content.size(), part.size(), st});
+                content.append(part);
+            };
+            push("\xe2\x86\x92 ", maya::Style{}.with_fg(muted));   // →
+            push(msg.smart_route_model, maya::Style{}.with_fg(code_path).with_bold());
+            push("  \xc2\xb7 effort ", maya::Style{}.with_fg(muted));
+            push(msg.smart_route_effort.empty() ? "off" : msg.smart_route_effort,
+                 maya::Style{}.with_fg(fg));
+            push("  \xc2\xb7 ", maya::Style{}.with_fg(muted));
+            push(msg.smart_route_complexity,
+                 maya::Style{}.with_fg(cx_color(msg.smart_route_complexity)));
+            cfg.body.emplace_back(maya::Turn::BodySlot{maya::Element{maya::TextElement{
+                .content = std::move(content),
+                .style   = {},
+                .wrap    = maya::TextWrap::TruncateEnd,
+                .runs    = std::move(runs),
+            }}});
+        }
+
+        // Line 2: active layers as compact chips.
+        {
+            std::string content;
+            std::vector<maya::StyledRun> runs;
+            auto chip = [&](std::string_view label, bool on) {
+                const std::size_t s = content.size();
+                content.append(on ? "\xe2\x97\x8f " : "\xe2\x97\x8b ");  // ● / ○
+                content.append(label);
+                content.append("   ");
+                runs.push_back(maya::StyledRun{s, content.size() - s,
+                    maya::Style{}.with_fg(on ? status_ok : muted)});
+            };
+            chip("orchestrate", msg.smart_route_orchestrate);
+            chip("subagents",   msg.smart_route_subagents);
+            cfg.body.emplace_back(maya::Turn::BodySlot{maya::Element{maya::TextElement{
+                .content = std::move(content),
+                .style   = {},
+                .wrap    = maya::TextWrap::TruncateEnd,
+                .runs    = std::move(runs),
+            }}});
+        }
+        return cfg;
+    }
+
     // Proactive-retrieval context turn: like the compact boundary, this is
     // a synthetic User message the MODEL sees in full (msg.text carries the
     // <retrieved-context> block) but the transcript renders as a quiet
