@@ -1069,6 +1069,9 @@ store::Settings load_settings() {
         if (j.contains("smart") && j["smart"].is_object()) {
             const auto& sm = j["smart"];
             s.smart_enabled          = sm.value("enabled", false);
+            s.smart_route_internal   = sm.value("route_internal", true);
+            s.smart_orchestrate      = sm.value("orchestrate", true);
+            s.smart_route_subagents  = sm.value("route_subagents", true);
             s.smart_strategic_model  = sm.value("strategic_model", "");
             s.smart_strategic_effort = sm.value("strategic_effort", "");
             s.smart_impl_model       = sm.value("impl_model", "");
@@ -1141,6 +1144,9 @@ void save_settings(const store::Settings& s) {
         || !s.smart_impl_model.empty() || !s.smart_utility_model.empty()) {
         nlohmann::json sm;
         sm["enabled"] = s.smart_enabled;
+        sm["route_internal"]  = s.smart_route_internal;
+        sm["orchestrate"]     = s.smart_orchestrate;
+        sm["route_subagents"] = s.smart_route_subagents;
         if (!s.smart_strategic_model.empty())  sm["strategic_model"]  = s.smart_strategic_model;
         if (!s.smart_strategic_effort.empty()) sm["strategic_effort"] = s.smart_strategic_effort;
         if (!s.smart_impl_model.empty())       sm["impl_model"]       = s.smart_impl_model;

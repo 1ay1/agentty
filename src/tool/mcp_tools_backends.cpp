@@ -362,9 +362,11 @@ struct AgentType {
     bool                          read_only;
     std::string_view              role;
     std::vector<std::string_view> allow;   // empty ⇒ all (minus task)
+    smart::ModelRole              model_role = smart::ModelRole::Utility;
 };
 
 const AgentType& resolve_agent_type(std::string_view t) {
+    using MR = smart::ModelRole;
     static const std::vector<AgentType> kTypes = {
         {"explorer", true,
          "Your role: EXPLORER. Map and explain the codebase region the task "
@@ -373,7 +375,7 @@ const AgentType& resolve_agent_type(std::string_view t) {
          "connect, and any gotchas. Cite exact file paths and line numbers. "
          "You are READ-ONLY \xe2\x80\x94 never modify anything.",
          {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
-          "web_search", "web_fetch"}},
+          "web_search", "web_fetch"}, MR::Utility},
         {"reviewer", true,
          "Your role: REVIEWER. Critically review the code or change the task "
          "names. Look for bugs, edge cases, race conditions, security issues, "
@@ -381,7 +383,7 @@ const AgentType& resolve_agent_type(std::string_view t) {
          "a prioritised list (blocker / major / minor / nit), each with the "
          "exact file:line and a concrete fix suggestion. You are READ-ONLY.",
          {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
-          "git_diff", "git_log", "git_status"}},
+          "git_diff", "git_log", "git_status"}, MR::Strategic},
         {"tester", false,
          "Your role: TESTER. Reproduce, run, and diagnose. Build/run the "
          "relevant tests or commands the task names, read the failures, and "
@@ -389,18 +391,18 @@ const AgentType& resolve_agent_type(std::string_view t) {
          "file:line that produced it. Prefer running over guessing. Do NOT "
          "rewrite production code \xe2\x80\x94 only run, read, and diagnose.",
          {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
-          "bash", "diagnostics", "git_diff", "git_status"}},
+          "bash", "diagnostics", "git_diff", "git_status"}, MR::Implementation},
         {"coder", false,
          "Your role: CODER. Implement the change the task names end-to-end: "
          "read the relevant code first, make the edits, and verify they build/"
          "compile if a build command is obvious. Follow the surrounding "
          "conventions exactly. Report what you changed (files + a one-line "
          "summary each) and whether it built.",
-         {}},
+         {}, MR::Implementation},
         {"general", false,
          "Your role: GENERAL. Complete the delegated task end-to-end using "
          "whatever tools fit, then report the outcome.",
-         {}},
+         {}, MR::Implementation},
     };
     for (const auto& a : kTypes)
         if (a.name == t) return a;
@@ -469,9 +471,22 @@ provider::StreamResult run_one_completion(Thread& thread,
     // parent model — their edits must match the parent's quality. The router
     // never routes up and never crosses providers, so a single-model or
     // Opus-only provider sees no change (returns cfg.model unchanged).
-    req.model         = type.read_only
-                          ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)
-                          : cfg.model;
+    // Model routing: read-only roles (explorer/reviewer) do grunt work —
+    // route them to the cheapest capable model the ACTIVE provider offers.
+    // Write-capable roles (coder/tester/general) keep the parent model.
+    // Layer 3b: when Smart Mode subagent routing is on, resolve each worker's
+    // model by its ROLE (explorer→Utility, reviewer→Strategic, coder/tester/
+    // general→Implementation) through the shared resolver instead — honouring
+    // the user's pinned slots. Off ⇒ exactly the existing tier auto-router.
+    if (cfg.smart.subagent_routing()) {
+        req.model = smart::resolve_role(type.model_role, cfg.model,
+                                        Effort::None, cfg.candidates,
+                                        cfg.smart).model;
+    } else {
+        req.model = type.read_only
+                      ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)
+                      : cfg.model;
+    }
     // A subagent NEVER needs the 1M/2M extended-context window: it does a
     // bounded burst (8k output, tool results capped to 8 KiB, up to 24 turns)
     // that comfortably fits the base 200K window. Carrying the parent's

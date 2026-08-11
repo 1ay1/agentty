@@ -13,6 +13,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/smart_mode.hpp"
 #include "agentty/provider/provider.hpp"
 
 namespace agentty::tools::subagent {
@@ -42,6 +43,12 @@ struct Config {
     // tests that install only auth+model working).
     std::function<provider::StreamResult(provider::Request,
                                          provider::EventSink)> stream;
+
+    // Smart Mode config, mirrored from the Model so the subagent runner can
+    // resolve a worker's model by its ROLE (Layer 3b) when
+    // smart.subagent_routing() is on. Off/unconfigured ⇒ the existing
+    // read-only tier auto-router stands. Refreshed via set_smart().
+    smart::RoleConfig smart;
 };
 
 // Install the subagent config (call once at startup, after auth resolves).
@@ -63,6 +70,11 @@ void set_model(std::string model);
 // from. Called alongside set_model whenever the model list is (re)loaded or
 // the provider changes, so routing always reflects the live provider.
 void set_candidates(std::vector<ModelInfo> candidates);
+
+// Update the Smart Mode role config the subagent router honours (Layer 3b).
+// Called alongside set_candidates whenever Smart Mode or the model list
+// changes. No-op if the config was never installed.
+void set_smart(smart::RoleConfig smart);
 
 // Snapshot the installed config. `installed == false` until install() runs.
 [[nodiscard]] Config current();

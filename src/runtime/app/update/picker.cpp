@@ -103,6 +103,8 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             // on every load (startup, provider switch, refetch) so routing
             // never uses a stale provider's list.
             tools::subagent::set_candidates(m.d.available_models);
+            // Keep the subagent role-router in sync with Smart Mode (Layer 3b).
+            tools::subagent::set_smart(m.d.smart);
             // If the active model isn't offered by this provider (e.g. just
             // switched to Ollama with no recall, or a stale saved id), fall
             // back to the first available model so the user is never pointed

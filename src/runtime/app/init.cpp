@@ -93,6 +93,9 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // Smart Mode: rehydrate role config from settings. A slot counts as
     // "set" once the user pinned a model for it.
     m.d.smart.enabled = settings.smart_enabled;
+    m.d.smart.route_internal  = settings.smart_route_internal;
+    m.d.smart.orchestrate     = settings.smart_orchestrate;
+    m.d.smart.route_subagents = settings.smart_route_subagents;
     auto load_slot = [](smart::SlotOverride& slot,
                         const std::string& model, const std::string& eff) {
         if (!model.empty()) {

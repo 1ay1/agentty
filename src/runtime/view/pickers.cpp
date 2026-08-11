@@ -550,9 +550,19 @@ Element smart_mode_overlay(const Model& m) {
 
     const bool on = sm.enabled;
     struct Row { std::string lead, trail; };
+    auto tog = [&](bool active, std::string_view lbl) -> Row {
+        // Filled dot when the layer is active (master on AND its flag), hollow
+        // otherwise. Dimmed entirely when the master switch is off.
+        return { std::string{on ? (active ? "\xe2\x97\x8f " : "\xe2\x97\x8b ")
+                                 : "  "} + std::string{lbl},
+                 on ? (active ? "on" : "off") : std::string{"\xe2\x80\x94"} };
+    };
     std::vector<Row> rows = {
         {std::string{on ? "\xe2\x97\x8f Enabled" : "\xe2\x97\x8b Enabled"},
          on ? "on" : "off"},
+        tog(sm.route_internal,  "  Internal routing"),
+        tog(sm.orchestrate,     "  Orchestration"),
+        tog(sm.route_subagents, "  Subagent routing"),
         {"  Strategic",      on ? shown(smart::ModelRole::Strategic)      + slot_suffix(sm.strategic)      : std::string{"\xe2\x80\x94"}},
         {"  Implementation", on ? shown(smart::ModelRole::Implementation) + slot_suffix(sm.implementation) : std::string{"\xe2\x80\x94"}},
         {"  Utility",        on ? shown(smart::ModelRole::Utility)        + slot_suffix(sm.utility)        : std::string{"\xe2\x80\x94"}},
@@ -571,11 +581,11 @@ Element smart_mode_overlay(const Model& m) {
 
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(text(
-        "  Strategic = your main model \xc2\xb7 Utility = cheap grunt work "
-        "(compaction, retrieval)", fg_dim(muted)));
+        "  Internal = cheap compaction/retrieval \xc2\xb7 Orchestration = "
+        "Strategic delegates \xc2\xb7 Subagents route by role", fg_dim(muted)));
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"Enter", o->index == 0 ? "toggle" : "set model", 4},
+        {"Enter", o->index < 4 ? "toggle" : "set model", 4},
         {"x", "auto", 3},
         {"Esc", "close", 4},
     }));

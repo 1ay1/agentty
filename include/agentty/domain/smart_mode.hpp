@@ -64,9 +64,29 @@ struct SlotOverride {
 
 struct RoleConfig {
     bool         enabled = false;   // Smart Mode master switch (off by default)
+    // Three INDEPENDENTLY-selectable behaviour layers (all gated by `enabled`).
+    // Each is a pure win in isolation; the user picks which to run.
+    //   route_internal   Layer 2 — send internal utility LLM calls (compaction,
+    //                    thread title, commit message, HyDE, fork retrieval) to
+    //                    the Utility model. Invisible cost win. Default ON.
+    //   orchestrate      Layer 3a — run the MAIN turn on the Strategic model and
+    //                    inject a delegation directive so it offloads mechanical
+    //                    work to subagents (orchestrator-workers). Default ON.
+    //   route_subagents  Layer 3b — resolve each subagent's model by its role
+    //                    (explorer→Utility, reviewer→Strategic, coder/tester/
+    //                    general→Implementation) instead of the tier auto-router.
+    //                    Default ON.
+    bool route_internal  = true;
+    bool orchestrate     = true;
+    bool route_subagents = true;
     SlotOverride strategic;
     SlotOverride implementation;
     SlotOverride utility;
+
+    // Whether a given layer is active right now (master switch AND its flag).
+    [[nodiscard]] bool internal_routing() const noexcept { return enabled && route_internal; }
+    [[nodiscard]] bool orchestration()    const noexcept { return enabled && orchestrate; }
+    [[nodiscard]] bool subagent_routing() const noexcept { return enabled && route_subagents; }
 
     [[nodiscard]] const SlotOverride& slot(ModelRole r) const noexcept {
         switch (r) {
@@ -187,7 +207,7 @@ namespace detail {
         std::string_view parent_model,
         const std::vector<ModelInfo>& candidates,
         const RoleConfig& cfg) {
-    if (cfg.enabled) {
+    if (cfg.internal_routing()) {
         if (const auto& ov = cfg.utility; ov.set && !ov.model.empty())
             return wire_model_id(std::string_view{ov.model});
     }
