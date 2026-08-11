@@ -868,7 +868,12 @@ static void save_thread_sync(const Thread& t) {
     j["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(
         t.updated_at.time_since_epoch()).count();
     json msgs = json::array();
-    for (const auto& m : t.messages) msgs.push_back(message_to_json(m));
+    for (const auto& m : t.messages) {
+        // Smart Mode routing cards are view-only telemetry (no wire content) —
+        // never persist them, exactly like they're never sent to the model.
+        if (m.smart_routing) continue;
+        msgs.push_back(message_to_json(m));
+    }
     j["messages"] = std::move(msgs);
     // Wire-only compaction records. Persisting these lets a reloaded
     // thread keep sending the SAME wire payload it was sending before
