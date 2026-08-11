@@ -598,6 +598,10 @@ Config Config::from_env() {
     c.trace       = truthy_default_on("AGENTTY_RAG_TRACE");
     c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
     c.bm25_weight  = env_float("AGENTTY_RAG_BM25_WEIGHT", 1.0f);
+    // Proactive / "fork" behaviour (consumed by the tools backend).
+    c.proactive          = truthy_default_on("AGENTTY_RAG_PROACTIVE");
+    c.proactive_min_conf = static_cast<double>(env_float("AGENTTY_RAG_PROACTIVE_MIN", 0.35f));
+    c.proactive_bytes    = static_cast<int>(env_float("AGENTTY_RAG_PROACTIVE_BYTES", 6144.0f));
     return c;
 }
 
@@ -1775,6 +1779,71 @@ void Retriever::warm_async() {
     });
 }
 
+// Replace the live configuration. Anything that changes the CORPUS shape
+// (sources, contextual chunking, embed model, persistence, fusion, pipeline
+// stages) must invalidate the built indexes so the next retrieve() rebuilds
+// from the new config; pure ranking/labelling toggles (learn, trace,
+// proactive*) take effect on the very next call with no rebuild. We take the
+// conservative route: if ANY corpus-affecting field differs, drop all three
+// engines back to cold so refresh_docs/retrieve_code rebuild cleanly. The docs
+// root is preserved (embed_host/port/docs_root are not picker-exposed).
+void Retriever::apply_config(const Config& cfg) {
+    try {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        const Config& old = impl_->cfg;
+        const bool corpus_changed =
+               old.skills        != cfg.skills
+            || old.memory        != cfg.memory
+            || old.mcp_resources != cfg.mcp_resources
+            || old.contextual    != cfg.contextual
+            || old.dedup         != cfg.dedup
+            || old.mmr           != cfg.mmr
+            || old.stitch        != cfg.stitch
+            || old.autocut       != cfg.autocut
+            || old.fusion        != cfg.fusion
+            || old.adaptive_fusion != cfg.adaptive_fusion
+            || old.dense_weight  != cfg.dense_weight
+            || old.bm25_weight   != cfg.bm25_weight
+            || old.persist       != cfg.persist
+            || old.embed_model   != cfg.embed_model;
+        // Preserve the fields the picker never touches so a saved config never
+        // clobbers env-derived infra (docs root, embedder endpoint).
+        Config next = cfg;
+        next.docs_root  = old.docs_root;
+        next.embed_host = old.embed_host;
+        next.embed_port = old.embed_port;
+        impl_->cfg = std::move(next);
+        if (corpus_changed) {
+            // Cold-start every engine; the pipeline is rebuilt from the new
+            // toggles on the next reindex/refresh. Rebuilding the docs engine
+            // in place (make_engine_config reads cfg) keeps ownership simple.
+            impl_->engine = ::rag::Engine(impl_->make_engine_config());
+            impl_->embedder_ready = false;
+            impl_->docs_initialized = false;
+            impl_->indexed_root.clear();
+            impl_->indexed_fp = 0;
+            impl_->docs_files.clear();
+            impl_->persist_checked_for.clear();
+            impl_->warm_initialized = false;
+            impl_->warm_engine = ::rag::Engine(impl_->make_engine_config());
+            impl_->code_initialized = false;
+            impl_->code_root.clear();
+            impl_->code_files.clear();
+            impl_->attach_embedder();
+        } else {
+            // Ranking-only change: re-apply the pipeline in place so e.g. an
+            // MMR/autocut toggle that DID land in corpus_changed is covered,
+            // and cheap re-labels (fusion label) refresh without a rebuild.
+            impl_->apply_pipeline(impl_->engine);
+        }
+    } catch (...) { /* best-effort; keep the old config live on failure */ }
+}
+
+Config Retriever::snapshot_config() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->cfg;
+}
+
 // ── Learning loop (write side) ─────────────
 // Both halves delegate to the process-wide FeedbackStore, which owns the TSV
 // and the read-side nudge. Best-effort; never throws.
@@ -2099,6 +2168,8 @@ Retrieval Retriever::retrieve_code(const std::string& /*query*/, int /*k*/) {
 
 bool Retriever::warm() const { return true; }  // nothing to build → always warm
 void Retriever::warm_async() {}
+void Retriever::apply_config(const Config& /*cfg*/) {}
+Config Retriever::snapshot_config() const { return Config{}; }
 
 namespace feedback {
 void note_surfaced(const std::vector<std::string>& /*paths*/) {}

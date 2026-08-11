@@ -30,6 +30,8 @@
 #include "agentty/provider/wire.hpp"
 
 #include "agentty/rag/rag_adapter.hpp"
+#include "agentty/io/persistence.hpp"
+#include "agentty/store/store.hpp"
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
 #include "agentty/util/dbglog.hpp"
@@ -205,13 +207,88 @@ public:
 //   The `mode` string carries the rich provenance (root path, mode,
 //   reranked, +N variants, confidence) so no signal is lost when the
 //   shell renders the result.
+// Map a persisted store::RagConfig onto a live rag::Config, preserving the
+// infra fields the picker never exposes (docs root, embedder endpoint, embed
+// model) from the given base (env-derived) config.
+static ::agentty::rag::Config rag_config_from_settings(
+        const store::RagConfig& s, ::agentty::rag::Config base) {
+    base.skills          = s.skills;
+    base.memory          = s.memory;
+    base.mcp_resources   = s.mcp_resources;
+    base.contextual      = s.contextual;
+    base.dedup           = s.dedup;
+    base.mmr             = s.mmr;
+    base.stitch          = s.stitch;
+    base.autocut         = s.autocut;
+    base.prf             = s.prf;
+    base.corrective      = s.corrective;
+    base.graph           = s.graph;
+    base.expand          = s.expand;
+    base.hyde            = s.hyde;
+    base.fusion          = s.fusion;
+    base.adaptive_fusion = s.adaptive_fusion;
+    base.persist         = s.persist;
+    base.learn           = s.learn;
+    base.trace           = s.trace;
+    base.proactive          = s.proactive;
+    base.proactive_min_conf = s.proactive_min_conf;
+    base.proactive_bytes    = s.proactive_bytes;
+    return base;
+}
+
 // A single process-wide Retriever backs both the search_docs tool and the
 // proactive pre-turn path. Function-local static ⇒ constructed on first use
-// (after the app has set cwd / env), destroyed at exit.
+// (after the app has set cwd / env), destroyed at exit. On first construction
+// we fold in any persisted RAG settings (the RAG picker) so the user's saved
+// config wins over the env-derived defaults; if the user has never touched the
+// picker (configured=false) the env config stands.
 static ::agentty::rag::Retriever& shared_retriever() {
     static ::agentty::rag::Retriever r;
+    // Fold in persisted RAG picker settings exactly once, on first use.
+    static const bool configured_once = [] {
+        try {
+            auto s = persistence::load_settings();
+            if (s.rag.configured)
+                r.apply_config(rag_config_from_settings(s.rag, r.snapshot_config()));
+        } catch (...) { /* best-effort; env config stands */ }
+        return true;
+    }();
+    (void)configured_once;
     return r;
 }
+
+} // namespace (anonymous)
+
+// Live-apply a RagConfig from the running app (the RAG settings picker's
+// commit path). Thread-safe; rebuilds indexes lazily on the next retrieve.
+void rag_apply_settings(const store::RagConfig& s) {
+    try {
+        auto& r = shared_retriever();
+        r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
+    } catch (...) { /* best-effort */ }
+}
+
+bool proactive_enabled() {
+    // Shell override wins for one-off runs; otherwise the live config (which
+    // folds in the persisted RAG picker) is the source of truth. Default off
+    // at the app level — proactive injection is an explicit opt-in.
+    if (const char* v = std::getenv("AGENTTY_RAG_PROACTIVE"); v && v[0]) {
+        std::string s{v};
+        for (auto& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
+        return s == "1" || s == "true" || s == "on" || s == "yes";
+    }
+    try { return shared_retriever().snapshot_config().proactive; }
+    catch (...) { return false; }
+}
+
+bool proactive_first_turn_only() {
+    try {
+        auto s = persistence::load_settings();
+        return s.rag.configured && s.rag.mode == store::RagMode::FirstTurnOnly;
+    } catch (...) { return false; }
+}
+
+namespace {
 
 class AgenttyDocRetriever final : public mt::DocRetriever {
 public:
@@ -1012,14 +1089,20 @@ double proactive_min_conf_() {
     // The confidence is now CRAG's CALIBRATED relevance grade (a real
     // model-free evaluator), not the old raw fusion score. CRAG grades a
     // genuinely-relevant retrieval in the ~0.3–0.6 band, so the unprompted
-    // injection bar is 0.35 — high enough to skip noise, low enough that a
-    // solidly-relevant hit reaches the model. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
+    // injection bar defaults to 0.35 — high enough to skip noise, low enough
+    // that a solidly-relevant hit reaches the model.
+    //
+    // Source of truth is the retriever's LIVE config (which folds in the
+    // persisted RAG picker settings). An explicit AGENTTY_RAG_PROACTIVE_MIN
+    // still wins so a shell override is honoured for a one-off run.
     double min_conf = 0.35;
+    try { min_conf = shared_retriever().snapshot_config().proactive_min_conf; }
+    catch (...) { /* keep default */ }
     if (const char* mc = std::getenv("AGENTTY_RAG_PROACTIVE_MIN"); mc && mc[0]) {
         // Any non-negative value is honoured; a bar above 1.0 is a
         // legitimate "never inject" switch (confidence is clamped to [0,1]).
         try { double v = std::stod(mc); if (v >= 0) min_conf = v; }
-        catch (...) { /* keep default */ }
+        catch (...) { /* keep config/default */ }
     }
     return min_conf;
 }
@@ -1106,6 +1189,12 @@ run_proactive_funnel_(const std::string& query, int k, double min_conf) {
     // AGENTTY_RAG_PROACTIVE_BYTES.
     {
         std::size_t cap = 6 * 1024;
+        try {
+            int cfg_bytes = shared_retriever().snapshot_config().proactive_bytes;
+            if (cfg_bytes > 0)
+                cap = std::clamp<std::size_t>(static_cast<std::size_t>(cfg_bytes),
+                                              1024, 32 * 1024);
+        } catch (...) {}
         if (const char* v = std::getenv("AGENTTY_RAG_PROACTIVE_BYTES"); v && v[0]) {
             try { cap = std::clamp<std::size_t>(std::stoull(v), 1024, 32 * 1024); }
             catch (...) {}

@@ -16,6 +16,78 @@
 
 namespace agentty::store {
 
+// Persisted RAG configuration. The USER-FACING surface is a single mode
+// (the RAG picker cycles it); every other field is an internal default the
+// adapter still honours (tunable via env for power users) but the UI no
+// longer exposes — keeping the picker to one decision. `configured=false`
+// means the user never touched the picker, so the adapter keeps its
+// env-derived defaults; once the picker commits it flips true and `mode`
+// becomes authoritative for the proactive/pre-turn behaviour.
+enum class RagMode : std::uint8_t {
+    On = 0,        // proactive pre-turn retrieval on every turn
+    FirstTurnOnly, // proactive retrieval only on a thread's first turn
+    Off,           // no proactive injection (search_docs/search_code still work)
+};
+
+[[nodiscard]] constexpr std::string_view to_string(RagMode m) noexcept {
+    switch (m) {
+        case RagMode::On:            return "On";
+        case RagMode::FirstTurnOnly: return "First turn only";
+        case RagMode::Off:           return "Off";
+    }
+    return "?";
+}
+
+[[nodiscard]] constexpr std::string_view describe(RagMode m) noexcept {
+    switch (m) {
+        case RagMode::On:            return "inject retrieved context before every turn";
+        case RagMode::FirstTurnOnly: return "ground the first turn, then stay quiet";
+        case RagMode::Off:           return "no pre-turn injection (tools still work)";
+    }
+    return "";
+}
+
+struct RagConfig {
+    bool     configured = false;   // has the user ever saved RAG settings?
+    RagMode  mode       = RagMode::On;
+
+    // ── Internal defaults (not picker-exposed; env-tunable) ──
+    // Knowledge sources.
+    bool  skills        = true;
+    bool  memory        = true;
+    bool  mcp_resources = false;
+
+    // Pipeline stages.
+    bool  contextual = true;
+    bool  dedup      = true;
+    bool  mmr        = true;
+    bool  stitch     = true;
+    bool  autocut    = true;
+
+    // Power modes (latency / round-trip cost).
+    bool  prf        = false;   // pseudo-relevance-feedback expansion
+    bool  corrective = false;   // CRAG grading
+    bool  graph      = false;   // GraphRAG expansion
+    bool  expand     = false;   // multi-query / RAG-Fusion
+    bool  hyde       = false;   // HyDE
+
+    // Fusion.
+    std::string fusion = "convex";   // "convex" | "rrf"
+    bool  adaptive_fusion = true;
+
+    // Proactive / pre-turn injection tuning. `proactive` is DERIVED from
+    // `mode` (On/FirstTurnOnly ⇒ true, Off ⇒ false) at apply time; the bar
+    // and byte cap stay internal defaults.
+    bool   proactive          = true;
+    double proactive_min_conf = 0.35;
+    int    proactive_bytes    = 6144;
+
+    // Infrastructure.
+    bool  persist = true;   // .ragdb cache under .agentty/
+    bool  learn   = false;  // implicit file-open feedback loop
+    bool  trace   = false;  // fold per-stage trace into the mode label
+};
+
 // Persisted user settings — model + profile + favorites.  Lives with the
 // Store concept because it's what the Store reads/writes, not because
 // settings are themselves a first-class domain.
@@ -50,6 +122,9 @@ struct Settings {
     // clears the in-memory set for the session (tightening the profile
     // re-arms prompts), but the grants reload on next launch.
     std::vector<std::string> always_allow_tools;
+    // User-configured RAG behaviour (the RAG settings picker). Defaults to
+    // configured=false ⇒ the adapter keeps its env-derived config.
+    RagConfig rag;
 };
 
 template <class S>
