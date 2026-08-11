@@ -683,6 +683,7 @@ set(AGENTTY_IO_SOURCES
     src/util/dbglog.cpp
     src/domain/complexity.cpp
     src/domain/routing_memory.cpp
+    src/domain/decomposition_memory.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES
@@ -2124,6 +2125,12 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(routing_memory_test)
     set_tests_properties(routing_memory_test PROPERTIES TIMEOUT 30)
 
+    # decomposition_memory_test — retrieval-augmented orchestration store
+    # (smart::DecompositionMemory): capture successful decompositions, recall
+    # by exact signature then same-tier fallback, dedup, disk round-trip.
+    agentty_add_full_test(decomposition_memory_test)
+    set_tests_properties(decomposition_memory_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2374,6 +2381,7 @@ if(AGENTTY_BUILD_TESTS)
         smart_mode_test
         complexity_test
         routing_memory_test
+        decomposition_memory_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test

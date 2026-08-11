@@ -35,6 +35,7 @@
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/isolated_thread.hpp"
 
 #include <mcp/tools/host.hpp>
 
@@ -286,6 +287,23 @@ bool proactive_first_turn_only() {
         auto s = persistence::load_settings();
         return s.rag.configured && s.rag.mode == store::RagMode::FirstTurnOnly;
     } catch (...) { return false; }
+}
+
+void smart_speculative_prewarm(const std::string& query) {
+    if (query.empty()) return;
+    // Detached + terminate-proof: warm the index and prime a code retrieval on
+    // the query so it's cached by the time the orchestrator's first explorer
+    // runs. Best-effort — any failure is swallowed; results are cached inside
+    // the shared retriever, not returned.
+    std::string q = query.substr(0, 2000);
+    ::agentty::util::run_isolated_detached("smart.speculative_prewarm",
+        [q = std::move(q)] {
+            try {
+                auto& r = shared_retriever();
+                r.warm_async();
+                (void)r.retrieve_code(q, 5);
+            } catch (...) { /* best-effort */ }
+        });
 }
 
 namespace {
