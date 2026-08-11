@@ -131,6 +131,21 @@ int main() {
               "layers: master off overrides any set flag");
     }
 
+    // 6. Cascade effort bias: a positive bias steps effort UP, negative DOWN,
+    //    clamped to the model; Trivial stays None regardless.
+    {
+        const auto caps = ModelCapabilities::from_id("gpt-5");   // supports effort
+        // Standard @ Medium base, +1 bias → High; -1 bias → Low.
+        auto up = sm::effort_for_complexity(Effort::Medium, sm::Complexity::Standard, caps, +1);
+        auto dn = sm::effort_for_complexity(Effort::Medium, sm::Complexity::Standard, caps, -1);
+        auto mid = sm::effort_for_complexity(Effort::Medium, sm::Complexity::Standard, caps, 0);
+        CHECK(static_cast<int>(up) > static_cast<int>(mid), "cascade: +bias raises effort");
+        CHECK(static_cast<int>(dn) < static_cast<int>(mid), "cascade: -bias lowers effort");
+        // Trivial ignores a positive bias — an ack is an ack.
+        auto triv = sm::effort_for_complexity(Effort::High, sm::Complexity::Trivial, caps, +2);
+        CHECK(triv == Effort::None, "cascade: trivial stays None despite +bias");
+    }
+
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

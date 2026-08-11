@@ -587,7 +587,8 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         }
     const smart::Complexity cx = smart::classify_complexity(newest_user);
     const auto caps = ModelCapabilities::from_id(prof.model);
-    const Effort scaled = smart::effort_for_complexity(prof.effort, cx, caps);
+    const Effort scaled = smart::effort_for_complexity(prof.effort, cx, caps,
+                                                       m.s.smart_effort_bias);
 
     Message card;
     // Message.id auto-inits via new_message_id().
@@ -724,7 +725,10 @@ Cmd<Msg> launch_stream(Model& m) {
         turn_complexity = smart::classify_complexity(newest_user);
         const auto caps = ModelCapabilities::from_id(strategic_profile.model);
         strategic_profile.effort =
-            smart::effort_for_complexity(strategic_profile.effort, turn_complexity, caps);
+            smart::effort_for_complexity(strategic_profile.effort, turn_complexity,
+                                         caps, m.s.smart_effort_bias);
+        // Stash for the cascade feedback at finalize_turn.
+        m.s.smart_turn_complexity = turn_complexity;
     }
 
     return Cmd<Msg>::task(

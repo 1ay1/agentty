@@ -139,33 +139,39 @@ namespace detail {
 
 } // namespace detail
 
-// Scale a base reasoning effort by the turn's complexity, then clamp to what
-// the model supports. The research lever "scale effort to query complexity":
-// a Complex turn thinks one step HARDER than the user's baseline, a Trivial
-// turn thinks NONE, a Simple turn drops one step. Standard is unchanged. Bias
-// is upward on ambiguity — under-thinking a hard turn costs more than a little
+// Scale a base reasoning effort by the turn's complexity, apply the cascade
+// correction `bias` (in effort-steps; the loop's running estimate of whether
+// the heuristic is under/over-rating this session), then clamp to what the
+// model supports. The research lever "scale effort to query complexity" plus
+// the cascade the routing survey prefers over one-shot routing: a Complex turn
+// thinks one step HARDER than baseline, Trivial thinks NONE, Simple one step
+// down; `bias` nudges the result up/down by the loop's feedback. Bias is
+// upward on ambiguity — under-thinking a hard turn costs more than a little
 // wasted budget on an easy one.
 [[nodiscard]] inline Effort effort_for_complexity(
-        Effort base, Complexity c, const ModelCapabilities& caps) {
+        Effort base, Complexity c, const ModelCapabilities& caps, int bias = 0) {
     using E = Effort;
-    auto step_up = [](E e) {
-        switch (e) {
-            case E::None:   return E::Low;
-            case E::Low:    return E::Medium;
-            case E::Medium: return E::High;
-            case E::High:   return E::Xhigh;
-            case E::Xhigh:  return E::Max;
-            case E::Max:    return E::Max;
-        }
-        return e;
+    auto step = [](E e, int n) {
+        // Ordered ladder; step n places, saturating at the ends.
+        constexpr E ladder[] = {E::None, E::Low, E::Medium, E::High, E::Xhigh, E::Max};
+        int idx = 0;
+        for (int i = 0; i < 6; ++i) if (ladder[i] == e) { idx = i; break; }
+        idx += n;
+        if (idx < 0) idx = 0;
+        if (idx > 5) idx = 5;
+        return ladder[idx];
     };
+    E scaled;
     switch (c) {
-        case Complexity::Trivial:  return E::None;
-        case Complexity::Simple:   return detail::effort_step_down(base, caps);
-        case Complexity::Standard: return clamp_effort(base, caps);
-        case Complexity::Complex:  return clamp_effort(step_up(base), caps);
+        case Complexity::Trivial:  scaled = E::None;       break;
+        case Complexity::Simple:   scaled = step(base, -1); break;
+        case Complexity::Standard: scaled = base;          break;
+        case Complexity::Complex:  scaled = step(base, +1); break;
+        default:                   scaled = base;          break;
     }
-    return clamp_effort(base, caps);
+    // Trivial stays None regardless of a positive bias — an ack is an ack.
+    if (c != Complexity::Trivial && bias != 0) scaled = step(scaled, bias);
+    return clamp_effort(scaled, caps);
 }
 
 // Resolve a role to the (model, effort) it should run on.

@@ -610,6 +610,39 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         m.s.recent_compacts      = 0;
     }
 
+    // Smart Mode CASCADE feedback. The complexity heuristic set this turn's
+    // effort floor upfront; now correct it from what the orchestrator ACTUALLY
+    // did. Count the `task` delegations in the just-settled assistant turn:
+    // heavy delegation on a turn the heuristic under-rated (≤ Simple) is
+    // evidence it was really complex — raise the bias; a trivial, zero-
+    // delegation reply on an over-rated (Complex) turn lowers it. The bias
+    // first DECAYS one step toward 0 each turn so a single anomaly never
+    // sticks, then the signal applies. Only meaningful while orchestrating.
+    if (m.d.smart.orchestration() && !m.d.current.messages.empty()) {
+        int delegations = 0;
+        for (auto it = m.d.current.messages.rbegin();
+             it != m.d.current.messages.rend(); ++it) {
+            if (it->role != Role::Assistant) break;   // this turn's run only
+            for (const auto& tc : it->tool_calls)
+                if (tc.name == "task") ++delegations;
+            if (!it->text.empty() || !it->tool_calls.empty()) break; // newest real msg
+        }
+        const auto cx = m.s.smart_turn_complexity;
+        // Decay toward neutral first.
+        if (m.s.smart_effort_bias > 0) --m.s.smart_effort_bias;
+        else if (m.s.smart_effort_bias < 0) ++m.s.smart_effort_bias;
+        // Under-rated: cheap-classified turn that spawned real parallel work.
+        if (delegations >= 2
+            && (cx == smart::Complexity::Simple || cx == smart::Complexity::Standard))
+            ++m.s.smart_effort_bias;
+        // Over-rated: Complex-classified turn that delegated nothing and was
+        // effectively a direct reply.
+        else if (delegations == 0 && cx == smart::Complexity::Complex)
+            --m.s.smart_effort_bias;
+        if (m.s.smart_effort_bias > 2)  m.s.smart_effort_bias = 2;
+        if (m.s.smart_effort_bias < -1) m.s.smart_effort_bias = -1;
+    }
+
     deps().save_thread(m.d.current);
     auto kp = cmd::kick_pending_tools(m);
     // Set by the idle-settle block below when the reply carries runnable

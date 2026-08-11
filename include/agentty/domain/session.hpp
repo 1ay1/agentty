@@ -18,6 +18,7 @@
 #include <maya/widget/spinner.hpp>
 
 #include "agentty/domain/compaction_style.hpp"
+#include "agentty/domain/complexity.hpp"
 
 namespace agentty::http { class CancelToken; }
 
@@ -528,6 +529,20 @@ struct StreamState {
     // only ever true when phase != Idle (the transition is paired
     // with the launch of the compaction stream).
     bool compacting = false;
+    // Smart Mode CASCADE feedback (session-scoped, not persisted). The
+    // complexity heuristic sets each turn's effort FLOOR upfront; this signed
+    // bias, in effort-steps, is the loop's correction on top of it — the
+    // cascade the routing research prefers over pure upfront routing. It's
+    // adjusted at finalize_turn from the orchestrator's ACTUAL behaviour:
+    // heavy delegation on a turn the heuristic under-rated bumps it up; a
+    // trivial no-delegation reply on an over-rated turn nudges it down. It
+    // DECAYS toward 0 each turn so a single anomaly never sticks. Clamped to
+    // [-1, +2]. Read by build_smart_routing_card / launch_stream.
+    int smart_effort_bias = 0;
+    // The complexity the classifier assigned to the IN-FLIGHT turn, stashed at
+    // launch so finalize_turn can compare it against what the model actually
+    // did (delegation count) and update smart_effort_bias.
+    smart::Complexity smart_turn_complexity = smart::Complexity::Standard;
     // Which summary shape the in-flight compaction is producing. Set at
     // CompactContext / fork kickoff, read by the wire builder to choose the
     // summarisation prompt. Defaults to Recoverable (the original behaviour).
