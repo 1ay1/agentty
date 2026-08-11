@@ -72,7 +72,8 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                 || o->index < 0
                 || o->index >= static_cast<int>(matches.size()))
                 return done(std::move(m));
-            switch (matches[static_cast<std::size_t>(o->index)]->id) {
+            const Command sel = matches[static_cast<std::size_t>(o->index)]->id;
+            switch (sel) {
                 case Command::NewThread:     return agentty::app::update(std::move(m), Msg{NewThread{}});
                 case Command::ReviewChanges: return agentty::app::update(std::move(m), Msg{OpenDiffReview{}});
                 case Command::AcceptAll:     return agentty::app::update(std::move(m), Msg{AcceptAllChanges{}});
@@ -98,6 +99,17 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                           ? "Smart Mode ON \xe2\x80\x94 grunt work routes to a cheaper model"
                           : "Smart Mode off");
                     return {std::move(m), std::move(toast)};
+                }
+                case Command::SmartSetStrategic:
+                case Command::SmartSetImpl:
+                case Command::SmartSetUtility: {
+                    // Open the model picker in slot-assign mode: the chosen
+                    // model fills the role slot (ModelPickerSelect reads
+                    // smart_assign_slot) instead of switching the active model.
+                    m.ui.smart_assign_slot =
+                        sel == Command::SmartSetStrategic ? 0 :
+                        sel == Command::SmartSetImpl      ? 1 : 2;
+                    return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
                 }
                 case Command::RewindCheckpoint:
                     // Open the checkpoint picker so ANY earlier turn is a

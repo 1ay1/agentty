@@ -218,6 +218,13 @@ Element model_picker(const Model& m) {
         cfg.title = prov.empty() ? std::string{" Models "}
                                  : " " + prov + " models ";
     }
+    // Slot-assign mode: retitle so it's clear the pick fills a Smart Mode role.
+    if (m.ui.smart_assign_slot >= 0) {
+        const char* role = m.ui.smart_assign_slot == 0 ? "Strategic"
+                         : m.ui.smart_assign_slot == 1 ? "Implementation"
+                                                       : "Utility";
+        cfg.title = std::string{" Smart Mode \xc2\xb7 pick "} + role + " model ";
+    }
     cfg.accent     = accent;
     cfg.min_width  = 40;
     cfg.viewport_h = picker_viewport_h();
