@@ -18,6 +18,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/routing_memory.hpp"
 #include "agentty/provider/error_class.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -620,11 +621,19 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // sticks, then the signal applies. Only meaningful while orchestrating.
     if (m.d.smart.orchestration() && !m.d.current.messages.empty()) {
         int delegations = 0;
+        bool tool_failure = false;
         for (auto it = m.d.current.messages.rbegin();
              it != m.d.current.messages.rend(); ++it) {
             if (it->role != Role::Assistant) break;   // this turn's run only
-            for (const auto& tc : it->tool_calls)
+            for (const auto& tc : it->tool_calls) {
                 if (tc.name == "task") ++delegations;
+                // A failed build / test / diagnostics call in this turn is a
+                // ground-truth "the cheap route may have been wrong" signal.
+                if (std::holds_alternative<ToolUse::Failed>(tc.status)
+                    && (tc.name == "bash" || tc.name == "diagnostics"
+                        || tc.name == "test" || tc.name == "edit"))
+                    tool_failure = true;
+            }
             if (!it->text.empty() || !it->tool_calls.empty()) break; // newest real msg
         }
         const auto cx = m.s.smart_turn_complexity;
@@ -632,15 +641,27 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         if (m.s.smart_effort_bias > 0) --m.s.smart_effort_bias;
         else if (m.s.smart_effort_bias < 0) ++m.s.smart_effort_bias;
         // Under-rated: cheap-classified turn that spawned real parallel work.
+        int regret = 0;
         if (delegations >= 2
             && (cx == smart::Complexity::Simple || cx == smart::Complexity::Standard))
-            ++m.s.smart_effort_bias;
+            regret = +1;
         // Over-rated: Complex-classified turn that delegated nothing and was
         // effectively a direct reply.
         else if (delegations == 0 && cx == smart::Complexity::Complex)
-            --m.s.smart_effort_bias;
+            regret = -1;
+        // Innovation 2 — OUTCOME FEEDBACK: a failed build/test this turn is
+        // real evidence the turn was harder than routed; bias up regardless of
+        // delegation count (ground truth beats the proxy).
+        if (m.d.smart.outcome_learning() && tool_failure && regret <= 0)
+            regret = +1;
+        m.s.smart_effort_bias += regret;
         if (m.s.smart_effort_bias > 2)  m.s.smart_effort_bias = 2;
         if (m.s.smart_effort_bias < -1) m.s.smart_effort_bias = -1;
+        // Innovation 1 — persist the correction per-workspace for this class of
+        // turn so it survives the session.
+        if (m.d.smart.routing_learning() && regret != 0
+            && !m.s.smart_turn_signature.empty())
+            smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, regret);
     }
 
     deps().save_thread(m.d.current);

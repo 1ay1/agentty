@@ -563,6 +563,10 @@ Element smart_mode_overlay(const Model& m) {
         tog(sm.route_internal,  "  Internal routing"),
         tog(sm.orchestrate,     "  Orchestration"),
         tog(sm.route_subagents, "  Subagent routing"),
+        tog(sm.learn_routing,    "  Learned routing"),
+        tog(sm.outcome_feedback, "  Outcome feedback"),
+        tog(sm.speculative,      "  Speculative"),
+        tog(sm.recall_plans,     "  Plan recall"),
         {"  Strategic",      on ? shown(smart::ModelRole::Strategic)      + slot_suffix(sm.strategic)      : std::string{"\xe2\x80\x94"}},
         {"  Implementation", on ? shown(smart::ModelRole::Implementation) + slot_suffix(sm.implementation) : std::string{"\xe2\x80\x94"}},
         {"  Utility",        on ? shown(smart::ModelRole::Utility)        + slot_suffix(sm.utility)        : std::string{"\xe2\x80\x94"}},
@@ -581,11 +585,11 @@ Element smart_mode_overlay(const Model& m) {
 
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(text(
-        "  Internal = cheap compaction/retrieval \xc2\xb7 Orchestration = "
-        "Strategic delegates \xc2\xb7 Subagents route by role", fg_dim(muted)));
+        "  Learning layers get better at THIS repo over time \xc2\xb7 all learn "
+        "from your own runs", fg_dim(muted)));
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"Enter", o->index < 4 ? "toggle" : "set model", 4},
+        {"Enter", o->index < 8 ? "toggle" : "set model", 4},
         {"x", "auto", 3},
         {"Esc", "close", 4},
     }));

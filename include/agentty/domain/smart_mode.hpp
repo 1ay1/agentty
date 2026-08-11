@@ -80,6 +80,23 @@ struct RoleConfig {
     bool route_internal  = true;
     bool orchestrate     = true;
     bool route_subagents = true;
+    // Four learning/innovation layers (all gated by `enabled`, all default
+    // ON). They exploit substrate stateless routers lack: agentty's own
+    // execution history in this workspace.
+    //   learn_routing    persist the cascade correction per-workspace, keyed
+    //                    by turn signature, so the router improves on YOUR repo
+    //                    across sessions (RoutingMemory prior).
+    //   outcome_feedback ground the learning in REAL outcomes — a user
+    //                    correction / failed build / git revert right after a
+    //                    turn is a routing regret that re-rates its signature.
+    //   speculative      pre-warm the likely explorer worker while the lead is
+    //                    still thinking, so delegation isn't on the critical path.
+    //   recall_plans     retrieve past SUCCESSFUL decompositions for similar
+    //                    turns and prime the delegation prompt with them.
+    bool learn_routing    = true;
+    bool outcome_feedback = true;
+    bool speculative      = false;   // off by default — can waste a worker
+    bool recall_plans     = true;
     SlotOverride strategic;
     SlotOverride implementation;
     SlotOverride utility;
@@ -88,6 +105,12 @@ struct RoleConfig {
     [[nodiscard]] bool internal_routing() const noexcept { return enabled && route_internal; }
     [[nodiscard]] bool orchestration()    const noexcept { return enabled && orchestrate; }
     [[nodiscard]] bool subagent_routing() const noexcept { return enabled && route_subagents; }
+    // The learning layers additionally require orchestration — they all refine
+    // the orchestrated main turn's routing, which only exists when it's on.
+    [[nodiscard]] bool routing_learning()  const noexcept { return orchestration() && learn_routing; }
+    [[nodiscard]] bool outcome_learning()  const noexcept { return orchestration() && outcome_feedback; }
+    [[nodiscard]] bool speculation()       const noexcept { return orchestration() && speculative; }
+    [[nodiscard]] bool plan_recall()       const noexcept { return orchestration() && recall_plans; }
 
     [[nodiscard]] const SlotOverride& slot(ModelRole r) const noexcept {
         switch (r) {

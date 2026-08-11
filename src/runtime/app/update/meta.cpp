@@ -104,7 +104,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         },
         [&](SmartModeMove& e) -> Step {
             if (auto* o = ui::pick::opened(m.ui.smart_mode)) {
-                const int rows = 7;   // Enabled + 3 layer toggles + 3 slots
+                const int rows = 11;  // Enabled + 3 layers + 4 learning + 3 slots
                 o->index = ((o->index + e.delta) % rows + rows) % rows;
             }
             return done(std::move(m));
@@ -112,45 +112,51 @@ Step meta_update(Model m, msg::MetaMsg mm) {
         [&](SmartModeSelect) -> Step {
             auto* o = ui::pick::opened(m.ui.smart_mode);
             if (!o) return done(std::move(m));
-            // Rows 0-3 are boolean toggles; 4-6 are model slots.
+            // Rows 0-7 are boolean toggles; 8-10 are model slots.
+            auto toggled = [&](const char* label, bool on) -> Step {
+                persist_settings(m);
+                return {std::move(m), set_status_toast(m,
+                    std::string{label} + (on ? " on" : " off"))};
+            };
             switch (o->index) {
                 case 0:
                     m.d.smart.enabled = !m.d.smart.enabled;
-                    persist_settings(m);
-                    return {std::move(m), set_status_toast(m,
-                        m.d.smart.enabled ? "Smart Mode on" : "Smart Mode off")};
+                    return toggled("Smart Mode", m.d.smart.enabled);
                 case 1:
                     m.d.smart.route_internal = !m.d.smart.route_internal;
-                    persist_settings(m);
-                    return {std::move(m), set_status_toast(m,
-                        std::string{"internal routing "} +
-                        (m.d.smart.route_internal ? "on" : "off"))};
+                    return toggled("internal routing", m.d.smart.route_internal);
                 case 2:
                     m.d.smart.orchestrate = !m.d.smart.orchestrate;
-                    persist_settings(m);
-                    return {std::move(m), set_status_toast(m,
-                        std::string{"orchestration "} +
-                        (m.d.smart.orchestrate ? "on" : "off"))};
+                    return toggled("orchestration", m.d.smart.orchestrate);
                 case 3:
                     m.d.smart.route_subagents = !m.d.smart.route_subagents;
-                    persist_settings(m);
-                    return {std::move(m), set_status_toast(m,
-                        std::string{"subagent routing "} +
-                        (m.d.smart.route_subagents ? "on" : "off"))};
+                    return toggled("subagent routing", m.d.smart.route_subagents);
+                case 4:
+                    m.d.smart.learn_routing = !m.d.smart.learn_routing;
+                    return toggled("learned routing", m.d.smart.learn_routing);
+                case 5:
+                    m.d.smart.outcome_feedback = !m.d.smart.outcome_feedback;
+                    return toggled("outcome feedback", m.d.smart.outcome_feedback);
+                case 6:
+                    m.d.smart.speculative = !m.d.smart.speculative;
+                    return toggled("speculative", m.d.smart.speculative);
+                case 7:
+                    m.d.smart.recall_plans = !m.d.smart.recall_plans;
+                    return toggled("plan recall", m.d.smart.recall_plans);
                 default: break;
             }
             // A slot row → open the model picker in slot-assign mode.
-            m.ui.smart_assign_slot = o->index - 4;   // 0=Strategic 1=Impl 2=Utility
+            m.ui.smart_assign_slot = o->index - 8;   // 0=Strategic 1=Impl 2=Utility
             m.ui.smart_mode = ui::pick::Closed{};
             return agentty::app::update(std::move(m), Msg{OpenModelPicker{}});
         },
         [&](SmartModeClearSlot) -> Step {
             auto* o = ui::pick::opened(m.ui.smart_mode);
-            if (!o || o->index < 4) return done(std::move(m));
+            if (!o || o->index < 8) return done(std::move(m));
             smart::SlotOverride* slot =
-                  o->index == 4 ? &m.d.smart.strategic
-                : o->index == 5 ? &m.d.smart.implementation
-                                : &m.d.smart.utility;
+                  o->index == 8  ? &m.d.smart.strategic
+                : o->index == 9  ? &m.d.smart.implementation
+                                 : &m.d.smart.utility;
             *slot = smart::SlotOverride{};   // reset to auto (empty + unset)
             persist_settings(m);
             return {std::move(m), set_status_toast(m, "slot reset to auto")};

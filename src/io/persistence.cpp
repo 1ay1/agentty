@@ -1077,6 +1077,10 @@ store::Settings load_settings() {
             s.smart_route_internal   = sm.value("route_internal", true);
             s.smart_orchestrate      = sm.value("orchestrate", true);
             s.smart_route_subagents  = sm.value("route_subagents", true);
+            s.smart_learn_routing    = sm.value("learn_routing", true);
+            s.smart_outcome_feedback = sm.value("outcome_feedback", true);
+            s.smart_speculative      = sm.value("speculative", false);
+            s.smart_recall_plans     = sm.value("recall_plans", true);
             s.smart_strategic_model  = sm.value("strategic_model", "");
             s.smart_strategic_effort = sm.value("strategic_effort", "");
             s.smart_impl_model       = sm.value("impl_model", "");
@@ -1152,6 +1156,10 @@ void save_settings(const store::Settings& s) {
         sm["route_internal"]  = s.smart_route_internal;
         sm["orchestrate"]     = s.smart_orchestrate;
         sm["route_subagents"] = s.smart_route_subagents;
+        sm["learn_routing"]    = s.smart_learn_routing;
+        sm["outcome_feedback"] = s.smart_outcome_feedback;
+        sm["speculative"]      = s.smart_speculative;
+        sm["recall_plans"]     = s.smart_recall_plans;
         if (!s.smart_strategic_model.empty())  sm["strategic_model"]  = s.smart_strategic_model;
         if (!s.smart_strategic_effort.empty()) sm["strategic_effort"] = s.smart_strategic_effort;
         if (!s.smart_impl_model.empty())       sm["impl_model"]       = s.smart_impl_model;
