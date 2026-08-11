@@ -1,8 +1,51 @@
 # Smart Mode — role-based execution routing
 
-**Status:** design proposal
+**Status:** design proposal (v2 refinements below; core design unchanged)
 **Author:** agentty
 **Scope:** cost reduction without quality regression, via a three-model role hierarchy
+
+---
+
+## 0. What makes it a selling point (v2 refinements)
+
+The core idea (roles, not model names; resolve `role → model` at dispatch) is
+right and unchanged. Four refinements turn it from "cheaper routing" into a
+feature users *feel*:
+
+1. **Per-role reasoning effort, not just per-role model.** The biggest quality
+   × cost lever is often *how hard the model thinks*, orthogonal to *which*
+   model. Smart Mode pins an effort per role: **Strategic thinks hard** (high
+   reasoning effort), **Implementation medium**, **Utility not at all** (effort
+   off — grep/read/commit-msg don't need a reasoning budget). This alone can
+   beat the model swap: a flagship at zero effort on a mechanical task is pure
+   waste; a mid model at high effort on a hard bug can match the flagship.
+   `RoleProfile { ModelId model; Effort effort; }` — the resolver returns both.
+
+2. **Zero-config by default.** Turning Smart Mode *on* with no slots set
+   auto-fills from the signed-in catalog: Strategic = the flagship you're
+   already on, Implementation = the strongest mid-tier, Utility = the cheapest
+   capable. It works instantly; power users override any slot. No "configure 3
+   models before it does anything" wall.
+
+3. **Legible, live cost accounting.** The pitch isn't "trust us, it's cheaper"
+   — it's *visible*. A per-turn footer readout: `Strategic 12k · Impl 4k ·
+   Utility 1k · saved ~63% vs all-flagship`. Users watch the routing work.
+   Backed by a `RoleSpend` accumulator keyed on `ModelRole`, rendered in the
+   status bar and the turn meta.
+
+4. **Utility owns retrieval — tie it to the RAG stack we shipped.** The
+   Utility role is the natural home for the internal retrieval calls (thread
+   fork carry-context, proactive `search_docs`, HyDE query expansion). Those
+   already run on the cheapest capable model; Smart Mode makes that *explicit
+   and user-visible* as "Utility work," so "recall" and "gather" read as one
+   coherent tier instead of scattered internal cheapness.
+
+**Rollout stays the same, foundation-first:** Step 1 (resolver + settings +
+RoleProfile) and Step 2 (internal utility calls — compaction summary, commit
+messages, HyDE, fork/thread retrieval) are pure wins with zero user-visible
+behaviour change and ship first. The visible orchestrator-workers routing
+(Step 3+) lands behind the `smart_mode` flag, off by default, once the
+foundation is proven.
 
 ---
 
