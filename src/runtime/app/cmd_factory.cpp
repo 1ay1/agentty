@@ -14,6 +14,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/routing_memory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
@@ -707,6 +708,8 @@ Cmd<Msg> launch_stream(Model& m) {
     // (needs the live catalog); a no-op profile == (model_id, effort) when
     // orchestration is off, so the captured values below are always valid.
     const bool orchestrate = m.d.smart.orchestration();
+    const bool plan_recall = m.d.smart.plan_recall();
+    const bool speculative = m.d.smart.speculation();
     smart::RoleProfile strategic_profile =
         smart::resolve_role(smart::ModelRole::Strategic, model_id,
                             m.d.effort, m.d.available_models, m.d.smart);
@@ -724,9 +727,21 @@ Cmd<Msg> launch_stream(Model& m) {
             }
         turn_complexity = smart::classify_complexity(newest_user);
         const auto caps = ModelCapabilities::from_id(strategic_profile.model);
+        // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this
+        // repo has taught us for this class of turn (persisted cascade), on
+        // top of the live session bias. Record the routing so the outcome
+        // signal at finalize_turn has a denominator.
+        int total_bias = m.s.smart_effort_bias;
+        std::string sig;
+        if (m.d.smart.routing_learning()) {
+            sig = smart::turn_signature(turn_complexity, newest_user);
+            total_bias += smart::RoutingMemory::instance().prior_bias(sig);
+            smart::RoutingMemory::instance().note_routed(sig);
+        }
+        m.s.smart_turn_signature = sig;
         strategic_profile.effort =
             smart::effort_for_complexity(strategic_profile.effort, turn_complexity,
-                                         caps, m.s.smart_effort_bias);
+                                         caps, total_bias);
         // Stash for the cascade feedback at finalize_turn.
         m.s.smart_turn_complexity = turn_complexity;
     }
@@ -734,7 +749,7 @@ Cmd<Msg> launch_stream(Model& m) {
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, context_max, retry_count,
-         orchestrate, strategic_profile, turn_complexity,
+         orchestrate, strategic_profile, turn_complexity, plan_recall, speculative,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -814,6 +829,18 @@ Cmd<Msg> launch_stream(Model& m) {
                 "PARALLEL. Start wide (broad exploration), then narrow to the "
                 "specifics.\n"
                 + std::string{budget} +
+                (plan_recall
+                   ? "\nBefore decomposing a non-trivial task, recall how similar "
+                     "work was structured in THIS codebase: check your learned "
+                     "memory and `search_docs` for a prior decomposition or plan "
+                     "that worked, and reuse its shape rather than re-deriving it."
+                   : "") +
+                (speculative && turn_complexity == smart::Complexity::Complex
+                   ? "\nSPECULATE: fire your first exploration task(s) as your "
+                     "VERY FIRST action — before you finish planning — so the "
+                     "worker runs while you think. Launch the independent "
+                     "explorers together, then reason over their reports."
+                   : "") +
                 "\n</smart-mode>";
         }
         const bool openai_provider = sel_now.kind == provider::Kind::OpenAI;

@@ -543,6 +543,10 @@ struct StreamState {
     // launch so finalize_turn can compare it against what the model actually
     // did (delegation count) and update smart_effort_bias.
     smart::Complexity smart_turn_complexity = smart::Complexity::Standard;
+    // The RoutingMemory signature of the in-flight turn (Innovation 1/2), so
+    // finalize_turn can attribute the outcome regret to the right class of
+    // turn. Empty when learned routing is off.
+    std::string smart_turn_signature;
     // Which summary shape the in-flight compaction is producing. Set at
     // CompactContext / fork kickoff, read by the wire builder to choose the
     // summarisation prompt. Defaults to Recoverable (the original behaviour).

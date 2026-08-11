@@ -682,6 +682,7 @@ set(AGENTTY_IO_SOURCES
     src/util/base64.cpp
     src/util/dbglog.cpp
     src/domain/complexity.cpp
+    src/domain/routing_memory.cpp
 )
 
 set(AGENTTY_WORKSPACE_SOURCES
@@ -2117,6 +2118,12 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(complexity_test)
     set_tests_properties(complexity_test PROPERTIES TIMEOUT 30)
 
+    # routing_memory_test — the per-workspace learned routing prior
+    # (smart::RoutingMemory): Beta-smoothed regret accounting keyed by turn
+    # signature, persisted to .agentty/routing_memory.tsv. Isolated temp root.
+    agentty_add_full_test(routing_memory_test)
+    set_tests_properties(routing_memory_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2366,6 +2373,7 @@ if(AGENTTY_BUILD_TESTS)
         code_block_extract_test
         smart_mode_test
         complexity_test
+        routing_memory_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test

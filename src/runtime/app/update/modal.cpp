@@ -21,6 +21,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/domain/routing_memory.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -336,6 +337,32 @@ Step submit_message(Model m) {
     // the user Turn paints once from frozen (zero-copy list_ref blit)
     // instead of being re-built every frame for the whole run, and the
     // settle-time freeze has one fewer seam to hand off.
+    // Innovation 2 — OUTCOME FEEDBACK (correction side): if this new user
+    // turn looks like a correction of the PREVIOUS turn ("no", "that's wrong",
+    // "actually…", "undo", "revert"), that's ground truth the prior route was
+    // too weak — attribute a regret to its signature so this class of turn
+    // escalates next time. Cheap prefix/keyword scan on the trimmed text.
+    if (m.d.smart.outcome_learning() && !m.s.smart_turn_signature.empty()) {
+        std::string low;
+        low.reserve(user.text.size());
+        for (char c : user.text) {
+            if (low.size() >= 40) break;   // only the opening matters
+            low.push_back((c >= 'A' && c <= 'Z') ? char(c + 32) : c);
+        }
+        auto starts = [&](std::string_view p){ return low.rfind(p, 0) == 0; };
+        const bool correction =
+               starts("no,") || starts("no ") || low == "no"
+            || starts("that's wrong") || starts("thats wrong")
+            || starts("wrong") || starts("actually") || starts("not quite")
+            || starts("that's not") || starts("undo") || starts("revert")
+            || starts("that broke") || starts("you broke") || starts("nope")
+            || low.find("doesn't work") != std::string::npos
+            || low.find("still broken") != std::string::npos
+            || low.find("still fail") != std::string::npos;
+        if (correction)
+            smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, +1);
+    }
+
     m.d.current.messages.push_back(std::move(user));
 
     // Force the prior turn's reveal to settle BEFORE the freeze snapshot.
@@ -540,6 +567,10 @@ void persist_settings(const Model& m) {
     s.smart_route_internal   = m.d.smart.route_internal;
     s.smart_orchestrate      = m.d.smart.orchestrate;
     s.smart_route_subagents  = m.d.smart.route_subagents;
+    s.smart_learn_routing    = m.d.smart.learn_routing;
+    s.smart_outcome_feedback = m.d.smart.outcome_feedback;
+    s.smart_speculative      = m.d.smart.speculative;
+    s.smart_recall_plans     = m.d.smart.recall_plans;
     s.smart_strategic_model  = m.d.smart.strategic.model;
     s.smart_strategic_effort = std::string{effort_wire(m.d.smart.strategic.effort)};
     s.smart_impl_model       = m.d.smart.implementation.model;
