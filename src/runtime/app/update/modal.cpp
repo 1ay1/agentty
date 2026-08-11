@@ -531,6 +531,9 @@ void persist_settings(const Model& m) {
     s.effort = std::string{effort_wire(m.d.effort)};
     // Smart Mode: enabled flag + any pinned slots (empty model = auto).
     s.smart_enabled          = m.d.smart.enabled;
+    s.smart_route_internal   = m.d.smart.route_internal;
+    s.smart_orchestrate      = m.d.smart.orchestrate;
+    s.smart_route_subagents  = m.d.smart.route_subagents;
     s.smart_strategic_model  = m.d.smart.strategic.model;
     s.smart_strategic_effort = std::string{effort_wire(m.d.smart.strategic.effort)};
     s.smart_impl_model       = m.d.smart.implementation.model;
@@ -538,6 +541,9 @@ void persist_settings(const Model& m) {
     s.smart_utility_model    = m.d.smart.utility.model;
     s.smart_utility_effort   = std::string{effort_wire(m.d.smart.utility.effort)};
     deps().save_settings(s);
+    // Keep the subagent role-router (Layer 3b) in step with any Smart Mode
+    // change the user just made in the overlay.
+    tools::subagent::set_smart(m.d.smart);
 }
 
 std::pair<Model, maya::Cmd<Msg>>

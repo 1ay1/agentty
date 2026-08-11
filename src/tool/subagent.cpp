@@ -44,6 +44,12 @@ void set_candidates(std::vector<ModelInfo> candidates) {
     g_cfg.candidates = std::move(candidates);
 }
 
+void set_smart(smart::RoleConfig smart) {
+    std::lock_guard lk(g_mu);
+    if (!g_cfg.installed) return;
+    g_cfg.smart = std::move(smart);
+}
+
 int current_depth() noexcept { return g_depth; }
 void push_depth() noexcept { ++g_depth; }
 void pop_depth() noexcept { if (g_depth > 0) --g_depth; }

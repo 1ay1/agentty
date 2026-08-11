@@ -662,9 +662,20 @@ Cmd<Msg> launch_stream(Model& m) {
     std::string compaction_model =
         smart::utility_model(model_id, m.d.available_models, m.d.smart);
 
+    // Layer 3a (orchestration): when active, the MAIN turn runs on the
+    // Strategic role's (model, effort) so the flagship orchestrates and
+    // delegates grunt work to subagents. Resolved here on the UI thread
+    // (needs the live catalog); a no-op profile == (model_id, effort) when
+    // orchestration is off, so the captured values below are always valid.
+    const bool orchestrate = m.d.smart.orchestration();
+    smart::RoleProfile strategic_profile =
+        smart::resolve_role(smart::ModelRole::Strategic, model_id,
+                            m.d.effort, m.d.available_models, m.d.smart);
+
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, context_max, retry_count,
+         orchestrate, strategic_profile,
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -677,7 +688,8 @@ Cmd<Msg> launch_stream(Model& m) {
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = compacting ? std::move(compaction_model)
-                                       : std::move(model_id);
+                                       : (orchestrate ? strategic_profile.model
+                                                      : std::move(model_id));
         // Compaction NEVER needs the 1M/2M extended-context window: it
         // summarises a transcript trimmed to ~65% of the BASE window into a
         // short text reply (no tools). If the parent is on a 1M variant and no
@@ -705,6 +717,23 @@ Cmd<Msg> launch_stream(Model& m) {
         // instructions; only constrained local endpoints use a compact profile.
         const auto sel_now = provider::active();
         req.system_prompt = provider::system_prompt_for(sel_now);
+        // Layer 3a (orchestration): teach the Strategic model to keep the
+        // thinking and DELEGATE mechanical work to subagents — the
+        // orchestrator-workers pattern. Only on the main turn (never on the
+        // text-only compaction pass).
+        if (orchestrate && !compacting) {
+            req.system_prompt +=
+                "\n\n<smart-mode>\nYou are the STRATEGIC model in a role-routed"
+                " team. Do the high-value thinking yourself — architecture,"
+                " decisions, review, decomposition. DELEGATE bounded, well-"
+                "specified mechanical work to subagents via the `task` tool:"
+                " send searching/reading/summarising to"
+                " task(agent_type:\"explorer\"), and code execution / edits to"
+                " task(agent_type:\"coder\"). Pass a crisp brief (objective +"
+                " constraints + relevant file:line refs), not your reasoning"
+                " transcript; keep only the decisions. Prefer delegation for"
+                " any sub-task a cheaper model can do correctly.\n</smart-mode>";
+        }
         const bool openai_provider = sel_now.kind == provider::Kind::OpenAI;
         // Weak models (small local / coder ids) still hide a few footgun
         // tools below; the prompt no longer branches on it.
@@ -726,7 +755,9 @@ Cmd<Msg> launch_stream(Model& m) {
         // Compaction never needs reasoning — summarising is a mechanical text
         // task — and the cheap compaction model may not even support the
         // parent's effort tier, so force it OFF (no wasted thinking tokens).
-        req.effort        = compacting ? std::string{} : std::move(effort);
+        req.effort        = compacting ? std::string{}
+                          : (orchestrate ? std::string{effort_wire(strategic_profile.effort)}
+                                         : std::move(effort));
         req.session_key   = std::move(session_key);
 
         // Ollama capability gate: if /api/show reported the model does NOT

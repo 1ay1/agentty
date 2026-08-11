@@ -114,6 +114,23 @@ int main() {
         CHECK(u.model == parent, "solo account: utility stays on parent (nothing cheaper)");
     }
 
+    // 5. The three behaviour layers gate independently, all under `enabled`.
+    {
+        sm::RoleConfig cfg;
+        // Off master ⇒ no layer is active regardless of flags.
+        CHECK(!cfg.internal_routing() && !cfg.orchestration() && !cfg.subagent_routing(),
+              "layers: disabled master → all layers inactive");
+        cfg.enabled = true;   // flags default true
+        CHECK(cfg.internal_routing() && cfg.orchestration() && cfg.subagent_routing(),
+              "layers: enabled + default flags → all three active");
+        cfg.orchestrate = false;
+        CHECK(cfg.internal_routing() && !cfg.orchestration() && cfg.subagent_routing(),
+              "layers: clearing one flag disables only that layer");
+        cfg.enabled = false;
+        CHECK(!cfg.internal_routing() && !cfg.subagent_routing(),
+              "layers: master off overrides any set flag");
+    }
+
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }
