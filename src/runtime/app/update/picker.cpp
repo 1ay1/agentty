@@ -150,6 +150,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
         },
         [&](CloseModelPicker) -> Step {
             m.ui.model_picker = pick::Closed{};
+            m.ui.smart_assign_slot = -1;   // abandon a slot-assign on Esc
             return done(std::move(m));
         },
         [&](ModelPickerMove& e) -> Step {
@@ -226,6 +227,33 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                 if (!vis.empty() && p->index >= 0
                     && p->index < static_cast<int>(vis.size())) {
                     const int real = vis[static_cast<std::size_t>(p->index)];
+                    const std::string chosen =
+                        m.d.available_models[static_cast<std::size_t>(real)].id.value;
+
+                    // Smart Mode slot-assign mode: write the chosen model into
+                    // the target role slot instead of switching the active
+                    // model. Enabling Smart Mode implicitly (pinning a slot
+                    // means you want it on).
+                    if (m.ui.smart_assign_slot >= 0) {
+                        smart::SlotOverride* slot = nullptr;
+                        switch (m.ui.smart_assign_slot) {
+                            case 0: slot = &m.d.smart.strategic;      break;
+                            case 1: slot = &m.d.smart.implementation; break;
+                            case 2: slot = &m.d.smart.utility;        break;
+                        }
+                        if (slot) {
+                            slot->model = chosen;
+                            slot->set   = true;
+                            m.d.smart.enabled = true;
+                        }
+                        m.ui.smart_assign_slot = -1;
+                        persist_settings(m);
+                        m.ui.model_picker = pick::Closed{};
+                        auto toast = set_status_toast(m,
+                            "Smart Mode slot set");
+                        return {std::move(m), std::move(toast)};
+                    }
+
                     m.d.model_id = m.d.available_models[static_cast<std::size_t>(real)].id;
                     // Update the per-model context cap so the status-bar ctx
                     // % bar (and the auto-compaction threshold) uses the right

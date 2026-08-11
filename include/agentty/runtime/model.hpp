@@ -192,6 +192,11 @@ struct Model {
     struct UI {
         ComposerState       composer;
         ui::pick::OneAxis   model_picker;     // Closed | OpenAt{index}
+        // When the model picker was opened to ASSIGN a Smart Mode role slot
+        // (not to switch the active model), this names the target slot.
+        // ModelPickerSelect writes the chosen model into that slot and
+        // clears this instead of switching models. -1 = normal model switch.
+        int                 smart_assign_slot = -1;   // -1 | 0=Strategic 1=Impl 2=Utility
         ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
         ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
         CommandPaletteState command_palette;
