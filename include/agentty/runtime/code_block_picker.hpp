@@ -240,6 +240,56 @@ enum class BlockShell {
     return out;
 }
 
+// Mid-stream-safe extraction: like extract_code_blocks, but DROPS a block
+// whose fence hasn't closed yet (the one still being typed at the live edge).
+// Running a half-typed command is dangerous — the model may not have finished
+// the line — so while a reply is still streaming we only ever offer blocks
+// whose closing ``` has already arrived. `complete_out` (optional) receives
+// whether the trailing block was still open, so the caller can hint "a block
+// is still streaming" vs "no blocks at all".
+[[nodiscard]] inline std::vector<CodeBlock>
+extract_closed_code_blocks(std::string_view text, bool* had_open = nullptr) {
+    // Detect an unterminated trailing fence by re-scanning fence lines: an
+    // odd number of fence-delimiter lines (opening without a matching close)
+    // means the last opened block never closed.
+    auto blocks = extract_code_blocks(text);
+    bool open_tail = false;
+    {
+        std::size_t pos = 0;
+        bool in_block = false;
+        char fence_ch = '`';
+        while (pos <= text.size()) {
+            std::size_t eol = text.find('\n', pos);
+            std::size_t len =
+                (eol == std::string_view::npos ? text.size() : eol) - pos;
+            std::string_view line = text.substr(pos, len);
+            if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+            std::string_view t = line;
+            int indent = 0;
+            while (!t.empty() && t.front() == ' ' && indent < 3) {
+                t.remove_prefix(1); ++indent;
+            }
+            const bool is_fence = t.size() >= 3
+                && (t[0] == '`' || t[0] == '~') && t[1] == t[0] && t[2] == t[0];
+            if (!in_block) {
+                if (is_fence) { in_block = true; fence_ch = t[0]; }
+            } else if (is_fence && t[0] == fence_ch) {
+                std::size_t i = 0;
+                while (i < t.size() && t[i] == fence_ch) ++i;
+                while (i < t.size() && t[i] == ' ') ++i;
+                if (i == t.size()) in_block = false;   // valid close
+            }
+            if (eol == std::string_view::npos) break;
+            pos = eol + 1;
+        }
+        open_tail = in_block;
+    }
+    if (had_open) *had_open = open_tail;
+    // extract_code_blocks appended the still-open block last; drop it.
+    if (open_tail && !blocks.empty()) blocks.pop_back();
+    return blocks;
+}
+
 struct Closed {};
 
 struct Open {

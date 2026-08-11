@@ -2086,6 +2086,18 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME command_palette_test COMMAND command_palette_test)
     set_tests_properties(command_palette_test PROPERTIES TIMEOUT 30)
 
+    # code_block_extract_test — the Ctrl+G fenced-block extractor, focused on
+    # the mid-stream-safe path: extract_closed_code_blocks must drop a
+    # trailing block whose ``` fence hasn't arrived yet (running a half-typed
+    # command is unsafe), keep every closed block, handle tilde fences, and
+    # report had_open so the reducer can say "still streaming" vs "no blocks".
+    # Header-only (code_block_picker.hpp), no deps.
+    add_executable(code_block_extract_test EXCLUDE_FROM_ALL
+        tests/code_block_extract_test.cpp)
+    target_include_directories(code_block_extract_test PRIVATE include)
+    add_test(NAME code_block_extract_test COMMAND code_block_extract_test)
+    set_tests_properties(code_block_extract_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2332,6 +2344,7 @@ if(AGENTTY_BUILD_TESTS)
         persistence_proactive_test
         codex_login_flow_test
         command_palette_test
+        code_block_extract_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test
