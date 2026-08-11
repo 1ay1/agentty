@@ -540,7 +540,13 @@ Element command_palette(const Model& m) {
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
             Picker::Config::Row row;
-            row.leading        = std::string{cmd.label};
+            // Smart Mode is a toggle — surface its live state in the label so
+            // the palette shows what pressing Enter will do.
+            if (cmd.id == Command::SmartMode)
+                row.leading = std::string{cmd.label}
+                            + (m.d.smart.enabled ? "  (on)" : "  (off)");
+            else
+                row.leading = std::string{cmd.label};
             row.leading_style  = fg_of(muted);
             // Trailing carries the one-line description and — for commands
             // that have a direct global keybinding — the shortcut, so the
