@@ -325,6 +325,19 @@ Step submit_message(Model m) {
             proactive_probe = std::move(probe);
         }
     }
+    // Chip-stripped, human-readable view of the turn for Smart Mode's
+    // speculative prewarm (Innovation 3). Captured before `user` is moved.
+    std::string speculate_probe;
+    if (m.d.smart.speculation()) {
+        speculate_probe.reserve(user.text.size());
+        for (std::size_t i = 0; i < user.text.size();) {
+            if (static_cast<unsigned char>(user.text[i]) == attachment::kSentinel) {
+                auto len = attachment::placeholder_len_at(user.text, i);
+                if (len > 0) { i += len; continue; }
+            }
+            speculate_probe.push_back(user.text[i++]);
+        }
+    }
 
     // Freeze the prior turn AND the freshly-pushed User in one pass —
     // the agent_session SessionStart analog (it pushes gap() + the user
@@ -395,6 +408,13 @@ Step submit_message(Model m) {
     // detail what orchestration did. Wire-inert; std::nullopt when off.
     if (auto card = cmd::build_smart_routing_card(m))
         m.d.current.messages.push_back(std::move(*card));
+
+    // Innovation 3 (deep) — SPECULATIVE: on a Complex orchestrated turn, kick a
+    // detached retrieval warm-up NOW so the workspace grounding is hot by the
+    // time the lead delegates. Free (local retrieval), best-effort.
+    if (m.d.smart.speculation() && !speculate_probe.empty()
+        && smart::classify_complexity(speculate_probe) == smart::Complexity::Complex)
+        tools::smart_speculative_prewarm(speculate_probe);
 
     Message placeholder;
     placeholder.role = Role::Assistant;

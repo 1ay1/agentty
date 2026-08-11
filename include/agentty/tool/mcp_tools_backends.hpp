@@ -37,6 +37,13 @@ void rag_apply_settings(const store::RagConfig& cfg);
 // no per-thread override.
 [[nodiscard]] bool proactive_first_turn_only();
 
+// Smart Mode Innovation 3 (SPECULATIVE): kick a detached, best-effort code/
+// docs retrieval warm-up for `query` so the workspace index is hot and the
+// grounding is pre-fetched by the time the orchestrator delegates — real
+// speculative execution overlapping the lead's thinking, with zero wasted-
+// token risk (retrieval is local). Returns immediately; never throws.
+void smart_speculative_prewarm(const std::string& query);
+
 // ── Proactive retrieval (explicit opt-in) ────────────────────────────
 // Run the RAG pipeline outside the model's tool loop. The app invokes the
 // blocking form on an isolated worker and launches the model only after it

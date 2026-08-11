@@ -15,6 +15,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/routing_memory.hpp"
+#include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
@@ -710,6 +711,7 @@ Cmd<Msg> launch_stream(Model& m) {
     const bool orchestrate = m.d.smart.orchestration();
     const bool plan_recall = m.d.smart.plan_recall();
     const bool speculative = m.d.smart.speculation();
+    std::string recalled_plan;   // filled below when a past decomposition matches
     smart::RoleProfile strategic_profile =
         smart::resolve_role(smart::ModelRole::Strategic, model_id,
                             m.d.effort, m.d.available_models, m.d.smart);
@@ -739,6 +741,20 @@ Cmd<Msg> launch_stream(Model& m) {
             smart::RoutingMemory::instance().note_routed(sig);
         }
         m.s.smart_turn_signature = sig;
+        // Innovation 4 (deep) — PLAN RECALL: pull the closest past successful
+        // decomposition for this class of turn and hand it to the orchestrator
+        // as a concrete few-shot, so it reuses what worked in THIS repo.
+        if (m.d.smart.plan_recall() && !sig.empty()
+            && turn_complexity == smart::Complexity::Complex) {
+            auto hits = smart::DecompositionMemory::instance().recall(sig, 1);
+            if (!hits.empty() && !hits.front().steps.empty()) {
+                std::string plan = "A past turn like this in THIS repo was "
+                                   "decomposed as:\n";
+                for (const auto& s : hits.front().steps) plan += "  • " + s + "\n";
+                plan += "Reuse this shape where it fits; adapt as needed.";
+                recalled_plan = std::move(plan);
+            }
+        }
         strategic_profile.effort =
             smart::effort_for_complexity(strategic_profile.effort, turn_complexity,
                                          caps, total_bias);
@@ -750,6 +766,7 @@ Cmd<Msg> launch_stream(Model& m) {
         [thread = std::move(thread_snapshot),
          compacting, compaction_style, context_max, retry_count,
          orchestrate, strategic_profile, turn_complexity, plan_recall, speculative,
+         recalled_plan = std::move(recalled_plan),
          session_key = std::move(session_key),
          model_id = std::move(model_id),
          compaction_model = std::move(compaction_model),
@@ -835,6 +852,7 @@ Cmd<Msg> launch_stream(Model& m) {
                      "memory and `search_docs` for a prior decomposition or plan "
                      "that worked, and reuse its shape rather than re-deriving it."
                    : "") +
+                (recalled_plan.empty() ? "" : "\n" + recalled_plan) +
                 (speculative && turn_complexity == smart::Complexity::Complex
                    ? "\nSPECULATE: fire your first exploration task(s) as your "
                      "VERY FIRST action — before you finish planning — so the "
