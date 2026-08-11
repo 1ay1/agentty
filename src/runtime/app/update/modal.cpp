@@ -529,6 +529,14 @@ void persist_settings(const Model& m) {
     if (!m.d.model_id.empty())
         s.provider_models[active_provider_id()] = m.d.model_id.value;
     s.effort = std::string{effort_wire(m.d.effort)};
+    // Smart Mode: enabled flag + any pinned slots (empty model = auto).
+    s.smart_enabled          = m.d.smart.enabled;
+    s.smart_strategic_model  = m.d.smart.strategic.model;
+    s.smart_strategic_effort = std::string{effort_wire(m.d.smart.strategic.effort)};
+    s.smart_impl_model       = m.d.smart.implementation.model;
+    s.smart_impl_effort      = std::string{effort_wire(m.d.smart.implementation.effort)};
+    s.smart_utility_model    = m.d.smart.utility.model;
+    s.smart_utility_effort   = std::string{effort_wire(m.d.smart.utility.effort)};
     deps().save_settings(s);
 }
 
