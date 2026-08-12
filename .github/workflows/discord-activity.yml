@@ -1,0 +1,103 @@
+name: discord-activity
+
+# Split ALL repo activity into per-type Discord channels.
+#
+# GitHub's native webhook -> Discord "/github" adapter is one-channel-per-URL,
+# so to route by event TYPE we forward each event's raw payload to the matching
+# channel webhook here. Discord still renders every event natively (commit
+# lists, issue/PR cards, release notes, stars) — we just choose the destination.
+#
+# Channels (each a repo secret holding the Discord webhook URL, WITHOUT the
+# trailing /github — the workflow appends it):
+#   DISCORD_WH_COMMITS   -> #commits        (push)
+#   DISCORD_WH_ACTIVITY  -> #activity       (issues, PRs, reviews, discussions)
+#   DISCORD_WH_RELEASES  -> #releases-feed  (release, create/delete tags)
+#   DISCORD_WH_STARS     -> #stars          (star, fork)
+#
+# Any secret left unset -> that event is skipped silently. The prettier release
+# embed in #announcements is handled separately by discord-release.yml.
+
+on:
+  push:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, assigned]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, closed, reopened, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+  discussion:
+    types: [created, answered]
+  discussion_comment:
+    types: [created]
+  release:
+    types: [published, released]
+  create:
+  delete:
+  star:
+    types: [created]
+  fork:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-activity-${{ github.event_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Route event to the right Discord channel
+        env:
+          EVENT: ${{ github.event_name }}
+          PAYLOAD: ${{ toJSON(github.event) }}
+          WH_COMMITS: ${{ secrets.DISCORD_WH_COMMITS }}
+          WH_ACTIVITY: ${{ secrets.DISCORD_WH_ACTIVITY }}
+          WH_RELEASES: ${{ secrets.DISCORD_WH_RELEASES }}
+          WH_STARS: ${{ secrets.DISCORD_WH_STARS }}
+        run: |
+          set -euo pipefail
+
+          # Map the event type to a destination webhook.
+          case "$EVENT" in
+            push)
+              WH="$WH_COMMITS" ;;
+            issues|issue_comment|pull_request|pull_request_review|pull_request_review_comment|discussion|discussion_comment)
+              WH="$WH_ACTIVITY" ;;
+            release|create|delete)
+              WH="$WH_RELEASES" ;;
+            star|fork)
+              WH="$WH_STARS" ;;
+            *)
+              echo "Unhandled event '$EVENT' — skipping."; exit 0 ;;
+          esac
+
+          if [ -z "${WH:-}" ]; then
+            echo "No webhook configured for '$EVENT' — skipping."; exit 0
+          fi
+
+          # Skip empty pushes (e.g. branch deletes arrive as push with no commits
+          # AND a delete event; let the delete event handle those).
+          if [ "$EVENT" = "push" ]; then
+            commits=$(printf '%s' "$PAYLOAD" | jq '.commits | length')
+            if [ "$commits" = "0" ]; then
+              echo "Push with no commits — skipping (handled by create/delete)."; exit 0
+            fi
+          fi
+
+          # Forward the raw payload to Discord's native GitHub adapter. Passing
+          # the original X-GitHub-Event header lets Discord render it natively.
+          code=$(printf '%s' "$PAYLOAD" | curl -s -o /tmp/resp -w '%{http_code}' \
+            -X POST "$WH/github" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: $EVENT" \
+            --data-binary @-)
+          echo "Discord ($EVENT) responded: $code"
+          cat /tmp/resp 2>/dev/null || true
+          # 204 = posted, 200 = accepted; anything else is a failure worth seeing.
+          [ "$code" = "204" ] || [ "$code" = "200" ]
