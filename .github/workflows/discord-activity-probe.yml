@@ -1,0 +1,8 @@
+name: discord-activity-probe
+on:
+  push:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "event=${{ github.event_name }} ok"
