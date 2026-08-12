@@ -33,16 +33,12 @@ on:
     types: [published, released]
   create:
   delete:
-  star:
-    types: [created]
   fork:
+  watch:
+    types: [started]
 
 permissions:
   contents: read
-
-concurrency:
-  group: discord-activity-${{ github.event_name }}-${{ github.run_id }}
-  cancel-in-progress: false
 
 jobs:
   forward:
@@ -67,7 +63,7 @@ jobs:
               WH="$WH_ACTIVITY" ;;
             release|create|delete)
               WH="$WH_RELEASES" ;;
-            star|fork)
+            watch|star|fork)
               WH="$WH_STARS" ;;
             *)
               echo "Unhandled event '$EVENT' — skipping."; exit 0 ;;
@@ -88,10 +84,14 @@ jobs:
 
           # Forward the raw payload to Discord's native GitHub adapter. Passing
           # the original X-GitHub-Event header lets Discord render it natively.
+          # Note: the Actions trigger for starring is `watch`, but Discord's
+          # adapter expects the webhook event name `star` — translate it.
+          GH_EVENT="$EVENT"
+          [ "$EVENT" = "watch" ] && GH_EVENT="star"
           code=$(printf '%s' "$PAYLOAD" | curl -s -o /tmp/resp -w '%{http_code}' \
             -X POST "$WH/github" \
             -H "Content-Type: application/json" \
-            -H "X-GitHub-Event: $EVENT" \
+            -H "X-GitHub-Event: $GH_EVENT" \
             --data-binary @-)
           echo "Discord ($EVENT) responded: $code"
           cat /tmp/resp 2>/dev/null || true
