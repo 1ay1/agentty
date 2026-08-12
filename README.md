@@ -53,6 +53,9 @@ read · write · edit · bash · grep · glob · git · web · search_docs · se
 ### 🧠 Learns your codebase
 Agent Skills + remember/forget memory, plus a fully **local RAG** engine — hybrid BM25 + embeddings, RRF-fused, reranked, diversified, and expanded over a **GraphRAG** document graph — over your docs, skills, and memory. Teach it once, every session knows your conventions. [How it works ↓](#retrieval-rag)
 
+### 🎯 Smart Mode
+One flagship model plans; cheaper models do the legwork. Effort scales to each turn's complexity, a cascade retries harder only when a cheap attempt falls short, and the router **learns your repo** across sessions. Off is a strict no-op. [How it works ↓](#smart-mode)
+
 </td>
 </tr>
 </table>
@@ -164,6 +167,33 @@ rescore, ~2.5×). Full write-up:
 [`docs/website/retrieval.md`](docs/website/retrieval.md).
 
 </details>
+
+## Smart Mode
+
+One model rarely fits every turn. A one-line rename and a cross-file refactor
+don't deserve the same effort, and burning flagship reasoning on trivia is
+just slow and expensive. Smart Mode (`^S`) fixes that with an
+**orchestrator-workers** design: a strong model owns the plan and delegates
+well-scoped subtasks to cheaper workers.
+
+It's built from **three roles** and **eight independent layers**, each a toggle:
+
+- **Strategic** (flagship) plans and delegates · **Implementation** (mid) writes
+  code · **Utility** (cheap) handles summaries and grunt work. The resolver maps
+  a *role* to `(model, effort)` — it never checks a model name by string, so
+  pinning any model to any slot is always safe.
+- **Complexity-scaled effort** sizes each turn (trivial → complex), and a
+  **cascade** retries at higher effort only when a cheap attempt actually falls
+  short — the RouteLLM/cascade idea applied *inside* the agent loop.
+- Because the loop sees outcomes a stateless router can't — the build fails, the
+  test goes red, you correct the next turn — Smart Mode **learns per-workspace**:
+  it persists the effort prior the cascade discovered and recalls decompositions
+  that worked. The second session in a repo is smarter than the first. All
+  learning is local, on-disk (`.agentty/`), and wipeable.
+
+Open the overlay with `^S`; the footer shows what it's learned in this repo.
+**Off is a strict byte-for-byte no-op** — zero extra tokens, zero latency.
+Full write-up: [`docs/website/smart-mode.md`](docs/website/smart-mode.md).
 
 ## Keys
 
