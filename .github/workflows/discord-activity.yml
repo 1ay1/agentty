@@ -29,10 +29,6 @@ on:
     types: [submitted]
   pull_request_review_comment:
     types: [created]
-  discussion:
-    types: [created, answered]
-  discussion_comment:
-    types: [created]
   release:
     types: [published, released]
   create:
@@ -67,7 +63,7 @@ jobs:
           case "$EVENT" in
             push)
               WH="$WH_COMMITS" ;;
-            issues|issue_comment|pull_request|pull_request_review|pull_request_review_comment|discussion|discussion_comment)
+            issues|issue_comment|pull_request|pull_request_review|pull_request_review_comment)
               WH="$WH_ACTIVITY" ;;
             release|create|delete)
               WH="$WH_RELEASES" ;;
