@@ -1,0 +1,64 @@
+name: discord-release
+
+# Announce every published GitHub release to the Discord #announcements channel.
+# Zero hosting: GitHub runs this on the release event and POSTs a rich embed to
+# a Discord webhook URL stored in the repo secret DISCORD_RELEASE_WEBHOOK.
+#
+# Setup (once):
+#   1. In Discord: #announcements → Edit Channel → Integrations → Webhooks →
+#      New Webhook → Copy Webhook URL.
+#   2. In GitHub: repo → Settings → Secrets and variables → Actions →
+#      New repository secret → name DISCORD_RELEASE_WEBHOOK, paste the URL.
+# That's it — every release now auto-posts. No server, no bot needed for this.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ github.event.release.tag_name }}
+          NAME: ${{ github.event.release.name }}
+          URL: ${{ github.event.release.html_url }}
+          BODY: ${{ github.event.release.body }}
+        run: |
+          # Skip silently if the webhook secret isn't configured.
+          if [ -z "$WEBHOOK" ]; then
+            echo "DISCORD_RELEASE_WEBHOOK not set — skipping."; exit 0
+          fi
+          # Trim release notes to keep the embed within Discord's 4096-char limit.
+          notes=$(printf '%s' "$BODY" | head -c 1800)
+          title="${NAME:-$TAG}"
+          payload=$(jq -n \
+            --arg title "🚀 agentty $title" \
+            --arg url "$URL" \
+            --arg desc "$notes" \
+            --arg tag "$TAG" \
+            '{
+              username: "agentty releases",
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 13653980,
+                footer: { text: "agentty • \($tag)" }
+              }],
+              components: [{
+                type: 1,
+                components: [
+                  { type: 2, style: 5, label: "Release notes", url: $url },
+                  { type: 2, style: 5, label: "Install", url: "https://agentty.org/docs/installation" }
+                ]
+              }]
+            }')
+          code=$(curl -s -o /tmp/resp -w '%{http_code}' \
+            -H "Content-Type: application/json" \
+            -d "$payload" "$WEBHOOK")
+          echo "Discord responded: $code"
+          cat /tmp/resp || true
+          [ "$code" = "204" ] || [ "$code" = "200" ]
