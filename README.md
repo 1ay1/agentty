@@ -10,6 +10,7 @@
   <a href="https://github.com/1ay1/agentty/stargazers"><img src="https://img.shields.io/github/stars/1ay1/agentty?style=flat-square&color=f1c40f&labelColor=555555" alt="Stars" /></a>
   <a href="https://github.com/1ay1/agentty/releases"><img src="https://img.shields.io/github/downloads/1ay1/agentty/total?style=flat-square&color=brightgreen" alt="Downloads" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
+  <a href="https://discord.gg/qhb9AZ8f3c"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
 <p align="center">
@@ -381,6 +382,10 @@ winget, Homebrew, Scoop, and the AUR — nix/snap/gentoo manifests are attached
 to the release. `--dry-run` previews without writing anything.
 
 </details>
+
+## Community
+
+Join the [**Discord**](https://discord.gg/qhb9AZ8f3c) to ask questions, share sessions, and get help. The server has an AI helper bot that answers agentty questions using the real agent — `@mention` it, DM it, or use `/ask`.
 
 ## License
 
