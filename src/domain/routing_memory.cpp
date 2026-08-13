@@ -16,6 +16,8 @@
 #include <mutex>
 #include <unordered_map>
 
+#include "agentty/tool/util/fs_helpers.hpp"
+
 namespace fs = std::filesystem;
 
 namespace agentty::smart {
@@ -36,10 +38,32 @@ std::string turn_signature(Complexity tier, std::string_view text) {
     }
     is_long = words >= 40;
 
+    // Coarse INTENT axis: the leading verb clusters distinct kinds of work
+    // (fix vs. add vs. explain) that otherwise collide onto one signature and
+    // bleed each other's priors. Lowercased opening scan, single char code,
+    // so cardinality stays bounded (4 values).
+    char intent = '.';
+    {
+        std::string head;
+        head.reserve(24);
+        for (char c : text) {
+            if (head.size() >= 24) break;
+            head.push_back((c >= 'A' && c <= 'Z') ? char(c + 32) : c);
+        }
+        auto has = [&](std::string_view w){ return head.find(w) != std::string::npos; };
+        if (has("fix") || has("bug") || has("broke") || has("error") || has("debug"))
+            intent = 'f';                                   // repair
+        else if (has("add") || has("implement") || has("create") || has("write") || has("build"))
+            intent = 'a';                                   // build
+        else if (has("why") || has("explain") || has("how") || has("what") || has("understand"))
+            intent = 'e';                                   // explain
+    }
+
     std::string sig{to_string(tier)};
     sig += has_q     ? ":q"  : ":.";
     sig += looks_code? ":c"  : ":.";
     sig += is_long   ? ":l"  : ":.";
+    sig += ":"; sig += intent;
     return sig;
 }
 
@@ -57,21 +81,21 @@ struct RoutingMemory::Impl {
     fs::path tsv_path() {
         std::string root = forced_root;
         if (root.empty()) {
-            std::error_code ec;
-            auto cwd = fs::current_path(ec);
-            if (ec) return {};
-            root = cwd.string();
+            // The ACTIVE PROJECT dir (process cwd clamped inside the access
+            // boundary), NOT raw current_path — under --workspace / the two
+            // differ and the store must land where the rest of persistence
+            // does. Best-effort: empty ⇒ neutral / no persistence.
+            auto pr = tools::util::project_root();
+            if (pr.empty()) return {};
+            root = pr.string();
         }
         return fs::path{root} / ".agentty" / "routing_memory.tsv";
     }
 
     void ensure_loaded() {
         std::string root = forced_root;
-        if (root.empty()) {
-            std::error_code ec;
-            auto cwd = fs::current_path(ec);
-            root = ec ? std::string{} : cwd.string();
-        }
+        if (root.empty())
+            root = tools::util::project_root().string();
         if (loaded && loaded_for == root) return;
         counts.clear();
         loaded = true;

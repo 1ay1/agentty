@@ -148,6 +148,28 @@ int main() {
         CHECK(triv == Effort::None, "cascade: trivial stays None despite +bias");
     }
 
+    // 7. resolve_subagent_role: a worker never thinks harder than its parent.
+    //    reviewer→Strategic returns the parent model at parent effort; the
+    //    subagent wrapper must clamp that to ≤ parent (invariant: subagent
+    //    effort ≤ parent effort; parent None ⇒ worker None).
+    {
+        sm::RoleConfig cfg; cfg.enabled = true;
+        const char* parent = "gpt-5";   // supports effort
+        std::vector<ModelInfo> g5 = { mi("gpt-5"), mi("gpt-5-mini") };
+        // Parent thinking Low: a Strategic-routed reviewer must not exceed Low.
+        auto rev = sm::resolve_subagent_role(sm::ModelRole::Strategic, parent,
+                                             Effort::Low, g5, cfg);
+        CHECK(static_cast<int>(rev.effort) <= static_cast<int>(Effort::Low),
+              "subagent: reviewer effort clamped to ≤ parent (Low)");
+        // Parent effort OFF ⇒ every worker role is off too.
+        for (auto role : {sm::ModelRole::Strategic, sm::ModelRole::Implementation,
+                          sm::ModelRole::Utility}) {
+            auto p = sm::resolve_subagent_role(role, parent, Effort::None, g5, cfg);
+            CHECK(p.effort == Effort::None,
+                  "subagent: parent effort None ⇒ worker effort None");
+        }
+    }
+
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

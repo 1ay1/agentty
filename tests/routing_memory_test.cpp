@@ -64,6 +64,16 @@ int main() {
     // Telemetry count reflects the distinct signatures seen.
     CHECK(rm.learned_count() >= 2, "learned_count reflects seen signatures");
 
+    // Intent axis: same tier + shape but different leading verb must NOT
+    // collide, so a 'fix' prior doesn't bleed into an 'add' turn.
+    {
+        const std::string fix = turn_signature(Complexity::Standard, "fix the parser");
+        const std::string add = turn_signature(Complexity::Standard, "add a parser");
+        const std::string exp = turn_signature(Complexity::Standard, "explain the parser");
+        CHECK(fix != add && add != exp && fix != exp,
+              "distinct intents (fix/add/explain) → distinct signatures");
+    }
+
     // Reset wipes the workspace's learning.
     rm.reset();
     CHECK(rm.prior_bias(sig) == 0 && rm.prior_bias(ov) == 0,

@@ -587,7 +587,8 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         if (it->role == Role::User && !it->proactive_context) {
             newest_user = it->text; break;
         }
-    const smart::Complexity cx = smart::classify_complexity(newest_user);
+    const smart::Complexity cx =
+        smart::classify_with_context(newest_user, m.s.smart_turn_complexity);
     const auto caps = ModelCapabilities::from_id(prof.model);
     const Effort scaled = smart::effort_for_complexity(prof.effort, cx, caps,
                                                        m.s.smart_effort_bias);
@@ -727,18 +728,36 @@ Cmd<Msg> launch_stream(Model& m) {
             if (it->role == Role::User && !it->proactive_context) {
                 newest_user = it->text; break;
             }
-        turn_complexity = smart::classify_complexity(newest_user);
+        // Context-aware: a short follow-up to a Complex turn keeps some of
+        // that weight instead of collapsing to Simple. m.s.smart_turn_complexity
+        // still holds the PREVIOUS turn's tier here (overwritten below at 776).
+        turn_complexity =
+            smart::classify_with_context(newest_user, m.s.smart_turn_complexity);
         const auto caps = ModelCapabilities::from_id(strategic_profile.model);
         // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this
-        // repo has taught us for this class of turn (persisted cascade), on
-        // top of the live session bias. Record the routing so the outcome
-        // signal at finalize_turn has a denominator.
+        // repo has taught us for this class of turn (persisted cascade). The
+        // live session bias (smart_effort_bias) and this persisted prior encode
+        // the SAME regret signal at two timescales, so we must NOT sum them —
+        // that double-escalates a sticky turn-class to ~2× the intended
+        // correction. Blend instead: take whichever points harder in a given
+        // direction, keeping the effort nudge a single-strength correction.
         int total_bias = m.s.smart_effort_bias;
         std::string sig;
         if (m.d.smart.routing_learning()) {
             sig = smart::turn_signature(turn_complexity, newest_user);
-            total_bias += smart::RoutingMemory::instance().prior_bias(sig);
-            smart::RoutingMemory::instance().note_routed(sig);
+            const int prior = smart::RoutingMemory::instance().prior_bias(sig);
+            // Same-sign: keep the stronger. Opposite-sign (session dynamics
+            // disagree with the durable prior): let the live session win, it's
+            // the more recent evidence. Either way, no stacking.
+            if ((prior >= 0) == (total_bias >= 0))
+                total_bias = std::abs(prior) > std::abs(total_bias) ? prior : total_bias;
+            // Record the routing ONCE per user turn so the outcome signal at
+            // finalize_turn has an honest denominator. launch_stream re-runs on
+            // post-tool sub-turns and transient retries; the latch skips those.
+            if (!m.s.smart_turn_routed) {
+                smart::RoutingMemory::instance().note_routed(sig);
+                m.s.smart_turn_routed = true;
+            }
         }
         m.s.smart_turn_signature = sig;
         // Innovation 4 (deep) — PLAN RECALL: pull the closest past successful

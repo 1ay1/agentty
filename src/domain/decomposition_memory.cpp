@@ -16,6 +16,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/tool/util/fs_helpers.hpp"
+
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
@@ -31,9 +33,10 @@ struct DecompositionMemory::Impl {
 
     std::string root() {
         if (!forced_root.empty()) return forced_root;
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        return ec ? std::string{} : cwd.string();
+        // Active project dir (cwd clamped inside the workspace boundary),
+        // not raw current_path — keeps per-workspace learning aligned with
+        // the rest of persistence under --workspace.
+        return tools::util::project_root().string();
     }
     fs::path path() {
         auto r = root();

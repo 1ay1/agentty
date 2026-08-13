@@ -255,6 +255,28 @@ namespace detail {
     return pass;
 }
 
+// Subagent-context role resolution. Identical model routing to resolve_role,
+// but the returned reasoning effort is HARD-CLAMPED to the parent's: a worker
+// must never think harder than the turn that spawned it (invariant: subagent
+// effort ≤ parent effort; when the parent's effort is off, every worker's is
+// off too). This keeps the invariant in the resolver instead of relying on the
+// call site never wiring req.effort — a reviewer/coder role mapped to Strategic
+// (which returns the parent model at parent effort) would otherwise inherit
+// full parent effort the moment a caller reads .effort.
+[[nodiscard]] inline RoleProfile resolve_subagent_role(
+        ModelRole role,
+        std::string_view parent_model,
+        Effort parent_effort,
+        const std::vector<ModelInfo>& candidates,
+        const RoleConfig& cfg) {
+    RoleProfile p = resolve_role(role, parent_model, parent_effort,
+                                 candidates, cfg);
+    // min(resolved, parent) on the ordered Effort scale.
+    if (static_cast<int>(p.effort) > static_cast<int>(parent_effort))
+        p.effort = parent_effort;
+    return p;
+}
+
 // Convenience for the INTERNAL utility calls (compaction summary, commit
 // messages, HyDE query expansion, fork/thread retrieval). These already
 // default to the cheapest capable model even with Smart Mode OFF — so this

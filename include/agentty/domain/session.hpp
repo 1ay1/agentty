@@ -547,6 +547,13 @@ struct StreamState {
     // finalize_turn can attribute the outcome regret to the right class of
     // turn. Empty when learned routing is off.
     std::string smart_turn_signature;
+    // First-stream-of-turn latch for learned-routing accounting. launch_stream
+    // re-runs on every post-tool sub-turn AND every transient retry; without
+    // this gate each of those would call note_routed() again, inflating the
+    // `routed` denominator 5× on a tool-heavy turn and structurally diluting
+    // the regret rate the prior is built from. Set true after the first
+    // note_routed of a user turn; reset to false at submit_message.
+    bool smart_turn_routed = false;
     // Which summary shape the in-flight compaction is producing. Set at
     // CompactContext / fork kickoff, read by the wire builder to choose the
     // summarisation prompt. Defaults to Recoverable (the original behaviour).
