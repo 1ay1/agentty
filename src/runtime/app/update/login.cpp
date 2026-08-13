@@ -549,16 +549,33 @@ Step login_submit(Model m) {
 }
 
 Step login_copy_auth_url(Model m) {
-    auto* oc = std::get_if<login::OAuthCode>(&m.ui.login);
-    if (!oc || oc->authorize_url.empty()) return done(std::move(m));
-    auto url = oc->authorize_url;
-    (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
-    auto write_cmd = Cmd<Msg>::write_clipboard(url);
-    auto toast = set_status_toast(m,
-        "authorize URL copied to clipboard",
-        std::chrono::seconds{3});
-    return {std::move(m),
-        Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+    if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) {
+        if (oc->authorize_url.empty()) return done(std::move(m));
+        auto url = oc->authorize_url;
+        (void)write_clipboard_text(url);   // native pbcopy/wl-copy/xclip
+        auto write_cmd = Cmd<Msg>::write_clipboard(url);
+        auto toast = set_status_toast(m,
+            "authorize URL copied to clipboard",
+            std::chrono::seconds{3});
+        return {std::move(m),
+            Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+    }
+    // Copilot device flow: the CODE is what the user types into the browser,
+    // so copy THAT (not the URL). Terminal text-selection can't grab it — the
+    // modal re-renders on every poll tick, wiping any selection — so this
+    // keystroke is the reliable way to get the code onto the clipboard.
+    if (auto* cw = std::get_if<login::CopilotWaiting>(&m.ui.login)) {
+        if (cw->user_code.empty()) return done(std::move(m));
+        auto code = cw->user_code;
+        (void)write_clipboard_text(code);
+        auto write_cmd = Cmd<Msg>::write_clipboard(code);
+        auto toast = set_status_toast(m,
+            "code " + code + " copied to clipboard",
+            std::chrono::seconds{3});
+        return {std::move(m),
+            Cmd<Msg>::batch(std::move(write_cmd), std::move(toast))};
+    }
+    return done(std::move(m));
 }
 
 Step login_open_browser_again(Model m) {
