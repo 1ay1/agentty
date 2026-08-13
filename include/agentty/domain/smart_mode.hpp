@@ -20,6 +20,7 @@
 // A single-model / Opus-only / one-tier account degrades to "everything on the
 // parent model" — no change, no regression — exactly like the subagent router.
 
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -337,6 +338,18 @@ namespace detail {
     }
     return cheapest_capable_model(wire_model_id(parent_model), candidates,
                                   ModelCapabilities::Tier::Cheap);
+}
+
+// Blend the live SESSION cascade bias with the persisted LEARNED prior. Both
+// encode the same regret signal at two timescales, so they must NOT be summed
+// (that double-escalates a sticky turn-class). Same-sign: keep whichever points
+// harder. Opposite-sign: the live session wins (more recent evidence). Used by
+// both launch_stream (the real effort) and the routing card (its provenance),
+// so the card can never disagree with the wire.
+[[nodiscard]] inline int blend_bias(int session, int prior) noexcept {
+    if ((prior >= 0) == (session >= 0))
+        return std::abs(prior) > std::abs(session) ? prior : session;
+    return session;
 }
 
 } // namespace agentty::smart

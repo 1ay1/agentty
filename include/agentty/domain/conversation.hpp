@@ -417,6 +417,9 @@ struct Message {
     std::string smart_route_model;    // wire id the Strategic turn ran on
     std::string smart_route_effort;   // effort label ("off"/"high"/…)
     std::string smart_route_complexity; // "trivial"/"simple"/"standard"/"complex"
+    std::string smart_route_note;     // effort PROVENANCE, e.g.
+                                      // "medium → complex · learned +1 · session -1"
+                                      // — makes the adaptive decision legible.
     bool        smart_route_orchestrate = false;  // delegation directive active
     bool        smart_route_subagents   = false;  // per-role subagent routing
 
@@ -469,6 +472,7 @@ struct Message {
             mix(smart_route_model.size());
             mix(smart_route_effort.size());
             mix(smart_route_complexity.size());
+            mix(smart_route_note.size());
             mix((smart_route_orchestrate ? 16ULL : 0ULL)
                 | (smart_route_subagents ? 32ULL : 0ULL));
         }
