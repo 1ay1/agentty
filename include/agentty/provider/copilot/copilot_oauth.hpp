@@ -71,6 +71,25 @@ using CancelProbe    = std::function<bool()>;
 [[nodiscard]] std::expected<GithubToken, OAuthError>
 login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled);
 
+// The account's real plan + quota entitlement, from GET
+// api.github.com/copilot_internal/user — the AUTHORITATIVE source for which
+// model classes the account may use (the /models catalog is global and does
+// NOT encode per-account access). premium_available gates the premium model
+// families (Claude, Gemini, GPT-5.x, o-series); when it's false only the
+// base/free models (gpt-4o family) are usable.
+struct Entitlement {
+    std::string plan;               // copilot_plan, e.g. "individual"
+    std::string sku;                // access_type_sku, e.g. "free_limited_copilot"
+    bool chat_enabled = true;
+    bool premium_available = true;  // premium_interactions entitlement>0 or unlimited
+    bool known = false;             // false = couldn't fetch (fall back to permissive)
+};
+
+// Fetch (and briefly cache) the account entitlement. Best-effort: on any
+// failure returns {known=false}, and callers should degrade PERMISSIVELY (show
+// everything) rather than hide models on a transient network blip.
+[[nodiscard]] Entitlement account_entitlement();
+
 // ── Persistence ──────────────────────────────────────────────────────────
 [[nodiscard]] std::optional<GithubToken> load_github_token();
 bool save_github_token(const GithubToken&);
@@ -90,6 +109,19 @@ bool clear_credentials();                 // wipes both the ghu_ token and cache
 // Force a re-exchange on the next fresh_token() (called after a 401 from the
 // inference endpoint, in case the cached proxy token was revoked early).
 void invalidate_cached_token();
+
+// ── Per-account model-support learning ─────────────────────────────────
+// Copilot's /models catalog advertises models the account's BILLING tier can't
+// actually run — they 400 "model not supported" only at inference time, with no
+// reliable catalog signal (policy.state "enabled" still 400s on free tiers). So
+// we LEARN: when a turn 400s as unsupported, record the model id; list_models
+// then demotes it out of the usable set. Persisted per config dir.
+void note_unsupported_model(const std::string& model_id);
+[[nodiscard]] bool is_unsupported_model(const std::string& model_id);
+// Also record models that DID work, so a known-good one is never demoted by a
+// stale/transient 400.
+void note_supported_model(const std::string& model_id);
+[[nodiscard]] bool is_supported_model(const std::string& model_id);
 
 // ── Pure helpers (exposed for tests) ─────────────────────────────────────
 // Parse the `/copilot_internal/v2/token` success JSON into a CopilotToken,

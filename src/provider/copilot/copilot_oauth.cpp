@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <thread>
 
 #include <nlohmann/json.hpp>
@@ -370,6 +371,65 @@ bool signed_in() {
 
 void invalidate_cached_token() { g_force_refresh.store(true); }
 
+// ── Per-account model-support learning ─────────────────────────────────
+namespace {
+std::mutex& support_mu() { static std::mutex m; return m; }
+fs::path support_path() { return auth::config_dir() / "copilot_model_support.json"; }
+
+struct SupportSets { std::set<std::string> unsupported, supported; };
+
+SupportSets load_support() {
+    SupportSets s;
+    std::ifstream ifs(support_path());
+    if (!ifs) return s;
+    try {
+        auto j = json::parse(std::string{std::istreambuf_iterator<char>(ifs),
+                                          std::istreambuf_iterator<char>()});
+        for (auto& e : j.value("unsupported", json::array()))
+            if (e.is_string()) s.unsupported.insert(e.get<std::string>());
+        for (auto& e : j.value("supported", json::array()))
+            if (e.is_string()) s.supported.insert(e.get<std::string>());
+    } catch (...) {}
+    return s;
+}
+
+void save_support(const SupportSets& s) {
+    json j;
+    j["unsupported"] = json::array();
+    for (auto& id : s.unsupported) j["unsupported"].push_back(id);
+    j["supported"] = json::array();
+    for (auto& id : s.supported) j["supported"].push_back(id);
+    std::error_code ec;
+    fs::create_directories(support_path().parent_path(), ec);
+    std::ofstream ofs(support_path(), std::ios::trunc);
+    if (ofs) ofs << j.dump();
+}
+} // namespace
+
+void note_unsupported_model(const std::string& model_id) {
+    if (model_id.empty()) return;
+    std::scoped_lock lk(support_mu());
+    auto s = load_support();
+    s.supported.erase(model_id);
+    if (s.unsupported.insert(model_id).second) save_support(s);
+}
+bool is_unsupported_model(const std::string& model_id) {
+    std::scoped_lock lk(support_mu());
+    return load_support().unsupported.count(model_id) > 0;
+}
+void note_supported_model(const std::string& model_id) {
+    if (model_id.empty()) return;
+    std::scoped_lock lk(support_mu());
+    auto s = load_support();
+    bool changed = s.unsupported.erase(model_id) > 0;
+    changed |= s.supported.insert(model_id).second;
+    if (changed) save_support(s);
+}
+bool is_supported_model(const std::string& model_id) {
+    std::scoped_lock lk(support_mu());
+    return load_support().supported.count(model_id) > 0;
+}
+
 std::expected<GithubToken, OAuthError>
 login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
     if (cancelled && cancelled())
@@ -429,6 +489,56 @@ std::optional<CopilotToken> fresh_token() {
     s.proxy = *exchanged;
     save_unlocked(s);
     return *exchanged;
+}
+
+Entitlement account_entitlement() {
+    // Short in-process cache: the picker may call this repeatedly while open.
+    static std::mutex mu;
+    static Entitlement cached;
+    static std::int64_t fetched_at = 0;
+    {
+        std::scoped_lock lk(mu);
+        if (cached.known && now_ms_impl() - fetched_at < 5 * 60 * 1000)
+            return cached;
+    }
+    Entitlement e;   // known=false by default → permissive fallback
+    auto gh = load_github_token();
+    if (!gh) return e;
+
+    // GET api.github.com/copilot_internal/user with the ghu_ token — the
+    // authoritative per-account plan + quota snapshot.
+    auto r = request(http::HttpMethod::Get, kApiHost, "/copilot_internal/user",
+        {{"authorization", "token " + gh->access_token},
+         {"copilot-integration-id", kIntegration}});
+    if (!r.transport_error.empty() || r.status < 200 || r.status >= 300)
+        return e;
+    try {
+        auto j = json::parse(r.body);
+        e.plan         = j.value("copilot_plan", "");
+        e.sku          = j.value("access_type_sku", "");
+        e.chat_enabled = j.value("chat_enabled", true);
+        // Premium models (Claude/Gemini/GPT-5.x/o-series) draw from the
+        // premium_interactions quota. entitlement==0 && !unlimited && no quota
+        // ⇒ this account can't run them (free tier). Any positive entitlement,
+        // unlimited, or permitted overage ⇒ premium available.
+        e.premium_available = true;
+        if (j.contains("quota_snapshots") && j["quota_snapshots"].is_object()) {
+            const auto& qs = j["quota_snapshots"];
+            if (qs.contains("premium_interactions") && qs["premium_interactions"].is_object()) {
+                const auto& p = qs["premium_interactions"];
+                const bool unlimited = p.value("unlimited", false);
+                const double ent     = p.value("entitlement", 0.0);
+                const bool overage   = p.value("overage_permitted", false);
+                e.premium_available = unlimited || ent > 0.0 || overage;
+            }
+        }
+        e.known = true;
+    } catch (...) { return Entitlement{}; }
+
+    std::scoped_lock lk(mu);
+    cached = e;
+    fetched_at = now_ms_impl();
+    return e;
 }
 
 } // namespace agentty::provider::copilot

@@ -104,12 +104,24 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
         return provider::openai::run_stream_sync(std::move(oreq), sink, req.cancel);
     };
 
+    const std::string model_id = req.model;
     auto result = run(*tok);
     // One forced-refresh retry if the proxy token was rejected mid-life (401/403).
     if (!result.ok() && (result.http_status == 401 || result.http_status == 403)) {
         invalidate_cached_token();
         if (auto fresh = fresh_token())
             result = run(*fresh);
+    }
+    // LEARN model support: Copilot 400s "model not supported" for models the
+    // account's billing tier can't run — the /models catalog can't be trusted
+    // to predict this, so we record the outcome and list_models demotes the
+    // unsupported ones next refresh.
+    if (result.http_status == 400 && result.error
+        && result.error->find("not supported") != std::string::npos) {
+        note_unsupported_model(model_id);
+        invalidate_model_cache();
+    } else if (result.ok()) {
+        note_supported_model(model_id);
     }
     return result;
 }
@@ -157,15 +169,28 @@ std::vector<ModelInfo> list_models() {
     auto resp = http::default_client().send(req);
     if (!resp || resp->status < 200 || resp->status >= 300) return bundled_models();
 
+    // AUTHORITATIVE entitlement: does this account's billing tier include the
+    // premium model families at all? On Copilot Free (premium_available=false)
+    // only the base gpt-4o-family models run — every premium model 400s. We
+    // fetch this once and HIDE the models the account can't use.
+    const Entitlement ent = account_entitlement();
+    const bool hide_premium = ent.known && !ent.premium_available;
+
+    // A model is PREMIUM (needs the premium_interactions quota) when it's not
+    // in the base free-tier line. Base = the current-gen gpt-4o / gpt-4.1
+    // models GitHub documents as included on every plan (incl. Copilot Free).
+    // A `policy` block on these is just terms-acceptance, not a premium gate.
+    auto is_base_family = [](const std::string& id) {
+        return id == "gpt-4o" || id == "gpt-4.1" || id == "gpt-4o-mini"
+            || id == "gpt-4o-copilot" || id == "gpt-4.1-mini"
+            || id.rfind("gpt-4o-mini", 0) == 0;
+    };
+
     struct Row { ModelInfo info; int rank = 0; };
     std::vector<Row> rows;
     try {
         auto j = nlohmann::json::parse(resp->body);
         const auto& data = j.contains("data") ? j["data"] : j;
-        // De-dup by family: Copilot lists many internal aliases (…-picker,
-        // …-secondary, exec-agent-*, copilot-search-*). Keep the canonical id
-        // per family, and only chat-type models.
-        std::vector<std::string> seen_family;
         for (const auto& m : data) {
             std::string id = m.value("id", "");
             if (id.empty()) continue;
@@ -180,11 +205,9 @@ std::vector<ModelInfo> list_models() {
                 || id.rfind("trajectory-", 0) == 0
                 || id.rfind("oswe-", 0) == 0) continue;
             // Skip pinned dated snapshots (gpt-4o-2024-11-20, gpt-4-0613, …):
-            // the canonical id (gpt-4o, gpt-4) already appears and is what a
-            // user wants. A trailing -YYYY-MM-DD or -NNNN date is the tell.
+            // the canonical id (gpt-4o, gpt-4) already appears.
             {
                 auto is_date_tail = [&](std::size_t pos) {
-                    // pos points at a '-'; check the rest is all digits/'-'.
                     if (pos == std::string::npos) return false;
                     bool has_digit = false;
                     for (std::size_t k = pos + 1; k < id.size(); ++k) {
@@ -194,9 +217,8 @@ std::vector<ModelInfo> list_models() {
                     }
                     return has_digit;
                 };
-                auto dash = id.find("-20");                 // -2024… / -2025…
+                auto dash = id.find("-20");
                 if (dash != std::string::npos && is_date_tail(dash)) continue;
-                // -0613 / -0125 style 4-digit month-year snapshots.
                 if (id.size() >= 5) {
                     auto tail = id.rfind('-');
                     if (tail != std::string::npos && id.size() - tail == 5
@@ -204,32 +226,41 @@ std::vector<ModelInfo> list_models() {
                 }
             }
 
-            // ENTITLEMENT: policy.state "enabled" or a model with no policy
-            // block is usable on this plan; "disabled" needs opt-in at
-            // github.com. Usable models sort first and get the ★.
-            std::string policy_state = "none";
-            if (m.contains("policy") && m["policy"].is_object())
-                policy_state = m["policy"].value("state", "none");
-            const bool usable = (policy_state == "enabled" || policy_state == "none");
+            const bool has_policy   = m.contains("policy") && m["policy"].is_object();
+            const bool base         = is_base_family(id);   // policy = terms, not premium
+            const bool learned_bad  = is_unsupported_model(id);
+            const bool learned_good = is_supported_model(id);
+
+            // A model is premium (draws the premium quota) unless it's a base
+            // family model. Confirmed-good overrides (we've actually run it).
+            const bool premium = !base && !learned_good;
+
+            // FILTER: hide models this account can't run.
+            //   • anything we've confirmed 400s (learned_bad) — always hide.
+            //   • premium models when the plan has no premium entitlement.
+            if (learned_bad) continue;
+            if (hide_premium && premium) continue;
 
             ModelInfo info;
             info.id           = ModelId{id};
             info.display_name = m.value("name", id);
             info.provider     = "copilot";
-            info.favorite     = usable;
+            // ★ the models we're CONFIDENT the account can use: base family, or
+            // confirmed-good, or (premium plan) any premium model.
+            info.favorite     = base || learned_good
+                              || (!hide_premium && !has_policy);
             if (caps.contains("limits"))
                 info.context_window =
                     caps["limits"].value("max_context_window_tokens", 200000);
             if (caps.contains("supports"))
                 info.supports_tools = caps["supports"].value("tool_calls", true);
 
-            // Rank: usable first, then a rough category weight (powerful >
-            // versatile > lightweight), then name for stability.
             const std::string cat = m.value("model_picker_category", "");
             int cat_w = cat == "powerful" ? 0 : cat == "versatile" ? 1
                       : cat == "lightweight" ? 2 : 3;
-            int rank = (usable ? 0 : 100) + cat_w;
-            rows.push_back({std::move(info), rank});
+            // Confirmed-good / base first, then the rest by category.
+            int tier = (learned_good || base) ? 0 : 100;
+            rows.push_back({std::move(info), tier + cat_w});
         }
     } catch (...) { return bundled_models(); }
 
@@ -250,8 +281,19 @@ std::vector<ModelInfo> list_models() {
 }
 
 std::string default_model() {
+    // Prefer a base-allowlist model that works on every Copilot tier, so a
+    // fresh sign-in never lands on a model that 400s on the first turn.
+    for (const char* id : {"gpt-4o", "gpt-4.1", "gpt-4o-mini"})
+        if (!is_unsupported_model(id)) return id;
     auto ms = list_models();
     return ms.empty() ? std::string{"gpt-4o"} : ms.front().id.value;
+}
+
+// Drop the cached catalog so the next list_models() re-ranks with freshly
+// learned support (called after a turn records a 400/200 outcome).
+void invalidate_model_cache() {
+    std::lock_guard<std::mutex> lk(models_mu());
+    models_cache().clear();
 }
 
 } // namespace agentty::provider::copilot
