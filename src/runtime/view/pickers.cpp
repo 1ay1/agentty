@@ -378,7 +378,7 @@ Element provider_picker(const Model& m) {
             // checkmark. Selecting it while signed out launches the device
             // login (picker.cpp), so "sign in" is an actionable hint.
             if (provider::copilot::signed_in()) {
-                note = active ? "\xe2\x9c\x93 signed in" : "GitHub Copilot (signed in)";
+                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "GitHub Copilot (signed in)";
                 note_color = active ? success : muted;
             } else {
                 note = "\xe2\x9a\xa0 sign in with GitHub";
@@ -467,6 +467,7 @@ Element provider_picker(const Model& m) {
         const auto& highlighted = presets[static_cast<std::size_t>(picker->index)];
         return highlighted.id == active_id
             && (highlighted.id == "chatgpt"
+                || highlighted.id == "copilot"
                 || highlighted.kind() == provider::Kind::Anthropic);
     }();
 

@@ -124,10 +124,12 @@ Step sign_out(Model m) {
 
 namespace {
 
-// Canonical registry id for the active provider's accounts. Only Anthropic
-// and ChatGPT have file-backed credential stores the account layer can
-// snapshot; OpenAI-family keys already switch per-endpoint via the picker.
+// Canonical registry id for the active provider's accounts. Anthropic,
+// ChatGPT, and GitHub Copilot have file-backed credential stores the account
+// layer can snapshot; OpenAI-family keys already switch per-endpoint via the
+// picker.
 std::string account_provider_id(const provider::Selection& sel) {
+    if (sel.is_copilot())                 return "copilot";
     if (sel.is_chatgpt())                 return "chatgpt";
     if (sel.kind == provider::Kind::Anthropic) return "anthropic";
     return {};   // no account switching for this provider
@@ -194,8 +196,8 @@ Step account_select(Model m) {
     const int add_row = static_cast<int>(al->rows.size());
 
     // Trailing "+ Add another account…" row. Keep the continuation scoped
-    // to the provider the user was managing: ChatGPT has one native OAuth
-    // method, while Anthropic offers only its API-key and OAuth choices.
+    // to the provider the user was managing: ChatGPT and Copilot each have
+    // one native OAuth method, while Anthropic offers its API-key/OAuth choices.
     if (al->cursor >= add_row) {
         const std::string provider = al->provider;
         if (provider == "chatgpt") {
@@ -207,6 +209,15 @@ Step account_select(Model m) {
                 .device_auth = provider::chatgpt::codex_device_auth_preferred(),
             };
             return {std::move(m), cmd::codex_login_async(attempt_id, std::move(cancel))};
+        }
+        if (provider == "copilot") {
+            const auto attempt_id = cmd::next_codex_login_attempt_id();
+            auto cancel = std::make_shared<std::atomic_bool>(false);
+            m.ui.login = login::CopilotWaiting{
+                .attempt_id = attempt_id,
+                .cancel = cancel,
+            };
+            return {std::move(m), cmd::copilot_login_async(attempt_id, std::move(cancel))};
         }
         m.ui.login = login::Picking{.provider = provider};
         return done(std::move(m));
@@ -229,9 +240,9 @@ Step account_select(Model m) {
     if (provider == "anthropic") {
         if (auto c = auth::load_credentials())
             agentty::app::update_auth(auth::make_auth_header(*c));
-    } else if (provider == "chatgpt") {
-        // The Codex transport reads its token from the store on each turn;
-        // clearing the cached header forces a fresh read next turn.
+    } else if (provider == "chatgpt" || provider == "copilot") {
+        // The Codex / Copilot transports read their token from the store on
+        // each turn; clearing the cached header forces a fresh read next turn.
         agentty::app::update_auth(auth::AuthHeader{});
     }
     const std::string provider_label = al->provider_label;
@@ -279,8 +290,9 @@ Step account_remove(Model m) {
             // The registry is empty. Clear the underlying live credential
             // file too; otherwise build_account_list() would rediscover and
             // silently resurrect the account the user just removed.
-            if (row.provider == "anthropic") auth::clear_credentials();
-            else provider::chatgpt::clear_codex_credentials();
+            if (row.provider == "anthropic")      auth::clear_credentials();
+            else if (row.provider == "copilot")   provider::copilot::clear_credentials();
+            else                                  provider::chatgpt::clear_codex_credentials();
             agentty::app::update_auth(auth::AuthHeader{});
 
             login::AccountList empty;

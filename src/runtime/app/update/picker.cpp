@@ -422,6 +422,7 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
             const auto& active = provider::active();
             const bool is_active_account_provider =
                 (preset.id == "chatgpt" && active.is_chatgpt())
+                || (preset.id == "copilot" && active.is_copilot())
                 || (preset.kind() == provider::Kind::Anthropic
                     && active.kind == provider::Kind::Anthropic);
             if (is_active_account_provider) {
