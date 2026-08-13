@@ -43,17 +43,44 @@ permissions:
 jobs:
   forward:
     runs-on: ubuntu-latest
+    # Hard allowlist: only ever run for the product repo itself. If this file
+    # is forked or copied elsewhere, github.repository won't match and the job
+    # is skipped entirely — the Discord webhooks can never be posted to from
+    # any other repository.
+    if: github.repository == '1ay1/agentty'
     steps:
       - name: Route event to the right Discord channel
         env:
           EVENT: ${{ github.event_name }}
           PAYLOAD: ${{ toJSON(github.event) }}
+          REPO: ${{ github.repository }}
           WH_COMMITS: ${{ secrets.DISCORD_WH_COMMITS }}
           WH_ACTIVITY: ${{ secrets.DISCORD_WH_ACTIVITY }}
           WH_RELEASES: ${{ secrets.DISCORD_WH_RELEASES }}
           WH_STARS: ${{ secrets.DISCORD_WH_STARS }}
         run: |
           set -euo pipefail
+
+          # ---- Defense in depth: only forward events that genuinely belong to
+          # the product repo. Both the workflow context AND the event payload
+          # must name 1ay1/agentty, so a spoofed/mismatched payload is dropped
+          # before any Discord webhook is contacted.
+          ALLOWED_REPO="1ay1/agentty"
+          if [ "$REPO" != "$ALLOWED_REPO" ]; then
+            echo "Refusing: workflow repo '$REPO' != '$ALLOWED_REPO'."; exit 0
+          fi
+          PAYLOAD_REPO=$(printf '%s' "$PAYLOAD" | jq -r '.repository.full_name // empty')
+          if [ -n "$PAYLOAD_REPO" ] && [ "$PAYLOAD_REPO" != "$ALLOWED_REPO" ]; then
+            echo "Refusing: payload repo '$PAYLOAD_REPO' != '$ALLOWED_REPO'."; exit 0
+          fi
+
+          # PRs opened from a fork are the only untrusted-actor path on a public
+          # repo. GitHub already withholds secrets from fork-PR runs, but be
+          # explicit: if the PR's head repo isn't ours, don't forward anything.
+          HEAD_REPO=$(printf '%s' "$PAYLOAD" | jq -r '.pull_request.head.repo.full_name // empty')
+          if [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != "$ALLOWED_REPO" ]; then
+            echo "Skipping PR from fork '$HEAD_REPO'."; exit 0
+          fi
 
           # Map the event type to a destination webhook.
           case "$EVENT" in
