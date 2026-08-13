@@ -144,13 +144,15 @@ using ProviderPreset = ProviderDescriptor;
 // To add a provider: append a row here, and — if it's OpenAI-compatible with
 // a non-default wire path — add the matching `Endpoint` arm in
 // openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderDescriptor, 9> kProviders{{
+inline constexpr std::array<ProviderDescriptor, 10> kProviders{{
     {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
      Wire::AnthropicMessages, Lifetime::LongLived, AuthStyle::OAuthOrKey, false, {"", "", ""}, "api.anthropic.com"},
     {"openai",     "OpenAI",     "GPT / Codex — api.openai.com",
      Wire::OpenAIResponses,   Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "CODEX_API_KEY", ""}, ""},
     {"chatgpt",   "ChatGPT",    "Sign in with ChatGPT — Codex models, no API key",
      Wire::OpenAIResponses,   Lifetime::LongLived, AuthStyle::None,       true,  {"", "", ""}, "chatgpt.com", /*oauth_native=*/true},
+    {"copilot",   "GitHub Copilot", "Sign in with GitHub — Copilot models, no API key",
+     Wire::OpenAIChat,        Lifetime::LongLived, AuthStyle::None,       false, {"", "", ""}, "api.githubcopilot.com", /*oauth_native=*/true},
     {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
      Wire::OpenAIChat,        Lifetime::PerCall,   AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}, ""},
     {"openrouter", "OpenRouter", "Any model via openrouter.ai",

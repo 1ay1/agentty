@@ -1074,6 +1074,16 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         // `--provider codex-cli`) but normalises to the same endpoint.
         return Endpoint{"localhost", 0, "/", "/", false, "chatgpt"};
     }
+    if (eq(spec, "copilot")) {
+        // Like chatgpt: the native Copilot path (copilot::CopilotProvider)
+        // builds the REAL endpoint at request time — the host comes from the
+        // token exchange's `endpoints.api` (Individual/Business/Enterprise all
+        // differ), so it can't be hardcoded here. This is only a sentinel so
+        // generic OpenAI-family selection invariants hold; the label is what
+        // the picker/badge read.
+        return Endpoint{"api.githubcopilot.com", 443, "/chat/completions",
+                        "/models", true, "copilot"};
+    }
     if (eq(spec, "groq")) {
         return Endpoint{"api.groq.com", 443, "/openai/v1/chat/completions",
                         "/openai/v1/models", true, "groq"};
@@ -1288,6 +1298,10 @@ http::Headers build_request_headers(const AuthHeader& auth,
         // here.)
         h.push_back({"authorization", "Bearer " + key});
     }
+    // Endpoint-specific static headers (e.g. Copilot's editor-identification
+    // block). Appended last so they can't be clobbered by the defaults above.
+    for (const auto& kv : endpoint.extra_headers)
+        h.push_back({kv.first, kv.second});
     return h;
 }
 

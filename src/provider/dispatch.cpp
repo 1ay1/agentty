@@ -18,6 +18,7 @@ LongLived long_lived_slot(const Selection& sel) {
     // long-lived transport; the Anthropic dialect picks the Anthropic one.
     // Everything else (per-call OpenAI-compat / Ollama, or the ACP arm) has no
     // long-lived slot. No label compares, no is_chatgpt idiom.
+    if (sel.is_copilot())             return LongLived::Copilot;
     if (sel.is_oauth_native())        return LongLived::ChatGpt;
     if (sel.kind == Kind::Anthropic)  return LongLived::Anthropic;
     return LongLived::None;

@@ -33,6 +33,8 @@ Signed in with Claude Pro/Max OAuth, the model picker offers a **"(1M context)"*
 | ID | Backend | Key |
 |---|---|---|
 | `anthropic` | Claude — API key or Pro/Max OAuth | `agentty login` |
+| `chatgpt` | Codex models — Sign in with ChatGPT (Plus/Pro) | `agentty login` → 3 |
+| `copilot` | GitHub Copilot models — Sign in with GitHub | `agentty login` → 4 |
 | `openai` | GPT / o-series on `api.openai.com` | `OPENAI_API_KEY` |
 | `groq` | Llama / Mixtral on Groq LPUs — very fast | `GROQ_API_KEY` |
 | `openrouter` | Any model via `openrouter.ai` | `OPENROUTER_API_KEY` |
@@ -52,6 +54,21 @@ agentty --provider groq -m llama-3.3-70b
 # or a one-off, never written to disk:
 agentty --provider openai -k sk-… -m gpt-4o
 ```
+
+## Sign in with GitHub Copilot
+
+If you have a GitHub Copilot subscription (Individual, Business, or Enterprise), you can use its models — GPT-4o, o-series, Claude, Gemini, and more — through your existing Copilot plan, **no API key required**.
+
+```bash
+agentty login          # choose 4) GitHub Copilot
+agentty --provider copilot
+```
+
+Sign-in uses GitHub's **device flow**: agentty shows a one-time code and opens `github.com/login/device` (works over SSH too — just enter the code in any browser). The available model list is fetched live from your account's entitlements, so you see exactly the models your plan offers. agentty stores a durable GitHub token (encrypted, at `~/.config/agentty/copilot_credentials.json`) and transparently exchanges it for the short-lived Copilot session token, refreshing mid-session so long agent runs never drop. `agentty status` shows your plan, entitlement, and the active inference host; `agentty logout` → GitHub Copilot signs out.
+
+:::note
+Copilot routes to the right host automatically (Individual / Business / Enterprise each use a different endpoint) — there's nothing to configure. On the free Copilot tier, agentty surfaces a clear "chat quota exhausted" message rather than a raw error.
+:::
 
 ## Local models (Ollama)
 

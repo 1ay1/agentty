@@ -4,6 +4,7 @@
 // existing OAuthConfig:: references below stay short.
 #include "agentty/provider/anthropic/oauth.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -1004,16 +1005,47 @@ int cmd_login() {
             std::cout << "Currently signed in: ChatGPT / Codex\n";
             any = true;
         }
+        if (provider::copilot::signed_in()) {
+            std::cout << "Currently signed in: GitHub Copilot\n";
+            any = true;
+        }
         if (any) std::cout << "\n";
     }
     std::cout << "agentty — sign in (bring your own model)\n\n"
               << "  1) Paste an API key (Anthropic sk-ant-..., or any provider)\n"
               << "  2) OAuth via claude.ai (Pro/Max subscription)\n"
               << "  3) OAuth via ChatGPT (Codex / Plus / Pro)\n"
-              << "\nChoice [1/2/3]: " << std::flush;
+              << "  4) OAuth via GitHub Copilot (Individual / Business / Enterprise)\n"
+              << "\nChoice [1/2/3/4]: " << std::flush;
     std::string choice;
     std::getline(std::cin, choice);
     for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
+
+    // GitHub Copilot OAuth — GitHub's device flow (works everywhere, SSH
+    // included): show a code, the user enters it at github.com/login/device.
+    if (choice == "4" || choice == "copilot" || choice == "github") {
+        std::cout << "\nRequesting a GitHub device code\xE2\x80\xA6\n" << std::flush;
+        auto r = provider::copilot::login(
+            900,
+            [](const provider::copilot::DeviceCode& dc) {
+                std::cout << "\nOpen this link in a browser on any device:\n  "
+                          << dc.verification_uri
+                          << "\n\nEnter this one-time code (expires in "
+                          << (dc.expires_in / 60) << " minutes):\n  "
+                          << dc.user_code
+                          << "\n\nWaiting for approval\xE2\x80\xA6\n" << std::flush;
+                open_browser(dc.verification_uri);
+            },
+            /*cancelled=*/{});
+        if (!r) {
+            std::cerr << "GitHub Copilot sign-in failed: " << r.error().render() << "\n";
+            return 1;
+        }
+        std::cout << "\n\xE2\x9C\x93 Signed in to GitHub Copilot. Saved to "
+                  << provider::copilot::credentials_path().string() << "\n"
+                  << "  Run agentty with `--provider copilot` to use it.\n";
+        return 0;
+    }
 
     // ChatGPT OAuth. SSH sessions automatically use OpenAI's device-code
     // flow; local sessions keep the browser + loopback callback.
@@ -1106,69 +1138,62 @@ int cmd_login() {
 
 int cmd_logout() {
     namespace codex = provider::chatgpt;
+    // One entry per signed-in account. Scales to N providers without the
+    // 2-way special case (which didn't cover Copilot).
+    struct Account {
+        std::string label;
+        std::string path;
+        std::function<bool()> clear;
+    };
+    std::vector<Account> accounts;
+
     auto p = credentials_path();
     std::error_code ec;
-    const bool have_anthropic = fs::exists(p, ec);
-    const bool have_chatgpt   = codex::load_codex_credentials().has_value();
+    if (fs::exists(p, ec))
+        accounts.push_back({"claude.ai / Anthropic", p.string(),
+                            [] { return clear_credentials(); }});
+    if (codex::load_codex_credentials())
+        accounts.push_back({"ChatGPT / Codex", codex::codex_credentials_path().string(),
+                            [] { return codex::clear_codex_credentials(); }});
+    if (provider::copilot::signed_in())
+        accounts.push_back({"GitHub Copilot", provider::copilot::credentials_path().string(),
+                            [] { return provider::copilot::clear_credentials(); }});
 
-    if (!have_anthropic && !have_chatgpt) {
-        std::cout << "No saved credentials.\n"; return 0;
-    }
-
-    // Both providers signed in → let the user pick which account to drop
-    // (or all of them). This is the "switch account" escape hatch: sign
-    // out of one, `agentty login` back into the other.
-    if (have_anthropic && have_chatgpt) {
-        std::cout << "Signed in to more than one account:\n"
-                  << "  1) claude.ai / Anthropic  (" << p.string() << ")\n"
-                  << "  2) ChatGPT / Codex        ("
-                  << codex::codex_credentials_path().string() << ")\n"
-                  << "  3) both\n"
-                  << "\nSign out of [1/2/3]: " << std::flush;
-        std::string choice;
-        std::getline(std::cin, choice);
-        for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
-
-        bool drop_anthropic = (choice == "1" || choice == "3"
-                               || choice == "claude" || choice == "anthropic"
-                               || choice == "both");
-        bool drop_chatgpt   = (choice == "2" || choice == "3"
-                               || choice == "chatgpt" || choice == "codex"
-                               || choice == "openai" || choice == "both");
-        if (!drop_anthropic && !drop_chatgpt) {
-            std::cout << "Nothing removed.\n"; return 0;
-        }
-        int rc = 0;
-        if (drop_anthropic) {
-            if (clear_credentials())
-                std::cout << "Removed " << p.string() << "\n";
-            else { std::cerr << "Failed to remove " << p.string() << "\n"; rc = 1; }
-        }
-        if (drop_chatgpt) {
-            if (codex::clear_codex_credentials())
-                std::cout << "Removed "
-                          << codex::codex_credentials_path().string() << "\n";
-            else { std::cerr << "Failed to remove ChatGPT credentials\n"; rc = 1; }
-        }
-        return rc;
-    }
+    if (accounts.empty()) { std::cout << "No saved credentials.\n"; return 0; }
 
     // Exactly one signed in → drop it, no prompt.
-    if (have_chatgpt) {
-        if (!codex::clear_codex_credentials()) {
-            std::cerr << "Failed to remove "
-                      << codex::codex_credentials_path().string() << "\n";
-            return 1;
+    if (accounts.size() == 1) {
+        if (!accounts[0].clear()) {
+            std::cerr << "Failed to remove " << accounts[0].path << "\n"; return 1;
         }
-        std::cout << "Removed "
-                  << codex::codex_credentials_path().string() << "\n";
+        std::cout << "Removed " << accounts[0].path << "\n";
         return 0;
     }
-    if (!clear_credentials()) {
-        std::cerr << "Failed to remove " << p.string() << "\n"; return 1;
+
+    // Several signed in → pick one (by number) or `a` for all.
+    std::cout << "Signed in to more than one account:\n";
+    for (std::size_t i = 0; i < accounts.size(); ++i)
+        std::cout << "  " << (i + 1) << ") " << accounts[i].label
+                  << "  (" << accounts[i].path << ")\n";
+    std::cout << "  a) all of them\n"
+              << "\nSign out of [1-" << accounts.size() << "/a]: " << std::flush;
+    std::string choice;
+    std::getline(std::cin, choice);
+    for (auto& c : choice) c = (char)std::tolower((unsigned char)c);
+
+    const bool all = (choice == "a" || choice == "all");
+    int rc = 0, removed = 0;
+    for (std::size_t i = 0; i < accounts.size(); ++i) {
+        const bool pick = all || choice == std::to_string(i + 1);
+        if (!pick) continue;
+        if (accounts[i].clear()) {
+            std::cout << "Removed " << accounts[i].path << "\n"; ++removed;
+        } else {
+            std::cerr << "Failed to remove " << accounts[i].path << "\n"; rc = 1;
+        }
     }
-    std::cout << "Removed " << p.string() << "\n";
-    return 0;
+    if (removed == 0 && rc == 0) std::cout << "Nothing removed.\n";
+    return rc;
 }
 
 int cmd_status() {
@@ -1233,6 +1258,41 @@ int cmd_status() {
                       << "\n";
         } else {
             std::cout << "ChatGPT: (not signed in — `agentty login` → 3)\n";
+        }
+    }
+
+    // ── GitHub Copilot OAuth (separate store) ───────────────────────
+    {
+        std::cout << "\nGitHub Copilot file: "
+                  << provider::copilot::credentials_path().string() << "\n";
+        if (provider::copilot::signed_in()) {
+            std::cout << "Signed in via GitHub Copilot OAuth\n";
+            // Probe the proxy token so status reflects real usability + host.
+            if (auto t = provider::copilot::fresh_token()) {
+                if (!t->chat_enabled)
+                    std::cout << "Chat: NOT entitled on this account\n";
+                else if (t->quota_exhausted)
+                    std::cout << "Chat: quota exhausted (free tier)\n";
+                else
+                    std::cout << "Chat: available\n";
+                if (!t->sku.empty())
+                    std::cout << "Plan (sku): " << t->sku << "\n";
+                if (!t->endpoint_api.empty())
+                    std::cout << "Inference host: " << t->endpoint_api << "\n";
+                if (t->expires_at_ms) {
+                    auto remaining_s = (t->expires_at_ms - now_ms()) / 1000;
+                    std::cout << "Session token "
+                              << (remaining_s <= 0
+                                    ? std::string{"stale (auto-refreshes on next use)"}
+                                    : "refreshes in " + std::to_string(remaining_s) + "s")
+                              << "\n";
+                }
+            } else {
+                std::cout << "Session token: could not exchange — the GitHub sign-"
+                             "in may be revoked or lack a Copilot subscription\n";
+            }
+        } else {
+            std::cout << "GitHub Copilot: (not signed in — `agentty login` → 4)\n";
         }
     }
     return 0;

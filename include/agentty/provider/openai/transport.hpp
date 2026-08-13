@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -69,6 +70,14 @@ struct Endpoint {
     // no "Bearer " prefix. Populated from --auth-header via
     // provider::parse_selection.
     std::string auth_header_name;
+
+    // Extra static request headers injected verbatim on EVERY request to this
+    // endpoint (after the auth header). GitHub Copilot needs its editor-
+    // identification block (Copilot-Integration-Id / Editor-Version / …) on
+    // every call or the proxy returns 400/403. Empty for the plain OpenAI
+    // family. Names should be lowercase (header names are case-insensitive and
+    // the rest of agentty sends lowercase).
+    std::vector<std::pair<std::string, std::string>> extra_headers;
 
     // Built-in presets for the common free / hosted backends. Pass a bare
     // name ("openai", "groq", "openrouter", "together", "cerebras",
