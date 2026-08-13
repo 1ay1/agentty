@@ -20,6 +20,7 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
@@ -480,6 +481,23 @@ Step provider_picker_update(Model m, msg::ProviderPickerMsg pm) {
                     .provider_label = std::string{preset.label},
                 };
                 return done(std::move(m));
+            }
+
+            // GitHub Copilot authenticates via native device-flow OAuth, not
+            // an API key. If no GitHub credential is saved yet, launch the same
+            // device login the modal runs instead of switching to a provider
+            // that would show "not signed in" on the first turn — first-class
+            // parity with the ChatGPT/Anthropic OAuth prompts. login_copilot_done
+            // commits the switch to copilot on success.
+            if (spec == "copilot" && !provider::copilot::signed_in()) {
+                const auto attempt_id = cmd::next_codex_login_attempt_id();
+                auto cancel = std::make_shared<std::atomic_bool>(false);
+                m.ui.login = ui::login::CopilotWaiting{
+                    .attempt_id = attempt_id,
+                    .cancel = cancel,
+                };
+                return {std::move(m),
+                        cmd::copilot_login_async(attempt_id, std::move(cancel))};
             }
 
             // codex-cli authenticates via native ChatGPT OAuth, not an API

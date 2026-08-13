@@ -309,6 +309,36 @@ Element panel_chatgpt_waiting(const login::ChatGptWaiting& s) {
     return v(std::move(rows)).build();
 }
 
+Element panel_copilot_waiting(const login::CopilotWaiting& s) {
+    std::vector<Element> rows;
+    rows.push_back(text(s.user_code.empty()
+                            ? "Requesting GitHub device code\xE2\x80\xA6"
+                            : "Sign in with GitHub Copilot",
+                        fg_bold(fg)));
+    rows.push_back(text(""));
+    if (s.user_code.empty()) {
+        rows.push_back(body_text(
+            "Waiting for GitHub to issue a one-time code\xE2\x80\xA6",
+            fg_dim(muted)));
+    } else {
+        rows.push_back(body_text(
+            "Open this link in a browser on any device:", fg_dim(muted)));
+        rows.push_back(text(""));
+        rows.push_back(url_panel(s.authorize_url));
+        rows.push_back(text(""));
+        rows.push_back(body_text("Then enter this one-time code:",
+                                 fg_dim(muted)));
+        rows.push_back(text(s.user_code, fg_bold(fg)));
+        rows.push_back(text(""));
+        rows.push_back(body_text(
+            "The code expires in ~15 minutes. This uses your existing GitHub "
+            "Copilot subscription \xE2\x80\x94 no API key needed.", fg_dim(muted)));
+    }
+    rows.push_back(text(""));
+    rows.push_back(key_hints({{"Esc", "cancel"}}));
+    return v(std::move(rows)).build();
+}
+
 Element panel_api_key(const login::ApiKeyInput& s) {
     std::vector<Element> rows;
     const bool anthropic = s.provider.empty();
@@ -420,6 +450,8 @@ Element login_modal(const Model& m) {
             return panel_oauth_exchanging();
         } else if constexpr (std::same_as<T, login::ChatGptWaiting>) {
             return panel_chatgpt_waiting(s);
+        } else if constexpr (std::same_as<T, login::CopilotWaiting>) {
+            return panel_copilot_waiting(s);
         } else if constexpr (std::same_as<T, login::ApiKeyInput>) {
             return panel_api_key(s);
         } else if constexpr (std::same_as<T, login::CustomHostInput>) {
