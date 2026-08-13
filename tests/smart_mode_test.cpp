@@ -148,6 +148,33 @@ int main() {
         CHECK(triv == Effort::None, "cascade: trivial stays None despite +bias");
     }
 
+    // 8. CONTINUOUS effort scaling (effort_for_score): a turn DEEP in the
+    //    Complex band gets more effort than one barely into it, and the tier
+    //    boundary matches the discrete effort_for_complexity exactly.
+    {
+        const auto caps = ModelCapabilities::from_id("gpt-5");
+        // Boundary parity: a shallow-Complex score (margin 0) == discrete path.
+        sm::ComplexityScore shallow{sm::Complexity::Complex, 3, 0};
+        sm::ComplexityScore deep   {sm::Complexity::Complex, 8, 5};
+        auto e_shallow = sm::effort_for_score(Effort::Medium, shallow, caps, 0);
+        auto e_deep    = sm::effort_for_score(Effort::Medium, deep,    caps, 0);
+        auto e_tier    = sm::effort_for_complexity(Effort::Medium, sm::Complexity::Complex, caps, 0);
+        CHECK(e_shallow == e_tier, "scored: shallow-Complex matches the discrete tier step");
+        CHECK(static_cast<int>(e_deep) > static_cast<int>(e_shallow),
+              "scored: deep-Complex thinks harder than shallow-Complex");
+        // Deep-Simple drops further than shallow-Simple.
+        sm::ComplexityScore sh_simple{sm::Complexity::Simple, 0, 0};
+        sm::ComplexityScore dp_simple{sm::Complexity::Simple, -4, 4};
+        auto s_sh = sm::effort_for_score(Effort::High, sh_simple, caps, 0);
+        auto s_dp = sm::effort_for_score(Effort::High, dp_simple, caps, 0);
+        CHECK(static_cast<int>(s_dp) <= static_cast<int>(s_sh),
+              "scored: deep-Simple drops at least as far as shallow-Simple");
+        // Trivial still pins to None regardless of score/bias.
+        sm::ComplexityScore triv_s{sm::Complexity::Trivial, -100, 100};
+        CHECK(sm::effort_for_score(Effort::High, triv_s, caps, +2) == Effort::None,
+              "scored: trivial pins to None");
+    }
+
     // 7. resolve_subagent_role: a worker never thinks harder than its parent.
     //    reviewer→Strategic returns the parent model at parent effort; the
     //    subagent wrapper must clamp that to ≤ parent (invariant: subagent

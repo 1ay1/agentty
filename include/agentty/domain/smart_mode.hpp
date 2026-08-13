@@ -197,6 +197,48 @@ namespace detail {
     return clamp_effort(scaled, caps);
 }
 
+// CONTINUOUS effort scaling. effort_for_complexity uses only the discrete tier,
+// so a turn barely into Complex and one that is OVERWHELMINGLY complex both get
+// exactly +1 — the classifier's score/margin is thrown away at the last mile.
+// This overload keeps the tier step as the backbone (identical output at the
+// tier boundary) but adds a fractional refinement from how DEEP the turn sits
+// in its band:
+//   • deep inside Complex (large margin)  → an extra +1 step (reaches the
+//     effective +2 the old path needed the cascade bias to ever hit),
+//   • deep inside Simple (large margin)    → an extra -1 step (a clear ack-ish
+//     one-liner drops further than a borderline-Simple turn),
+//   • Standard and shallow bands            → exactly the tier behaviour.
+// Monotone in score, still clamped to the model, Trivial still pins to None.
+// `deep` is the margin at which the band is considered saturated.
+[[nodiscard]] inline Effort effort_for_score(
+        Effort base, const ComplexityScore& cx, const ModelCapabilities& caps,
+        int bias = 0) {
+    using E = Effort;
+    auto step = [](E e, int n) {
+        constexpr E ladder[] = {E::None, E::Low, E::Medium, E::High, E::Xhigh, E::Max};
+        int idx = 0;
+        for (int i = 0; i < 6; ++i) if (ladder[i] == e) { idx = i; break; }
+        idx += n;
+        if (idx < 0) idx = 0;
+        if (idx > 5) idx = 5;
+        return ladder[idx];
+    };
+    if (cx.tier == Complexity::Trivial) return E::None;
+
+    constexpr int kDeep = 3;   // margin at which a band counts as saturated
+    int extra = 0;
+    if (cx.tier == Complexity::Complex && cx.margin >= kDeep) extra = +1;
+    else if (cx.tier == Complexity::Simple && cx.margin >= kDeep) extra = -1;
+
+    // Tier backbone (matches effort_for_complexity), then the fractional refine,
+    // then the cascade bias, then clamp.
+    int tier_step = (cx.tier == Complexity::Complex) ? +1
+                  : (cx.tier == Complexity::Simple)  ? -1 : 0;
+    E scaled = step(base, tier_step + extra);
+    if (bias != 0) scaled = step(scaled, bias);
+    return clamp_effort(scaled, caps);
+}
+
 // Resolve a role to the (model, effort) it should run on.
 //
 //   role          the execution role for this call

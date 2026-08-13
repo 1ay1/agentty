@@ -89,4 +89,21 @@ struct ComplexityScore {
     return static_cast<int>(inherited) > static_cast<int>(self) ? inherited : self;
 }
 
+// Scored context-aware classification: the ComplexityScore for a turn, adjusted
+// for a Complex-ish predecessor exactly as classify_with_context adjusts the
+// tier. When a follow-up is LIFTED a tier by inheritance, its score/margin are
+// carried to the lifted tier's boundary (margin 0) so downstream continuous
+// effort scaling treats an inherited tier as "just barely in" rather than
+// "deep in" — an inherited turn shouldn't get the deep-band extra step it never
+// earned on its own text.
+[[nodiscard]] inline ComplexityScore classify_score_with_context(
+        std::string_view text, Complexity prev) noexcept {
+    ComplexityScore s = classify_score(text);
+    const Complexity lifted = classify_with_context(text, prev);
+    if (lifted == s.tier) return s;            // no inheritance change
+    s.tier   = lifted;
+    s.margin = 0;                              // sits AT the boundary, not deep
+    return s;
+}
+
 } // namespace agentty::smart

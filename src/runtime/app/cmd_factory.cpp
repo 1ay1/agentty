@@ -587,11 +587,11 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
         if (it->role == Role::User && !it->proactive_context) {
             newest_user = it->text; break;
         }
-    const smart::Complexity cx =
-        smart::classify_with_context(newest_user, m.s.smart_turn_complexity);
+    const smart::ComplexityScore cx =
+        smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
     const auto caps = ModelCapabilities::from_id(prof.model);
-    const Effort scaled = smart::effort_for_complexity(prof.effort, cx, caps,
-                                                       m.s.smart_effort_bias);
+    const Effort scaled = smart::effort_for_score(prof.effort, cx, caps,
+                                                  m.s.smart_effort_bias);
 
     Message card;
     // Message.id auto-inits via new_message_id().
@@ -603,7 +603,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     card.smart_routing = true;
     card.smart_route_model      = prof.model;
     card.smart_route_effort     = std::string{effort_label(scaled)};
-    card.smart_route_complexity = std::string{smart::to_string(cx)};
+    card.smart_route_complexity = std::string{smart::to_string(cx.tier)};
     card.smart_route_orchestrate = m.d.smart.orchestration();
     card.smart_route_subagents   = m.d.smart.subagent_routing();
     return card;
@@ -731,8 +731,9 @@ Cmd<Msg> launch_stream(Model& m) {
         // Context-aware: a short follow-up to a Complex turn keeps some of
         // that weight instead of collapsing to Simple. m.s.smart_turn_complexity
         // still holds the PREVIOUS turn's tier here (overwritten below at 776).
-        turn_complexity =
-            smart::classify_with_context(newest_user, m.s.smart_turn_complexity);
+        const smart::ComplexityScore turn_cx =
+            smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
+        turn_complexity = turn_cx.tier;
         const auto caps = ModelCapabilities::from_id(strategic_profile.model);
         // Innovation 1 — LEARNED ROUTING: fold in the per-workspace prior this
         // repo has taught us for this class of turn (persisted cascade). The
@@ -775,8 +776,8 @@ Cmd<Msg> launch_stream(Model& m) {
             }
         }
         strategic_profile.effort =
-            smart::effort_for_complexity(strategic_profile.effort, turn_complexity,
-                                         caps, total_bias);
+            smart::effort_for_score(strategic_profile.effort, turn_cx,
+                                    caps, total_bias);
         // Stash for the cascade feedback at finalize_turn.
         m.s.smart_turn_complexity = turn_complexity;
     }
