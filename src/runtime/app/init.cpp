@@ -5,6 +5,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
 
 #include <vector>
 
@@ -148,6 +149,11 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         const bool codex_active = sel.is_chatgpt();
         if (codex_active && !provider::chatgpt::responses_available())
             m.ui.login = ui::login::Picking{};
+        // Same courtesy for GitHub Copilot: launched with --provider copilot
+        // but no GitHub credential yet → open the sign-in modal instead of
+        // failing on the first send.
+        if (sel.is_copilot() && !provider::copilot::signed_in())
+            m.ui.login = ui::login::Picking{.provider = "copilot"};
     }
 
     std::vector<maya::Cmd<Msg>> cmds;
