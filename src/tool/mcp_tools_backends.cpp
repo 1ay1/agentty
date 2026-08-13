@@ -497,9 +497,20 @@ provider::StreamResult run_one_completion(Thread& thread,
     // general→Implementation) through the shared resolver instead — honouring
     // the user's pinned slots. Off ⇒ exactly the existing tier auto-router.
     if (cfg.smart.subagent_routing()) {
-        req.model = smart::resolve_role(type.model_role, cfg.model,
-                                        Effort::None, cfg.candidates,
-                                        cfg.smart).model;
+        // resolve_subagent_role hard-clamps effort to the parent's (Effort::None
+        // here, so effort stays off — a worker never thinks harder than the
+        // turn that spawned it). Model routing is unchanged: explorer→Utility,
+        // reviewer→Strategic, coder/tester/general→Implementation.
+        smart::RoleProfile role_prof =
+            smart::resolve_subagent_role(type.model_role, cfg.model,
+                                         Effort::None, cfg.candidates,
+                                         cfg.smart);
+        req.model  = role_prof.model;
+        // provider::Request.effort is the WIRE string; convert the clamped
+        // Effort through the resolved model's capabilities (None → "", i.e.
+        // effort off — which is the case today since parent_effort is None).
+        req.effort = std::string(effort_wire_for(
+            role_prof.effort, ModelCapabilities::from_id(role_prof.model)));
     } else {
         req.model = type.read_only
                       ? agentty::cheapest_capable_model(cfg.model, cfg.candidates)

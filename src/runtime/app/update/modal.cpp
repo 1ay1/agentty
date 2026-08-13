@@ -374,7 +374,21 @@ Step submit_message(Model m) {
             || low.find("still fail") != std::string::npos;
         if (correction)
             smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, +1);
+        else if (m.s.smart_turn_complexity != smart::Complexity::Complex)
+            // #5 SYMMETRIC signal: a non-correction follow-up after a turn we
+            // did NOT already escalate is weak ground truth the route was
+            // adequate. Feed a small negative regret so the prior can relax
+            // back down — without this the store only ever accrues positive
+            // regret (corrections + tool failures) and ratchets effort/cost
+            // upward monotonically. Gated off Complex so a genuinely hard
+            // class that got a clean answer isn't pushed to under-think next
+            // time.
+            smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, -1);
     }
+
+    // New user turn begins: clear the first-stream-of-turn routing latch so
+    // the upcoming launch_stream records exactly one note_routed for it.
+    m.s.smart_turn_routed = false;
 
     m.d.current.messages.push_back(std::move(user));
 
