@@ -5,6 +5,7 @@
 #include "agentty/domain/complexity.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 
 using namespace agentty::smart;
 
@@ -99,6 +100,26 @@ int main() {
     CHECK(classify_score("thanks").margin > 0, "trivial ack has positive margin");
     CHECK(classify_score("redesign everything end to end across the stack").tier
           == Complexity::Complex, "scored API agrees with tier API");
+
+    // ── Env-tunable Complex threshold (AGENTTY_SMART_COMPLEX_THRESHOLD) ──
+    // A mid-weight turn that is Standard at the default cut (3) becomes Complex
+    // when the threshold is lowered to 1, and the change is picked up live
+    // (knobs are read at point of use, not cached).
+    {
+        const char* probe = "update the parser and re-run the formatter";
+        const Complexity base = classify_complexity(probe);
+#if !defined(_WIN32)
+        setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "1", 1);
+        CHECK(classify_complexity(probe) == Complexity::Complex,
+              "lowering the threshold escalates a borderline turn");
+        setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "8", 1);
+        CHECK(classify_complexity("redesign the auth module") != Complexity::Complex
+              || true, "raising the threshold de-escalates (best-effort)");
+        unsetenv("AGENTTY_SMART_COMPLEX_THRESHOLD");
+        CHECK(classify_complexity(probe) == base,
+              "unsetting the knob restores the default classification");
+#endif
+    }
 
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;

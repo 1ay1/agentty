@@ -57,6 +57,17 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE` | Set AGENTTY_DEBUG_API=1 to dump streaming provider events to AGENTTY_DEBUG_FILE. |
 | `SSL_CERT_FILE / SSL_CERT_DIR / CURL_CA_BUNDLE` | Override the TLS root store agentty trusts (standard OpenSSL vars). |
 
+### Smart Mode tuning
+
+The Smart Mode *feature* toggles (which layers run) live in the `Ctrl+S` overlay and persist to `settings.json`. These are the numeric **policy** knobs below that — advanced tuning, read at point of use and clamped to a safe range (unset ⇒ the shipped default). Only genuine policy is exposed; the signature hash space, storage compaction thresholds, and individual classifier feature weights are deliberately fixed (changing them corrupts stored learning or breaks invariants).
+
+| Variable | Meaning |
+|----------|---------|
+| `AGENTTY_SMART_COMPLEX_THRESHOLD` | Feature-score at/above which a turn classifies as **Complex** (more reasoning, more cost). Lower ⇒ more turns escalate; higher ⇒ fewer. The Simple/Standard boundary tracks it. Default `3`; range 1–8. |
+| `AGENTTY_SMART_DEEP_MARGIN` | How far *into* a tier (score margin) a turn must sit to earn the extra **continuous effort** step — a genuinely hard Complex turn reaches +2 immediately instead of waiting for the session bias to drift. Lower ⇒ eager; higher ⇒ stays close to the discrete tier. Default `3`; range 1–8. |
+| `AGENTTY_SMART_PRIOR_EVIDENCE` | Evidence pseudo-count before the per-workspace **learned routing prior** is trusted. Lower ⇒ the store reacts faster (fewer turns to move a prior); higher ⇒ more conservative. Default `5`; range 1–100. |
+| `AGENTTY_SMART_BIAS_CLAMP` | Symmetric cap (±N steps) on the **session cascade bias** — how far this session's self-correction can drift effort from baseline. Default `2`; range 1–4. |
+
 ## On-disk paths
 
 Credentials live under XDG config; everything else lives under `~/.agentty`.

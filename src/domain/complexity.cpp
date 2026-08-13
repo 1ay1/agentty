@@ -22,6 +22,7 @@
 // cheap one).
 
 #include "agentty/domain/complexity.hpp"
+#include "agentty/domain/smart_tuning.hpp"
 
 #include <array>
 #include <cctype>
@@ -257,25 +258,26 @@ ComplexityScore classify_score(std::string_view text) noexcept {
         if (has(low, t.s)) { lex += t.w; if (lex >= 6) { lex = 6; break; } }
     score += lex;
 
-    // ── Threshold into tiers, with margin to the nearest boundary. Bands:
-    //    score <= 0   → Simple      (also the sub-band that was "trivial-ish")
-    //    1..2         → Standard
-    //    >= 3         → Complex
-    //    Ties break upward via the boundary placement. ──────────────────────
-    constexpr int kSimpleMax   = 0;   // <= 0 ⇒ Simple
-    constexpr int kStandardMax = 2;   // 1..2 ⇒ Standard; >=3 ⇒ Complex
+    // ── Threshold into tiers, with margin to the nearest boundary. The Complex
+    //    cut is user-tunable (AGENTTY_SMART_COMPLEX_THRESHOLD): Standard is the
+    //    band just below it, Simple everything at or under that. Ties break
+    //    upward via the boundary placement. ────────────────────────────────
+    const int kComplexMin  = tuning::complex_threshold();   // >= this ⇒ Complex
+    const int kSimpleMax   = kComplexMin - 3;               // <= this ⇒ Simple
+                                                            // (Standard is the
+                                                            //  2-wide band between)
 
     Complexity tier;
     int margin;
     if (score <= kSimpleMax) {
         tier   = Complexity::Simple;
         margin = kSimpleMax - score;                 // how far below the boundary
-    } else if (score <= kStandardMax) {
+    } else if (score < kComplexMin) {
         tier   = Complexity::Standard;
-        margin = std::min(score - kSimpleMax, kStandardMax + 1 - score);
+        margin = std::min(score - kSimpleMax, kComplexMin - score);
     } else {
         tier   = Complexity::Complex;
-        margin = score - (kStandardMax + 1);
+        margin = score - kComplexMin;
     }
     return {tier, score, margin};
 }
