@@ -30,6 +30,7 @@ struct DecompositionMemory::Impl {
     std::string forced_root;
     std::vector<Decomposition> recs;   // chronological (append order)
     static constexpr std::size_t kMax = 400;   // cap the in-memory/scan size
+    std::size_t disk_lines = 0;                 // append-only lines on disk
 
     std::string root() {
         if (!forced_root.empty()) return forced_root;
@@ -55,8 +56,10 @@ struct DecompositionMemory::Impl {
         std::ifstream f(p);
         if (!f) return;
         std::string line;
+        disk_lines = 0;
         while (std::getline(f, line)) {
             if (line.empty()) continue;
+            ++disk_lines;
             try {
                 auto j = json::parse(line);
                 Decomposition d;
@@ -72,6 +75,32 @@ struct DecompositionMemory::Impl {
         // Keep only the newest kMax so scans stay bounded.
         if (recs.size() > kMax)
             recs.erase(recs.begin(), recs.end() - static_cast<std::ptrdiff_t>(kMax));
+    }
+
+    // Rewrite the .jsonl from the (already kMax-capped) in-memory recs when the
+    // append-only file has grown well past the cap. Without this the file grows
+    // unbounded even though the in-memory view is bounded. Best-effort, atomic
+    // via temp+rename; a failure leaves the original intact.
+    void compact() {
+        auto p = path();
+        if (p.empty()) return;
+        auto tmp = p; tmp += ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f) return;
+            for (const auto& d : recs) {
+                json j;
+                j["sig"]   = d.signature;
+                j["gist"]  = d.gist;
+                j["steps"] = d.steps;
+                f << j.dump() << '\n';
+            }
+            if (!f) return;
+            disk_lines = recs.size();
+        }
+        std::error_code ec;
+        fs::rename(tmp, p, ec);
+        if (ec) fs::remove(tmp, ec);
     }
 };
 
@@ -120,6 +149,12 @@ void DecompositionMemory::record(const std::string& signature,
     j["gist"] = rec.gist;
     j["steps"] = rec.steps;
     f << j.dump() << '\n';
+    // Bound the in-memory view (record() pushes without the load-time cap) and
+    // rewrite the file once it has drifted well past the cap.
+    if (d.recs.size() > Impl::kMax)
+        d.recs.erase(d.recs.begin(),
+                     d.recs.end() - static_cast<std::ptrdiff_t>(Impl::kMax));
+    if (++d.disk_lines > Impl::kMax * 4) { f.close(); d.compact(); }
 }
 
 std::vector<Decomposition> DecompositionMemory::recall(const std::string& signature,

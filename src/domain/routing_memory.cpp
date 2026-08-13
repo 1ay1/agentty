@@ -74,9 +74,16 @@ struct RoutingMemory::Impl {
     std::string forced_root;   // test seam
     struct Tally { double routed = 0.0; double regret = 0.0; };
     std::unordered_map<std::string, Tally> counts;
+    std::size_t disk_lines = 0;   // append-only lines currently on disk
 
     static constexpr double kMaxBias = 1.0;   // clamp of the returned prior
     static constexpr double kPriorN  = 5.0;   // routed count for ~half confidence
+    // Append-only lines accumulate forever (a handful of low-cardinality
+    // signatures, re-added every turn), and ensure_loaded replays the whole
+    // file each launch. Rewrite from the aggregated in-memory state once the
+    // file grows past this — bounded disk + bounded startup replay, matching
+    // the header's "bounded output" contract.
+    static constexpr std::size_t kCompactThreshold = 2000;
 
     fs::path tsv_path() {
         std::string root = forced_root;
@@ -105,7 +112,9 @@ struct RoutingMemory::Impl {
         std::ifstream f(p);
         if (!f) return;
         std::string line;
+        disk_lines = 0;
         while (std::getline(f, line)) {
+            ++disk_lines;
             // <epoch>\t<routed|regret>\t<signature>\t<delta>
             auto t1 = line.find('\t');
             if (t1 == std::string::npos) continue;
@@ -135,6 +144,34 @@ struct RoutingMemory::Impl {
         auto now = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         f << now << '\t' << kind << '\t' << sig << '\t' << delta << '\n';
+        if (++disk_lines > kCompactThreshold) { f.close(); compact(); }
+    }
+
+    // Rewrite the file from the aggregated in-memory tallies: at most two lines
+    // (routed + regret) per distinct signature, collapsing thousands of
+    // redundant append lines. Best-effort and atomic-ish (temp + rename); a
+    // failure leaves the append-only file intact, so no data is ever lost.
+    void compact() {
+        auto p = tsv_path();
+        if (p.empty()) return;
+        auto tmp = p;
+        tmp += ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f) return;
+            auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::size_t n = 0;
+            for (const auto& [sig, t] : counts) {
+                if (t.routed != 0.0) { f << now << "\trouted\t" << sig << '\t' << t.routed << '\n'; ++n; }
+                if (t.regret != 0.0) { f << now << "\tregret\t" << sig << '\t' << t.regret << '\n'; ++n; }
+            }
+            if (!f) return;
+            disk_lines = n;
+        }
+        std::error_code ec;
+        fs::rename(tmp, p, ec);
+        if (ec) fs::remove(tmp, ec);   // keep the original on failure
     }
 };
 
