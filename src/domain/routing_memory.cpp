@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/auth/auth.hpp"   // CrossProcessFileLock
 
 namespace fs = std::filesystem;
 
@@ -99,22 +100,17 @@ struct RoutingMemory::Impl {
         return fs::path{root} / ".agentty" / "routing_memory.tsv";
     }
 
-    void ensure_loaded() {
-        std::string root = forced_root;
-        if (root.empty())
-            root = tools::util::project_root().string();
-        if (loaded && loaded_for == root) return;
-        counts.clear();
-        loaded = true;
-        loaded_for = root;
-        auto p = tsv_path();
-        if (p.empty()) return;
+    // Parse an append-only TSV into `into`, returning the physical line count.
+    // Shared by ensure_loaded and the compaction re-read (so a compaction sees
+    // any lines a PEER process appended and never drops them).
+    static std::size_t parse_into(std::unordered_map<std::string, Tally>& into,
+                                  const fs::path& p) {
         std::ifstream f(p);
-        if (!f) return;
+        if (!f) return 0;
+        std::size_t n = 0;
         std::string line;
-        disk_lines = 0;
         while (std::getline(f, line)) {
-            ++disk_lines;
+            ++n;
             // <epoch>\t<routed|regret>\t<signature>\t<delta>
             auto t1 = line.find('\t');
             if (t1 == std::string::npos) continue;
@@ -126,12 +122,26 @@ struct RoutingMemory::Impl {
                                  ? line.substr(t2 + 1)
                                  : line.substr(t2 + 1, t3 - t2 - 1);
             if (sig.empty()) continue;
-            if (kind == "routed") counts[sig].routed += 1.0;
+            if (kind == "routed") into[sig].routed += 1.0;
             else if (kind == "regret" && t3 != std::string::npos) {
-                try { counts[sig].regret += std::stod(line.substr(t3 + 1)); }
+                try { into[sig].regret += std::stod(line.substr(t3 + 1)); }
                 catch (...) {}
             }
         }
+        return n;
+    }
+
+    void ensure_loaded() {
+        std::string root = forced_root;
+        if (root.empty())
+            root = tools::util::project_root().string();
+        if (loaded && loaded_for == root) return;
+        counts.clear();
+        loaded = true;
+        loaded_for = root;
+        auto p = tsv_path();
+        if (p.empty()) return;
+        disk_lines = parse_into(counts, p);
     }
 
     void append(const char* kind, const std::string& sig, double delta) {
@@ -139,30 +149,41 @@ struct RoutingMemory::Impl {
         if (p.empty()) return;
         std::error_code ec;
         fs::create_directories(p.parent_path(), ec);
-        std::ofstream f(p, std::ios::app);
-        if (!f) return;
-        auto now = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        f << now << '\t' << kind << '\t' << sig << '\t' << delta << '\n';
-        if (++disk_lines > kCompactThreshold) { f.close(); compact(); }
+        // Serialize append+compact across separate agentty processes sharing
+        // this repo's store, so two instances can't interleave a partial
+        // append with a compaction rewrite. Advisory + best-effort: if the
+        // lock can't be taken we proceed anyway (O_APPEND writes stay atomic).
+        auth::CrossProcessFileLock xlock(p);
+        {
+            std::ofstream f(p, std::ios::app);
+            if (!f) return;
+            auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            f << now << '\t' << kind << '\t' << sig << '\t' << delta << '\n';
+        }
+        if (++disk_lines > kCompactThreshold) compact_locked(p);
     }
 
-    // Rewrite the file from the aggregated in-memory tallies: at most two lines
-    // (routed + regret) per distinct signature, collapsing thousands of
-    // redundant append lines. Best-effort and atomic-ish (temp + rename); a
-    // failure leaves the append-only file intact, so no data is ever lost.
-    void compact() {
-        auto p = tsv_path();
+    // Rewrite the file from the aggregated tallies: at most two lines (routed +
+    // regret) per distinct signature, collapsing thousands of redundant append
+    // lines. Re-reads the on-disk file FIRST under the lock so any lines a peer
+    // process appended (that this process never loaded) are merged in, never
+    // dropped. Atomic via temp+rename; a failure leaves the append-only file
+    // intact. Caller must already hold the cross-process lock on `p`.
+    void compact_locked(const fs::path& p) {
         if (p.empty()) return;
-        auto tmp = p;
-        tmp += ".tmp";
+        // Merge peer writes: start from a fresh parse of the current file, not
+        // this process's possibly-stale in-memory view.
+        std::unordered_map<std::string, Tally> merged;
+        parse_into(merged, p);
+        auto tmp = p; tmp += ".tmp";
         {
             std::ofstream f(tmp, std::ios::trunc);
             if (!f) return;
             auto now = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
             std::size_t n = 0;
-            for (const auto& [sig, t] : counts) {
+            for (const auto& [sig, t] : merged) {
                 if (t.routed != 0.0) { f << now << "\trouted\t" << sig << '\t' << t.routed << '\n'; ++n; }
                 if (t.regret != 0.0) { f << now << "\tregret\t" << sig << '\t' << t.regret << '\n'; ++n; }
             }
@@ -171,7 +192,9 @@ struct RoutingMemory::Impl {
         }
         std::error_code ec;
         fs::rename(tmp, p, ec);
-        if (ec) fs::remove(tmp, ec);   // keep the original on failure
+        if (ec) { fs::remove(tmp, ec); return; }   // keep the original on failure
+        // Adopt the merged view so this process's prior reflects peer evidence.
+        counts = std::move(merged);
     }
 };
 

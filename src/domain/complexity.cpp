@@ -113,9 +113,17 @@ Complexity classify_complexity(std::string_view text) noexcept {
     for (char c : trimmed) low.push_back(lower(c));
 
     const std::size_t words = word_count(trimmed);
+    // Byte length is a script-agnostic size proxy: keyword scans below are
+    // English-only, and word_count splits on ASCII whitespace, so a CJK / other
+    // no-space-delimited turn always counts as ~1 word and would perpetually
+    // under-rate to Simple/Trivial. Fall back on raw length for the size gate
+    // so a long non-English request still escalates. (English keeps its
+    // word-based path; this only lifts the floor for unsegmented scripts.)
+    const bool long_by_bytes = trimmed.size() >= 240;   // ~60 4-byte glyphs
 
     // 1. Exact trivial acknowledgements / one-word imperatives (no '?').
-    if (words <= 3 && trimmed.find('?') == std::string_view::npos) {
+    if (words <= 3 && !long_by_bytes
+        && trimmed.find('?') == std::string_view::npos) {
         for (auto t : kTrivialExact)
             if (low == t) return Complexity::Trivial;
     }
@@ -124,13 +132,15 @@ Complexity classify_complexity(std::string_view text) noexcept {
     for (auto term : kComplexTerms)
         if (has(low, term)) return Complexity::Complex;
 
-    // 3. Size / structure signals → Complex. A long turn, or several
-    //    enumerated asks, is inherently multi-step.
-    if (words >= 60 || enumerated_asks(trimmed) >= 3)
+    // 3. Size / structure signals → Complex. A long turn (by words OR raw
+    //    bytes, so non-space-delimited scripts count), or several enumerated
+    //    asks, is inherently multi-step.
+    if (words >= 60 || long_by_bytes || enumerated_asks(trimmed) >= 3)
         return Complexity::Complex;
 
     // 4. A short, single-clause request → Simple.
-    if (words <= 8 && trimmed.find('\n') == std::string_view::npos)
+    if (words <= 8 && !long_by_bytes
+        && trimmed.find('\n') == std::string_view::npos)
         return Complexity::Simple;
 
     // 5. Conservative default.
