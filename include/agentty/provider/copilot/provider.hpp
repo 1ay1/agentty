@@ -44,4 +44,8 @@ static_assert(provider::Provider<CopilotProvider>);
 // The account's default model slug (first catalog entry) or a safe fallback.
 [[nodiscard]] std::string default_model();
 
+// Drop the cached model catalog so the next list_models() re-ranks with any
+// freshly learned per-model support (after a turn's 400/200 outcome).
+void invalidate_model_cache();
+
 } // namespace agentty::provider::copilot
