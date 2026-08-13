@@ -78,6 +78,10 @@ Step close_login(Model m) {
         waiting && waiting->cancel) {
         waiting->cancel->store(true, std::memory_order_release);
     }
+    if (auto* waiting = std::get_if<login::CopilotWaiting>(&m.ui.login);
+        waiting && waiting->cancel) {
+        waiting->cancel->store(true, std::memory_order_release);
+    }
     m.ui.login = login::Closed{};
     return done(std::move(m));
 }
@@ -90,7 +94,10 @@ Step sign_out(Model m) {
     // the pasted key so a re-auth is required.
     const auto& sel = provider::active();
     std::string what = "credentials";
-    if (sel.is_oauth_native()) {
+    if (sel.is_copilot()) {
+        provider::copilot::clear_credentials();
+        what = "GitHub Copilot";
+    } else if (sel.is_oauth_native()) {
         provider::chatgpt::clear_codex_credentials();
         what = "ChatGPT";
     } else if (sel.kind == provider::Kind::Anthropic) {
@@ -624,6 +631,41 @@ Step login_codex_done(
                                   auth::AuthHeader{}, "ChatGPT");
 }
 
+Step login_copilot_device_code_ready(Model m, std::uint64_t attempt_id,
+                                     std::string verification_url,
+                                     std::string user_code) {
+    auto* waiting = std::get_if<login::CopilotWaiting>(&m.ui.login);
+    if (!waiting || waiting->attempt_id != attempt_id)
+        return done(std::move(m));
+    waiting->authorize_url = verification_url;
+    waiting->user_code = std::move(user_code);
+    // Best-effort: also open the browser to the device page so the user
+    // doesn't have to type the URL. Harmless if it can't (SSH/headless).
+    return {std::move(m), cmd::open_browser_async(std::move(verification_url))};
+}
+
+Step login_copilot_done(
+    Model m, std::uint64_t attempt_id,
+    std::expected<provider::copilot::GithubToken, auth::OAuthError> result)
+{
+    auto* waiting = std::get_if<login::CopilotWaiting>(&m.ui.login);
+    if (!waiting || waiting->attempt_id != attempt_id)
+        return done(std::move(m));
+    if (waiting->cancel)
+        waiting->cancel->store(true, std::memory_order_release);
+    if (!result) {
+        m.ui.login = login::Failed{result.error().render()};
+        return done(std::move(m));
+    }
+    // login() already persisted the GitHub token; the proxy token is
+    // exchanged lazily on the first turn. Switch the active provider now.
+    m.ui.login = login::Closed{};
+    m.s.status = "signed in to GitHub Copilot";
+    m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    return commit_provider_switch(std::move(m), "copilot",
+                                  auth::AuthHeader{}, "GitHub Copilot");
+}
+
 Step token_refreshed(Model m, auth::TokenResult result) {
     // Background-refresh result. Distinct from login_exchanged: this
     // path was kicked off either by `init()` (stale-but-refreshable
@@ -766,6 +808,14 @@ Step login_update(Model m, msg::LoginMsg lm) {
         [&](CodexLoginDone& e)      -> Step {
             return login_codex_done(std::move(m), e.attempt_id,
                                     std::move(e.result));
+        },
+        [&](CopilotDeviceCodeReady& e) -> Step {
+            return login_copilot_device_code_ready(std::move(m), e.attempt_id,
+                std::move(e.verification_url), std::move(e.user_code));
+        },
+        [&](CopilotLoginDone& e)    -> Step {
+            return login_copilot_done(std::move(m), e.attempt_id,
+                                      std::move(e.result));
         },
         [&](TokenRefreshed& e)      -> Step { return token_refreshed(std::move(m), std::move(e.result)); },
     }, lm);

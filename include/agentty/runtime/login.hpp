@@ -61,6 +61,17 @@ struct ChatGptWaiting {
     std::string                        user_code;
 };
 
+// GitHub Copilot device-flow login is in flight. GitHub always issues a
+// one-time code (device flow only — no browser-callback variant), so the modal
+// shows the verification URL + code as soon as CopilotDeviceCodeReady lands.
+// Esc closes the modal; the bounded worker eventually exits.
+struct CopilotWaiting {
+    std::uint64_t                      attempt_id = 0;
+    std::shared_ptr<std::atomic_bool> cancel;
+    std::string                        authorize_url;
+    std::string                        user_code;
+};
+
 struct ApiKeyInput {
     std::string key_input;
     int         cursor = 0;
@@ -109,7 +120,7 @@ struct AccountList {
 };
 
 using State = std::variant<Closed, Picking, OAuthCode, OAuthExchanging,
-                           ChatGptWaiting, ApiKeyInput, CustomHostInput,
+                           ChatGptWaiting, CopilotWaiting, ApiKeyInput, CustomHostInput,
                            AccountList, Failed>;
 
 [[nodiscard]] inline bool is_open(const State& s) noexcept {

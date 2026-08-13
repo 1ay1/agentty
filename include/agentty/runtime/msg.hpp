@@ -35,6 +35,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/runtime/fork_picker.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/registry.hpp"
@@ -546,6 +547,21 @@ struct CodexLoginDone {
     std::expected<agentty::provider::chatgpt::CodexCredentials,
                   agentty::auth::OAuthError> result;
 };
+
+// GitHub Copilot device-flow login — the exact sibling of the Codex pair. The
+// worker dispatches CopilotDeviceCodeReady as soon as GitHub issues the
+// one-time code (so the modal can show it) and CopilotLoginDone when the user
+// approves (or the flow fails/times out).
+struct CopilotDeviceCodeReady {
+    std::uint64_t attempt_id = 0;
+    std::string verification_url;
+    std::string user_code;
+};
+struct CopilotLoginDone {
+    std::uint64_t attempt_id = 0;
+    std::expected<agentty::provider::copilot::GithubToken,
+                  agentty::auth::OAuthError> result;
+};
 // Result of the background OAuth refresh kicked off from init() when
 // `auth::resolve()` returned an expired token paired with a refresh
 // token. Same TokenResult shape as LoginExchanged, handled in
@@ -756,7 +772,8 @@ using LoginMsg = std::variant<
     LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginOpenBrowserAgain,
-    LoginExchanged, CodexDeviceCodeReady, CodexLoginDone, TokenRefreshed>;
+    LoginExchanged, CodexDeviceCodeReady, CodexLoginDone,
+    CopilotDeviceCodeReady, CopilotLoginDone, TokenRefreshed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove,

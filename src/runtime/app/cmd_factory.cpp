@@ -1692,6 +1692,48 @@ std::uint64_t next_codex_login_attempt_id() noexcept {
     return next.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
+Cmd<Msg> copilot_login_async(std::uint64_t attempt_id,
+                             std::shared_ptr<std::atomic_bool> cancel) {
+    // GitHub device flow: request a code (dispatched to the modal via
+    // CopilotDeviceCodeReady), then block-poll until the user approves. Every
+    // message carries attempt_id so a stale worker can't complete a newer
+    // login; Esc trips `cancel` for cooperative shutdown.
+    return Cmd<Msg>::task_isolated(
+        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
+        const auto cancelled = [cancel] {
+            return cancel && cancel->load(std::memory_order_acquire);
+        };
+        try {
+            auto r = provider::copilot::login(
+                900, [attempt_id, &dispatch](
+                         const provider::copilot::DeviceCode& code) {
+                    dispatch(CopilotDeviceCodeReady{
+                        .attempt_id = attempt_id,
+                        .verification_url = code.verification_uri,
+                        .user_code = code.user_code,
+                    });
+                }, cancelled);
+            dispatch(CopilotLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::move(r),
+            });
+        } catch (const std::exception& e) {
+            dispatch(CopilotLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network,
+                    std::string{"copilot login threw: "} + e.what()}),
+            });
+        } catch (...) {
+            dispatch(CopilotLoginDone{
+                .attempt_id = attempt_id,
+                .result = std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Network, "copilot login threw"}),
+            });
+        }
+    });
+}
+
 Cmd<Msg> codex_login_async(std::uint64_t attempt_id,
                            std::shared_ptr<std::atomic_bool> cancel) {
     // Isolated because either OAuth mode blocks while the user signs in. Every

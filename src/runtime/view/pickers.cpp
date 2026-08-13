@@ -20,6 +20,7 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/provider/registry.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
@@ -363,6 +364,17 @@ Element provider_picker(const Model& m) {
         if (p.id == "chatgpt") {
             note = active ? "manage accounts" : "ChatGPT (native OAuth)";
             note_color = active ? info : muted;
+        } else if (p.id == "copilot") {
+            // Native GitHub OAuth: reflect REAL sign-in state, not a hardcoded
+            // checkmark. Selecting it while signed out launches the device
+            // login (picker.cpp), so "sign in" is an actionable hint.
+            if (provider::copilot::signed_in()) {
+                note = active ? "\xe2\x9c\x93 signed in" : "GitHub Copilot (signed in)";
+                note_color = active ? success : muted;
+            } else {
+                note = "\xe2\x9a\xa0 sign in with GitHub";
+                note_color = warn;
+            }
         } else if (p.is_local || p.auth == provider::AuthStyle::None) {
             note = "● local";
             note_color = info;
