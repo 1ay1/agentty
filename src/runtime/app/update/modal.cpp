@@ -18,6 +18,7 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/provider/copilot/provider.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/store/store.hpp"
@@ -535,6 +536,7 @@ std::string active_provider_id() {
 std::string model_for_provider(std::string_view spec) {
     const bool is_chatgpt =
         spec == "codex" || spec == "chatgpt" || spec == "codex-cli";
+    const bool is_copilot = spec == "copilot";
 
     // 1) Recall the model the user last used on this provider.
     auto s = deps().load_settings();
@@ -545,8 +547,10 @@ std::string model_for_provider(std::string_view spec) {
         // rejected on the very first turn. Only honour a recalled ChatGPT slug
         // if the LIVE catalog still lists it; otherwise fall through to the
         // account's current default so we never restore a dead model.
-        if (!is_chatgpt) return it->second;
-        for (const auto& mi : provider::chatgpt::list_models())
+        if (!is_chatgpt && !is_copilot) return it->second;
+        const auto& live = is_copilot ? provider::copilot::list_models()
+                                      : provider::chatgpt::list_models();
+        for (const auto& mi : live)
             if (mi.id.value == it->second) return it->second;
         // recalled slug is stale — drop through to default_model() below.
     }
@@ -565,6 +569,11 @@ std::string model_for_provider(std::string_view spec) {
     if (is_chatgpt) {
         auto def = provider::chatgpt::default_model();
         return def;   // may be a real slug (catalog) or a safe "gpt-5" fallback
+    }
+    if (is_copilot) {
+        // Copilot's catalog is entitlement-driven; resolve from the LIVE list,
+        // else empty and let ModelsLoaded auto-select the first available.
+        return provider::copilot::default_model();
     }
     return {};
 }

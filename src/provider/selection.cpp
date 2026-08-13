@@ -11,6 +11,7 @@
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/provider/copilot/provider.hpp"
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/io/http.hpp"
 
@@ -201,6 +202,7 @@ std::vector<ModelInfo> list_models_for(const Selection& sel,
     // brand-new catalog mechanism — it inherits one of these by its Wire /
     // oauth_native row fields.
     if (sel.kind == Kind::ExternalAcp) return {};
+    if (sel.is_copilot())              return copilot::list_models();
     if (sel.is_oauth_native())         return chatgpt::list_models();
     if (sel.kind == Kind::OpenAI)
         return openai::list_models(auth, sel.openai_endpoint);
