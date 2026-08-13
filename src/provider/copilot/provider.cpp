@@ -74,6 +74,44 @@ provider::openai::Endpoint CopilotProvider::make_endpoint(const std::string& api
     return ep;
 }
 
+namespace {
+// The synthetic "Auto" model id agentty exposes in the picker. Selecting it
+// lets GitHub's server route each turn to the best model the account may use.
+constexpr const char* kAutoId = "copilot-auto";
+
+// gpt-4o-family base models run on every plan via a DIRECT chat request — they
+// must NOT be forced through the Auto session (which doesn't list them).
+bool is_base_direct(const std::string& id) {
+    return id == "gpt-4o" || id == "gpt-4.1" || id == "gpt-4o-mini"
+        || id == "gpt-4o-copilot" || id == "gpt-4.1-mini"
+        || id.rfind("gpt-4o-mini", 0) == 0;
+}
+
+// Some Auto models only speak /responses (mai-code-*), which agentty's
+// OpenAI-Chat transport can't drive. Prefer a chat-completions model.
+bool auto_chat_compatible(const std::string& id) {
+    return id.rfind("mai-code", 0) != 0;
+}
+
+// An auto Endpoint carries the session token + CAPI api-version so the server
+// accepts models that a free/limited plan can only reach via Auto.
+provider::openai::Endpoint make_auto_endpoint(const std::string& api_base,
+                                              const std::string& session_token) {
+    auto hp = parse_api_base(api_base);
+    provider::openai::Endpoint ep;
+    ep.host        = hp.host;
+    ep.port        = hp.port;
+    ep.use_tls     = hp.tls;
+    ep.path        = "/chat/completions";
+    ep.models_path = "/models";
+    ep.label       = "copilot";
+    ep.extra_headers = copilot_headers();
+    ep.extra_headers.push_back({"x-github-api-version", kAutoApiVersion});
+    ep.extra_headers.push_back({"copilot-session-token", session_token});
+    return ep;
+}
+} // namespace
+
 provider::StreamResult CopilotProvider::stream(provider::Request req,
                                                provider::EventSink sink) {
     auto tok = fresh_token();
@@ -87,41 +125,73 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
         sink(StreamError{"This GitHub account has no Copilot Chat entitlement."});
         return provider::StreamResult::failed("copilot: chat not enabled");
     }
-    if (tok->quota_exhausted) {
-        sink(StreamError{"GitHub Copilot chat quota is exhausted for this "
-                         "account (free tier). Try again later or upgrade your "
-                         "Copilot plan."});
-        return provider::StreamResult::failed("copilot: quota exhausted");
-    }
+
+    const std::string requested = req.model;
+    // Route through Auto when the picked model is the synthetic Auto entry, or
+    // a premium model the account can only reach via a session. Base gpt-4o
+    // family models run DIRECT (they're not in the Auto set), and models we've
+    // confirmed work directly also skip Auto.
+    const bool wants_auto = (requested == kAutoId)
+        || (!is_base_direct(requested) && !is_supported_model(requested));
+
+    std::optional<AutoSession> as;
+    if (wants_auto) as = auto_session();
 
     auto run = [&](const CopilotToken& t) -> provider::StreamResult {
         provider::openai::Request oreq;
         provider::lower_shared(oreq, req);
         oreq.context_window = req.context_window;
         oreq.session_key    = req.session_key;
-        oreq.endpoint       = make_endpoint(t.endpoint_api);
-        oreq.auth           = auth::BearerHeader{t.token};
+        if (as && as->valid()) {
+            // Pick the concrete model: honour the user's choice if it's in the
+            // session's allow-list, else the server's selected_model, else the
+            // first available.
+            std::string picked;
+            if (requested != kAutoId) {
+                for (auto& m : as->available_models)
+                    if (m == requested) { picked = m; break; }
+            }
+            // For Auto (or if the request wasn't in the set), pick the server's
+            // choice — but only if it's chat-completions-compatible; else the
+            // first compatible available model.
+            if (picked.empty() && auto_chat_compatible(as->selected_model))
+                picked = as->selected_model;
+            if (picked.empty())
+                for (auto& m : as->available_models)
+                    if (auto_chat_compatible(m)) { picked = m; break; }
+            if (picked.empty() && !as->available_models.empty())
+                picked = as->available_models.front();
+            oreq.model    = picked;
+            oreq.endpoint = make_auto_endpoint(as->endpoint_api, as->session_token);
+        } else {
+            oreq.endpoint = make_endpoint(t.endpoint_api);
+        }
+        oreq.auth = auth::BearerHeader{t.token};
         return provider::openai::run_stream_sync(std::move(oreq), sink, req.cancel);
     };
 
-    const std::string model_id = req.model;
     auto result = run(*tok);
-    // One forced-refresh retry if the proxy token was rejected mid-life (401/403).
+    // Proxy token revoked mid-life → refresh + retry once.
     if (!result.ok() && (result.http_status == 401 || result.http_status == 403)) {
         invalidate_cached_token();
-        if (auto fresh = fresh_token())
-            result = run(*fresh);
+        if (auto fresh = fresh_token()) result = run(*fresh);
     }
-    // LEARN model support: Copilot 400s "model not supported" for models the
-    // account's billing tier can't run — the /models catalog can't be trusted
-    // to predict this, so we record the outcome and list_models demotes the
-    // unsupported ones next refresh.
-    if (result.http_status == 400 && result.error
-        && result.error->find("not supported") != std::string::npos) {
-        note_unsupported_model(model_id);
-        invalidate_model_cache();
-    } else if (result.ok()) {
-        note_supported_model(model_id);
+    // Auto session expired/stale → refresh it + retry once.
+    if (!result.ok() && wants_auto && result.http_status == 400) {
+        invalidate_auto_session();
+        as = auto_session();
+        if (as) result = run(*tok);
+    }
+    // LEARN direct model support (only meaningful for a directly-requested
+    // model, not the auto pseudo-id).
+    if (requested != kAutoId) {
+        if (result.http_status == 400 && result.error
+            && result.error->find("not supported") != std::string::npos) {
+            note_unsupported_model(requested);
+            invalidate_model_cache();
+        } else if (result.ok() && !wants_auto) {
+            note_supported_model(requested);
+        }
     }
     return result;
 }
@@ -175,6 +245,14 @@ std::vector<ModelInfo> list_models() {
     // fetch this once and HIDE the models the account can't use.
     const Entitlement ent = account_entitlement();
     const bool hide_premium = ent.known && !ent.premium_available;
+
+    // AUTO session: the per-account set of models reachable via server-side
+    // routing (the ONLY way a free/limited plan runs premium models). These
+    // become first-class usable entries even though a DIRECT request 400s.
+    auto as = auto_session();
+    std::set<std::string> auto_ok;
+    if (as) for (auto& m : as->available_models)
+        if (auto_chat_compatible(m)) auto_ok.insert(m);   // skip /responses-only
 
     // A model is PREMIUM (needs the premium_interactions quota) when it's not
     // in the base free-tier line. Base = the current-gen gpt-4o / gpt-4.1
@@ -230,24 +308,28 @@ std::vector<ModelInfo> list_models() {
             const bool base         = is_base_family(id);   // policy = terms, not premium
             const bool learned_bad  = is_unsupported_model(id);
             const bool learned_good = is_supported_model(id);
+            const bool auto_usable  = auto_ok.count(id) > 0;   // reachable via Auto
 
             // A model is premium (draws the premium quota) unless it's a base
             // family model. Confirmed-good overrides (we've actually run it).
-            const bool premium = !base && !learned_good;
+            const bool premium = !base && !learned_good && !auto_usable;
 
             // FILTER: hide models this account can't run.
-            //   • anything we've confirmed 400s (learned_bad) — always hide.
-            //   • premium models when the plan has no premium entitlement.
-            if (learned_bad) continue;
+            //   • anything we've confirmed 400s (learned_bad) — always hide,
+            //     UNLESS it's reachable via the Auto session.
+            //   • premium models when the plan has no premium entitlement AND
+            //     they're not in the Auto set.
+            if (learned_bad && !auto_usable) continue;
             if (hide_premium && premium) continue;
 
             ModelInfo info;
             info.id           = ModelId{id};
-            info.display_name = m.value("name", id);
+            info.display_name = m.value("name", id)
+                              + std::string{auto_usable && !base ? " (auto)" : ""};
             info.provider     = "copilot";
-            // ★ the models we're CONFIDENT the account can use: base family, or
-            // confirmed-good, or (premium plan) any premium model.
-            info.favorite     = base || learned_good
+            // ★ the models we're CONFIDENT the account can use: base family,
+            // confirmed-good, Auto-reachable, or (premium plan) any premium.
+            info.favorite     = base || learned_good || auto_usable
                               || (!hide_premium && !has_policy);
             if (caps.contains("limits"))
                 info.context_window =
@@ -258,11 +340,25 @@ std::vector<ModelInfo> list_models() {
             const std::string cat = m.value("model_picker_category", "");
             int cat_w = cat == "powerful" ? 0 : cat == "versatile" ? 1
                       : cat == "lightweight" ? 2 : 3;
-            // Confirmed-good / base first, then the rest by category.
-            int tier = (learned_good || base) ? 0 : 100;
+            // Confirmed-good / base first, then Auto-reachable, then the rest.
+            int tier = (learned_good || base) ? 0 : auto_usable ? 10 : 100;
             rows.push_back({std::move(info), tier + cat_w});
         }
     } catch (...) { return bundled_models(); }
+
+    // Prepend the synthetic "Auto" model — the top pick. Selecting it lets the
+    // server route each turn to the best model the account may use (the same
+    // "Auto" VS Code offers). Only shown when a session is actually available.
+    if (as && as->valid()) {
+        ModelInfo autom;
+        autom.id           = ModelId{kAutoId};
+        autom.display_name = "Auto (best available)";
+        autom.provider     = "copilot";
+        autom.favorite     = true;
+        autom.context_window = 200000;
+        autom.supports_tools = true;
+        rows.insert(rows.begin(), {std::move(autom), -1});   // rank -1 = very top
+    }
 
     if (rows.empty()) return bundled_models();
     std::stable_sort(rows.begin(), rows.end(),

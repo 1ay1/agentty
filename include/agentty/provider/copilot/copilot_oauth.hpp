@@ -90,6 +90,32 @@ struct Entitlement {
 // everything) rather than hide models on a transient network blip.
 [[nodiscard]] Entitlement account_entitlement();
 
+// ── Auto model selection ────────────────────────────────────────────
+// GitHub's "Auto" mode (POST {api}/models/session) is how Free/Limited plans
+// reach premium models (Claude, GPT-5): the SERVER picks a model from a
+// per-account set and issues a short-lived signed session token that the chat
+// request carries as `Copilot-Session-Token`. This is the ONLY way a free-tier
+// account can run those models — requesting them directly 400s. The request
+// requires the current CAPI api-version header (kAutoApiVersion).
+struct AutoSession {
+    std::vector<std::string> available_models;  // models this session may use
+    std::string selected_model;                 // the server's pick ("best")
+    std::string session_token;                  // signed JWT → Copilot-Session-Token
+    std::int64_t expires_at_ms = 0;             // from the JWT exp claim
+    std::string endpoint_api;                    // inference host for this session
+    [[nodiscard]] bool valid() const noexcept {
+        return !session_token.empty()
+            && (expires_at_ms == 0 || CopilotToken::now_ms() < expires_at_ms - 30'000);
+    }
+};
+// The CAPI api-version the /models/session + auto-routed chat calls require.
+inline constexpr const char* kAutoApiVersion = "2026-08-01";
+
+// Return a valid Auto session, fetching/refreshing as needed. nullopt when not
+// signed in or the endpoint is unavailable. Single-flight cached.
+[[nodiscard]] std::optional<AutoSession> auto_session();
+void invalidate_auto_session();
+
 // ── Persistence ──────────────────────────────────────────────────────────
 [[nodiscard]] std::optional<GithubToken> load_github_token();
 bool save_github_token(const GithubToken&);
