@@ -14,13 +14,16 @@ Everything here is **per-workspace** and **local** — the learning for one repo
 
 The [cascade correction](/docs/smart-mode-routing#the-cascade-correction) adjusts effort *within* a session. **Learned routing** persists that signal *across* sessions.
 
-Each turn gets a coarse **signature** — its complexity tier plus a few cheap buckets (does it mention code? ask a question? is it long?). agentty keeps a Beta-smoothed tally, per signature, of whether that class of turn tends to be **under-** or **over-rated** by the heuristic in *this* repo. On a future turn with a matching signature, the learned prior folds into the effort decision.
+Each turn gets a **signature** — a hierarchical key with a coarse and a fine part. The **coarse** part is language-agnostic structure: the complexity tier plus a few cheap buckets (does it mention code? ask a question? how long is it?). The **fine** part is a compact feature-hash of the turn's salient content words (any language, order-independent). agentty keeps a Beta-smoothed tally, per signature, of whether that class of turn tends to be **under-** or **over-rated** by the classifier in *this* repo.
 
-The effect compounds. In a gnarly systems codebase, "fix the build" is almost always a complex, multi-file turn — after a few of them, Smart Mode learns to route that shape with more effort here, even though the same words in a notes repo stay trivial. **The router gets better at your repo the more you use it.**
+The two levels give you the best of both: **specificity when there's evidence, generalization when there isn't.** On a future turn, the learned prior reads the fine key first, but if that exact turn hasn't been seen enough, it **backs off** to its coarse structural class — so a brand-new turn *inherits the prior its whole class has already earned*, and a turn you've done many times gets its own sharper prior. (This is the empirical-Bayes shrinkage that production ranking systems use.)
 
-- Stored at `.agentty/routing_memory.tsv` (append-only, Beta-smoothed).
-- A single event never swings the prior; confidence grows with evidence.
-- Neutral when unseen — a fresh repo behaves exactly like the plain heuristic.
+The effect compounds. In a gnarly systems codebase, "fix the build" is almost always a complex, multi-file turn — after a few of them, Smart Mode learns to route that *shape* with more effort here, even though the same words in a notes repo stay trivial. **The router gets better at your repo the more you use it.**
+
+- Stored at `.agentty/routing_memory.tsv` (append-only, Beta-smoothed, periodically compacted so the file stays small).
+- A single event never swings the prior; confidence grows with evidence. How much evidence is [tunable](/docs/configuration#smart-mode-tuning) via `AGENTTY_SMART_PRIOR_EVIDENCE`.
+- Neutral when unseen — a fresh repo behaves exactly like the plain classifier.
+- Safe across concurrent agentty processes in the same repo (advisory file lock; a peer's writes are never lost).
 
 ## Outcome feedback
 

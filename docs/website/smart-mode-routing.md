@@ -41,16 +41,30 @@ All three slots must be on the **same provider** (see the [reference](/docs/smar
 
 ## Complexity-scaled effort
 
-Reasoning effort has to be decided *before* the request is sent, so Smart Mode classifies each turn upfront with a fast local heuristic — no extra model call, no latency — into one of four tiers:
+Reasoning effort has to be decided *before* the request is sent, so Smart Mode classifies each turn upfront — no extra model call, no latency — into one of four tiers:
 
 | Tier | Looks like | Effort |
 |------|-----------|--------|
 | **Trivial** | "yes", "commit it", "run it" | none |
 | **Simple** | a short, single-clause fix | one step **down** from your baseline |
 | **Standard** | the everyday working turn | your baseline (unchanged) |
-| **Complex** | "why does this deadlock?", "refactor the auth module", a long or multi-part ask | one step **up** |
+| **Complex** | "why does this deadlock?", "refactor the auth module", a long or multi-part ask | one step **up** (or **two** when the turn is *deeply* complex) |
+
+### How the classifier works
+
+It's not a keyword lookup — it's a small **additive feature score**. Three orthogonal signal families each contribute weight, and the sum is thresholded into a tier:
+
+- **Structural** (carries most of the weight, and is *language-agnostic*): enumerated asks, clause and conjunction density, code-token density, question shape, and length. A request's complexity lives mostly in its **structure**, not its verbs — so this works whether you write in English or not.
+- **Lexical**: weighted design/debug/architecture keyword sets across the major languages. Keywords **add evidence** (capped) rather than overriding — one stray "design" in *"add a design token"* no longer forces the top tier.
+- **Morphological**: token-shape variety (prose vs. identifiers vs. paths).
+
+Because it's a score and not a switch, Smart Mode also knows *how far* into a tier a turn sits. **Continuous effort scaling** uses that: a turn that is barely Complex gets the normal one-step bump, but a turn that is *overwhelmingly* complex (long, multi-part, code-heavy, design vocabulary) gets an extra step — reaching the ceiling immediately instead of waiting for the session cascade to drift there.
 
 The classifier is deliberately **conservative**: *Standard* is the fallback, and ambiguity biases **upward** — under-thinking a hard turn costs far more than a little wasted budget on an easy one. Effort is always clamped to what the chosen model actually supports (a model with no reasoning control resolves to *none*, honestly, rather than requesting an effort it will reject).
+
+The tier boundary and the deep-band aggressiveness are [tunable](/docs/configuration#smart-mode-tuning) via `AGENTTY_SMART_COMPLEX_THRESHOLD` and `AGENTTY_SMART_DEEP_MARGIN` if you want the router more or less eager to escalate.
+
+Classification is also **context-aware**: a short follow-up to a hard turn (*"now do the same for the other module"*) would score as Simple on its own text, but it inherits weight from the Complex turn it continues rather than collapsing to a one-liner — while a plain acknowledgement (*"thanks"*) is always taken at face value.
 
 :::tip
 You don't set the tier — it's inferred from your prompt. Ask a design or "why" question, or spell out a multi-step task, and the Strategic model automatically gets more room to think.
