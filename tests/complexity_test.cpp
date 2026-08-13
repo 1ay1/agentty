@@ -65,6 +65,20 @@ int main() {
     CHECK(classify_with_context("rename foo to bar", Complexity::Standard)
           == Complexity::Simple, "Standard history does not lift a Simple follow-up");
 
+    // ── Script-agnostic size floor: a long non-space-delimited (e.g. CJK)
+    //    turn must not perpetually under-rate to Simple just because
+    //    word_count sees ~1 whitespace-token. A ~300-byte no-space string
+    //    escalates via the byte-length proxy.
+    {
+        std::string cjk;
+        for (int i = 0; i < 100; ++i) cjk += "\xE6\x8E\xA2";   // 3-byte glyph ×100 = 300B
+        CHECK(classify_complexity(cjk) == Complexity::Complex,
+              "long no-space (CJK-like) turn escalates via byte-length floor");
+    }
+    // Empty / whitespace-only input is Trivial, never a crash.
+    CHECK(classify_complexity("") == Complexity::Trivial, "empty → trivial");
+    CHECK(classify_complexity("   \n\t ") == Complexity::Trivial, "whitespace → trivial");
+
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

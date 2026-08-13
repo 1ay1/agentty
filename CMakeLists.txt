@@ -2131,6 +2131,13 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(decomposition_memory_test)
     set_tests_properties(decomposition_memory_test PROPERTIES TIMEOUT 30)
 
+    # smart_cascade_gate_test — drives finalize_turn through a simulated
+    # multi-round-trip orchestrated turn and asserts the cascade side-effects
+    # (decomposition record, bias decay) fire ONCE at the final settle, never
+    # on an intermediate StopReason::ToolUse or a still-pending-tools settle.
+    agentty_add_full_test(smart_cascade_gate_test)
+    set_tests_properties(smart_cascade_gate_test PROPERTIES TIMEOUT 30)
+
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
     # "profile" key both resolve to Write (the Profile enum's zero value).
@@ -2382,6 +2389,7 @@ if(AGENTTY_BUILD_TESTS)
         complexity_test
         routing_memory_test
         decomposition_memory_test
+        smart_cascade_gate_test
         settings_default_test
         salvage_dedup_test
         doom_loop_test

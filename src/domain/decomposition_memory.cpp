@@ -1,10 +1,10 @@
 // decomposition_memory.cpp — retrieval-augmented orchestration store.
 //
 // Append-only JSONL of successful turn decompositions under
-// <cwd>/.agentty/decompositions.jsonl. Retrieval is deliberately simple:
-// exact turn-signature match first, then same-complexity-tier fallback,
-// newest-first. The value is grounding the orchestrator in what actually
-// worked in THIS repo, not a fancy similarity model.
+// <project-root>/.agentty/decompositions.jsonl. Retrieval is deliberately
+// simple: exact turn-signature match first, then same-complexity-tier
+// fallback, newest-first. The value is grounding the orchestrator in what
+// actually worked in THIS repo, not a fancy similarity model.
 
 #include "agentty/domain/decomposition_memory.hpp"
 
@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/auth/auth.hpp"   // CrossProcessFileLock
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -77,18 +78,38 @@ struct DecompositionMemory::Impl {
             recs.erase(recs.begin(), recs.end() - static_cast<std::ptrdiff_t>(kMax));
     }
 
-    // Rewrite the .jsonl from the (already kMax-capped) in-memory recs when the
-    // append-only file has grown well past the cap. Without this the file grows
-    // unbounded even though the in-memory view is bounded. Best-effort, atomic
-    // via temp+rename; a failure leaves the original intact.
-    void compact() {
-        auto p = path();
+    // Rewrite the .jsonl from the newest kMax records ON DISK (re-read under
+    // the lock so a peer process's appended records are merged in, not dropped)
+    // when the append-only file has grown past the cap. Best-effort, atomic via
+    // temp+rename; a failure leaves the original intact. Caller holds the lock.
+    void compact_locked(const fs::path& p) {
         if (p.empty()) return;
+        // Re-parse the current file so peer appends survive the rewrite.
+        std::vector<Decomposition> disk;
+        if (std::ifstream f{p}) {
+            std::string line;
+            while (std::getline(f, line)) {
+                if (line.empty()) continue;
+                try {
+                    auto j = json::parse(line);
+                    Decomposition d;
+                    d.signature = j.value("sig", "");
+                    d.gist      = j.value("gist", "");
+                    if (j.contains("steps") && j["steps"].is_array())
+                        for (const auto& s : j["steps"])
+                            if (s.is_string()) d.steps.push_back(s.get<std::string>());
+                    if (!d.signature.empty() && !d.steps.empty())
+                        disk.push_back(std::move(d));
+                } catch (...) { /* skip malformed */ }
+            }
+        }
+        if (disk.size() > kMax)
+            disk.erase(disk.begin(), disk.end() - static_cast<std::ptrdiff_t>(kMax));
         auto tmp = p; tmp += ".tmp";
         {
             std::ofstream f(tmp, std::ios::trunc);
             if (!f) return;
-            for (const auto& d : recs) {
+            for (const auto& d : disk) {
                 json j;
                 j["sig"]   = d.signature;
                 j["gist"]  = d.gist;
@@ -96,11 +117,12 @@ struct DecompositionMemory::Impl {
                 f << j.dump() << '\n';
             }
             if (!f) return;
-            disk_lines = recs.size();
+            disk_lines = disk.size();
         }
         std::error_code ec;
         fs::rename(tmp, p, ec);
-        if (ec) fs::remove(tmp, ec);
+        if (ec) { fs::remove(tmp, ec); return; }
+        recs = std::move(disk);   // adopt the merged view
     }
 };
 
@@ -140,21 +162,26 @@ void DecompositionMemory::record(const std::string& signature,
     if (p.empty()) return;
     std::error_code ec;
     fs::create_directories(p.parent_path(), ec);
-    std::ofstream f(p, std::ios::app);
-    if (!f) return;
-    json j;
-    j["ts"]   = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
-    j["sig"]  = signature;
-    j["gist"] = rec.gist;
-    j["steps"] = rec.steps;
-    f << j.dump() << '\n';
+    // Serialize the append + any compaction against peer agentty processes
+    // sharing this repo's store. Advisory + best-effort.
+    auth::CrossProcessFileLock xlock(p);
+    {
+        std::ofstream f(p, std::ios::app);
+        if (!f) return;
+        json j;
+        j["ts"]   = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+        j["sig"]  = signature;
+        j["gist"] = rec.gist;
+        j["steps"] = rec.steps;
+        f << j.dump() << '\n';
+    }
     // Bound the in-memory view (record() pushes without the load-time cap) and
     // rewrite the file once it has drifted well past the cap.
     if (d.recs.size() > Impl::kMax)
         d.recs.erase(d.recs.begin(),
                      d.recs.end() - static_cast<std::ptrdiff_t>(Impl::kMax));
-    if (++d.disk_lines > Impl::kMax * 4) { f.close(); d.compact(); }
+    if (++d.disk_lines > Impl::kMax * 4) d.compact_locked(p);
 }
 
 std::vector<Decomposition> DecompositionMemory::recall(const std::string& signature,
