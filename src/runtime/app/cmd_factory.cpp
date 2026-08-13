@@ -851,37 +851,51 @@ Cmd<Msg> launch_stream(Model& m) {
         // text-only compaction pass).
         if (orchestrate && !compacting) {
             // SOTA orchestrator-workers directive (Anthropic, "How we built our
-            // multi-agent research system"): teach the lead to (1) THINK first
-            // to plan the decomposition, (2) DELEGATE bounded work with a full
-            // brief — objective + output format + tool/scope guidance + clear
-            // boundaries (vague briefs cause duplicated/gapped work), (3) SCALE
-            // the number of workers to the task's complexity, and (4) start
-            // wide then narrow. The effort budget line is keyed to the
-            // classified turn complexity so simple turns don't over-spawn.
+            // multi-agent research system" + the wider orchestrator-workers
+            // literature). Encodes the decision RULES for the documented failure
+            // modes, not just aspirations: (1) over-delegation — the #1 failure,
+            // spawning a worker for work cheaper to do directly; (2) blind
+            // synthesis — relaying an unverified worker claim; (3) treating
+            // dependent work as parallel; (4) losing the economic rationale
+            // (delegation exists to spend a CHEAP model's context on mechanical
+            // breadth, protecting the lead's expensive context for decisions).
             const char* budget =
-                turn_complexity == smart::Complexity::Trivial  ? "This turn is trivial — just do it directly; do NOT spawn subagents."
-              : turn_complexity == smart::Complexity::Simple   ? "This turn is simple — handle it yourself or use at most one explorer; keep it lean."
-              : turn_complexity == smart::Complexity::Complex   ? "This turn is complex — plan the decomposition first, then run SEVERAL subagents in parallel (aim 3+ for independent sub-tasks), and synthesise their reports."
-              : "Delegate the clearly-separable sub-tasks; keep the decisions.";
+                turn_complexity == smart::Complexity::Trivial  ? "This turn is trivial — answer directly. Do NOT spawn any subagent; the delegation overhead exceeds the work."
+              : turn_complexity == smart::Complexity::Simple   ? "This turn is simple — do it yourself, or use at most ONE explorer if you must read widely first. Spawning workers for a one-step task loses time and money."
+              : turn_complexity == smart::Complexity::Complex   ? "This turn is complex — plan the decomposition first, then run SEVERAL workers in parallel for the INDEPENDENT sub-tasks (aim 3+), and synthesise their reports into one verified answer."
+              : "Delegate the clearly-separable mechanical sub-tasks; keep every decision and the synthesis yourself.";
             req.system_prompt +=
                 "\n\n<smart-mode>\n"
-                "You are the STRATEGIC lead in a role-routed team. Do the high-"
-                "value thinking yourself — architecture, decisions, review, "
-                "decomposition — and DELEGATE bounded, well-specified mechanical "
-                "work to cheaper worker models via the `task` tool.\n"
-                "When you delegate, give each worker a COMPLETE brief: the "
-                "objective, the exact output format you need back, which tools/"
-                "paths are in scope, and clear boundaries (what NOT to do). A "
-                "vague brief makes workers duplicate effort or miss the point. "
-                "Pass a crisp brief — objective + constraints + relevant file:line "
-                "refs — not your reasoning transcript.\n"
-                "Routing: send searching / reading / summarising to "
-                "task(agent_type:\"explorer\"); code execution and edits to "
-                "task(agent_type:\"coder\"); repro/diagnose runs to "
-                "task(agent_type:\"tester\"); critical review to "
-                "task(agent_type:\"reviewer\"). Run independent workers in "
-                "PARALLEL. Start wide (broad exploration), then narrow to the "
-                "specifics.\n"
+                "You are the STRATEGIC lead of a role-routed team. Your context "
+                "is the expensive resource: spend it on the high-value thinking "
+                "— architecture, decisions, decomposition, review, synthesis — and "
+                "push bounded, well-specified MECHANICAL work (broad reading, "
+                "repro runs, mechanical edits) to cheaper workers via the `task` "
+                "tool so their context, not yours, absorbs the bulk.\n"
+                "DELEGATE ONLY WHEN IT PAYS. A `task` costs a full worker "
+                "round-trip; if you could finish the step yourself in one or two "
+                "tool calls, just do it. Delegate breadth (many files, parallel "
+                "threads) and depth you'd rather not spend your own context on — "
+                "never a single quick lookup.\n"
+                "BRIEF EACH WORKER COMPLETELY: the objective, the exact output "
+                "format you need back, which tools/paths are in scope, and clear "
+                "boundaries (what NOT to touch). Pass a crisp brief — objective + "
+                "constraints + relevant file:line refs — NOT your reasoning "
+                "transcript. A vague brief makes workers duplicate effort or miss "
+                "the point; that wasted work is on you.\n"
+                "SEQUENCE vs PARALLEL: run genuinely INDEPENDENT work in parallel "
+                "(launch the tasks together). When one step needs another's "
+                "output (explore → then edit what you found), sequence them — "
+                "don't guess at inputs you haven't gathered.\n"
+                "OWN THE ANSWER: a worker's report is evidence, not truth. Verify "
+                "claims that matter (spot-check a cited file:line, re-run a test) "
+                "before you build on them. The final answer is YOURS — never "
+                "relay a worker report verbatim as your conclusion.\n"
+                "Routing: reading / searching / mapping → "
+                "task(agent_type:\"explorer\"); edits + build → "
+                "task(agent_type:\"coder\"); repro / diagnose → "
+                "task(agent_type:\"tester\"); critical review → "
+                "task(agent_type:\"reviewer\"). Start wide, then narrow.\n"
                 + std::string{budget} +
                 (plan_recall
                    ? "\nBefore decomposing a non-trivial task, recall how similar "

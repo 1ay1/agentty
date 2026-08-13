@@ -28,15 +28,17 @@ This is the **orchestrator-workers** pattern — the same one Anthropic's multi-
 
 ## The delegation directive
 
-When orchestration is active, agentty appends a `<smart-mode>` instruction to the system prompt for the main turn. It encodes the hard-won lessons from production multi-agent systems:
+When orchestration is active, agentty appends a `<smart-mode>` instruction to the system prompt for the main turn. Rather than a list of aspirations, it encodes the **decision rules** for the documented failure modes of orchestrator-workers systems:
 
-- **Think first.** Plan the decomposition before acting.
-- **Delegate with a complete brief.** Each subagent gets an objective, the output format you need back, which tools/paths are in scope, and clear boundaries. Vague briefs make workers duplicate effort or miss the point.
-- **Scale the number of workers to complexity.** A trivial turn spawns none; a complex one runs several in parallel.
-- **Pass a structured hand-off, not a transcript.** The lead sends a crisp brief (objective + constraints + relevant `file:line` refs), and each subagent returns *one condensed report* — not its whole reasoning trace.
-- **Start wide, then narrow.** Broad exploration first, then drill into specifics.
+- **Context economy is the *why*.** The lead is told its own context is the expensive resource — delegation exists to spend a *cheaper* worker's context on mechanical breadth, protecting the lead's for decisions and synthesis.
+- **Delegate only when it pays.** The #1 failure mode is over-delegation: spawning a worker for a one-step lookup that costs more than doing it directly. The rule is explicit — delegate breadth and depth, never a single quick tool call.
+- **Brief each worker completely.** Objective, exact output format, in-scope tools/paths, and clear boundaries (what *not* to touch) — a crisp brief (objective + constraints + `file:line` refs), not the lead's reasoning transcript. Vague briefs make workers duplicate effort; that waste is on the lead.
+- **Sequence vs parallel.** Genuinely independent work runs in parallel (tasks launched together); dependent work (explore → then edit what you found) is sequenced so the lead never guesses at inputs it hasn't gathered.
+- **Own the answer.** A worker's report is *evidence, not truth* — the lead verifies claims that matter (spot-check a cited `file:line`, re-run a test) before building on them, and never relays a worker report verbatim as its conclusion.
 
-The worker-budget line is keyed to the [classified complexity](/docs/smart-mode-routing#complexity-scaled-effort): a *Trivial* turn is told to just do it directly; a *Complex* turn is told to plan, then run several explorers in parallel and synthesise.
+The worker-budget line is keyed to the [classified complexity](/docs/smart-mode-routing#complexity-scaled-effort): a *Trivial* turn is told the delegation overhead exceeds the work; a *Complex* turn is told to plan, then run several workers in parallel for the independent sub-tasks and synthesise them into one verified answer.
+
+The **worker** side interlocks: each subagent is told to *decide, don't stall* (make a reasonable assumption on a minor gap and note it, rather than aborting the whole delegation) and to return a **tight** report — one-line outcome, only the details the parent needs to act with `file:line` evidence, and any assumptions — because the parent pays context for every line it sends back.
 
 :::note
 The directive is guidance, not a hard rule — the lead decides. In practice a strong Strategic model delegates readily once told the taxonomy; a weaker one may keep more work itself, which is still correct, just less parallel.
