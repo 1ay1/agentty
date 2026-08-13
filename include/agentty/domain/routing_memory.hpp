@@ -7,7 +7,8 @@
 // codebase the more you use it.
 //
 // Mirrors the RAG FeedbackStore's proven shape (append-only TSV under
-// <cwd>/.agentty/, Beta-smoothed evidence, bounded output). Two orthogonal
+// <project-root>/.agentty/, Beta-smoothed evidence, periodically compacted so
+// both the file and the startup replay stay bounded). Two orthogonal
 // signals feed it:
 //   • delegation   — the cascade proxy already in finalize_turn (heavy
 //                    delegation on a cheap-rated turn ⇒ under-rated).

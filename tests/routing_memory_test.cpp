@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -72,6 +73,31 @@ int main() {
         const std::string exp = turn_signature(Complexity::Standard, "explain the parser");
         CHECK(fix != add && add != exp && fix != exp,
               "distinct intents (fix/add/explain) → distinct signatures");
+    }
+
+    // Compaction: an append-only store must not grow without bound. After many
+    // events the file is rewritten to at most two lines per signature, and the
+    // learned prior is PRESERVED across the rewrite (aggregate is what matters).
+    {
+        const std::string cs = turn_signature(Complexity::Standard, "compact me");
+        for (int i = 0; i < 1300; ++i) { rm.note_routed(cs); rm.note_regret(cs, +1); }
+        const int before = rm.prior_bias(cs);
+        // Cross the 2000-line threshold to force at least one compaction.
+        for (int i = 0; i < 900; ++i) { rm.note_routed(cs); rm.note_regret(cs, +1); }
+        const int after = rm.prior_bias(cs);
+        CHECK(after == before || after != 0, "prior survives compaction (non-neutral)");
+
+        // Count physical lines: compaction rewrites to ~2 lines per signature,
+        // then appends accrue again until the next threshold crossing — so the
+        // file is BOUNDED by the compaction threshold, never the ~4400 raw
+        // events written. (Pre-compaction it would be strictly monotonic.)
+        auto tsv = root / ".agentty" / "routing_memory.tsv";
+        std::size_t lines = 0;
+        if (std::ifstream f{tsv}) {
+            std::string l; while (std::getline(f, l)) ++lines;
+        }
+        CHECK(lines > 0 && lines <= 2100,
+              "compaction bounds the file below the threshold, not raw event count");
     }
 
     // Reset wipes the workspace's learning.
