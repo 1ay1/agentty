@@ -548,9 +548,12 @@ std::string model_for_provider(std::string_view spec) {
         // if the LIVE catalog still lists it; otherwise fall through to the
         // account's current default so we never restore a dead model.
         if (!is_chatgpt && !is_copilot) return it->second;
-        const auto& live = is_copilot ? provider::copilot::list_models()
-                                      : provider::chatgpt::list_models();
-        for (const auto& mi : live)
+        // Copilot: trust the recalled slug WITHOUT a network round-trip — this
+        // runs on the UI thread during a provider switch, and hitting the live
+        // catalog here is what made selecting Copilot lag. The async
+        // fetch_models refetch corrects a stale slug a moment later.
+        if (is_copilot) return it->second;
+        for (const auto& mi : provider::chatgpt::list_models())
             if (mi.id.value == it->second) return it->second;
         // recalled slug is stale — drop through to default_model() below.
     }
@@ -571,9 +574,10 @@ std::string model_for_provider(std::string_view spec) {
         return def;   // may be a real slug (catalog) or a safe "gpt-5" fallback
     }
     if (is_copilot) {
-        // Copilot's catalog is entitlement-driven; resolve from the LIVE list,
-        // else empty and let ModelsLoaded auto-select the first available.
-        return provider::copilot::default_model();
+        // Network-free default (this runs on the UI thread during a switch).
+        // gpt-4o runs on every Copilot tier; the async fetch_models will
+        // replace it with the account's real line-up (incl. Auto) shortly.
+        return "gpt-4o";
     }
     return {};
 }
