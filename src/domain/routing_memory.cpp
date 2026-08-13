@@ -11,9 +11,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -23,49 +26,87 @@ namespace fs = std::filesystem;
 
 namespace agentty::smart {
 
-std::string turn_signature(Complexity tier, std::string_view text) {
-    // Cheap token-class buckets, order-independent, low cardinality.
-    bool has_q = false, is_long = false, looks_code = false;
-    std::size_t words = 0;
+namespace {
+
+// FNV-1a over a byte range — cheap, well-mixed, deterministic across processes.
+constexpr std::uint64_t fnv1a(std::string_view s, std::uint64_t h = 1469598103934665603ULL) noexcept {
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    return h;
+}
+
+// The COARSE prefix: classified tier + language-agnostic STRUCTURAL buckets
+// (question shape, code density, length). This is the low-cardinality key the
+// fine signature backs off TO when a specific turn hasn't accrued evidence yet.
+// No English verbs — structure only, so it generalises across languages.
+std::string coarse_prefix(Complexity tier, std::string_view text) {
+    bool has_q = false, looks_code = false;
+    std::size_t glyphs = 0;
     bool in = false;
-    for (char c : text) {
+    for (unsigned char c : text) {
         const bool ws = (c == ' ' || c == '\t' || c == '\n' || c == '\r');
-        if (!ws && !in) { ++words; in = true; }
+        if (!ws && !in) { in = true; }
         else if (ws) in = false;
+        if ((c & 0xC0) != 0x80) ++glyphs;   // count glyphs, not continuation bytes
         if (c == '?') has_q = true;
-        // A crude "mentions code" signal: path separators, dotted idents,
-        // camelCase, or an extension-like token.
-        if (c == '/' || c == '.' || c == '_' || (c >= 'A' && c <= 'Z')) looks_code = true;
+        if (c == '/' || c == '_' || (c >= 'A' && c <= 'Z')) looks_code = true;
     }
-    is_long = words >= 40;
+    std::string p{to_string(tier)};
+    p += has_q     ? ":q" : ":.";
+    p += looks_code? ":c" : ":.";
+    p += (glyphs >= 220) ? ":L" : (glyphs >= 60 ? ":m" : ":s");   // size band
+    return p;
+}
 
-    // Coarse INTENT axis: the leading verb clusters distinct kinds of work
-    // (fix vs. add vs. explain) that otherwise collide onto one signature and
-    // bleed each other's priors. Lowercased opening scan, single char code,
-    // so cardinality stays bounded (4 values).
-    char intent = '.';
-    {
-        std::string head;
-        head.reserve(24);
-        for (char c : text) {
-            if (head.size() >= 24) break;
-            head.push_back((c >= 'A' && c <= 'Z') ? char(c + 32) : c);
-        }
-        auto has = [&](std::string_view w){ return head.find(w) != std::string::npos; };
-        if (has("fix") || has("bug") || has("broke") || has("error") || has("debug"))
-            intent = 'f';                                   // repair
-        else if (has("add") || has("implement") || has("create") || has("write") || has("build"))
-            intent = 'a';                                   // build
-        else if (has("why") || has("explain") || has("how") || has("what") || has("understand"))
-            intent = 'e';                                   // explain
+// The FINE discriminator: a bounded feature-hash of the SALIENT content tokens
+// (order-independent set, so word order doesn't fragment the key). A token is a
+// maximal run of letter/digit-ish bytes ≥ 3 glyphs (drops most stopwords and
+// punctuation without an English stoplist — works for any script). We fold each
+// token's FNV hash into a small bitset over a fixed modulus, then emit it as a
+// short hex code. Distinct turns get distinct codes; the modulus caps
+// cardinality so the store stays bounded, and collisions merely share a prior
+// (harmless — same effect as a coarser bucket).
+std::string content_hash(std::string_view text) {
+    constexpr int kBuckets = 64;            // fine-key space per coarse prefix
+    std::uint64_t bits = 0;
+    std::string tok;
+    auto flush = [&] {
+        // ≥ 3 glyphs of content; hash lowercased.
+        if (tok.size() >= 3) bits |= (1ULL << (fnv1a(tok) % kBuckets));
+        tok.clear();
+    };
+    for (unsigned char c : text) {
+        const bool wordish =
+            (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+            || (c >= 'A' && c <= 'Z') || (c & 0x80);   // keep multibyte scripts
+        if (wordish) tok.push_back(static_cast<char>(
+                         (c >= 'A' && c <= 'Z') ? c + 32 : c));
+        else flush();
     }
+    flush();
+    // Emit the folded bitset as fixed-width hex (stable, tab/newline-free).
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(bits));
+    return std::string{buf};
+}
 
-    std::string sig{to_string(tier)};
-    sig += has_q     ? ":q"  : ":.";
-    sig += looks_code? ":c"  : ":.";
-    sig += is_long   ? ":l"  : ":.";
-    sig += ":"; sig += intent;
-    return sig;
+} // namespace
+
+std::string turn_signature(Complexity tier, std::string_view text) {
+    // HIERARCHICAL key: "<coarse>#<fine>". prior_bias reads the fine key when it
+    // has evidence and BACKS OFF to the coarse prefix when it doesn't — so a
+    // brand-new specific turn borrows the prior of its structural class, and a
+    // well-seen specific turn gets its own sharper prior. This replaces the old
+    // 4-boolean × English-verb bucketing, which both collided unrelated turns
+    // and couldn't see past an English lexicon.
+    return coarse_prefix(tier, text) + "#" + content_hash(text);
+}
+
+// Split a hierarchical signature at '#'. Older/coarse-only signatures (no '#')
+// are their own prefix with an empty fine part — fully backward compatible with
+// any TSV rows written before the hierarchy landed.
+static std::string_view sig_coarse(std::string_view sig) {
+    auto h = sig.find('#');
+    return h == std::string_view::npos ? sig : sig.substr(0, h);
 }
 
 struct RoutingMemory::Impl {
@@ -212,17 +253,40 @@ int RoutingMemory::prior_bias(const std::string& signature) {
     auto& d = impl();
     std::lock_guard<std::mutex> lk(d.mu);
     d.ensure_loaded();
-    auto it = d.counts.find(signature);
-    if (it == d.counts.end() || it->second.routed <= 0.0) return 0;
-    const double routed = it->second.routed;
-    const double regret = it->second.regret;
-    // Mean signed regret per routed turn, in ~[-1, 1]. A positive mean means
-    // this signature has historically needed MORE effort than the heuristic
-    // gave it.
-    const double rate = regret / routed;
-    // Confidence grows with sample count (saturating), so a single event never
-    // swings the prior.
-    const double conf = routed / (routed + Impl::kPriorN);
+
+    // Hierarchical estimate. The signature is "<coarse>#<fine>":
+    //   • FINE tally  = this exact turn's own evidence (sharp but often thin).
+    //   • COARSE tally = the aggregate over EVERY fine key sharing this coarse
+    //     structural prefix (blunt but well-populated) — the parent bucket.
+    // We shrink the fine estimate toward the coarse one by evidence: a fine key
+    // with little data borrows its structural class's prior; a well-seen fine
+    // key trusts its own. This is the classic backoff/empirical-Bayes move — it
+    // gives specificity when confident and generalization when not, which the
+    // old flat single-bucket key could not.
+    const std::string_view coarse = sig_coarse(signature);
+
+    double f_routed = 0.0, f_regret = 0.0;   // fine (exact key)
+    double c_routed = 0.0, c_regret = 0.0;   // coarse (all keys with this prefix)
+    if (auto it = d.counts.find(signature); it != d.counts.end()) {
+        f_routed = it->second.routed; f_regret = it->second.regret;
+    }
+    for (const auto& [sig, t] : d.counts)
+        if (sig_coarse(sig) == coarse) { c_routed += t.routed; c_regret += t.regret; }
+    if (c_routed <= 0.0) return 0;   // never seen this structural class at all
+
+    const double f_rate = f_routed > 0.0 ? f_regret / f_routed : 0.0;
+    const double c_rate = c_regret / c_routed;
+    // Shrinkage weight toward the fine estimate grows with its own sample count;
+    // with zero fine evidence it's a pure coarse (backoff) estimate.
+    const double alpha = f_routed / (f_routed + Impl::kPriorN);
+    const double rate  = alpha * f_rate + (1.0 - alpha) * c_rate;
+
+    // Overall confidence from the TOTAL evidence backing the estimate (fine +
+    // its coarse parent), so a thin fine key riding a rich parent is still
+    // allowed to move the prior.
+    const double evidence = std::max(f_routed, c_routed);
+    const double conf = evidence / (evidence + Impl::kPriorN);
+
     double bias = rate * conf * Impl::kMaxBias;
     bias = std::clamp(bias, -Impl::kMaxBias, Impl::kMaxBias);
     // Return a whole effort-step: only a confident, sustained signal rounds to
