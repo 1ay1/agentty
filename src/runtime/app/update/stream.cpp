@@ -620,7 +620,27 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     // delegation reply on an over-rated (Complex) turn lowers it. The bias
     // first DECAYS one step toward 0 each turn so a single anomaly never
     // sticks, then the signal applies. Only meaningful while orchestrating.
-    if (m.d.smart.orchestration() && !m.d.current.messages.empty()) {
+    //
+    // GATE: run the cascade ONCE per user turn, at the FINAL settle — not on
+    // every tool round-trip. finalize_turn fires on each StreamFinished, and a
+    // tool-using turn produces several (StopReason::ToolUse) before its real
+    // EndTurn. Running the cascade on each would decay the bias N times, count
+    // regret N times (poisoning the RoutingMemory denominator, exactly the
+    // note_routed bug's twin), and record the decomposition repeatedly. The
+    // turn is still mid-flight if the model asked for tools OR any pending/
+    // approved tool call is queued for kick_pending_tools to promote.
+    const bool tools_pending =
+        stop_reason == StopReason::ToolUse
+        || [&]{
+               for (auto it = m.d.current.messages.rbegin();
+                    it != m.d.current.messages.rend(); ++it) {
+                   if (it->role != Role::Assistant) break;
+                   for (const auto& tc : it->tool_calls)
+                       if (tc.is_pending() || tc.is_approved()) return true;
+               }
+               return false;
+           }();
+    if (!tools_pending && m.d.smart.orchestration() && !m.d.current.messages.empty()) {
         int delegations = 0;
         bool tool_failure = false;
         std::vector<std::string> decomposition;   // "agent_type: brief" in call order
@@ -672,7 +692,12 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             regret = +1;
         m.s.smart_effort_bias += regret;
         if (m.s.smart_effort_bias > 2)  m.s.smart_effort_bias = 2;
-        if (m.s.smart_effort_bias < -1) m.s.smart_effort_bias = -1;
+        if (m.s.smart_effort_bias < -2) m.s.smart_effort_bias = -2;
+        // Publish whether this turn hit a tool failure so the NEXT
+        // submit_message can suppress its symmetric −1 "clean continuation"
+        // signal — a turn that already earned a +1 failure regret must not be
+        // silently relaxed back to neutral by the follow-up.
+        m.s.smart_turn_had_failure = tool_failure;
         // Innovation 1 — persist the correction per-workspace for this class of
         // turn so it survives the session.
         if (m.d.smart.routing_learning() && regret != 0
