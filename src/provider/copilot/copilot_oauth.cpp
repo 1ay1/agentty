@@ -28,6 +28,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
+#include "agentty/util/base64.hpp"
 #include "agentty/io/http.hpp"
 
 #ifndef _WIN32
@@ -539,6 +540,71 @@ Entitlement account_entitlement() {
     cached = e;
     fetched_at = now_ms_impl();
     return e;
+}
+
+namespace {
+// Pull the `exp` (unix seconds) claim out of a JWT without verifying it (the
+// server signs it; we only need the expiry to know when to refresh).
+std::int64_t jwt_exp_ms(const std::string& jwt) {
+    auto a = jwt.find('.');
+    if (a == std::string::npos) return 0;
+    auto b = jwt.find('.', a + 1);
+    if (b == std::string::npos) return 0;
+    std::string payload = jwt.substr(a + 1, b - a - 1);
+    for (auto& c : payload) { if (c == '-') c = '+'; else if (c == '_') c = '/'; }
+    while (payload.size() % 4) payload.push_back('=');
+    try {
+        auto raw = util::base64_decode(payload);
+        auto j = json::parse(raw);
+        if (auto e = j.value("exp", std::int64_t{0}); e > 0) return e * 1000;
+    } catch (...) {}
+    return 0;
+}
+
+std::mutex& auto_mu() { static std::mutex m; return m; }
+AutoSession& auto_cache() { static AutoSession s; return s; }
+} // namespace
+
+std::optional<AutoSession> auto_session() {
+    std::scoped_lock lk(auto_mu());
+    if (auto_cache().valid()) return auto_cache();
+
+    auto tok = fresh_token();
+    if (!tok || !tok->chat_enabled) return std::nullopt;
+
+    std::string host = tok->endpoint_api;
+    if (host.rfind("https://", 0) == 0) host = host.substr(8);
+    if (auto slash = host.find('/'); slash != std::string::npos) host = host.substr(0, slash);
+
+    // POST {api}/models/session with the CAPI api-version — the server returns
+    // the per-account available models + a signed session token.
+    auto r = request(http::HttpMethod::Post, host, "/models/session",
+        {{"authorization", "Bearer " + tok->token},
+         {"copilot-integration-id", kIntegration},
+         {"x-github-api-version", kAutoApiVersion},
+         {"content-type", "application/json"}},
+        R"({"auto_mode":{"model_hints":["auto"]}})");
+    if (!r.transport_error.empty() || r.status < 200 || r.status >= 300)
+        return std::nullopt;
+    try {
+        auto j = json::parse(r.body);
+        AutoSession s;
+        s.session_token  = j.value("session_token", "");
+        s.selected_model = j.value("selected_model", "");
+        s.endpoint_api   = tok->endpoint_api;
+        if (j.contains("available_models") && j["available_models"].is_array())
+            for (auto& m : j["available_models"])
+                if (m.is_string()) s.available_models.push_back(m.get<std::string>());
+        if (s.session_token.empty()) return std::nullopt;
+        s.expires_at_ms = jwt_exp_ms(s.session_token);
+        auto_cache() = s;
+        return s;
+    } catch (...) { return std::nullopt; }
+}
+
+void invalidate_auto_session() {
+    std::scoped_lock lk(auto_mu());
+    auto_cache() = AutoSession{};
 }
 
 } // namespace agentty::provider::copilot
