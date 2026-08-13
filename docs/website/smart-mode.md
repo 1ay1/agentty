@@ -35,7 +35,7 @@ Smart Mode is one master switch plus a stack of independently-selectable layers.
 - **Internal routing** — engine-internal utility calls (like the auto-compaction summary) run on the cheap Utility model instead of your flagship.
 - **Orchestration** — the *main turn* runs on Strategic, and it's told to keep the decisions and **delegate** mechanical work to subagents.
 - **Subagent routing** — each `task` subagent's model is chosen by its role (an explorer runs cheap; a reviewer runs strong).
-- **Complexity-scaled effort** — a fast classifier rates every turn and scales the Strategic model's reasoning budget up for hard turns, down for trivial ones.
+- **Complexity-scaled effort** — a language-agnostic feature classifier rates every turn and scales the Strategic model's reasoning budget up for hard turns, down for trivial ones, continuously with how hard the turn actually is.
 - **Cascade feedback** — the effort estimate self-corrects *within a session* from what the model actually did.
 - **Learned routing** — a per-workspace memory remembers whether each kind of turn was under- or over-rated in *this* repo, so routing improves across sessions.
 - **Outcome feedback** — a failed build or a "no, that's wrong" on the next turn teaches the router that class of turn needs more.

@@ -64,11 +64,11 @@ Every orchestrated turn shows its **routing decision** as a first-class card in 
 
 ```
 🧠 Smart Mode                                    14:32
-   → claude-opus-4-5  · effort high  · complex
+   → claude-opus-4-5  · effort high  · complex   medium → complex · learned +1
    ● orchestrate   ● subagents
 ```
 
-It tells you, at a glance: the model the turn was routed to, the reasoning effort it was scaled to, the classified complexity, and which layers are active. The **card is the decision**; the actual delegations render as ordinary `task` [tool cards](/docs/tools) below it — so you can watch each worker run and read its report. The card is display-only: it never goes to the model and is never saved to the thread.
+It tells you, at a glance: the model the turn was routed to, the reasoning effort it was scaled to, the classified complexity, and which layers are active. The trailing note is the **effort provenance** — it makes the adaptive decision legible: it reads *base effort → complexity tier*, then any correction that moved it and where that came from (`learned` = this repo's persisted prior, `session` = the in-session cascade). So when a turn thinks harder than your baseline, the card shows you exactly why. The **card is the decision**; the actual delegations render as ordinary `task` [tool cards](/docs/tools) below it — so you can watch each worker run and read its report. The card is display-only: it never goes to the model and is never saved to the thread.
 
 :::tip
 Watching the 🧠 card + the `task` cards together is the whole story of a turn: *what* agentty decided, then *how* it executed. If a turn feels over- or under-powered, the card tells you why — and the [learning loop](/docs/smart-mode-learning) is already adjusting for next time.

@@ -60,16 +60,29 @@ All learning is **local to the workspace** and lives in the project's `.agentty/
 | `.agentty/routing_memory.tsv` | learned routing + outcome feedback | one row per turn signature: the effort prior and its running success rate |
 | `.agentty/decompositions.jsonl` | plan recall | append-only log of successful task decompositions, keyed by turn signature |
 
-Both are plain text and safe to inspect, diff, or delete. The routing memory is a small TSV keyed by a coarse turn signature (task shape, not prompt text); the decomposition log is one JSON object per line.
+Both are plain text and safe to inspect, diff, or delete. The routing memory is a small TSV keyed by a **hierarchical turn signature** (a language-agnostic structural class plus a content feature-hash — the task's *shape*, never the prompt text); the decomposition log is one JSON object per line. Both are **periodically compacted** so they stay small no matter how long you use the repo, and both are safe to write from **two agentty processes at once** in the same repo (an advisory file lock serialises them and merges rather than clobbers).
+
+## Advanced tuning
+
+The overlay controls *which* layers run. Four numeric **policy** knobs — for power users who want to retune the router's aggressiveness — are exposed as environment variables (read live, clamped to a safe range, unset = the shipped default). They're documented in full under [Configuration › Smart Mode tuning](/docs/configuration#smart-mode-tuning):
+
+| Variable | Controls |
+|----------|----------|
+| `AGENTTY_SMART_COMPLEX_THRESHOLD` | how readily a turn classifies as Complex (the main cost/quality dial) |
+| `AGENTTY_SMART_DEEP_MARGIN` | how deep into a tier before continuous effort adds an extra step |
+| `AGENTTY_SMART_PRIOR_EVIDENCE` | how much evidence before the learned prior is trusted (learn-speed vs. stability) |
+| `AGENTTY_SMART_BIAS_CLAMP` | how far the session cascade can drift effort from baseline |
+
+The signature hash space, storage compaction thresholds, and individual classifier weights are deliberately *not* exposed — changing them would invalidate stored learning or break invariants. The tier **threshold** is the right control surface, not fifteen fiddly weights.
 
 ## Constraints
 
 - **Off is a strict no-op.** With the master switch off, Smart Mode adds zero tokens, zero latency, and makes no routing decisions — the turn runs exactly as if the feature did not exist.
 - **Roles resolve to models, never model names to behavior.** The resolver maps a *role* to `(model, effort)`. It never inspects a model id string to decide what to do, so pinning any model to any slot is always safe.
 - **Effort never exceeds the turn's ceiling.** Complexity-scaled effort and cascade correction only move within the bounds the active model allows; a Utility model is never asked for more effort than it supports.
-- **Learning is bounded and reversible.** Priors decay toward the default, are keyed by a coarse signature rather than exact text, and can be wiped at any time. A cold workspace behaves identically to one with the learning layers off.
+- **Learning is bounded and reversible.** Priors decay toward the default, are keyed by a turn *signature* (a structural class plus a content hash) rather than exact text, and can be wiped at any time. A cold workspace behaves identically to one with the learning layers off.
 
-## Design rationale
+## Design rationale {#design}
 
 Smart Mode follows the **orchestrator-workers** pattern from Anthropic's multi-agent work: a strong model owns the plan and delegates well-scoped subtasks to cheaper workers, rather than one model doing everything at one effort level. Three ideas make that practical here:
 
