@@ -47,7 +47,7 @@ using StreamFn = std::function<StreamResult(Request, EventSink)>;
 // Adding a long-lived provider = one enumerator here + one slot in Router +
 // one `slot_for` arm. Adding a per-call provider needs NONE of this — it flows
 // through the generic OpenAI-compat builder purely from its registry row.
-enum class LongLived : std::uint8_t { None, Anthropic, ChatGpt };
+enum class LongLived : std::uint8_t { None, Anthropic, ChatGpt, Copilot };
 
 // Map a selection to its long-lived slot, purely from registry data: the
 // oauth_native flag (ChatGPT/Codex) and the Anthropic dialect. No label
@@ -62,7 +62,7 @@ enum class LongLived : std::uint8_t { None, Anthropic, ChatGpt };
 // (OpenAI-compat / Ollama) are built inside dispatch from the active Endpoint,
 // so they need no slot here.
 struct ProviderRouter {
-    StreamFn long_lived[3]{};   // indexed by LongLived: [None]=unused, [Anthropic], [ChatGpt]
+    StreamFn long_lived[4]{};   // indexed by LongLived: [None]=unused, [Anthropic], [ChatGpt], [Copilot]
 
     // Kind::ExternalAcp — drive an external ACP agent subprocess. Bound in
     // main() to stream_external_acp(agent_id, …); erased here so dispatch has

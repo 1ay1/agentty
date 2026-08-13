@@ -704,6 +704,8 @@ set(AGENTTY_PROVIDER_SOURCES
     src/provider/chatgpt/provider.cpp
     src/provider/chatgpt/codex_oauth.cpp
     src/provider/chatgpt/responses.cpp
+    src/provider/copilot/provider.cpp
+    src/provider/copilot/copilot_oauth.cpp
     src/provider/openai/transport.cpp
     src/provider/ollama/transport.cpp
     src/provider/selection.cpp
@@ -1931,6 +1933,15 @@ if(AGENTTY_BUILD_TESTS)
     # frames). Reuses the shared OBJECT libs like the sibling transport tests.
     agentty_add_full_test(codex_responses_test)
 
+    # copilot_token_test — the pure GitHub Copilot auth logic (no network):
+    # token-envelope parsing (skew-safe local expiry from refresh_in, absolute
+    # expires_at fallback, endpoints.api routing for Business/Enterprise, free-
+    # tier quota/entitlement flags, malformed → nullopt) and the skew-aware
+    # expired() refresh decision. These are exactly the spots every other
+    # Copilot integration got subtly wrong (mid-turn 401s, 404s).
+    agentty_add_full_test(copilot_token_test)
+    set_tests_properties(copilot_token_test PROPERTIES TIMEOUT 30)
+
     # chatgpt_bundled_models_test — regression guard for the retired
     # `gpt-5.1-codex` slug. When unsigned (the CI state) the ChatGPT provider's
     # OFFLINE bundled fallback drives list_models()/default_model(); it must
@@ -2306,6 +2317,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        copilot_token_test
         compaction_threshold_test
         error_class_test
         wire_shared_test

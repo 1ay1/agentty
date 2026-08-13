@@ -56,6 +56,13 @@ struct Selection {
     [[nodiscard]] bool is_chatgpt() const noexcept {
         return is_oauth_native() && openai_endpoint.label == "chatgpt";
     }
+
+    // The native GitHub Copilot OAuth backend — the sibling of is_chatgpt().
+    // Both are oauth_native OpenAI-family rows; the label disambiguates which
+    // dedicated long-lived transport (and login flow) to route to.
+    [[nodiscard]] bool is_copilot() const noexcept {
+        return is_oauth_native() && openai_endpoint.label == "copilot";
+    }
 };
 
 // Parse a provider spec into a Selection. Accepts:

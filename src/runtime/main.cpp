@@ -50,6 +50,7 @@
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
+#include "agentty/provider/copilot/provider.hpp"
 #include "agentty/provider/openai/provider.hpp"
 #include "agentty/provider/ollama/provider.hpp"
 #include "agentty/provider/acp_provider_adapter.hpp"
@@ -410,6 +411,7 @@ int main(int argc, char** argv) {
     // captures by reference outlives maya::run / the ACP serve loop.
     provider::anthropic::AnthropicProvider anthropic_provider;
     provider::chatgpt::ChatGptProvider chatgpt_provider;
+    provider::copilot::CopilotProvider copilot_provider;
     io::FsStore                            store;
 
     // The seam: a single std::function the runtime calls. It dispatches on
@@ -428,7 +430,7 @@ int main(int argc, char** argv) {
     // dispatch from the active endpoint.
     std::function<provider::StreamResult(provider::Request,
                                          provider::EventSink)> stream_fn =
-        [&anthropic_provider, &chatgpt_provider]
+        [&anthropic_provider, &chatgpt_provider, &copilot_provider]
         (provider::Request req, provider::EventSink sink) {
             provider::ProviderRouter router;
             router.set(provider::LongLived::Anthropic,
@@ -440,6 +442,11 @@ int main(int argc, char** argv) {
                        [&chatgpt_provider](provider::Request r,
                                            provider::EventSink s) {
                            return chatgpt_provider.stream(std::move(r), std::move(s));
+                       })
+                  .set(provider::LongLived::Copilot,
+                       [&copilot_provider](provider::Request r,
+                                           provider::EventSink s) {
+                           return copilot_provider.stream(std::move(r), std::move(s));
                        });
             router.external_acp = [](const std::string& agent_id,
                                      provider::Request r, provider::EventSink s) {
