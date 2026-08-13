@@ -1259,6 +1259,10 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
             push("  \xc2\xb7 ", maya::Style{}.with_fg(muted));
             push(msg.smart_route_complexity,
                  maya::Style{}.with_fg(cx_color(msg.smart_route_complexity)));
+            if (!msg.smart_route_note.empty()) {
+                push("   ", maya::Style{});
+                push(msg.smart_route_note, maya::Style{}.with_fg(muted).with_italic());
+            }
             cfg.body.emplace_back(maya::Turn::BodySlot{maya::Element{maya::TextElement{
                 .content = std::move(content),
                 .style   = {},

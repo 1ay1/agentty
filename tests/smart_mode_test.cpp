@@ -197,6 +197,19 @@ int main() {
         }
     }
 
+    // 9. blend_bias: session + learned prior must not SUM (that double-
+    //    escalates); same-sign keeps the stronger, opposite-sign the session
+    //    wins. This helper is shared by the wire and the routing card, so the
+    //    card can never show an effort the wire didn't use.
+    {
+        CHECK(sm::blend_bias(1, 1) == 1,  "blend: equal same-sign → that value (no sum)");
+        CHECK(sm::blend_bias(1, 2) == 2,  "blend: same-sign keeps the stronger (prior)");
+        CHECK(sm::blend_bias(2, 1) == 2,  "blend: same-sign keeps the stronger (session)");
+        CHECK(sm::blend_bias(1, -2) == 1, "blend: opposite-sign → the live session wins");
+        CHECK(sm::blend_bias(0, 2) == 2,  "blend: zero session → pure prior");
+        CHECK(sm::blend_bias(-1, -1) == -1, "blend: negative same-sign → no double-down");
+    }
+
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -590,8 +590,25 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     const smart::ComplexityScore cx =
         smart::classify_score_with_context(newest_user, m.s.smart_turn_complexity);
     const auto caps = ModelCapabilities::from_id(prof.model);
-    const Effort scaled = smart::effort_for_score(prof.effort, cx, caps,
-                                                  m.s.smart_effort_bias);
+    const int learned = m.d.smart.routing_learning()
+        ? smart::RoutingMemory::instance().prior_bias(
+              smart::turn_signature(cx.tier, newest_user))
+        : 0;
+    const int session = m.s.smart_effort_bias;
+    const int bias    = smart::blend_bias(session, learned);
+    const Effort scaled = smart::effort_for_score(prof.effort, cx, caps, bias);
+
+    // Effort PROVENANCE — make the adaptive decision legible: base effort, the
+    // complexity step, and the blended correction that moved it (shown as the
+    // winning source so the card matches what the wire actually carries).
+    std::string note{effort_label(prof.effort)};
+    note += " \xe2\x86\x92 ";                       // →
+    note += smart::to_string(cx.tier);
+    if (bias != 0) {
+        const bool from_learned = (bias == learned && learned != 0);
+        note += from_learned ? " \xc2\xb7 learned " : " \xc2\xb7 session ";
+        note += (bias > 0 ? "+" : "-") + std::to_string(std::abs(bias));
+    }
 
     Message card;
     // Message.id auto-inits via new_message_id().
@@ -604,6 +621,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     card.smart_route_model      = prof.model;
     card.smart_route_effort     = std::string{effort_label(scaled)};
     card.smart_route_complexity = std::string{smart::to_string(cx.tier)};
+    card.smart_route_note       = std::move(note);
     card.smart_route_orchestrate = m.d.smart.orchestration();
     card.smart_route_subagents   = m.d.smart.subagent_routing();
     return card;
@@ -747,11 +765,10 @@ Cmd<Msg> launch_stream(Model& m) {
         if (m.d.smart.routing_learning()) {
             sig = smart::turn_signature(turn_complexity, newest_user);
             const int prior = smart::RoutingMemory::instance().prior_bias(sig);
-            // Same-sign: keep the stronger. Opposite-sign (session dynamics
-            // disagree with the durable prior): let the live session win, it's
-            // the more recent evidence. Either way, no stacking.
-            if ((prior >= 0) == (total_bias >= 0))
-                total_bias = std::abs(prior) > std::abs(total_bias) ? prior : total_bias;
+            // Same-sign keeps the stronger; opposite-sign lets the live session
+            // win. Shared with build_smart_routing_card so the card's shown
+            // effort can never disagree with the wire.
+            total_bias = smart::blend_bias(total_bias, prior);
             // Record the routing ONCE per user turn so the outcome signal at
             // finalize_turn has an honest denominator. launch_stream re-runs on
             // post-tool sub-turns and transient retries; the latch skips those.
