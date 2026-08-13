@@ -333,6 +333,13 @@ Element panel_copilot_waiting(const login::CopilotWaiting& s) {
         rows.push_back(body_text(
             "The code expires in ~15 minutes. This uses your existing GitHub "
             "Copilot subscription \xE2\x80\x94 no API key needed.", fg_dim(muted)));
+        rows.push_back(text(""));
+        rows.push_back(key_hints({
+            {"c",   "copy code"},
+            {"o",   "open browser"},
+            {"Esc", "cancel"},
+        }));
+        return v(std::move(rows)).build();
     }
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Esc", "cancel"}}));

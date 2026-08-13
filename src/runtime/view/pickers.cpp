@@ -20,6 +20,7 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/provider/registry.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/acp_agents.hpp"
 #include "agentty/provider/selection.hpp"
@@ -362,8 +363,16 @@ Element provider_picker(const Model& m) {
         std::string note;
         maya::Color note_color = muted;
         if (p.id == "chatgpt") {
-            note = active ? "manage accounts" : "ChatGPT (native OAuth)";
-            note_color = active ? info : muted;
+            // Native ChatGPT OAuth: reflect REAL sign-in state, consistent with
+            // the Copilot row. Selecting it while signed out launches the
+            // device/loopback login (picker.cpp).
+            if (provider::chatgpt::responses_available()) {
+                note = active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "ChatGPT (signed in)";
+                note_color = active ? success : muted;
+            } else {
+                note = "\xe2\x9a\xa0 sign in with ChatGPT";
+                note_color = warn;
+            }
         } else if (p.id == "copilot") {
             // Native GitHub OAuth: reflect REAL sign-in state, not a hardcoded
             // checkmark. Selecting it while signed out launches the device
