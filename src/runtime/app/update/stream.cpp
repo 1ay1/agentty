@@ -20,6 +20,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/routing_memory.hpp"
 #include "agentty/domain/decomposition_memory.hpp"
+#include "agentty/domain/smart_tuning.hpp"
 #include "agentty/provider/error_class.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -691,8 +692,12 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         if (m.d.smart.outcome_learning() && tool_failure && regret <= 0)
             regret = +1;
         m.s.smart_effort_bias += regret;
-        if (m.s.smart_effort_bias > 2)  m.s.smart_effort_bias = 2;
-        if (m.s.smart_effort_bias < -2) m.s.smart_effort_bias = -2;
+        // Symmetric clamp on the session cascade bias, env-tunable
+        // (AGENTTY_SMART_BIAS_CLAMP): caps how far this session's self-
+        // correction can drift effort from baseline.
+        const int kBiasCap = smart::tuning::bias_clamp();
+        if (m.s.smart_effort_bias >  kBiasCap) m.s.smart_effort_bias =  kBiasCap;
+        if (m.s.smart_effort_bias < -kBiasCap) m.s.smart_effort_bias = -kBiasCap;
         // Publish whether this turn hit a tool failure so the NEXT
         // submit_message can suppress its symmetric −1 "clean continuation"
         // signal — a turn that already earned a +1 failure regret must not be

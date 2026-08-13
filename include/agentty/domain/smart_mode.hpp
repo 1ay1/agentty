@@ -26,6 +26,7 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/complexity.hpp"
+#include "agentty/domain/smart_tuning.hpp"
 
 namespace agentty::smart {
 
@@ -225,7 +226,7 @@ namespace detail {
     };
     if (cx.tier == Complexity::Trivial) return E::None;
 
-    constexpr int kDeep = 3;   // margin at which a band counts as saturated
+    const int kDeep = tuning::deep_margin();   // saturation margin (env-tunable)
     int extra = 0;
     if (cx.tier == Complexity::Complex && cx.margin >= kDeep) extra = +1;
     else if (cx.tier == Complexity::Simple && cx.margin >= kDeep) extra = -1;

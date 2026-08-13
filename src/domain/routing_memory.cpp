@@ -21,6 +21,7 @@
 
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/auth/auth.hpp"   // CrossProcessFileLock
+#include "agentty/domain/smart_tuning.hpp"
 
 namespace fs = std::filesystem;
 
@@ -119,7 +120,10 @@ struct RoutingMemory::Impl {
     std::size_t disk_lines = 0;   // append-only lines currently on disk
 
     static constexpr double kMaxBias = 1.0;   // clamp of the returned prior
-    static constexpr double kPriorN  = 5.0;   // routed count for ~half confidence
+    // Default evidence pseudo-count; the live value comes from
+    // tuning::prior_evidence() (AGENTTY_SMART_PRIOR_EVIDENCE) which defaults
+    // here. Kept as the documented baseline.
+    static constexpr double kPriorN  = 5.0;
     // Append-only lines accumulate forever (a handful of low-cardinality
     // signatures, re-added every turn), and ensure_loaded replays the whole
     // file each launch. Rewrite from the aggregated in-memory state once the
@@ -276,16 +280,20 @@ int RoutingMemory::prior_bias(const std::string& signature) {
 
     const double f_rate = f_routed > 0.0 ? f_regret / f_routed : 0.0;
     const double c_rate = c_regret / c_routed;
+    // Evidence pseudo-count: how much data before a prior is trusted. Env-
+    // tunable (AGENTTY_SMART_PRIOR_EVIDENCE) — lower reacts faster, higher is
+    // more conservative.
+    const double prior_n = tuning::prior_evidence();
     // Shrinkage weight toward the fine estimate grows with its own sample count;
     // with zero fine evidence it's a pure coarse (backoff) estimate.
-    const double alpha = f_routed / (f_routed + Impl::kPriorN);
+    const double alpha = f_routed / (f_routed + prior_n);
     const double rate  = alpha * f_rate + (1.0 - alpha) * c_rate;
 
     // Overall confidence from the TOTAL evidence backing the estimate (fine +
     // its coarse parent), so a thin fine key riding a rich parent is still
     // allowed to move the prior.
     const double evidence = std::max(f_routed, c_routed);
-    const double conf = evidence / (evidence + Impl::kPriorN);
+    const double conf = evidence / (evidence + prior_n);
 
     double bias = rate * conf * Impl::kMaxBias;
     bias = std::clamp(bias, -Impl::kMaxBias, Impl::kMaxBias);
