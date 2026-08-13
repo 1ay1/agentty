@@ -39,13 +39,33 @@ enum class Complexity : std::uint8_t {
 }
 
 // Classify a user turn's text. Pure, allocation-light, case-insensitive.
-// Heuristics (in priority order):
-//   • very short acknowledgements / imperatives with no question → Trivial
-//   • presence of design/architecture/debug/why vocabulary, OR a large
-//     message, OR many enumerated asks → Complex
-//   • a short single-clause request → Simple
-//   • everything else → Standard (the conservative default)
+//
+// This is a small ADDITIVE FEATURE SCORE, not a keyword lookup: three
+// orthogonal, mostly language-agnostic signal families each contribute weight,
+// and the sum is thresholded into a tier. That fixes the old all-or-nothing
+// behaviour (one stray "design" forcing Complex) and generalises past a fixed
+// English lexicon:
+//   • STRUCTURAL (language-agnostic): enumerated asks, conjunction/clause
+//     density, code-token density, question shape, glyph length. A request's
+//     complexity lives mostly in its STRUCTURE, not its verbs.
+//   • LEXICAL (multilingual): weighted "hard"/"trivial" keyword sets across the
+//     major languages — evidence that ADDS weight, never a hard override.
+//   • MORPHOLOGICAL: token-shape variety (prose vs. identifiers vs. paths).
+// Conservative: ties break upward (under-thinking a hard turn costs more than
+// over-thinking a cheap one).
 [[nodiscard]] Complexity classify_complexity(std::string_view text) noexcept;
+
+// The scored classification: the tier PLUS the continuous score and the margin
+// to the nearest tier boundary (0 = right on a threshold, larger = more
+// confident). classify_with_context uses the margin to blend a follow-up
+// smoothly instead of snapping between tiers. Score units are arbitrary but
+// monotonic in complexity.
+struct ComplexityScore {
+    Complexity tier   = Complexity::Standard;
+    int        score  = 0;   // additive feature score
+    int        margin = 0;   // distance to the nearest tier boundary
+};
+[[nodiscard]] ComplexityScore classify_score(std::string_view text) noexcept;
 
 // Context-aware classification. classify_complexity is turn-local, so a short
 // follow-up ("now do the same for the other module", "and the tests?") after a

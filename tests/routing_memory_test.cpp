@@ -75,6 +75,30 @@ int main() {
               "distinct intents (fix/add/explain) → distinct signatures");
     }
 
+    // ── HIERARCHICAL BACKOFF: the redesign's core property. ONE structural
+    //    class teaches a prior; a BRAND-NEW specific turn of that same class
+    //    (never routed itself) inherits the class prior instead of starting
+    //    neutral. A flat single-key store could not do this.
+    {
+        rm.reset();
+        // Teach the coarse class "Standard, no-?, code-ish, short" via several
+        // DISTINCT specific turns that all under-rated.
+        for (const char* q : {"refactor the http client", "refactor the tls layer",
+                              "refactor the sse framer", "refactor the retry loop"}) {
+            auto s = turn_signature(Complexity::Standard, q);
+            for (int i = 0; i < 6; ++i) { rm.note_routed(s); rm.note_regret(s, +1); }
+        }
+        // A NEW turn in the same structural class, never seen before, borrows
+        // the class's learned upward prior via backoff.
+        auto fresh = turn_signature(Complexity::Standard, "refactor the wire codec");
+        CHECK(rm.prior_bias(fresh) == 1,
+              "backoff: an unseen turn inherits its structural class's prior");
+        // A turn in a DIFFERENT structural class (a question) does not.
+        auto other_class = turn_signature(Complexity::Standard, "why is it slow?");
+        CHECK(rm.prior_bias(other_class) == 0,
+              "backoff is scoped to the coarse class, not global");
+    }
+
     // Compaction: an append-only store must not grow without bound. After many
     // events the file is rewritten to at most two lines per signature, and the
     // learned prior is PRESERVED across the rewrite (aggregate is what matters).

@@ -65,19 +65,40 @@ int main() {
     CHECK(classify_with_context("rename foo to bar", Complexity::Standard)
           == Complexity::Simple, "Standard history does not lift a Simple follow-up");
 
-    // ── Script-agnostic size floor: a long non-space-delimited (e.g. CJK)
-    //    turn must not perpetually under-rate to Simple just because
-    //    word_count sees ~1 whitespace-token. A ~300-byte no-space string
-    //    escalates via the byte-length proxy.
+    // ── Script-agnostic size floor: a LONG non-space-delimited (CJK) request
+    //    must escalate on structure/length, not collapse to Simple just because
+    //    word_count sees ~1 whitespace token. ~450 glyphs of CJK + clause
+    //    markers clears the Complex band via the glyph-length + clause signals.
     {
         std::string cjk;
-        for (int i = 0; i < 100; ++i) cjk += "\xE6\x8E\xA2";   // 3-byte glyph ×100 = 300B
+        for (int i = 0; i < 150; ++i) cjk += "\xE6\x8E\xA2\xE7\xB4\xA2\xE3\x80\x81";  // 2 glyphs + 、
         CHECK(classify_complexity(cjk) == Complexity::Complex,
-              "long no-space (CJK-like) turn escalates via byte-length floor");
+              "long structured CJK turn escalates (glyph length + clause density)");
     }
     // Empty / whitespace-only input is Trivial, never a crash.
     CHECK(classify_complexity("") == Complexity::Trivial, "empty → trivial");
     CHECK(classify_complexity("   \n\t ") == Complexity::Trivial, "whitespace → trivial");
+
+    // ── Additive model beats the old lookup table ──
+    // A single "design" no longer HARD-forces Complex on a short, concrete UI
+    // ask (the old `has(kComplexTerms)` override did exactly that).
+    CHECK(classify_complexity("add a design token for button padding")
+          != Complexity::Complex,
+          "one keyword doesn't override structure on a short concrete ask");
+    // But structure + vocabulary TOGETHER still escalate.
+    CHECK(classify_complexity(
+            "redesign the auth module: rework sessions, refresh tokens, and "
+            "the login flow end to end") == Complexity::Complex,
+          "vocabulary + multi-clause structure → complex");
+    // Multi-clause conjunction density escalates WITHOUT any hard keyword.
+    CHECK(classify_complexity(
+            "update the parser and the lexer and the formatter and re-run the "
+            "golden tests then wire it into the build")
+          == Complexity::Complex, "pure conjunction/clause density → complex");
+    // The scored API exposes a usable margin (confident on a clear ack).
+    CHECK(classify_score("thanks").margin > 0, "trivial ack has positive margin");
+    CHECK(classify_score("redesign everything end to end across the stack").tier
+          == Complexity::Complex, "scored API agrees with tier API");
 
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
