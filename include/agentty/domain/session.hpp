@@ -537,7 +537,9 @@ struct StreamState {
     // heavy delegation on a turn the heuristic under-rated bumps it up; a
     // trivial no-delegation reply on an over-rated turn nudges it down. It
     // DECAYS toward 0 each turn so a single anomaly never sticks. Clamped to
-    // [-1, +2]. Read by build_smart_routing_card / launch_stream.
+    // [-2, +2] (symmetric: sustained clean turns can relax effort as far as
+    // sustained hard turns raise it). Read by build_smart_routing_card /
+    // launch_stream.
     int smart_effort_bias = 0;
     // The complexity the classifier assigned to the IN-FLIGHT turn, stashed at
     // launch so finalize_turn can compare it against what the model actually
@@ -554,6 +556,12 @@ struct StreamState {
     // the regret rate the prior is built from. Set true after the first
     // note_routed of a user turn; reset to false at submit_message.
     bool smart_turn_routed = false;
+    // True if the just-settled turn had a build/test/edit tool FAILURE. Set in
+    // finalize_turn (where the +1 outcome regret is applied), read by the next
+    // submit_message: the symmetric −1 "clean continuation" signal must NOT
+    // fire for a turn that already earned a +1 failure regret, else the two
+    // cancel and the failure signal is silently erased. Reset with the latch.
+    bool smart_turn_had_failure = false;
     // Which summary shape the in-flight compaction is producing. Set at
     // CompactContext / fork kickoff, read by the wire builder to choose the
     // summarisation prompt. Defaults to Recoverable (the original behaviour).
