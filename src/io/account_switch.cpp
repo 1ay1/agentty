@@ -19,6 +19,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
 
 namespace agentty::auth::accounts {
 
@@ -28,6 +29,7 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 namespace crypt = agentty::auth::crypt;
 namespace chatgpt = agentty::provider::chatgpt;
+namespace copilot = agentty::provider::copilot;
 
 // The active-store file for a provider whose credential is a single file.
 // nullopt for providers whose accounts are handled elsewhere (OpenAI keys
@@ -37,6 +39,8 @@ std::optional<fs::path> active_store_file(const std::string& provider) {
         return agentty::auth::credentials_path();
     if (provider == "chatgpt")
         return chatgpt::codex_credentials_path();
+    if (provider == "copilot")
+        return copilot::credentials_path();
     return std::nullopt;
 }
 
@@ -104,6 +108,11 @@ bool activate(const std::string& provider, const std::string& label) {
         if (auto c = chatgpt::load_codex_credentials())
             chatgpt::save_codex_credentials(*c);
     }
+    // Copilot writes a plain 0600 file (no keystore mirror), so the direct
+    // write_store above is already authoritative — no round-trip needed. But
+    // invalidate any cached proxy token so the switched-to account re-exchanges
+    // against ITS GitHub credential, not the previous account's.
+    if (provider == "copilot") copilot::invalidate_cached_token();
     return set_active(provider, label);
 }
 
@@ -125,6 +134,18 @@ std::string derive_current_label(const std::string& provider) {
             std::string acct = j.value("account_id", "");
             if (!acct.empty()) return "ChatGPT " + acct.substr(0, 8);
             return "ChatGPT";
+        }
+        if (provider == "copilot") {
+            // The Copilot store is {github_token, proxy:{sku,…}}. The token
+            // itself isn't a stable human id, so label by plan + a short hash
+            // of the github token so distinct accounts get distinct labels.
+            std::string sku;
+            if (j.contains("proxy") && j["proxy"].is_object())
+                sku = j["proxy"].value("sku", "");
+            std::string gh = j.value("github_token", "");
+            std::string tag = gh.size() >= 8 ? gh.substr(gh.size() - 4) : "";
+            std::string base = sku.empty() ? "Copilot" : "Copilot (" + sku + ")";
+            return tag.empty() ? base : base + " …" + tag;
         }
         std::string method = j.value("method", "");
         if (method == "api_key" || method == "apikey") return "API key";
