@@ -889,6 +889,15 @@ Step stream_update(Model m, msg::StreamMsg sm) {
     // is the canonical assembler boundary: wire adapters may deliver append
     // deltas or replacement snapshots, but neither ordering nor "latest call"
     // is provider-dependent here.
+    //
+    // Duplicate ids across sub-turns (some OpenAI-compatible gateways mint a
+    // deterministic id per (tool, index) — literally "bash:0" every turn) do
+    // NOT need special handling here: this scan is scoped to messages.back(),
+    // the CURRENT sub-turn's assistant message, so an earlier sub-turn's
+    // identically-id'd call is out of range and can't shadow the live one.
+    // (Result routing — a different path, with_live_tool — scans the whole
+    // live tail and handles the collision by preferring the non-terminal
+    // match.)
     auto find_streaming_tool = [&](const ToolCallId& id) -> ToolUse* {
         if (id.empty()
             || m.d.current.messages.empty()
@@ -896,47 +905,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             return nullptr;
         auto& calls = m.d.current.messages.back().tool_calls;
         auto it = std::ranges::find(calls, id, &ToolUse::id);
-        if (it != calls.end()) return &*it;
-        // Renamed at ingest (see `uniquify` below) — the wire goes on
-        // addressing the original id in its delta / end events. Match the
-        // NEWEST call carrying it: with the sequential collisions gateways
-        // actually produce, that is always the one still streaming.
-        for (auto rit = calls.rbegin(); rit != calls.rend(); ++rit)
-            if (!rit->wire_id.empty() && rit->wire_id == id) return &*rit;
-        return nullptr;
-    };
-
-    // ── Duplicate tool-call id guard ─────────────────────────────────────
-    // The ToolCallId is the ONLY key the runtime has for routing a tool's
-    // result, progress snapshots, timeout and permission decision back to
-    // its card (`with_live_tool`), and it is what the wire uses to pair a
-    // role:"tool" message with its assistant tool_call. Providers are
-    // supposed to make it unique. Several OpenAI-compatible gateways
-    // instead mint a deterministic id per (tool, index) — literally
-    // "bash:0" for every bash call on every turn.
-    //
-    // That is fatal here because one turn holds SEVERAL assistant messages
-    // in the live tail (kick_pending_tools appends a fresh placeholder per
-    // sub-turn), so turn 2's "bash:0" lands beside turn 1's, which is
-    // already Done. Rename the newcomer so every live call is uniquely
-    // addressable again; `wire_id` keeps the original for the stream events
-    // still to come. The rewritten id is what goes back out on the wire in
-    // both the assistant tool_call and its paired tool result, so the
-    // request stays self-consistent — and unlike the original, unambiguous.
-    auto uniquify = [&](const ToolCallId& id) -> ToolCallId {
-        auto taken = [&](const ToolCallId& cand) {
-            for (std::size_t i = m.ui.frozen_through;
-                 i < m.d.current.messages.size(); ++i)
-                for (const auto& tc : m.d.current.messages[i].tool_calls)
-                    if (tc.id == cand) return true;
-            return false;
-        };
-        if (id.empty() || !taken(id)) return id;
-        for (int n = 2; n < 1000; ++n) {
-            ToolCallId cand{id.value + "#" + std::to_string(n)};
-            if (!taken(cand)) return cand;
-        }
-        return id;   // 1000 collisions on one id: give up, not worth more
+        return it != calls.end() ? &*it : nullptr;
     };
 
     return std::visit(overload{
@@ -1087,14 +1056,7 @@ Step stream_update(Model m, msg::StreamMsg sm) {
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 ToolUse tc;
-                // Never let a second live call share an id with a first —
-                // see `uniquify` above for why that silently eats results.
-                if (auto uid = uniquify(e.id); uid != e.id) {
-                    tc.wire_id = e.id;
-                    tc.id      = std::move(uid);
-                } else {
-                    tc.id = e.id;
-                }
+                tc.id   = e.id;
                 tc.name = e.name;
                 tc.args = json::object();
                 // Stamp start now so the card shows a live timer during the
