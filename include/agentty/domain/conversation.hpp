@@ -83,6 +83,15 @@ struct ToolUse {
     using Status = std::variant<Pending, Approved, Running, Done, Failed, Rejected>;
 
     ToolCallId     id;
+    // The provider's ORIGINAL id, set only when `id` had to be rewritten at
+    // ingest because the wire id already belonged to another call in the
+    // live tail (update/stream.cpp's `uniquify`). The wire keeps addressing
+    // its own id on the following input_json_delta / tool_use_end events, so
+    // find_streaming_tool falls back to matching this. Empty whenever no
+    // rewrite happened, which is the overwhelmingly common case.
+    // Streaming-time scratch only — not persisted; a reloaded thread has no
+    // live stream to route.
+    ToolCallId     wire_id;
     ToolName       name;
     nlohmann::json args;
     std::string    args_streaming;

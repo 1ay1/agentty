@@ -4,6 +4,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Tool results no longer vanish onto a dead card when a provider reuses tool-call ids.** Some OpenAI-compatible gateways mint a deterministic id per (tool, index) — literally `"bash:0"` for every bash call on every turn — instead of a unique `ToolCallId`. One agent turn holds several assistant messages in the live tail, so the next sub-turn's `"bash:0"` collided with the previous one's (already Done): the result was stamped onto the dead card, the real call stayed Pending, and its card hung until the step timeout. A duplicate import is now renamed at ingest (`bash:0#2`, …) with the wire id preserved for routing of the in-flight delta/end/result events, and tagged-back calls prefer the *first non-terminal* carrier, so every tool card completes with its own output. (`src/runtime/app/update/stream.cpp`; new `dup_tool_call_id_test`, 5 scenarios green.)
+
 ## [0.3.0] - 2026-08-14
 
 ### Added

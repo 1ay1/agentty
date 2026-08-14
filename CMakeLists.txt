@@ -2159,6 +2159,14 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(settings_default_test)
     set_tests_properties(settings_default_test PROPERTIES TIMEOUT 30)
 
+    # dup_tool_call_id_test — duplicate tool-call id ingest (stream.cpp
+    # `uniquify` + ToolUse::wire_id). OpenAI-compatible gateways that mint a
+    # per-(tool,index) id like "bash:0" every turn must not smash a live
+    # call's result onto the prior sub-turn's already-Done card (the stuck
+    # "card hangs until step timeout" bug): the newcomer is renamed to id#N
+    # and wire events keep routing via wire_id.
+    agentty_add_full_test(dup_tool_call_id_test)
+
     # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
     # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
     # re-leaks a tool call it already ran this turn must not run it twice.
@@ -2405,6 +2413,7 @@ if(AGENTTY_BUILD_TESTS)
         decomposition_memory_test
         smart_cascade_gate_test
         settings_default_test
+        dup_tool_call_id_test
         salvage_dedup_test
         doom_loop_test
         acp_integration_test
