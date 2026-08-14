@@ -584,7 +584,11 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     std::string_view newest_user;
     for (auto it = m.d.current.messages.rbegin();
          it != m.d.current.messages.rend(); ++it)
-        if (it->role == Role::User && !it->proactive_context) {
+        // !smart_routing: never classify a prior turn's zero-text 🧠 card —
+        // keeps this scan IDENTICAL to launch_stream's so the card's shown
+        // route can never disagree with the wire.
+        if (it->role == Role::User && !it->proactive_context
+            && !it->smart_routing) {
             newest_user = it->text; break;
         }
     const smart::ComplexityScore cx =
@@ -743,7 +747,13 @@ Cmd<Msg> launch_stream(Model& m) {
         std::string_view newest_user;
         for (auto it = m.d.current.messages.rbegin();
              it != m.d.current.messages.rend(); ++it)
-            if (it->role == Role::User && !it->proactive_context) {
+            // Skip the zero-text 🧠 routing card (Role::User, smart_routing):
+            // submit_message inserts it AFTER the real user message, so
+            // without this guard the scan classifies an empty string — wrong
+            // effort on the wire, a degenerate turn_signature pooling every
+            // turn's learned prior, and a card that disagrees with the wire.
+            if (it->role == Role::User && !it->proactive_context
+                && !it->smart_routing) {
                 newest_user = it->text; break;
             }
         // Context-aware: a short follow-up to a Complex turn keeps some of
@@ -1278,7 +1288,8 @@ std::optional<LoopBreak> agent_loop_should_break(
         // A proactively-retrieved context message is a synthetic User turn,
         // NOT a human turn boundary — skip it so the run-start lands on the
         // real user message it was injected after.
-        if (messages[i].role == Role::User && !messages[i].proactive_context) {
+        if (messages[i].role == Role::User && !messages[i].proactive_context
+            && !messages[i].smart_routing) {
             run_start = i + 1; break;
         }
     }

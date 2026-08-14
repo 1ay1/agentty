@@ -342,11 +342,16 @@ namespace detail {
 
 // Blend the live SESSION cascade bias with the persisted LEARNED prior. Both
 // encode the same regret signal at two timescales, so they must NOT be summed
-// (that double-escalates a sticky turn-class). Same-sign: keep whichever points
-// harder. Opposite-sign: the live session wins (more recent evidence). Used by
-// both launch_stream (the real effort) and the routing card (its provenance),
-// so the card can never disagree with the wire.
+// (that double-escalates a sticky turn-class). A NEUTRAL session (0, the cold-
+// start state of every fresh session) defers to the prior outright — 0 carries
+// no evidence, and treating it as "positive sign" would discard a learned
+// negative prior, silently disabling the relax-effort half of the loop.
+// Same-sign: keep whichever points harder. Opposite-sign: the live session
+// wins (more recent evidence). Used by both launch_stream (the real effort)
+// and the routing card (its provenance), so the card can never disagree with
+// the wire.
 [[nodiscard]] inline int blend_bias(int session, int prior) noexcept {
+    if (session == 0) return prior;
     if ((prior >= 0) == (session >= 0))
         return std::abs(prior) > std::abs(session) ? prior : session;
     return session;

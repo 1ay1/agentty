@@ -27,7 +27,9 @@ static void check(bool ok, const char* label) {
 static A::Model apply(A::Model m, A::msg::StreamMsg event) {
     auto [next, cmd] = D::stream_update(std::move(m), std::move(event));
     (void)cmd;
-    return next;
+    // `next` is a structured binding: no implicit move-on-return before C++23,
+    // and Model's copy ctor is deleted.
+    return std::move(next);
 }
 
 int main() {

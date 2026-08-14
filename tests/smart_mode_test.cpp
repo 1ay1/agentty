@@ -207,6 +207,9 @@ int main() {
         CHECK(sm::blend_bias(2, 1) == 2,  "blend: same-sign keeps the stronger (session)");
         CHECK(sm::blend_bias(1, -2) == 1, "blend: opposite-sign → the live session wins");
         CHECK(sm::blend_bias(0, 2) == 2,  "blend: zero session → pure prior");
+        CHECK(sm::blend_bias(0, -2) == -2,
+              "blend: zero session defers to a NEGATIVE prior too — cold-start "
+              "sessions must not discard the learned relax-effort signal");
         CHECK(sm::blend_bias(-1, -1) == -1, "blend: negative same-sign → no double-down");
     }
 
