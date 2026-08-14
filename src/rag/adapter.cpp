@@ -930,7 +930,7 @@ struct Retriever::Impl {
         if (skip_docs && docs_root.empty() && !indexed_root.empty())
             docs_root = fs::path{indexed_root};
         if (!docs_root.empty()) {
-            ::rag::loaders::DirOptions opts;   // sane include/exclude defaults
+            ::rag::loaders::DirOptions opts = docs_dir_options();
             auto docs = ::rag::loaders::load_directory(docs_root, opts);
             if (docs) {
                 for (auto& d : *docs) {
@@ -981,7 +981,7 @@ struct Retriever::Impl {
 
         if (!skip_docs) {
             indexed_root = root.string();
-            ::rag::loaders::DirOptions opts;
+            ::rag::loaders::DirOptions opts = docs_dir_options();
             docs_files = file_manifest(root, opts);
             indexed_fp = manifest_fingerprint(docs_files);
             docs_initialized = true;
@@ -1043,7 +1043,7 @@ struct Retriever::Impl {
             if (!in) return false;
             ::rag::plugin::Json j;
             in >> j;
-            ::rag::loaders::DirOptions opts;
+            ::rag::loaders::DirOptions opts = docs_dir_options();
             auto current_files = file_manifest(root, opts);
             const auto current_docs = manifest_fingerprint(current_files);
             const auto current_skills = skills_fingerprint();
@@ -1082,7 +1082,7 @@ struct Retriever::Impl {
         // folder is repointed.
         if (!root.empty() && indexed_root != root.string()) return true;
         if (!skip_docs) {
-            ::rag::loaders::DirOptions opts;
+            ::rag::loaders::DirOptions opts = docs_dir_options();
             if (manifest_fingerprint(file_manifest(root, opts)) != indexed_fp) return true;
         }
         if (skills_gen != skills_fingerprint()) return true;
@@ -1092,6 +1092,29 @@ struct Retriever::Impl {
     }
 
     using FileManifest = std::unordered_map<std::string, std::uint64_t>;
+
+    // Bounded, build-aware DirOptions for the docs / knowledge corpus.
+    //
+    // The rag-cpp DEFAULT DirOptions is UNBOUNDED (max_files = 0) with a 4 MB
+    // per-file cap and an exclude list that only knows the common VCS/package
+    // dirs. When AGENTTY_DOCS_DIR is pointed at a large repo root (a supported
+    // config) the defaults walk and load the ENTIRE tree — vendored deps under
+    // _deps/, generated CMakeFiles/, build output, the .agentty cache — into
+    // the HNSW dense store, whose backing vector grows to n_chunks * dim. On a
+    // very large codebase that allocation is what the OS OOM-kills, and an
+    // OOM-kill can't be caught by the try/catch guarding every retrieval entry
+    // point. Cap the walk (files + bytes) and skip build/vendor dirs so the
+    // docs path is as bounded as the search_code path already is.
+    static ::rag::loaders::DirOptions docs_dir_options() {
+        ::rag::loaders::DirOptions opts;   // inherit rag-cpp include_ext
+        opts.exclude_dirs = {
+            ".git",".hg",".svn","node_modules","build","dist","out",
+            "target","venv",".venv","__pycache__",".cache","_deps",
+            "CMakeFiles",".agentty","vendor","third_party"};
+        opts.max_file_bytes = 1 * 1024 * 1024;   // 1 MB: docs, not blobs
+        opts.max_files = 6000;                    // hard ceiling on corpus size
+        return opts;
+    }
 
     FileManifest file_manifest(const fs::path& root,
                                const ::rag::loaders::DirOptions& opts) {
@@ -1200,7 +1223,7 @@ struct Retriever::Impl {
     }
 
     void refresh_docs(const fs::path& root) {
-        ::rag::loaders::DirOptions opts;
+        ::rag::loaders::DirOptions opts = docs_dir_options();
         auto manifest = file_manifest(root, opts);
         const auto fp = manifest_fingerprint(manifest);
         const bool non_doc_changed = skills_gen != skills_fingerprint()
@@ -1956,6 +1979,15 @@ int run(const std::string& root) {
 
         auto t0 = std::chrono::steady_clock::now();
         ::rag::loaders::DirOptions opts;
+        // Match the interactive docs path: skip build/vendor dirs and cap the
+        // corpus so `rag-bench` on a huge tree can't OOM the way an unbounded
+        // walk would.
+        opts.exclude_dirs = {
+            ".git",".hg",".svn","node_modules","build","dist","out",
+            "target","venv",".venv","__pycache__",".cache","_deps",
+            "CMakeFiles",".agentty","vendor","third_party"};
+        opts.max_file_bytes = 1 * 1024 * 1024;
+        opts.max_files = 6000;
         auto docs = ::rag::loaders::load_directory(r, opts);
         std::size_t n = 0;
         if (docs) for (auto& d : *docs) { (void)engine.add(d.uri, std::move(d.text), d.meta, d.title); ++n; }
