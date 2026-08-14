@@ -274,6 +274,28 @@ int main() {
         check(code_before == code_after, "warm code open does not rewrite its index");
     }
 
+    // Corrupt/truncated .meta.json must not crash a fresh Retriever: the load
+    // path parses meta inside try/catch and falls back to a clean rebuild. This
+    // guards the persistence hardening (atomic meta writes) — even a half-
+    // written meta from a killed process is recovered from, never fatal.
+    {
+        std::error_code ec;
+        auto meta = tmp / ".agentty" / "rag_docs.ragdb.meta.json";
+        // Truncated JSON object: exactly what an interrupted write could leave
+        // if writes were not atomic.
+        write_file(meta, "{\"version\": 2, \"root\": \"/tmp\", \"docs_fp\":");
+        agentty::rag::Retriever r;
+        auto res = r.retrieve("encrypted OAuth keystore", 5);
+        check(res.error.empty(), "corrupt .meta.json recovers via rebuild, no crash");
+        check(!res.passages.empty(), "rebuild after corrupt meta still returns results");
+        // The rebuild must rewrite a VALID meta (parseable JSON object).
+        std::ifstream in(meta);
+        std::string body((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+        check(!body.empty() && body.front() == '{' && body.back() == '}',
+              "rebuild republishes a complete .meta.json");
+    }
+
     // Very-large-corpus bounds: a docs root with more than the file cap,
     // plus vendored/build dirs and an oversized blob, must index a BOUNDED
     // corpus and never crash. This guards the OOM that unbounded DirOptions
