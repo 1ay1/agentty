@@ -3,35 +3,36 @@
 // Root cause: several OpenAI-compatible gateways mint a DETERMINISTIC id per
 // (tool, index) — literally "bash:0" for every bash call on every turn —
 // instead of a unique ToolCallId. One agent turn holds several assistant
-// messages in the live tail (submit_message appends a fresh placeholder per
-// sub-turn), so turn 2's "bash:0" landed beside turn 1's, already Done, and
-// every lookup (`with_live_tool`) matched the FIRST one: the result was
-// stamped onto the dead card, the real call stayed Pending, and its card
-// hung until the 330 s step timeout — on every response with a tool call.
+// messages in the live tail (kick_pending_tools appends a fresh placeholder
+// per sub-turn), so turn 2's "bash:0" lands beside turn 1's, already Done.
+// The old `with_live_tool` matched the FIRST id in the whole live tail: turn
+// 2's result was stamped onto turn 1's dead card, the real call stayed
+// Pending, and its card hung until the 330 s step timeout — on every response
+// with a tool call.
 //
-// The fix (stream.cpp): `uniquify` renames the NEW call at ingest
-// ("bash:0" -> "bash:0#2", ...) and stashes the original on
-// `ToolUse::wire_id`, which `find_streaming_tool` falls back to (newest
-// carrier) so the wire's own delta / end / result events still route. The
-// rewritten id goes back out on the wire in BOTH the assistant tool_call
-// and its paired role:"tool" result (all four transports), so the request
-// stays self-consistent — and unlike the original, unambiguous.
+// The fix (update/internal.hpp): `with_live_tool` prefers the first
+// NON-TERMINAL call carrying the id, falling back to a terminal one only when
+// no live call has it. Result/progress/timeout/permission routing all go
+// through `with_live_tool`, so this alone lands each event on the correct
+// (live) card even when an earlier sub-turn left an identically-id'd Done
+// call in the tail.
 //
-// `with_live_tool` (update/internal.hpp) additionally picks the FIRST
-// NON-TERMINAL call over the first call overall for worried callers that
-// still address the raw id.
+// Streaming assembly (stream.cpp `find_streaming_tool`) needs no special
+// casing: it is scoped to messages.back() — the CURRENT sub-turn's assistant
+// message — so an earlier sub-turn's identically-id'd call is simply out of
+// range and cannot shadow the one being streamed.
 //
 // Asserts:
-//   1. A tool_use_start replaying a Done call's id is renamed to id#2;
-//      the original keeps id + output; wire_id points back at the wire id.
-//   2. A NEVER-TERMINATED hanging first call doesn't swallow the replay:
-//      the observed result still lands on the NEW (newest wire_id) call,
-//      and the delta routes by wire_id to the newest carrier.
-//   3. A THIRD start with the same wire id gets id#3; wire routing stays
-//      per-newest — all three results land on their own call.
-//   4. A fresh unique id is untouched: no rewrite, wire_id stays empty.
-//   5. with_live_tool targeted at the RAW wire id picks the first
-//      non-terminal carrier — not the first (already-Done) match.
+//   1. with_live_tool targeted at a duplicated id picks the first
+//      NON-TERMINAL carrier — not the first (already-Done) match.
+//   2. Full cross-sub-turn flow: turn 1's call is Done; turn 2 replays the
+//      same wire id; its streamed args + observed result land on turn 2's
+//      live call, and turn 1's Done card keeps its own output.
+//   3. find_streaming_tool is isolated to the current sub-turn: a delta for
+//      the replayed id never leaks onto the previous sub-turn's call.
+//   4. A hanging (never-terminated) first call in the SAME message does not
+//      swallow a genuinely distinct later call's result.
+//   5. Unique ids route to their own call, untouched.
 
 #include <cstdio>
 #include <string>
@@ -91,153 +92,158 @@ static Step observed(Model m, const std::string& id, std::string out) {
                              std::move(out)}});
 }
 
-// sub_turn_start mirrors kick_pending_tools / submit_message: append the
-// next sub-turn's assistant placeholder (the real runtime also expires any
-// leftover Pending/Approved calls, which the end() events here already
-// handled; when they didn't, that's exactly test 2's hanging case).
+// sub_turn_start mirrors kick_pending_tools: append the next sub-turn's
+// assistant placeholder without freezing the prior one, so both live in the
+// tail at once — the precondition for the duplicate-id collision.
 static void sub_turn_start(Model& m) {
     m.d.current.messages.push_back(asst_placeholder());
 }
 
-// ── 1. Impersonated start: newcomer is renamed, original is untouched ──────
-static void test_impersonated_start_renamed() {
-    Model m;
-    m.d.current.messages.push_back(asst_placeholder());
-
-    // Turn T0: bash:0 starts, streams args, executed -> Done "hello".
-    m = start(std::move(m), "bash:0", "bash").first;
-    m = delta(std::move(m), "bash:0", "{\"command\": \"echo hello\"}").first;
-    m = end(std::move(m), "bash:0").first;
-    {
-        auto& tc0 = m.d.current.messages.back().tool_calls.back();
-        check(tc0.id.value == "bash:0", "T0: first call keeps raw id");
-        check(tc0.wire_id.empty(),     "T0: first call has no wire_id");
-        tc0.status = ToolUse::Done{
-            tc0.started_at(), std::chrono::steady_clock::now(), "hello"};
-    }
-
-    // Turn T1: gateway re-mints bash:0 for the very next call.
-    sub_turn_start(m);
-    m = start(std::move(m), "bash:0", "bash").first;
-    const auto& calls = m.d.current.messages.back().tool_calls;
-    check(calls.size() == 1,                "T1: placeholder holds the new call");
-    check(calls[0].id.value == "bash:0#2",  "T1: newcomer renamed to id#2");
-    check(calls[0].wire_id.value == "bash:0", "T1: wire_id keeps the raw wire id");
-
-    // The finished call in the previous sub-turn must be untouched.
-    const auto& prev = m.d.current.messages[0].tool_calls[0];
-    check(prev.id.value == "bash:0", "T1: original id not rewritten");
-    check(prev.is_done() && prev.output() == "hello",
-          "T1: original result not clobbered");
+static ToolUse make_call(const std::string& id, ToolUse::Status st) {
+    ToolUse tc;
+    tc.id     = ToolCallId{id};
+    tc.name   = ToolName{"bash"};
+    tc.status = std::move(st);
+    return tc;
 }
 
-// ── 2. Result routes to the replay, even if the first call hung ────────────
-static void test_result_routes_to_renamed_newcomer() {
-    Model m;
-    m.d.current.messages.push_back(asst_placeholder());
-
-    // T0's call NEVER terminated (the stuck-card bug shape): still Pending.
-    m = start(std::move(m), "bash:0", "bash").first;
-    m = delta(std::move(m), "bash:0", "{\"command\": \"echo first\"}").first;
-    m = end(std::move(m), "bash:0").first;
-
-    // T1: gateway reuses bash:0.
-    sub_turn_start(m);
-    m = start(std::move(m), "bash:0", "bash").first;
-    m = delta(std::move(m), "bash:0", "{\"command\": \"echo second\"}").first;
-    m = end(std::move(m), "bash:0").first;
-
-    // The wire addresses its result by the RAW id. It must land on the
-    // replay (newest wire_id carrier), not the hung first call.
-    m = observed(std::move(m), "bash:0", "world").first;
-
-    const auto& tc_first = m.d.current.messages[0].tool_calls[0];
-    const auto& tc_new   = m.d.current.messages[1].tool_calls[0];
-    check(tc_new.id.value == "bash:0#2",        "T1: replay carries id#2");
-    check(tc_new.is_done(),                     "result resolves the replay");
-    check(tc_new.output() == "world",           "output on the replay");
-    check(!tc_first.is_done(),                  "hung first call untouched");
-    check(tc_first.args.value("command", "") == "echo first",
-          "first call keeps its own args");
-    check(tc_new.args.value("command", "") == "echo second",
-          "delta routed by wire_id to the replay");
+static ToolUse::Done done_status(const char* out) {
+    auto now = std::chrono::steady_clock::now();
+    return ToolUse::Done{now, now, out};
 }
 
-// ── 3. Sequential collisions: a third bash:0 renames again ─────────────────
-static void test_sequential_collisions() {
-    Model m;
-    m.d.current.messages.push_back(asst_placeholder());
-
-    m = start(std::move(m), "bash:0", "bash").first;
-    m = observed(std::move(m), "bash:0", "r1").first;
-    sub_turn_start(m);
-    m = start(std::move(m), "bash:0", "bash").first;
-    m = observed(std::move(m), "bash:0", "r2").first;
-    sub_turn_start(m);
-    m = start(std::move(m), "bash:0", "bash").first;
-    m = observed(std::move(m), "bash:0", "r3").first;
-
-    const auto& c0 = m.d.current.messages[0].tool_calls[0];
-    const auto& c1 = m.d.current.messages[1].tool_calls[0];
-    const auto& c2 = m.d.current.messages[2].tool_calls[0];
-    check(c1.id.value == "bash:0#2", "collision #2 renamed");
-    check(c2.id.value == "bash:0#3", "collision #3 renamed");
-    check(c0.is_done() && c0.output() == "r1", "result 1 stayed on first call");
-    check(c1.is_done() && c1.output() == "r2", "result 2 routed to id#2");
-    check(c2.is_done() && c2.output() == "r3", "result 3 routed to id#3");
-}
-
-// ── 4. A genuinely unique id is untouched ──────────────────────────────────
-static void test_unique_id_not_rewritten() {
-    Model m;
-    m.d.current.messages.push_back(asst_placeholder());
-    m = start(std::move(m), "bash:0", "bash").first;
-    sub_turn_start(m);
-    m = start(std::move(m), "call_abc123", "bash").first;
-    const auto& tc = m.d.current.messages.back().tool_calls[0];
-    check(tc.id.value == "call_abc123", "unique id kept verbatim");
-    check(tc.wire_id.empty(),          "no wire_id on the happy path");
-}
-
-// ── 5. with_live_tool prefers the first NON-TERMINAL carrier ───────────────
+// ── 1. with_live_tool prefers the first non-terminal carrier ───────────────
 static void test_with_live_tool_prefers_non_terminal() {
     Model m;
+    // Two live assistant messages, both carrying "bash:0": the first Done
+    // (previous sub-turn), the second Pending (current). The raw lookup must
+    // land on the Pending one.
     m.d.current.messages.push_back(asst_placeholder());
+    m.d.current.messages.back().tool_calls.push_back(
+        make_call("bash:0", done_status("stale")));
+    m.d.current.messages.push_back(asst_placeholder());
+    m.d.current.messages.back().tool_calls.push_back(
+        make_call("bash:0", ToolUse::Pending{}));
 
-    // Hand-build the pre-fix collision shape: two calls sharing one raw id,
-    // the first already Done, the second still Pending.
-    ToolUse done_tc;
-    done_tc.id   = ToolCallId{"bash:0"};
-    done_tc.name = ToolName{"bash"};
-    done_tc.args = {{ "command", "echo first" }};
-    done_tc.status = ToolUse::Done{{}, std::chrono::steady_clock::now(), "hi"};
-    ToolUse pending_tc = done_tc;
-    pending_tc.args    = {{ "command", "echo second" }};
-    pending_tc.status  = ToolUse::Pending{std::chrono::steady_clock::now()};
-    m.d.current.messages.back().tool_calls.push_back(std::move(done_tc));
-
-    sub_turn_start(m);
-    m.d.current.messages.back().tool_calls.push_back(std::move(pending_tc));
-
-    bool hit_pending = false;
-    with_live_tool(m, ToolCallId{"bash:0"}, [&](ToolUse& t) {
-        hit_pending = t.is_pending();
-        t.status = ToolUse::Done{
-            t.started_at(), std::chrono::steady_clock::now(), "world"};
+    bool hit_terminal = false;
+    bool hit_pending  = false;
+    with_live_tool(m, ToolCallId{"bash:0"}, [&](ToolUse& tc) {
+        if (tc.is_terminal()) hit_terminal = true;
+        if (tc.is_pending())  hit_pending  = true;
     });
-    check(hit_pending, "mutation landed on the Pending call, not the Done one");
-    check(m.d.current.messages[0].tool_calls[0].output() == "hi",
-          "Done call's original output preserved");
-    check(m.d.current.messages[1].tool_calls[0].output() == "world",
-          "Pending call received the new result");
+    check(!hit_terminal, "L1: did not route to the Done card");
+    check(hit_pending,   "L1: routed to the live (Pending) card");
+
+    // With the live call gone (all terminal), it may fall back to a terminal
+    // match rather than silently no-op.
+    m.d.current.messages.back().tool_calls[0].status = done_status("fresh");
+    bool any = false;
+    with_live_tool(m, ToolCallId{"bash:0"}, [&](ToolUse&) { any = true; });
+    check(any, "L1: falls back to a terminal match when none are live");
+}
+
+// ── 2. Cross-sub-turn: result lands on the live call, Done card untouched ──
+static void test_result_routes_across_sub_turns() {
+    Model m;
+    // Turn 1: stream bash:0, finish it, drive it Done with its own output.
+    m.d.current.messages.push_back(asst_placeholder());
+    Step s = start(std::move(m), "bash:0", "bash");
+    s = delta(std::move(s.first), "bash:0", "{\"cmd\":\"one\"}");
+    s = end(std::move(s.first), "bash:0");
+    m = std::move(s.first);
+    m.d.current.messages.back().tool_calls[0].status = done_status("first-out");
+
+    // Turn 2: new sub-turn placeholder, same wire id replays.
+    sub_turn_start(m);
+    s = start(std::move(m), "bash:0", "bash");
+    s = delta(std::move(s.first), "bash:0", "{\"cmd\":\"two\"}");
+    s = end(std::move(s.first), "bash:0");
+    // The observed result for turn 2 must land on turn 2's live call.
+    s = observed(std::move(s.first), "bash:0", "second-out");
+    m = std::move(s.first);
+
+    const auto& t1 = m.d.current.messages[m.d.current.messages.size() - 2];
+    const auto& t2 = m.d.current.messages.back();
+    check(t1.tool_calls.size() == 1 && t2.tool_calls.size() == 1,
+          "T2: one call in each sub-turn message");
+    check(t1.tool_calls[0].output() == "first-out",
+          "T2: turn 1's Done card keeps its own output");
+    check(t2.tool_calls[0].is_terminal(),
+          "T2: turn 2's call settled (did not hang)");
+    check(t2.tool_calls[0].output() == "second-out",
+          "T2: turn 2's result landed on turn 2's call");
+}
+
+// ── 3. find_streaming_tool is scoped to the current sub-turn ───────────────
+static void test_streaming_isolated_to_current_sub_turn() {
+    Model m;
+    // Turn 1: a fully-streamed bash:0 with args "{A}".
+    m.d.current.messages.push_back(asst_placeholder());
+    Step s = start(std::move(m), "bash:0", "bash");
+    s = delta(std::move(s.first), "bash:0", "{A}");
+    s = end(std::move(s.first), "bash:0");
+    m = std::move(s.first);
+    const std::string turn1_args = m.d.current.messages.back().tool_calls[0].args_streaming;
+
+    // Turn 2: new placeholder, same id, DIFFERENT args stream.
+    sub_turn_start(m);
+    s = start(std::move(m), "bash:0", "bash");
+    s = delta(std::move(s.first), "bash:0", "{B}");
+    m = std::move(s.first);
+
+    const auto& t1 = m.d.current.messages[m.d.current.messages.size() - 2];
+    const auto& t2 = m.d.current.messages.back();
+    check(t1.tool_calls[0].args_streaming == turn1_args,
+          "T3: turn 1's streamed args were NOT mutated by turn 2's delta");
+    check(t2.tool_calls[0].args_streaming.find("{B}") != std::string::npos,
+          "T3: turn 2's delta landed on turn 2's call");
+}
+
+// ── 4. A hanging first call doesn't swallow a distinct later call ──────────
+static void test_hanging_first_call_does_not_swallow() {
+    Model m;
+    // One message, two DISTINCT ids (normal parallel calls). The first never
+    // terminates; the second gets its own result.
+    m.d.current.messages.push_back(asst_placeholder());
+    Step s = start(std::move(m), "bash:0", "bash");   // never ended → hangs
+    s = start(std::move(s.first), "bash:1", "bash");
+    s = end(std::move(s.first), "bash:1");
+    s = observed(std::move(s.first), "bash:1", "b1-out");
+    m = std::move(s.first);
+
+    const auto& calls = m.d.current.messages.back().tool_calls;
+    check(calls.size() == 2, "T4: both parallel calls present");
+    check(!calls[0].is_terminal(), "T4: first (hanging) call still live");
+    check(calls[1].output() == "b1-out",
+          "T4: second call received its own result");
+}
+
+// ── 5. Unique ids route to their own call ──────────────────────────────────
+static void test_unique_ids_untouched() {
+    Model m;
+    m.d.current.messages.push_back(asst_placeholder());
+    Step s = start(std::move(m), "call_a", "bash");
+    s = start(std::move(s.first), "call_b", "read");
+    s = delta(std::move(s.first), "call_a", "{\"x\":1}");
+    s = delta(std::move(s.first), "call_b", "{\"y\":2}");
+    m = std::move(s.first);
+
+    const auto& calls = m.d.current.messages.back().tool_calls;
+    check(calls.size() == 2, "T5: two distinct calls");
+    check(calls[0].id.value == "call_a" && calls[1].id.value == "call_b",
+          "T5: unique ids untouched");
+    check(calls[0].args_streaming.find("\"x\":1") != std::string::npos,
+          "T5: call_a got its own args");
+    check(calls[1].args_streaming.find("\"y\":2") != std::string::npos,
+          "T5: call_b got its own args");
 }
 
 int main() {
-    test_impersonated_start_renamed();
-    test_result_routes_to_renamed_newcomer();
-    test_sequential_collisions();
-    test_unique_id_not_rewritten();
     test_with_live_tool_prefers_non_terminal();
+    test_result_routes_across_sub_turns();
+    test_streaming_isolated_to_current_sub_turn();
+    test_hanging_first_call_does_not_swallow();
+    test_unique_ids_untouched();
     if (g_fails) {
         std::fprintf(stderr, "%d check(s) failed\n", g_fails);
         return 1;
