@@ -37,6 +37,18 @@ agentty --provider my-gateway.lan:9000 --auth-header X-API-Key -k sk-xxx
 # emits:  x-api-key: sk-xxx     (instead of authorization: Bearer sk-xxx)
 ```
 
+### Custom path prefix
+
+If the gateway doesn't serve on the standard `/v1` path, specify a full URL instead of a bare `host:port`:
+
+```bash
+agentty --provider https://chat.example.org/api --auth-header X-API-Key -k sk-xxx
+# chats at https://chat.example.org/api/chat/completions
+# auth:   x-api-key: sk-xxx
+```
+
+The URL's path is a prefix — agentty appends `/chat/completions` and `/models`.
+
 Session-scoped like `-k` (not persisted). Applies to every OpenAI-family
 request — chat completions, model listing, the Ollama capability probe —
 and survives live provider switches (`^P`). The Anthropic path is
