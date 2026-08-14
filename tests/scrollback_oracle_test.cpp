@@ -1246,6 +1246,15 @@ done:
 }
 
 int main() {
+    // Debug-built libmaya ABORTS on any scrollback-gate firing (the loud
+    // tripwire, maya 8ce18ac) — including the KNOWN-BENIGN classes this
+    // oracle deliberately tolerates as telemetry (t0 splash teardown,
+    // conceal-band style_id self-heals; see the recov_after block above).
+    // Tell maya to soft-recover instead, exactly as production/Release
+    // does; the oracle's own append-only [oracle] + duplicate-line
+    // [transcript] checks remain the ground truth for real corruption.
+    // Same precedent as scrollback_prefix_harness.cpp.
+    setenv("MAYA_NO_GATE_ABORT", "1", 1);
     setlocale(LC_ALL, "C.UTF-8");   // wcwidth needs a UTF-8 locale
     err = fdopen(dup(STDERR_FILENO), "w");
     const int shapes[][2] = {{80, 30}, {60, 18}, {100, 50}, {46, 76}};
