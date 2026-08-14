@@ -2336,6 +2336,7 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
+        copilot_token_test
         compaction_threshold_test
         error_class_test
         wire_shared_test
@@ -2377,6 +2378,7 @@ if(AGENTTY_BUILD_TESTS)
         table_render_test
         openai_transport_test
         codex_responses_test
+        copilot_token_test
         chatgpt_bundled_models_test
         ollama_transport_test
         dispatch_route_test
