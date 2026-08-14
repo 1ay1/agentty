@@ -274,6 +274,45 @@ int main() {
         check(code_before == code_after, "warm code open does not rewrite its index");
     }
 
+    // Very-large-corpus bounds: a docs root with more than the file cap,
+    // plus vendored/build dirs and an oversized blob, must index a BOUNDED
+    // corpus and never crash. This guards the OOM that unbounded DirOptions
+    // (max_files=0, 4 MB files, no _deps/build exclusion) caused on large
+    // codebases when AGENTTY_DOCS_DIR pointed at a repo root.
+    {
+        fs::path big = tmp / "big_corpus";
+        fs::remove_all(big);
+        // 7000 tiny docs (> the 6000 cap) so the walk must truncate.
+        for (int i = 0; i < 7000; ++i)
+            write_file(big / ("doc" + std::to_string(i) + ".md"),
+                       "# Doc " + std::to_string(i) +
+                       "\n\nalpha beta gamma delta term" + std::to_string(i) + "\n");
+        // Vendored + build output that MUST be skipped, not indexed.
+        write_file(big / "_deps" / "vendored.md", "should not be indexed\n");
+        write_file(big / "build" / "generated.md", "should not be indexed\n");
+        write_file(big / "node_modules" / "pkg.md", "should not be indexed\n");
+        // An oversized blob that exceeds the 1 MB per-file cap.
+        std::string blob = "# Huge\n";
+        blob.reserve(3 * 1024 * 1024);
+        while (blob.size() < 3u * 1024 * 1024) blob += "filler filler filler\n";
+        write_file(big / "huge.md", blob);
+
+#if defined(_WIN32)
+        _putenv_s("AGENTTY_DOCS_DIR", big.string().c_str());
+#else
+        ::setenv("AGENTTY_DOCS_DIR", big.string().c_str(), 1);
+#endif
+        agentty::rag::Retriever r;
+        auto res = r.retrieve("alpha beta gamma delta", 5);
+        check(res.error.empty(), "large-corpus retrieve() does not crash or error");
+        check(!res.passages.empty(), "large-corpus retrieve() returns passages");
+        for (const auto& p : res.passages) {
+            check(p.path.find("_deps") == std::string::npos
+                  && p.path.find("node_modules") == std::string::npos,
+                  "vendored/build dirs are excluded from the docs corpus");
+        }
+    }
+
     // (3): empty knowledge ⇒ graceful "no knowledge" error, not a crash.
     {
         fs::path empty_dir = tmp / "empty";
