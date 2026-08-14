@@ -228,6 +228,19 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // false — caller treats it as a no-op, matching the existing
 // "idempotent on terminal" behaviour of apply_tool_output.
 //
+// Duplicate ids: a ToolCallId is supposed to be unique, but providers
+// break that (see the `uniquify` guard in update/stream.cpp) and the
+// live tail routinely holds SEVERAL assistant messages within one turn
+// — kick_pending_tools appends a fresh placeholder per sub-turn. When
+// two calls share an id, matching the first one found routes the second
+// tool's result onto the first tool's already-terminal card, where
+// apply_tool_output drops it as a late duplicate: the tool really ran,
+// its output vanished, and the card stayed Running until the 330 s
+// wedge net failed it. So prefer the first NON-terminal match and only
+// fall back to a terminal one when no live call carries the id. Every
+// caller wants this: the four exec/permission sites bail on terminal
+// anyway, and ToggleToolExpanded flipping the running card is the
+// better guess of the two.
 // The callback is invoked as `f(ToolUse&)`. `ToolMutator` pins that shape so a
 // wrong-signature lambda is a clean concept error at the call site, not a
 // template-depth error inside the loop.
@@ -236,14 +249,21 @@ concept ToolMutator = std::invocable<F&, ToolUse&>;
 
 template <ToolMutator F>
 bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
+    ToolUse* settled = nullptr;   // first terminal match — fallback only
     for (std::size_t i = m.ui.frozen_through;
          i < m.d.current.messages.size(); ++i) {
         for (auto& tc : m.d.current.messages[i].tool_calls) {
-            if (tc.id == id) {
+            if (tc.id != id) continue;
+            if (!tc.is_terminal()) {
                 std::forward<F>(f)(tc);
                 return true;
             }
+            if (!settled) settled = &tc;
         }
+    }
+    if (settled) {
+        std::forward<F>(f)(*settled);
+        return true;
     }
     return false;
 }
