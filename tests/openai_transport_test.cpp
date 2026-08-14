@@ -523,6 +523,90 @@ static void test_endpoint_presets() {
     CHECK(def.host == "api.openai.com");
     CHECK(def.use_tls);
 
+    // ── Full URL specs (http:// or https:// prefix) ──────────────
+    // A URL spec lets the user pick a custom path prefix for servers
+    // that don't serve on /v1 (e.g. chat.example.org serves on
+    // /api/chat/completions). The path in the URL is a BASE PREFIX;
+    // agentty appends /chat/completions and /models to it.
+    {
+        auto url = oai::Endpoint::from_spec("https://chat.example.org/api");
+        CHECK(url.host == "chat.example.org");
+        CHECK(url.port == 443);
+        CHECK(url.use_tls);
+        CHECK(url.path == "/api/chat/completions");
+        CHECK(url.models_path == "/api/models");
+        CHECK(!url.native_api);
+        CHECK(url.label == "https://chat.example.org/api");
+    }
+    {
+        auto url = oai::Endpoint::from_spec("http://localhost:8080/custom");
+        CHECK(url.host == "localhost");
+        CHECK(url.port == 8080);
+        CHECK(!url.use_tls);
+        CHECK(url.path == "/custom/chat/completions");
+        CHECK(url.models_path == "/custom/models");
+    }
+    {
+        // No path after scheme://authority → empty prefix → /chat/completions
+        auto url = oai::Endpoint::from_spec("https://my-gateway.com");
+        CHECK(url.host == "my-gateway.com");
+        CHECK(url.port == 443);
+        CHECK(url.use_tls);
+        CHECK(url.path == "/chat/completions");
+        CHECK(url.models_path == "/models");
+    }
+    {
+        // Trailing slash on the prefix is stripped before appending.
+        auto url = oai::Endpoint::from_spec("https://host:9000/prefix/");
+        CHECK(url.host == "host");
+        CHECK(url.port == 9000);
+        CHECK(url.use_tls);
+        CHECK(url.path == "/prefix/chat/completions");
+        CHECK(url.models_path == "/prefix/models");
+    }
+    {
+        // http:// with explicit port and no path.
+        auto url = oai::Endpoint::from_spec("http://10.0.0.5:5000");
+        CHECK(url.host == "10.0.0.5");
+        CHECK(url.port == 5000);
+        CHECK(!url.use_tls);
+        CHECK(url.path == "/chat/completions");
+        CHECK(url.models_path == "/models");
+    }
+    {
+        // Invalid port (non-numeric) → falls back to scheme default.
+        auto url = oai::Endpoint::from_spec("https://host:abc/path");
+        CHECK(url.host == "host");
+        CHECK(url.port == 443);
+        CHECK(url.use_tls);
+        CHECK(url.path == "/path/chat/completions");
+    }
+    {
+        // Out-of-range port → falls back to scheme default.
+        auto url = oai::Endpoint::from_spec("http://host:99999/path");
+        CHECK(url.host == "host");
+        CHECK(url.port == 80);
+        CHECK(!url.use_tls);
+        CHECK(url.path == "/path/chat/completions");
+    }
+    {
+        // Empty host (e.g. "https:///path") → falls back to default endpoint.
+        auto url = oai::Endpoint::from_spec("https:///path");
+        CHECK(url.host == "api.openai.com");
+        CHECK(url.port == 443);
+        CHECK(url.use_tls);
+    }
+    {
+        // Backward compat: bare host:port (no scheme) still uses /v1 default.
+        auto noscheme = oai::Endpoint::from_spec("my.host:8080");
+        CHECK(noscheme.host == "my.host");
+        CHECK(noscheme.port == 8080);
+        CHECK(!noscheme.use_tls);
+        CHECK(noscheme.path == "/v1/chat/completions");
+        CHECK(noscheme.models_path == "/v1/models");
+        CHECK(noscheme.label == "my.host:8080");
+    }
+
     // Registry ↔ from_spec consistency: EVERY OpenAI-family preset id must
     // resolve to a usable endpoint (non-empty host + chat/models paths).
     // Anthropic is skipped — it doesn't go through the OpenAI from_spec.

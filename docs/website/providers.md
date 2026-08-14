@@ -42,6 +42,7 @@ Signed in with Claude Pro/Max OAuth, the model picker offers a **"(1M context)"*
 | `cerebras` | Wafer-scale inference — very fast | `CEREBRAS_API_KEY` |
 | `ollama` | Local models at `localhost:11434` | None |
 | `host:port` | Any raw OpenAI-compatible endpoint | `OPENAI_API_KEY` |
+| `https://host[:port]/path` | Any OpenAI-compatible endpoint with a custom path prefix (e.g. a gateway serving on `/api` instead of `/v1`) | `OPENAI_API_KEY` |
 
 ## API keys
 
@@ -54,6 +55,18 @@ agentty --provider groq -m llama-3.3-70b
 # or a one-off, never written to disk:
 agentty --provider openai -k sk-… -m gpt-4o
 ```
+
+### Custom path prefix
+
+Some gateways or self-hosted servers don't serve on the standard `/v1` path. Specify a full URL and agentty will use its path as a prefix, appending `/chat/completions` and `/models`:
+
+```bash
+agentty --provider https://chat.example.org/api -k sk-… -m GLM-5.2
+# chats at  https://chat.example.org/api/chat/completions
+# models at https://chat.example.org/api/models
+```
+
+A bare `host:port` (no `http://`/`https://`) keeps the default `/v1` prefix.
 
 ## Sign in with GitHub Copilot
 

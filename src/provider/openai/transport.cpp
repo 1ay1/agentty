@@ -1111,7 +1111,59 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         // /v1 (NOT Ollama's native /api/chat), defaults to port 8080, and
         // needs no auth. Plain HTTP — it's a localhost daemon.
         return Endpoint{"localhost", 8080, "/v1/chat/completions",
-                        "/v1/models", false, "llama.cpp"};
+                         "/v1/models", false, "llama.cpp"};
+    }
+    // Full URL form: "https://host[:port][/path]" or "http://host[:port][/path]".
+    // The path is a BASE PREFIX — agentty appends /chat/completions and /models
+    // to it, so "https://gw.example.com/api" → path "/api/chat/completions".
+    // No path after scheme://authority → empty prefix → "/chat/completions".
+    // This lets users reach servers that don't serve on /v1 (e.g. gateways
+    // proxying to /api/chat/completions). Bare "host[:port]" specs (no scheme)
+    // fall through to the legacy handler below and keep the /v1 default.
+    if (spec.starts_with("https://") || spec.starts_with("http://")) {
+        Endpoint ep;
+        ep.label = std::string{spec};
+        std::string_view s{spec};
+        const bool tls = spec.starts_with("https://");
+        ep.use_tls = tls;
+        s.remove_prefix(tls ? 8 : 7);   // "https://" = 8, "http://" = 7
+        ep.port = tls ? 443 : 80;
+
+        // Split authority from path at the first '/'.
+        auto slash = s.find('/');
+        std::string_view authority = (slash == std::string_view::npos)
+            ? s : s.substr(0, slash);
+        std::string prefix;   // base path prefix, may be empty
+        if (slash != std::string_view::npos) {
+            prefix = std::string{s.substr(slash)};
+            // Strip trailing '/' so "/api/" → "/api", and "/" → "".
+            while (prefix.size() > 1 && prefix.back() == '/')
+                prefix.pop_back();
+            if (prefix == "/") prefix.clear();
+        }
+
+        // Split host from port at the last ':' in the authority.
+        auto colon = authority.rfind(':');
+        if (colon != std::string_view::npos) {
+            ep.host = std::string{authority.substr(0, colon)};
+            try {
+                int port_int = std::stoi(std::string{authority.substr(colon + 1)});
+                ep.port = (port_int > 0 && port_int <= 65535)
+                    ? static_cast<std::uint16_t>(port_int)
+                    : (tls ? 443 : 80);
+            }
+            catch (...) { ep.port = tls ? 443 : 80; }
+        } else {
+            ep.host = std::string{authority};
+        }
+
+        // Empty host (e.g. "https:///path" or "https://:443/") → fall back
+        // to the default endpoint rather than dialing an empty host.
+        if (ep.host.empty()) return Endpoint{};
+
+        ep.path       = prefix + "/chat/completions";
+        ep.models_path = prefix + "/models";
+        return ep;
     }
     // Treat anything else as a raw "host[:port]" — defaults to https on 443,
     // plain http if a non-443 port is given (a local server convention).

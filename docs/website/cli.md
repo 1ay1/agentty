@@ -62,7 +62,7 @@ These mirror `agentty --help` exactly.
 |---|---|
 | `-k`, `--key <key>` | API-key override for this session; never written to disk. |
 | `-m`, `--model <id>` | Model id for the session (e.g. `claude-opus-4-5`). |
-| `--provider <p>` | LLM backend: `anthropic` (default) or an OpenAI-compatible one — `openai` · `groq` · `openrouter` · `together` · `cerebras` · `ollama`, or a raw `host:port`. Persisted like `-m`; switch live with `^P`. See [Providers & Models](/docs/providers). |
+| `--provider <p>` | LLM backend: `anthropic` (default) or an OpenAI-compatible one — `openai` · `groq` · `openrouter` · `together` · `cerebras` · `ollama`, a raw `host:port`, or a full URL `https://host/path` for servers with a custom path prefix. Persisted like `-m`; switch live with `^P`. See [Providers & Models](/docs/providers). |
 | `-p`, `--profile <mode>` | ACP permission tier (Zed shows the prompts): `ask` (default) · `minimal` (also prompt reads) · `write` (never prompts — fully autonomous). |
 | `-w`, `--workspace <dir>` | Sandbox filesystem tools to this directory (default: cwd). Tools refuse paths outside it. Pass `--workspace /` to disable the gate. |
 | `--sandbox <mode>` | Wrap `bash`/`diagnostics` in an OS-native sandbox. `auto` (default) · `on` (require a backend) · `off` (disable). |
