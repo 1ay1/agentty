@@ -801,52 +801,6 @@ struct Retriever::Impl {
         embedder_ready = engine.with_embedder_spec(ollama_spec()).has_value();
     }
 
-    // Fingerprint exactly the files the loader can index. Directory pruning is
-    // essential on Windows: descending into .git/build/node_modules and only
-    // filtering files afterwards turns every query into thousands of NTFS and
-    // Defender metadata operations.
-    std::uint64_t fingerprint(
-        const fs::path& root,
-        const ::rag::loaders::DirOptions& opts = ::rag::loaders::DirOptions{}) {
-        std::uint64_t fp = 1469598103934665603ull;
-        if (root.empty()) return fp;
-        std::unordered_set<std::string> wanted(opts.include_ext.begin(), opts.include_ext.end());
-        std::unordered_set<std::string> skipped(opts.exclude_dirs.begin(), opts.exclude_dirs.end());
-        std::error_code ec;
-        std::size_t files = 0;
-        auto flags = fs::directory_options::skip_permission_denied;
-        if (opts.follow_symlinks) flags |= fs::directory_options::follow_directory_symlink;
-        for (fs::recursive_directory_iterator it(root, flags, ec), end;
-             it != end; it.increment(ec)) {
-            if (ec) { ec.clear(); continue; }
-            const auto& entry = *it;
-            if (entry.is_directory(ec)) {
-                if (skipped.contains(entry.path().filename().string()))
-                    it.disable_recursion_pending();
-                continue;
-            }
-            if (!entry.is_regular_file(ec)) continue;
-            std::string ext = entry.path().extension().string();
-            for (char& c : ext)
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (!wanted.contains(ext)) continue;
-            auto sz = entry.file_size(ec);
-            if (ec || sz > opts.max_file_bytes) { ec.clear(); continue; }
-            if (opts.max_files > 0 && files >= opts.max_files) break;
-            ++files;
-            auto tm = entry.last_write_time(ec).time_since_epoch().count();
-            if (ec) { ec.clear(); continue; }
-            auto rel = fs::relative(entry.path(), root, ec).generic_string();
-            if (ec) { ec.clear(); rel = entry.path().generic_string(); }
-            for (unsigned char c : rel) { fp ^= c; fp *= 1099511628211ull; }
-            fp ^= static_cast<std::uint64_t>(sz);
-            fp *= 1099511628211ull;
-            fp ^= static_cast<std::uint64_t>(tm);
-            fp *= 1099511628211ull;
-        }
-        return fp;
-    }
-
     static void hash_text(std::uint64_t& h, std::string_view value) {
         for (unsigned char c : value) { h ^= c; h *= 1099511628211ull; }
         h ^= 0xff; h *= 1099511628211ull;
@@ -998,6 +952,29 @@ struct Retriever::Impl {
         persist_index();
     }
 
+    // Atomically publish text to `dest`: write a sibling temp file, flush, and
+    // rename over the target. rename(2) is atomic on the same filesystem, so a
+    // reader never observes a half-written .meta.json and a crash mid-write
+    // leaves the previous good file (or none) intact — never a truncated one
+    // that would desync the meta from its .ragdb.
+    static bool atomic_write(const fs::path& dest, const std::string& body) {
+        if (dest.empty()) return false;
+        std::error_code ec;
+        fs::create_directories(dest.parent_path(), ec);
+        fs::path tmp = dest;
+        tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            if (!out) return false;
+            out << body;
+            out.flush();
+            if (!out) { fs::remove(tmp, ec); return false; }
+        }
+        fs::rename(tmp, dest, ec);
+        if (ec) { fs::remove(tmp, ec); return false; }
+        return true;
+    }
+
     // Where the persisted docs index lives (under the workspace .agentty/).
     fs::path ragdb_path() {
         std::error_code ec;
@@ -1024,10 +1001,9 @@ struct Retriever::Impl {
             {"version", 2}, {"root", indexed_root}, {"docs_fp", indexed_fp},
             {"skills_fp", skills_gen}, {"memory_fp", memory_gen},
             {"contextual", cfg.contextual}, {"embed_model", cfg.embed_model},
-            {"dense", embedder_ready},
+            {"dense", ollama_ready},
         };
-        std::ofstream out(meta, std::ios::trunc);
-        if (out) out << j.dump();
+        atomic_write(meta, j.dump());
     }
 
     bool try_load_persisted(const fs::path& root) {
@@ -1216,10 +1192,9 @@ struct Retriever::Impl {
         ::rag::plugin::Json j = {
             {"version", 1}, {"root", code_root}, {"files", code_files},
             {"contextual", cfg.contextual}, {"embed_model", cfg.embed_model},
-            {"dense", code_embedder_ready},
+            {"dense", ollama_ready},
         };
-        std::ofstream out(meta, std::ios::trunc);
-        if (out) out << j.dump();
+        atomic_write(meta, j.dump());
     }
 
     void refresh_docs(const fs::path& root) {
@@ -1249,16 +1224,12 @@ struct Retriever::Impl {
         }
 
         auto remove_uri = [&](const std::string& rel) {
-            const std::string uri = "docs://" + rel;
+            // O(1) URI→id lookup instead of a linear scan over every document
+            // in the corpus — which made incremental docs updates O(changed ×
+            // corpus_size) and pathological on large corpora.
             auto& corpus = engine.corpus();
-            for (std::uint32_t i = 0; i < corpus.document_count(); ++i) {
-                ::rag::DocId id{i};
-                const auto* doc = corpus.document(id);
-                if (doc && doc->uri == uri && !corpus.is_deleted(id)) {
-                    (void)corpus.remove_document(id);
-                    return;
-                }
-            }
+            if (auto id = corpus.find_by_uri("docs://" + rel))
+                (void)corpus.remove_document(*id);
         };
         for (const auto& [path, old_stamp] : docs_files) {
             auto now = manifest.find(path);
@@ -1270,7 +1241,11 @@ struct Retriever::Impl {
             auto loaded = ::rag::loaders::load_file(root / fs::path{path});
             if (!loaded) continue;
             loaded->meta["rel"] = path;
-            (void)engine.add("docs://" + path, std::move(loaded->text),
+            // upsert_document atomically replaces any live doc with this uri,
+            // so a changed file can't leave a stale duplicate even if the
+            // remove_uri above missed a tombstoned entry.
+            (void)engine.corpus().upsert_document("docs://" + path,
+                             std::move(loaded->text),
                              loaded->meta, loaded->title);
         }
         auto built = engine.build();
@@ -1648,16 +1623,10 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             impl_->apply_pipeline(impl_->code_engine);
         } else if (changed > 0) {
             auto remove_uri = [&](const std::string& rel) {
-                const std::string uri = "code://" + rel;
+                // O(1) URI→id lookup, not a full-corpus linear scan.
                 auto& corpus = impl_->code_engine.corpus();
-                for (std::uint32_t i = 0; i < corpus.document_count(); ++i) {
-                    ::rag::DocId id{i};
-                    const auto* doc = corpus.document(id);
-                    if (doc && doc->uri == uri && !corpus.is_deleted(id)) {
-                        (void)corpus.remove_document(id);
-                        return;
-                    }
-                }
+                if (auto id = corpus.find_by_uri("code://" + rel))
+                    (void)corpus.remove_document(*id);
             };
 
             for (const auto& [path, old_stamp] : impl_->code_files) {
@@ -1671,7 +1640,8 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
                 auto loaded = ::rag::loaders::load_file(root / fs::path{path});
                 if (!loaded) continue;
                 loaded->meta["rel"] = path;
-                (void)impl_->code_engine.add("code://" + path,
+                // upsert = dedup-safe replace (see docs path).
+                (void)impl_->code_engine.corpus().upsert_document("code://" + path,
                     std::move(loaded->text), loaded->meta, loaded->title);
             }
             auto built = impl_->code_engine.build();
