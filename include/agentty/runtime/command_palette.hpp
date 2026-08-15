@@ -139,6 +139,16 @@ struct Open {
 
 using CommandPaletteState = std::variant<palette::Closed, palette::Open>;
 
+// Index of `cmd` in the blank-query palette list (which is exactly
+// kCommands order). Used to re-open the palette focused on the row the
+// user last selected, e.g. after Esc-ing back out of a settings picker.
+// Returns 0 if not found (defensive; every Command is in kCommands).
+[[nodiscard]] inline int palette_index_of(Command cmd) noexcept {
+    for (int i = 0; i < static_cast<int>(kCommands.size()); ++i)
+        if (kCommands[static_cast<std::size_t>(i)].id == cmd) return i;
+    return 0;
+}
+
 [[nodiscard]] inline bool is_open(const CommandPaletteState& s) noexcept {
     return std::holds_alternative<palette::Open>(s);
 }

@@ -33,8 +33,20 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // rather than dropping straight back to the thread — the
             // settings pickers are reached via Ctrl+K, so Esc unwinds one
             // level (picker → palette → thread), matching the mental stack.
+            // Restore the cursor to the row that opened this picker so the
+            // palette comes back exactly where the user left it.
+            Command src = Command::OpenPlugins;
+            if (auto* o = settings_list_opened(m.ui.settings_list)) {
+                switch (o->concern) {
+                    case se::Category::Plugins:  src = Command::OpenPlugins;  break;
+                    case se::Category::Commands: src = Command::OpenCommands; break;
+                    case se::Category::Agents:   src = Command::OpenAgents;   break;
+                    case se::Category::Hooks:    src = Command::OpenHooks;    break;
+                    case se::Category::General:  src = Command::OpenPlugins;  break;
+                }
+            }
             m.ui.settings_list = se::ListClosed{};
-            m.ui.command_palette = palette::Open{};
+            m.ui.command_palette = palette::Open{"", palette_index_of(src)};
             return done(std::move(m));
         },
         [&](SettingsListMove& e) -> Step {
