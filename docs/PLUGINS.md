@@ -136,6 +136,129 @@ Or no SDK at all — MCP is just JSON-RPC on stdio, so a static server fits
 in a shell script; and `agentty mcp-serve` turns agentty itself into a
 plugin for some *other* MCP host. The interface is symmetric.
 
+## A compiled one: C++ with mcp-cpp
+
+agentty's own MCP stack — [mcp-cpp](https://github.com/1ay1/mcp-cpp), the
+header-only library its built-in tools are served with — works just as
+well for writing plugins. A compiled plugin makes sense when the tool
+wraps native code, needs real performance, or should ship as a single
+static binary with zero runtime dependencies (no Python/Node on the
+target machine).
+
+The example: **sysmon**, live system stats — data a model cannot know
+and `bash` answers only with flag-soup guessing.
+
+`sysmon.cpp`:
+
+```cpp
+// sysmon — a tiny agentty plugin in C++ (mcp-cpp): live system stats.
+#include <mcp/mcp.hpp>
+
+#include <cstdio>
+#include <iostream>
+#include <string>
+
+using namespace mcp;
+
+// Run a shell command, capture stdout (bounded).
+static std::string sh(const std::string& cmd) {
+    std::string out;
+    if (FILE* p = ::popen(cmd.c_str(), "r")) {
+        char buf[4096];
+        size_t n;
+        while ((n = ::fread(buf, 1, sizeof buf, p)) > 0 && out.size() < 30'000)
+            out.append(buf, n);
+        ::pclose(p);
+    }
+    return out.empty() ? "(no output)" : out;
+}
+
+int main() {
+    StdioTransport transport(std::cin, std::cout);
+    Server server(transport.sink(),
+                  Implementation{"sysmon", "1.0.0",
+                                 std::string("System Monitor"),
+                                 Nothing, Nothing, Nothing});
+    server.set_capabilities(ServerCapabilities{
+        .tools = ToolsCapability{false},
+    });
+
+    {
+        Tool t;
+        t.name = "top_processes";
+        t.description =
+            "The busiest processes RIGHT NOW (CPU + memory), for questions "
+            "like 'what is eating my CPU?'. Live data the model cannot know.";
+        t.inputSchema.properties = Json{
+            {"count", {{"type", "integer"},
+                       {"description", "how many rows (default 10)"}}}};
+        t.annotations = ToolAnnotations{};
+        t.annotations->readOnlyHint = true;
+        server.register_tool(std::move(t), [](const Json& a) -> CallToolResult {
+            const int n = a.value("count", 10);
+            CallToolResult r;
+            r.content = {text(sh(
+                "ps axo pid,pcpu,pmem,comm -r | head -" +
+                std::to_string(n + 1)))};
+            return r;
+        });
+    }
+    {
+        Tool t;
+        t.name = "disk_usage";
+        t.description = "Filesystem usage (df -h): free space per mount.";
+        t.inputSchema.properties = Json::object();
+        t.annotations = ToolAnnotations{};
+        t.annotations->readOnlyHint = true;
+        server.register_tool(std::move(t), [](const Json&) -> CallToolResult {
+            CallToolResult r;
+            r.content = {text(sh("df -h"))};
+            return r;
+        });
+    }
+
+    transport.start(server.engine());
+    transport.join();   // serve until the host closes stdin
+    return 0;
+}
+```
+
+`CMakeLists.txt` — mcp-cpp is header-only, so the whole build setup is:
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(sysmon CXX)
+set(CMAKE_CXX_STANDARD 23)
+
+include(FetchContent)
+FetchContent_Declare(mcp
+    GIT_REPOSITORY https://github.com/1ay1/mcp-cpp.git
+    GIT_TAG        master)
+FetchContent_MakeAvailable(mcp)
+
+add_executable(sysmon sysmon.cpp)
+target_link_libraries(sysmon PRIVATE mcp::mcp)
+```
+
+Build and install:
+
+```bash
+cmake -B build && cmake --build build -j
+agentty plugin add sysmon -- $(pwd)/build/sysmon
+```
+
+Restart agentty and ask *"what's eating my CPU right now?"* — the model
+calls `mcp__sysmon__top_processes` and reads live `ps` output.
+
+The anatomy mirrors the Python version one-to-one: `Tool` spec =
+docstring + type hints, `register_tool` lambda = the decorated function,
+`transport.start(server.engine())` = `mcp.run()`. Same protocol, same
+integration, different language — which is the whole point. (You can
+sanity-check any stdio server by piping `initialize` / `tools/list`
+JSON-RPC lines into it by hand; it's just newline-delimited JSON. See
+`mcp-cpp/examples/server_example.cpp` for the full-featured reference —
+resources, prompts, structured output.)
+
 ## A real one: the Git Time-Machine (Python example)
 
 Something genuinely useful: **git archaeology**. Agents read code as it
