@@ -27,7 +27,7 @@
 #include "agentty/runtime/code_block_picker.hpp"
 #include "agentty/runtime/checkpoint_picker.hpp"
 #include "agentty/runtime/rag_settings.hpp"
-#include "agentty/runtime/settings_pane.hpp"
+#include "agentty/runtime/settings_list.hpp"
 #include "agentty/runtime/fork_picker.hpp"
 #include "agentty/runtime/tool_output_viewer.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -207,7 +207,7 @@ struct Model {
         CodeBlockPickerState code_blocks;      // Closed | Open{blocks, index}
         CheckpointPickerState checkpoints;     // Closed | Open{entries, index}
         RagSettingsState    rag_settings;      // Closed | Open{cfg, index}
-        SettingsState       settings;          // Closed | Open{cat, indices}
+        SettingsListState   settings_list;     // Closed | Open{concern, index}
         ForkPickerState     fork_picker;       // Closed | Open{index}
         ToolViewerState     tool_viewer;       // Closed | Open{entries, index, viewing}
         // Tail-follow toggle for the tool viewer's LIVE row (row 0). True =

@@ -104,8 +104,18 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                         Msg{OpenCheckpointPicker{}});
                 case Command::OpenRagSettings:
                     return agentty::app::update(std::move(m), Msg{OpenRagSettings{}});
-                case Command::OpenSettings:
-                    return agentty::app::update(std::move(m), Msg{OpenSettings{}});
+                case Command::OpenPlugins:
+                    return agentty::app::update(std::move(m),
+                        Msg{OpenSettingsList{settings::Category::Plugins}});
+                case Command::OpenCommands:
+                    return agentty::app::update(std::move(m),
+                        Msg{OpenSettingsList{settings::Category::Commands}});
+                case Command::OpenAgents:
+                    return agentty::app::update(std::move(m),
+                        Msg{OpenSettingsList{settings::Category::Agents}});
+                case Command::OpenHooks:
+                    return agentty::app::update(std::move(m),
+                        Msg{OpenSettingsList{settings::Category::Hooks}});
                 case Command::ForkThread:
                     return agentty::app::update(std::move(m), Msg{OpenForkPicker{}});
                 case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});

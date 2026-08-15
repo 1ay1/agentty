@@ -16,7 +16,7 @@ namespace agentty::ui {
 [[nodiscard]] maya::Element tool_output_viewer(const Model& m);
 [[nodiscard]] maya::Element checkpoint_picker(const Model& m);
 [[nodiscard]] maya::Element rag_settings_picker(const Model& m);
-[[nodiscard]] maya::Element settings_pane(const Model& m);
+[[nodiscard]] maya::Element settings_list_picker(const Model& m);
 [[nodiscard]] maya::Element fork_picker_view(const Model& m);
 [[nodiscard]] maya::Element todo_modal(const Model& m);
 
