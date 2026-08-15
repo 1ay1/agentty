@@ -51,7 +51,12 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](CloseRagSettings) -> Step {
+            // Esc backs out to the command palette it was opened from,
+            // matching the other Ctrl+K settings pickers. (Selecting a
+            // mode, below, commits and drops to the thread — that's "done",
+            // not "back".)
             m.ui.rag_settings = rs::Closed{};
+            m.ui.command_palette = palette::Open{};
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](RagSettingsMove& e) -> Step {
