@@ -1810,7 +1810,7 @@ if(AGENTTY_BUILD_TESTS)
     # renderer (the bug the user feels as streaming stutter on a big reply)
     # fails both the timing-ratio gate and the committed-progress assertion.
     # Standalone against maya only — no agentty sources needed.
-    add_executable(stream_md_lag_test EXCLUDE_FROM_ALL tests/stream_md_lag_test.cpp)
+    add_executable(stream_md_lag_test EXCLUDE_FROM_ALL maya/tests/stream_md_lag_test.cpp)
     target_link_libraries(stream_md_lag_test PRIVATE maya::maya)
     add_test(NAME stream_md_lag_test COMMAND stream_md_lag_test)
     set_tests_properties(stream_md_lag_test PROPERTIES TIMEOUT 60)
@@ -1819,7 +1819,7 @@ if(AGENTTY_BUILD_TESTS)
     # cursor on a long turn ending in a big eager (code) block at agentty's
     # production pacing to reproduce the "first char sticks, then bursts on
     # the next tool use" stall. maya-only.
-    add_executable(reveal_lag_probe EXCLUDE_FROM_ALL tests/reveal_lag_probe.cpp)
+    add_executable(reveal_lag_probe EXCLUDE_FROM_ALL maya/tests/reveal_lag_probe.cpp)
     target_link_libraries(reveal_lag_probe PRIVATE maya::maya)
 
     # composer_edit_test — reducer-level coverage for the composer's
@@ -1852,7 +1852,12 @@ if(AGENTTY_BUILD_TESTS)
     # fast model outpaces the cruise), that a slow feed still tracks the wire,
     # and that the finalize ramp still bypasses the cap to flush the tail.
     # Header-only against maya — no agentty sources needed.
-    add_executable(reveal_pacing_test EXCLUDE_FROM_ALL tests/reveal_pacing_test.cpp)
+    # NOTE: the reveal/stream widget-contract test SOURCES live in
+    # maya/tests/ (single source of truth — they pin StreamingMarkdown/
+    # RateCursor behavior and are also registered in maya's own suite).
+    # agentty builds them too so its ctest run gates on the same contract
+    # without enabling maya's full test build.
+    add_executable(reveal_pacing_test EXCLUDE_FROM_ALL maya/tests/reveal_pacing_test.cpp)
     target_link_libraries(reveal_pacing_test PRIVATE maya::maya)
     add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
     set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
@@ -1865,7 +1870,7 @@ if(AGENTTY_BUILD_TESTS)
     # (no adaptive stretch), and a chunk arriving after a long FRAMELESS
     # idle gap must glide out, not drain the stale µs clock as a paste.
     # Drives the real StreamingMarkdown widget on the frozen test clock.
-    add_executable(reveal_resume_test EXCLUDE_FROM_ALL tests/reveal_resume_test.cpp)
+    add_executable(reveal_resume_test EXCLUDE_FROM_ALL maya/tests/reveal_resume_test.cpp)
     target_link_libraries(reveal_resume_test PRIVATE maya::maya)
     add_test(NAME reveal_resume_test COMMAND reveal_resume_test)
     set_tests_properties(reveal_resume_test PROPERTIES TIMEOUT 60)
@@ -1878,7 +1883,7 @@ if(AGENTTY_BUILD_TESTS)
     # live !settled path now) never parses async and is live in the same
     # call (the fix). Header-driven against maya only.
     add_executable(stream_async_freeze_test EXCLUDE_FROM_ALL
-        tests/stream_async_freeze_test.cpp)
+        maya/tests/stream_async_freeze_test.cpp)
     target_link_libraries(stream_async_freeze_test PRIVATE maya::maya)
     add_test(NAME stream_async_freeze_test COMMAND stream_async_freeze_test)
     set_tests_properties(stream_async_freeze_test PROPERTIES TIMEOUT 60)
@@ -1893,7 +1898,7 @@ if(AGENTTY_BUILD_TESTS)
     # regression (block commits outrunning the reveal cursor) popped
     # whole blocks at +100..+196 cells/frame while prose glided at ~2.
     add_executable(reveal_smoothness_probe EXCLUDE_FROM_ALL
-        tests/reveal_smoothness_probe.cpp)
+        maya/tests/reveal_smoothness_probe.cpp)
     target_link_libraries(reveal_smoothness_probe PRIVATE maya::maya)
     add_test(NAME reveal_smoothness_probe COMMAND reveal_smoothness_probe)
     set_tests_properties(reveal_smoothness_probe PROPERTIES TIMEOUT 120)
