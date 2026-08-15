@@ -247,4 +247,24 @@ unsigned long mcp_generation() noexcept {
     return mcp::mcp_generation();
 }
 
+std::size_t reload_mcp_plugins() {
+    // Rebuild the MCP pool from the current mcp.json. The bridge installs
+    // the new pool + bumps its generation; the next select_wire_tools /
+    // refresh_wire_cache_locked sees the changed generation and re-projects
+    // the tool surface via mcp_tools_live(). We only need to ensure the
+    // wire cache is marked connected (so it consults the live pool rather
+    // than the cached startup snapshot) — which it already is after any
+    // catalog access, and startup always accesses the catalog once.
+    const std::size_t n = mcp::mcp_reload();
+    // Drop the current published snapshot so the very next catalog build
+    // re-projects immediately (generation changed, so it would rebuild
+    // anyway; this just avoids serving one stale read in a race).
+    {
+        auto& c = wire_cache();
+        std::lock_guard lk(c.mu);
+        c.generation = static_cast<unsigned long>(-1);
+    }
+    return n;
+}
+
 } // namespace agentty::tools
