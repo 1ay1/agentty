@@ -33,9 +33,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#ifndef _WIN32
+#include <unistd.h>   // isatty (headless `run` stdin detection)
+#else
+#include <io.h>
+#define isatty _isatty
+#define fileno _fileno
+#endif
 
 #include <maya/maya.hpp>
 
@@ -59,10 +68,20 @@
 #include "agentty/provider/dispatch.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/tool/commands.hpp"
+#include "agentty/tool/hooks.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
+
+// Forward decl (mcp_tools_backends.hpp pulls in <mcp/tools/host.hpp>, whose
+// ::mcp namespace collides with agentty::mcp inside main.cpp's usings).
+namespace agentty::tools {
+std::string run_one_shot(const std::string& prompt,
+                         const std::string& agent_type,
+                         bool& is_error);
+}
 
 namespace {
 
@@ -92,6 +111,12 @@ void print_usage() {
         "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"
         "                    (`agentty airgap --help` for details)\n"
         "  acp               Run as an ACP agent over stdio (for Zed et al.)\n"
+        "  run [PROMPT]      Headless one-shot: run PROMPT through the full\n"
+        "                    agent loop (tools, sandbox) and print the final\n"
+        "                    answer to stdout. PROMPT `-` or absent reads\n"
+        "                    stdin: `git diff | agentty run \"review this\"`.\n"
+        "                    --agent TYPE picks the role (general default,\n"
+        "                    explorer/reviewer/tester/coder). Exit 1 on error.\n"
         "  mcp-serve         Serve agentty's native tools over MCP (stdio).\n"
         "                    Point any MCP client at `agentty mcp-serve`.\n"
         "  mcp-login <srv>   Authorize an OAuth-gated MCP server from mcp.json\n"
@@ -100,6 +125,9 @@ void print_usage() {
         "  mcp-status        List MCP servers and their authorization state.\n"
         "  skills            List discovered skills with spec-lint diagnostics\n"
         "                    (exit 1 on warnings — CI-friendly validate)\n"
+        "  hooks [list]      Show configured lifecycle hooks + approval state\n"
+        "  hooks approve     Inspect + approve the active hooks file (hooks\n"
+        "                    NEVER run unapproved; any change re-gates)\n"
         "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
         "                    (recall@k / MRR / nDCG per pipeline stage)\n"
         "  version           Print the agentty version and exit\n"
@@ -160,6 +188,8 @@ struct Args {
     std::string cli_mcp_server;  // mcp-login/logout: server name (positional)
     std::string cli_mcp_metadata; // mcp-login: explicit resource-metadata URL
     std::string cli_mcp_client_id; // mcp-login: pre-registered / CIMD client_id
+    std::string cli_run_prompt;    // run: the one-shot prompt (positional)
+    std::string cli_run_agent;     // run: --agent explorer|reviewer|…|general
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
@@ -172,6 +202,12 @@ Args parse_args(int argc, char** argv) {
         if (a == "login" || a == "logout" || a == "status" || a == "help"
          || a == "acp" || a == "skills" || a == "mcp-serve") {
             out.subcommand = std::move(a);
+        } else if (a == "hooks") {
+            // `agentty hooks [list|approve]` — verb rides in cli_run_agent
+            // (reused scratch; hooks has no agent).
+            out.subcommand = std::move(a);
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                out.cli_run_agent = argv[++i];
         } else if (a == "mcp-login" || a == "mcp-logout" || a == "mcp-status") {
             // `agentty mcp-login <server> [--metadata <url>] [--client-id <id>]`
             out.subcommand = std::move(a);
@@ -188,6 +224,22 @@ Args parse_args(int argc, char** argv) {
             out.subcommand = std::move(a);
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 out.cli_bench_root = argv[++i];
+        } else if (a == "run") {
+            // Headless one-shot: `agentty run "prompt" [--agent TYPE]`.
+            // A missing / `-` prompt reads stdin (pipe usage:
+            // `git diff | agentty run -` or `… | agentty run`).
+            out.subcommand = std::move(a);
+            while (i + 1 < argc) {
+                std::string opt = argv[i + 1];
+                if (opt == "--agent" && i + 2 < argc) {
+                    out.cli_run_agent = argv[i += 2];
+                } else if (opt[0] != '-' || opt == "-") {
+                    if (out.cli_run_prompt.empty()) out.cli_run_prompt = argv[++i];
+                    else break;   // extra positional → top-level flags below
+                } else {
+                    break;        // -m/-w/… handled by the outer loop
+                }
+            }
         } else if (a == "airgap") {
             // Hand the remaining argv tail to the airgap subcommand verbatim
             // so it can run its own flag parsing without re-implementing
@@ -302,6 +354,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
     if (args.subcommand == "mcp-login")
         return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata,
                                          args.cli_mcp_client_id);
@@ -538,6 +591,62 @@ int main(int argc, char** argv) {
         int rc = mcp::serve_stdio();
         persistence::flush_pending_saves();
         return rc;
+    }
+
+    // ── Headless one-shot: `agentty run "prompt"` ───────────────────
+    // No maya, no terminal UI. Runs the prompt through the SAME agent loop
+    // the `task` tool uses — full toolset, sandbox, doom-loop breaker,
+    // bounded turns — and prints the final report to stdout. Perfect for
+    // scripting/CI: `git diff | agentty run "review this change"`.
+    if (args.subcommand == "run") {
+        std::string prompt = args.cli_run_prompt;
+        const bool want_stdin = prompt.empty() || prompt == "-";
+        std::string piped;
+        // Read piped stdin when the prompt asks for it (`-` / absent) OR
+        // when input is a pipe (attach `git diff | agentty run "review"`:
+        // the piped bytes become context appended after the prompt).
+        if (want_stdin || !isatty(fileno(stdin))) {
+            std::ostringstream ss;
+            ss << std::cin.rdbuf();
+            piped = ss.str();
+        }
+        if (want_stdin) {
+            prompt = std::move(piped);
+            piped.clear();
+        }
+        // Trim: `echo "" | agentty run` pipes a lone newline — that is
+        // NOT a prompt, and an accidental empty run bills a real API call.
+        while (!prompt.empty() && (prompt.back() == '\n' || prompt.back() == '\r'
+                                   || prompt.back() == ' ' || prompt.back() == '\t'))
+            prompt.pop_back();
+        std::size_t lead = 0;
+        while (lead < prompt.size() && (prompt[lead] == '\n' || prompt[lead] == '\r'
+                                        || prompt[lead] == ' ' || prompt[lead] == '\t'))
+            ++lead;
+        prompt.erase(0, lead);
+        if (!piped.empty()) {
+            prompt += "\n\n<piped-input>\n";
+            prompt += piped;
+            prompt += "\n</piped-input>";
+        }
+        if (prompt.empty()) {
+            std::fprintf(stderr,
+                "agentty run: no prompt (pass one, or pipe stdin)\n");
+            return 2;
+        }
+        // Slash commands work here too: `agentty run "/review src/x.cpp"`.
+        if (auto expanded = tools::commands::try_expand(prompt))
+            prompt = std::move(*expanded);
+
+        provider::prewarm_active_provider();
+        bool is_error = false;
+        std::string report =
+            tools::run_one_shot(prompt, args.cli_run_agent, is_error);
+        std::fputs(report.c_str(), is_error ? stderr : stdout);
+        if (!report.empty() && report.back() != '\n')
+            std::fputc('\n', is_error ? stderr : stdout);
+        persistence::flush_pending_saves();
+        return is_error ? 1 : 0;
     }
 
     // ── ACP mode: run as a headless agent over stdio (Zed et al.) ───────

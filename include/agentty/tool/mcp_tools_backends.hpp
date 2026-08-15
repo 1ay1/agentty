@@ -24,6 +24,16 @@ namespace agentty::tools {
 // state) and svc.http untouched (the bridge installs the HttpClient).
 void install_host_backends(::mcp::tools::HostServices& svc);
 
+// Headless one-shot: run `prompt` through the SAME agent loop the `task`
+// tool uses (full toolset, doom-loop breaker, retry/backoff, kMaxTurns
+// bound) and return the final report text. `agent_type` picks the system
+// prompt / model-routing role ("general" default). Requires the subagent
+// seam to be installed (main wires it before subcommand dispatch). On
+// failure returns the actionable error text and sets is_error.
+[[nodiscard]] std::string run_one_shot(const std::string& prompt,
+                                       const std::string& agent_type,
+                                       bool& is_error);
+
 // Live-apply user RAG configuration (the RAG settings picker's commit path)
 // to the process-wide retriever. Rebuilds indexes lazily. Never throws.
 void rag_apply_settings(const store::RagConfig& cfg);

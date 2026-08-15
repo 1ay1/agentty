@@ -16,6 +16,7 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/tool/commands.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
@@ -39,6 +40,20 @@ Step submit_message(Model m) {
     // into the wire text.
     if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
         return done(std::move(m));
+
+    // ── Slash-command expansion ──────────────────────────────────
+    // `/name args` → the command's template body with $ARGUMENTS/$1..$9
+    // substituted, BEFORE any queue/checkpoint/wire path sees the text —
+    // every downstream consumer (queued resend, transcript, provider
+    // request) uniformly gets the expanded prompt. A `/` that matches no
+    // discovered command falls through unchanged (typing /etc/hosts as a
+    // message must keep working). Attachment chips survive: only .text is
+    // rewritten, placeholders inside it are left intact (a command body
+    // does not carry chips, so expansion cannot orphan one).
+    if (auto expanded = tools::commands::try_expand(m.ui.composer.text)) {
+        m.ui.composer.text   = std::move(*expanded);
+        m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+    }
 
     // Drain composer.text + composer.attachments into a single fully
     // expanded payload string, resetting composer fields. Used by the
