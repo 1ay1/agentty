@@ -76,13 +76,32 @@ constexpr int kMaxTruncationRetries = 2;
 
 bool running_over_ssh() {
     static const bool remote = [] {
+        // Explicit FORCE-ON: a session the env sniff can't see (a bespoke
+        // remote wrapper, a serial console, a laggy container attach) can
+        // opt into the remote cadence. Takes precedence over everything.
+        if (const char* on = std::getenv("AGENTTY_FORCE_REMOTE");
+            on && on[0] && on[0] != '0')
+            return true;
         // Escape hatch: a fast LAN SSH hop doesn't need throttling.
         if (const char* off = std::getenv("AGENTTY_NO_SSH_THROTTLE");
             off && off[0] && off[0] != '0')
             return false;
-        return std::getenv("SSH_CONNECTION") != nullptr
+        // Direct SSH: sshd exports these into the remote shell.
+        if (std::getenv("SSH_CONNECTION") != nullptr
             || std::getenv("SSH_TTY") != nullptr
-            || std::getenv("SSH_CLIENT") != nullptr;
+            || std::getenv("SSH_CLIENT") != nullptr)
+            return true;
+        // mosh: the SSH_* vars are NOT propagated through the mosh-server
+        // (it re-execs), but MOSH_* are — and mosh is ALWAYS remote +
+        // latency-adaptive itself, so throttling our byte rate helps it.
+        if (std::getenv("MOSH_CONNECTION") != nullptr
+            || std::getenv("MOSH_KEY") != nullptr
+            || std::getenv("MOSH_SERVER_PID") != nullptr)
+            return true;
+        // Eternal Terminal: exports ET_VERSION into the remote shell.
+        if (std::getenv("ET_VERSION") != nullptr)
+            return true;
+        return false;
     }();
     return remote;
 }

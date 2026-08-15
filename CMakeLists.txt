@@ -1801,6 +1801,17 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(stream_liveness_test)
     set_tests_properties(stream_liveness_test PROPERTIES TIMEOUT 30)
 
+    # turn_settle_test — byte-CONSERVATION + settle-shape invariants across
+    # the turn-ending transitions (finalize_turn). fsm_test covers the
+    # generic typestate machinery and stream_liveness the caret edge, but
+    # the transitions where bytes move pending_stream → streaming_text →
+    # text had no direct test — exactly where the reveal audit found six
+    # bugs (a byte lost at settle, a backlog pasted, a widget wedged live).
+    # Pins: no byte dropped or double-committed, finalize is idempotent,
+    # and the turn actually reaches a settled shape (freeze gate opens).
+    agentty_add_full_test(turn_settle_test)
+    set_tests_properties(turn_settle_test PROPERTIES TIMEOUT 30)
+
     # stream_md_lag_test — long-turn markdown LAG regression. Drives maya's
     # StreamingMarkdown exactly as turn.cpp::cached_markdown_for does
     # (reveal_fx ON, live ON, full content resent + build() every frame) and
@@ -2432,6 +2443,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_timeline_adapter_test
         midrun_wire_test
         stream_liveness_test
+        turn_settle_test
         stream_md_lag_test
         reveal_pacing_test
         reveal_resume_test
