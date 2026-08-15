@@ -9,6 +9,10 @@
 #include "agentty/tool/hooks.hpp"
 
 #include <filesystem>
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -160,6 +164,124 @@ std::vector<Item> items_for(const Model& m, Category cat) {
         case Category::Hooks:    return hooks();
     }
     return {};
+}
+
+namespace {
+
+fs::path home_dir_() {
+    if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
+    if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
+    return {};
+}
+
+// Whitespace-split a line into tokens.
+std::vector<std::string> split_ws(const std::string& s) {
+    std::vector<std::string> out;
+    std::istringstream in(s);
+    std::string tok;
+    while (in >> tok) out.push_back(std::move(tok));
+    return out;
+}
+
+// A slug safe for a filename: keep [A-Za-z0-9_:-], collapse the rest.
+bool valid_name(const std::string& n) {
+    if (n.empty()) return false;
+    for (char c : n)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_'
+              || c == '-' || c == ':'))
+            return false;
+    return true;
+}
+
+} // namespace
+
+AddResult add_plugin_from_line(const std::string& line) {
+    auto tok = split_ws(line);
+    if (tok.size() < 2)
+        return {false, "usage: <name> <command> [args…]  — or  "
+                       "<name> --python file.py / --uvx pkg / --npx pkg"};
+    const std::string name = tok[0];
+    if (!valid_name(name))
+        return {false, "plugin name may use letters, digits, _ - : only"};
+
+    tools::plugin::ServerSpec spec;
+    spec.name = name;
+    const std::string& recipe = tok[1];
+    std::vector<std::string> rest(tok.begin() + 2, tok.end());
+
+    if (recipe == "--python") {
+        if (rest.empty()) return {false, "--python needs a script path"};
+        spec.command = "python3";
+        std::error_code ec;
+        fs::path abs = fs::absolute(rest[0], ec);
+        if (!ec) rest[0] = abs.string();
+        spec.args = std::move(rest);
+    } else if (recipe == "--uvx") {
+        if (rest.empty()) return {false, "--uvx needs a package name"};
+        spec.command = "uvx";
+        spec.args = std::move(rest);
+    } else if (recipe == "--npx") {
+        if (rest.empty()) return {false, "--npx needs a package name"};
+        spec.command = "npx";
+        spec.args.push_back("-y");
+        for (auto& t : rest) spec.args.push_back(std::move(t));
+    } else {
+        spec.command = recipe;
+        spec.args = std::move(rest);
+    }
+
+    const auto path = tools::plugin::config_path(/*project=*/false);
+    switch (tools::plugin::add_server(path, spec, /*force=*/false)) {
+        case tools::plugin::EditResult::Ok:
+            return {true, "added plugin '" + name +
+                          "' — restart agentty to connect"};
+        case tools::plugin::EditResult::AlreadyExists:
+            return {false, "'" + name + "' already exists"};
+        case tools::plugin::EditResult::ParseError:
+            return {false, "mcp.json is not valid JSON — fix it by hand"};
+        default:
+            return {false, "could not write mcp.json"};
+    }
+}
+
+AddResult create_starter(Category cat, const std::string& name) {
+    if (!valid_name(name))
+        return {false, "name may use letters, digits, _ - : only"};
+    const fs::path home = home_dir_();
+    if (home.empty()) return {false, "no HOME to write under"};
+
+    const char* sub = nullptr;
+    std::string tmpl;
+    if (cat == Category::Commands) {
+        sub = "commands";
+        tmpl = "---\ndescription: " + name + " command\n"
+               "argument-hint: <args>\n---\n"
+               "Do the thing for $ARGUMENTS.\n";
+    } else if (cat == Category::Agents) {
+        sub = "agents";
+        tmpl = "---\ndescription: " + name + " agent\n"
+               "read-only: false\n"
+               "# tools: read grep glob list_dir   # optional allowlist\n"
+               "---\nYour role: " + name +
+               ". Complete the delegated task end-to-end, then report.\n";
+    } else {
+        return {false, "create_starter only supports commands/agents"};
+    }
+
+    const fs::path dir = home / ".agentty" / sub;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const fs::path file = dir / (name + ".md");
+    if (fs::exists(file, ec))
+        return {false, "already exists: " + file.string()};
+    std::ofstream f(file, std::ios::binary);
+    if (!f) return {false, "could not create " + file.string()};
+    f << tmpl;
+    if (!f) return {false, "write failed: " + file.string()};
+
+    // Force a rescan so the new entry shows on the next open.
+    if (cat == Category::Commands) tools::commands::invalidate_cache();
+    return {true, "created " + file.string() + " — edit it, then reopen"};
 }
 
 } // namespace agentty::settings

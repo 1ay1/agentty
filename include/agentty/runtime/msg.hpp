@@ -600,6 +600,12 @@ struct OpenSettingsList  { settings::Category concern; };
 struct CloseSettingsList {};
 struct SettingsListMove  { int delta; };
 struct SettingsListActivate {};
+// Inline add-mode.
+struct SettingsListAddStart   {};              // `a` — enter the add prompt
+struct SettingsListChar       { char32_t ch; };// typed codepoint
+struct SettingsListBackspace  {};
+struct SettingsListSubmitInput{};              // Enter in add-mode → create
+struct SettingsListCancelInput{};              // Esc in add-mode → back to list
 
 // ── Fork picker ───────────────────────────────────────────────────────
 // Branch the current thread into a new one and choose how the carried-over
@@ -771,7 +777,8 @@ using RagSettingsMsg = std::variant<
 
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
-    SettingsListActivate>;
+    SettingsListActivate, SettingsListAddStart, SettingsListChar,
+    SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput>;
 
 using ForkMsg = std::variant<
     OpenForkPicker, CloseForkPicker, ForkPickerMove, ForkThread>;
