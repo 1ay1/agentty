@@ -2,10 +2,30 @@
 
 > Research compiled August 2026 from primary sources: Anthropic's official
 > post, the SynthID-Text *Nature* paper (2024), Scott Aaronson's writings,
-> ETH SRI Lab's adversarial analysis, the EU AI Act legal text, and the
-> C2PA specification. This is a standalone reference, **not** agentty
-> internals — it documents an external phenomenon that affects any output
-> produced by recent Claude models (including via this tool).
+> the Christ–Gunn–Zamir cryptographic-watermark line, Omidi et al.'s
+> theoretical analysis (arXiv 2603.03410), ETH SRI Lab's adversarial
+> analysis, the EU AI Act legal text, and the C2PA specification. This is a
+> standalone reference, **not** agentty internals — it documents an
+> external phenomenon that affects any output produced by recent Claude
+> models (including via this tool). §10 covers what it means *for agentty*.
+
+## Contents
+
+0. TL;DR
+1. Lineage — three generations of one idea
+2. How SynthID-Text actually works (the algorithm)
+3. The detection math (mean score, Bayesian log-odds, TPR@FPR)
+4. Theoretical vulnerabilities (layer-inflation, Bernoulli(0.5) optimality)
+5. Cryptographically *undetectable* watermarks (the research frontier)
+6. The two mechanisms — text watermark vs. C2PA metadata
+7. Robustness & attacks (spoofing, scrubbing)
+8. Why this barely matters for code
+9. Why now — the EU AI Act legal driver
+10. Opting out **in agentty**
+11. Limitations that matter in practice
+12. FAQ
+13. Glossary
+14. Bottom line + Sources
 
 ---
 
@@ -131,19 +151,142 @@ stack. This is why it's "production-ready" where prior schemes were not.
 
 ### Detection
 
-- Runs **without the LLM** — cheap, just the key + the scoring function.
-- **Mean score** detector: statistical guarantee, controllable false
-  positive rate (Anthropic mentions a "weighted mean detector" with
-  rigorously controlled FPR).
-- **Bayesian** detector: higher power, but needs training data and becomes
-  a *hybrid* watermark + post-hoc detector (it learns the specific model's
-  watermarked distribution vs. the human-text distribution).
-- Longer text → more token choices → more accumulated evidence → higher
-  confidence. Short passages fall below threshold.
+- Runs **without the LLM** — cheap: the detector needs only the secret
+  **key** (to recompute g-values from the observed tokens) and a scoring
+  function. No forward pass, no logits.
+- **Mean score** detector: sum the g-values of the chosen tokens, normalise,
+  compare to a threshold. Simple, fast, statistical guarantee, controllable
+  false-positive rate (Anthropic mentions a "weighted mean detector" with
+  rigorously controlled FPR). *But* it has a fatal theoretical flaw against
+  layer inflation — see §4.
+- **Bayesian** detector: a likelihood-ratio test that models the g-value
+  distribution under "watermarked" vs "human" hypotheses. Higher power,
+  monotone in layers, but needs training data and is costlier to compute.
+- Longer text → more (token × layer) g-values summed → more accumulated
+  evidence → higher confidence. Short passages fall below threshold.
+
+The exact formulas, the CLT argument, and *why* the choice of detector
+matters are in **§3**; the attacks those formulas expose are in **§4**.
 
 ---
 
-## 3. The two mechanisms — do not conflate them
+## 3. The detection math (mean score, Bayesian log-odds, TPR@FPR)
+
+Notation (from Omidi et al., arXiv 2603.03410, and the *Nature* paper):
+generate `T` tokens with `m` tournament layers; `g_{t,ℓ} ∈ {0,1}` is the
+g-value of the token at position `t`, layer `ℓ`, drawn Bernoulli(0.5) for
+human text. The random seed is `r_t = h(x_{t-H}, …, x_{t-1}, k)` — a hash of
+the last `H` tokens and secret key `k`, indistinguishable from IID Bernoulli
+without `k`.
+
+### Mean Score (MS)
+
+$$\mathrm{MS}(x) = \frac{1}{Tm}\sum_{t=1}^{T}\sum_{\ell=1}^{m} g_{\ell}(x_t, r_t)$$
+
+- **Human / unwatermarked text:** each `g` is a fair coin, so `E[MS] = 0.5`.
+- **Watermarked text:** the tournament systematically kept high-g winners,
+  so `E[MS] > 0.5`.
+
+Because `MS` sums `mT` near-independent bounded variables, the **Central
+Limit Theorem** makes it approximately Gaussian:
+`MS(x) ~ Normal(E[MS], Var[MS])`. Detection is then a one-sided test.
+
+### TPR at a fixed FPR
+
+The operational metric is **True Positive Rate at a small False Positive
+Rate** (e.g. TPR@FPR=1%). Under the Gaussian approximation, if `τ(ε)` is the
+threshold that yields false-positive rate `ε` on human text:
+
+$$\mathbb{E}[\mathrm{TPR}(\tau(\epsilon)) \mid \mathrm{FPR}=\epsilon] = 1 - \Phi\!\left(\frac{\tau(\epsilon) - \mathbb{E}[\mathrm{MS}\mid w]}{\sqrt{\mathrm{Var}[\mathrm{MS}\mid w]}}\right)$$
+
+where `Φ` is the standard-normal CDF and `w` denotes the watermarked
+hypothesis. Reported headline: on Gemma-7B / ELI5, 400-token outputs, 30
+layers, Bernoulli(0.5), Bayesian score — **TPR = 85% vs. prior SOTA 73% at
+FPR = 1%**.
+
+### Bayesian Score (BS)
+
+Frames detection as a hypothesis test and returns the posterior via a
+sigmoid of the **log-odds**:
+
+$$\mathrm{BS}(x) = \sigma\!\Big(\log P(g \mid w) - \log P(g \mid \neg w) + \log P(w) - \log(1 - P(w))\Big)$$
+
+The likelihoods factor across tokens and layers; the watermarked likelihood
+involves the **collision probability** `C_{t,ℓ}` — the chance two sampled
+candidates coincide (high for low-entropy positions, which is exactly why
+low-entropy text carries little signal):
+
+$$P(g\mid\neg w) = \prod_{t,\ell} f_g(g_{t,\ell}), \qquad P(g\mid w) = \prod_{t,\ell} \sum_{c} P(g_{t,\ell}\mid \psi_{t,\ell}=c)\,P(\psi_{t,\ell}=c \mid g_{t,<\ell})$$
+
+where `ψ_{t,ℓ}` is the number of *unique* tokens surviving to layer `ℓ`.
+The collision-probability dependence is the mathematical statement of
+"**entropy is the fuel**": no entropy → collisions → no detectable bias.
+
+---
+
+## 4. Theoretical vulnerabilities
+
+Omidi et al. (2026) give the first formal analysis and surface two results
+that matter operationally:
+
+### 4.1 Mean score is non-monotone in layers → the layer-inflation attack
+
+Under the **mean score**, TPR@FPR is a **unimodal** function of the number
+of tournament layers `m`: it rises, peaks, then **falls back toward the
+floor FPR** as `m → ∞`. This is exploitable. An attacker who can stack
+layers — concretely, *concatenate a watermarked model with a copied
+instance of itself* to inflate the effective layer count — can drive the
+mean-score detector's TPR **down to chance**, blinding it while the text
+stays fluent. A black-box **layer-inflation attack**.
+
+### 4.2 Bayesian score is monotone but saturates (and costs more)
+
+Under the **Bayesian score**, TPR@FPR is **monotonically non-decreasing** in
+`m` and then **saturates** — so it resists layer inflation, which is why a
+production detector prefers it. The price: it needs labelled training data
+and is markedly more expensive to compute than the mean score.
+
+### 4.3 Bernoulli(0.5) is provably optimal
+
+The analysis proves the g-value distribution that maximises TPR@FPR is
+exactly **Bernoulli(0.5)** — confirming SynthID-Text's default is not a
+heuristic but the optimum.
+
+**Takeaway for a reader assessing a detector result:** the *detector
+variant* is load-bearing. A mean-score detector can be defeated cheaply and
+silently; a Bayesian one can't be layer-inflated but saturates and is
+heavier. Neither survives a full paraphrase (§7).
+
+---
+
+## 5. Cryptographically *undetectable* watermarks (the frontier)
+
+SynthID-Text is *statistical* — its bias is, in principle, observable
+(§7, finding 1). A parallel research line asks for something stronger: a watermark
+that is **cryptographically undetectable** — no efficient adversary without
+the key can distinguish watermarked from unwatermarked output *at all*,
+which formally guarantees **zero quality degradation**.
+
+- **Aaronson's Gumbel scheme (2022)** already had this flavour: replace
+  sampling randomness with a PRF output; without the key it looks like
+  ordinary sampling.
+- **Christ, Gunn & Zamir, "Undetectable Watermarks for Language Models"
+  (2023, arXiv 2306.09194):** the formal construction. They prove
+  undetectable watermarks exist **assuming only one-way functions** (a
+  standard cryptographic assumption). The user *provably cannot observe any
+  quality degradation*, because detecting the watermark is as hard as
+  breaking the PRF.
+- **Follow-ups** add *public* detectability (anyone can verify without the
+  secret key) and *robustness* to edits — the two properties production
+  systems still trade against each other.
+
+Why it matters here: it sets the theoretical ceiling. SynthID-Text is the
+*deployable, robust-ish, cheap* point on the curve; the crypto line is the
+*provably-invisible* point. Anthropic shipped the former.
+
+---
+
+## 6. The two mechanisms — do not conflate them
 
 | | **Text watermark** | **C2PA metadata** |
 |---|---|---|
@@ -165,7 +308,7 @@ limitation.
 
 ---
 
-## 4. Robustness & attacks (ETH SRI Lab adversarial study)
+## 7. Robustness & attacks (ETH SRI Lab adversarial study)
 
 The most rigorous independent analysis. Four findings:
 
@@ -198,7 +341,7 @@ against a motivated adversary who paraphrases or round-trip-translates.
 
 ---
 
-## 5. Why this barely matters for code (and this tool)
+## 8. Why this barely matters for code (and this tool)
 
 Reasoning directly from the mechanism:
 
@@ -221,7 +364,7 @@ near-zero**; it's modest only on long generated **prose**.
 
 ---
 
-## 6. Why now — the legal driver
+## 9. Why now — the legal driver
 
 - **EU AI Act, Article 50(2):** *"Providers of AI systems… generating
   synthetic audio, image, video or **text** content, shall ensure that the
@@ -239,30 +382,9 @@ near-zero**; it's modest only on long generated **prose**.
 
 ---
 
-## 7. Limitations that matter in practice
+## 10. Opting out **in agentty**
 
-- **A hit means "processed," not "authored."** It cannot distinguish Claude
-  *writing* the text from Claude *proofreading / translating / formatting*
-  human text. Do not treat a detector result as a verdict.
-- **Absence proves nothing:** pre-August models, short text, paraphrase, or
-  stripped metadata all read clean.
-- **No public detection API yet** (an Anthropic engineer says one "you can
-  use yourself" is coming). Tension: the Code of Practice wants third-party
-  detection, but an open detector lets adversaries iterate paraphrases until
-  the mark vanishes.
-- **The model isn't aware** it's being watermarked — applied in the sampling
-  pipeline *below* the model, so it cannot be prompted away.
-- **The credible escape hatch is open-weight models you run yourself** — a
-  sampling-time watermark cannot survive an operator who controls the
-  sampler.
-- **Older Claude models** (pre-Aug 2 releases) are mid-transition, no firm
-  date.
-
----
-
-## 9. Opting out **in agentty**
-
-### 9.0 The one fact that governs everything
+### 10.0 The one fact that governs everything
 
 **agentty cannot disable the watermark, and no API client ever can.** The
 mark is applied by Tournament sampling *inside Anthropic's inference
@@ -278,17 +400,17 @@ So "turn it off in agentty" can only mean one of two real things:
 - **(A) Don't route through Claude** — use a model/provider that Anthropic
   doesn't watermark. *This is the only clean, reliable option.*
 - **(B) Scrub the response after the fact** — the paraphrase attack from
-  §4. Unreliable, destroys code, and off-topic for a coding agent. Not
-  recommended, and agentty deliberately does not ship it (see §9.4).
+  §7. Unreliable, destroys code, and off-topic for a coding agent. Not
+  recommended, and agentty deliberately does not ship it (see §10.4).
 
-> ⚠️ **Caveat (see §6):** most major labs signed the *same* EU code of
+> ⚠️ **Caveat (see §9):** most major labs signed the *same* EU code of
 > practice. Routing to OpenAI or Google models trades Claude's watermark
 > for **that provider's** watermark. The genuinely unmarked path is a model
 > **whose sampler you control** — i.e. an **open-weight model you run
 > locally** (Ollama / llama.cpp). That is the only configuration where
 > *no* sampling-time watermark can be present, because you own the sampler.
 
-### 9.1 agentty already has the levers — no code change needed
+### 10.1 agentty already has the levers — no code change needed
 
 Provider routing is **registry-driven** (`src/provider/selection.cpp`,
 `src/provider/dispatch.cpp`). Anything that isn't the Anthropic preset goes
@@ -303,7 +425,7 @@ Select one per session with `--provider` (`src/runtime/main.cpp`), or
 persist it as `provider` in settings (`~/.agentty/…`, loaded by
 `load_settings`).
 
-### 9.2 The recommended opt-out: local open-weight model (zero watermark)
+### 10.2 The recommended opt-out: local open-weight model (zero watermark)
 
 Because you own the sampler, a local model carries **no** sampling-time
 watermark from anyone.
@@ -324,7 +446,7 @@ agentty --provider localhost:8080 --model <id>     # raw custom endpoint
 This is the **only** configuration that is watermark-free by construction.
 Everything else depends on that provider's compliance choices.
 
-### 9.3 Other non-Claude routes (traded, not eliminated)
+### 10.3 Other non-Claude routes (traded, not eliminated)
 
 ```sh
 agentty --provider openrouter  --model <id>   # OPENROUTER_API_KEY / --key
@@ -336,15 +458,15 @@ agentty --provider openai      --model gpt-...  # OpenAI's OWN mark may apply
 Key precedence (`resolve_auth_for`): `--key` > saved in-app key > provider
 env chain > `OPENAI_API_KEY`. Gateways that reject `Authorization: Bearer`
 take `--auth-header X-API-Key` (`set_custom_auth_header`). These reach a
-non-Anthropic sampler, so **Claude's** watermark is absent — but see §6:
+non-Anthropic sampler, so **Claude's** watermark is absent — but see §9:
 you may inherit the destination provider's watermark instead.
 
-### 9.4 What agentty should — and should not — do about this
+### 10.4 What agentty should — and should not — do about this
 
 **Recommended product stance (honest, minimal, non-fictional):**
 
 1. **Document, don't fake.** Ship this file. Do **not** add a `--no-watermark`
-   flag against Anthropic — it would be a lie (§9.0). A flag that silently
+   flag against Anthropic — it would be a lie (§10.0). A flag that silently
    does nothing is worse than no flag.
 2. **Make the honest path first-class.** The lever already exists; the gap
    is *discoverability*. Concretely:
@@ -356,19 +478,111 @@ you may inherit the destination provider's watermark instead.
      as "watermarked (EU AI Act)" and local rows as "no watermark".
 3. **If you truly want a scrub stage** (strongly discouraged for a coding
    agent): it would be a *post-response text transform* on assistant prose
-   only, never on code/diffs, and it is exactly the §4 paraphrase attack —
+   only, never on code/diffs, and it is exactly the §7 paraphrase attack —
    lossy, model-assisted, and it would change meaning. agentty's value is
    faithful code edits; a paraphrase pass is antithetical to that. Leave it
    out.
 
 **Net:** the way to let watermark-averse users use agentty is to point them
-at a **local open-weight model** (§9.2) and make that path obvious in
+at a **local open-weight model** (§10.2) and make that path obvious in
 `--help` and the picker — not to pretend a switch can disable a
 server-side, no-opt-out compliance control.
 
 ---
 
-## 8. Bottom line
+## 11. Limitations that matter in practice
+
+- **A hit means "processed," not "authored."** It cannot distinguish Claude
+  *writing* the text from Claude *proofreading / translating / formatting*
+  human text. Do not treat a detector result as a verdict.
+- **Absence proves nothing:** pre-August models, short text, paraphrase, or
+  stripped metadata all read clean.
+- **No public detection API yet** (an Anthropic engineer says one "you can
+  use yourself" is coming). Tension: the Code of Practice wants third-party
+  detection, but an open detector lets adversaries iterate paraphrases until
+  the mark vanishes.
+- **The model isn't aware** it's being watermarked — applied in the sampling
+  pipeline *below* the model, so it cannot be prompted away.
+- **The credible escape hatch is open-weight models you run yourself** — a
+  sampling-time watermark cannot survive an operator who controls the
+  sampler.
+- **Older Claude models** (pre-Aug 2 releases) are mid-transition, no firm
+  date.
+
+---
+
+## 12. FAQ
+
+**Is there an invisible character I can search for and delete?**
+No. The mark is in the *choice of words*, not in added characters. Unicode
+cleaners do nothing to it (they target a different technique other tools
+use).
+
+**Does it slow Claude down or cost me more tokens?**
+No. Tournament sampling composes with speculative sampling at negligible
+latency, and it emits the same number of tokens.
+
+**Can Anthropic (or anyone) trace a watermarked passage back to me?**
+No. The key is provider-level and carries no per-user, per-org, or per-chat
+information. It answers “did Claude likely produce this?”, not “who asked?”.
+
+**Will it flag my writing as AI if Claude only proofread it?**
+Possibly — a detected mark means Claude *processed* the text, not that it
+*authored* it. Treat detector output as a weak signal, never a verdict.
+
+**Can I turn it off with a prompt / system message / API flag?**
+No. It lives in the sampling pipeline below the model; the model isn’t even
+aware of it, and there is no API parameter for it.
+
+**Does it survive if I paste into Word / a CMS / an email?**
+Yes — it rides the text itself, so copy-paste preserves it. Heavy
+paraphrase or round-trip translation removes it.
+
+**Is code watermarked?**
+Barely. Low entropy + a formatter pass erases almost all of it; only
+comments carry meaningful signal. See §8.
+
+**Which Claude models are affected?**
+Models launched on/after 2026-08-02. Older models (Opus 5, Sonnet 5, Fable
+5) are in a transition period with no fixed date.
+
+**How do I use agentty with no watermark at all?**
+Run a local open-weight model — `agentty --provider ollama --model …`. You
+own the sampler, so no provider watermark can be present (§10.2).
+
+---
+
+## 13. Glossary
+
+- **SynthID-Text** — Google DeepMind’s production text-watermarking scheme
+  (the one Claude uses). *Nature*, 2024.
+- **Tournament sampling** — SynthID’s embedding step: a single-elimination
+  bracket over candidate tokens, won by higher g-value, biasing the output
+  toward the key without changing the model’s distribution.
+- **g-value** — a pseudorandom `{0,1}` score assigned to a candidate token
+  as a function of `(secret key, preceding context)`; Bernoulli(0.5).
+- **Layer (m)** — one round of the tournament. Default `m = 30`. More layers
+  = stronger mark (up to the mean-score non-monotonicity of §4.1).
+- **Context depth (H)** — how many preceding tokens seed the g-value hash
+  (SynthID ≈ 3–4; classic Red-Green = 1).
+- **Distortionary vs. non-distortionary** — whether the watermark provably
+  preserves the model’s output distribution (K=1 = single-sequence
+  non-distortion) or trades distortion for strength.
+- **Mean Score / Bayesian Score** — the two detectors (§3); the latter
+  resists layer inflation, the former doesn’t.
+- **TPR@FPR** — true-positive rate at a fixed false-positive rate; the
+  standard watermark-quality metric.
+- **Scrubbing** — removing the watermark while preserving meaning
+  (paraphrase). **Spoofing** — forging fake watermarked text to frame the
+  provider.
+- **C2PA** — Coalition for Content Provenance and Authenticity; the signed
+  file-metadata standard used for generated *images/files* (§6).
+- **EU AI Act Article 50(2)** — the legal mandate to mark synthetic content
+  machine-readably; the reason this exists (§9).
+
+---
+
+## 14. Bottom line
 
 A **legitimate, invisible, quality-neutral statistical watermark**
 (SynthID-Text / Tournament sampling) added for **EU AI Act compliance** —
@@ -387,7 +601,8 @@ selling zero-width-character stripping are solving a myth.
 - Kirchenbauer et al. — *A Watermark for Large Language Models*, arXiv 2301.10226
 - Scott Aaronson — *Theory and AI Alignment* (scottaaronson.blog/?p=9333); Simons Institute watermarking talks
 - ETH Zürich SRI Lab — *Probing Google DeepMind's SynthID-Text* (sri.inf.ethz.ch/blog/probingsynthid)
-- *On Google's SynthID-Text LLM Watermarking System: Theoretical Analysis and Empirical Validation*, arXiv 2603.03410
+- *On Google's SynthID-Text LLM Watermarking System: Theoretical Analysis and Empirical Validation*, Omidi, Dong & Wang (Illinois Tech), arXiv 2603.03410 (mean/Bayesian score analysis, layer-inflation attack, Bernoulli(0.5) optimality)
+- Christ, Gunn & Zamir — *Undetectable Watermarks for Language Models*, arXiv 2306.09194 / eprint.iacr.org/2023/763 (cryptographic undetectability from one-way functions)
 - EU AI Act **Article 50** + *Code of Practice on Transparency of AI-Generated Content* (digital-strategy.ec.europa.eu)
 - **C2PA** Technical Specification 2.4 (spec.c2pa.org)
 - Reporting: Forbes, Business Insider, Axios, Gizmodo, Fortune, BleepingComputer; explainx.ai technical breakdown
