@@ -56,7 +56,8 @@ Step rag_settings_update(Model m, msg::RagSettingsMsg rm) {
             // mode, below, commits and drops to the thread — that's "done",
             // not "back".)
             m.ui.rag_settings = rs::Closed{};
-            m.ui.command_palette = palette::Open{};
+            m.ui.command_palette =
+                palette::Open{"", palette_index_of(Command::OpenRagSettings)};
             return {std::move(m), Cmd<Msg>::none()};
         },
         [&](RagSettingsMove& e) -> Step {
