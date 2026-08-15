@@ -228,7 +228,11 @@ broke). Three additions make them positively enforced:
   deadline stretch (#1 class)). Wired into `reveal_stream_gate` (caps 40 /
   3600 ms; measured healthy: 8–14 cells, 1150–1750 ms) and a new
   `reveal_stream_gate_prod` arm that runs the SHIPPED pacing
-  (45 cps / 0.40 s / adaptive) instead of the harness default.
+  (45 cps / 0.40 s / adaptive) instead of the harness default. A third arm,
+  `reveal_stream_gate_snap`, fires a HARD tool-boundary glide
+  (`--snap-at 40 --snap-glide 150`) mid-stream at production pacing —
+  exercising `finalize_hard_` on real bytes (an unpaced snap measures as a
+  56-cell paste and fails the cap; the glide measures 2).
 - **`reveal_resume_test`** (ctest): drives the real widget on the frozen
   clock across the three timing edges steady streaming never crosses —
   mid-message finalize then resume (must disarm + restore the jitter-buffer
@@ -242,6 +246,11 @@ broke). Three additions make them positively enforced:
   the is_idle settle-skip, and the frame re-arm is now a single widget
   method, `StreamingMarkdown::is_animating()`. The "MUST agree" comments
   are enforced by construction instead of by review.
+- **Cadence-gated glide policy**: `reveal_end_glide_enabled()` requires
+  BOTH dense-frame signals the streaming tick derives its cadence from —
+  not-SSH **and** synchronized-output support. A non-sync terminal ticks at
+  100 ms (a 200 ms ramp ≈ 2 frames — the same height-drift geometry as
+  SSH), so it keeps the immediate-finish path.
 
 ## The block-boundary pop — FIXED (maya 4c47249)
 

@@ -2341,6 +2341,22 @@ if(AGENTTY_BUILD_TESTS)
                      --assert-finalize-max 40
                      --assert-finalize-ms 3600)
     set_tests_properties(reveal_stream_gate_prod PROPERTIES TIMEOUT 120)
+    # Third arm: a HARD tool-boundary glide (snap_reveal_to_edge(150)) fired
+    # mid-stream at frame 40, at production pacing. Exercises finalize_hard_
+    # on real bytes: the glide must stay paced (streaming cap 40 still
+    # applies — pre-fix the #4 stretch turned this into a slow cruise, and
+    # an unpaced snap is a 56-cell paste, measured) and the eventual
+    # end-of-turn ramp must still land. Measured healthy: max streaming
+    # delta 2, finalize 15, land 1536 ms.
+    add_test(NAME reveal_stream_gate_snap
+             COMMAND anthropic_md_stream det
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic_md_smoke.jsonl
+                     --cps 45 --drain 0.40 --adaptive
+                     --snap-at 40 --snap-glide 150
+                     --assert-max-delta 40
+                     --assert-finalize-max 40
+                     --assert-finalize-ms 3600)
+    set_tests_properties(reveal_stream_gate_snap PROPERTIES TIMEOUT 120)
     # Aggregate target so CI can build every ctest-registered binary in one
     # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
     # default `cmake --build` so a plain build stays lean), which means
