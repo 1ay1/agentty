@@ -14,6 +14,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/settings_items.hpp"
+#include "agentty/runtime/view/helpers.hpp"   // utf8_encode / utf8_prev
 #include "agentty/tool/plugin.hpp"
 
 namespace agentty::app::detail {
@@ -88,6 +89,66 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 default:
                     return done(std::move(m));
             }
+        },
+        [&](SettingsListAddStart) -> Step {
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o) return done(std::move(m));
+            // Add is only meaningful for the file/config-backed concerns.
+            if (o->concern != se::Category::Plugins
+                && o->concern != se::Category::Commands
+                && o->concern != se::Category::Agents)
+                return done(std::move(m));
+            o->input_active = true;
+            o->input.clear();
+            o->cursor = 0;
+            return done(std::move(m));
+        },
+        [&](SettingsListChar& e) -> Step {
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o || !o->input_active) return done(std::move(m));
+            const std::string utf8 = ui::utf8_encode(e.ch);
+            o->input.insert(static_cast<std::size_t>(o->cursor), utf8);
+            o->cursor += static_cast<int>(utf8.size());
+            return done(std::move(m));
+        },
+        [&](SettingsListBackspace) -> Step {
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o || !o->input_active || o->cursor <= 0)
+                return done(std::move(m));
+            int p = ui::utf8_prev(o->input, o->cursor);
+            o->input.erase(static_cast<std::size_t>(p),
+                           static_cast<std::size_t>(o->cursor - p));
+            o->cursor = p;
+            return done(std::move(m));
+        },
+        [&](SettingsListCancelInput) -> Step {
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o) return done(std::move(m));
+            o->input_active = false;
+            o->input.clear();
+            o->cursor = 0;
+            return done(std::move(m));
+        },
+        [&](SettingsListSubmitInput) -> Step {
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o || !o->input_active) return done(std::move(m));
+            const std::string line = o->input;
+            const se::Category concern = o->concern;
+            o->input_active = false;
+            o->input.clear();
+            o->cursor = 0;
+            if (line.empty()) return done(std::move(m));   // empty = cancel
+
+            se::AddResult r = (concern == se::Category::Plugins)
+                ? se::add_plugin_from_line(line)
+                : se::create_starter(concern, line);
+            // Re-clamp the (possibly grown) list to the top of the new row.
+            if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+                const int cnt =
+                    static_cast<int>(se::items_for(m, oo->concern).size());
+                oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));
+            }
+            return {std::move(m), set_status_toast(m, r.message)};
         },
     }, sm);
 }

@@ -254,7 +254,30 @@ std::optional<Msg> on_rag_settings(const KeyEvent& ev) {
 
 // Settings pickers (Plugins/Commands/Agents/Hooks). A plain list: ↑↓/j/k
 // move, Enter/Space act on the focused row, Esc/q close.
-std::optional<Msg> on_settings_list(const KeyEvent& ev) {
+// Settings pickers (Plugins/Commands/Agents/Hooks). Two modes:
+//   list mode  — ↑↓/j/k move, Enter/Space act, `a` starts an add prompt,
+//               Esc/q close (back to the palette).
+//   add mode   — a one-line text prompt: printable chars type, Backspace
+//               deletes, Enter submits (creates), Esc cancels back to the
+//               list. In add mode j/k/q/space are LITERAL text, so the
+//               nav shortcuts are suppressed — hence the `input_active`
+//               branch.
+std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active) {
+    if (input_active) {
+        if (std::holds_alternative<SpecialKey>(ev.key)) {
+            switch (std::get<SpecialKey>(ev.key)) {
+                case SpecialKey::Escape:    return SettingsListCancelInput{};
+                case SpecialKey::Enter:     return SettingsListSubmitInput{};
+                case SpecialKey::Backspace: return SettingsListBackspace{};
+                default: break;
+            }
+        }
+        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+            if (ck->codepoint >= 0x20)   // printable
+                return SettingsListChar{ck->codepoint};
+        }
+        return std::nullopt;
+    }
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         switch (std::get<SpecialKey>(ev.key)) {
             case SpecialKey::Escape: return CloseSettingsList{};
@@ -268,6 +291,7 @@ std::optional<Msg> on_settings_list(const KeyEvent& ev) {
         switch (ck->codepoint) {
             case U'k': case U'K': return SettingsListMove{-1};
             case U'j': case U'J': return SettingsListMove{+1};
+            case U'a': case U'A': return SettingsListAddStart{};
             case U' ':            return SettingsListActivate{};
             case U'q': case U'Q': return CloseSettingsList{};
             default: break;
@@ -815,6 +839,10 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_checkpoints = checkpoint_picker_is_open(m.ui.checkpoints);
     const bool in_rag_settings = rag_settings_is_open(m.ui.rag_settings);
     const bool in_settings_list = settings_list_is_open(m.ui.settings_list);
+    const bool settings_list_adding = [&] {
+        const auto* so = settings_list_opened(m.ui.settings_list);
+        return so && so->input_active;
+    }();
     const bool in_fork = fork_picker_is_open(m.ui.fork_picker);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
@@ -868,7 +896,8 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_toolview) return on_tool_viewer(ev);
             if (in_checkpoints) return on_checkpoint_picker(ev);
             if (in_rag_settings) return on_rag_settings(ev);
-            if (in_settings_list) return on_settings_list(ev);
+            if (in_settings_list)
+                return on_settings_list(ev, settings_list_adding);
             if (in_fork) return on_fork_picker(ev);
             if (in_models)  return on_model_picker(ev);
             if (in_providers) return on_provider_picker(ev);

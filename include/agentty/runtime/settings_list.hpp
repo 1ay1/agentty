@@ -27,6 +27,15 @@ struct ListClosed {};
 struct ListOpen {
     Category concern = Category::Plugins;
     int      index   = 0;
+    // Inline add-mode: pressing `a` on a concern opens a one-line text
+    // prompt right in the picker. Empty `input_active` == browsing the
+    // list; true == typing a new entry. The prompt's meaning depends on
+    // the concern (see settings_list.cpp): for Plugins it's
+    // "name command args…"; for Commands/Agents it's the new file's name
+    // (a starter file is created + the path surfaced to edit).
+    bool        input_active = false;
+    std::string input;          // typed buffer
+    int         cursor = 0;     // byte cursor into `input`
 };
 
 } // namespace settings
