@@ -765,6 +765,8 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/util/partial_json.cpp
     src/tool/subagent.cpp
     src/tool/skills.cpp
+    src/tool/commands.cpp
+    src/tool/hooks.cpp
     src/tool/memory_store.cpp
 )
 
@@ -1701,6 +1703,19 @@ if(AGENTTY_BUILD_TESTS)
     endif()
     add_test(NAME skills_engine_test COMMAND skills_engine_test)
 
+    # slash_commands_test — user-authored slash commands (tools::commands):
+    # discovery across the six roots with shadowing (.agentty > .agents >
+    # .claude, project > user), namespaced subdirectories (git/fixup.md →
+    # /git:fixup), lenient frontmatter, and the $ARGUMENTS/$1..$9/$$
+    # substitution contract. Standalone: links just the commands TU.
+    add_executable(slash_commands_test EXCLUDE_FROM_ALL
+        tests/slash_commands_test.cpp
+        src/tool/commands.cpp
+    )
+    target_include_directories(slash_commands_test PRIVATE include)
+    add_test(NAME slash_commands_test COMMAND slash_commands_test)
+    set_tests_properties(slash_commands_test PROPERTIES TIMEOUT 30)
+
     # cred_crypt_test — at-rest credential sealing. Forks children to cover
     # the process-global passphrase states independently: v1 machine-only
     # (+ tamper rejection), v2 with a passphrase (argon2id default), v2
@@ -1811,6 +1826,16 @@ if(AGENTTY_BUILD_TESTS)
     # and the turn actually reaches a settled shape (freeze gate opens).
     agentty_add_full_test(turn_settle_test)
     set_tests_properties(turn_settle_test PROPERTIES TIMEOUT 30)
+
+    # hooks_gate_test — the lifecycle-hooks CONSENT GATE (the security
+    # property the whole hooks design hangs on): an unapproved hooks file
+    # NEVER executes, any byte change to an approved file re-gates it,
+    # matching pre_tool guards block with the hook's stdout as the reason,
+    # post_tool is fire-and-forget, and AGENTTY_NO_HOOKS=1 kills all of it.
+    # Temp-sandboxed CWD+HOME; hook commands drop marker files so absence
+    # of execution is observable.
+    agentty_add_full_test(hooks_gate_test)
+    set_tests_properties(hooks_gate_test PROPERTIES TIMEOUT 60)
 
     # stream_md_lag_test — long-turn markdown LAG regression. Drives maya's
     # StreamingMarkdown exactly as turn.cpp::cached_markdown_for does
@@ -2444,6 +2469,8 @@ if(AGENTTY_BUILD_TESTS)
         midrun_wire_test
         stream_liveness_test
         turn_settle_test
+        hooks_gate_test
+        slash_commands_test
         stream_md_lag_test
         reveal_pacing_test
         reveal_resume_test

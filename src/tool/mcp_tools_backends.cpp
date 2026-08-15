@@ -396,6 +396,193 @@ struct AgentType {
     smart::ModelRole              model_role = smart::ModelRole::Utility;
 };
 
+// ── User-defined agents (.agentty/agents/*.md) ─────────────────────
+// A user agent is a markdown file whose BODY becomes the role prompt and
+// whose frontmatter configures the sandbox:
+//
+//     ---
+//     description: Reviews SQL migrations for safety.   # for the catalog
+//     tools: read grep glob list_dir                     # allowlist (opt)
+//     read-only: true                                    # effect gate (opt)
+//     ---
+//     Your role: MIGRATION REVIEWER. Check every migration for …
+//
+// Roots (project first, then user; first name wins — mirrors commands/
+// skills): .agentty/agents, .agents/agents, .claude/agents, then the same
+// three under ~. Built-in types always win over a user agent of the same
+// name (a user file can't silently replace `general`).
+//
+// Storage note: AgentType's fields are string_views, so the parsed user
+// agents live in a process-lifetime cache; entries are appended once per
+// (mtime-signature) scan and NEVER erased or reordered in place — a
+// returned reference stays valid for the life of a subagent run.
+struct UserAgentStore {
+    std::vector<std::unique_ptr<AgentType>> types;   // stable addresses
+    std::deque<std::string>                 owned;   // element-stable backing
+    // Prior generations, kept alive for the process lifetime: a subagent
+    // holds a `const AgentType&` across its whole (minutes-long) run, so a
+    // cache refresh mid-run must not destroy the referenced storage.
+    // Bounded in practice by how often the agent files change on disk.
+    std::vector<std::vector<std::unique_ptr<AgentType>>> retired_types;
+    std::vector<std::deque<std::string>>                 retired_owned;
+    std::string                             sig = "\x01uninit";
+    std::mutex                              mu;
+};
+
+UserAgentStore& user_agents() {
+    static UserAgentStore s;
+    return s;
+}
+
+// Frontmatter subset parser (same lenient rules as commands/skills).
+void parse_user_agent(const std::string& raw, const std::string& slug,
+                      UserAgentStore& store) {
+    auto trim = [](std::string_view v) -> std::string {
+        std::size_t b = 0, e = v.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(v[b]))) ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(v[e-1]))) --e;
+        return std::string{v.substr(b, e - b)};
+    };
+
+    std::string body = raw, tools_line;
+    bool read_only = false;
+    std::istringstream in(raw);
+    std::string line;
+    if (std::getline(in, line) && trim(line) == "---") {
+        std::streampos body_start{-1};
+        while (std::getline(in, line)) {
+            if (trim(line) == "---") { body_start = in.tellg(); break; }
+            auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string k = trim(line.substr(0, colon));
+            std::string v = trim(line.substr(colon + 1));
+            if      (k == "tools")     tools_line = v;
+            else if (k == "read-only") read_only = (v == "true" || v == "1" || v == "yes");
+            // description consumed by extra_agent_types' caller via the
+            // task-tool description; not needed in the AgentType itself.
+        }
+        if (body_start != std::streampos(-1))
+            body = trim(raw.substr(static_cast<std::size_t>(body_start)));
+    }
+    body = trim(body);
+    if (body.empty()) return;
+
+    auto at = std::make_unique<AgentType>();
+    store.owned.push_back(slug);
+    at->name = store.owned.back();
+    store.owned.push_back(std::move(body));
+    at->role = store.owned.back();
+    at->read_only = read_only;
+    at->model_role = read_only ? smart::ModelRole::Utility
+                               : smart::ModelRole::Implementation;
+    // Whitespace-split tools allowlist — each token stored owned.
+    std::istringstream ts(tools_line);
+    std::string tok;
+    while (ts >> tok) {
+        store.owned.push_back(tok);
+        at->allow.push_back(store.owned.back());
+    }
+    store.types.push_back(std::move(at));
+}
+
+// Scan the six roots; refresh the cache when the mtime signature moves.
+// Returns under the store lock — callers copy names or hold refs to the
+// stable unique_ptr targets.
+void refresh_user_agents_locked(UserAgentStore& store) {
+    namespace fs = std::filesystem;
+    std::string sig;
+    auto scan_root = [&](const fs::path& root) {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec) || ec) return;
+        auto mt = fs::last_write_time(root, ec);
+        if (!ec)
+            sig += std::to_string(static_cast<long long>(
+                       mt.time_since_epoch().count())) + ";";
+        std::vector<fs::path> files;
+        for (fs::directory_iterator it(root, ec), end; !ec && it != end;
+             it.increment(ec))
+            if (it->path().extension() == ".md") files.push_back(it->path());
+        std::sort(files.begin(), files.end());
+        for (const auto& p : files) {
+            std::error_code fec;
+            auto fmt = fs::last_write_time(p, fec);
+            if (!fec)
+                sig += std::to_string(static_cast<long long>(
+                           fmt.time_since_epoch().count())) + ";";
+        }
+    };
+    auto home = [] {
+        if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
+        if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
+        return fs::path{};
+    }();
+    const fs::path roots[] = {
+        fs::path{".agentty"} / "agents", fs::path{".agents"} / "agents",
+        fs::path{".claude"}  / "agents",
+        home.empty() ? fs::path{} : home / ".agentty" / "agents",
+        home.empty() ? fs::path{} : home / ".agents"  / "agents",
+        home.empty() ? fs::path{} : home / ".claude"  / "agents",
+    };
+    for (const auto& r : roots) if (!r.empty()) scan_root(r);
+
+    if (sig == store.sig) return;
+    store.sig = sig;
+    // Retire (never destroy) the previous generation — see UserAgentStore.
+    if (!store.types.empty()) {
+        store.retired_types.push_back(std::move(store.types));
+        store.retired_owned.push_back(std::move(store.owned));
+    }
+    store.types.clear();
+    store.owned.clear();
+    // std::deque never moves existing elements on push_back, so the
+    // string_views taken into owned.back() stay valid even for SSO-small
+    // strings (a vector would move the inline bytes on reallocation).
+    constexpr std::size_t kMaxUserAgents = 32;
+    constexpr std::size_t kMaxAgentBytes = 32 * 1024;
+    static const char* kBuiltins[] = {"explorer","reviewer","tester",
+                                      "coder","general"};
+    for (const auto& r : roots) {
+        if (r.empty()) continue;
+        std::error_code ec;
+        if (!fs::is_directory(r, ec) || ec) continue;
+        std::vector<fs::path> files;
+        for (fs::directory_iterator it(r, ec), end; !ec && it != end;
+             it.increment(ec))
+            if (it->path().extension() == ".md") files.push_back(it->path());
+        std::sort(files.begin(), files.end());
+        for (const auto& p : files) {
+            if (store.types.size() >= kMaxUserAgents) return;
+            const std::string slug = p.stem().string();
+            if (slug.empty() || slug[0] == '.') continue;
+            bool taken = false;
+            for (auto* b : kBuiltins) if (slug == b) { taken = true; break; }
+            for (const auto& t : store.types)
+                if (t->name == slug) { taken = true; break; }
+            if (taken) continue;
+            std::error_code sec;
+            auto sz = fs::file_size(p, sec);
+            if (sec || sz == 0 || sz > kMaxAgentBytes) continue;
+            std::ifstream f(p, std::ios::binary);
+            if (!f) continue;
+            std::string raw(static_cast<std::size_t>(sz), '\0');
+            f.read(raw.data(), static_cast<std::streamsize>(sz));
+            raw.resize(static_cast<std::size_t>(f.gcount()));
+            parse_user_agent(raw, slug, store);
+        }
+    }
+}
+
+// Names of the discovered user agents (for the task tool's enum).
+std::vector<std::string> user_agent_names() {
+    auto& store = user_agents();
+    std::lock_guard lk(store.mu);
+    refresh_user_agents_locked(store);
+    std::vector<std::string> out;
+    out.reserve(store.types.size());
+    for (const auto& t : store.types) out.emplace_back(t->name);
+    return out;
+}
+
 const AgentType& resolve_agent_type(std::string_view t) {
     using MR = smart::ModelRole;
     static const std::vector<AgentType> kTypes = {
@@ -437,6 +624,17 @@ const AgentType& resolve_agent_type(std::string_view t) {
     };
     for (const auto& a : kTypes)
         if (a.name == t) return a;
+    // User-defined agents (.agentty/agents/*.md): consulted after the
+    // built-ins so a user file can never shadow `general` etc. The
+    // returned reference points into process-lifetime storage (see
+    // UserAgentStore) so it outlives the whole subagent run.
+    {
+        auto& store = user_agents();
+        std::lock_guard lk(store.mu);
+        refresh_user_agents_locked(store);
+        for (const auto& ua : store.types)
+            if (ua->name == t) return *ua;
+    }
     return kTypes.back();
 }
 
@@ -754,6 +952,12 @@ provider::StreamResult run_one_completion(Thread& thread,
 
 class AgenttySubagentRunner final : public mt::SubagentRunner {
 public:
+    std::vector<std::string> extra_agent_types() const override {
+        // User-authored .agentty/agents/*.md — discoverable in the task
+        // tool's agent_type enum. Names only; bodies load at resolve time.
+        return user_agent_names();
+    }
+
     std::string unavailable_reason() const override {
         auto cfg = subagent::current();
         if (!cfg.installed)
@@ -1044,6 +1248,23 @@ void install_host_backends(::mcp::tools::HostServices& svc) {
     // svc.todo intentionally left null: the mcp todo shell renders identical
     // text to the native tool with no host state needed, and agentty's TUI
     // parses the rendered text — there is no structured sink to feed.
+}
+
+std::string run_one_shot(const std::string& prompt,
+                         const std::string& agent_type,
+                         bool& is_error) {
+    // The one-shot CLI is exactly one subagent run driven from main()
+    // instead of from the `task` tool: same loop, same toolset, same
+    // bounds. Instantiate the runner directly — no HostServices needed.
+    AgenttySubagentRunner runner;
+    if (auto why = runner.unavailable_reason(); !why.empty()) {
+        is_error = true;
+        return why;
+    }
+    mt::SubagentRequest sreq;
+    sreq.prompt     = prompt;
+    sreq.agent_type = agent_type.empty() ? "general" : agent_type;
+    return runner.run(sreq, is_error);
 }
 
 // ── Proactive retrieval (SOTA active-RAG / FLARE / Self-RAG) ────────────

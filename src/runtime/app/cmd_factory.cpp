@@ -24,6 +24,7 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/hooks.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -1112,8 +1113,26 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
             agentty::tools::cancellation::Scope cancellation_scope{
                 [cancel] { return cancel && cancel->is_cancelled(); }};
             try {
+                // ── pre_tool hooks (consent-gated, see hooks.hpp) ─────
+                // A blocking decision becomes the tool's error result: the
+                // model sees the hook's stdout and can adapt. Runs on this
+                // tool's own isolated thread, so a slow hook never wedges
+                // the UI — only this one call.
+                const std::string args_dump = args.dump();
+                if (auto pre = tools::hooks::run_pre_tool(name.value,
+                                                          args_dump);
+                    pre.blocked) {
+                    dispatch(ToolExecOutput{id, std::unexpected(
+                        tools::ToolError::unknown(
+                            "blocked by pre_tool hook: " + pre.reason))});
+                    return;
+                }
                 auto result = tool::DynamicDispatch::execute(name.value, args);
                 if (result) {
+                    // post_tool hooks: fire-and-forget (never block, never
+                    // rewrite the result).
+                    tools::hooks::run_post_tool(name.value, args_dump,
+                                                result->text);
                     dispatch(ToolExecOutput{id, std::move(result->text)});
                 } else {
                     dispatch(ToolExecOutput{id,
