@@ -143,6 +143,13 @@ struct ToolDef {
 // re-listed. Bumps on every `tools/list_changed` (and resources/prompts).
 [[nodiscard]] unsigned long mcp_generation() noexcept;
 
+// Live-reload MCP plugins from mcp.json into the CURRENT session: rebuild
+// the connection pool (spawn newly-added servers, drop removed ones) and
+// re-project the wire catalog so the new tools are usable immediately —
+// no restart. Returns the number of servers connected after the reload.
+// Blocking (server handshakes); the TUI runs it off the UI thread.
+[[nodiscard]] std::size_t reload_mcp_plugins();
+
 // ── Live progress sink (thread-local) ────────────────────────────────────
 //
 // Set by the cmd runner (cmd_factory::run_tool) before dispatching a tool

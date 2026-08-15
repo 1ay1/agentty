@@ -900,6 +900,30 @@ unsigned long mcp_generation() noexcept {
     return pool->generation.load(std::memory_order_relaxed);
 }
 
+std::size_t mcp_reload() {
+    // Rebuild the pool from the CURRENT config. mcp_tools() reads the
+    // config fresh, spawns every listed server, and installs the new pool
+    // as g_pool_ref (replacing the old one). We throw away the returned
+    // ToolDefs here — the registry re-projects them from the pool on its
+    // next refresh; what matters is that g_pool_ref now points at the
+    // reloaded pool and its generation is non-zero.
+    //
+    // Generation: a fresh pool starts at 0, but refresh_wire_cache_locked
+    // treats generation==0 as "use the cached initial_mcp snapshot" — so a
+    // reloaded pool MUST report a non-zero generation to route through the
+    // live projection. Seed it to 1 before mcp_tools() connects (any
+    // subsequent list_changed bumps from there).
+    PoolHandle throwaway;
+    (void)mcp_tools(throwaway);
+    if (auto p = current_pool()) {
+        unsigned long g = p->generation.load(std::memory_order_relaxed);
+        if (g == 0) p->generation.store(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(p->mu);
+        return p->registry.provider_count();
+    }
+    return 0;
+}
+
 std::vector<ResourceInfo> mcp_resources() {
     auto pool = current_pool();
     if (!pool) return {};

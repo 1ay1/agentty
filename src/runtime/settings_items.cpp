@@ -233,8 +233,7 @@ AddResult add_plugin_from_line(const std::string& line) {
     const auto path = tools::plugin::config_path(/*project=*/false);
     switch (tools::plugin::add_server(path, spec, /*force=*/false)) {
         case tools::plugin::EditResult::Ok:
-            return {true, "added plugin '" + name +
-                          "' — restart agentty to connect"};
+            return {true, "added plugin '" + name + "'"};
         case tools::plugin::EditResult::AlreadyExists:
             return {false, "'" + name + "' already exists"};
         case tools::plugin::EditResult::ParseError:

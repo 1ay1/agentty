@@ -16,6 +16,7 @@
 #include "agentty/runtime/settings_items.hpp"
 #include "agentty/runtime/view/helpers.hpp"   // utf8_encode / utf8_prev
 #include "agentty/tool/plugin.hpp"
+#include "agentty/tool/registry.hpp"   // reload_mcp_plugins
 
 namespace agentty::app::detail {
 
@@ -78,10 +79,23 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 case se::Action::RemovePlugin: {
                     auto path = tools::plugin::config_path(/*project=*/false);
                     auto r = tools::plugin::remove_server(path, row.arg);
-                    auto cmd = (r == tools::plugin::EditResult::Ok)
-                        ? set_status_toast(m, "removed plugin '" + row.arg +
-                              "' \u2014 restart to disconnect")
-                        : set_status_toast(m, "could not remove '" + row.arg + "'");
+                    maya::Cmd<Msg> cmd;
+                    if (r == tools::plugin::EditResult::Ok) {
+                        // Reload OFF the UI thread — the connect handshake
+                        // can take a beat and must never freeze the TUI.
+                        // The config write already happened synchronously,
+                        // so the reload just re-syncs the live pool to disk.
+                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                            maya::Cmd<Msg>::task_isolated(
+                                [](std::function<void(Msg)>) {
+                                    (void)tools::reload_mcp_plugins();
+                                }),
+                            set_status_toast(m, "removed plugin '" + row.arg +
+                                                "' — disconnected")});
+                    } else {
+                        cmd = set_status_toast(m,
+                                  "could not remove '" + row.arg + "'");
+                    }
                     // Re-clamp: the list shrank by one.
                     if (auto* oo = settings_list_opened(m.ui.settings_list)) {
                         const int n = static_cast<int>(
@@ -154,13 +168,31 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             se::AddResult r = (concern == se::Category::Plugins)
                 ? se::add_plugin_from_line(line)
                 : se::create_starter(concern, line);
+
+            // Make it USABLE NOW, not after a restart. For Plugins the
+            // add already wrote mcp.json; reload the live pool OFF the UI
+            // thread (the connect handshake must never freeze the TUI —
+            // the bridge bounds it with a deadline). Commands are loaded
+            // fresh per use (create_starter invalidated the cache) and
+            // agents are scanned per task-tool call, so both are already
+            // live — no reload needed.
+            maya::Cmd<Msg> reload = maya::Cmd<Msg>::none();
+            if (r.ok && concern == se::Category::Plugins) {
+                reload = maya::Cmd<Msg>::task_isolated(
+                    [](std::function<void(Msg)>) {
+                        (void)tools::reload_mcp_plugins();
+                    });
+                r.message += " — connecting…";
+            }
             // Re-clamp the (possibly grown) list to the top of the new row.
             if (auto* oo = settings_list_opened(m.ui.settings_list)) {
                 const int cnt =
                     static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));
             }
-            return {std::move(m), set_status_toast(m, r.message)};
+            return {std::move(m), maya::Cmd<Msg>::batch(
+                std::vector<maya::Cmd<Msg>>{
+                    std::move(reload), set_status_toast(m, r.message)})};
         },
     }, sm);
 }

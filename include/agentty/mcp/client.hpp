@@ -103,6 +103,17 @@ struct ServerLaunch {
 [[nodiscard]] std::vector<tools::ToolDef> mcp_tools_live();
 [[nodiscard]] unsigned long mcp_generation() noexcept;
 
+// Live reload: re-read the MCP config from disk and rebuild the process-
+// wide connection pool (spawning newly-added servers, dropping removed
+// ones). Used by the TUI's `agentty plugin add` flow so a plugin becomes
+// usable in the CURRENT session without a restart. Bumps mcp_generation()
+// so the registry's wire-cache re-projects the tool surface on next
+// access. The OLD pool's providers stay alive as long as a retained tool
+// snapshot references them (safe against an in-flight tool call). Returns
+// the number of servers connected after the reload. Blocking (same
+// connect handshake + deadline as startup); call off the UI thread.
+[[nodiscard]] std::size_t mcp_reload();
+
 // ── Resources (MCP resources/*) ──────────────────────────────────────────
 // A resource the agent can read by URI (file, db row, API doc, …).
 struct ResourceInfo {
