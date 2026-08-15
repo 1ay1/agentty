@@ -34,3 +34,9 @@ Testing/
 # Local scratchpad — repro/diag sources, build artifacts (.exe/.obj), logs
 scratch/
 AGENTTY_ASSISTANT_USAGE.md
+
+# Personal files that live in this workspace but are NOT part of the
+# project — must never be committed (a stage_all once swept resume/ into
+# a public commit; the ignore makes that structurally impossible).
+hand/
+resume/
