@@ -17,6 +17,7 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
+#include <maya/terminal/ansi.hpp>
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/routing_memory.hpp"
@@ -88,16 +89,24 @@ bool running_over_ssh() {
 
 bool reveal_end_glide_enabled() {
     // Interactive terminals get the bounded end-of-turn glide (the design
-    // contract: end-of-turn is a visible catch-up, never a paste). Over
-    // SSH the frames are too sparse to hold the live height steady
-    // mid-glide, so the immediate-finish path stays (see internal.hpp).
+    // contract: end-of-turn is a visible catch-up, never a paste). The
+    // glide needs the DENSE frame cadence to hold the live height steady
+    // mid-ramp, so require BOTH of the signals streaming_tick_period()
+    // derives its cadence from:
+    //   • not SSH — remote frames land ≥80 ms apart (throttled) and the
+    //     wire round-trip adds jitter on top;
+    //   • synchronized-output support — without it the streaming tick is
+    //     100 ms, so a 200 ms ramp is ~2 frames: the same sparse-frame
+    //     height-drift geometry (stranded-duplicate bug) as SSH.
+    // Everywhere sparse, the immediate-finish path stays.
     // AGENTTY_NO_REVEAL_GLIDE=1 forces the old immediate finish
     // everywhere — the escape hatch if a terminal misbehaves.
     static const bool enabled = [] {
         if (const char* off = std::getenv("AGENTTY_NO_REVEAL_GLIDE");
             off && off[0] && off[0] != '0')
             return false;
-        return !running_over_ssh();
+        return !running_over_ssh()
+            && maya::ansi::env_supports_synchronized_output();
     }();
     return enabled;
 }
