@@ -166,6 +166,56 @@ guard this. If you change reveal pacing or clipping, run them.
 - **Capture** (`anthropic_md_stream capture <out.jsonl>`): records a fresh
   real fixture (live billed API call — manual dev action).
 
+## Audit fixes (second pass, code-review sweep)
+
+A close re-read of the cursor/ramp/host seams found six latent issues; all
+fixed together (reveal_fx.cpp / animation.hpp / stream.cpp / turn.cpp):
+
+1. **Hard vs adaptive deadline** (`finalize_hard_`): `snap_reveal_to_edge`'s
+   glide promised a hard wall-clock window but shared `finalize_deadline_ms_`
+   with `request_finalize`, so the #4 adaptive re-eval stretched a 150 ms
+   tool-seam snap to up to 2.5 s on a big backlog (deferred tool cards stayed
+   hidden the whole time). Hard ramps are now exempt from the stretch; late
+   GROWTH still completes on time via the deadline rate.
+2. **Ramp disarm on resume**: `finalize_armed_` was only cleared at settle, so
+   a mid-message `request_finalize` (text→tool gap, `text_block_closed`)
+   left the widget in ramp mode for the REST of the turn once more text
+   arrived — cursor cruising ≥2× floor, jitter buffer collapsed. Growth
+   arriving after the cursor reached the armed-time edge
+   (`reveal_edge_reached_ms_ != 0 && size > finalize_armed_size_`) now
+   disarms the ramp. The genuine late-delta case (cursor still behind the
+   edge) is untouched.
+3. **Post-idle carry burst**: the residual-time carry decided "owed vs idle"
+   from the CURRENT frame's backlog — but frames stop 4 s after the edge
+   settles (caret window), so a chunk arriving after a long model silence saw
+   one frame with seconds of stale `reveal_us_` elapsed and drained it at
+   ~15× real time (a paste). Growth that lands while the cursor was at-edge
+   now re-stamps the µs clock (`reveal_us_ = 0` → re-init on next advance).
+4. **Adaptive cold-start seed**: `RateCursor`'s adaptive branch clamped a
+   cold (≈0) wire estimate up to `adapt_floor_min_` (25) and never consulted
+   the documented seed (`floor_rate_`, 45) — every message's first ~τ typed
+   at the band minimum, and a post-pause decayed estimate crawled the same
+   way. Below-band estimates now fall back to the seed (then band-clamp).
+5. **End-of-turn paste**: `finalize_turn`'s unconditional `settle_message_md`
+   (finish() at message_stop) pasted the steady-state backlog (≈wire_cps ×
+   0.40 s — a line+) in one frame — tripled in size by the 0.15→0.40 drain
+   retune after that trade was accepted. On interactive (non-SSH) terminals
+   the turn now ends with the widget's own bounded `request_finalize(200)`
+   glide; the deferred settle-freeze (already gated on
+   `live_tail_reveal_settled`) settles + freezes after the widget flips
+   `live_` off itself. Over SSH/fps=0 the immediate-finish path is kept
+   (sparse frames can't hold the height mid-glide — the original stranded-
+   duplicate bug). Escape hatch: `AGENTTY_NO_REVEAL_GLIDE=1`.
+6. **Instant-snap clock skew**: `snap_reveal_to_edge(0)` stamped only
+   `reveal_ms_`; per-frame dt integrates off `reveal_us_`, so bytes arriving
+   right after a mid-stream resize snap burst-integrated up to 250 ms. Both
+   clocks are stamped now.
+
+Plus two hardenings: the O(1) append-proof in `set_content` samples a third
+(midpoint) window so a same-length mid-buffer divergence can't alias as
+"unchanged", and `finish()`/`set_live(false)`/settle all clear the new ramp
+state so no path leaks `finalize_hard_`.
+
 ## The block-boundary pop — FIXED (maya 4c47249)
 
 For a while a completed block popped into view whole in one frame at a block

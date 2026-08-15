@@ -387,17 +387,26 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         // directly.
         if (!sizes_unchanged) {
             if (settled) {
-                // Finish IMMEDIATELY (no 200 ms request_finalize glide) so
-                // the live height equals the settled/frozen height in the
-                // same frame — agent_session's MessageStop discipline. The
-                // glide kept the widget live_ and animating after the
-                // stream ended; at fps=0 over SSH the sparse frames let the
-                // live-tail height drift between paints, so the freeze
-                // handoff diffed a moved tree and stranded a duplicate in
-                // scrollback. The reducer already pre-settles via
-                // settle_message_md; this keeps the view path in lockstep
-                // for any settled message still in the live tail.
-                cache.streaming->finish();
+                // Finish so the live height equals the settled/frozen height
+                // — agent_session's MessageStop discipline — UNLESS an
+                // end-of-turn finalize ramp is still gliding (#5, interactive
+                // terminals only: finalize_turn arms request_finalize instead
+                // of settling, precisely so the steady-state backlog types
+                // out over ~200 ms instead of pasting in one frame). While
+                // the ramp runs, the widget is animating dense frames and
+                // flips live_ off ON ITS OWN once the tail visually
+                // settles; forcing finish() here would cut the glide and
+                // dump the backlog — the exact paste the ramp exists to
+                // prevent. Once the widget settles itself (is_finalizing
+                // false again), this branch runs finish() as before — a
+                // no-op shape-wise, but it flushes any trailing block and
+                // keeps the fps=0/SSH path (where the reducer already
+                // settled via settle_message_md) in lockstep.
+                const bool end_glide_running =
+                    cache.streaming->is_finalizing()
+                    || (cache.streaming->is_live()
+                        && cache.streaming->reveal_in_progress());
+                if (!end_glide_running) cache.streaming->finish();
             } else {
                 cache.streaming->set_live(true);
             }
