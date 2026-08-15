@@ -37,6 +37,7 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/runtime/fork_picker.hpp"
+#include "agentty/runtime/settings_categories.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/registry.hpp"
 
@@ -592,13 +593,13 @@ struct RagSettingsMove   { int delta; };   // move the row cursor
 struct RagSettingsAdjust {};               // select the highlighted mode
 struct RagSettingsReset  {};               // back to default (On)
 
-// ── Settings pane (Ctrl+K → Settings) ────────────────────────
-// Two-column hub over plugins/commands/agents/hooks + the live toggles.
-struct OpenSettings   {};
-struct CloseSettings  {};
-struct SettingsMove   { int delta; };  // move cursor in the FOCUSED column
-struct SettingsFocus  { int delta; };  // switch column (←/→/Tab)
-struct SettingsActivate {};            // Enter on the focused item
+// ── Settings pickers (Ctrl+K → Plugins/Commands/Agents/Hooks) ──────
+// One shared list modal, parameterised by the config concern. Opening
+// carries which concern; Move scrolls; Activate acts on the focused row.
+struct OpenSettingsList  { settings::Category concern; };
+struct CloseSettingsList {};
+struct SettingsListMove  { int delta; };
+struct SettingsListActivate {};
 
 // ── Fork picker ───────────────────────────────────────────────────────
 // Branch the current thread into a new one and choose how the carried-over
@@ -768,9 +769,9 @@ using RagSettingsMsg = std::variant<
     OpenRagSettings, CloseRagSettings, RagSettingsMove,
     RagSettingsAdjust, RagSettingsReset>;
 
-using SettingsMsg = std::variant<
-    OpenSettings, CloseSettings, SettingsMove, SettingsFocus,
-    SettingsActivate>;
+using SettingsListMsg = std::variant<
+    OpenSettingsList, CloseSettingsList, SettingsListMove,
+    SettingsListActivate>;
 
 using ForkMsg = std::variant<
     OpenForkPicker, CloseForkPicker, ForkPickerMove, ForkThread>;
@@ -825,7 +826,7 @@ using Msg = std::variant<
     msg::CodeBlockMsg,
     msg::CheckpointMsg,
     msg::RagSettingsMsg,
-    msg::SettingsMsg,
+    msg::SettingsListMsg,
     msg::ForkMsg,
     msg::TodoMsg,
     msg::LoginMsg,

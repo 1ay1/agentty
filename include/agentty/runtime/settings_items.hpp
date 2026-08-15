@@ -1,15 +1,13 @@
-// settings_items.hpp — the per-category item model for the Settings pane,
-// shared by the reducer (update/settings.cpp) and the view
-// (view/settings_view.cpp) so the two never disagree on row count or
-// meaning. Built fresh each call from the live loaders — the pane always
-// reflects what's actually on disk.
+// settings_items.hpp — the per-concern row model for the settings pickers
+// (Ctrl+K → Plugins/Commands/Agents/Hooks). Built fresh each call from the
+// live loaders so the picker always mirrors what's actually on disk.
 
 #pragma once
 
 #include <string>
 #include <vector>
 
-#include "agentty/runtime/settings_pane.hpp"
+#include "agentty/runtime/settings_categories.hpp"
 
 namespace agentty { struct Model; }
 
