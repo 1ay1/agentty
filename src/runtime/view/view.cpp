@@ -39,6 +39,7 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
     if (tool_viewer_is_open(m.ui.tool_viewer))       return tool_output_viewer(m);
     if (checkpoint_picker_is_open(m.ui.checkpoints)) return checkpoint_picker(m);
     if (rag_settings_is_open(m.ui.rag_settings))     return rag_settings_picker(m);
+    if (settings_is_open(m.ui.settings))             return settings_pane(m);
     if (fork_picker_is_open(m.ui.fork_picker))       return fork_picker_view(m);
     if (pick::is_open(m.ui.diff_review))   return diff_review(m);
     if (pick::is_open(m.ui.todo.open))     return todo_modal(m);
