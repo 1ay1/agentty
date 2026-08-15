@@ -37,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>   // isatty (headless `run` stdin detection)
@@ -70,6 +71,7 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
+#include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -128,6 +130,12 @@ void print_usage() {
         "  hooks [list]      Show configured lifecycle hooks + approval state\n"
         "  hooks approve     Inspect + approve the active hooks file (hooks\n"
         "                    NEVER run unapproved; any change re-gates)\n"
+        "  plugin add|list|remove\n"
+        "                    Manage plugins — a plugin IS an MCP server\n"
+        "                    (any language, mcp.json entry): `agentty plugin\n"
+        "                    add today --python today.py`, `--uvx pkg`,\n"
+        "                    `--npx pkg`, or `-- cmd args`. Tutorial:\n"
+        "                    docs/PLUGINS.md\n"
         "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
         "                    (recall@k / MRR / nDCG per pipeline stage)\n"
         "  version           Print the agentty version and exit\n"
@@ -190,6 +198,7 @@ struct Args {
     std::string cli_mcp_client_id; // mcp-login: pre-registered / CIMD client_id
     std::string cli_run_prompt;    // run: the one-shot prompt (positional)
     std::string cli_run_agent;     // run: --agent explorer|reviewer|…|general
+    std::vector<std::string> plugin_argv;  // plugin: verb + tail, verbatim
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
     bool        bad = false;
@@ -240,6 +249,14 @@ Args parse_args(int argc, char** argv) {
                     break;        // -m/-w/… handled by the outer loop
                 }
             }
+        } else if (a == "plugin") {
+            // `agentty plugin <verb> …` — hand the whole tail to the
+            // plugin CLI verbatim (it owns its own flags: --uvx/--python/
+            // --npx/--/--project/--force).
+            out.subcommand = std::move(a);
+            for (int j = i + 1; j < argc; ++j)
+                out.plugin_argv.emplace_back(argv[j]);
+            return out;
         } else if (a == "airgap") {
             // Hand the remaining argv tail to the airgap subcommand verbatim
             // so it can run its own flag parsing without re-implementing
@@ -355,6 +372,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "status") return auth::cmd_status();
     if (args.subcommand == "skills") return tools::skills::cmd_skills();
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
+    if (args.subcommand == "plugin") return tools::plugin::cli(args.plugin_argv);
     if (args.subcommand == "mcp-login")
         return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata,
                                          args.cli_mcp_client_id);

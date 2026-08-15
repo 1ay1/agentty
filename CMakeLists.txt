@@ -767,6 +767,7 @@ set(AGENTTY_TOOL_SOURCES
     src/tool/skills.cpp
     src/tool/commands.cpp
     src/tool/hooks.cpp
+    src/tool/plugin.cpp
     src/tool/memory_store.cpp
 )
 
@@ -1716,6 +1717,20 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME slash_commands_test COMMAND slash_commands_test)
     set_tests_properties(slash_commands_test PROPERTIES TIMEOUT 30)
 
+    # plugin_config_test — the `agentty plugin` mcp.json editor: round-trip
+    # preservation of foreign keys (other servers, env blocks, the "servers"
+    # spelling, unknown top-level keys), no-clobber-without-force, distinct
+    # not-found, refusal to rewrite unparseable files, and file creation on
+    # first add. Standalone: links just the plugin TU + json.
+    add_executable(plugin_config_test EXCLUDE_FROM_ALL
+        tests/plugin_config_test.cpp
+        src/tool/plugin.cpp
+    )
+    target_include_directories(plugin_config_test PRIVATE include)
+    target_link_libraries(plugin_config_test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME plugin_config_test COMMAND plugin_config_test)
+    set_tests_properties(plugin_config_test PROPERTIES TIMEOUT 30)
+
     # cred_crypt_test — at-rest credential sealing. Forks children to cover
     # the process-global passphrase states independently: v1 machine-only
     # (+ tamper rejection), v2 with a passphrase (argon2id default), v2
@@ -2471,6 +2486,7 @@ if(AGENTTY_BUILD_TESTS)
         turn_settle_test
         hooks_gate_test
         slash_commands_test
+        plugin_config_test
         stream_md_lag_test
         reveal_pacing_test
         reveal_resume_test
