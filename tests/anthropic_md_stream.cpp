@@ -360,7 +360,8 @@ int do_replay(const std::string& in_path,
 // This is what tells us, on REAL recorded bytes, whether the reveal glides.
 int do_det(const std::string& in_path, int width, double floor_cps,
            double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms,
-           long long assert_max_delta, bool adaptive) {
+           long long assert_max_delta, bool adaptive,
+           long long assert_finalize_max, long long assert_finalize_ms) {
     std::vector<Delta> deltas = load_fixture(in_path);
     if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
 
@@ -407,6 +408,18 @@ int do_det(const std::string& in_path, int width, double floor_cps,
     std::size_t di = 0, prev_vis = 0;
     long long max_delta = 0, worst_t = 0, max_delta_all = 0;
     int frame = 0, over24 = 0;
+    // Finalize-glide instrumentation (#5 positive verification): the
+    // streaming gate above deliberately EXCLUDES finalizing frames, so the
+    // end-of-turn contract — a bounded visible glide, never a paste — was
+    // only verified by eyeball. Track the finalize phase separately:
+    //   • fin_max_delta: worst single finalizing-frame reveal. A glide
+    //     paints a few cells/frame; a paste paints the whole backlog.
+    //   • fin_arm_t / fin_land_t: wall-clock from the first finalizing
+    //     frame to the cursor landing (live_ off) — must be bounded by
+    //     the ramp deadline + the settle window (the widget holds live_
+    //     through scramble resolution: settle_window_ms × 2.5 ≈ 940 ms).
+    long long fin_max_delta = 0, fin_worst_t = 0;
+    std::int64_t fin_arm_t = -1, fin_land_t = -1;
     std::println(stderr,
         "→ det replay {} deltas (w={}, cps={}, drain={}s, fx={})",
         deltas.size(), width, floor_cps, drain_secs, fx_on);
@@ -447,6 +460,12 @@ int do_det(const std::string& in_path, int width, double floor_cps,
         if (d > max_delta_all) { max_delta_all = d; }
         if (!md.is_finalizing() && d > max_delta) { max_delta = d; worst_t = t; }
         if (!md.is_finalizing() && d > 24) ++over24;
+        if (md.is_finalizing()) {
+            if (fin_arm_t < 0) fin_arm_t = t;
+            if (d > fin_max_delta) { fin_max_delta = d; fin_worst_t = t; }
+        }
+        if (fin_arm_t >= 0 && fin_land_t < 0 && !md.is_live())
+            fin_land_t = t;
         if (d != 0 || (frame % 30 == 0))
             std::println(stderr,
                 "[{:>6} ms] f={:>4} vis={:>5} d={:+5} src={} clip={} cur={:.0f} cmt={} live={}",
@@ -463,15 +482,49 @@ int do_det(const std::string& in_path, int width, double floor_cps,
         "→ det done: frames={} max_frame_delta={} (@ {} ms) frames_over_24={} "
         "(incl-settle max={})",
         frame, max_delta, worst_t, over24, max_delta_all);
+    std::println(stderr,
+        "→ finalize glide: max_delta={} (@ {} ms) armed@{} ms landed@{} ms "
+        "({} ms arm→land)",
+        fin_max_delta, fin_worst_t, fin_arm_t, fin_land_t,
+        (fin_arm_t >= 0 && fin_land_t >= 0) ? fin_land_t - fin_arm_t : -1);
     // Regression gate: a burst is a single frame that reveals more than
     // assert_max_delta content cells. Ignored during the settle/finalize tail
     // (finalizing frames are the deliberate land-the-tail glide, allowed to
     // move faster). 0 = no assertion (interactive / measurement use).
     if (assert_max_delta > 0 && max_delta > assert_max_delta) {
         std::println(stderr,
-            "FAIL: max_frame_delta {} exceeds cap {} \u2014 the reveal burst "
+            "FAIL: max_frame_delta {} exceeds cap {} — the reveal burst "
             "instead of gliding", max_delta, assert_max_delta);
         return 1;
+    }
+    // #5 positive gates. --assert-finalize-max: even the deliberate
+    // land-the-tail glide must be PACED — a finalizing frame that reveals
+    // the whole backlog at once is the end-of-turn paste the glide was
+    // built to remove. --assert-finalize-ms: the glide must actually LAND
+    // (live_ off) within the bound — catches a wedged ramp (the #2 class)
+    // and an unbounded adaptive stretch (the #1 class).
+    if (assert_finalize_max > 0 && fin_max_delta > assert_finalize_max) {
+        std::println(stderr,
+            "FAIL: finalize-frame delta {} exceeds cap {} — the end-of-turn "
+            "glide pasted instead of gliding",
+            fin_max_delta, assert_finalize_max);
+        return 1;
+    }
+    if (assert_finalize_ms > 0) {
+        if (fin_arm_t < 0 || fin_land_t < 0) {
+            std::println(stderr,
+                "FAIL: finalize glide never {} (armed@{} landed@{}) — the "
+                "ramp wedged instead of landing",
+                fin_arm_t < 0 ? "armed" : "landed", fin_arm_t, fin_land_t);
+            return 1;
+        }
+        if (fin_land_t - fin_arm_t > assert_finalize_ms) {
+            std::println(stderr,
+                "FAIL: finalize glide took {} ms (cap {}) — deadline "
+                "stretched past its contract",
+                fin_land_t - fin_arm_t, assert_finalize_ms);
+            return 1;
+        }
     }
     return 0;
 }
@@ -525,6 +578,8 @@ int main(int argc, char** argv) {
         int    snap_glide = 0;      // 0 = instant snap; >0 = bounded glide ms
         long long assert_max = 0;   // >0 = fail if a streaming frame bursts past it
         bool   adaptive   = false;  // auto-tune floor to wire rate
+        long long assert_fin_max = 0;  // >0 = cap on a finalizing frame's reveal
+        long long assert_fin_ms  = 0;  // >0 = cap on arm→land wall-clock
         for (int i = 3; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--no-fx")  fx_on = false;
@@ -534,11 +589,14 @@ int main(int argc, char** argv) {
             else if (a == "--snap-at" && i + 1 < argc) snap_at = std::atoi(argv[++i]);
             else if (a == "--snap-glide" && i + 1 < argc) snap_glide = std::atoi(argv[++i]);
             else if (a == "--assert-max-delta" && i + 1 < argc) assert_max = std::atoll(argv[++i]);
+            else if (a == "--assert-finalize-max" && i + 1 < argc) assert_fin_max = std::atoll(argv[++i]);
+            else if (a == "--assert-finalize-ms" && i + 1 < argc) assert_fin_ms = std::atoll(argv[++i]);
             else if (a == "--adaptive") adaptive = true;
             else { usage(); return 1; }
         }
         return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at,
-                      snap_glide, assert_max, adaptive);
+                      snap_glide, assert_max, adaptive,
+                      assert_fin_max, assert_fin_ms);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;

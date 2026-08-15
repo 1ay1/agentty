@@ -151,16 +151,12 @@ bool live_tail_reveal_settled(const Model& m) {
         // freeze fires. If they disagree the freeze can stamp a key the
         // live tail never painted (cache MISS) → freeze_range rebuilds the
         // run under FrozenBuildScope (show_all) at a possibly different
-        // height → the seam shifts and strands a duplicate. is_live() is a
-        // DISTINCT term from the other three: a widget can be live_ with the
-        // reveal cursor already at the edge (reveal_in_progress false, no
-        // ramp, no parse) during a mid-stream pause, so dropping it would
-        // re-open the asymmetry. finish() drops all four together, so once
-        // finalize_turn has settled the tail this returns true immediately.
-        if (cache->streaming->is_live()
-         || cache->streaming->reveal_in_progress()
-         || cache->streaming->is_finalizing()
-         || cache->streaming->is_parsing())
+        // height → the seam shifts and strands a duplicate. The union
+        // (live ∪ finalizing ∪ reveal-gliding ∪ parsing) lives in ONE
+        // place now — maya's StreamingMarkdown::is_animating() — so this
+        // gate, the view's reveal_settled cache-key gate, and the is_idle
+        // settle-skip can never drift apart again.
+        if (cache->streaming->is_animating())
             return false;
     }
     return true;
@@ -837,11 +833,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             // Tick runs settle_message_md once the widget settles itself.
             if (reveal_end_glide_enabled()) {
                 const auto* c = m.ui.view_cache.peek(m.d.current.id, mm.id);
-                if (c && c->streaming
-                    && (c->streaming->is_live()
-                        || c->streaming->is_finalizing()
-                        || c->streaming->reveal_in_progress()
-                        || c->streaming->is_parsing()))
+                if (c && c->streaming && c->streaming->is_animating())
                     continue;
             }
             settle_message_md(m, mm);
