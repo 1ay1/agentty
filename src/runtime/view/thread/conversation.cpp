@@ -265,10 +265,11 @@ void build_live_tail(const Model& m, int& running_turn,
                     const auto* mc = m.ui.view_cache.peek(
                         m.d.current.id, mj.id);
                     if (!mc || !mc->streaming) continue;
-                    if (mc->streaming->is_live()
-                     || mc->streaming->is_finalizing()
-                     || mc->streaming->reveal_in_progress()
-                     || mc->streaming->is_parsing())
+                    // One authoritative predicate (see is_animating() in
+                    // maya) — MUST stay the exact mirror of
+                    // live_tail_reveal_settled's gate, which now also
+                    // calls it.
+                    if (mc->streaming->is_animating())
                         return false;
                 }
                 return true;

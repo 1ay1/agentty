@@ -216,6 +216,33 @@ Plus two hardenings: the O(1) append-proof in `set_content` samples a third
 "unchanged", and `finish()`/`set_live(false)`/settle all clear the new ramp
 state so no path leaks `finalize_hard_`.
 
+### Verification hardening (same sweep, follow-up)
+
+The fixes above initially shipped with only *negative* verification (nothing
+broke). Three additions make them positively enforced:
+
+- **Finalize-glide gates in the det harness**: `--assert-finalize-max N`
+  (no finalizing frame reveals > N cells — catches a #5-class end-of-turn
+  paste) and `--assert-finalize-ms M` (the ramp must LAND — `live_` off —
+  within M ms of arming; catches a wedged ramp (#2 class) and an unbounded
+  deadline stretch (#1 class)). Wired into `reveal_stream_gate` (caps 40 /
+  3600 ms; measured healthy: 8–14 cells, 1150–1750 ms) and a new
+  `reveal_stream_gate_prod` arm that runs the SHIPPED pacing
+  (45 cps / 0.40 s / adaptive) instead of the harness default.
+- **`reveal_resume_test`** (ctest): drives the real widget on the frozen
+  clock across the three timing edges steady streaming never crosses —
+  mid-message finalize then resume (must disarm + restore the jitter-buffer
+  lag), hard snap against a ~600 cp backlog (must land by the 150 ms
+  deadline), and an 8 s FRAMELESS idle gap then a chunk (per-frame step must
+  stay glide-sized). Mutation-tested: reverting any one of the three widget
+  fixes fails exactly its check.
+- **One settle predicate**: the four-way union (live ∥ finalizing ∥
+  reveal-gliding ∥ parsing) that was hand-mirrored across
+  `live_tail_reveal_settled`, the view's `reveal_settled` cache-key gate,
+  the is_idle settle-skip, and the frame re-arm is now a single widget
+  method, `StreamingMarkdown::is_animating()`. The "MUST agree" comments
+  are enforced by construction instead of by review.
+
 ## The block-boundary pop — FIXED (maya 4c47249)
 
 For a while a completed block popped into view whole in one frame at a block

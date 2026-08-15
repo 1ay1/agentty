@@ -1857,6 +1857,19 @@ if(AGENTTY_BUILD_TESTS)
     add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
     set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
 
+    # reveal_resume_test — property test for the finalize-ramp DISARM and
+    # clock-carry seams from the reveal audit (docs/STREAMING_REVEAL.md
+    # "Audit fixes" #1/#2/#3): a mid-message finalize must disarm when the
+    # stream resumes at the edge (no wedged ramp-mode cruise), a hard
+    # snap_reveal_to_edge deadline must be honoured against a big backlog
+    # (no adaptive stretch), and a chunk arriving after a long FRAMELESS
+    # idle gap must glide out, not drain the stale µs clock as a paste.
+    # Drives the real StreamingMarkdown widget on the frozen test clock.
+    add_executable(reveal_resume_test EXCLUDE_FROM_ALL tests/reveal_resume_test.cpp)
+    target_link_libraries(reveal_resume_test PRIVATE maya::maya)
+    add_test(NAME reveal_resume_test COMMAND reveal_resume_test)
+    set_tests_properties(reveal_resume_test PROPERTIES TIMEOUT 60)
+
     # stream_async_freeze_test — reproduces the long-turn "md streaming
     # stops partway, fine again next turn" freeze and pins the fix. Drives
     # StreamingMarkdown directly at the cached_markdown_for seam: a >=16 KB
@@ -2300,11 +2313,34 @@ if(AGENTTY_BUILD_TESTS)
     # mid-stream settle-relive, tool-boundary paste). See docs/STREAMING_REVEAL.md.
     # Cap 40: normal gliding frames sit ≤12; 40 leaves headroom for a wide
     # CJK/emoji cell landing while still catching the +100-class paste.
+    # The finalize gates (#5 positive verification) assert the END-OF-TURN
+    # glide too: no finalizing frame may reveal >40 cells (a paste), and the
+    # ramp must LAND (live_ off) within 3600 ms of arming — worst legal is
+    # the 2500 ms adaptive-stretch cap + the 940 ms scramble-settle hold
+    # (settle_window_ms × 2.5) + slack. Measured healthy: max_delta 8-14,
+    # arm→land 1150-1750 ms. A wedged ramp (#2 class) or unbounded
+    # deadline stretch (#1 class) fails the ms gate; a finish()-paste
+    # regression (#5) fails the max gate.
     add_test(NAME reveal_stream_gate
              COMMAND anthropic_md_stream det
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic_md_smoke.jsonl
-                     --assert-max-delta 40)
+                     --assert-max-delta 40
+                     --assert-finalize-max 40
+                     --assert-finalize-ms 3600)
     set_tests_properties(reveal_stream_gate PROPERTIES TIMEOUT 120)
+    # Same gates at PRODUCTION pacing (turn.cpp: 45 cps floor, 0.40 s drain,
+    # adaptive) — the shipped configuration, not the harness default. The
+    # larger steady-state backlog (≈wire_cps × 0.40 s) is exactly what made
+    # the old end-of-turn finish() paste visibly worse after the pacing
+    # retune, so this arm is the regression guard for that geometry.
+    add_test(NAME reveal_stream_gate_prod
+             COMMAND anthropic_md_stream det
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/anthropic_md_smoke.jsonl
+                     --cps 45 --drain 0.40 --adaptive
+                     --assert-max-delta 40
+                     --assert-finalize-max 40
+                     --assert-finalize-ms 3600)
+    set_tests_properties(reveal_stream_gate_prod PROPERTIES TIMEOUT 120)
     # Aggregate target so CI can build every ctest-registered binary in one
     # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
     # default `cmake --build` so a plain build stays lean), which means
@@ -2377,6 +2413,7 @@ if(AGENTTY_BUILD_TESTS)
         stream_liveness_test
         stream_md_lag_test
         reveal_pacing_test
+        reveal_resume_test
         stream_async_freeze_test
         reveal_smoothness_probe
         md_shape_sweep

@@ -870,9 +870,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
         !settled && cache.streaming->is_live();
     if (stream_in_motion
         || live_caret
-        || (!settled && cache.streaming->reveal_in_progress())
-        || cache.streaming->is_finalizing()
-        || cache.streaming->is_parsing()) {
+        || cache.streaming->is_animating()) {
         ::maya::request_animation_frame();
     }
 
@@ -1903,11 +1901,7 @@ maya::Turn::Config turn_config_for_assistant_run(
         // whether or not text has committed — a message can have a
         // settled text prefix with the widget still live_ during the
         // finalize ramp, so DON'T gate this on text being non-empty.
-        if (mc && mc->streaming
-            && (mc->streaming->is_live()
-             || mc->streaming->is_finalizing()
-             || mc->streaming->reveal_in_progress()
-             || mc->streaming->is_parsing()))
+        if (mc && mc->streaming && mc->streaming->is_animating())
             return false;
         return true;
     };
