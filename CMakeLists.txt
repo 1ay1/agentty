@@ -793,6 +793,8 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/codeblock.cpp
     src/runtime/app/update/checkpoint.cpp
     src/runtime/app/update/rag_settings.cpp
+    src/runtime/app/update/settings.cpp
+    src/runtime/settings_items.cpp
     src/runtime/app/update/fork.cpp
     src/runtime/app/update/diff.cpp
     src/runtime/app/update/meta.cpp
@@ -831,6 +833,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/changes_strip.cpp
     src/runtime/view/pickers.cpp
     src/runtime/view/rag_settings_view.cpp
+    src/runtime/view/settings_view.cpp
     src/runtime/view/fork_view.cpp
     src/runtime/view/diff_review.cpp
     src/runtime/view/login.cpp

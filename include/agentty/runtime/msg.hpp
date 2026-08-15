@@ -592,6 +592,14 @@ struct RagSettingsMove   { int delta; };   // move the row cursor
 struct RagSettingsAdjust {};               // select the highlighted mode
 struct RagSettingsReset  {};               // back to default (On)
 
+// ── Settings pane (Ctrl+K → Settings) ────────────────────────
+// Two-column hub over plugins/commands/agents/hooks + the live toggles.
+struct OpenSettings   {};
+struct CloseSettings  {};
+struct SettingsMove   { int delta; };  // move cursor in the FOCUSED column
+struct SettingsFocus  { int delta; };  // switch column (←/→/Tab)
+struct SettingsActivate {};            // Enter on the focused item
+
 // ── Fork picker ───────────────────────────────────────────────────────
 // Branch the current thread into a new one and choose how the carried-over
 // history is summarized (verbatim, or any CompactionStyle). ForkThread does
@@ -760,6 +768,10 @@ using RagSettingsMsg = std::variant<
     OpenRagSettings, CloseRagSettings, RagSettingsMove,
     RagSettingsAdjust, RagSettingsReset>;
 
+using SettingsMsg = std::variant<
+    OpenSettings, CloseSettings, SettingsMove, SettingsFocus,
+    SettingsActivate>;
+
 using ForkMsg = std::variant<
     OpenForkPicker, CloseForkPicker, ForkPickerMove, ForkThread>;
 
@@ -813,6 +825,7 @@ using Msg = std::variant<
     msg::CodeBlockMsg,
     msg::CheckpointMsg,
     msg::RagSettingsMsg,
+    msg::SettingsMsg,
     msg::ForkMsg,
     msg::TodoMsg,
     msg::LoginMsg,
@@ -909,7 +922,7 @@ static_assert(leaf_domain_count<Tick>()                      == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 17,
+static_assert(std::variant_size_v<Msg> == 18,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

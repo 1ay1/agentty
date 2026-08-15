@@ -252,6 +252,37 @@ std::optional<Msg> on_rag_settings(const KeyEvent& ev) {
     return std::nullopt;
 }
 
+// Settings pane. Two columns: ←/→ (or Tab/Shift+Tab) switch column,
+// ↑↓/j/k move within it, Enter acts on the focused row, Esc/q closes.
+// h/l double as ←/→ (vim). ← from the items column returns focus to the
+// categories rather than closing — Esc is the single close key.
+std::optional<Msg> on_settings(const KeyEvent& ev) {
+    if (std::holds_alternative<SpecialKey>(ev.key)) {
+        switch (std::get<SpecialKey>(ev.key)) {
+            case SpecialKey::Escape:   return CloseSettings{};
+            case SpecialKey::Up:       return SettingsMove{-1};
+            case SpecialKey::Down:     return SettingsMove{+1};
+            case SpecialKey::Left:     return SettingsFocus{-1};
+            case SpecialKey::Right:    return SettingsFocus{+1};
+            case SpecialKey::Tab:      return SettingsFocus{+1};
+            case SpecialKey::Enter:    return SettingsActivate{};
+            default: break;
+        }
+    }
+    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+        switch (ck->codepoint) {
+            case U'k': case U'K': return SettingsMove{-1};
+            case U'j': case U'J': return SettingsMove{+1};
+            case U'h': case U'H': return SettingsFocus{-1};
+            case U'l': case U'L': return SettingsFocus{+1};
+            case U' ':            return SettingsActivate{};
+            case U'q': case U'Q': return CloseSettings{};
+            default: break;
+        }
+    }
+    return std::nullopt;
+}
+
 // Fork picker. ↑↓/j/k choose the summary style; Enter forks with it; Esc/q
 // close. A pure list — each row is a distinct "how to summarize the fork."
 std::optional<Msg> on_fork_picker(const KeyEvent& ev) {
@@ -790,6 +821,7 @@ Sub<Msg> subscribe(const Model& m) {
     const bool in_toolview = tool_viewer_is_open(m.ui.tool_viewer);
     const bool in_checkpoints = checkpoint_picker_is_open(m.ui.checkpoints);
     const bool in_rag_settings = rag_settings_is_open(m.ui.rag_settings);
+    const bool in_settings = settings_is_open(m.ui.settings);
     const bool in_fork = fork_picker_is_open(m.ui.fork_picker);
     const bool in_models  = pick::is_open(m.ui.model_picker);
     const bool in_providers = pick::is_open(m.ui.provider_picker);
@@ -843,6 +875,7 @@ Sub<Msg> subscribe(const Model& m) {
             if (in_toolview) return on_tool_viewer(ev);
             if (in_checkpoints) return on_checkpoint_picker(ev);
             if (in_rag_settings) return on_rag_settings(ev);
+            if (in_settings) return on_settings(ev);
             if (in_fork) return on_fork_picker(ev);
             if (in_models)  return on_model_picker(ev);
             if (in_providers) return on_provider_picker(ev);
