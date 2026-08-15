@@ -28,18 +28,9 @@ namespace {
 // high-latency / low-bandwidth link, producing the mid-turn lag and
 // the end-of-turn catch-up repaint. We slow the streaming tick when
 // remote (see the cadence block below).
-bool running_over_ssh() {
-    static const bool remote = [] {
-        // Escape hatch: a fast LAN SSH hop doesn't need throttling.
-        if (const char* off = std::getenv("AGENTTY_NO_SSH_THROTTLE");
-            off && off[0] && off[0] != '0')
-            return false;
-        return std::getenv("SSH_CONNECTION") != nullptr
-            || std::getenv("SSH_TTY") != nullptr
-            || std::getenv("SSH_CLIENT") != nullptr;
-    }();
-    return remote;
-}
+// SSH detection moved to app::detail (stream.cpp) so the end-of-turn
+// reveal policy can share it; see internal.hpp. This TU keeps using it
+// via the detail:: declaration.
 
 } // namespace
 
@@ -53,7 +44,7 @@ std::chrono::milliseconds streaming_tick_period() noexcept {
         auto base = maya::ansi::env_supports_synchronized_output()
             ? std::chrono::milliseconds(33)
             : std::chrono::milliseconds(100);
-        if (running_over_ssh())
+        if (detail::running_over_ssh())
             return std::max(base, std::chrono::milliseconds(80));
         return base;
     }();

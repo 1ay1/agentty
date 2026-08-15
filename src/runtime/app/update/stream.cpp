@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <ranges>
 #include <span>
 #include <unordered_set>
@@ -71,6 +72,35 @@ constexpr int kMaxTruncationRetries = 2;
 // meta.cpp's deferred settle-freeze can call it once the reveal has
 // drained.
 }  // namespace (close anon for the cross-TU helpers below)
+
+bool running_over_ssh() {
+    static const bool remote = [] {
+        // Escape hatch: a fast LAN SSH hop doesn't need throttling.
+        if (const char* off = std::getenv("AGENTTY_NO_SSH_THROTTLE");
+            off && off[0] && off[0] != '0')
+            return false;
+        return std::getenv("SSH_CONNECTION") != nullptr
+            || std::getenv("SSH_TTY") != nullptr
+            || std::getenv("SSH_CLIENT") != nullptr;
+    }();
+    return remote;
+}
+
+bool reveal_end_glide_enabled() {
+    // Interactive terminals get the bounded end-of-turn glide (the design
+    // contract: end-of-turn is a visible catch-up, never a paste). Over
+    // SSH the frames are too sparse to hold the live height steady
+    // mid-glide, so the immediate-finish path stays (see internal.hpp).
+    // AGENTTY_NO_REVEAL_GLIDE=1 forces the old immediate finish
+    // everywhere — the escape hatch if a terminal misbehaves.
+    static const bool enabled = [] {
+        if (const char* off = std::getenv("AGENTTY_NO_REVEAL_GLIDE");
+            off && off[0] && off[0] != '0')
+            return false;
+        return !running_over_ssh();
+    }();
+    return enabled;
+}
 
 void settle_message_md(Model& m, const Message& msg) {
     auto& cache = m.ui.view_cache.message_md(m.d.current.id, msg.id);
@@ -426,7 +456,31 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
         // only thing lost is the ~200 ms post-stream typewriter glide —
         // exactly the trade agent_session makes.
         if (last.role == Role::Assistant && !last.text.empty()) {
-            settle_message_md(m, last);
+            if (reveal_end_glide_enabled()) {
+                // #5: bounded GLIDE, not a paste. At message_stop the reveal
+                // cursor still holds a steady-state backlog (≈wire_cps ×
+                // drain_secs — with the 0.40 s retune, a line or more).
+                // settle_message_md's finish() would reveal it all in ONE
+                // frame. Instead arm the widget's adaptive finalize ramp:
+                // the cursor sprints to the edge over ~ramp_ms while fx
+                // stays on, the widget flips live_ off on its own once the
+                // tail visually settles, and meta.cpp's deferred
+                // settle-freeze (pending_settle_freeze, gated on
+                // live_tail_reveal_settled — armed by the is_idle path or
+                // re-checked every Tick) runs the now-shape-neutral
+                // settle_message_md + freeze afterwards. Height stays
+                // locked because the ramp is dense-frame animated here
+                // (non-SSH only).
+                auto& cache =
+                    m.ui.view_cache.message_md(m.d.current.id, last.id);
+                if (!cache.streaming)
+                    cache.streaming =
+                        std::make_shared<maya::StreamingMarkdown>();
+                cache.streaming->set_content(last.text);
+                cache.streaming->request_finalize(/*ramp_ms=*/200);
+            } else {
+                settle_message_md(m, last);
+            }
         }
         // Flush any tool_calls whose StreamToolUseEnd never fired — Anthropic
         // normally sends content_block_stop per tool block, but proxies /
@@ -774,6 +828,22 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
              i < m.d.current.messages.size(); ++i) {
             auto& mm = m.d.current.messages[i];
             if (mm.role != Role::Assistant || mm.text.empty()) continue;
+            // #5: on an interactive terminal, let a still-gliding reveal
+            // finish its bounded ramp instead of force-finishing (a paste).
+            // finalize_turn already armed request_finalize on the tail
+            // message; skip any message whose widget is still animating —
+            // the pending_settle_freeze gate below waits for
+            // live_tail_reveal_settled before freezing, and meta.cpp's
+            // Tick runs settle_message_md once the widget settles itself.
+            if (reveal_end_glide_enabled()) {
+                const auto* c = m.ui.view_cache.peek(m.d.current.id, mm.id);
+                if (c && c->streaming
+                    && (c->streaming->is_live()
+                        || c->streaming->is_finalizing()
+                        || c->streaming->reveal_in_progress()
+                        || c->streaming->is_parsing()))
+                    continue;
+            }
             settle_message_md(m, mm);
         }
         // Freeze on the next Tick (meta.cpp), gated on

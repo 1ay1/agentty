@@ -159,6 +159,24 @@ void clear_frozen(Model& m);
 // sizes so the per-frame settled fast-path engages. Defined in stream.cpp.
 void settle_message_md(Model& m, const Message& msg);
 
+// True when agentty is driven over an SSH session (env-sniffed once;
+// AGENTTY_NO_SSH_THROTTLE=1 forces false). Shared by the subscription
+// cadence throttle AND the end-of-turn reveal policy below. Defined in
+// stream.cpp.
+bool running_over_ssh();
+
+// End-of-turn reveal policy: on an interactive (non-SSH) terminal the
+// steady-state reveal backlog (≈wire_cps × drain_secs — a line or more)
+// glides out through the widget's finalize ramp instead of being pasted
+// in one frame by an immediate finish(). The deferred settle-freeze in
+// meta.cpp (gated on live_tail_reveal_settled) then settles + freezes
+// once the widget flips live_ off on its own — the freeze snapshot is
+// still byte-identical to the last live frame. Over SSH/fps=0 the sparse
+// frames can't hold the live height steady mid-glide (height drift →
+// stranded duplicate turn in scrollback), so there the immediate finish
+// stays. Defined in stream.cpp.
+bool reveal_end_glide_enabled();
+
 // live_tail_reveal_settled: true iff EVERY Assistant message in the live
 // tail [frozen_through..end) has fully drained its reveal animation — the
 // widget flipped live_ off, the typewriter cursor reached the live edge,
