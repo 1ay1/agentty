@@ -28,7 +28,12 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             return done(std::move(m));
         },
         [&](CloseSettingsList) -> Step {
+            // Esc returns to the command palette the user opened this from,
+            // rather than dropping straight back to the thread — the
+            // settings pickers are reached via Ctrl+K, so Esc unwinds one
+            // level (picker → palette → thread), matching the mental stack.
             m.ui.settings_list = se::ListClosed{};
+            m.ui.command_palette = palette::Open{};
             return done(std::move(m));
         },
         [&](SettingsListMove& e) -> Step {
