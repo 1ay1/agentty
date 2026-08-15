@@ -159,10 +159,12 @@ void clear_frozen(Model& m);
 // sizes so the per-frame settled fast-path engages. Defined in stream.cpp.
 void settle_message_md(Model& m, const Message& msg);
 
-// True when agentty is driven over an SSH session (env-sniffed once;
-// AGENTTY_NO_SSH_THROTTLE=1 forces false). Shared by the subscription
-// cadence throttle AND the end-of-turn reveal policy below. Defined in
-// stream.cpp.
+// True when agentty is driven over a REMOTE session (env-sniffed once):
+// direct SSH (SSH_CONNECTION/SSH_TTY/SSH_CLIENT), mosh (MOSH_*), or
+// Eternal Terminal (ET_VERSION). AGENTTY_FORCE_REMOTE=1 forces true (a
+// session the sniff can't see); AGENTTY_NO_SSH_THROTTLE=1 forces false (a
+// fast LAN hop). Shared by the subscription cadence throttle AND the
+// end-of-turn reveal policy below. Defined in stream.cpp.
 bool running_over_ssh();
 
 // End-of-turn reveal policy: on an interactive (non-SSH) terminal the
