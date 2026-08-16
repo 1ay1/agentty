@@ -29,6 +29,7 @@
 #include "agentty/runtime/rag_settings.hpp"
 #include "agentty/runtime/settings_list.hpp"
 #include "agentty/runtime/fork_picker.hpp"
+#include "agentty/mcp/plugin_model.hpp"    // mcp::PluginModel (owned in the Model)
 #include "agentty/runtime/tool_output_viewer.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
@@ -208,6 +209,19 @@ struct Model {
         CheckpointPickerState checkpoints;     // Closed | Open{entries, index}
         RagSettingsState    rag_settings;      // Closed | Open{cfg, index}
         SettingsListState   settings_list;     // Closed | Open{concern, index}
+        // Plugins/MCP connection snapshot — OWNED BY THE MODEL, not read from
+        // the global pool at render time. This is the architectural fix for
+        // the recurring "stuck on connecting… / laggy panel" bugs: the view
+        // and visual_hash are contractually pure functions of the Model, so
+        // any UI truth living OUTSIDE the Model (as plugin_model() used to,
+        // reaching into a process-global pool) is invisible to the render
+        // gate and undriveable by the update loop. The connection itself
+        // still lives in the mcp:: ConnectionPool (it owns sockets/child
+        // procs), but its UI-facing VALUE snapshot is mirrored here via the
+        // PluginsUpdated message (Cmd→Msg, exactly like ThreadsLoaded). The
+        // view renders THIS; nothing in the view path calls plugin_model().
+        mcp::PluginModel    plugins;
+        bool                plugins_loading = false;  // a connect/reload Cmd is in flight
         ForkPickerState     fork_picker;       // Closed | Open{index}
         ToolViewerState     tool_viewer;       // Closed | Open{entries, index, viewing}
         // Tail-follow toggle for the tool viewer's LIVE row (row 0). True =

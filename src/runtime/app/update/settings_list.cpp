@@ -7,6 +7,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"   // load_plugins_async
 
 #include <algorithm>
 #include <utility>
@@ -22,11 +23,36 @@ namespace agentty::app::detail {
 
 using maya::overload;
 namespace se = agentty::settings;
+namespace cmdf = agentty::app::cmd;   // cmd_factory (local vars named `cmd` shadow the ns)
 
 Step settings_list_update(Model m, msg::SettingsListMsg sm) {
     return std::visit(overload{
         [&](OpenSettingsList& e) -> Step {
             m.ui.settings_list = se::ListOpen{e.concern, 0};
+            // Opening the Plugins panel is what CONNECTS the servers (and
+            // refreshes the snapshot): the connection is driven by the update
+            // loop, not a lazy side effect of the first tool call. Without
+            // this the panel showed "connecting…" forever until you happened
+            // to send a turn. Fire the async connect; PluginsUpdated lands
+            // the result in m.ui.plugins.
+            if (e.concern == se::Category::Plugins) {
+                m.ui.plugins_loading = true;
+                return {std::move(m), cmdf::load_plugins_async(/*reconnect=*/true)};
+            }
+            return done(std::move(m));
+        },
+        [&](PluginsUpdated& e) -> Step {
+            // The connect/reload finished on a worker. Store the snapshot
+            // (this IS the model delta that repaints the panel — visual_hash
+            // covers m.ui.plugins, so no nonce hack) and clear the spinner.
+            m.ui.plugins = std::move(e.model);
+            m.ui.plugins_loading = false;
+            // Keep the cursor in range if the server/tool count shrank.
+            if (auto* o = settings_list_opened(m.ui.settings_list);
+                o && o->concern == se::Category::Plugins) {
+                const int cnt = static_cast<int>(se::items_for(m, o->concern).size());
+                o->index = std::clamp(o->index, 0, std::max(0, cnt - 1));
+            }
             return done(std::move(m));
         },
         [&](CloseSettingsList) -> Step {
@@ -82,15 +108,13 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     maya::Cmd<Msg> cmd;
                     if (r == tools::plugin::EditResult::Ok) {
                         // Reload OFF the UI thread — the connect handshake
-                        // can take a beat and must never freeze the TUI.
-                        // The config write already happened synchronously,
-                        // so the reload just re-syncs the live pool to disk.
+                        // can take a beat and must never freeze the TUI. The
+                        // config write already happened synchronously; the
+                        // reload re-syncs the pool and PluginsUpdated lands
+                        // the fresh snapshot in m.ui.plugins.
+                        m.ui.plugins_loading = true;
                         cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-                            maya::Cmd<Msg>::task_isolated(
-                                [](std::function<void(Msg)> dispatch) {
-                                    (void)tools::reload_mcp_plugins();
-                                    dispatch(SettingsListReloaded{}); // repaint
-                                }),
+                            cmdf::load_plugins_async(/*reconnect=*/true),
                             set_status_toast(m, "removed plugin '" + row.arg +
                                                 "' — disconnected")});
                     } else {
@@ -121,9 +145,14 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     maya::Cmd<Msg> cmd;
                     if (r == tools::plugin::EditResult::Ok) {
                         tools::invalidate_mcp_catalog();
-                        cmd = set_status_toast(m,
-                            (want_enabled ? "enabled " : "disabled ")
-                            + row.arg + "__" + row.arg2);
+                        // No respawn (only the exclude filter changed), but
+                        // the Model snapshot must reflect the new enabled set
+                        // — re-snapshot the live pool (reconnect=false).
+                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                            cmdf::load_plugins_async(/*reconnect=*/false),
+                            set_status_toast(m,
+                                (want_enabled ? "enabled " : "disabled ")
+                                + row.arg + "__" + row.arg2)});
                     } else {
                         cmd = set_status_toast(m,
                             "could not toggle '" + row.arg2 + "'");
@@ -184,16 +213,6 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             o->cursor += static_cast<int>(clean.size());
             return done(std::move(m));
         },
-        [&](SettingsListReloaded) -> Step {
-            // A background plugin reload just finished. Bump the nonce so the
-            // Model genuinely changes and the TEA loop repaints the panel;
-            // the view re-runs items_for() → plugin_model(), which now
-            // reports the server as connected (or errored) instead of the
-            // stale "connecting…". No-op if the panel was closed meanwhile.
-            if (auto* o = settings_list_opened(m.ui.settings_list))
-                ++o->reload_nonce;
-            return done(std::move(m));
-        },
         [&](SettingsListBackspace) -> Step {
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o || !o->input_active || o->cursor <= 0)
@@ -235,17 +254,8 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // live — no reload needed.
             maya::Cmd<Msg> reload = maya::Cmd<Msg>::none();
             if (r.ok && concern == se::Category::Plugins) {
-                reload = maya::Cmd<Msg>::task_isolated(
-                    [](std::function<void(Msg)> dispatch) {
-                        (void)tools::reload_mcp_plugins();
-                        // The pool is now rebuilt (the new server is
-                        // connected/failed for real). Kick the reducer so
-                        // the Plugins panel re-renders from the fresh
-                        // plugin_model() — otherwise it stays on the stale
-                        // "connecting…" snapshot until the next unrelated
-                        // event, which reads as a permanent hang.
-                        dispatch(SettingsListReloaded{});
-                    });
+                m.ui.plugins_loading = true;
+                reload = cmdf::load_plugins_async(/*reconnect=*/true);
                 r.message += " — connecting…";
             }
             // Re-clamp the (possibly grown) list to the top of the new row.

@@ -2183,6 +2183,14 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(compaction_wire_test)
     set_tests_properties(compaction_wire_test PROPERTIES TIMEOUT 30)
 
+    # plugins_in_model_test — the Plugins panel is a pure function of the Model
+    # (m.ui.plugins), connection driven by Cmd→Msg. Locks the redesign that
+    # ended the recurring "stuck on connecting… / laggy panel" bugs: open arms
+    # loading + returns a Cmd; PluginsUpdated stores the snapshot; items_for is
+    # a pure projection (no live pool call).
+    agentty_add_full_test(plugins_in_model_test)
+    set_tests_properties(plugins_in_model_test PROPERTIES TIMEOUT 30)
+
     # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
     # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
     # a failed CodexLoginDone lands in Failed, and a late result after Esc is
@@ -2549,6 +2557,7 @@ if(AGENTTY_BUILD_TESTS)
         persistence_proactive_test
         transcript_bound_test
         compaction_wire_test
+        plugins_in_model_test
         codex_login_flow_test
         command_palette_test
         code_block_extract_test

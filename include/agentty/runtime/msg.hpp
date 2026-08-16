@@ -604,7 +604,12 @@ struct SettingsListActivate {};
 struct SettingsListAddStart   {};              // `a` — enter the add prompt
 struct SettingsListChar       { char32_t ch; };// typed codepoint
 struct SettingsListPaste      { std::string text; }; // bracketed paste into the add-mode input
-struct SettingsListReloaded   {};              // a background plugin reload finished → repaint
+// The MCP connection snapshot the Plugins panel renders. Dispatched by the
+// load_plugins_async() Cmd when a connect/reload finishes on a worker. The
+// reducer stores it in m.ui.plugins — the SINGLE source the view reads, so
+// the panel is a pure function of the Model (no plugin_model() at render
+// time). Mirrors the ThreadsLoaded{vec} pattern.
+struct PluginsUpdated         { mcp::PluginModel model; };
 struct SettingsListBackspace  {};
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
@@ -781,7 +786,7 @@ using RagSettingsMsg = std::variant<
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
     SettingsListActivate, SettingsListAddStart, SettingsListChar,
-    SettingsListPaste, SettingsListReloaded, SettingsListBackspace,
+    SettingsListPaste, PluginsUpdated, SettingsListBackspace,
     SettingsListSubmitInput, SettingsListCancelInput>;
 
 using ForkMsg = std::variant<

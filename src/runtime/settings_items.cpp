@@ -66,17 +66,23 @@ std::vector<Item> general(const Model& m) {
     return out;
 }
 
-std::vector<Item> plugins() {
-    // Pure projection of the authoritative PluginModel snapshot. No
-    // reconciliation of live-catalog vs config here — the model already
-    // unified them, so a tool can never vanish or duplicate.
+std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) {
+    // Pure projection of the PluginModel snapshot OWNED BY THE MODEL
+    // (m.ui.plugins) — NOT a live plugin_model() call. This keeps items_for
+    // (and therefore the view) a pure function of the Model, so the render
+    // gate + update loop can see every change. No reconciliation here: the
+    // snapshot already unified config vs live catalog.
     std::vector<Item> out;
-    const agentty::mcp::PluginModel model = agentty::mcp::plugin_model();
 
     if (model.servers.empty()) {
         Item i;
-        i.primary   = "(no plugins configured)";
-        i.secondary = "press `a` to add one, or agentty plugin add <name> …";
+        if (loading) {
+            i.primary   = "connecting to plugins…";
+            i.secondary = "reading mcp.json and handshaking servers";
+        } else {
+            i.primary   = "(no plugins configured)";
+            i.secondary = "press `a` to add one, or agentty plugin add <name> …";
+        }
         i.hint      = "docs/PLUGINS.md";
         out.push_back(std::move(i));
         return out;
@@ -201,7 +207,7 @@ std::vector<Item> hooks() {
 std::vector<Item> items_for(const Model& m, Category cat) {
     switch (cat) {
         case Category::General:  return general(m);
-        case Category::Plugins:  return plugins();
+        case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
         case Category::Commands: return commands();
         case Category::Agents:   return agents();
         case Category::Hooks:    return hooks();
