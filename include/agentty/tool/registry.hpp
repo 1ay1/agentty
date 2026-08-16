@@ -122,6 +122,14 @@ struct ToolDef {
 
 [[nodiscard]] const std::vector<ToolDef>& native_registry();
 [[nodiscard]] const std::vector<ToolDef>& registry();
+
+// Race-safe value copy of the current wire catalog. Unlike registry() /
+// wire_tools() — which return a reference into cache-owned memory that a
+// concurrent reload_mcp_plugins() (background thread) can swap out from
+// under the caller — this returns an independent snapshot the caller owns.
+// Use this from any path that might run while a plugin reload is in flight
+// (e.g. the settings picker reading the catalog to list plugin tools).
+[[nodiscard]] std::vector<ToolDef> wire_tools_snapshot();
 [[nodiscard]] const ToolDef* find(std::string_view name);
 
 // The tool set to advertise on the wire for THIS turn. Equals registry()
@@ -149,6 +157,13 @@ struct ToolDef {
 // no restart. Returns the number of servers connected after the reload.
 // Blocking (server handshakes); the TUI runs it off the UI thread.
 [[nodiscard]] std::size_t reload_mcp_plugins();
+
+// Force the wire catalog to re-project on next access WITHOUT re-spawning
+// any server. Used by the per-tool enable/disable toggle: the server stays
+// connected; only the projection filter (config tools.exclude, read live)
+// changes, so a re-spawn would be wasteful and — under rapid toggles —
+// race-prone. Cheap and synchronous; safe to call from the UI thread.
+void invalidate_mcp_catalog();
 
 // ── Live progress sink (thread-local) ────────────────────────────────────
 //

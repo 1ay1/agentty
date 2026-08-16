@@ -199,6 +199,38 @@ int main() {
     for (const auto& t : tools) if (t.name.value == "mcp_get_prompt") get_prompt = &t;
     CHECK(get_prompt != nullptr);
 
+    // ── per-tool live exclude (the enable/disable toggle path) ───────────
+    // Disabling a tool must drop it from the projected catalog WITHOUT a
+    // re-spawn: project_tools reads the config's tools.exclude live, and
+    // mcp_bump_generation() forces the next projection. Rewrite the config
+    // to exclude "add", re-list, and confirm it's gone; then clear the
+    // exclude and confirm it's back — proving the re-spawn-free toggle both
+    // filters and un-filters, with no hang.
+    {
+        auto has_add = []{
+            for (auto& t : mcp::mcp_tools_live())
+                if (t.name.value.find("__add") != std::string::npos
+                    || t.name.value == "add") return true;
+            return false;
+        };
+        CHECK(has_add());                       // present before toggle
+        {
+            std::ofstream f(cfg, std::ios::trunc);
+            f << "{ \"mcpServers\": { \"demo\": { \"command\": \""
+              << server << "\", \"tools\": { \"exclude\": [\"add\"] } } } }\n";
+        }
+        mcp::mcp_bump_generation();
+        CHECK(!has_add());                      // disabled → filtered out
+        {
+            std::ofstream f(cfg, std::ios::trunc);
+            f << "{ \"mcpServers\": { \"demo\": { \"command\": \""
+              << server << "\" } } }\n";
+        }
+        mcp::mcp_bump_generation();
+        CHECK(has_add());                       // re-enabled → back, no hang
+        std::printf("mcp_bridge_test: per-tool live exclude toggles cleanly\n");
+    }
+
     if (g_failures == 0) { std::printf("mcp_bridge_test: all checks passed\n"); return 0; }
     std::fprintf(stderr, "mcp_bridge_test: %d failure(s)\n", g_failures);
     return 1;

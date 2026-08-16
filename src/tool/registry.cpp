@@ -196,6 +196,20 @@ const std::vector<ToolDef>& wire_tools() {
     return snapshot->tools;
 }
 
+std::vector<ToolDef> wire_tools_snapshot() {
+    // Hold the snapshot's shared_ptr across the copy so a concurrent
+    // reload swapping c.current can't free it mid-copy, and RETURN a value
+    // the caller owns — no reference into cache memory escapes. This is the
+    // safe accessor for any thread that may overlap reload_mcp_plugins().
+    auto& cache = wire_cache();
+    std::shared_ptr<const Snapshot> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(cache.mu);
+        snapshot = refresh_wire_cache_locked(cache);
+    }
+    return snapshot->tools;   // deep copy while snapshot keeps it alive
+}
+
 std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external) {
     const auto& catalog = wire_tools();
@@ -248,23 +262,53 @@ unsigned long mcp_generation() noexcept {
 }
 
 std::size_t reload_mcp_plugins() {
-    // Rebuild the MCP pool from the current mcp.json. The bridge installs
-    // the new pool + bumps its generation; the next select_wire_tools /
-    // refresh_wire_cache_locked sees the changed generation and re-projects
-    // the tool surface via mcp_tools_live(). We only need to ensure the
-    // wire cache is marked connected (so it consults the live pool rather
-    // than the cached startup snapshot) — which it already is after any
-    // catalog access, and startup always accesses the catalog once.
-    const std::size_t n = mcp::mcp_reload();
-    // Drop the current published snapshot so the very next catalog build
-    // re-projects immediately (generation changed, so it would rebuild
-    // anyway; this just avoids serving one stale read in a race).
-    {
-        auto& c = wire_cache();
-        std::lock_guard lk(c.mu);
-        c.generation = static_cast<unsigned long>(-1);
+    // Serialize + coalesce reloads. Each plugin add/remove/toggle fires this
+    // on a detached thread; the connect handshake can take seconds (bounded
+    // by the bridge's 15s deadline). Without a guard, rapid toggles (disable
+    // then re-enable) stack multiple reloads that each re-spawn the server
+    // and race on the process-wide pool handle — the observed hang.
+    //
+    // Design: one reload runs at a time (reload_mu). A request that arrives
+    // while a reload is in flight sets `pending` and returns immediately —
+    // the running reload will loop once more to pick up the newer config,
+    // so no edit is ever lost. This is the classic coalescing-worker
+    // pattern: at most one extra pass, never a lost update, never a stack
+    // of concurrent spawns.
+    static std::mutex reload_mu;
+    static std::atomic<bool> pending{false};
+
+    std::unique_lock<std::mutex> lk(reload_mu, std::try_to_lock);
+    if (!lk.owns_lock()) {
+        pending.store(true, std::memory_order_release);
+        return 0;   // the in-flight reload will re-run for our edit
     }
+
+    std::size_t n = 0;
+    do {
+        pending.store(false, std::memory_order_release);
+        n = mcp::mcp_reload();
+        {
+            auto& c = wire_cache();
+            std::lock_guard<std::mutex> clk(c.mu);
+            c.generation = static_cast<unsigned long>(-1);
+        }
+        // If a toggle landed during mcp_reload(), loop once more so the
+        // config it wrote is reflected. Bounded: each pass clears the flag
+        // first, so it only re-runs for edits that arrived AFTER this pass
+        // started reading.
+    } while (pending.load(std::memory_order_acquire));
     return n;
+}
+
+void invalidate_mcp_catalog() {
+    // No re-spawn: bump the pool generation (so refresh_wire_cache_locked
+    // rebuilds) and drop the published snapshot. project_tools re-reads the
+    // live tools.exclude on the rebuild, so an enable/disable toggle takes
+    // effect on the next catalog access with zero server churn.
+    mcp::mcp_bump_generation();
+    auto& c = wire_cache();
+    std::lock_guard<std::mutex> clk(c.mu);
+    c.generation = static_cast<unsigned long>(-1);
 }
 
 } // namespace agentty::tools

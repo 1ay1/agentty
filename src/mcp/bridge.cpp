@@ -696,6 +696,43 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
 std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     std::vector<tools::ToolDef> out;
     bool any_resources = false, any_prompts = false;
+
+    // LIVE exclude: read the current config's per-server tools.exclude here,
+    // at PROJECTION time, rather than trusting only the policy baked at
+    // connect. This makes enabling/disabling a tool a config edit + cache
+    // invalidation — NO server re-spawn — so a toggle can't hang on a
+    // reload/re-connect race. Parsed once per projection (cheap; runs when
+    // the wire catalog rebuilds, not per turn on a warm cache).
+    std::unordered_map<std::string, std::unordered_set<std::string>> live_excl;
+    {
+        std::error_code ec;
+        const fs::path cfg = resolve_config();
+        if (!cfg.empty()) {
+            std::ifstream in(cfg);
+            json doc = json::parse(in, nullptr, /*throw=*/false);
+            const json* servers = nullptr;
+            if (doc.is_object()) {
+                if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
+                    servers = &doc["mcpServers"];
+                else if (doc.contains("servers") && doc["servers"].is_object())
+                    servers = &doc["servers"];
+            }
+            if (servers) {
+                for (auto it = servers->begin(); it != servers->end(); ++it) {
+                    const json& e = it.value();
+                    if (!e.is_object() || !e.contains("tools")) continue;
+                    const json& tj = e["tools"];
+                    if (!tj.is_object() || !tj.contains("exclude")) continue;
+                    const json& ex = tj["exclude"];
+                    if (!ex.is_array()) continue;
+                    auto& set = live_excl[it.key()];
+                    for (const auto& v : ex)
+                        if (v.is_string()) set.insert(v.get<std::string>());
+                }
+            }
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lk(pool->mu);
         for (auto& t : pool->registry.tools()) {
@@ -707,6 +744,10 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
                 ? fallback : policy_it->second;
             if ((!policy.include.empty() && !policy.include.contains(bare))
                 || policy.exclude.contains(bare))
+                continue;
+            // Live per-config exclude (the toggle path).
+            if (auto le = live_excl.find(origin);
+                le != live_excl.end() && le->second.contains(bare))
                 continue;
             out.push_back(make_tool(pool, t, policy));
         }
@@ -964,6 +1005,11 @@ unsigned long mcp_generation() noexcept {
     auto pool = current_pool();
     if (!pool) return 0;
     return pool->generation.load(std::memory_order_relaxed);
+}
+
+void mcp_bump_generation() noexcept {
+    if (auto pool = current_pool())
+        pool->generation.fetch_add(1, std::memory_order_relaxed);
 }
 
 std::size_t mcp_reload() {

@@ -103,6 +103,12 @@ struct ServerLaunch {
 [[nodiscard]] std::vector<tools::ToolDef> mcp_tools_live();
 [[nodiscard]] unsigned long mcp_generation() noexcept;
 
+// Bump the generation WITHOUT touching the connection pool. Signals the
+// registry's wire cache to re-project the tool surface on next access
+// (which re-reads the live tools.exclude in project_tools) — the cheap,
+// re-spawn-free path behind a per-tool enable/disable toggle.
+void mcp_bump_generation() noexcept;
+
 // Live reload: re-read the MCP config from disk and rebuild the process-
 // wide connection pool (spawning newly-added servers, dropping removed
 // ones). Used by the TUI's `agentty plugin add` flow so a plugin becomes
