@@ -113,33 +113,35 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             if (!fork.title.empty() && fork.title.rfind("Fork: ", 0) != 0)
                 fork.title = "Fork: " + fork.title;
 
-            // Summarize ONLY when RAG is off in the fork: with no proactive
-            // retrieval to surface context, the fork needs a clean utility-
-            // model recap. When RAG is on (per-turn or first-turn), the fork
-            // keeps the full transcript verbatim and lets retrieval do the
-            // work — so inherited compaction records stay put in that case.
-            const bool summarize = (choice == fp::Choice::RagOff);
-            if (summarize) fork.compactions.clear();
+            // A fork ALWAYS summarizes — that is the point of forking a
+            // nearly-full thread: reclaim context. The picker's choice is
+            // ONLY the fork's future RAG behaviour (an independent axis),
+            // not whether to summarize. (Previously RAG-on forks landed
+            // VERBATIM — they copied the whole transcript and reclaimed
+            // nothing, so a user forking to escape a full context got a
+            // full context back. That was the bug.) Drop inherited
+            // compaction records: the fresh summary supersedes them.
+            fork.compactions.clear();
 
-            // 3. Switch to the fork (same reset as New/Open thread).
+            // 3. Switch to the fork with a BOUNDED render, exactly like
+            //    New/Open/Rewind thread: rehydrate_frozen seeds only ~2
+            //    screens into the live canvas (older turns live in native
+            //    scrollback, never re-emitted), so switching a long thread
+            //    repaints ~2 screens instead of the ENTIRE transcript.
+            //    (The old path called clear_frozen + reset_inline, which
+            //    re-emitted every message live — the slow full repaint.)
             tools::skills::reset_activations();
             m.ui.view_cache.clear();
-            clear_frozen(m);
             m.d.current = std::move(fork);
             deps().save_thread(m.d.current);
             m.ui.thread_list = pick::Closed{};
+            rehydrate_frozen(m);
+            m.ui.needs_warmup_render = !m.ui.frozen.empty();
 
-            // 4a. RAG-on forks land verbatim — no summary stream.
-            if (!summarize) {
-                auto toast = set_status_toast(
-                    m, std::string{"forked \xc2\xb7 "} + label_of(choice),
-                    std::chrono::seconds{3});
-                return {std::move(m),
-                        Cmd<Msg>::batch(std::move(toast), Cmd<Msg>::reset_inline())};
-            }
-
-            // 4b. RAG-off fork — summarize on the fork with the utility model
-            //     (the cheapest-capable compaction path selects the model).
+            // 4. Summarize on the fork with the utility model (the cheapest-
+            //    capable compaction path selects the model). The wire prefix
+            //    collapses to the recap — which is what actually reclaims
+            //    the context window.
             m.s.compaction_style        = CompactionStyle::Recoverable;
             m.s.compaction_target_index = m.d.current.messages.size();
             m.s.compaction_buffer.clear();
@@ -149,7 +151,8 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             ctx.last_event_at = now;
             m.s.phase      = phase::Streaming{std::move(ctx)};
             m.s.compacting = true;
-            m.s.status = "forking \xc2\xb7 summarizing\xe2\x80\xa6";
+            m.s.status = std::string{"forking \xc2\xb7 summarizing… ("} +
+                         label_of(choice) + ")";
             m.s.status_until = {};
             return {std::move(m),
                     Cmd<Msg>::batch(cmd::launch_stream(m), Cmd<Msg>::reset_inline())};

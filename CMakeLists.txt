@@ -1845,6 +1845,13 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(turn_settle_test)
     set_tests_properties(turn_settle_test PROPERTIES TIMEOUT 30)
 
+    # fork_test — the fork reducer (ForkThread). Pins that a fork ALWAYS
+    # summarizes to reclaim context (not just the RAG-off choice, the old
+    # bug), clears inherited compaction records, and switches to a new
+    # thread with fresh id + forked_from provenance + a per-choice RAG mode.
+    agentty_add_full_test(fork_test)
+    set_tests_properties(fork_test PROPERTIES TIMEOUT 30)
+
     # hooks_gate_test — the lifecycle-hooks CONSENT GATE (the security
     # property the whole hooks design hangs on): an unapproved hooks file
     # NEVER executes, any byte change to an approved file re-gates it,
@@ -2487,6 +2494,7 @@ if(AGENTTY_BUILD_TESTS)
         midrun_wire_test
         stream_liveness_test
         turn_settle_test
+        fork_test
         hooks_gate_test
         slash_commands_test
         plugin_config_test
