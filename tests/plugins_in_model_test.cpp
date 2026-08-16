@@ -104,15 +104,34 @@ int main() {
         check(saw_tool, "projection: populated model renders its tools");
 
         // A CONNECTED server row must read as healthy (Status::Ok), NOT wear
-        // the remove-action badge that looked like an error. The remove
-        // action stays available via the hint, but the badge is health.
+        // the remove-action badge that looked like an error.
         for (const auto& r : rows) {
             if (r.primary == "date") {
                 check(r.status == settings::Item::Status::Ok,
                       "badge: connected server is Status::Ok (healthy, not a red ✕)");
-                check(r.action == settings::Action::RemovePlugin
-                      && r.hint == "remove",
-                      "badge: remove stays available via the action/hint, not the badge");
+                // Enter TOGGLES the whole plugin on/off (reversible), it does
+                // NOT remove — destructive delete is the deliberate `d` key.
+                check(r.action == settings::Action::TogglePlugin,
+                      "interaction: Enter on a plugin toggles it on/off");
+                check(r.on && r.hint == "disable",
+                      "interaction: an enabled plugin shows on + 'disable'");
+            }
+        }
+
+        // A DISABLED server reads as off (Neutral, not an error) and offers
+        // to re-enable.
+        Model off;
+        mcp::ServerState d;
+        d.name = "date";
+        d.disabled = true;
+        d.tools.push_back({"current_date", "", true, false});
+        off.ui.plugins.servers.push_back(std::move(d));
+        for (const auto& r : settings::items_for(off, settings::Category::Plugins)) {
+            if (r.primary == "date") {
+                check(!r.on && r.hint == "enable",
+                      "interaction: a disabled plugin shows off + 'enable'");
+                check(r.status == settings::Item::Status::Neutral,
+                      "badge: a disabled plugin is Neutral (off on purpose, not an error)");
             }
         }
 

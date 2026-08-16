@@ -110,7 +110,12 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
     for (const auto& s : model.servers) {
         Item i;
         i.primary   = s.name;
-        if (!s.error.empty()) {
+        i.on        = !s.disabled;
+        i.arg       = s.name;
+        if (s.disabled) {
+            i.secondary = std::to_string(s.tools.size()) + " tools · disabled";
+            i.status    = Item::Status::Neutral;   // off on purpose — not an error
+        } else if (!s.error.empty()) {
             i.secondary = s.error;
             i.status    = Item::Status::Bad;
         } else if (!s.connected) {
@@ -121,9 +126,10 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
                           std::to_string(s.tools.size()) + " tools active";
             i.status    = Item::Status::Ok;
         }
-        i.hint      = "remove";
-        i.action    = Action::RemovePlugin;
-        i.arg       = s.name;
+        // Enter toggles the WHOLE plugin on/off (reversible). Remove is the
+        // deliberate `d` key — destructive actions aren't the default Enter.
+        i.action    = Action::TogglePlugin;
+        i.hint      = s.disabled ? "enable" : "disable";
         out.push_back(std::move(i));
 
         for (const auto& t : s.tools) {

@@ -129,6 +129,31 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     }
                     return {std::move(m), std::move(cmd)};
                 }
+                case se::Action::TogglePlugin: {
+                    // Enter on a plugin row flips the WHOLE server on/off — a
+                    // reversible `disabled` flag in mcp.json, NOT a delete.
+                    // Enabling spawns + handshakes; disabling drops the
+                    // connection. Either way it changes the live process set,
+                    // so reconnect=true, off the UI thread.
+                    auto path = tools::plugin::config_path(/*project=*/false);
+                    const bool want_disabled = row.on;   // on → turn off
+                    auto r = tools::plugin::set_server_disabled(
+                        path, row.arg, want_disabled);
+                    maya::Cmd<Msg> cmd;
+                    if (r == tools::plugin::EditResult::Ok) {
+                        m.ui.plugins_loading = true;
+                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                            cmdf::load_plugins_async(/*reconnect=*/true),
+                            set_status_toast(m,
+                                (want_disabled ? "disabled plugin '"
+                                               : "enabled plugin '")
+                                + row.arg + "'")});
+                    } else {
+                        cmd = set_status_toast(m,
+                                  "could not toggle '" + row.arg + "'");
+                    }
+                    return {std::move(m), std::move(cmd)};
+                }
                 case se::Action::ToggleTool: {
                     // Enable/disable one tool of a plugin: persist to
                     // mcp.json's tools.exclude, then invalidate the wire
@@ -176,6 +201,38 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 default:
                     return done(std::move(m));
             }
+        },
+        [&](SettingsListRemove) -> Step {
+            // `d` deletes the highlighted plugin — the deliberate, destructive
+            // counterpart to Enter's reversible on/off toggle. Only applies
+            // to a server row (Plugins concern, TogglePlugin action); ignored
+            // on tool sub-rows and every other category.
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o || o->concern != se::Category::Plugins)
+                return done(std::move(m));
+            auto rows = se::items_for(m, o->concern);
+            if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
+                return done(std::move(m));
+            const se::Item& row = rows[static_cast<std::size_t>(o->index)];
+            if (row.action != se::Action::TogglePlugin || row.arg.empty())
+                return done(std::move(m));   // not a server row
+
+            auto path = tools::plugin::config_path(/*project=*/false);
+            auto r = tools::plugin::remove_server(path, row.arg);
+            maya::Cmd<Msg> cmd;
+            if (r == tools::plugin::EditResult::Ok) {
+                m.ui.plugins_loading = true;
+                cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                    cmdf::load_plugins_async(/*reconnect=*/true),
+                    set_status_toast(m, "removed plugin '" + row.arg + "'")});
+            } else {
+                cmd = set_status_toast(m, "could not remove '" + row.arg + "'");
+            }
+            if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+                const int n = static_cast<int>(se::items_for(m, oo->concern).size());
+                oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
+            }
+            return {std::move(m), std::move(cmd)};
         },
         [&](SettingsListAddStart) -> Step {
             auto* o = settings_list_opened(m.ui.settings_list);

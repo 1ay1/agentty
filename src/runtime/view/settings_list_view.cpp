@@ -168,6 +168,10 @@ Element settings_list_picker(const Model& m) {
             keys.push_back(text("a ", fg_of(success)));
             keys.push_back(text("add   ", fg_dim(muted)));
         }
+        if (o->concern == se::Category::Plugins) {
+            keys.push_back(text("d ", fg_of(warn)));
+            keys.push_back(text("remove   ", fg_dim(muted)));
+        }
         keys.push_back(text("esc ", fg_of(fg)));
         keys.push_back(text("close", fg_dim(muted)));
         cfg.footer.push_back(h(std::move(keys)).build());

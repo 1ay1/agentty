@@ -292,6 +292,7 @@ std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active) {
             case U'k': case U'K': return SettingsListMove{-1};
             case U'j': case U'J': return SettingsListMove{+1};
             case U'a': case U'A': return SettingsListAddStart{};
+            case U'd': case U'D': return SettingsListRemove{};
             case U' ':            return SettingsListActivate{};
             case U'q': case U'Q': return CloseSettingsList{};
             default: break;

@@ -135,6 +135,35 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
     return out;
 }
 
+EditResult set_server_disabled(const fs::path& path, const std::string& name,
+                              bool disabled) {
+    Loaded l = load(path);
+    if (!l.existed) return EditResult::NotFound;
+    if (!l.ok) return EditResult::ParseError;
+    const char* key = servers_key(l.doc);
+    if (!l.doc.contains(key) || !l.doc[key].is_object()
+        || !l.doc[key].contains(name))
+        return EditResult::NotFound;
+    json& entry = l.doc[key][name];
+    if (!entry.is_object()) return EditResult::NotFound;
+    const bool cur = entry.value("disabled", false);
+    if (cur == disabled) return EditResult::Ok;   // no-op-Ok
+    if (disabled) entry["disabled"] = true;
+    else          entry.erase("disabled");        // absent == enabled (clean)
+    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+}
+
+bool is_server_disabled(const fs::path& path, const std::string& name) {
+    Loaded l = load(path);
+    if (!l.existed || !l.ok) return false;
+    const char* key = servers_key(l.doc);
+    if (!l.doc.contains(key) || !l.doc[key].is_object()
+        || !l.doc[key].contains(name))
+        return false;
+    const json& entry = l.doc[key][name];
+    return entry.is_object() && entry.value("disabled", false);
+}
+
 EditResult set_tool_enabled(const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
     Loaded l = load(path);
