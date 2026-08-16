@@ -1401,4 +1401,24 @@ std::optional<std::string> mcp_get_prompt(
     return render_prompt(res);
 }
 
+void release_servers() noexcept {
+    // Drop the process-wide pool PROMPTLY on quit, instead of leaving it to
+    // static destruction after main() returns. Two wins:
+    //   1. Teardown happens while the app is still "alive" and visible, not
+    //      during the opaque static-dtor phase where a hang looks like the
+    //      whole process wedged (the "first Ctrl-C doesn't quit" symptom).
+    //   2. The child MCP servers get their stdin closed + SIGTERM now; a
+    //      well-behaved stdio server exits on EOF in ~1ms, so the common
+    //      case is instant. A wedged one is still bounded by ChildProcess's
+    //      own SIGTERM→SIGKILL deadline.
+    // Swap the handle out under the lock, then let the Registry destructor
+    // run OUTSIDE the lock (it terminates each child).
+    PoolHandle drained;
+    {
+        std::lock_guard<std::mutex> lk(g_pool_mu());
+        drained.swap(g_pool_ref());
+    }
+    // `drained` drops here: Registry → providers → ChildProcess teardown.
+}
+
 } // namespace agentty::mcp

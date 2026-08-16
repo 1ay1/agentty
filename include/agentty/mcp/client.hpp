@@ -121,6 +121,12 @@ struct ServerLaunch {
 // re-spawn-free path behind a per-tool enable/disable toggle.
 void mcp_bump_generation() noexcept;
 
+// Promptly tear down all connected MCP servers (close stdin + terminate the
+// child processes) instead of leaving it to static destruction after main().
+// Called on quit so a well-behaved server exits instantly and a wedged one is
+// bounded, rather than making shutdown look like a hang.
+void release_servers() noexcept;
+
 // Every tool a CONNECTED server advertises, as bare names (no mcp__ prefix,
 // no exclude filtering). The single authoritative source for the settings
 // picker's per-plugin tool list: enabled-vs-disabled is then derived purely
