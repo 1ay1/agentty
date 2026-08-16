@@ -607,10 +607,11 @@ struct SettingsListBackspace  {};
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
 
-// ── Fork picker ───────────────────────────────────────────────────────
-// Branch the current thread into a new one and choose how the carried-over
-// history is summarized (verbatim, or any CompactionStyle). ForkThread does
-// the branch; the summary, if any, runs as a compaction on the new thread.
+// ── Fork picker ──────────────────────────────────────────────
+// Branch the current thread into a FRESH one (near-zero context) and choose
+// how proactive RAG behaves in the fork. The parent's transcript is written
+// to disk and the fork carries a read-on-demand pointer to it — no copy, no
+// summary. ForkThread does the branch. See docs/FORK.md.
 struct OpenForkPicker  {};
 struct CloseForkPicker {};
 struct ForkPickerMove  { int delta; };

@@ -300,8 +300,8 @@ std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active) {
     return std::nullopt;
 }
 
-// Fork picker. ↑↓/j/k choose the summary style; Enter forks with it; Esc/q
-// close. A pure list — each row is a distinct "how to summarize the fork."
+// Fork picker. ↑↓/j/k choose the RAG behaviour; Enter forks with it; Esc/q
+// close. A pure list — each row is a distinct RAG mode for the fresh fork.
 std::optional<Msg> on_fork_picker(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         switch (std::get<SpecialKey>(ev.key)) {

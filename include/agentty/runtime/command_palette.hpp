@@ -65,7 +65,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::SmartMode,     "Smart Mode",         "Configure role-based routing — send cheap grunt work to a cheaper model", "Ctrl+S"},
     CommandDef{Command::ResetSmartLearning, "Reset Smart Mode learning", "Forget this repo's learned routing priors + captured decompositions", ""},
     CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn", ""},
-    CommandDef{Command::ForkThread,    "Fork thread",        "Branch this conversation into a new thread — choose how to summarize it", ""},
+    CommandDef{Command::ForkThread,    "Fork thread",        "Branch into a fresh thread with near-zero context — the parent transcript stays readable on demand", ""},
     CommandDef{Command::OpenPlugins,   "Plugins",            "MCP servers (mcp.json) — list & remove; add with `agentty plugin add`", ""},
     CommandDef{Command::OpenCommands,  "Slash commands",     "Discovered /commands — author in .agentty/commands/*.md", ""},
     CommandDef{Command::OpenAgents,    "Subagents",          "Task agent types — built-ins + your .agentty/agents/*.md", ""},
