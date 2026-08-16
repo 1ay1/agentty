@@ -87,8 +87,9 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                         // so the reload just re-syncs the live pool to disk.
                         cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
                             maya::Cmd<Msg>::task_isolated(
-                                [](std::function<void(Msg)>) {
+                                [](std::function<void(Msg)> dispatch) {
                                     (void)tools::reload_mcp_plugins();
+                                    dispatch(NoOp{});   // refresh the panel
                                 }),
                             set_status_toast(m, "removed plugin '" + row.arg +
                                                 "' — disconnected")});
@@ -225,8 +226,15 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             maya::Cmd<Msg> reload = maya::Cmd<Msg>::none();
             if (r.ok && concern == se::Category::Plugins) {
                 reload = maya::Cmd<Msg>::task_isolated(
-                    [](std::function<void(Msg)>) {
+                    [](std::function<void(Msg)> dispatch) {
                         (void)tools::reload_mcp_plugins();
+                        // The pool is now rebuilt (the new server is
+                        // connected/failed for real). Kick the reducer so
+                        // the Plugins panel re-renders from the fresh
+                        // plugin_model() — otherwise it stays on the stale
+                        // "connecting…" snapshot until the next unrelated
+                        // event, which reads as a permanent hang.
+                        dispatch(NoOp{});
                     });
                 r.message += " — connecting…";
             }
