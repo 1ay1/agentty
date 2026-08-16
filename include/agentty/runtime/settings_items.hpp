@@ -49,6 +49,13 @@ struct Item {
     std::string arg2;       // secondary payload (e.g. bare tool name)
     bool        indented = false;  // render as a sub-row (a plugin's tool)
     bool        on = true;         // toggle state (for ToggleTool rows)
+    // Effectively inactive though PRESENT: a tool under a DISABLED (or not-
+    // connected) plugin. Its individual on/off is still shown (◉/○) so you
+    // know what it'll be when the plugin comes back, but the whole row is
+    // dimmed to signal "this can't run right now." Distinct from `on` (the
+    // stored toggle state) so the toggle stays correct while the group reads
+    // as off. Only set on tool sub-rows.
+    bool        inactive = false;
 };
 
 // The rows for one category, live. `m` supplies profile/RAG/Smart state

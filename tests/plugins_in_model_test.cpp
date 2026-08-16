@@ -118,20 +118,51 @@ int main() {
             }
         }
 
-        // A DISABLED server reads as off (Neutral, not an error) and offers
-        // to re-enable.
+        // A DISABLED server reads as off (Neutral, not an error), offers to
+        // re-enable, and KEEPS its tools listed — but marks the whole subtree
+        // inactive (present-but-can't-run), with no per-tool toggle hint.
         Model off;
         mcp::ServerState d;
         d.name = "date";
         d.disabled = true;
         d.tools.push_back({"current_date", "", true, false});
+        d.tools.push_back({"days_between", "", true, false});
         off.ui.plugins.servers.push_back(std::move(d));
+        int tools_seen = 0, inactive_seen = 0;
         for (const auto& r : settings::items_for(off, settings::Category::Plugins)) {
             if (r.primary == "date") {
                 check(!r.on && r.hint == "enable",
                       "interaction: a disabled plugin shows off + 'enable'");
                 check(r.status == settings::Item::Status::Neutral,
                       "badge: a disabled plugin is Neutral (off on purpose, not an error)");
+            }
+            if (r.indented) {   // a tool row under the disabled plugin
+                ++tools_seen;
+                if (r.inactive) ++inactive_seen;
+                check(r.hint.empty(),
+                      "interaction: a tool under a disabled plugin has no toggle hint");
+            }
+        }
+        check(tools_seen == 2,
+              "UX: a disabled plugin STILL lists its tools (got "
+              + std::to_string(tools_seen) + ")");
+        check(inactive_seen == 2,
+              "UX: every tool under a disabled plugin is marked inactive (dimmed)");
+
+        // An ENABLED, connected plugin's tools are ACTIVE (not dimmed) and
+        // toggleable.
+        Model live;
+        mcp::ServerState ls;
+        ls.name = "date";
+        ls.connected = true;
+        ls.tools.push_back({"current_date", "", true, false});
+        live.ui.plugins.servers.push_back(std::move(ls));
+        for (const auto& r : settings::items_for(live, settings::Category::Plugins)) {
+            if (r.indented) {
+                check(!r.inactive,
+                      "UX: a tool under a connected plugin is active (not dimmed)");
+                check(r.hint == "disable",
+                      "interaction: an active enabled tool toggles to 'disable'");
             }
         }
 

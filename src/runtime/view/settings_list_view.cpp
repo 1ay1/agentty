@@ -137,11 +137,14 @@ Element settings_list_picker(const Model& m) {
             const char* box   = it.on ? "\xe2\x97\x89" : "\xe2\x97\x8b"; // ◉ / ○
             row.badge       = std::string("  ") + elbow + box;
             // Connector + box are structural — dim; the tool NAME carries the
-            // on/off emphasis (bright when on, dim when off), so the eye
-            // follows the tree lightly and lands on what's enabled.
+            // on/off emphasis. But when the tool is INACTIVE (its plugin is
+            // disabled/not connected) the WHOLE subtree greys out — name and
+            // all — so it reads as "present but can't run," no matter each
+            // tool's individual state. `adding` also dims everything.
+            const bool dim = adding || it.inactive;
             row.badge_style = fg_dim(muted);
             row.leading       = it.primary;
-            row.leading_style = fg_of(adding ? muted : (it.on ? fg : muted));
+            row.leading_style = fg_of(dim ? muted : (it.on ? fg : muted));
         } else {
             row.badge       = b.glyph;
             row.badge_style = fg_of(adding ? muted : b.color);
