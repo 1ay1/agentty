@@ -116,33 +116,140 @@ fs::path threads_dir() {
 
 static std::string role_to_string(Role r);
 
-fs::path write_thread_transcript_md(const Thread& t) {
-    // Clean transcript: "## user" / "## assistant" headers + the text,
-    // tool calls collapsed to a single `› tool(name)` line. None of the
-    // <id>.json noise (ids, timestamps, streaming scaffolding). Small and
-    // readable so the model can `read` it (and grep/slice it) cheaply.
-    std::ostringstream md;
-    md << "# Transcript: " << (t.title.empty() ? t.id.value : t.title) << "\n";
-    md << "# (" << t.messages.size() << " messages; read/grep as needed)\n\n";
-    for (const auto& m : t.messages) {
-        const std::string role = role_to_string(m.role);
-        md << "## " << role << "\n";
-        if (!m.text.empty()) md << m.text << "\n";
-        for (const auto& tc : m.tool_calls) {
-            md << "› tool(" << tc.name.value << ")";
-            // A short arg hint if present, one line, bounded.
-            if (!tc.args.is_null()) {
-                std::string a = tc.args.dump();
-                if (a.size() > 120) a = a.substr(0, 120) + "…";
-                md << " " << a;
-            }
-            md << "\n";
-        }
-        md << "\n";
+namespace {
+
+// Transcript budgets. The transcript is a fork's on-disk memory of its
+// parent: the model READS it on demand (paginated / greppable), so it must
+// stay a bounded, useful artifact even when the parent thread is enormous
+// (a 1M-token agentic run). Two independent caps:
+//
+//   • kMaxMsgTextBytes  — one giant pasted/emitted `text` block can't
+//     dominate; it's clipped head+tail with a "… N bytes elided …" marker.
+//   • kMaxTranscriptBytes — total output ceiling. When the whole thread
+//     doesn't fit we keep the MOST RECENT turns (the ones a fork is most
+//     likely to need) and drop the oldest, noting how many we elided.
+//
+// Bounding the OUTPUT also bounds peak memory: the in-RAM string is at most
+// ~kMaxTranscriptBytes, so there's no unbounded ostringstream on a fork of a
+// runaway thread. Tool OUTPUT is never written (only name + a 120-char arg
+// hint), which already strips the heaviest bytes of a long thread.
+constexpr std::size_t kMaxMsgTextBytes     = 16 * 1024;    // 16 KB / message
+constexpr std::size_t kMaxTranscriptBytes  = 512 * 1024;   // 512 KB total
+
+// Clip a text block to a byte budget, keeping a head and a tail (the ends
+// carry the most signal — a question's ask + its conclusion) and marking
+// the gap. UTF-8-safe: cuts land on codepoint boundaries so the .md never
+// contains a truncated multibyte sequence.
+std::string clip_text(const std::string& s, std::size_t budget) {
+    if (s.size() <= budget) return s;
+    const std::size_t head = budget * 3 / 4;       // 75% head, 25% tail
+    const std::size_t tail = budget - head;
+    const std::size_t hcut = tools::util::safe_utf8_cut(s, head);
+    // Tail start: back off `tail` bytes from the end, then forward to the
+    // next codepoint boundary so we never begin mid-sequence.
+    std::size_t tstart = s.size() > tail ? s.size() - tail : 0;
+    while (tstart < s.size() && (static_cast<unsigned char>(s[tstart]) & 0xC0) == 0x80)
+        ++tstart;
+    const std::size_t elided = tstart > hcut ? tstart - hcut : 0;
+    std::string out;
+    out.reserve(hcut + (s.size() - tstart) + 48);
+    out.append(s, 0, hcut);
+    out.append("\n… [").append(std::to_string(elided)).append(" bytes elided] …\n");
+    out.append(s, tstart, std::string::npos);
+    return out;
+}
+
+// Render ONE message to its transcript chunk (header + clipped text +
+// collapsed tool lines). Synthetic view-only cards with no content
+// (smart_routing) are skipped entirely — they'd be empty noise. Returns an
+// empty string for a message that contributes nothing.
+std::string render_message_md(const Message& m) {
+    if (m.smart_routing) return {};   // zero-content routing telemetry
+    std::string chunk = "## ";
+    chunk += role_to_string(m.role);
+    chunk += '\n';
+    bool any = false;
+    if (!m.text.empty()) {
+        chunk += clip_text(tools::util::to_valid_utf8(m.text), kMaxMsgTextBytes);
+        chunk += '\n';
+        any = true;
     }
+    for (const auto& tc : m.tool_calls) {
+        chunk += "› tool(";
+        chunk += tc.name.value;
+        chunk += ')';
+        if (!tc.args.is_null()) {
+            std::string a = tc.args.dump();
+            if (a.size() > 120) { a.resize(tools::util::safe_utf8_cut(a, 120)); a += "…"; }
+            chunk += ' ';
+            chunk += a;
+        }
+        chunk += '\n';
+        any = true;
+    }
+    if (!any) return {};   // e.g. an empty assistant placeholder
+    chunk += '\n';
+    return chunk;
+}
+
+} // namespace
+
+fs::path write_thread_transcript_md(const Thread& t) {
+    // Clean, BOUNDED transcript: "## user" / "## assistant" headers + the
+    // (clipped) text, tool calls collapsed to a single `› tool(name)` line.
+    // None of the <id>.json noise. Small and greppable so a fork can `read`
+    // it cheaply; recency-biased + size-capped so even a huge parent thread
+    // yields a useful artifact instead of a multi-MB file.
+    //
+    // Two-pass for recency bias: render newest→oldest, accumulating until the
+    // total budget is hit, then emit the kept slice oldest→newest (natural
+    // reading order) with an elision marker if we dropped the oldest turns.
+    std::vector<std::string> kept;   // newest-first while building
+    std::size_t used = 0;
+    std::size_t kept_count = 0;
+    bool truncated = false;
+    for (auto it = t.messages.rbegin(); it != t.messages.rend(); ++it) {
+        std::string chunk = render_message_md(*it);
+        if (chunk.empty()) continue;
+        if (used + chunk.size() > kMaxTranscriptBytes && !kept.empty()) {
+            // Budget hit and we already have at least the newest turn — stop.
+            // (The `!kept.empty()` guard guarantees we ALWAYS keep the most
+            // recent contentful message even if it alone exceeds the budget;
+            // its own text was already clipped to kMaxMsgTextBytes.)
+            truncated = true;
+            break;
+        }
+        used += chunk.size();
+        ++kept_count;
+        kept.push_back(std::move(chunk));
+    }
+
+    std::string md;
+    md.reserve(used + 256);
+    md += "# Transcript: ";
+    md += (t.title.empty() ? t.id.value : t.title);
+    md += '\n';
+    md += "# (";
+    md += std::to_string(t.messages.size());
+    md += " messages total";
+    if (truncated) {
+        md += "; showing the ";
+        md += std::to_string(kept_count);
+        md += " most recent — read the parent thread for older turns";
+    }
+    md += "; read/grep as needed)\n\n";
+    if (truncated) {
+        md += "_[… older turns elided to keep this transcript bounded; the ";
+        md += "newest ";
+        md += std::to_string(kept_count);
+        md += " messages follow …]_\n\n";
+    }
+    // Emit oldest→newest (reverse of the newest-first `kept`).
+    for (auto it = kept.rbegin(); it != kept.rend(); ++it) md += *it;
+
     // Write next to the thread files under a stable, discoverable name.
     const fs::path out = threads_dir() / (t.id.value + ".transcript.md");
-    if (!write_json_atomic(out, md.str())) return {};
+    if (!write_json_atomic(out, md)) return {};
     return out;
 }
 

@@ -2164,6 +2164,15 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(persistence_proactive_test)
     set_tests_properties(persistence_proactive_test PROPERTIES TIMEOUT 30)
 
+    # transcript_bound_test — write_thread_transcript_md is BOUNDED, recency-
+    # biased, and correct. A fork's on-disk parent memory must stay a small,
+    # useful, greppable artifact even for a 1M-token thread: total size cap,
+    # newest-turns-kept elision, per-message head+tail clip, tool-output
+    # never written, smart_routing skipped, UTF-8-safe. Drives the public
+    # writer against an isolated $HOME and asserts on the produced .md.
+    agentty_add_full_test(transcript_bound_test)
+    set_tests_properties(transcript_bound_test PROPERTIES TIMEOUT 30)
+
     # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
     # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
     # a failed CodexLoginDone lands in Failed, and a late result after Esc is
@@ -2528,6 +2537,7 @@ if(AGENTTY_BUILD_TESTS)
         proactive_deferred_test
         tool_stream_snapshot_test
         persistence_proactive_test
+        transcript_bound_test
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
