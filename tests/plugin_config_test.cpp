@@ -12,6 +12,8 @@
 #include <fstream>
 #include <print>
 #include <string>
+#include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <process.h>
@@ -235,6 +237,100 @@ void server_enable_disable(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// A hand-edited malformed `disabled` (string, not bool) must NOT throw —
+// is_server_disabled and set_server_disabled must fail-open (treat as false).
+void malformed_disabled_no_throw(const fs::path& dir) {
+    std::println("--- malformed_disabled_no_throw ---");
+    const fs::path cfg = dir / "bad" / "mcp.json";
+    write_file(cfg,
+        R"({"mcpServers":{"date":{"command":"/x","disabled":"true"}}})");
+    // Reading a string `disabled` must not throw and reads as "not disabled".
+    bool threw = false;
+    try {
+        check(!plug::is_server_disabled(cfg, "date"),
+              "string disabled reads as not-disabled (fail-open)");
+    } catch (...) { threw = true; }
+    check(!threw, "is_server_disabled does not throw on a string flag");
+    // Toggling it must succeed and REPLACE the bad value with a real bool.
+    threw = false;
+    try {
+        check(plug::set_server_disabled(cfg, "date", true) == plug::EditResult::Ok,
+              "toggle over a malformed flag succeeds");
+    } catch (...) { threw = true; }
+    check(!threw, "set_server_disabled does not throw on a string flag");
+    check(read_json(cfg)["mcpServers"]["date"]["disabled"] == true,
+          "malformed flag replaced by a real bool");
+    std::println("PASS\n");
+}
+
+// A non-object server entry (e.g. `"date": "just a string"`) must not throw.
+void non_object_entry_no_throw(const fs::path& dir) {
+    std::println("--- non_object_entry_no_throw ---");
+    const fs::path cfg = dir / "nonobj" / "mcp.json";
+    write_file(cfg, R"({"mcpServers":{"date":"just a string"}})");
+    bool threw = false;
+    try {
+        check(plug::set_server_disabled(cfg, "date", true)
+                  == plug::EditResult::NotFound,
+              "non-object entry → NotFound, no throw");
+        check(!plug::is_server_disabled(cfg, "date"),
+              "non-object entry is_server_disabled false");
+    } catch (...) { threw = true; }
+    check(!threw, "non-object entry never throws");
+    std::println("PASS\n");
+}
+
+// Concurrent mutations on detached threads must not lose updates or corrupt
+// the file (the mutation_mutex + unique temp guarantee).
+void concurrent_mutations_safe(const fs::path& dir) {
+    std::println("--- concurrent_mutations_safe ---");
+    const fs::path cfg = dir / "conc" / "mcp.json";
+    // Seed N servers.
+    constexpr int N = 24;
+    for (int i = 0; i < N; ++i)
+        (void)plug::add_server(cfg, {"s" + std::to_string(i), "/x", {}}, false);
+
+    // Hammer: each thread disables a distinct server concurrently.
+    std::vector<std::thread> ts;
+    for (int i = 0; i < N; ++i)
+        ts.emplace_back([&, i]{
+            (void)plug::set_server_disabled(cfg, "s" + std::to_string(i), true);
+        });
+    for (auto& t : ts) t.join();
+
+    // The file must still be valid JSON — no torn/interleaved write.
+    json j = read_json(cfg);
+    check(!j.is_discarded(), "file is still valid JSON after concurrent writes");
+    // EVERY disable must have landed (no lost update).
+    int disabled = 0;
+    for (int i = 0; i < N; ++i)
+        if (plug::is_server_disabled(cfg, "s" + std::to_string(i))) ++disabled;
+    check(disabled == N,
+          "all " + std::to_string(N) + " concurrent disables landed (got "
+          + std::to_string(disabled) + ")");
+    std::println("PASS\n");
+}
+
+// A symlinked mcp.json must be written THROUGH (target updated), not replaced
+// by a regular file (which would orphan the user's dotfile symlink).
+void symlink_written_through(const fs::path& dir) {
+    std::println("--- symlink_written_through ---");
+    const fs::path real = dir / "sym" / "real.json";
+    const fs::path link = dir / "sym" / "mcp.json";
+    write_file(real, R"({"mcpServers":{}})");
+    std::error_code ec;
+    fs::create_symlink(real, link, ec);
+    if (ec) { std::println("  (skip: symlinks unsupported here)\nPASS\n"); return; }
+
+    check(plug::add_server(link, {"date", "/x", {}}, false) == plug::EditResult::Ok,
+          "add via symlink succeeds");
+    check(fs::is_symlink(link), "mcp.json is STILL a symlink after the write");
+    check(read_json(real).contains("mcpServers")
+          && read_json(real)["mcpServers"].contains("date"),
+          "the write landed in the symlink TARGET");
+    std::println("PASS\n");
+}
+
 int main() {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
@@ -251,6 +347,10 @@ int main() {
     list_reads_back(sandbox);
     tool_enable_disable(sandbox);
     server_enable_disable(sandbox);
+    malformed_disabled_no_throw(sandbox);
+    non_object_entry_no_throw(sandbox);
+    concurrent_mutations_safe(sandbox);
+    symlink_written_through(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);
