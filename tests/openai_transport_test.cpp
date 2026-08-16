@@ -633,6 +633,109 @@ static void test_endpoint_presets() {
     }
 }
 
+// ── provider_display_name: URL-form labels collapse to host[:port] ──
+// A custom OpenAI-compatible host entered as "https://chat.example.org/api"
+// has Endpoint::label == the full URL (see Endpoint::from_spec, transport.cpp).
+// The badge/toast should read "chat.example.org", not the long URL. Default
+// port for the scheme is omitted; a non-default port is kept ("host:port").
+static void test_provider_display_name_url_label() {
+    namespace P = agentty::provider;
+    using oai::Endpoint;
+
+    {
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("https://chat.example.org/api");
+        // Sanity: from_spec built the URL-form endpoint as designed.
+        CHECK(s.openai_endpoint.host == "chat.example.org");
+        CHECK(s.openai_endpoint.port == 443);
+        CHECK(s.openai_endpoint.use_tls);
+        CHECK(s.openai_endpoint.path == "/api/chat/completions");
+        // label stays the full URL (preset lookup keys on it); display collapses.
+        CHECK(s.openai_endpoint.label == "https://chat.example.org/api");
+        CHECK(P::provider_display_name(s) == "chat.example.org");
+    }
+    {
+        // Non-default https port: keep host:port.
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("https://host:9000/prefix/");
+        CHECK(P::provider_display_name(s) == "host:9000");
+    }
+    {
+        // http:// with non-default port: keep host:port (80 IS default for http,
+        // so http://host:80 → "host", not "host:80").
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("http://10.0.0.5:5000");
+        CHECK(P::provider_display_name(s) == "10.0.0.5:5000");
+    }
+    {
+        // http:// with default port 80: collapse to bare host.
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("http://10.0.0.5:80");
+        CHECK(P::provider_display_name(s) == "10.0.0.5");
+    }
+    {
+        // Bare host[:port] (no scheme) label is unchanged: passes through.
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("my.host:8080");
+        CHECK(s.openai_endpoint.label == "my.host:8080");
+        CHECK(P::provider_display_name(s) == "my.host:8080");
+    }
+}
+
+// ── TUI custom-host submit: the spec string must round-trip unchanged ──
+// login_submit's CustomHostInput arm used to strip the URL scheme and trim
+// the path, which broke https://host/api → /v1/chat/completions. After the
+// fix the raw spec flows into parse_selection → from_spec. This pins the
+// contract for the specs the TUI must accept: every URL form a CLI user
+// can pass via --provider, plus bare host[:port].
+static void test_tui_custom_host_specs() {
+    namespace P = agentty::provider;
+
+    // The exact spec the user reported broken.
+    {
+        auto sel = P::parse_selection("https://chat.example.org/api");
+        CHECK(sel.kind == P::Kind::OpenAI);
+        CHECK(sel.openai_endpoint.host == "chat.example.org");
+        CHECK(sel.openai_endpoint.port == 443);
+        CHECK(sel.openai_endpoint.use_tls);
+        CHECK(sel.openai_endpoint.path == "/api/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/api/models");
+    }
+    // http:// with explicit port and path prefix.
+    {
+        auto sel = P::parse_selection("http://localhost:8080/custom");
+        CHECK(sel.kind == P::Kind::OpenAI);
+        CHECK(sel.openai_endpoint.host == "localhost");
+        CHECK(sel.openai_endpoint.port == 8080);
+        CHECK(!sel.openai_endpoint.use_tls);
+        CHECK(sel.openai_endpoint.path == "/custom/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/custom/models");
+    }
+    // https:// with no path → empty prefix → /chat/completions (not /v1/...).
+    {
+        auto sel = P::parse_selection("https://my-gateway.com");
+        CHECK(sel.kind == P::Kind::OpenAI);
+        CHECK(sel.openai_endpoint.host == "my-gateway.com");
+        CHECK(sel.openai_endpoint.path == "/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/models");
+    }
+    // Bare host[:port] (legacy TUI behaviour) → /v1 default, unchanged.
+    {
+        auto sel = P::parse_selection("localhost:8080");
+        CHECK(sel.kind == P::Kind::OpenAI);
+        CHECK(sel.openai_endpoint.host == "localhost");
+        CHECK(sel.openai_endpoint.port == 8080);
+        CHECK(!sel.openai_endpoint.use_tls);
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/v1/models");
+    }
+}
+
 // ── Request headers / --auth-header ─────────────────────────────────────────
 // build_request_headers is the single place the OpenAI-family auth header is
 // emitted (stream, model listing, Ollama probe). Verify the default Bearer
@@ -1183,6 +1286,8 @@ int main() {
     test_sse_plain_json_prose_not_salvaged();
     test_sse_structured_tool_still_works_with_salvage_on();
     test_endpoint_presets();
+    test_provider_display_name_url_label();
+    test_tui_custom_host_specs();
     test_build_request_headers();
     test_resolve_auth_per_preset();
     // Incremental salvage tests.
