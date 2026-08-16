@@ -32,6 +32,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <csignal>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -328,6 +329,22 @@ int main(int argc, char** argv) {
 
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
+#endif
+
+    // ── Ignore SIGPIPE process-wide ────────────────────────────────────
+    // agentty writes to many pipes it doesn't fully control: spawned MCP
+    // plugin servers (stdio), the sandbox/bash child procs, clipboard
+    // helpers. If ANY of them dies mid-write — a plugin that crashes on its
+    // startup handshake, a server pointed at a bad path that spawns then
+    // exits — a write to the now-closed pipe delivers SIGPIPE, whose DEFAULT
+    // action is to KILL the process. That is a real "agentty suddenly
+    // crashes" cause: one flaky plugin takes down the whole app with no
+    // abort message. Individual sites used MSG_NOSIGNAL / local SIG_IGN, but
+    // the stdio-pipe writes (MCP transport) can't, so ignore it globally and
+    // handle write failures via EPIPE return codes instead. Must run FIRST,
+    // before any child is spawned.
+#if !defined(_WIN32)
+    std::signal(SIGPIPE, SIG_IGN);
 #endif
 
     auto args = parse_args(argc, argv);
