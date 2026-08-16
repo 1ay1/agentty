@@ -52,13 +52,43 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // The connect/reload finished on a worker. Store the snapshot
             // (this IS the model delta that repaints the panel — visual_hash
             // covers m.ui.plugins, so no nonce hack) and clear the spinner.
-            m.ui.plugins = std::move(e.model);
-            m.ui.plugins_loading = false;
-            // Keep the cursor in range if the server/tool count shrank.
+            //
+            // Cursor IDENTITY, not index: a reload can add/remove/reorder
+            // rows, so a raw index clamp would silently slide the cursor to a
+            // neighbour — and a later Enter/`d` would act on the wrong server.
+            // Remember which row (by server+tool+action) was selected BEFORE
+            // the swap, then restore the cursor to that same row after.
+            std::optional<std::tuple<std::string, std::string, se::Action>> sel;
             if (auto* o = settings_list_opened(m.ui.settings_list);
                 o && o->concern == se::Category::Plugins) {
-                const int cnt = static_cast<int>(se::items_for(m, o->concern).size());
-                o->index = std::clamp(o->index, 0, std::max(0, cnt - 1));
+                auto before = se::items_for(m, o->concern);
+                if (o->index >= 0 && o->index < static_cast<int>(before.size())) {
+                    const auto& r = before[static_cast<std::size_t>(o->index)];
+                    sel = std::make_tuple(r.arg, r.arg2, r.action);
+                }
+            }
+
+            m.ui.plugins = std::move(e.model);
+            m.ui.plugins_loading = false;
+
+            if (auto* o = settings_list_opened(m.ui.settings_list);
+                o && o->concern == se::Category::Plugins) {
+                auto after = se::items_for(m, o->concern);
+                const int cnt = static_cast<int>(after.size());
+                int restored = -1;
+                if (sel) {
+                    for (int i = 0; i < cnt; ++i)
+                        if (after[static_cast<std::size_t>(i)].arg == std::get<0>(*sel)
+                            && after[static_cast<std::size_t>(i)].arg2 == std::get<1>(*sel)
+                            && after[static_cast<std::size_t>(i)].action == std::get<2>(*sel)) {
+                            restored = i; break;
+                        }
+                }
+                // Same row found → follow it; otherwise clamp the old index into
+                // range (the row it named is gone — e.g. removed server).
+                o->index = restored >= 0
+                    ? restored
+                    : std::clamp(o->index, 0, std::max(0, cnt - 1));
             }
             return done(std::move(m));
         },
@@ -198,8 +228,8 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                         cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
                             cmdf::load_plugins_async(/*reconnect=*/false),
                             set_status_toast(m,
-                                (want_enabled ? "enabled " : "disabled ")
-                                + row.arg + "__" + row.arg2)});
+                                (want_enabled ? "enabled tool '" : "disabled tool '")
+                                + row.arg2 + "' on " + row.arg)});
                     } else {
                         cmd = set_status_toast(m,
                             "could not toggle '" + row.arg2 + "'");

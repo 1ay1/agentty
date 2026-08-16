@@ -110,6 +110,44 @@ int main() {
           "re-enabled server shows its tools again (got "
           + std::to_string(reenabled) + ")");
 
+    // 5. A DISABLED server's cached tools must NOT count against the wire
+    //    budget (they're display-only, not on the wire). Compare wire_tool_
+    //    count enabled vs disabled — disabling must DROP it by kN.
+    {
+        auto m_on = mcp::plugin_model();
+        (void)tools::plugin::set_server_disabled(cfg, "demo", true);
+        (void)tools::reload_mcp_plugins();
+        auto m_off = mcp::plugin_model();
+        check(m_off.wire_tool_count + kN == m_on.wire_tool_count,
+              "budget: disabling drops wire_tool_count by its tool count "
+              "(on=" + std::to_string(m_on.wire_tool_count) + " off="
+              + std::to_string(m_off.wire_tool_count) + ")");
+        // And none of the disabled server's tools are flagged over_budget.
+        bool any_ob = false;
+        for (const auto& s : m_off.servers)
+            if (s.name == "demo")
+                for (const auto& t : s.tools) if (t.over_budget) any_ob = true;
+        check(!any_ob, "budget: a disabled server's tools are never over_budget");
+        (void)tools::plugin::set_server_disabled(cfg, "demo", false);
+        (void)tools::reload_mcp_plugins();
+    }
+
+    // 6. A command-less server surfaces an ERROR, not an eternal "connecting…".
+    {
+        std::ofstream f(cfg);
+        f << R"({"mcpServers":{"broken":{}}})";
+        f.close();
+        (void)tools::reload_mcp_plugins();
+        auto m = mcp::plugin_model();
+        bool found = false;
+        for (const auto& s : m.servers)
+            if (s.name == "broken") { found = true;
+                check(!s.error.empty() && !s.connected,
+                      "command-less server is an error, not connecting forever");
+            }
+        check(found, "command-less server still appears in the model");
+    }
+
     fs::remove_all(tmp);
     if (g_fails == 0) { std::printf("\nAll disabled-tools tests passed.\n"); return 0; }
     std::printf("\n%d disabled-tools test(s) FAILED.\n", g_fails);
