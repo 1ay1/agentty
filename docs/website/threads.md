@@ -27,6 +27,10 @@ Threads are global — the directory is flat and a thread isn't bound to the wor
 
 Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. Since each thread is plain JSON, you can also `rm` one or copy it elsewhere as a backup.
 
+## Forking a thread
+
+When a conversation fills the context window, open the command palette ([[Ctrl+K]]) and pick **Fork thread** to branch it into a *fresh* thread that carries **near-zero context**. The parent's full transcript is written to disk and the fork reads it on demand, so forking costs O(1) tokens no matter how large the parent grew — nothing is copied into the window and nothing is lost. The original thread is saved untouched, and the fork records where it came from. See **[Forking a Thread](/docs/fork)** for the full walkthrough.
+
 ## Checkpoints & rewind
 
 Inside a git repo, every user turn pins a **worktree snapshot** before the agent starts editing. The turn's meta line carries a subtle `· ↺ checkpoint` tag so a restore point reads as an ordinary turn, not a banner. Nothing is committed to your history — the snapshot is captured out-of-band, concurrent with the request, so it costs you nothing.

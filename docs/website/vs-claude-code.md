@@ -46,6 +46,10 @@ Every shell and build command agentty runs is wrapped in an OS-native sandbox �
 
 Background context compaction — the summarization pass that fires when a long thread nears the context window — runs on the **cheapest capable model on your active provider**, not the flagship model you're chatting with, so a compaction costs a fraction of a normal turn. The trigger itself scales with the model's real window (tunable 75/90/95% via the *Compaction depth* command) instead of a fixed token margin, so a big-window model rides much further before it needs to summarize at all. Read-only subagent fan-out (`explorer`, `reviewer`) gets the same treatment. The 1M-context window is an explicit, entitlement-gated model variant you opt into from the picker, never a silent auto-upgrade.
 
+### Fork a thread to escape a full context window
+
+When a conversation fills the window, agentty can **[fork](/docs/fork)** it into a *fresh* thread that carries **near-zero context**: the parent's full transcript is written to disk and the fork reads it on demand, so forking costs O(1) tokens no matter how large the parent grew — and nothing is lost, because the transcript is verbatim, not a lossy summary. Most agents that offer forking copy the whole history into the new session (inheriting its token cost); agentty inverts that into a read-on-demand pointer, turning fork from *"branch with the same context"* into *"reclaim the window and keep going."*
+
 ### Runs on air-gapped hosts
 
 `agentty airgap user@host` relays traffic from your laptop to a machine with no direct internet, over SOCKS5-over-SSH with TLS pinned end-to-end. One command. See the [air-gap guide](/docs/airgap).
