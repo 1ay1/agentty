@@ -231,6 +231,26 @@ struct AgenttyApp {
             mix(static_cast<std::uint64_t>(o->reload_nonce));
         }
 
+        // The remaining selection overlays. Same contract as every picker
+        // above: their open/closed state AND the in-overlay cursor must feed
+        // the hash, or an ↑/↓ that mutates only the cursor produces an
+        // identical hash and the move is gated away until the caret parity
+        // flips ~265 ms later — the "selector doesn't move sometimes"
+        // symptom. These three were entirely absent from the hash.
+        //   • Smart Mode config overlay (Ctrl+S) — a OneAxis like the pickers.
+        mix(static_cast<std::uint64_t>(m.ui.smart_mode.index()));
+        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.smart_mode)));
+        //   • RAG picker (Ctrl+K → RAG) — 3 rows; active marks the persisted mode.
+        mix(static_cast<std::uint64_t>(m.ui.rag_settings.index()));
+        if (auto* o = rag_settings_opened(m.ui.rag_settings)) {
+            mix(static_cast<std::uint64_t>(o->index));
+            mix(static_cast<std::uint64_t>(o->active));
+        }
+        //   • Fork picker (Ctrl+K → Fork thread) — 3 RAG-mode rows.
+        mix(static_cast<std::uint64_t>(m.ui.fork_picker.index()));
+        if (auto* o = fork_picker_opened(m.ui.fork_picker))
+            mix(static_cast<std::uint64_t>(o->index));
+
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
         // how often we'll re-render purely for animation; the actual
