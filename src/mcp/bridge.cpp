@@ -1161,16 +1161,37 @@ PluginModel plugin_model() {
     // Remember what each server last advertised so its tree stays populated
     // (shown dimmed) across a disable→enable round-trip. Process-lifetime,
     // mutex-guarded, keyed by server name.
+    //
+    // Bounded + identity-checked: we PRUNE entries for servers no longer in
+    // config (so add/remove churn can't grow it without bound), and store the
+    // command so a re-add under the SAME name with a DIFFERENT command evicts
+    // the stale tools (otherwise the new server would show the old one's
+    // tools until it connects).
+    struct SeenEntry {
+        std::string command;
+        std::vector<std::pair<std::string, std::string>> tools;  // (bare, desc)
+    };
     static std::mutex s_seen_mu;
-    static std::unordered_map<std::string,
-                              std::vector<std::pair<std::string, std::string>>>
-        s_seen;   // server → [(bare, desc)]
+    static std::unordered_map<std::string, SeenEntry> s_seen;
     {
         std::lock_guard<std::mutex> lk(s_seen_mu);
+        // Prune: drop cache for any server not in the current config, and
+        // evict a same-name entry whose command changed (identity reuse).
+        for (auto it = s_seen.begin(); it != s_seen.end();) {
+            auto cit = cfg.find(it->first);
+            if (cit == cfg.end()
+                || cit->second.command != it->second.command)
+                it = s_seen.erase(it);
+            else
+                ++it;
+        }
+        // Record what each live server currently advertises, under its command.
         for (const auto& [srv, tools] : live) {
-            auto& slot = s_seen[srv];
-            slot.clear();
-            for (const auto& lt : tools) slot.emplace_back(lt.bare, lt.desc);
+            auto& ent = s_seen[srv];
+            if (auto cit = cfg.find(srv); cit != cfg.end())
+                ent.command = cit->second.command;
+            ent.tools.clear();
+            for (const auto& lt : tools) ent.tools.emplace_back(lt.bare, lt.desc);
         }
     }
 
@@ -1187,8 +1208,14 @@ PluginModel plugin_model() {
         // so it carries no error and no live tools — disabled wins over any
         // stale connect-error entry from a previous session.
         if (!ss.disabled) {
-            if (auto eit = errors.find(name); eit != errors.end())
+            if (cs.command.empty()) {
+                // No command — it can NEVER connect (make_provider skips it).
+                // Surface that as an error instead of a permanent
+                // "connecting…" row that waits forever.
+                ss.error = "no \"command\" in mcp.json";
+            } else if (auto eit = errors.find(name); eit != errors.end()) {
                 ss.error = eit->second;
+            }
         }
 
         // Tools: authoritative from the LIVE advertised set (so a disabled
@@ -1210,7 +1237,7 @@ PluginModel plugin_model() {
             // or an individually-excluded set kept them.
             std::lock_guard<std::mutex> lk(s_seen_mu);
             if (auto sit = s_seen.find(name); sit != s_seen.end()) {
-                for (const auto& [bare, desc] : sit->second) {
+                for (const auto& [bare, desc] : sit->second.tools) {
                     ToolState ts;
                     ts.name        = bare;
                     ts.description = desc;
@@ -1222,6 +1249,7 @@ PluginModel plugin_model() {
         // A disabled tool the server no longer advertises (e.g. excluded so
         // hard the server dropped it) — fold in from config so it shows.
         for (const auto& ex : cs.exclude) {
+            if (ex.empty()) continue;   // a stray "" exclude → don't add a blank row
             bool present = false;
             for (const auto& ts : ss.tools) if (ts.name == ex) present = true;
             if (!present) {
@@ -1231,7 +1259,16 @@ PluginModel plugin_model() {
         }
         std::sort(ss.tools.begin(), ss.tools.end(),
                   [](const ToolState& a, const ToolState& b){ return a.name < b.name; });
-        enabled_mcp += ss.enabled_count();
+        // Only a server that is actually ON THE WIRE (connected, not disabled)
+        // contributes to the tool budget. A disabled or not-yet-connected
+        // server's tools come from the s_seen CACHE for display only — they
+        // are not in the live pool and not sent to the model, so counting
+        // them would over-report "N tools on the wire" and steal budget,
+        // falsely flagging real enabled tools on OTHER servers as
+        // over-budget. (project_tools iterates the live pool, which never
+        // includes these, so this keeps the budget math in sync with reality.)
+        if (ss.connected && !ss.disabled)
+            enabled_mcp += ss.enabled_count();
         model.servers.push_back(std::move(ss));
     }
     std::sort(model.servers.begin(), model.servers.end(),
@@ -1245,12 +1282,17 @@ PluginModel plugin_model() {
         std::size_t room = model.tool_budget > model.native_tool_count
             ? model.tool_budget - model.native_tool_count : 0;
         std::size_t taken = 0;
-        for (auto& ss : model.servers)
+        for (auto& ss : model.servers) {
+            // Match the enabled_mcp accounting: only live wire tools can be
+            // trimmed / flagged over-budget. A cached disabled/disconnected
+            // server's tools aren't on the wire, so never flag them.
+            if (!ss.connected || ss.disabled) continue;
             for (auto& ts : ss.tools)
                 if (ts.enabled) {
                     if (taken < room) ++taken;
                     else { ts.over_budget = true; ++model.trimmed_count; }
                 }
+        }
     }
     return model;
 }
