@@ -105,23 +105,24 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     return {std::move(m), std::move(cmd)};
                 }
                 case se::Action::ToggleTool: {
-                    // Enable/disable one tool of a plugin (persists to
-                    // mcp.json's tools.exclude) then reload the pool live
-                    // OFF the UI thread, exactly like add/remove.
+                    // Enable/disable one tool of a plugin: persist to
+                    // mcp.json's tools.exclude, then invalidate the wire
+                    // catalog so it re-projects with the new filter. NO
+                    // server re-spawn, NO background thread — the server
+                    // stays connected and project_tools re-reads the live
+                    // exclude. This is synchronous + race-free (the earlier
+                    // reload-on-toggle re-spawned the server and hung on
+                    // rapid disable→re-enable).
                     auto path = tools::plugin::config_path(/*project=*/false);
                     const bool want_enabled = !row.on;   // toggle
                     auto r = tools::plugin::set_tool_enabled(
                         path, row.arg, row.arg2, want_enabled);
                     maya::Cmd<Msg> cmd;
                     if (r == tools::plugin::EditResult::Ok) {
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-                            maya::Cmd<Msg>::task_isolated(
-                                [](std::function<void(Msg)>) {
-                                    (void)tools::reload_mcp_plugins();
-                                }),
-                            set_status_toast(m,
-                                (want_enabled ? "enabled " : "disabled ")
-                                + row.arg + "__" + row.arg2)});
+                        tools::invalidate_mcp_catalog();
+                        cmd = set_status_toast(m,
+                            (want_enabled ? "enabled " : "disabled ")
+                            + row.arg + "__" + row.arg2);
                     } else {
                         cmd = set_status_toast(m,
                             "could not toggle '" + row.arg2 + "'");
