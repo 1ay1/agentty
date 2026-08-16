@@ -17,7 +17,7 @@
 #include <acp/stdio.hpp>         // acp::StdioTransport
 #include <acp/tools.hpp>         // RequestPermissionOutcome, PO_*
 
-#include <mcp/cap/process.hpp>   // mcp::cap::ChildProcess (portable spawn)
+#include <mcp/cap/process.hpp>   // ::mcp::cap::ChildProcess (portable spawn)
 
 #include "agentty/domain/conversation.hpp"  // agentty::Message, Role
 #include "agentty/util/base64.hpp"
@@ -512,7 +512,7 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
 // SpawnedAcpAgent tears the agent down (stops the reader, closes the pipes,
 // waits/kills the child) in the holder's destructor.
 //
-// Portable: mcp::cap::ChildProcess is fork/exec/pipe on POSIX and
+// Portable: ::mcp::cap::ChildProcess is fork/exec/pipe on POSIX and
 // CreateProcess/CreatePipe on Windows, exposing the child's stdout as an
 // istream (.out()) and its stdin as an ostream (.in()) — exactly what
 // StdioTransport consumes. No platform #ifdef leaks into this file.
@@ -546,7 +546,7 @@ namespace {
 //                           way), so this returns promptly.
 //   5. child.reset()      — reap (idempotent; already dead).
 struct AgentProcessHolder {
-    std::unique_ptr<mcp::cap::ChildProcess> child;
+    std::unique_ptr<::mcp::cap::ChildProcess> child;
     std::unique_ptr<acp::StdioTransport>    transport;
 
     ~AgentProcessHolder() {
@@ -596,10 +596,10 @@ SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
 
     // 1. Spawn the child with piped stdio.
     try {
-        mcp::cap::ChildProcess::Spawn spawn;
+        ::mcp::cap::ChildProcess::Spawn spawn;
         spawn.command = argv.front();
         spawn.args.assign(argv.begin() + 1, argv.end());
-        holder->child = std::make_unique<mcp::cap::ChildProcess>(spawn);
+        holder->child = std::make_unique<::mcp::cap::ChildProcess>(spawn);
     } catch (const std::exception& e) {
         err = std::string("spawn_acp_agent: cannot start '") + argv.front() + "': " + e.what();
         return {};

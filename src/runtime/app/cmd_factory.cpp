@@ -24,6 +24,7 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
@@ -1704,6 +1705,30 @@ Cmd<Msg> load_threads_async() {
             dispatch(ThreadsLoaded{std::vector<Thread>{}});
         }
     });
+}
+
+Cmd<Msg> load_plugins_async(bool reconnect) {
+    // Bring the MCP connection snapshot INTO the Model. reconnect=true runs
+    // the full reload (respawn + handshake, bounded by the bridge's 15s
+    // deadline) for add/remove/toggle and first open; reconnect=false just
+    // snapshots the already-live pool. Either way it dispatches
+    // PluginsUpdated{plugin_model()} so the reducer stores the result in
+    // m.ui.plugins — the view reads THAT, never the global pool. This is the
+    // Cmd→Msg discipline that makes the panel a pure function of the Model.
+    return Cmd<Msg>::task_isolated(
+        [reconnect](std::function<void(Msg)> dispatch) {
+            if (reconnect) {
+                // Force the connect. On a COLD start nothing has accessed the
+                // registry yet, so the pool is unbuilt — touching registry()
+                // runs connect_initial_mcp() (spawn + handshake) once. On a
+                // WARM path (add/remove/toggle) the pool already exists, so we
+                // also run reload_mcp_plugins() to re-sync it to the edited
+                // config. Order matters: build-if-cold, then reload.
+                (void)tools::registry();
+                (void)tools::reload_mcp_plugins();
+            }
+            dispatch(PluginsUpdated{mcp::plugin_model()});
+        });
 }
 
 Cmd<Msg> load_thread_async(ThreadId id) {

@@ -276,11 +276,15 @@ const std::vector<Axis>& visual_axes() {
             o.cursor = 4;
             m.ui.settings_list = o;
         }},
-        {"settings_list reload nonce (plugin connect finished)", [](Model& m) {
-            agentty::settings::ListOpen o;
-            o.concern = agentty::settings::Category::Plugins;
-            o.reload_nonce = 1;   // background reload just completed
-            m.ui.settings_list = o;
+        {"plugins loading flag", [](Model& m) {
+            m.ui.plugins_loading = true;
+        }},
+        {"plugins snapshot lands (server connected)", [](Model& m) {
+            agentty::mcp::ServerState s;
+            s.name = "date";
+            s.connected = true;
+            s.tools.push_back({"current_date", "", true, false});
+            m.ui.plugins.servers.push_back(std::move(s));
         }},
         {"smart_mode overlay opens", [](Model& m) {
             m.ui.smart_mode = agentty::ui::pick::OpenAt{0};

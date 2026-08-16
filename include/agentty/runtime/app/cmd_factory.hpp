@@ -165,6 +165,13 @@ struct LoopBreak {
 // `init()` returns immediately with an empty thread list.
 [[nodiscard]] maya::Cmd<Msg> load_threads_async();
 
+// Connect/snapshot the MCP servers off the UI thread and dispatch
+// `PluginsUpdated{model}` when done — the reducer stores it in m.ui.plugins,
+// the single source the Plugins panel renders. reconnect=true respawns +
+// re-handshakes (add/remove/toggle/first open); reconnect=false just
+// snapshots the live pool. Mirrors load_threads_async.
+[[nodiscard]] maya::Cmd<Msg> load_plugins_async(bool reconnect);
+
 // Parse a single thread's JSON off the UI thread. Dispatched from the
 // thread picker's Enter handler so the synchronous ~30ms-per-thread
 // parse doesn't land between the keypress and the next paint.

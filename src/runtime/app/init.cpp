@@ -1,5 +1,6 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/mcp/client.hpp"   // mcp_config_present()
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
@@ -158,6 +159,12 @@ std::pair<Model, maya::Cmd<Msg>> init() {
 
     std::vector<maya::Cmd<Msg>> cmds;
     cmds.push_back(cmd::load_threads_async());
+    // Connect MCP servers (plugins) at startup on a worker, exactly like
+    // threads. This warms the tool surface for the first turn AND lands the
+    // snapshot in m.ui.plugins so the Plugins panel is populated the instant
+    // it opens — the connection is loop-driven, never a lazy side effect.
+    if (mcp::mcp_config_present())
+        cmds.push_back(cmd::load_plugins_async(/*reconnect=*/true));
 
     // OpenAI-family backends (Ollama, llama.cpp, groq, …) have no fixed
     // built-in model list — seed_models() only knows Claude ids. A saved

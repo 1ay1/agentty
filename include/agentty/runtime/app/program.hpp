@@ -228,7 +228,21 @@ struct AgenttyApp {
             mix(o->input_active ? 1ULL : 0ULL);
             mix_str(o->input);
             mix(static_cast<std::uint64_t>(o->cursor));
-            mix(static_cast<std::uint64_t>(o->reload_nonce));
+        }
+        // Plugins snapshot (owned in the Model). The panel is a pure
+        // projection of m.ui.plugins, so its connection state must feed the
+        // hash directly — no nonce. A cheap structural digest: loading flag,
+        // server count, and per-server connected/error/tool-count. When a
+        // background connect lands via PluginsUpdated this digest changes and
+        // the panel repaints; when nothing changed it's stable (free tick).
+        mix(m.ui.plugins_loading ? 1ULL : 0ULL);
+        mix(m.ui.plugins.servers.size());
+        for (const auto& s : m.ui.plugins.servers) {
+            mix_str(s.name);
+            mix((s.connected ? 2ULL : 1ULL));
+            mix(s.error.size());
+            mix(s.tools.size());
+            mix(s.enabled_count());
         }
 
         // The remaining selection overlays. Same contract as every picker

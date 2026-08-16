@@ -30,47 +30,16 @@
 #include <utility>
 #include <vector>
 
+#include "agentty/mcp/plugin_model.hpp"   // PluginModel value snapshot
 #include "agentty/tool/registry.hpp"   // ToolDef
 
 namespace agentty::mcp {
 
 // ── PluginModel: the single source of truth for plugin/tool state ─────────
 // A value snapshot (plugin_model()) any UI can hold without racing the live
-// pool. Built from the config (which servers, which tools disabled) unified
-// with the live connection (connected?, advertised tools). See
-// docs/design/plugin-model.md.
-struct ToolState {
-    std::string name;        // bare advertised name (no mcp__ prefix)
-    std::string description; // advertised description (for the UI)
-    bool        enabled = true;  // NOT in config tools.exclude
-    bool        over_budget = false; // enabled but trimmed from the wire
-};
-
-struct ServerState {
-    std::string name;        // config key
-    std::string command;     // config command
-    bool        connected = false; // handshake succeeded this session
-    std::string error;       // why not connected (empty if connected/ok)
-    std::vector<ToolState> tools;
-
-    [[nodiscard]] std::size_t enabled_count() const noexcept {
-        std::size_t n = 0;
-        for (const auto& t : tools) if (t.enabled) ++n;
-        return n;
-    }
-};
-
-struct PluginModel {
-    std::vector<ServerState> servers;
-    std::size_t native_tool_count = 0; // agentty's own tools (always shipped)
-    std::size_t wire_tool_count   = 0; // total tools actually on the wire
-    std::size_t tool_budget       = 0; // soft cap (0 = unset)
-    std::size_t trimmed_count     = 0; // enabled MCP tools dropped for budget
-
-    [[nodiscard]] bool over_budget() const noexcept {
-        return tool_budget > 0 && wire_tool_count > tool_budget;
-    }
-};
+// pool. The value types now live in a standalone header so the TEA Model can
+// own a snapshot without an include cycle through tools::ToolDef.
+// See docs/design/plugin-model.md.
 
 // The current model as a value snapshot — safe to hold across the pool
 // swapping under a concurrent reload. Cheap: reads the live pool + config
