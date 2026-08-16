@@ -107,6 +107,7 @@ If the server requires OAuth, authorize once with `agentty mcp-login acme` — a
 
 ## Related
 
+- [Build a Plugin](/docs/build-a-plugin) — write your own MCP server (Python & C++ walkthroughs + the protocol).
 - [MCP Server](/docs/mcp) — the full protocol: serving agentty's tools, resources, OAuth, ACP pass-through.
 - [Retrieval](/docs/retrieval) — fold a plugin's MCP **resources** into `search_docs` with `AGENTTY_RAG_MCP=1`.
 - [Sandboxing & permissions](/docs/sandboxing) — how tool calls are gated.
