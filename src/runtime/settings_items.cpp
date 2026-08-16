@@ -14,6 +14,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+
+#include "agentty/mcp/client.hpp"   // PluginModel, plugin_model()
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -65,79 +67,64 @@ std::vector<Item> general(const Model& m) {
 }
 
 std::vector<Item> plugins() {
+    // Pure projection of the authoritative PluginModel snapshot. No
+    // reconciliation of live-catalog vs config here — the model already
+    // unified them, so a tool can never vanish or duplicate.
     std::vector<Item> out;
-    const auto path = tools::plugin::config_path(false);
-    auto servers = tools::plugin::list_servers(path);
-    if (servers.empty()) {
+    const agentty::mcp::PluginModel model = agentty::mcp::plugin_model();
+
+    if (model.servers.empty()) {
         Item i;
         i.primary   = "(no plugins configured)";
-        i.secondary = "add one: press `a`, or agentty plugin add <name> …";
+        i.secondary = "press `a` to add one, or agentty plugin add <name> …";
         i.hint      = "docs/PLUGINS.md";
         out.push_back(std::move(i));
         return out;
     }
 
-    // Live catalog: every tool actually on the wire this session, so we can
-    // show a plugin's ENABLED tools + the running total (for the budget
-    // warning). A VALUE COPY (wire_tools_snapshot) — NOT a reference into
-    // the cache — because a plugin toggle triggers reload_mcp_plugins() on
-    // a background thread that swaps the cache's snapshot; iterating a bare
-    // reference here would be a use-after-free (the toggle crash).
-    const std::vector<tools::ToolDef> catalog = tools::wire_tools_snapshot();
-    std::size_t total = catalog.size();
-
-    // Budget warning header. The wire sends every native tool + up to
-    // kInlineBudget MCP tools inline; a large total inflates each request
-    // (and, historically, tripped provider limits). Warn past a soft cap.
-    constexpr std::size_t kSoftCap = 48;
+    // Header: total tools on the wire + budget warning.
     {
         Item w;
-        if (total > kSoftCap) {
-            w.primary   = "⚠  " + std::to_string(total) + " tools on the wire";
-            w.secondary = "large tool sets bloat every request — disable "
-                          "unused ones below";
+        if (model.over_budget()) {
+            w.primary   = "⚠  " + std::to_string(model.wire_tool_count) +
+                          " tools (budget " + std::to_string(model.tool_budget) + ")";
+            w.secondary = std::to_string(model.trimmed_count) +
+                          " over budget were dropped from this session — "
+                          "disable some below to make room";
         } else {
-            w.primary   = std::to_string(total) + " tools on the wire";
+            w.primary   = std::to_string(model.wire_tool_count) +
+                          " tools on the wire";
             w.secondary = "◉ on / ○ off · Enter toggles a tool or removes a plugin";
         }
         out.push_back(std::move(w));
     }
 
-    for (const auto& s : servers) {
-        // Gather this server's tools first, so the header can show a count.
-        const std::string prefix = "mcp__" + s.name + "__";
-        std::vector<std::pair<std::string,bool>> stools;  // (bare, enabled)
-        for (const auto& t : catalog)
-            if (t.name.value.rfind(prefix, 0) == 0)
-                stools.emplace_back(t.name.value.substr(prefix.size()), true);
-        for (const auto& bare : tools::plugin::disabled_tools(path, s.name))
-            stools.emplace_back(bare, false);
-        std::sort(stools.begin(), stools.end());
-        const std::size_t on_ct = static_cast<std::size_t>(
-            std::count_if(stools.begin(), stools.end(),
-                          [](const auto& p) { return p.second; }));
-
-        // Plugin header row.
+    for (const auto& s : model.servers) {
         Item i;
         i.primary   = s.name;
-        i.secondary = std::to_string(on_ct) + "/" +
-                      std::to_string(stools.size()) + " tools";
+        if (!s.error.empty()) {
+            i.secondary = "⚠ " + s.error;
+        } else if (!s.connected) {
+            i.secondary = "connecting…";
+        } else {
+            i.secondary = std::to_string(s.enabled_count()) + "/" +
+                          std::to_string(s.tools.size()) + " tools";
+        }
         i.hint      = "remove";
         i.action    = Action::RemovePlugin;
         i.arg       = s.name;
         out.push_back(std::move(i));
 
-        // Tool rows, indented, with the ◉/○ glyph carrying the state.
-        for (const auto& [bare, en] : stools) {
+        for (const auto& t : s.tools) {
             Item ti;
-            ti.primary   = bare;
-            ti.secondary = "";                 // glyph shows on/off, no words
-            ti.hint      = en ? "disable" : "enable";
+            ti.primary   = t.name;
+            ti.secondary = t.over_budget ? "over budget — not on the wire" : "";
+            ti.hint      = t.enabled ? "disable" : "enable";
             ti.action    = Action::ToggleTool;
             ti.arg       = s.name;
-            ti.arg2      = bare;
+            ti.arg2      = t.name;
             ti.indented  = true;
-            ti.on        = en;
+            ti.on        = t.enabled;
             out.push_back(std::move(ti));
         }
     }

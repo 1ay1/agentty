@@ -78,14 +78,17 @@ Element settings_list_picker(const Model& m) {
 
     // ── Header ───────────────────────────────────────────────────
     if (adding) {
-        // The live add prompt: label, then the typed buffer + block caret.
+        // The live add prompt. Make it visually own the pane: a bright
+        // prompt line with a solid block cursor, the format hint above it
+        // dim. cfg.selected == -1 already removes the list highlight, so
+        // the eye lands here.
         cfg.header.push_back(h(
             text("  "), text(add_prompt(o->concern), fg_dim(muted))
         ).build());
         cfg.header.push_back(h(
-            text("  \xe2\x9d\xaf ", fg_of(highlight)),          // ❯
-            text(o->input, fg_of(fg)),
-            text("\xe2\x96\x8a", fg_of(highlight))              // ▊ caret
+            text("  \xe2\x9c\x8e  ", fg_of(highlight)),         // ✎ pencil
+            text(o->input.empty() ? std::string{} : o->input, fg_bold(fg)),
+            text("\xe2\x96\x88", fg_of(highlight))              // █ solid cursor
         ).build());
     } else {
         cfg.header.push_back(h(

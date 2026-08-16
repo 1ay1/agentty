@@ -34,6 +34,49 @@
 
 namespace agentty::mcp {
 
+// ── PluginModel: the single source of truth for plugin/tool state ─────────
+// A value snapshot (plugin_model()) any UI can hold without racing the live
+// pool. Built from the config (which servers, which tools disabled) unified
+// with the live connection (connected?, advertised tools). See
+// docs/design/plugin-model.md.
+struct ToolState {
+    std::string name;        // bare advertised name (no mcp__ prefix)
+    std::string description; // advertised description (for the UI)
+    bool        enabled = true;  // NOT in config tools.exclude
+    bool        over_budget = false; // enabled but trimmed from the wire
+};
+
+struct ServerState {
+    std::string name;        // config key
+    std::string command;     // config command
+    bool        connected = false; // handshake succeeded this session
+    std::string error;       // why not connected (empty if connected/ok)
+    std::vector<ToolState> tools;
+
+    [[nodiscard]] std::size_t enabled_count() const noexcept {
+        std::size_t n = 0;
+        for (const auto& t : tools) if (t.enabled) ++n;
+        return n;
+    }
+};
+
+struct PluginModel {
+    std::vector<ServerState> servers;
+    std::size_t native_tool_count = 0; // agentty's own tools (always shipped)
+    std::size_t wire_tool_count   = 0; // total tools actually on the wire
+    std::size_t tool_budget       = 0; // soft cap (0 = unset)
+    std::size_t trimmed_count     = 0; // enabled MCP tools dropped for budget
+
+    [[nodiscard]] bool over_budget() const noexcept {
+        return tool_budget > 0 && wire_tool_count > tool_budget;
+    }
+};
+
+// The current model as a value snapshot — safe to hold across the pool
+// swapping under a concurrent reload. Cheap: reads the live pool + config
+// once. The authoritative view the settings picker renders.
+[[nodiscard]] PluginModel plugin_model();
+
 // Opaque, reference-counted handle keeping all connected MCP servers alive
 // for the lifetime of the process. The ToolDef execute() closures returned by
 // mcp_tools() capture a copy of this (a shared_ptr), so the connections —
@@ -108,6 +151,14 @@ struct ServerLaunch {
 // (which re-reads the live tools.exclude in project_tools) — the cheap,
 // re-spawn-free path behind a per-tool enable/disable toggle.
 void mcp_bump_generation() noexcept;
+
+// Every tool a CONNECTED server advertises, as bare names (no mcp__ prefix,
+// no exclude filtering). The single authoritative source for the settings
+// picker's per-plugin tool list: enabled-vs-disabled is then derived purely
+// from the config's tools.exclude, so a tool can never fall between a
+// "live catalog" and a "config" view (the vanishing-row bug). Empty if the
+// server isn't connected.
+[[nodiscard]] std::vector<std::string> mcp_server_tools(const std::string& server);
 
 // Live reload: re-read the MCP config from disk and rebuild the process-
 // wide connection pool (spawning newly-added servers, dropping removed

@@ -77,7 +77,17 @@ struct ConnectionPool {
     std::mutex           mu;          // guards list/resource/prompt projection
     std::atomic<unsigned long> generation{0};   // bumps on any *_list_changed
     std::unordered_map<std::string, ServerPolicy> policies;
+    // Why a configured server did NOT connect this session (empty entry =
+    // connected fine). Populated by mcp_tools() during the connect loop so
+    // plugin_model() can show the user "connected" vs "failed: <reason>".
+    std::unordered_map<std::string, std::string> connect_errors;
 };
+
+// Soft cap on total tools carried on the wire (native + enabled MCP). Past
+// this, the projection trims MCP tools (native always ship) and the model
+// reports over_budget so the picker can warn. Sized generously — the point
+// is to catch runaway plugin sets, not to police a healthy toolset.
+inline constexpr std::size_t kToolBudget = 100;
 
 namespace {
 
@@ -130,6 +140,45 @@ fs::path resolve_config(bool& out_project_local) {
 fs::path resolve_config() {
     bool ignore = false;
     return resolve_config(ignore);
+}
+
+// Parsed per-server config the model needs: command + the exclude set.
+// One place that reads mcp.json, so every consumer (projection, model,
+// picker) agrees on the same bytes. Missing/invalid config → empty map.
+struct ConfigServer {
+    std::string command;
+    std::unordered_set<std::string> exclude;
+    bool disabled = false;
+};
+[[nodiscard]] std::unordered_map<std::string, ConfigServer>
+read_config_servers() {
+    std::unordered_map<std::string, ConfigServer> out;
+    const fs::path cfg = resolve_config();
+    if (cfg.empty()) return out;
+    std::ifstream in(cfg);
+    json doc = json::parse(in, nullptr, /*throw=*/false);
+    if (!doc.is_object()) return out;
+    const json* servers = nullptr;
+    if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
+        servers = &doc["mcpServers"];
+    else if (doc.contains("servers") && doc["servers"].is_object())
+        servers = &doc["servers"];
+    if (!servers) return out;
+    for (auto it = servers->begin(); it != servers->end(); ++it) {
+        const json& e = it.value();
+        if (!e.is_object()) continue;
+        ConfigServer cs;
+        cs.command  = e.value("command", std::string{});
+        cs.disabled = e.value("disabled", false);
+        if (e.contains("tools") && e["tools"].is_object()) {
+            const json& tj = e["tools"];
+            if (tj.contains("exclude") && tj["exclude"].is_array())
+                for (const auto& v : tj["exclude"])
+                    if (v.is_string()) cs.exclude.insert(v.get<std::string>());
+        }
+        out.emplace(it.key(), std::move(cs));
+    }
+    return out;
 }
 
 // Build a cap provider from one server config entry. Returns nullptr (and logs)
@@ -780,6 +829,20 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     }
     if (any_resources) out.push_back(make_read_resource_tool(pool));
     if (any_prompts)   out.push_back(make_get_prompt_tool(pool));
+
+    // Budget enforcement: the wire must never carry more than kToolBudget
+    // total tools (native + MCP). Native tools are the core toolset and
+    // always ship; if native + these MCP tools exceed the cap, TRIM the MCP
+    // tail so the request stays within provider limits. The picker surfaces
+    // the same over-budget count (plugin_model) and lets the user disable
+    // some to make room — so a runaway plugin set degrades gracefully
+    // (fewer MCP tools) instead of failing the whole turn.
+    const std::size_t native = tools::native_registry().size();
+    if (native + out.size() > kToolBudget) {
+        const std::size_t room =
+            kToolBudget > native ? kToolBudget - native : 0;
+        if (out.size() > room) out.resize(room);
+    }
     return out;
 }
 
@@ -970,6 +1033,7 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
             std::fprintf(stderr,
                 "mcp: server '%s' did not connect within the deadline — skipping\n",
                 pend.name.c_str());
+            pool->connect_errors[pend.name] = "did not connect within deadline";
             // Detach so the still-handshaking worker can finish and clean up
             // without blocking startup; its result is dropped.
             std::thread([f = pend.fut]() mutable { f.wait(); }).detach();
@@ -981,9 +1045,17 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
                 "mcp: server '%s' connected (%zu tools, %zu resources, %zu prompts)\n",
                 pend.name.c_str(), p->list().size(), p->resources().size(), p->prompts().size());
             pool->registry.add(std::move(p));
+        } else {
+            // make_provider returned nullptr — spawn/handshake failed. The
+            // specific reason went to stderr; record a generic marker so the
+            // model shows this server as failed rather than silently absent.
+            if (!pool->connect_errors.count(pend.name))
+                pool->connect_errors[pend.name] = "failed to start (see stderr log)";
         }
     }
-    if (pool->registry.provider_count() == 0) return out;   // nothing connected
+    // NOTE: do NOT early-return when provider_count()==0 — a config with only
+    // failed servers still needs its pool published so plugin_model() can
+    // report the failures. The pool is installed below unconditionally.
 
     out_pool = pool;                       // keep providers alive (caller)
     {
@@ -1010,6 +1082,103 @@ unsigned long mcp_generation() noexcept {
 void mcp_bump_generation() noexcept {
     if (auto pool = current_pool())
         pool->generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::vector<std::string> mcp_server_tools(const std::string& server) {
+    std::vector<std::string> out;
+    auto pool = current_pool();
+    if (!pool) return out;
+    std::lock_guard<std::mutex> lk(pool->mu);
+    for (const auto& t : pool->registry.tools()) {
+        if (mcp_origin_id(t.name) == server)
+            out.push_back(mcp_bare_name(t.name));
+    }
+    return out;
+}
+
+PluginModel plugin_model() {
+    PluginModel model;
+    model.tool_budget = kToolBudget;
+
+    // Native tools always ship — count them for the budget math.
+    model.native_tool_count = tools::native_registry().size();
+
+    // Config: which servers exist, their command, and disabled tools.
+    const auto cfg = read_config_servers();
+
+    // Live: advertised tools + connect errors, under the pool lock.
+    struct LiveTool { std::string bare, desc; };
+    std::unordered_map<std::string, std::vector<LiveTool>> live;
+    std::unordered_map<std::string, std::string> errors;
+    if (auto pool = current_pool()) {
+        std::lock_guard<std::mutex> lk(pool->mu);
+        for (const auto& t : pool->registry.tools()) {
+            const std::string origin = mcp_origin_id(t.name);
+            LiveTool lt;
+            lt.bare = mcp_bare_name(t.name);
+            lt.desc = t.description.has_value() ? *t.description : std::string{};
+            live[origin].push_back(std::move(lt));
+        }
+        errors = pool->connect_errors;
+    }
+
+    // Build one ServerState per configured server, unifying config + live.
+    std::size_t enabled_mcp = 0;
+    for (const auto& [name, cs] : cfg) {
+        ServerState ss;
+        ss.name    = name;
+        ss.command = cs.command;
+        auto lit = live.find(name);
+        ss.connected = (lit != live.end() && !lit->second.empty());
+        if (auto eit = errors.find(name); eit != errors.end())
+            ss.error = eit->second;
+        if (cs.disabled && ss.error.empty()) ss.error = "disabled in config";
+
+        // Tools: authoritative from the LIVE advertised set (so a disabled
+        // tool never vanishes); enabled derived from config exclude.
+        if (lit != live.end()) {
+            for (const auto& lt : lit->second) {
+                ToolState ts;
+                ts.name        = lt.bare;
+                ts.description = lt.desc;
+                ts.enabled     = !cs.exclude.contains(lt.bare);
+                ss.tools.push_back(std::move(ts));
+            }
+        }
+        // A disabled tool the server no longer advertises (e.g. excluded so
+        // hard the server dropped it) — fold in from config so it shows.
+        for (const auto& ex : cs.exclude) {
+            bool present = false;
+            for (const auto& ts : ss.tools) if (ts.name == ex) present = true;
+            if (!present) {
+                ToolState ts; ts.name = ex; ts.enabled = false;
+                ss.tools.push_back(std::move(ts));
+            }
+        }
+        std::sort(ss.tools.begin(), ss.tools.end(),
+                  [](const ToolState& a, const ToolState& b){ return a.name < b.name; });
+        enabled_mcp += ss.enabled_count();
+        model.servers.push_back(std::move(ss));
+    }
+    std::sort(model.servers.begin(), model.servers.end(),
+              [](const ServerState& a, const ServerState& b){ return a.name < b.name; });
+
+    // Budget: native always ship; enabled MCP fill the rest. Anything past
+    // the budget is trimmed (recorded), and the over-budget tools are
+    // flagged so the picker can mark them.
+    model.wire_tool_count = model.native_tool_count + enabled_mcp;
+    if (model.tool_budget > 0 && model.wire_tool_count > model.tool_budget) {
+        std::size_t room = model.tool_budget > model.native_tool_count
+            ? model.tool_budget - model.native_tool_count : 0;
+        std::size_t taken = 0;
+        for (auto& ss : model.servers)
+            for (auto& ts : ss.tools)
+                if (ts.enabled) {
+                    if (taken < room) ++taken;
+                    else { ts.over_budget = true; ++model.trimmed_count; }
+                }
+    }
+    return model;
 }
 
 std::size_t mcp_reload() {
