@@ -146,6 +146,51 @@ make_provider(const std::string& name, const json& spec) {
         std::fprintf(stderr, "mcp: server '%s' has no \"command\"\n", name.c_str());
         return nullptr;
     }
+    // ── Pre-flight: resolve the command BEFORE forking + exec ────────────
+    // A missing binary otherwise fails deep in the child
+    // (execvp -> "mcp::cap: exec '…' failed: No such file or directory"),
+    // whose stderr can bleed onto the TUI and whose failure recurs every
+    // connect. Resolve it up front and skip the server with ONE clear line
+    // if it doesn't exist — no fork, no exec, no terminal corruption.
+    {
+        const bool has_slash = command.find('/') != std::string::npos
+#ifdef _WIN32
+                            || command.find('\\') != std::string::npos
+#endif
+            ;
+        bool resolvable = false;
+        std::error_code ec;
+        if (has_slash) {
+            // Explicit path (absolute or relative): must exist + be a file.
+            resolvable = fs::exists(command, ec) && !fs::is_directory(command, ec);
+        } else {
+            // Bare name: search PATH, like execvp will.
+            if (const char* path = std::getenv("PATH"); path && *path) {
+                std::string p(path);
+                std::size_t start = 0;
+                while (start <= p.size() && !resolvable) {
+                    std::size_t sep = p.find(':', start);
+                    std::string dir = p.substr(start,
+                        sep == std::string::npos ? std::string::npos : sep - start);
+                    if (!dir.empty()) {
+                        fs::path cand = fs::path{dir} / command;
+                        if (fs::exists(cand, ec) && !fs::is_directory(cand, ec))
+                            resolvable = true;
+                    }
+                    if (sep == std::string::npos) break;
+                    start = sep + 1;
+                }
+            }
+        }
+        if (!resolvable) {
+            std::fprintf(stderr,
+                "mcp: server '%s' skipped — command not found: %s\n"
+                "     (check the path in mcp.json; use an ABSOLUTE path for a "
+                "local build)\n",
+                name.c_str(), command.c_str());
+            return nullptr;
+        }
+    }
     ::mcp::cap::StdioServerProvider::Config cfg;
     cfg.name           = name;
     cfg.spawn.command  = command;

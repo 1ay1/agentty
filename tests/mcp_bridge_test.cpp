@@ -47,6 +47,33 @@ static std::string find_server() {
 }
 
 int main() {
+    // ── Robustness: a server whose command does NOT exist must be SKIPPED
+    // cleanly (no spawn, no hang, no crash), returning zero tools. This is
+    // the exact failure a wrong path in mcp.json produces — it must never
+    // take down the session. Runs unconditionally (no example server
+    // needed): a bogus absolute path can't resolve on any machine.
+    {
+        auto btmp = fs::temp_directory_path() /
+                    ("agentty_mcp_badpath_" + std::to_string(::getpid()));
+        std::error_code bec; fs::remove_all(btmp, bec);
+        fs::create_directories(btmp, bec);
+        auto bcfg = btmp / "mcp.json";
+        {
+            std::ofstream f(bcfg);
+            f << "{ \"mcpServers\": { \"ghost\": { \"command\": "
+              << "\"/nonexistent/definitely/not/here/date_server\" } } }\n";
+        }
+        ::setenv("AGENTTY_MCP_CONFIG", bcfg.string().c_str(), 1);
+        CHECK(mcp::mcp_config_present());
+        mcp::PoolHandle bpool;
+        auto btools = mcp::mcp_tools(bpool);
+        std::printf("mcp_bridge_test: bad-path config → %zu tool(s) "
+                    "(expect 0)\n", btools.size());
+        CHECK(btools.empty());   // skipped, not spawned; session survives
+        ::unsetenv("AGENTTY_MCP_CONFIG");
+        fs::remove_all(btmp, bec);
+    }
+
     std::string server = find_server();
     if (server.empty()) {
         std::printf("mcp_bridge_test: SKIP (no example server built; "
