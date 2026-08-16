@@ -48,3 +48,12 @@ The **effect class** determines which permission profile auto-runs the tool. *Pu
 ## Compile-time enforcement
 
 Each tool's effect set is declared at compile time and checked against the permission matrix via `static_assert`. A tool can't accidentally gain a side effect that the policy doesn't account for — the build catches it.
+
+## Extending the toolset
+
+The native tools are the floor, not the ceiling. Four mechanisms extend what the agent can do:
+
+- **[Plugins](/docs/plugins)** — add external tools via MCP servers (a browser driver, a database client, a hosted API).
+- **[Subagents](/docs/subagents)** — delegate a self-contained task to an isolated agent with its own context window, via the `task` tool.
+- **[Slash commands](/docs/slash-commands)** — reusable prompt macros you invoke as `/name`.
+- **[Hooks](/docs/hooks)** — run your own shell commands around every tool call, to block or observe.
