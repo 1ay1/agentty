@@ -282,6 +282,27 @@ const std::vector<Axis>& visual_axes() {
             o.reload_nonce = 1;   // background reload just completed
             m.ui.settings_list = o;
         }},
+        {"smart_mode overlay opens", [](Model& m) {
+            m.ui.smart_mode = agentty::ui::pick::OpenAt{0};
+        }},
+        {"smart_mode cursor move", [](Model& m) {
+            m.ui.smart_mode = agentty::ui::pick::OpenAt{3};
+        }},
+        {"rag picker opens", [](Model& m) {
+            agentty::rag_settings::Open o;
+            m.ui.rag_settings = o;
+        }},
+        {"rag picker cursor move", [](Model& m) {
+            agentty::rag_settings::Open o;
+            o.index = 2;
+            m.ui.rag_settings = o;
+        }},
+        {"fork picker opens", [](Model& m) {
+            m.ui.fork_picker = agentty::fork_picker::Open{0};
+        }},
+        {"fork picker cursor move", [](Model& m) {
+            m.ui.fork_picker = agentty::fork_picker::Open{2};
+        }},
     };
     return axes;
 }
