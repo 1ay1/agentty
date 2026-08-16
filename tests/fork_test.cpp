@@ -79,8 +79,14 @@ void fresh_cheap_fork(int choice, const char* name) {
     Model forked = fork_with(make_parent(), choice);
 
     // 1. No compaction — the fork does NOT summarize (that cost the window
-    //    and hit "prompt too long"). It's a fresh start.
+    //    and hit "prompt too long"). It's a fresh start. Concretely: no
+    //    compaction is in flight AND the fork carries no CompactionRecord
+    //    (the OLD design landed one, collapsing the wire prefix to a recap;
+    //    the read-on-demand design must leave `compactions` empty so
+    //    wire_messages_for_impl sends the fork's turns verbatim).
     check(!forked.s.compacting, "fork does NOT summarize (no compaction)");
+    check(forked.d.current.compactions.empty(),
+          "fork carries NO CompactionRecord (read-on-demand, not summarize)");
 
     // 2. Near-empty: the parent's 8 turns are NOT carried over. Exactly a
     //    single fork_note message (the on-disk transcript pointer).

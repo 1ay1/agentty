@@ -64,6 +64,19 @@ int main() {
     reply.text = "It uses exponential backoff with full jitter, capped at 30s.";
     t.messages.push_back(reply);
 
+    // A fork-provenance note — same marker-message shape (Role::User +
+    // wire-inert flag). fork_note + fork_transcript must round-trip so a
+    // reloaded fork still renders the "\u2443 Forked" card and still points the
+    // model at the parent transcript.
+    Message fnote;
+    fnote.id   = MessageId{"m-fork"};
+    fnote.role = Role::User;
+    fnote.fork_note       = true;
+    fnote.fork_transcript = "/tmp/threads/parent.transcript.md";
+    fnote.text = "This conversation is a fork of an earlier one. Its full "
+                 "transcript is saved at:\n  /tmp/threads/parent.transcript.md";
+    t.messages.push_back(fnote);
+
     // ── Round-trip through real disk ────────────────────────────────────
     persistence::save_thread(t);
     persistence::flush_pending_saves();
@@ -76,8 +89,8 @@ int main() {
     if (!loaded) { std::printf("FAILED\n"); return 1; }
 
     const auto& msgs = loaded->messages;
-    check(msgs.size() == 3, "all three messages survived");
-    if (msgs.size() != 3) { std::printf("FAILED\n"); return 1; }
+    check(msgs.size() == 4, "all four messages survived");
+    if (msgs.size() != 4) { std::printf("FAILED\n"); return 1; }
 
     // The proactive turn kept its identity.
     check(msgs[1].proactive_context, "proactive_context flag survived reload");
@@ -92,6 +105,15 @@ int main() {
     check(msgs[0].proactive_confidence < 0.0
        && msgs[2].proactive_confidence < 0.0,
           "confidence sentinel (-1) preserved on normal turns");
+
+    // The fork note kept its identity and its transcript pointer.
+    check(msgs[3].fork_note, "fork_note flag survived reload");
+    check(msgs[3].fork_transcript == "/tmp/threads/parent.transcript.md",
+          "fork_transcript path survived reload");
+    check(msgs[3].role == Role::User,
+          "fork note stays a User message (provider-proof) across reload");
+    check(!msgs[0].fork_note && !msgs[1].fork_note && !msgs[2].fork_note,
+          "fork_note did not leak onto other turns");
 
     fs::remove_all(tmp);
 

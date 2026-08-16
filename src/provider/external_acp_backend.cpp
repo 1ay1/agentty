@@ -47,7 +47,7 @@ namespace {
     std::size_t user_index = req.messages.size();
     for (std::size_t i = req.messages.size(); i-- > 0;) {
         const auto& m = req.messages[i];
-        if (m.role == agentty::Role::User && !m.proactive_context
+        if (m.role == agentty::Role::User && !m.proactive_context && !m.fork_note
             && (!m.text.empty() || has_image(m))) {
             user_index = i;
             break;
