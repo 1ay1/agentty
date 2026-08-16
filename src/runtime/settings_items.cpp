@@ -92,15 +92,17 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
     {
         Item w;
         if (model.over_budget()) {
-            w.primary   = "⚠  " + std::to_string(model.wire_tool_count) +
+            w.primary   = std::to_string(model.wire_tool_count) +
                           " tools (budget " + std::to_string(model.tool_budget) + ")";
             w.secondary = std::to_string(model.trimmed_count) +
                           " over budget were dropped from this session — "
                           "disable some below to make room";
+            w.status    = Item::Status::Bad;
         } else {
             w.primary   = std::to_string(model.wire_tool_count) +
                           " tools on the wire";
             w.secondary = "◉ on / ○ off · Enter toggles a tool or removes a plugin";
+            w.status    = Item::Status::Neutral;
         }
         out.push_back(std::move(w));
     }
@@ -109,12 +111,15 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         Item i;
         i.primary   = s.name;
         if (!s.error.empty()) {
-            i.secondary = "⚠ " + s.error;
+            i.secondary = s.error;
+            i.status    = Item::Status::Bad;
         } else if (!s.connected) {
             i.secondary = "connecting…";
+            i.status    = Item::Status::Pending;
         } else {
-            i.secondary = std::to_string(s.enabled_count()) + "/" +
-                          std::to_string(s.tools.size()) + " tools";
+            i.secondary = std::to_string(s.enabled_count()) + " of " +
+                          std::to_string(s.tools.size()) + " tools active";
+            i.status    = Item::Status::Ok;
         }
         i.hint      = "remove";
         i.action    = Action::RemovePlugin;
@@ -125,6 +130,7 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
             Item ti;
             ti.primary   = t.name;
             ti.secondary = t.over_budget ? "over budget — not on the wire" : "";
+            if (t.over_budget) ti.status = Item::Status::Bad;
             ti.hint      = t.enabled ? "disable" : "enable";
             ti.action    = Action::ToggleTool;
             ti.arg       = s.name;
@@ -194,9 +200,11 @@ std::vector<Item> hooks() {
         i.secondary = "NOT APPROVED — hooks will not run";
         i.hint      = "Enter: review & approve";
         i.action    = Action::ApproveHooks;
+        i.status    = Item::Status::Bad;
     } else {
         i.secondary = "approved — active";
         i.hint      = "";
+        i.status    = Item::Status::Ok;
     }
     out.push_back(std::move(i));
     return out;
