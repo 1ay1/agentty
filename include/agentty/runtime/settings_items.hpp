@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -26,10 +27,23 @@ enum class Action : std::uint8_t {
 };
 
 struct Item {
+    // Row health/status — drives the LEADING badge so a row communicates its
+    // state at a glance (like every other agentty status surface), instead of
+    // encoding the Enter ACTION in the badge (a red ✕ "remove" on a healthy
+    // server read as an error). Removability is conveyed by the footer, not
+    // the badge.
+    enum class Status : std::uint8_t {
+        Neutral,   // informational / no health signal
+        Ok,        // healthy — connected, approved, present  (● green)
+        Pending,   // in progress — connecting…              (◌ dim)
+        Bad,       // failed / needs attention — error, unapproved (⚠ amber)
+    };
+
     std::string primary;    // left/main text (name)
     std::string secondary;  // dim detail (command line, path, state)
     std::string hint;       // right-aligned action/CLI hint
     Action      action = Action::None;
+    Status      status = Status::Neutral;
     std::string arg;        // action payload (plugin/server name)
     std::string arg2;       // secondary payload (e.g. bare tool name)
     bool        indented = false;  // render as a sub-row (a plugin's tool)

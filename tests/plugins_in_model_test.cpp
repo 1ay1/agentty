@@ -102,6 +102,32 @@ int main() {
         }
         check(saw_date, "projection: populated model renders the server");
         check(saw_tool, "projection: populated model renders its tools");
+
+        // A CONNECTED server row must read as healthy (Status::Ok), NOT wear
+        // the remove-action badge that looked like an error. The remove
+        // action stays available via the hint, but the badge is health.
+        for (const auto& r : rows) {
+            if (r.primary == "date") {
+                check(r.status == settings::Item::Status::Ok,
+                      "badge: connected server is Status::Ok (healthy, not a red ✕)");
+                check(r.action == settings::Action::RemovePlugin
+                      && r.hint == "remove",
+                      "badge: remove stays available via the action/hint, not the badge");
+            }
+        }
+
+        // A FAILED server reads as Bad.
+        Model failed;
+        mcp::ServerState bad;
+        bad.name = "broken";
+        bad.connected = false;
+        bad.error = "spawn failed: no such file";
+        failed.ui.plugins.servers.push_back(std::move(bad));
+        for (const auto& r : settings::items_for(failed, settings::Category::Plugins)) {
+            if (r.primary == "broken")
+                check(r.status == settings::Item::Status::Bad,
+                      "badge: a failed server is Status::Bad (⚠)");
+        }
     }
 
     if (g_fails == 0) { std::printf("\nAll plugins-in-model tests passed.\n"); return 0; }

@@ -3,9 +3,10 @@
 // Picker widget so it frames/scrolls exactly like every other picker.
 //
 // Two modes, both rendered here:
-//   • list  — rows from settings::items_for(concern), each with a
-//             colour-coded action badge; footer names what Enter does and
-//             offers `a add`.
+//   • list  — rows from settings::items_for(concern), each led by a HEALTH
+//             badge (● connected / ◌ connecting / ⚠ attention) or, for
+//             navigation rows, an affordance arrow; the Enter action lives in
+//             the right-aligned hint + footer, never the badge.
 //   • add   — a one-line prompt (header) with a live caret; footer shows
 //             the format hint + submit/cancel keys.
 
@@ -29,15 +30,31 @@ namespace se = agentty::settings;
 namespace {
 
 struct Badge { std::string glyph; Color color; };
-Badge action_badge(se::Action a) {
+
+// Health badge — the LEADING glyph on a top-level row. A row shows its STATE
+// at a glance (connected / connecting / failed), the way every agentty status
+// surface does. The Enter action (remove / approve) is communicated by the
+// footer + the right-aligned hint, NOT the badge — so a healthy connected
+// server never wears a scary red ✕.
+Badge status_badge(se::Item::Status s) {
+    switch (s) {
+        case se::Item::Status::Ok:      return {"\xe2\x97\x8f", success};  // ● connected/healthy
+        case se::Item::Status::Pending: return {"\xe2\x97\x8c", muted};    // ◌ connecting…
+        case se::Item::Status::Bad:     return {"\xe2\x9a\xa0", warn};     // ⚠ error/attention
+        case se::Item::Status::Neutral:
+        default:                        return {" ", muted};
+    }
+}
+
+// Navigation rows (RAG / Smart / profile) that jump elsewhere show a subtle
+// affordance arrow instead of a health dot — they have no health, they're
+// doors. Returns std::nullopt for rows that should use the status badge.
+std::optional<Badge> nav_badge(se::Action a) {
     switch (a) {
-        case se::Action::CycleProfile: return {"\xe2\x86\xbb", info};      // ↻
+        case se::Action::CycleProfile: return Badge{"\xe2\x86\xbb", info};      // ↻
         case se::Action::OpenRag:
-        case se::Action::OpenSmart:    return {"\xe2\x86\x92", highlight};  // →
-        case se::Action::RemovePlugin: return {"\xe2\x9c\x95", danger};     // ✕
-        case se::Action::ApproveHooks: return {"\xe2\x9c\x93", warn};       // ✓
-        case se::Action::None:
-        default:                       return {" ", muted};
+        case se::Action::OpenSmart:    return Badge{"\xe2\x86\x92", highlight};  // →
+        default:                       return std::nullopt;
     }
 }
 
@@ -100,11 +117,13 @@ Element settings_list_picker(const Model& m) {
     // ── Rows (dimmed while adding, to focus the prompt) ──────────
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& it = rows[static_cast<std::size_t>(i)];
-        const Badge b = action_badge(it.action);
+        // Top-level rows lead with a HEALTH badge (status), except pure
+        // navigation rows (RAG/Smart/profile) which show an affordance arrow.
+        const Badge b = nav_badge(it.action).value_or(status_badge(it.status));
 
         Picker::Config::Row row;
         // A plugin's tool rows are indented and carry an on/off checkbox;
-        // top-level rows keep their action badge.
+        // top-level rows lead with their health/nav badge.
         if (it.indented) {
             row.badge       = it.on ? "\xe2\x97\x89" : "\xe2\x97\x8b"; // ◉ / ○
             row.badge_style = fg_of(adding ? muted : (it.on ? success : muted));
