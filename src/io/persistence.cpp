@@ -114,6 +114,38 @@ fs::path threads_dir() {
     return p;
 }
 
+static std::string role_to_string(Role r);
+
+fs::path write_thread_transcript_md(const Thread& t) {
+    // Clean transcript: "## user" / "## assistant" headers + the text,
+    // tool calls collapsed to a single `› tool(name)` line. None of the
+    // <id>.json noise (ids, timestamps, streaming scaffolding). Small and
+    // readable so the model can `read` it (and grep/slice it) cheaply.
+    std::ostringstream md;
+    md << "# Transcript: " << (t.title.empty() ? t.id.value : t.title) << "\n";
+    md << "# (" << t.messages.size() << " messages; read/grep as needed)\n\n";
+    for (const auto& m : t.messages) {
+        const std::string role = role_to_string(m.role);
+        md << "## " << role << "\n";
+        if (!m.text.empty()) md << m.text << "\n";
+        for (const auto& tc : m.tool_calls) {
+            md << "› tool(" << tc.name.value << ")";
+            // A short arg hint if present, one line, bounded.
+            if (!tc.args.is_null()) {
+                std::string a = tc.args.dump();
+                if (a.size() > 120) a = a.substr(0, 120) + "…";
+                md << " " << a;
+            }
+            md << "\n";
+        }
+        md << "\n";
+    }
+    // Write next to the thread files under a stable, discoverable name.
+    const fs::path out = threads_dir() / (t.id.value + ".transcript.md");
+    if (!write_json_atomic(out, md.str())) return {};
+    return out;
+}
+
 static std::string role_to_string(Role r) {
     switch (r) {
         case Role::User: return "user";

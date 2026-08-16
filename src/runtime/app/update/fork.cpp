@@ -30,6 +30,10 @@
 #include "agentty/runtime/picker.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/io/persistence.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include <mcp/tools/util/fs_helpers.hpp>
+#include <filesystem>
 #include "agentty/tool/skills.hpp"
 
 namespace agentty::app::detail {
@@ -103,33 +107,59 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             deps().save_thread(m.d.current);
             const std::string parent_id = m.d.current.id.value;
 
-            // 2. Build the fork: a copy with fresh identity + provenance +
-            //    per-thread RAG override.
-            Thread fork = m.d.current;
+            // 2. Write the parent's transcript to a clean, readable file
+            //    the fork can READ ON DEMAND — the whole point of forking:
+            //    escape a full context window CHEAPLY. The new thread starts
+            //    EMPTY (near-zero tokens); the model pulls earlier context
+            //    from disk only if it needs it (exactly like manually
+            //    opening a new thread and asking it to read the old one).
+            const std::filesystem::path transcript =
+                persistence::write_thread_transcript_md(m.d.current);
+
+            // The transcript lives under ~/.agentty/threads — OUTSIDE the
+            // workspace the read tool is sandboxed to. Allowlist that dir
+            // for reads (both the agentty and mcp-cpp fs layers, since
+            // tools are served through mcp-cpp) so the model can actually
+            // read the file the note points it at.
+            if (!transcript.empty()) {
+                const auto dir = persistence::threads_dir();
+                tools::util::allow_read_root(dir);
+                ::mcp::tools::util::allow_read_root(dir);
+            }
+
+            // 3. Build the fork: a FRESH, EMPTY thread with provenance +
+            //    per-thread RAG override. No messages carried over.
+            Thread fork;
             fork.id = deps().new_thread_id();
             fork.forked_from = parent_id;
             fork.rag_mode_override = static_cast<int>(rag_mode_of(choice));
             fork.created_at = fork.updated_at = std::chrono::system_clock::now();
-            if (!fork.title.empty() && fork.title.rfind("Fork: ", 0) != 0)
-                fork.title = "Fork: " + fork.title;
+            fork.title = m.d.current.title.rfind("Fork: ", 0) == 0
+                             ? m.d.current.title
+                             : ("Fork: " + (m.d.current.title.empty()
+                                                ? std::string{"conversation"}
+                                                : m.d.current.title));
 
-            // A fork ALWAYS summarizes — that is the point of forking a
-            // nearly-full thread: reclaim context. The picker's choice is
-            // ONLY the fork's future RAG behaviour (an independent axis),
-            // not whether to summarize. (Previously RAG-on forks landed
-            // VERBATIM — they copied the whole transcript and reclaimed
-            // nothing, so a user forking to escape a full context got a
-            // full context back. That was the bug.) Drop inherited
-            // compaction records: the fresh summary supersedes them.
-            fork.compactions.clear();
+            // 4. Seed a tiny system note so the model KNOWS the prior
+            //    context exists and how to reach it — without paying for it
+            //    up front. This is the entire fork mechanism.
+            if (!transcript.empty()) {
+                Message note;
+                note.role = Role::System;
+                note.text =
+                    "This conversation is a fork of an earlier one. Its full "
+                    "transcript is saved at:\n  " + transcript.string() +
+                    "\nRead it with the `read` tool (or grep it) ONLY if you "
+                    "need earlier context — don't read it pre-emptively. The "
+                    "fork starts fresh precisely to reclaim the context "
+                    "window; pull just the slice you need.";
+                fork.messages.push_back(std::move(note));
+            }
 
-            // 3. Switch to the fork with a BOUNDED render, exactly like
-            //    New/Open/Rewind thread: rehydrate_frozen seeds only ~2
-            //    screens into the live canvas (older turns live in native
-            //    scrollback, never re-emitted), so switching a long thread
-            //    repaints ~2 screens instead of the ENTIRE transcript.
-            //    (The old path called clear_frozen + reset_inline, which
-            //    re-emitted every message live — the slow full repaint.)
+            // 5. Switch to the fork — a fresh empty thread, so the render is
+            //    trivially cheap (nothing to re-emit). rehydrate_frozen on
+            //    an ~empty thread is a no-op; reset_inline paints the clean
+            //    composer.
             tools::skills::reset_activations();
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
@@ -138,24 +168,13 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
 
-            // 4. Summarize on the fork with the utility model (the cheapest-
-            //    capable compaction path selects the model). The wire prefix
-            //    collapses to the recap — which is what actually reclaims
-            //    the context window.
-            m.s.compaction_style        = CompactionStyle::Recoverable;
-            m.s.compaction_target_index = m.d.current.messages.size();
-            m.s.compaction_buffer.clear();
-            auto now = std::chrono::steady_clock::now();
-            phase::Active ctx;
-            ctx.started       = now;
-            ctx.last_event_at = now;
-            m.s.phase      = phase::Streaming{std::move(ctx)};
-            m.s.compacting = true;
-            m.s.status = std::string{"forking \xc2\xb7 summarizing… ("} +
-                         label_of(choice) + ")";
-            m.s.status_until = {};
+            auto toast = set_status_toast(
+                m, std::string{"forked \xc2\xb7 fresh context · "} +
+                       label_of(choice) +
+                       " · prior transcript readable on demand",
+                std::chrono::seconds{5});
             return {std::move(m),
-                    Cmd<Msg>::batch(cmd::launch_stream(m), Cmd<Msg>::reset_inline())};
+                    Cmd<Msg>::batch(std::move(toast), Cmd<Msg>::reset_inline())};
         },
     }, fm);
 }

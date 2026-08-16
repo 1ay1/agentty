@@ -25,9 +25,9 @@ namespace {
 struct RowSpec { const char* label; const char* help; };
 
 const RowSpec kRows[fp::kChoiceCount] = {
-    {"RAG per turn",   "summarize + retrieve context before every turn"},
-    {"First-turn RAG", "summarize + retrieve once, up front"},
-    {"RAG off",        "summarize only · no retrieval"},
+    {"RAG per turn",   "fresh thread · retrieve context before every turn"},
+    {"First-turn RAG", "fresh thread · retrieve once, up front"},
+    {"RAG off",        "fresh thread · no retrieval"},
 };
 
 } // namespace
@@ -56,7 +56,8 @@ Element fork_picker_view(const Model& m) {
 
     cfg.footer.push_back(text(""));
     cfg.footer.push_back(text(
-        "  The fork is summarized to reclaim context · original left untouched.",
+        "  A fork starts FRESH (near-zero context) · the old transcript is "
+        "readable on demand.",
         fg_dim(muted)));
     cfg.footer.push_back(h(
         text("\xe2\x86\x91\xe2\x86\x93 ", fg_of(fg)),  text("choose   ", fg_dim(muted)),

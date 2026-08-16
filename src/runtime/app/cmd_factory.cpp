@@ -477,7 +477,8 @@ std::vector<Message> wire_messages_for_impl(Thread&& t) {
 // summary already at the head) until the estimate fits ~65% of the
 // window, leaving headroom for the prompt + the summary response.
 std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_max,
-                                                  CompactionStyle style) {
+                                                  CompactionStyle style,
+                                                  int ceiling_override) {
     // Start from the already-compaction-substituted view so stacked
     // compactions don't double-count the summarised prefix.
     std::vector<Message> base = wire_messages_for_impl(t);
@@ -494,14 +495,24 @@ std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_m
     //     recent bounded slab of history.
     // The trim keeps the first real User turn (keep_head=1) so the original
     // task framing survives into the summary instead of being dropped.
-    if (context_max > 0) {
+    if (context_max > 0 || ceiling_override > 0) {
         constexpr int kCompactionSliceCap = 150000;
         int ceiling = static_cast<int>(static_cast<double>(context_max) * 0.65);
         if (ceiling > kCompactionSliceCap) ceiling = kCompactionSliceCap;
-        const std::size_t drop = front_drop_count(base, ceiling, /*keep_head=*/1);
+        // An explicit override (the adaptive shrink-retry) wins outright —
+        // it's the ceiling we already know fits under the provider's hard
+        // limit. It can drive the slice far below the default, down to a
+        // last-few-turns recap on a tiny window.
+        if (ceiling_override > 0) ceiling = ceiling_override;
+        // When shrinking hard (a small override), don't insist on keeping
+        // the first User turn — if the head alone busts the ceiling, the
+        // summary of whatever recent slab fits is better than a 400.
+        const std::size_t keep_head = (ceiling_override > 0 && ceiling < 20000)
+                                          ? 0u : 1u;
+        const std::size_t drop = front_drop_count(base, ceiling, keep_head);
         if (drop > 0)
-            base.erase(base.begin() + 1,
-                       base.begin() + 1 + static_cast<std::ptrdiff_t>(drop));
+            base.erase(base.begin() + static_cast<std::ptrdiff_t>(keep_head),
+                       base.begin() + static_cast<std::ptrdiff_t>(keep_head + drop));
         // Drop any leading Assistants exposed by the trim — Anthropic
         // requires the wire to start with a User.
         std::size_t lead = 0;
@@ -682,6 +693,7 @@ Cmd<Msg> launch_stream(Model& m) {
     std::string session_key = thread_snapshot.id.value;
     const bool compacting  = m.s.compacting;
     const CompactionStyle compaction_style = m.s.compaction_style;
+    const int  compaction_ceiling = m.s.compaction_ceiling;
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
     auth::AuthHeader auth  = deps().auth;
@@ -812,7 +824,7 @@ Cmd<Msg> launch_stream(Model& m) {
 
     return Cmd<Msg>::task(
         [thread = std::move(thread_snapshot),
-         compacting, compaction_style, context_max, retry_count,
+         compacting, compaction_style, compaction_ceiling, context_max, retry_count,
          orchestrate, strategic_profile, turn_complexity, plan_recall, speculative,
          recalled_plan = std::move(recalled_plan),
          session_key = std::move(session_key),
@@ -1007,7 +1019,7 @@ Cmd<Msg> launch_stream(Model& m) {
             if (int base = ui::context_max_for_model(req.model);
                 base > 0 && (compaction_ctx <= 0 || base < compaction_ctx))
                 compaction_ctx = base;
-            req.messages = wire_messages_for_compaction(thread, compaction_ctx, compaction_style);
+            req.messages = wire_messages_for_compaction(thread, compaction_ctx, compaction_style, compaction_ceiling);
             drop_stale_proactive(req.messages);
             // req.tools left empty — summarisation is text-only.
         } else {
