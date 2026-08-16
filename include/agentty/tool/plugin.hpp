@@ -61,6 +61,27 @@ enum class EditResult : std::uint8_t {
 [[nodiscard]] std::vector<ServerSpec>
 list_servers(const std::filesystem::path& path);
 
+// Enable/disable ONE tool of a server, persisted as the server's
+// `tools.exclude` list in mcp.json (the bridge already honours it). A
+// disabled tool is dropped from the wire catalog on the next reload.
+// `bare` is the tool's short name (e.g. "current_date", NOT the
+// mcp__server__tool form). No-op-Ok if already in the desired state.
+[[nodiscard]] EditResult set_tool_enabled(const std::filesystem::path& path,
+                                          const std::string& server,
+                                          const std::string& bare,
+                                          bool enabled);
+
+// True when `bare` is in server's tools.exclude (i.e. disabled).
+[[nodiscard]] bool is_tool_disabled(const std::filesystem::path& path,
+                                    const std::string& server,
+                                    const std::string& bare);
+
+// The bare names in a server's tools.exclude list (its disabled tools).
+// Empty if the server/list is absent. Lets the UI show disabled tools
+// (which are dropped from the live pool, so invisible otherwise).
+[[nodiscard]] std::vector<std::string>
+disabled_tools(const std::filesystem::path& path, const std::string& server);
+
 // The config path for a scope. user → ~/.agentty/mcp.json,
 // project → ./.agentty/mcp.json.
 [[nodiscard]] std::filesystem::path config_path(bool project);

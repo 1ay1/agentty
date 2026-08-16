@@ -21,6 +21,7 @@ enum class Action : std::uint8_t {
     OpenRag,       // General: open the RAG mode picker
     OpenSmart,     // General: open Smart Mode config
     RemovePlugin,  // Plugins: remove this server from mcp.json
+    ToggleTool,    // Plugins: enable/disable one tool (arg=server, arg2=bare)
     ApproveHooks,  // Hooks: approve the active hooks file
 };
 
@@ -29,7 +30,10 @@ struct Item {
     std::string secondary;  // dim detail (command line, path, state)
     std::string hint;       // right-aligned action/CLI hint
     Action      action = Action::None;
-    std::string arg;        // action payload (e.g. plugin name to remove)
+    std::string arg;        // action payload (plugin/server name)
+    std::string arg2;       // secondary payload (e.g. bare tool name)
+    bool        indented = false;  // render as a sub-row (a plugin's tool)
+    bool        on = true;         // toggle state (for ToggleTool rows)
 };
 
 // The rows for one category, live. `m` supplies profile/RAG/Smart state

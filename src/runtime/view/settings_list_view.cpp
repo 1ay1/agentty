@@ -100,10 +100,19 @@ Element settings_list_picker(const Model& m) {
         const Badge b = action_badge(it.action);
 
         Picker::Config::Row row;
-        row.badge       = b.glyph;
-        row.badge_style = fg_of(adding ? muted : b.color);
-        row.leading       = it.primary;
-        row.leading_style = fg_of(adding ? muted : fg);
+        // A plugin's tool rows are indented and carry an on/off checkbox;
+        // top-level rows keep their action badge.
+        if (it.indented) {
+            row.badge       = it.on ? "\xe2\x97\x89" : "\xe2\x97\x8b"; // ◉ / ○
+            row.badge_style = fg_of(adding ? muted : (it.on ? success : muted));
+            row.leading       = "  " + it.primary;   // indent under the plugin
+            row.leading_style = fg_of(adding ? muted : (it.on ? fg : muted));
+        } else {
+            row.badge       = b.glyph;
+            row.badge_style = fg_of(adding ? muted : b.color);
+            row.leading       = it.primary;
+            row.leading_style = fg_of(adding ? muted : fg);
+        }
         row.trailing       = it.secondary;
         row.trailing_style = fg_dim(muted);
         row.selected       = !adding && (i == o->index);

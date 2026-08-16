@@ -104,6 +104,36 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     }
                     return {std::move(m), std::move(cmd)};
                 }
+                case se::Action::ToggleTool: {
+                    // Enable/disable one tool of a plugin (persists to
+                    // mcp.json's tools.exclude) then reload the pool live
+                    // OFF the UI thread, exactly like add/remove.
+                    auto path = tools::plugin::config_path(/*project=*/false);
+                    const bool want_enabled = !row.on;   // toggle
+                    auto r = tools::plugin::set_tool_enabled(
+                        path, row.arg, row.arg2, want_enabled);
+                    maya::Cmd<Msg> cmd;
+                    if (r == tools::plugin::EditResult::Ok) {
+                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                            maya::Cmd<Msg>::task_isolated(
+                                [](std::function<void(Msg)>) {
+                                    (void)tools::reload_mcp_plugins();
+                                }),
+                            set_status_toast(m,
+                                (want_enabled ? "enabled " : "disabled ")
+                                + row.arg + "__" + row.arg2)});
+                    } else {
+                        cmd = set_status_toast(m,
+                            "could not toggle '" + row.arg2 + "'");
+                    }
+                    // Keep the cursor on the same row after the list rebuilds.
+                    if (auto* oo = settings_list_opened(m.ui.settings_list)) {
+                        const int n = static_cast<int>(
+                            se::items_for(m, oo->concern).size());
+                        oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
+                    }
+                    return {std::move(m), std::move(cmd)};
+                }
                 case se::Action::ApproveHooks:
                     // Consent MUST be a deliberate terminal action — the
                     // picker can't safely own the y/N prompt while it holds

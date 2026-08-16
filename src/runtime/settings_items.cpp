@@ -5,9 +5,11 @@
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/tool/plugin.hpp"
+#include "agentty/tool/registry.hpp"
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <cctype>
 #include <cstdlib>
@@ -69,11 +71,36 @@ std::vector<Item> plugins() {
     if (servers.empty()) {
         Item i;
         i.primary   = "(no plugins configured)";
-        i.secondary = "add one: agentty plugin add <name> --python … / --uvx …";
+        i.secondary = "add one: press `a`, or agentty plugin add <name> …";
         i.hint      = "docs/PLUGINS.md";
         out.push_back(std::move(i));
         return out;
     }
+
+    // Live catalog: every tool actually on the wire this session, so we can
+    // show a plugin's ENABLED tools + the running total (for the budget
+    // warning). registry() is the projected catalog (native + connected
+    // MCP); MCP tools are namespaced mcp__<server>__<tool>.
+    const auto& catalog = tools::registry();
+    std::size_t total = catalog.size();
+
+    // Budget warning header. The wire sends every native tool + up to
+    // kInlineBudget MCP tools inline; a large total inflates each request
+    // (and, historically, tripped provider limits). Warn past a soft cap.
+    constexpr std::size_t kSoftCap = 48;
+    if (total > kSoftCap) {
+        Item w;
+        w.primary   = "⚠ " + std::to_string(total) + " tools active";
+        w.secondary = "large tool sets bloat every request — disable unused "
+                      "ones below (Enter toggles)";
+        out.push_back(std::move(w));
+    } else {
+        Item w;
+        w.primary   = std::to_string(total) + " tools active";
+        w.secondary = "Enter on a plugin removes it; Enter on a tool toggles it";
+        out.push_back(std::move(w));
+    }
+
     for (const auto& s : servers) {
         Item i;
         i.primary = s.name;
@@ -84,6 +111,38 @@ std::vector<Item> plugins() {
         i.action    = Action::RemovePlugin;
         i.arg       = s.name;
         out.push_back(std::move(i));
+
+        // This server's tools, indented. Enabled ones come from the live
+        // catalog (mcp__<server>__<bare>); disabled ones are dropped from
+        // the pool, so we also fold in the config's exclude list.
+        const std::string prefix = "mcp__" + s.name + "__";
+        std::vector<std::pair<std::string,bool>> tools;  // (bare, enabled)
+        for (const auto& t : catalog) {
+            if (t.name.value.rfind(prefix, 0) == 0)
+                tools.emplace_back(t.name.value.substr(prefix.size()), true);
+        }
+        // Disabled tools: the picker records them in tools.exclude; surface
+        // them so they can be re-enabled. list_servers doesn't return the
+        // exclude set, so probe each candidate we know is off. Simplest:
+        // read them back via is_tool_disabled against a small discovered
+        // set. Since we can't enumerate a disconnected tool's name, we rely
+        // on the config's exclude list being visible through a helper.
+        for (const auto& bare : tools::plugin::disabled_tools(path, s.name))
+            tools.emplace_back(bare, false);
+
+        std::sort(tools.begin(), tools.end());
+        for (const auto& [bare, en] : tools) {
+            Item ti;
+            ti.primary   = bare;
+            ti.secondary = en ? "enabled" : "disabled";
+            ti.hint      = en ? "Enter: disable" : "Enter: enable";
+            ti.action    = Action::ToggleTool;
+            ti.arg       = s.name;
+            ti.arg2      = bare;
+            ti.indented  = true;
+            ti.on        = en;
+            out.push_back(std::move(ti));
+        }
     }
     return out;
 }
