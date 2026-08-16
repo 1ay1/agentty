@@ -150,6 +150,16 @@ struct ConfigServer {
     std::unordered_set<std::string> exclude;
     bool disabled = false;
 };
+// Read a boolean flag from a JSON object WITHOUT throwing on a malformed
+// value. A hand-edited non-bool (e.g. `"disabled": "true"`) would make
+// nlohmann's value(key, false) throw type_error and take down the config read
+// or the connect loop. Any non-bool reads as false (fail-open).
+[[nodiscard]] bool json_flag(const json& obj, const char* key) noexcept {
+    if (!obj.is_object()) return false;
+    auto it = obj.find(key);
+    return it != obj.end() && it->is_boolean() && it->get<bool>();
+}
+
 [[nodiscard]] std::unordered_map<std::string, ConfigServer>
 read_config_servers() {
     std::unordered_map<std::string, ConfigServer> out;
@@ -169,7 +179,12 @@ read_config_servers() {
         if (!e.is_object()) continue;
         ConfigServer cs;
         cs.command  = e.value("command", std::string{});
-        cs.disabled = e.value("disabled", false);
+        // A hand-edited non-bool `disabled` (e.g. the string "true") must not
+        // throw type_error and take down the whole config read — treat any
+        // non-bool as "not disabled".
+        if (auto dit = e.find("disabled");
+            dit != e.end() && dit->is_boolean())
+            cs.disabled = dit->get<bool>();
         if (e.contains("tools") && e["tools"].is_object()) {
             const json& tj = e["tools"];
             if (tj.contains("exclude") && tj["exclude"].is_array())
@@ -874,7 +889,8 @@ std::vector<ServerLaunch> configured_servers_for_delegation() {
     };
     std::vector<ServerLaunch> out;
     for (auto it = servers->begin(); it != servers->end(); ++it) {
-        if (!it.value().is_object() || it.value().value("disabled", false)) continue;
+        if (!it.value().is_object()
+            || json_flag(it.value(), "disabled")) continue;
         const auto& spec = it.value();
         ServerLaunch launch;
         launch.name = it.key();
@@ -977,7 +993,7 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     for (auto it = servers->begin(); it != servers->end(); ++it) {
         const std::string sname = it.key();
         const json spec = it.value();   // copy: detached worker outlives `doc`
-        if (spec.value("disabled", false)) continue;
+        if (json_flag(spec, "disabled")) continue;
 
         ServerPolicy policy;
         policy.trust_annotations = spec.value("trustAnnotations", false);
@@ -1131,10 +1147,13 @@ PluginModel plugin_model() {
         auto lit = live.find(name);
         ss.connected = (lit != live.end() && !lit->second.empty());
         ss.disabled  = cs.disabled;
-        if (auto eit = errors.find(name); eit != errors.end())
-            ss.error = eit->second;
-        // A server turned off on purpose is NOT an error — leave error empty
-        // and let ss.disabled drive the "off" badge.
+        // A server turned off on purpose is NOT an error and never connected,
+        // so it carries no error and no live tools — disabled wins over any
+        // stale connect-error entry from a previous session.
+        if (!ss.disabled) {
+            if (auto eit = errors.find(name); eit != errors.end())
+                ss.error = eit->second;
+        }
 
         // Tools: authoritative from the LIVE advertised set (so a disabled
         // tool never vanishes); enabled derived from config exclude.

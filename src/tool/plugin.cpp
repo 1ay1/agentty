@@ -6,13 +6,22 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
+
+#ifndef _WIN32
+#include <unistd.h>   // getpid
+#else
+#include <process.h>  // _getpid
+#define getpid _getpid
+#endif
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -20,6 +29,31 @@ using nlohmann::json;
 namespace agentty::tools::plugin {
 
 namespace {
+
+// All config MUTATIONS (add/remove/toggle) serialize behind this mutex. Each
+// mutator is a load→modify→store cycle with no cross-process CAS; the reducer
+// fires them on DETACHED worker threads (a "disable tool + disable server"
+// pair, or rapid toggles), so without serialization two loads race and the
+// second store clobbers the first's edit (classic lost update). One in-process
+// mutex makes every load+store atomic w.r.t. other agentty mutations. (A
+// concurrent EXTERNAL editor is still handled by the unique-temp + atomic
+// rename in store(), so at worst one side's write wins wholesale — never a
+// torn file.)
+[[nodiscard]] std::mutex& mutation_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+// Read an entry's `disabled` flag WITHOUT throwing on a malformed value. A
+// hand-edited `"disabled": "true"` (string, not bool) makes nlohmann's
+// value("disabled", false) throw type_error.302 — which would crash a toggle
+// or the connect loop. Treat any non-bool as "not disabled" (fail-open: a
+// garbled flag never silently hides a server).
+[[nodiscard]] bool entry_disabled(const json& entry) noexcept {
+    if (!entry.is_object()) return false;
+    auto it = entry.find("disabled");
+    return it != entry.end() && it->is_boolean() && it->get<bool>();
+}
 
 [[nodiscard]] fs::path home_dir() {
     if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
@@ -51,18 +85,34 @@ struct Loaded {
 [[nodiscard]] bool store(const fs::path& path, const json& doc) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
+    // If the target is a SYMLINK, write through to its real target rather than
+    // replacing the link with a regular file (a plain rename over a symlink
+    // orphans a user's dotfile symlink). weakly_canonical resolves the link;
+    // if it doesn't exist yet, we keep the original path.
+    fs::path target = path;
+    if (fs::is_symlink(path, ec)) {
+        auto real = fs::weakly_canonical(path, ec);
+        if (!ec && !real.empty()) target = real;
+    }
     // Write-then-rename for atomicity: a crash mid-write must not leave a
     // truncated mcp.json (which would then hit the ParseError refusal on
-    // every subsequent command — a self-inflicted lockout).
-    const fs::path tmp = path.string() + ".tmp";
+    // every subsequent command — a self-inflicted lockout). The temp name is
+    // UNIQUE (pid + a monotonic counter) so two concurrent writers — our own
+    // detached mutators, or an external tool — never open, truncate, and
+    // rename the SAME temp file (which would interleave into corruption).
+    static std::atomic<unsigned long> seq{0};
+    const fs::path tmp = target.string() + ".tmp."
+        + std::to_string(static_cast<long>(::getpid())) + "-"
+        + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;
         f << doc.dump(2) << '\n';
-        if (!f) return false;
+        f.flush();
+        if (!f) { std::error_code rec; fs::remove(tmp, rec); return false; }
     }
-    fs::rename(tmp, path, ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
+    fs::rename(tmp, target, ec);
+    if (ec) { std::error_code rec; fs::remove(tmp, rec); return false; }
     return true;
 }
 
@@ -86,6 +136,7 @@ fs::path config_path(bool project) {
 
 EditResult add_server(const fs::path& path, const ServerSpec& spec,
                       bool force) {
+    std::lock_guard<std::mutex> lk(mutation_mutex());
     Loaded l = load(path);
     if (!l.ok) return EditResult::ParseError;
     const char* key = servers_key(l.doc);
@@ -108,6 +159,7 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
 }
 
 EditResult remove_server(const fs::path& path, const std::string& name) {
+    std::lock_guard<std::mutex> lk(mutation_mutex());
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;
@@ -141,6 +193,7 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
 
 EditResult set_server_disabled(const fs::path& path, const std::string& name,
                               bool disabled) {
+    std::lock_guard<std::mutex> lk(mutation_mutex());
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;
@@ -150,7 +203,7 @@ EditResult set_server_disabled(const fs::path& path, const std::string& name,
         return EditResult::NotFound;
     json& entry = l.doc[key][name];
     if (!entry.is_object()) return EditResult::NotFound;
-    const bool cur = entry.value("disabled", false);
+    const bool cur = entry_disabled(entry);
     if (cur == disabled) return EditResult::Ok;   // no-op-Ok
     if (disabled) entry["disabled"] = true;
     else          entry.erase("disabled");        // absent == enabled (clean)
@@ -165,11 +218,12 @@ bool is_server_disabled(const fs::path& path, const std::string& name) {
         || !l.doc[key].contains(name))
         return false;
     const json& entry = l.doc[key][name];
-    return entry.is_object() && entry.value("disabled", false);
+    return entry_disabled(entry);
 }
 
 EditResult set_tool_enabled(const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
+    std::lock_guard<std::mutex> lk(mutation_mutex());
     Loaded l = load(path);
     if (!l.existed) return EditResult::NotFound;
     if (!l.ok) return EditResult::ParseError;

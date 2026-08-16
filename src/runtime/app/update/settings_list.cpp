@@ -130,6 +130,11 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     return {std::move(m), std::move(cmd)};
                 }
                 case se::Action::TogglePlugin: {
+                    // Ignore a toggle while a connect/reload is already in
+                    // flight — the snapshot (and this row's on/off) is mid-
+                    // change, so acting on it could write a stale intent.
+                    if (m.ui.plugins_loading)
+                        return done(std::move(m));
                     // Enter on a plugin row flips the WHOLE server on/off — a
                     // reversible `disabled` flag in mcp.json, NOT a delete.
                     // Enabling spawns + handshakes; disabling drops the
@@ -155,6 +160,8 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     return {std::move(m), std::move(cmd)};
                 }
                 case se::Action::ToggleTool: {
+                    if (m.ui.plugins_loading)
+                        return done(std::move(m));
                     // Enable/disable one tool of a plugin: persist to
                     // mcp.json's tools.exclude, then invalidate the wire
                     // catalog so it re-projects with the new filter. NO
@@ -207,6 +214,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // counterpart to Enter's reversible on/off toggle. Only applies
             // to a server row (Plugins concern, TogglePlugin action); ignored
             // on tool sub-rows and every other category.
+            if (m.ui.plugins_loading) return done(std::move(m));
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o || o->concern != se::Category::Plugins)
                 return done(std::move(m));
