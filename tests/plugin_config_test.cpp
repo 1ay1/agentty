@@ -209,6 +209,10 @@ void server_enable_disable(const fs::path& dir) {
     const fs::path cfg = dir / "srv" / "mcp.json";
     (void)plug::add_server(cfg, {"date", "/x/date", {}}, false);
     check(!plug::is_server_disabled(cfg, "date"), "new server starts enabled");
+    // Ecosystem portability: an added server is tagged type:stdio (the
+    // emerging cross-client convention).
+    check(read_json(cfg)["mcpServers"]["date"]["type"] == "stdio",
+          "added server carries type:stdio");
     // disable the whole server
     check(plug::set_server_disabled(cfg, "date", true) == plug::EditResult::Ok,
           "disable server succeeds");

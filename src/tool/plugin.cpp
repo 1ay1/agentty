@@ -94,7 +94,11 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
     auto& servers = l.doc[key];
     if (servers.contains(spec.name) && !force)
         return EditResult::AlreadyExists;
-    json entry = {{"command", spec.command}};
+    // `type: stdio` is the emerging cross-client convention (MCP config
+    // standard proposals; Claude Code / VS Code / Cursor tag it). agentty's
+    // add flow is command-based, so it's always stdio; writing it explicitly
+    // makes the file portable to stricter clients that require the tag.
+    json entry = {{"type", "stdio"}, {"command", spec.command}};
     if (!spec.args.empty()) entry["args"] = spec.args;
     // Overwrite-in-place (force) keeps any extra keys the user added to
     // THIS entry only when the command is unchanged in spirit — simplest
