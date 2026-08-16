@@ -204,6 +204,33 @@ void tool_enable_disable(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+void server_enable_disable(const fs::path& dir) {
+    std::println("--- server_enable_disable ---");
+    const fs::path cfg = dir / "srv" / "mcp.json";
+    (void)plug::add_server(cfg, {"date", "/x/date", {}}, false);
+    check(!plug::is_server_disabled(cfg, "date"), "new server starts enabled");
+    // disable the whole server
+    check(plug::set_server_disabled(cfg, "date", true) == plug::EditResult::Ok,
+          "disable server succeeds");
+    check(plug::is_server_disabled(cfg, "date"), "server recorded disabled");
+    check(read_json(cfg)["mcpServers"]["date"]["disabled"] == true,
+          "disabled:true persisted");
+    // idempotent
+    check(plug::set_server_disabled(cfg, "date", true) == plug::EditResult::Ok,
+          "double-disable is Ok no-op");
+    // re-enable removes the flag (absent == enabled, clean file)
+    check(plug::set_server_disabled(cfg, "date", false) == plug::EditResult::Ok,
+          "re-enable succeeds");
+    check(!plug::is_server_disabled(cfg, "date"), "server enabled again");
+    check(!read_json(cfg)["mcpServers"]["date"].contains("disabled"),
+          "disabled key removed on re-enable (not left as false)");
+    check(read_json(cfg)["mcpServers"]["date"]["command"] == "/x/date",
+          "command preserved across server toggles");
+    check(plug::set_server_disabled(cfg, "ghost", true)
+              == plug::EditResult::NotFound, "disable absent server NotFound");
+    std::println("PASS\n");
+}
+
 int main() {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
@@ -219,6 +246,7 @@ int main() {
     refuses_broken_json(sandbox);
     list_reads_back(sandbox);
     tool_enable_disable(sandbox);
+    server_enable_disable(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);

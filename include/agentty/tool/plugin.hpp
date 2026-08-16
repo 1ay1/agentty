@@ -57,6 +57,19 @@ enum class EditResult : std::uint8_t {
 [[nodiscard]] EditResult remove_server(const std::filesystem::path& path,
                                        const std::string& name);
 
+// Enable/disable a WHOLE server without removing it — persisted as the
+// server's top-level `disabled` flag in mcp.json (the bridge already skips a
+// disabled server on connect). This is the primary Enter action on a plugin
+// row: a reversible on/off, distinct from the destructive remove. No-op-Ok if
+// already in the desired state.
+[[nodiscard]] EditResult set_server_disabled(const std::filesystem::path& path,
+                                             const std::string& name,
+                                             bool disabled);
+
+// True when the named server carries `"disabled": true` in mcp.json.
+[[nodiscard]] bool is_server_disabled(const std::filesystem::path& path,
+                                      const std::string& name);
+
 // List the servers in the file (empty on missing/invalid file).
 [[nodiscard]] std::vector<ServerSpec>
 list_servers(const std::filesystem::path& path);

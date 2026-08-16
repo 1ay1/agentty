@@ -21,7 +21,8 @@ enum class Action : std::uint8_t {
     CycleProfile,  // General: Write → Ask → Minimal
     OpenRag,       // General: open the RAG mode picker
     OpenSmart,     // General: open Smart Mode config
-    RemovePlugin,  // Plugins: remove this server from mcp.json
+    RemovePlugin,  // Plugins: remove this server from mcp.json (deliberate; `d`)
+    TogglePlugin,  // Plugins: enable/disable the WHOLE server (Enter, reversible)
     ToggleTool,    // Plugins: enable/disable one tool (arg=server, arg2=bare)
     ApproveHooks,  // Hooks: approve the active hooks file
 };

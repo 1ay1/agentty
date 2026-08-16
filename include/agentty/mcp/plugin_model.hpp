@@ -27,6 +27,7 @@ struct ServerState {
     std::string name;            // config key
     std::string command;         // config command
     bool        connected = false;   // handshake succeeded this session
+    bool        disabled = false;    // config `disabled:true` — not connected on purpose
     std::string error;           // why not connected (empty if connected/ok)
     std::vector<ToolState> tools;
 

@@ -602,6 +602,7 @@ struct SettingsListMove  { int delta; };
 struct SettingsListActivate {};
 // Inline add-mode.
 struct SettingsListAddStart   {};              // `a` — enter the add prompt
+struct SettingsListRemove     {};              // `d` — delete the highlighted plugin (deliberate)
 struct SettingsListChar       { char32_t ch; };// typed codepoint
 struct SettingsListPaste      { std::string text; }; // bracketed paste into the add-mode input
 // The MCP connection snapshot the Plugins panel renders. Dispatched by the
@@ -785,8 +786,8 @@ using RagSettingsMsg = std::variant<
 
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
-    SettingsListActivate, SettingsListAddStart, SettingsListChar,
-    SettingsListPaste, PluginsUpdated, SettingsListBackspace,
+    SettingsListActivate, SettingsListAddStart, SettingsListRemove,
+    SettingsListChar, SettingsListPaste, PluginsUpdated, SettingsListBackspace,
     SettingsListSubmitInput, SettingsListCancelInput>;
 
 using ForkMsg = std::variant<

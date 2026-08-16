@@ -1130,9 +1130,11 @@ PluginModel plugin_model() {
         ss.command = cs.command;
         auto lit = live.find(name);
         ss.connected = (lit != live.end() && !lit->second.empty());
+        ss.disabled  = cs.disabled;
         if (auto eit = errors.find(name); eit != errors.end())
             ss.error = eit->second;
-        if (cs.disabled && ss.error.empty()) ss.error = "disabled in config";
+        // A server turned off on purpose is NOT an error — leave error empty
+        // and let ss.disabled drive the "off" badge.
 
         // Tools: authoritative from the LIVE advertised set (so a disabled
         // tool never vanishes); enabled derived from config exclude.
