@@ -36,6 +36,13 @@ struct ListOpen {
     bool        input_active = false;
     std::string input;          // typed buffer
     int         cursor = 0;     // byte cursor into `input`
+    // Bumped by SettingsListReloaded when a background plugin reload
+    // finishes. Its only job is to make the Model genuinely CHANGE so the
+    // TEA loop repaints the panel (which re-reads the now-connected
+    // plugin_model()). Without a real model delta a reload-done signal that
+    // returns the model unchanged would not trigger a render, and the row
+    // would sit on "connecting…" forever.
+    unsigned    reload_nonce = 0;
 };
 
 } // namespace settings

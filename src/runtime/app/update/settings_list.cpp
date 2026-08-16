@@ -89,7 +89,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                             maya::Cmd<Msg>::task_isolated(
                                 [](std::function<void(Msg)> dispatch) {
                                     (void)tools::reload_mcp_plugins();
-                                    dispatch(NoOp{});   // refresh the panel
+                                    dispatch(SettingsListReloaded{}); // repaint
                                 }),
                             set_status_toast(m, "removed plugin '" + row.arg +
                                                 "' — disconnected")});
@@ -184,6 +184,16 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             o->cursor += static_cast<int>(clean.size());
             return done(std::move(m));
         },
+        [&](SettingsListReloaded) -> Step {
+            // A background plugin reload just finished. Bump the nonce so the
+            // Model genuinely changes and the TEA loop repaints the panel;
+            // the view re-runs items_for() → plugin_model(), which now
+            // reports the server as connected (or errored) instead of the
+            // stale "connecting…". No-op if the panel was closed meanwhile.
+            if (auto* o = settings_list_opened(m.ui.settings_list))
+                ++o->reload_nonce;
+            return done(std::move(m));
+        },
         [&](SettingsListBackspace) -> Step {
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o || !o->input_active || o->cursor <= 0)
@@ -234,7 +244,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                         // plugin_model() — otherwise it stays on the stale
                         // "connecting…" snapshot until the next unrelated
                         // event, which reads as a permanent hang.
-                        dispatch(NoOp{});
+                        dispatch(SettingsListReloaded{});
                     });
                 r.message += " — connecting…";
             }

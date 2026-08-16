@@ -257,6 +257,31 @@ const std::vector<Axis>& visual_axes() {
         {"login chatgpt waiting", [](Model& m) {
             m.ui.login = agentty::ui::login::ChatGptWaiting{};
         }},
+        {"settings_list opens (Plugins)", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            m.ui.settings_list = o;
+        }},
+        {"settings_list cursor move", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            o.index = 3;
+            m.ui.settings_list = o;
+        }},
+        {"settings_list add-mode input", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            o.input_active = true;
+            o.input = "date -- /path/date_server";
+            o.cursor = 4;
+            m.ui.settings_list = o;
+        }},
+        {"settings_list reload nonce (plugin connect finished)", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            o.reload_nonce = 1;   // background reload just completed
+            m.ui.settings_list = o;
+        }},
     };
     return axes;
 }
