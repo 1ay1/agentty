@@ -423,6 +423,24 @@ struct Message {
     bool        smart_route_orchestrate = false;  // delegation directive active
     bool        smart_route_subagents   = false;  // per-role subagent routing
 
+    // Fork provenance card (view-visible, wire-VISIBLE). When `fork_note`
+    // is set, this is a synthetic Role::User message seeded at the head of
+    // a freshly-forked thread. Two jobs:
+    //   1. VIEW: renders as a first-class "\u2443 Forked" event card (glyph +
+    //      "Forked" label + a one-line body) so a brand-new fork is NOT a
+    //      blank screen — the user sees, as a thread event, that the fork
+    //      happened and that the parent transcript is readable on demand.
+    //   2. WIRE: unlike smart_routing/proactive_context, this message IS
+    //      sent to the model (its `text` is the transcript pointer). It is
+    //      a User message on purpose — the ChatGPT/Responses transport
+    //      DROPS mid-thread System messages (folded into `instructions`),
+    //      so a System note could vanish and the model would never learn
+    //      the parent transcript exists. A User message survives every
+    //      provider path. `fork_transcript` holds the path for the card's
+    //      body (the wire `text` carries the full instruction).
+    bool        fork_note        = false;
+    std::string fork_transcript;   // path to the parent transcript .md (may be empty)
+
     // FNV-1a over the fields that turn_element / turn_config consume
     // when building the rendered Element. The view cache stamps the
     // built Element with this key at insert time and re-checks it on
@@ -475,6 +493,10 @@ struct Message {
             mix(smart_route_note.size());
             mix((smart_route_orchestrate ? 16ULL : 0ULL)
                 | (smart_route_subagents ? 32ULL : 0ULL));
+        }
+        if (fork_note) {
+            mix(64ULL);
+            mix(fork_transcript.size());
         }
         // Quantize confidence to a bar-relevant bucket so a card whose
         // confidence changed (re-injection) invalidates the cache, without

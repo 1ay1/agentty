@@ -1,8 +1,9 @@
 // fork_view.cpp — the fork picker overlay.
 //
-// Three rows: how proactive RAG behaves in the fork. The fork is always
-// summarized by the utility model; the only choice is RAG behaviour. Enter
-// forks with the highlighted row. Own TU, matching rag_settings_view.
+// Three rows: how proactive RAG behaves in the fork. A fork always starts
+// FRESH (near-zero context; the parent transcript is readable on demand),
+// so the only choice is RAG behaviour. Enter forks with the highlighted
+// row. Own TU, matching rag_settings_view.
 
 #include "agentty/runtime/view/pickers.hpp"
 

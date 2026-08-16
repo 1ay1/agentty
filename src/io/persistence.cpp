@@ -217,6 +217,14 @@ static json message_to_json(const Message& m) {
         if (m.proactive_confidence >= 0.0)
             j["proactive_confidence"] = m.proactive_confidence;
     }
+    // Fork provenance card. Persisted so a reloaded fork still renders the
+    // "\u2443 Forked" event card and the model still sees the transcript pointer
+    // (it's a real wire User message, so it must round-trip like one).
+    if (m.fork_note) {
+        j["fork_note"] = true;
+        if (!m.fork_transcript.empty())
+            j["fork_transcript"] = tools::util::to_valid_utf8(m.fork_transcript);
+    }
     // Adaptive-thinking block (Assistant turns under an effort setting).
     // Persisted so a reloaded thread can replay it on a follow-up turn —
     // Anthropic 400s a tool_use turn whose thinking block was dropped.
@@ -396,6 +404,12 @@ static std::expected<Message, DeserializeError> parse_message(const json& j) {
     if (auto it = j.find("proactive_confidence");
         it != j.end() && it->is_number())
         m.proactive_confidence = it->get<double>();
+    if (auto it = j.find("fork_note");
+        it != j.end() && it->is_boolean())
+        m.fork_note = it->get<bool>();
+    if (auto it = j.find("fork_transcript");
+        it != j.end() && it->is_string())
+        m.fork_transcript = it->get<std::string>();
     if (j.contains("images")) {
         const auto& arr = j["images"];
         if (!arr.is_array())

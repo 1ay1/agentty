@@ -2,15 +2,18 @@
 //
 // Fork = escape a full context window CHEAPLY. It does NOT copy the
 // transcript and does NOT summarize (both still cost the window). Instead
-// it creates a FRESH thread that carries only a tiny system note pointing
-// at the parent's transcript on disk, which the model reads on demand.
-// This test pins that contract:
+// it creates a FRESH thread that carries only a tiny `fork_note` message
+// (Role::User, fork_note=true) pointing at the parent's transcript on
+// disk, which the model reads on demand. This test pins that contract:
 //   1. The fork does NOT enter a compaction (no summarize — the old
 //      design summarized, which sent the whole transcript to the model and
 //      hit "prompt too long", and still cost context).
 //   2. The fork is near-empty: it carries no user/assistant turns from the
-//      parent — at most a single System note (the transcript pointer).
-//   3. Fresh thread identity + forked_from provenance + the parent id
+//      parent — exactly one fork_note message (the transcript pointer).
+//   3. The seeded note is a Role::User fork_note (NOT System — the
+//      ChatGPT/Responses transport drops mid-thread System messages), it
+//      carries the transcript path, and its wire text mentions the parent.
+//   4. Fresh thread identity + forked_from provenance + the parent id
 //      unchanged + a per-choice RAG override.
 
 #include "agentty/runtime/app/update/internal.hpp"
@@ -79,14 +82,25 @@ void fresh_cheap_fork(int choice, const char* name) {
     //    and hit "prompt too long"). It's a fresh start.
     check(!forked.s.compacting, "fork does NOT summarize (no compaction)");
 
-    // 2. Near-empty: the parent's 8 turns are NOT carried over. At most a
-    //    single System note (the on-disk transcript pointer).
-    check(forked.d.current.messages.size() <= 1,
-          "fork carries no parent turns (got " +
+    // 2. Near-empty: the parent's 8 turns are NOT carried over. Exactly a
+    //    single fork_note message (the on-disk transcript pointer).
+    check(forked.d.current.messages.size() == 1,
+          "fork carries no parent turns, just the note (got " +
           std::to_string(forked.d.current.messages.size()) + " messages)");
-    for (const auto& msg : forked.d.current.messages)
-        check(msg.role == Role::System,
-              "the only seeded message is a System note");
+    for (const auto& msg : forked.d.current.messages) {
+        // 3. The seeded note is a Role::User fork_note — NOT a System
+        //    message, which the ChatGPT/Responses transport would drop.
+        check(msg.role == Role::User,
+              "the seeded note is a User message (survives every provider)");
+        check(msg.fork_note,
+              "the seeded note is flagged fork_note (quiet card + wire-kept)");
+        check(!msg.text.empty(),
+              "the fork note carries wire text the model actually reads");
+        check(msg.text.find("fork") != std::string::npos,
+              "the fork note text tells the model it's a fork");
+        check(!msg.fork_transcript.empty(),
+              "the fork note records the parent transcript path");
+    }
 
     // 3. Fresh identity + provenance.
     check(forked.d.current.id.value != "parent",

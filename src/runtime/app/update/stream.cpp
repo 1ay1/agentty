@@ -798,7 +798,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             for (auto it = m.d.current.messages.rbegin();
                  it != m.d.current.messages.rend(); ++it)
                 if (it->role == Role::User && !it->proactive_context && !it->smart_routing
-                    && !it->text.empty()) {
+                    && !it->fork_note && !it->text.empty()) {
                     gist = it->text.substr(0, 100);
                     if (auto nl = gist.find('\n'); nl != std::string::npos) gist.resize(nl);
                     break;
