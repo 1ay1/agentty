@@ -229,6 +229,73 @@ int main() {
         mcp::mcp_bump_generation();
         CHECK(has_add());                       // re-enabled → back, no hang
         std::printf("mcp_bridge_test: per-tool live exclude toggles cleanly\n");
+
+        // Anti-vanishing: mcp_server_tools lists ALL advertised tools
+        // regardless of exclude, so the picker can always show a disabled
+        // tool (to re-enable it). Disable "add", then confirm it's STILL
+        // in the unfiltered server-tools list.
+        {
+            std::ofstream f(cfg, std::ios::trunc);
+            f << "{ \"mcpServers\": { \"demo\": { \"command\": \""
+              << server << "\", \"tools\": { \"exclude\": [\"add\"] } } } }\n";
+        }
+        mcp::mcp_bump_generation();
+        auto all = mcp::mcp_server_tools("demo");
+        bool add_listed = false;
+        for (auto& n : all) if (n == "add") add_listed = true;
+        CHECK(add_listed);   // disabled tool still enumerable → never vanishes
+        // restore
+        {
+            std::ofstream f(cfg, std::ios::trunc);
+            f << "{ \"mcpServers\": { \"demo\": { \"command\": \""
+              << server << "\" } } }\n";
+        }
+        mcp::mcp_bump_generation();
+
+        // ── plugin_model: the unified source of truth ────────────────────
+        // Disable "add"; the model must still LIST it (never vanish), mark
+        // it disabled, and report the right enabled count. Then re-enable
+        // and confirm it flips back. This is the authoritative view the
+        // picker renders.
+        {
+            std::ofstream f(cfg, std::ios::trunc);
+            f << "{ \"mcpServers\": { \"demo\": { \"command\": \""
+              << server << "\", \"tools\": { \"exclude\": [\"add\"] } } } }\n";
+        }
+        mcp::mcp_bump_generation();
+        {
+            auto pm = mcp::plugin_model();
+            const mcp::ServerState* demo = nullptr;
+            for (auto& sv : pm.servers) if (sv.name == "demo") demo = &sv;
+            CHECK(demo != nullptr);
+            if (demo) {
+                CHECK(demo->connected);
+                bool add_listed = false, add_enabled = true;
+                for (auto& t : demo->tools)
+                    if (t.name == "add") { add_listed = true; add_enabled = t.enabled; }
+                CHECK(add_listed);        // still in the model (no vanish)
+                CHECK(!add_enabled);      // correctly marked disabled
+                CHECK(demo->tools.size() >= 2);  // add + now still there
+            }
+        }
+        {
+            std::ofstream f(cfg, std::ios::trunc);
+            f << "{ \"mcpServers\": { \"demo\": { \"command\": \""
+              << server << "\" } } }\n";
+        }
+        mcp::mcp_bump_generation();
+        {
+            auto pm = mcp::plugin_model();
+            const mcp::ServerState* demo = nullptr;
+            for (auto& sv : pm.servers) if (sv.name == "demo") demo = &sv;
+            CHECK(demo != nullptr);
+            if (demo) {
+                bool add_enabled = false;
+                for (auto& t : demo->tools) if (t.name == "add") add_enabled = t.enabled;
+                CHECK(add_enabled);       // re-enabled
+            }
+        }
+        std::printf("mcp_bridge_test: plugin_model unifies config + live cleanly\n");
     }
 
     if (g_failures == 0) { std::printf("mcp_bridge_test: all checks passed\n"); return 0; }
