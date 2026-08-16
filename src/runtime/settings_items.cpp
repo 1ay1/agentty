@@ -112,8 +112,14 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         i.primary   = s.name;
         i.on        = !s.disabled;
         i.arg       = s.name;
+        // A tool is EFFECTIVELY inactive unless its plugin is enabled AND
+        // connected — a disabled or still-connecting plugin can run nothing,
+        // so its whole subtree renders dimmed (but keeps individual state).
+        const bool subtree_inactive = s.disabled || !s.connected;
         if (s.disabled) {
-            i.secondary = std::to_string(s.tools.size()) + " tools · disabled";
+            i.secondary = "disabled · " + std::to_string(s.tools.size())
+                        + (s.tools.size() == 1 ? " tool" : " tools")
+                        + " — Enter to enable";
             i.status    = Item::Status::Neutral;   // off on purpose — not an error
         } else if (!s.error.empty()) {
             i.secondary = s.error;
@@ -135,14 +141,20 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         for (const auto& t : s.tools) {
             Item ti;
             ti.primary   = t.name;
-            ti.secondary = t.over_budget ? "over budget — not on the wire" : "";
-            if (t.over_budget) ti.status = Item::Status::Bad;
-            ti.hint      = t.enabled ? "disable" : "enable";
+            if (t.over_budget && !subtree_inactive) {
+                ti.secondary = "over budget — not on the wire";
+                ti.status    = Item::Status::Bad;
+            }
             ti.action    = Action::ToggleTool;
             ti.arg       = s.name;
             ti.arg2      = t.name;
             ti.indented  = true;
             ti.on        = t.enabled;
+            ti.inactive  = subtree_inactive;
+            // Under a disabled plugin, toggling one tool is meaningless —
+            // enable the plugin first. Say so instead of "disable/enable".
+            ti.hint      = subtree_inactive ? ""
+                                            : (t.enabled ? "disable" : "enable");
             out.push_back(std::move(ti));
         }
     }

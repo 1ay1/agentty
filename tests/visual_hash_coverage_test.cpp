@@ -286,6 +286,13 @@ const std::vector<Axis>& visual_axes() {
             s.tools.push_back({"current_date", "", true, false});
             m.ui.plugins.servers.push_back(std::move(s));
         }},
+        {"plugins server disabled toggles the hash", [](Model& m) {
+            agentty::mcp::ServerState s;
+            s.name = "date";
+            s.disabled = true;   // distinct from plain disconnected
+            s.tools.push_back({"current_date", "", true, false});
+            m.ui.plugins.servers.push_back(std::move(s));
+        }},
         {"smart_mode overlay opens", [](Model& m) {
             m.ui.smart_mode = agentty::ui::pick::OpenAt{0};
         }},

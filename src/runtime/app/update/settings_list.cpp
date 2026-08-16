@@ -169,6 +169,14 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 case se::Action::ToggleTool: {
                     if (m.ui.plugins_loading)
                         return done(std::move(m));
+                    // Toggling one tool of a DISABLED/disconnected plugin is
+                    // meaningless — the whole plugin runs nothing. Guide the
+                    // user to enable the plugin (Enter on the parent) instead
+                    // of silently editing an exclude that has no effect.
+                    if (row.inactive)
+                        return {std::move(m), set_status_toast(m,
+                            "'" + row.arg + "' is disabled — enable the plugin "
+                            "first (Enter on it), then toggle its tools")};
                     // Enable/disable one tool of a plugin: persist to
                     // mcp.json's tools.exclude, then invalidate the wire
                     // catalog so it re-projects with the new filter. NO

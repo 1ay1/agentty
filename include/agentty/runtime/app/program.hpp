@@ -240,6 +240,12 @@ struct AgenttyApp {
         for (const auto& s : m.ui.plugins.servers) {
             mix_str(s.name);
             mix((s.connected ? 2ULL : 1ULL));
+            // disabled is distinct from "not connected": both have
+            // connected=false but render differently (Neutral "disabled" vs
+            // Pending "connecting…" + a dimmed subtree), so it must feed the
+            // hash or a disable→enable that doesn't change the connected bit
+            // in this frame wouldn't repaint.
+            mix(s.disabled ? 4ULL : 0ULL);
             mix(s.error.size());
             mix(s.tools.size());
             mix(s.enabled_count());
