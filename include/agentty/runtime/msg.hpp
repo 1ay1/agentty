@@ -604,6 +604,7 @@ struct SettingsListActivate {};
 struct SettingsListAddStart   {};              // `a` — enter the add prompt
 struct SettingsListChar       { char32_t ch; };// typed codepoint
 struct SettingsListPaste      { std::string text; }; // bracketed paste into the add-mode input
+struct SettingsListReloaded   {};              // a background plugin reload finished → repaint
 struct SettingsListBackspace  {};
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
@@ -780,8 +781,8 @@ using RagSettingsMsg = std::variant<
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
     SettingsListActivate, SettingsListAddStart, SettingsListChar,
-    SettingsListPaste, SettingsListBackspace, SettingsListSubmitInput,
-    SettingsListCancelInput>;
+    SettingsListPaste, SettingsListReloaded, SettingsListBackspace,
+    SettingsListSubmitInput, SettingsListCancelInput>;
 
 using ForkMsg = std::variant<
     OpenForkPicker, CloseForkPicker, ForkPickerMove, ForkThread>;

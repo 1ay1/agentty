@@ -209,6 +209,28 @@ struct AgenttyApp {
                     + static_cast<std::uint64_t>(e.files_changed));
         }
 
+        // Settings list (Ctrl+K → Plugins / Commands / Agents / Hooks):
+        // open/closed + cursor + inline add-mode buffer/cursor + the
+        // reload nonce. Same selection-driven repaint contract as every
+        // picker above — WITHOUT this, ALL of them were gated away: the
+        // row cursor moved but didn't repaint until the caret parity
+        // flipped ~265 ms later (the "press it 5 times, registers once"
+        // symptom), typing in the add-prompt didn't echo, and — the
+        // reported bug — a background plugin reload finishing (nonce++)
+        // never repainted, so a freshly-added server sat on "connecting…"
+        // forever. The nonce is the ONLY backing for the reload-done
+        // repaint (the connected state lives in the external MCP pool,
+        // not the Model), so it MUST feed the hash.
+        mix(static_cast<std::uint64_t>(m.ui.settings_list.index()));
+        if (auto* o = settings_list_opened(m.ui.settings_list)) {
+            mix(static_cast<std::uint64_t>(o->index));
+            mix(static_cast<std::uint64_t>(o->concern));
+            mix(o->input_active ? 1ULL : 0ULL);
+            mix_str(o->input);
+            mix(static_cast<std::uint64_t>(o->cursor));
+            mix(static_cast<std::uint64_t>(o->reload_nonce));
+        }
+
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
         // how often we'll re-render purely for animation; the actual
