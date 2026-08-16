@@ -173,6 +173,37 @@ void list_reads_back(const fs::path& dir) {
 
 } // namespace
 
+void tool_enable_disable(const fs::path& dir) {
+    std::println("--- tool_enable_disable ---");
+    const fs::path cfg = dir / "tgl" / "mcp.json";
+    (void)plug::add_server(cfg, {"date", "/x/date", {}}, false);
+    // disable one tool
+    check(plug::set_tool_enabled(cfg, "date", "current_date", false)
+              == plug::EditResult::Ok, "disable succeeds");
+    check(plug::is_tool_disabled(cfg, "date", "current_date"),
+          "tool recorded as disabled");
+    check(read_json(cfg)["mcpServers"]["date"]["tools"]["exclude"]
+              == json::array({"current_date"}),
+          "tools.exclude holds the bare name");
+    // idempotent disable
+    check(plug::set_tool_enabled(cfg, "date", "current_date", false)
+              == plug::EditResult::Ok, "double-disable is Ok no-op");
+    // re-enable clears it (and prunes empty tools object)
+    check(plug::set_tool_enabled(cfg, "date", "current_date", true)
+              == plug::EditResult::Ok, "re-enable succeeds");
+    check(!plug::is_tool_disabled(cfg, "date", "current_date"),
+          "tool no longer disabled");
+    check(!read_json(cfg)["mcpServers"]["date"].contains("tools"),
+          "empty tools object pruned on re-enable");
+    // command survives all of it
+    check(read_json(cfg)["mcpServers"]["date"]["command"] == "/x/date",
+          "server command preserved across toggles");
+    // toggling on a missing server is NotFound
+    check(plug::set_tool_enabled(cfg, "ghost", "x", false)
+              == plug::EditResult::NotFound, "toggle on absent server NotFound");
+    std::println("PASS\n");
+}
+
 int main() {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
@@ -187,6 +218,7 @@ int main() {
     distinct_not_found(sandbox);
     refuses_broken_json(sandbox);
     list_reads_back(sandbox);
+    tool_enable_disable(sandbox);
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);

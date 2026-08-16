@@ -135,6 +135,70 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
     return out;
 }
 
+EditResult set_tool_enabled(const fs::path& path, const std::string& server,
+                            const std::string& bare, bool enabled) {
+    Loaded l = load(path);
+    if (!l.existed) return EditResult::NotFound;
+    if (!l.ok) return EditResult::ParseError;
+    const char* key = servers_key(l.doc);
+    if (!l.doc.contains(key) || !l.doc[key].is_object()
+        || !l.doc[key].contains(server))
+        return EditResult::NotFound;
+    json& entry = l.doc[key][server];
+    if (!entry.is_object()) return EditResult::NotFound;
+
+    // tools.exclude is the disabled set. Enabling removes from it;
+    // disabling adds. Preserve any tools.include/pin the user set.
+    json& tools = entry["tools"];
+    if (!tools.is_object()) tools = json::object();
+    json& excl = tools["exclude"];
+    if (!excl.is_array()) excl = json::array();
+
+    // Rebuild the array either with or without `bare`.
+    json rebuilt = json::array();
+    bool present = false;
+    for (const auto& v : excl) {
+        if (v.is_string() && v.get<std::string>() == bare) { present = true; continue; }
+        rebuilt.push_back(v);
+    }
+    if (!enabled) rebuilt.push_back(bare);   // disable = ensure present
+    // No-op if already in the desired state.
+    const bool changed = enabled ? present : !present;
+    if (!changed) return EditResult::Ok;
+
+    excl = std::move(rebuilt);
+    if (excl.empty()) tools.erase("exclude");
+    if (tools.empty()) entry.erase("tools");
+    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+}
+
+bool is_tool_disabled(const fs::path& path, const std::string& server,
+                      const std::string& bare) {
+    for (const auto& d : disabled_tools(path, server))
+        if (d == bare) return true;
+    return false;
+}
+
+std::vector<std::string> disabled_tools(const fs::path& path,
+                                        const std::string& server) {
+    std::vector<std::string> out;
+    Loaded l = load(path);
+    if (!l.ok || !l.existed) return out;
+    const char* key = servers_key(l.doc);
+    if (!l.doc.contains(key) || !l.doc[key].is_object()
+        || !l.doc[key].contains(server))
+        return out;
+    const json& entry = l.doc[key][server];
+    if (!entry.is_object() || !entry.contains("tools")) return out;
+    const json& tools = entry["tools"];
+    if (!tools.is_object() || !tools.contains("exclude")) return out;
+    const json& excl = tools["exclude"];
+    if (!excl.is_array()) return out;
+    for (const auto& v : excl)
+        if (v.is_string()) out.push_back(v.get<std::string>());
+    return out;
+}
+
 namespace {
 
 int usage() {
