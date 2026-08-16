@@ -122,12 +122,25 @@ Element settings_list_picker(const Model& m) {
         const Badge b = nav_badge(it.action).value_or(status_badge(it.status));
 
         Picker::Config::Row row;
-        // A plugin's tool rows are indented and carry an on/off checkbox;
-        // top-level rows lead with their health/nav badge.
+        // A plugin's tool rows are indented under their server with a tree
+        // connector (├─ / └─ for the last one), a dim on/off checkbox, and
+        // dimmed text — so the server→tools hierarchy reads at a glance
+        // instead of a flat list of same-looking dotted rows. Top-level rows
+        // lead with their health/nav badge and a brighter name.
         if (it.indented) {
-            row.badge       = it.on ? "\xe2\x97\x89" : "\xe2\x97\x8b"; // ◉ / ○
-            row.badge_style = fg_of(adding ? muted : (it.on ? success : muted));
-            row.leading       = "  " + it.primary;   // indent under the plugin
+            // Last child = the next row is a top-level row (or the end).
+            const bool last =
+                (i + 1 >= static_cast<int>(rows.size()))
+                || !rows[static_cast<std::size_t>(i + 1)].indented;
+            const char* elbow = last ? "\xe2\x94\x94\xe2\x94\x80 "   // └─
+                                     : "\xe2\x94\x9c\xe2\x94\x80 ";  // ├─
+            const char* box   = it.on ? "\xe2\x97\x89" : "\xe2\x97\x8b"; // ◉ / ○
+            row.badge       = std::string("  ") + elbow + box;
+            // Connector + box are structural — dim; the tool NAME carries the
+            // on/off emphasis (bright when on, dim when off), so the eye
+            // follows the tree lightly and lands on what's enabled.
+            row.badge_style = fg_dim(muted);
+            row.leading       = it.primary;
             row.leading_style = fg_of(adding ? muted : (it.on ? fg : muted));
         } else {
             row.badge       = b.glyph;
