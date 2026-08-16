@@ -598,9 +598,10 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
          it != m.d.current.messages.rend(); ++it)
         // !smart_routing: never classify a prior turn's zero-text 🧠 card —
         // keeps this scan IDENTICAL to launch_stream's so the card's shown
-        // route can never disagree with the wire.
+        // route can never disagree with the wire. !fork_note: the fork
+        // provenance card is not the user's prompt either.
         if (it->role == Role::User && !it->proactive_context
-            && !it->smart_routing) {
+            && !it->smart_routing && !it->fork_note) {
             newest_user = it->text; break;
         }
     const smart::ComplexityScore cx =
@@ -766,7 +767,7 @@ Cmd<Msg> launch_stream(Model& m) {
             // effort on the wire, a degenerate turn_signature pooling every
             // turn's learned prior, and a card that disagrees with the wire.
             if (it->role == Role::User && !it->proactive_context
-                && !it->smart_routing) {
+                && !it->smart_routing && !it->fork_note) {
                 newest_user = it->text; break;
             }
         // Context-aware: a short follow-up to a Complex turn keeps some of
@@ -995,7 +996,8 @@ Cmd<Msg> launch_stream(Model& m) {
             std::size_t newest_user = 0;
             bool have_user = false;
             for (std::size_t i = 0; i < messages.size(); ++i)
-                if (messages[i].role == Role::User && !messages[i].proactive_context) {
+                if (messages[i].role == Role::User && !messages[i].proactive_context
+                    && !messages[i].fork_note) {
                     newest_user = i;
                     have_user = true;
                 }
@@ -1052,7 +1054,7 @@ Cmd<Msg> launch_stream(Model& m) {
                 };
                 std::string_view newest_user;
                 for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
-                    if (it->role == Role::User && !it->proactive_context) {
+                    if (it->role == Role::User && !it->proactive_context && !it->fork_note) {
                         newest_user = it->text;
                         break;
                     }
@@ -1320,7 +1322,7 @@ std::optional<LoopBreak> agent_loop_should_break(
         // NOT a human turn boundary — skip it so the run-start lands on the
         // real user message it was injected after.
         if (messages[i].role == Role::User && !messages[i].proactive_context
-            && !messages[i].smart_routing) {
+            && !messages[i].smart_routing && !messages[i].fork_note) {
             run_start = i + 1; break;
         }
     }

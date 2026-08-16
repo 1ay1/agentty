@@ -70,6 +70,16 @@ namespace {
     };
 
     if (user_index < req.messages.size()) {
+        // Fork provenance: a fork_note is a synthetic User message seeded at
+        // the HEAD of a forked thread, BEFORE the user's first prompt. It
+        // carries the pointer to the parent transcript the model reads on
+        // demand. Prepend any such leading notes so the very first turn of a
+        // fork still tells the agent where its prior context lives (the
+        // proactive-context loop below only scans AFTER user_index).
+        for (std::size_t i = 0; i < user_index; ++i) {
+            if (req.messages[i].fork_note)
+                append_message(req.messages[i]);
+        }
         append_message(req.messages[user_index]);
         for (std::size_t i = user_index + 1; i < req.messages.size(); ++i) {
             const auto& m = req.messages[i];

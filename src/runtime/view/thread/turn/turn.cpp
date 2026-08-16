@@ -1228,6 +1228,48 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
         return cfg;
     }
 
+    // Fork provenance card: a synthetic Role::User message seeded at the
+    // head of a freshly-forked thread. WITHOUT this the fork would look
+    // like a blank screen — messages.empty() is false (this note exists)
+    // so the welcome screen is suppressed, yet a plain User bubble of the
+    // raw wire instruction would read as if the USER typed the pointer.
+    // Instead it gets its own quiet identity — a "\u2443" fork glyph, an info
+    // rail, a "Forked" label — and a one-line body telling the user the
+    // parent transcript is readable on demand. The model still receives
+    // msg.text in full on the wire (it's a real User message, not elided).
+    if (msg.fork_note) {
+        using namespace maya::dsl;
+        cfg.glyph      = "\xe2\x91\x83";              // ⑃
+        cfg.label      = "Forked";
+        cfg.rail_color = status_info;
+        cfg.meta       = timestamp_hh_mm(msg.timestamp);
+        cfg.body.emplace_back(maya::Turn::PlainText{
+            .content = "Branched into a fresh thread with near-zero context.",
+            .color   = fg});
+        // Second line names the parent transcript so the user (and the
+        // scrollback) can see WHERE the prior conversation lives — the
+        // model reads it on demand. Path in code-reference cyan, clipped
+        // so a long absolute path can never wrap the card.
+        if (!msg.fork_transcript.empty()) {
+            std::string content;
+            std::vector<maya::StyledRun> runs;
+            auto push = [&](std::string_view part, maya::Style st) {
+                if (part.empty()) return;
+                runs.push_back(maya::StyledRun{content.size(), part.size(), st});
+                content.append(part);
+            };
+            push("prior transcript \xc2\xb7 ", maya::Style{}.with_fg(muted));
+            push(msg.fork_transcript, maya::Style{}.with_fg(code_path));
+            cfg.body.emplace_back(maya::Turn::BodySlot{maya::Element{maya::TextElement{
+                .content = std::move(content),
+                .style   = {},
+                .wrap    = maya::TextWrap::TruncateEnd,
+                .runs    = std::move(runs),
+            }}});
+        }
+        return cfg;
+    }
+
     // Smart Mode ROUTING card: a synthetic, wire-inert event surfacing the
     // per-turn routing DECISION (which model + effort the turn ran on, the
     // classified complexity that scaled it, and which layers are active).

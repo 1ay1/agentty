@@ -1,10 +1,19 @@
 // fork_update — reducer for the fork picker.
 //
-// Forking BRANCHES the current thread into a brand-new one (new id,
-// forked_from = parent, "Fork:" title) that carries a COPY of the transcript.
-// The fork is ALWAYS summarized by the utility model (the cheap compaction
-// summary) so the branch starts from a clean recap — there is no verbatim
-// option. The picker's only choice is how proactive RAG behaves in the fork,
+// Forking ESCAPES a full context window. It branches the current thread
+// into a brand-new one (new id, forked_from = parent) that starts FRESH
+// with near-zero context — NOT a copy or a summary of the parent. The
+// parent's full transcript is exported to a Markdown file under
+// ~/.agentty/threads, and the fork is seeded with a single synthetic
+// `fork_note` message (Role::User) that:
+//   • tells the MODEL where that transcript lives, to be read ON DEMAND
+//     with the `read` tool only when earlier context is actually needed;
+//   • renders as a visible "\u2443 Forked" event card so the fresh thread is
+//     not a blank screen.
+// This is the entire fork mechanism: no summarization, no verbatim copy,
+// no up-front token cost — just a pointer the agent can follow lazily.
+//
+// The picker's only choice is how proactive RAG behaves in the fork,
 // stored as the fork's per-thread rag_mode_override:
 //
 //   RAG per turn   → override = On
@@ -12,9 +21,7 @@
 //   RAG off        → override = Off
 //
 // The original thread is saved and left completely untouched — a fork is
-// non-destructive by construction. The summary lands as a wire-only
-// CompactionRecord on the fork; its transcript still shows every carried-over
-// turn, but the wire prefix collapses to the recap.
+// non-destructive by construction.
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
@@ -140,19 +147,44 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                                                 ? std::string{"conversation"}
                                                 : m.d.current.title));
 
-            // 4. Seed a tiny system note so the model KNOWS the prior
-            //    context exists and how to reach it — without paying for it
-            //    up front. This is the entire fork mechanism.
-            if (!transcript.empty()) {
+            // 4. Seed the fork note: a synthetic Role::User message that
+            //    (a) tells the MODEL the prior context exists and how to
+            //    reach it, and (b) renders as a visible "\u2443 Forked" card so
+            //    the fresh thread isn't a blank screen. It is a USER (not
+            //    System) message on purpose: the ChatGPT/Responses transport
+            //    DROPS mid-thread System messages (folds them into the
+            //    top-level `instructions`), so a System note could silently
+            //    vanish and the model would never learn the transcript
+            //    exists. A User message survives every provider path. The
+            //    `fork_note`/`fork_transcript` flags give it a quiet card
+            //    identity and keep every "newest real user turn" scan
+            //    (routing / RAG / history / loop-break) from mistaking it
+            //    for the user's prompt — see conversation.hpp.
+            {
                 Message note;
-                note.role = Role::System;
-                note.text =
-                    "This conversation is a fork of an earlier one. Its full "
-                    "transcript is saved at:\n  " + transcript.string() +
-                    "\nRead it with the `read` tool (or grep it) ONLY if you "
-                    "need earlier context — don't read it pre-emptively. The "
-                    "fork starts fresh precisely to reclaim the context "
-                    "window; pull just the slice you need.";
+                note.role = Role::User;
+                note.fork_note = true;
+                if (!transcript.empty()) {
+                    note.fork_transcript = transcript.string();
+                    note.text =
+                        "This conversation is a fork of an earlier one. Its "
+                        "full transcript is saved at:\n  " + transcript.string() +
+                        "\nRead it with the `read` tool (or grep it) ONLY if "
+                        "you need earlier context — don't read it "
+                        "pre-emptively. The fork starts fresh precisely to "
+                        "reclaim the context window; pull just the slice you "
+                        "need.";
+                } else {
+                    // Transcript write failed (rare: disk/permissions). Still
+                    // seed the card so the thread isn't blank and the model
+                    // knows it's a fork, just without a readable pointer.
+                    note.text =
+                        "This conversation is a fork of an earlier one, "
+                        "started fresh to reclaim the context window. The "
+                        "prior transcript could not be exported to disk, so "
+                        "earlier context isn't retrievable — ask the user if "
+                        "you need it.";
+                }
                 fork.messages.push_back(std::move(note));
             }
 
