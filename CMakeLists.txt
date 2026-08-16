@@ -2173,6 +2173,16 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(transcript_bound_test)
     set_tests_properties(transcript_bound_test PROPERTIES TIMEOUT 30)
 
+    # compaction_wire_test — the compaction WIRE SUBSTITUTION (wire_messages_for
+    # / estimate_wire_tokens) and its interaction with fork provenance. Pins:
+    # prefix collapses to one synthetic User summary + raw tail, wire stays
+    # User-first, estimate prices the substituted (smaller) view, malformed
+    # records degrade to raw, and fork+compaction compose (fork_note ships
+    # uncompacted; a compacted fork's summary subsumes the note, still
+    # User-first). Companion to compaction_threshold_test (the WHEN).
+    agentty_add_full_test(compaction_wire_test)
+    set_tests_properties(compaction_wire_test PROPERTIES TIMEOUT 30)
+
     # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
     # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
     # a failed CodexLoginDone lands in Failed, and a late result after Esc is
@@ -2538,6 +2548,7 @@ if(AGENTTY_BUILD_TESTS)
         tool_stream_snapshot_test
         persistence_proactive_test
         transcript_bound_test
+        compaction_wire_test
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
