@@ -36,8 +36,15 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // to send a turn. Fire the async connect; PluginsUpdated lands
             // the result in m.ui.plugins.
             if (e.concern == se::Category::Plugins) {
-                m.ui.plugins_loading = true;
-                return {std::move(m), cmdf::load_plugins_async(/*reconnect=*/true)};
+                // If the startup connect (from init) is still in flight, don't
+                // fire a SECOND one — just show its spinner. Redundant
+                // concurrent connects were the "date connected 4×" symptom
+                // and the precondition for the pool-swap race. When idle,
+                // opening the panel is what (re)connects.
+                if (!m.ui.plugins_loading) {
+                    m.ui.plugins_loading = true;
+                    return {std::move(m), cmdf::load_plugins_async(/*reconnect=*/true)};
+                }
             }
             return done(std::move(m));
         },

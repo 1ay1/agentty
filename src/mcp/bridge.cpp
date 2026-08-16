@@ -97,6 +97,19 @@ namespace {
 std::mutex&  g_pool_mu()  { static std::mutex m;            return m; }
 PoolHandle&  g_pool_ref() { static PoolHandle p; return p; }
 
+// Serializes the ENTIRE connect-and-swap in mcp_tools(). Two independent
+// callers reach mcp_tools() — connect_initial_mcp() (first catalog access,
+// under the registry's cache.mu) and mcp_reload() (add/remove/toggle/panel-
+// open, under reload_mu). Those are DIFFERENT mutexes, so without this both
+// could run mcp_tools() at once: each spawns the full server set (the "date
+// connected" printed 4×), and a late/concurrent build could mutate a pool a
+// reader (plugin_model) is iterating — a data race that SIGSEGVs with no
+// abort message. One coarse mutex around the whole build makes connect+swap
+// strictly sequential; readers still use current_pool()+pool->mu and are
+// unaffected. Connects are rare (startup / explicit toggles), so serializing
+// them costs nothing on the hot path.
+std::mutex&  g_connect_mu() { static std::mutex m; return m; }
+
 PoolHandle current_pool() {
     std::lock_guard<std::mutex> lk(g_pool_mu());
     return g_pool_ref();
@@ -918,6 +931,8 @@ std::vector<ServerLaunch> configured_servers_for_delegation() {
 }
 
 std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
+    // Serialize the whole connect+swap — no two builds ever run at once.
+    std::lock_guard<std::mutex> connect_lk(g_connect_mu());
     std::vector<tools::ToolDef> out;
     bool project_local = false;
     fs::path cfg = resolve_config(project_local);

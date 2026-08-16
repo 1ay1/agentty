@@ -2191,6 +2191,14 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(plugins_in_model_test)
     set_tests_properties(plugins_in_model_test PROPERTIES TIMEOUT 30)
 
+    # mcp_reload_race_test — concurrent connect+snapshot must not crash. Locks
+    # the SIGSEGV fix where connect_initial_mcp() and mcp_reload() could run
+    # mcp_tools() at once (the "date connected 4×" symptom), racing a
+    # plugin_model() reader. Hammers 8 reloaders + 8 snappers against a tiny
+    # stdio server; must finish with a coherent snapshot and zero crashes.
+    agentty_add_full_test(mcp_reload_race_test)
+    set_tests_properties(mcp_reload_race_test PROPERTIES TIMEOUT 60)
+
     # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
     # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
     # a failed CodexLoginDone lands in Failed, and a late result after Esc is
@@ -2558,6 +2566,7 @@ if(AGENTTY_BUILD_TESTS)
         transcript_bound_test
         compaction_wire_test
         plugins_in_model_test
+        mcp_reload_race_test
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
