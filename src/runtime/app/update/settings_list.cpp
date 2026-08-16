@@ -168,6 +168,21 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             o->cursor += static_cast<int>(utf8.size());
             return done(std::move(m));
         },
+        [&](SettingsListPaste& e) -> Step {
+            auto* o = settings_list_opened(m.ui.settings_list);
+            if (!o || !o->input_active) return done(std::move(m));
+            // The add-prompt is a single line (a plugin's "name command
+            // args…" spec, or a new file's name). Flatten any newlines/tabs
+            // in the paste to spaces so a multi-line clipboard can't smuggle
+            // a line break into the one-line field or split the arg vector.
+            std::string clean;
+            clean.reserve(e.text.size());
+            for (char c : e.text)
+                clean += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+            o->input.insert(static_cast<std::size_t>(o->cursor), clean);
+            o->cursor += static_cast<int>(clean.size());
+            return done(std::move(m));
+        },
         [&](SettingsListBackspace) -> Step {
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o || !o->input_active || o->cursor <= 0)

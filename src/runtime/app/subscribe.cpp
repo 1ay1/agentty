@@ -947,11 +947,18 @@ Sub<Msg> subscribe(const Model& m) {
             return on_composer(composer_state, ev);
         });
 
-    auto paste_sub = Sub<Msg>::on_paste([in_login](std::string s) -> Msg {
-        // Pastes go to the login modal's text fields when it's open
-        // (users will paste OAuth codes / API keys); otherwise they're
-        // composer pastes.
+    auto paste_sub = Sub<Msg>::on_paste(
+        [in_login, settings_list_adding](std::string s) -> Msg {
+        // Route a bracketed paste to whatever modal currently owns text
+        // input, so it lands in that field's buffer — NOT the composer.
+        //   • login modal open      → its code/key fields (OAuth codes, keys)
+        //   • settings-list add-mode → the inline prompt (e.g. a plugin's
+        //     "name command args…" line under Ctrl+K → Plugins). Without
+        //     this the paste fell through to ComposerPaste and appeared in
+        //     the composer while the add-prompt had visual focus.
+        //   • otherwise               → the composer.
         if (in_login) return LoginPaste{std::move(s)};
+        if (settings_list_adding) return SettingsListPaste{std::move(s)};
         return ComposerPaste{std::move(s)};
     });
 

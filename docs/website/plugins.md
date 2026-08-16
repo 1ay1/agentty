@@ -43,9 +43,13 @@ Plugins are lazy and opt-in. With no `mcp.json` present, startup is a single `st
 
 ## Managing plugins in the app
 
-Open the command palette with [[Ctrl+K]] and choose **Plugins** to see every configured server, its connection state, and its tools. From there you can **enable/disable individual tools** per server and **remove** a plugin. A warning appears if you've left an unusually large number of tools active — too many tool schemas dilute the model's tool choice (see the tool-budget note below).
+Open the command palette with [[Ctrl+K]] and choose **Plugins** to see every configured server, its connection state, and its tools. From there you can:
 
-To add a new one, use `agentty plugin add` from a shell (authoring is deliberately a terminal action).
+- **Add** a plugin inline — press [[a]] and type a `name command args…` spec (e.g. `playwright npx -y @playwright/mcp`); it's written to `mcp.json` and the server connects immediately, no restart.
+- **Enable/disable individual tools** per server.
+- **Remove** a plugin.
+
+A warning appears if you've left an unusually large number of tools active — too many tool schemas dilute the model's tool choice (see the tool-budget note below). The `agentty plugin add` CLI does the same thing from a shell.
 
 ## The tool budget
 
