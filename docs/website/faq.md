@@ -50,6 +50,10 @@ Yes. `agentty acp` runs agentty as an [Agent Client Protocol](/docs/acp) agent i
 
 As plain JSON, one file per thread, under `~/.agentty/threads/`. Safe to inspect, back up, or delete.
 
+## What happens when a conversation runs out of context?
+
+Two options. agentty **auto-compacts** in the background as a thread nears the window — it summarizes the older turns (on the cheapest capable model) and keeps going in the same thread. Or you can **[fork](/docs/fork)** ([[Ctrl+K]] → *Fork thread*): that branches into a *fresh* thread carrying near-zero context, writing the parent's full transcript to disk for the model to read on demand. Compaction keeps one thread alive by compressing its history (lossy); fork starts clean and leaves the history verbatim on disk. Fork when you want a clean slate without losing the ability to look back.
+
 ## Is it stable / production ready?
 
 It's pre-1.0 and moving fast, but the core loop, tools, streaming, auth, and persistence all work and get daily smoke testing on Linux. Treat it as a capable beta.

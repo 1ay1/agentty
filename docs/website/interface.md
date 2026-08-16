@@ -30,6 +30,8 @@ When a reply hands you a fenced block of shell commands, don't copy-paste it. [[
 
 Every conversation is a saved thread. [[Ctrl+J]] opens the thread list *at the current thread* (marked with a bold `●`), and [[Ctrl+N]] starts a new one. To flip to the adjacent thread without opening the picker, use [[Alt+←/→]] (or [[Ctrl+←/→]] on an empty composer) — [[←]] newer, [[→]] older — with a “thread k/N · title” toast on every hop. Quick-cycle only fires while the session is idle, so a live stream can never be yanked out from under you.
 
+When a thread fills the context window, **Fork thread** ([[Ctrl+K]] → palette) branches it into a fresh thread that opens with a **⑃ Forked** card and carries near-zero context — the parent transcript is read on demand. See [Forking a Thread](/docs/fork).
+
 ## The status bar
 
 A single row at the bottom edge shows the active profile, provider, and model, plus the current phase. When something needs your attention — a transient retry, an error — it swaps in a banner-style notification (`▎⚠ <text>` for errors, `▎ <text>` for info) and reverts to the keybindings strip when the toast expires. Switch provider with [[Ctrl+P]] and model with [[Ctrl+/]] without leaving the thread.
