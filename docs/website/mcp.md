@@ -8,6 +8,10 @@ slug: mcp
 
 agentty speaks the [Model Context Protocol](https://modelcontextprotocol.io) both ways: it can **serve** its native tools to any MCP client, and **consume** tools from other MCP servers inside a thread.
 
+:::note
+Just want to add a tool (a browser driver, a database client)? See **[Plugins](/docs/plugins)** for the practical `mcp.json` / `agentty plugin add` guide. This page is the full protocol reference.
+:::
+
 ## Serving agentty's tools (mcp-serve)
 
 `agentty mcp-serve` runs headless — no terminal UI — and exposes agentty's native toolset over MCP on stdio. An external MCP client (Claude Desktop, an IDE, another agent) drives `tools/list` and `tools/call` over stdin/stdout; diagnostics go to stderr.

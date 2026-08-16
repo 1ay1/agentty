@@ -157,7 +157,29 @@ On a realistic 161-file corpus, these levers together cut retrieval output from 
 
 Automatic pre-turn context injection is off by default. The explicit `search_docs` tool is normally more economical because the model calls it only when project knowledge is needed.
 
-Enable proactive grounding with:
+### The RAG picker (in-app)
+
+Rather than juggling env vars, set proactive retrieval from the command palette: [[Ctrl+K]] → **RAG**. One decision, three modes:
+
+| Mode | Behaviour |
+|------|-----------|
+| **On** | retrieve and inject context before **every** turn |
+| **First turn only** | ground the **first** turn of a thread, then stay quiet |
+| **Off** | no pre-turn injection (the `search_docs` / `search_code` tools still work) |
+
+The choice is **persisted** in `settings.json`, so it sticks across sessions. A [forked thread](/docs/fork) can carry its own RAG mode, chosen in the fork picker, independent of the global setting. Setting `AGENTTY_RAG_PROACTIVE=1` (below) is the env-var equivalent of **On**; the picker is the everyday way in.
+
+### The retrieved-context card
+
+When proactive retrieval injects a block, it does **not** appear as if you typed it. It renders as its own quiet **retrieved-context** card — with the source list and a confidence bar reflecting the retrieval's grade — so you can always see *what* was pulled in and *how sure* the engine was. These synthetic blocks never leak into the composer's [[↑]]/[[↓]] history recall, and older ones are dropped from later wire payloads so you're not charged for them turn after turn.
+
+### The retrieval funnel
+
+Every `search_docs` / `search_code` result is headed by a compact **funnel** line showing how the candidate set narrowed — lexical/dense retrieval → fusion → dedup/autocut → the passages actually returned — plus whether the run was `bm25` or `hybrid`. It makes the ranking legible instead of a black box: you can see at a glance when a query found little, or when the relevance floor trimmed a weak tail.
+
+### Enabling proactive retrieval via env
+
+The env-var equivalent of the picker's **On** mode:
 
 ```bash
 export AGENTTY_RAG_PROACTIVE=1
