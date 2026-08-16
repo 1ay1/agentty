@@ -1153,6 +1153,27 @@ PluginModel plugin_model() {
         errors = pool->connect_errors;
     }
 
+    // Last-known tool set per server. A DISABLED (or momentarily
+    // disconnected) server advertises nothing live, so without this its whole
+    // tool list would vanish the instant you turn it off — while a server
+    // that started disabled would show nothing, and one with individually-
+    // excluded tools would show only those. Inconsistent + confusing.
+    // Remember what each server last advertised so its tree stays populated
+    // (shown dimmed) across a disable→enable round-trip. Process-lifetime,
+    // mutex-guarded, keyed by server name.
+    static std::mutex s_seen_mu;
+    static std::unordered_map<std::string,
+                              std::vector<std::pair<std::string, std::string>>>
+        s_seen;   // server → [(bare, desc)]
+    {
+        std::lock_guard<std::mutex> lk(s_seen_mu);
+        for (const auto& [srv, tools] : live) {
+            auto& slot = s_seen[srv];
+            slot.clear();
+            for (const auto& lt : tools) slot.emplace_back(lt.bare, lt.desc);
+        }
+    }
+
     // Build one ServerState per configured server, unifying config + live.
     std::size_t enabled_mcp = 0;
     for (const auto& [name, cs] : cfg) {
@@ -1179,6 +1200,23 @@ PluginModel plugin_model() {
                 ts.description = lt.desc;
                 ts.enabled     = !cs.exclude.contains(lt.bare);
                 ss.tools.push_back(std::move(ts));
+            }
+        } else {
+            // Not connected this instant (disabled on purpose, or momentarily
+            // between reloads). Fall back to what this server LAST advertised
+            // so its tool tree stays populated instead of collapsing the
+            // moment you disable the plugin — the exact inconsistency where a
+            // just-disabled server lost its tools while a start-disabled one
+            // or an individually-excluded set kept them.
+            std::lock_guard<std::mutex> lk(s_seen_mu);
+            if (auto sit = s_seen.find(name); sit != s_seen.end()) {
+                for (const auto& [bare, desc] : sit->second) {
+                    ToolState ts;
+                    ts.name        = bare;
+                    ts.description = desc;
+                    ts.enabled     = !cs.exclude.contains(bare);
+                    ss.tools.push_back(std::move(ts));
+                }
             }
         }
         // A disabled tool the server no longer advertises (e.g. excluded so

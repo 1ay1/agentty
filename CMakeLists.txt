@@ -2199,6 +2199,13 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(mcp_reload_race_test)
     set_tests_properties(mcp_reload_race_test PROPERTIES TIMEOUT 60)
 
+    # plugin_disabled_tools_test — a disabled server keeps its tool list.
+    # Drives the real plugin_model() producer: connect (records advertised
+    # tools) → disable → the snapshot still lists them (from the last-seen
+    # cache) instead of collapsing the tree. Locks the disable→vanish bug.
+    agentty_add_full_test(plugin_disabled_tools_test)
+    set_tests_properties(plugin_disabled_tools_test PROPERTIES TIMEOUT 60)
+
     # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
     # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
     # a failed CodexLoginDone lands in Failed, and a late result after Esc is
@@ -2567,6 +2574,7 @@ if(AGENTTY_BUILD_TESTS)
         compaction_wire_test
         plugins_in_model_test
         mcp_reload_race_test
+        plugin_disabled_tools_test
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
