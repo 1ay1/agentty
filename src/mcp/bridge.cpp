@@ -714,8 +714,29 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
                         !pool->registry.resource_templates().empty();
         any_prompts   = !pool->registry.prompts().empty();
     }
-    out.push_back(make_search_tools_tool(pool));
-    out.push_back(make_call_tool(pool));
+    // mcp_search_tools / mcp_call are the on-demand discovery layer: they let
+    // the model find MCP tools that AREN'T shipped inline. They only earn
+    // their place when there are MORE direct MCP tools than the wire's inline
+    // budget (select_wire_tools caps external tools at kInlineBudget) —
+    // otherwise every MCP tool already ships inline and the meta-tools are
+    // pure overhead.
+    //
+    // They also actively BREAK the Anthropic OAuth (first-party) path: that
+    // endpoint validates the tool set against Claude Code's and rejects a
+    // client-defined tool-search capability with HTTP 400 ("third-party apps
+    // now draw from your extra usage") — taking down EVERY turn while any MCP
+    // server is configured. Isolated empirically: dropping just these two
+    // tools flips the request 400→200 with the direct MCP tools still
+    // present (see the acp A/B in the plugins investigation). So: expose
+    // them only when they're genuinely needed (direct count over budget),
+    // which is also exactly when the small-setup 400 can't happen.
+    constexpr std::size_t kInlineBudget = 16;
+    const std::size_t direct_mcp = out.size();
+    const bool need_search = direct_mcp > kInlineBudget;
+    if (need_search) {
+        out.push_back(make_search_tools_tool(pool));
+        out.push_back(make_call_tool(pool));
+    }
     if (any_resources) out.push_back(make_read_resource_tool(pool));
     if (any_prompts)   out.push_back(make_get_prompt_tool(pool));
     return out;
