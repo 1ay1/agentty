@@ -60,6 +60,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
 #include "agentty/mcp/oauth.hpp"
+#include "agentty/mcp/client.hpp"   // mcp::release_servers
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
@@ -781,6 +782,16 @@ int main(int argc, char** argv) {
     // The spinner-tick subscription (gated on stream.active) supplies frames
     // while streaming; idle agentty costs zero CPU.
     maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0, .mode = maya::Mode::Inline});
+
+    // Tear down connected MCP plugin servers FIRST — before the blocking
+    // flushes below. Closing each server's stdin (→ EOF) unblocks any
+    // in-flight tool-call worker still reading from it, so a tool that was
+    // mid-call at quit time can't wedge the exit path. A well-behaved stdio
+    // server exits on EOF in ~1ms; a wedged one is bounded by ChildProcess's
+    // SIGTERM→SIGKILL deadline. Doing this promptly (not at static
+    // destruction) is what makes quit feel instant instead of hanging until
+    // the second Ctrl-C.
+    mcp::release_servers();
 
     // Join any in-flight TLS prewarm dial BEFORE the process tears down. On a
     // fast exit (e.g. immediate pipe-stdin EOF under MSYS2/mintty) the detached
