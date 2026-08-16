@@ -41,6 +41,15 @@ struct DeserializeError {
 [[nodiscard]] std::filesystem::path data_dir();
 [[nodiscard]] std::filesystem::path threads_dir();
 
+// Write a CLEAN, human/LLM-readable transcript of `t` (role + text, tool
+// calls collapsed to a one-line marker — none of the raw JSON noise of the
+// on-disk <id>.json). Returns the absolute path written, or empty on
+// failure. Used by fork: the new thread starts EMPTY (zero context) and
+// the model reads THIS file on demand for earlier context, instead of the
+// whole transcript being carried forward.
+[[nodiscard]] std::filesystem::path
+write_thread_transcript_md(const Thread& t);
+
 // Directory-walking loader: returns every thread we could deserialize,
 // **metadata only** (id, title, created_at, updated_at — `messages` is
 // empty). The thread picker only needs the metadata; full message bodies

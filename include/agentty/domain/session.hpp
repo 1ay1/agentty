@@ -587,6 +587,13 @@ struct StreamState {
     // at StreamFinished (on success: parsed into the new
     // CompactionRecord) or StreamError (on failure: discarded).
     std::string compaction_buffer;
+    // Adaptive shrink ceiling for the compaction slice, in TOKENS. 0 = use
+    // the default (min(65% of context_max, kCompactionSliceCap)). When a
+    // compaction request comes back "prompt is too long: X > Y", the
+    // StreamError handler sets this BELOW Y and retries — so a fork or
+    // /compact of a transcript far larger than the window keeps trimming
+    // (247k → fits) instead of failing. Reset to 0 when compaction ends.
+    int compaction_ceiling = 0;
     // Rapid-refill breaker. When auto-compaction fires within
     // `kRapidRefillTurns` assistant turns of the previous one,
     // `recent_compacts` increments; on a quieter cycle it resets.

@@ -1,19 +1,17 @@
 // fork_test.cpp — the fork reducer (fork_update / ForkThread).
 //
-// Pins the two properties the fork redesign fixed:
-//   1. A fork ALWAYS summarizes — regardless of the RAG choice — because
-//      the point of forking a nearly-full thread is to RECLAIM CONTEXT.
-//      (The old behaviour summarized only the RAG-off choice; a RAG-on
-//      fork landed verbatim and reclaimed nothing.) So after ForkThread
-//      the session is in a compaction (compacting=true, target_index set),
-//      and the fork's inherited compaction records are cleared.
-//   2. The fork switches to a NEW thread with fresh identity + provenance
-//      (forked_from = parent), the parent id unchanged, and the RAG mode
-//      override reflecting the picked choice.
-//
-// The frozen-render bounding (rehydrate_frozen vs a full re-emit) is a
-// render-path property covered by the frozen tests; here we assert the
-// state-machine contract of the fork.
+// Fork = escape a full context window CHEAPLY. It does NOT copy the
+// transcript and does NOT summarize (both still cost the window). Instead
+// it creates a FRESH thread that carries only a tiny system note pointing
+// at the parent's transcript on disk, which the model reads on demand.
+// This test pins that contract:
+//   1. The fork does NOT enter a compaction (no summarize — the old
+//      design summarized, which sent the whole transcript to the model and
+//      hit "prompt too long", and still cost context).
+//   2. The fork is near-empty: it carries no user/assistant turns from the
+//      parent — at most a single System note (the transcript pointer).
+//   3. Fresh thread identity + forked_from provenance + the parent id
+//      unchanged + a per-choice RAG override.
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -49,7 +47,6 @@ void install_stub_deps() {
     });
 }
 
-// A parent thread with a couple of turns + an inherited compaction record.
 Model make_parent() {
     Model m;
     m.d.current.id = ThreadId{"parent"};
@@ -60,20 +57,12 @@ Model make_parent() {
         m.d.current.messages.push_back(std::move(u));
         m.d.current.messages.push_back(std::move(a));
     }
-    // Inherited compaction (should be cleared on fork so the fresh summary
-    // supersedes it).
-    Thread::CompactionRecord rec;
-    rec.up_to_index = 2;
-    rec.summary = "old recap";
-    m.d.current.compactions.push_back(std::move(rec));
     return m;
 }
 
-// Open the picker at `choice_index`, then fork.
 Model fork_with(Model m, int choice_index) {
     auto s1 = detail::fork_update(std::move(m), OpenForkPicker{});
     Model m1 = std::move(s1.first);
-    // Move the picker cursor to the desired choice.
     for (int i = 0; i < choice_index; ++i) {
         auto s = detail::fork_update(std::move(m1), ForkPickerMove{+1});
         m1 = std::move(s.first);
@@ -82,18 +71,24 @@ Model fork_with(Model m, int choice_index) {
     return std::move(s2.first);
 }
 
-void always_summarizes(int choice, const char* name) {
-    std::println("--- always_summarizes: {} ---", name);
+void fresh_cheap_fork(int choice, const char* name) {
+    std::println("--- fresh_cheap_fork: {} ---", name);
     Model forked = fork_with(make_parent(), choice);
 
-    // 1. A summarization is in flight regardless of RAG choice.
-    check(forked.s.compacting, "fork entered a compaction (summarize)");
-    check(forked.s.compaction_target_index == forked.d.current.messages.size(),
-          "compaction covers the whole transcript");
-    check(forked.d.current.compactions.empty(),
-          "inherited compaction records cleared (fresh summary supersedes)");
+    // 1. No compaction — the fork does NOT summarize (that cost the window
+    //    and hit "prompt too long"). It's a fresh start.
+    check(!forked.s.compacting, "fork does NOT summarize (no compaction)");
 
-    // 2. New thread identity + provenance; parent id NOT reused.
+    // 2. Near-empty: the parent's 8 turns are NOT carried over. At most a
+    //    single System note (the on-disk transcript pointer).
+    check(forked.d.current.messages.size() <= 1,
+          "fork carries no parent turns (got " +
+          std::to_string(forked.d.current.messages.size()) + " messages)");
+    for (const auto& msg : forked.d.current.messages)
+        check(msg.role == Role::System,
+              "the only seeded message is a System note");
+
+    // 3. Fresh identity + provenance.
     check(forked.d.current.id.value != "parent",
           "fork has a new thread id (got '" + forked.d.current.id.value + "')");
     check(forked.d.current.forked_from == "parent",
@@ -107,8 +102,6 @@ void always_summarizes(int choice, const char* name) {
 
 void distinct_rag_modes() {
     std::println("--- distinct_rag_modes ---");
-    // The three choices must yield three distinct rag_mode_override values
-    // (On / FirstTurnOnly / Off), all while summarizing.
     int m0 = fork_with(make_parent(), 0).d.current.rag_mode_override;
     int m1 = fork_with(make_parent(), 1).d.current.rag_mode_override;
     int m2 = fork_with(make_parent(), 2).d.current.rag_mode_override;
@@ -121,11 +114,10 @@ void distinct_rag_modes() {
 
 void empty_thread_no_fork() {
     std::println("--- empty_thread_no_fork ---");
-    Model m;  // no messages
+    Model m;
     m.d.current.id = ThreadId{"empty"};
     Model after = fork_with(std::move(m), 0);
-    check(!after.s.compacting, "empty thread does not enter a fork");
-    check(after.d.current.id.value == "empty", "stays on the same thread");
+    check(after.d.current.id.value == "empty", "empty thread does not fork");
     std::println("PASS\n");
 }
 
@@ -134,9 +126,9 @@ void empty_thread_no_fork() {
 int main() {
     std::println("=== fork_test ===");
     install_stub_deps();
-    always_summarizes(0, "RAG per turn");
-    always_summarizes(1, "First-turn RAG");
-    always_summarizes(2, "RAG off");
+    fresh_cheap_fork(0, "RAG per turn");
+    fresh_cheap_fork(1, "First-turn RAG");
+    fresh_cheap_fork(2, "RAG off");
     distinct_rag_modes();
     empty_thread_no_fork();
     if (g_failed) { std::println("{} check(s) FAILED", g_failed); return 1; }

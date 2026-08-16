@@ -9,6 +9,7 @@
 #include "agentty/runtime/app/update/stream_args.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <ranges>
@@ -377,6 +378,7 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
 
         m.s.compaction_target_index = 0;
         m.s.compacting    = false;
+        m.s.compaction_ceiling = 0;
         m.s.phase         = phase::Idle{};
         // tokens_in / tokens_out are intentionally NOT touched: the
         // StreamUsage handler skipped writes during compaction, so
@@ -1553,12 +1555,60 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                             Cmd<Msg>::after(delay, Msg{RetryStream{}})};
                 }
 
+                // ── Adaptive shrink-retry on "prompt is too long" ──────────
+                // A fork or /compact of a transcript far bigger than the
+                // window comes back "prompt is too long: X tokens > Y
+                // maximum". Rather than give up, parse the LIMIT, set the
+                // compaction ceiling well below it, and retry — the trim
+                // then keeps only the recent slab that fits. Repeats,
+                // halving each time, down to a tiny last-few-turns recap, so
+                // it succeeds on ANY window (even ~10k). Bounded by a few
+                // attempts so a genuinely unshrinkable payload still ends.
+                if (m.s.compacting && e.http_status == 400
+                    && e.message.find("too long") != std::string::npos) {
+                    // Parse "... > N maximum" (fall back to X if only that
+                    // is present).
+                    long limit = 0;
+                    if (auto pos = e.message.find(" maximum");
+                        pos != std::string::npos) {
+                        std::size_t b = pos;
+                        while (b > 0 && std::isdigit(
+                                   static_cast<unsigned char>(e.message[b-1]))) --b;
+                        try { limit = std::stol(e.message.substr(b, pos - b)); }
+                        catch (...) { limit = 0; }
+                    }
+                    // Next ceiling: 60% of the reported limit, or if we
+                    // already had a ceiling, halve it. Floor so we don't
+                    // spin forever on an unshrinkable head.
+                    int prev = m.s.compaction_ceiling;
+                    int next = prev > 0 ? prev / 2
+                             : (limit > 0 ? static_cast<int>(limit * 6 / 10)
+                                          : 30000);
+                    if (next < 4000) next = 0;   // give up path below
+                    const phase::Active* sctx = active_ctx(m.s.phase);
+                    const int shrink_tries = sctx ? sctx->transient_retries : 0;
+                    if (next > 0 && shrink_tries < 6) {
+                        m.s.compaction_ceiling = next;
+                        m.s.compaction_buffer.clear();
+                        auto ctx = take_active_ctx(std::move(m.s.phase)).value();
+                        ctx.transient_retries = shrink_tries + 1;
+                        ctx.retry = retry::Scheduled{};
+                        m.s.phase = phase::Streaming{std::move(ctx)};
+                        m.s.status = "forking \xc2\xb7 trimming to fit…";
+                        m.s.status_until = {};
+                        return {std::move(m),
+                                Cmd<Msg>::after(std::chrono::milliseconds{100},
+                                                Msg{RetryStream{}})};
+                    }
+                }
+
                 // Terminal compaction failure. Drop everything compaction-
                 // related and surface ONE clear toast. Soft-trim on the
                 // normal-turn path keeps the agent working at reduced
                 // wire size; the user can /compact again later.
                 m.s.compacting              = false;
                 m.s.compaction_target_index = 0;
+                m.s.compaction_ceiling      = 0;
                 m.s.compaction_buffer.clear();
                 m.s.phase = phase::Idle{};
                 m.s.status = (klass == provider::ErrorClass::Cancelled)
