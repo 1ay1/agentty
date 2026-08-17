@@ -154,6 +154,17 @@ Element settings_list_picker(const Model& m) {
         }
         row.trailing       = it.secondary;
         row.trailing_style = fg_dim(muted);
+        // Armed for removal (first `d` pressed on this row) — paint it as a
+        // clear, reversible danger prompt: the second `d` commits, anything
+        // else disarms.
+        if (!adding && !it.indented && !it.arg.empty()
+            && o->confirm_remove == it.arg) {
+            row.badge       = "\xe2\x9a\xa0";           // ⚠
+            row.badge_style = fg_of(warn);
+            row.leading_style = fg_bold(warn);
+            row.trailing       = "press d again to remove";
+            row.trailing_style = fg_bold(warn);
+        }
         row.selected       = !adding && (i == o->index);
         cfg.rows.push_back(std::move(row));
     }

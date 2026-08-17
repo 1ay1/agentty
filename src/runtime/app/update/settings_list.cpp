@@ -129,6 +129,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
         [&](SettingsListMove& e) -> Step {
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o) return done(std::move(m));
+            o->confirm_remove.clear();   // moving off a row disarms a pending `d`
             const int n =
                 static_cast<int>(se::items_for(m, o->concern).size());
             if (n <= 0) { o->index = 0; return done(std::move(m)); }
@@ -138,6 +139,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
         [&](SettingsListActivate) -> Step {
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o) return done(std::move(m));
+            o->confirm_remove.clear();   // any Enter action disarms a pending `d`
             auto rows = se::items_for(m, o->concern);
             if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
                 return done(std::move(m));
@@ -311,6 +313,16 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                  && row.action != se::Action::ApprovePlugin)
                 || row.arg.empty())
                 return done(std::move(m));   // not a server row
+
+            // Two-step: the first `d` on a row ARMS (stores the name); the
+            // view then paints "press d again to remove". Only a second `d` on
+            // the SAME row commits — so a stray keystroke never deletes a
+            // hand-tuned mcp.json entry with no undo.
+            if (o->confirm_remove != row.arg) {
+                o->confirm_remove = row.arg;
+                return done(std::move(m));
+            }
+            o->confirm_remove.clear();
 
             auto path = edit_target(row);
             auto r = tools::plugin::remove_server(path, row.arg);

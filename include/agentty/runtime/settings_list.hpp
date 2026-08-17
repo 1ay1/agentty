@@ -36,6 +36,12 @@ struct ListOpen {
     bool        input_active = false;
     std::string input;          // typed buffer
     int         cursor = 0;     // byte cursor into `input`
+    // Destructive `d` (remove a plugin) is two-step, like account removal:
+    // the first press ARMS (stores the server name here + the view paints the
+    // row "press d again to remove"); the second press on the SAME row
+    // commits. Any move/other action disarms it. A stray keystroke can never
+    // delete a hand-tuned mcp.json entry with no undo.
+    std::string confirm_remove;
 };
 
 } // namespace settings
