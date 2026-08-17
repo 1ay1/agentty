@@ -113,6 +113,15 @@ content_sha, approvals)` states the fix as a type:
 This generalises hooks' proven content-hash approval into one primitive
 MCP will adopt when it migrates off the coarse env-var gate.
 
+**Now the ONE trust primitive across the codebase.** Hooks originally had
+their own bespoke content-hash store (predating scope); they've been
+consolidated onto `scope::Approvals` too (reading their legacy `{path:
+hash}` format transparently on upgrade). So every executable-from-untrusted-
+origin surface — plugins and hooks — now shares one content-hash trust
+mechanism, and lower-risk injection surfaces (project-defined agents) are
+surfaced via provenance rather than gated. Trust is applied in proportion
+to risk, through a single implementation.
+
 ## `Local` — shipped as a value, not yet wired
 
 `Locus::Local` (project-private, gitignored — the "evaluate a server before
