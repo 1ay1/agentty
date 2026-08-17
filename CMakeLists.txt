@@ -1840,68 +1840,19 @@ if(AGENTTY_BUILD_TESTS)
     # user), shadowing precedence, lenient frontmatter, tier-3 resource
     # enumeration, activation payload/dedup/reset, and the read-allowlist
     # gate. Standalone: links just the skills + fs_helpers TUs.
-    add_executable(skills_engine_test EXCLUDE_FROM_ALL
-        tests/skills_engine_test.cpp
-        src/tool/skills.cpp
-        src/scope/scope.cpp
-        src/tool/util/fs_helpers.cpp
-    )
-    target_include_directories(skills_engine_test PRIVATE include)
-    target_link_libraries(skills_engine_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json)
     # fs_helpers.cpp mirrors the workspace root into mcp-cpp's util layer.
-    if(TARGET mcp::tools)
-        target_link_libraries(skills_engine_test PRIVATE mcp::tools)
-    endif()
-    add_test(NAME skills_engine_test COMMAND skills_engine_test)
 
     # slash_commands_test — user-authored slash commands (tools::commands):
     # discovery across the six roots with shadowing (.agentty > .agents >
     # .claude, project > user), namespaced subdirectories (git/fixup.md →
     # /git:fixup), lenient frontmatter, and the $ARGUMENTS/$1..$9/$$
     # substitution contract. Standalone: links just the commands TU.
-    add_executable(slash_commands_test EXCLUDE_FROM_ALL
-        tests/slash_commands_test.cpp
-        src/tool/commands.cpp
-        src/scope/scope.cpp
-        src/tool/util/fs_helpers.cpp
-    )
-    target_include_directories(slash_commands_test PRIVATE include)
-    target_link_libraries(slash_commands_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json)
-    if(TARGET mcp::tools)
-        target_link_libraries(slash_commands_test PRIVATE mcp::tools)
-    endif()
-    add_test(NAME slash_commands_test COMMAND slash_commands_test)
-    set_tests_properties(slash_commands_test PROPERTIES TIMEOUT 30)
 
     # plugin_config_test — the `agentty plugin` mcp.json editor: round-trip
     # preservation of foreign keys (other servers, env blocks, the "servers"
     # spelling, unknown top-level keys), no-clobber-without-force, distinct
     # not-found, refusal to rewrite unparseable files, and file creation on
     # first add. Standalone: links just the plugin TU + json.
-    add_executable(plugin_config_test EXCLUDE_FROM_ALL
-        tests/plugin_config_test.cpp
-        src/tool/plugin.cpp
-        src/scope/scope.cpp
-        src/scope/trust.cpp
-        src/tool/util/fs_helpers.cpp
-        src/io/auth.cpp
-        src/util/base64.cpp
-    )
-    target_include_directories(plugin_config_test PRIVATE include)
-    target_link_libraries(plugin_config_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json
-        OpenSSL::SSL
-        OpenSSL::Crypto)
-    if(TARGET mcp::tools)
-        target_link_libraries(plugin_config_test PRIVATE mcp::tools)
-    endif()
-    add_test(NAME plugin_config_test COMMAND plugin_config_test)
-    set_tests_properties(plugin_config_test PROPERTIES TIMEOUT 30)
 
     # cred_crypt_test — at-rest credential sealing. Forks children to cover
     # the process-global passphrase states independently: v1 machine-only
@@ -2648,7 +2599,6 @@ if(AGENTTY_BUILD_TESTS)
     set_tests_properties(
         fuzzy_match_smoke
         concurrency_primitives_test
-        skills_engine_test
         cred_crypt_test
         keystore_test
         PROPERTIES LABELS sanitizer)
@@ -2677,6 +2627,13 @@ if(AGENTTY_BUILD_TESTS)
         tests/sandbox_escape_test.cpp
         tests/scope_test.cpp
         tests/table_render_test.cpp
+        # env/cwd-sandboxing tests: consolidated via a ScopedEnvSandbox guard
+        # (agtest.hpp) that saves+restores HOME and cwd around each case, so
+        # their setenv/chdir doesn't leak into sibling cases in the shared
+        # binary.
+        tests/plugin_config_test.cpp
+        tests/skills_engine_test.cpp
+        tests/slash_commands_test.cpp
         ${_migrated_srcs}
         ${AGENTTY_SHARED_OBJECTS}
         $<TARGET_OBJECTS:agentty_acp_obj>   # acp_integration_test needs AgentServer
@@ -2719,7 +2676,6 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         agentty_tests
         concurrency_primitives_test
-        skills_engine_test
         cred_crypt_test
         keystore_test)
 
@@ -2729,13 +2685,10 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         agentty_tests
         concurrency_primitives_test
-        skills_engine_test
         cred_crypt_test
         cross_process_lock_test
         keystore_test
         fork_test
-        slash_commands_test
-        plugin_config_test
         stream_md_lag_test
         reveal_pacing_test
         reveal_resume_test

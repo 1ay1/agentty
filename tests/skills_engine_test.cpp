@@ -14,6 +14,8 @@
 // stage writes new files, so cross-stage contamination is impossible
 // as long as stages use distinct skill names.
 
+#include "agtest.hpp"
+
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 
@@ -26,14 +28,7 @@
 namespace fs = std::filesystem;
 using namespace agentty::tools;
 
-static int failures = 0;
 
-#define CHECK(cond) do {                                                  \
-    if (!(cond)) {                                                        \
-        std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-        ++failures;                                                       \
-    }                                                                     \
-} while (0)
 
 static void write_file_at(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
@@ -45,7 +40,8 @@ static void write_file_at(const fs::path& p, const std::string& body) {
 // filesystem's mtime granularity is coarse: writing a brand-new SKILL.md
 // adds its own mtime to the signature, which is sufficient.
 
-int main() {
+TEST_CASE("skills engine") {
+    agtest::ScopedEnvSandbox _env_guard;
     std::error_code ec;
     fs::path base = fs::temp_directory_path(ec) / "agentty_skills_test";
     fs::remove_all(base, ec);
@@ -240,10 +236,4 @@ int main() {
     fs::current_path(base, ec);   // leave `work` so cleanup can remove it
     fs::remove_all(base, ec);
 
-    if (failures) {
-        std::fprintf(stderr, "%d check(s) FAILED\n", failures);
-        return 1;
-    }
-    std::puts("skills_engine_test: all checks passed");
-    return 0;
 }
