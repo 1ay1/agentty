@@ -18,6 +18,15 @@ set -eu
 BUILD_DIR=build
 JOBS=${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
 
+# Use the repo-tuned ccache config (content-hashed, path-relative) so a rebuild
+# after a submodule sync hits the cache instead of recompiling every
+# header-dependent TU. No-op if ccache isn't installed.
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if command -v ccache >/dev/null 2>&1; then
+  export CCACHE_CONFIGPATH="$REPO_ROOT/.ccache.conf"
+  export CCACHE_BASEDIR="$REPO_ROOT"
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -B) BUILD_DIR=$2; shift 2 ;;
@@ -39,5 +48,10 @@ cmake --build "$BUILD_DIR" --target submodules_sync
 
 echo ">> incremental rebuild (-j$JOBS) …"
 cmake --build "$BUILD_DIR" -j"$JOBS"
+
+if command -v ccache >/dev/null 2>&1; then
+  echo ">> ccache:"
+  ccache -s 2>/dev/null | grep -iE 'hits|misses|hit rate' || true
+fi
 
 echo ">> done."

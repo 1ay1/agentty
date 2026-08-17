@@ -1,6 +1,33 @@
 cmake_minimum_required(VERSION 3.28)
 project(agentty VERSION 0.3.0 LANGUAGES CXX)
 
+# ── Compiler cache (ccache / sccache) auto-detect ──────────────────────────
+# Placed right after project() so it applies to EVERY target in the tree,
+# including the submodules pulled in via add_subdirectory (maya, mcp-cpp,
+# rag-cpp, acp-cpp). Those submodules are header-heavy: a synced upstream
+# commit that touches one widely-included header (e.g. maya/widget/input.hpp)
+# otherwise recompiles all ~41 maya TUs plus the ~64 agentty TUs that include
+# a maya header, even when a given TU's preprocessed content didn't actually
+# change. ccache keys on CONTENT, so those become instant cache hits — the
+# right fix for "submodules are mostly headers, make re-sync rebuilds fast".
+#
+# Off is impossible to get wrong: if neither tool is installed we simply don't
+# set the launcher and the build is exactly as before. Opt out with
+# -DAGENTTY_COMPILER_CACHE=OFF. Honours a user-set *_COMPILER_LAUNCHER.
+option(AGENTTY_COMPILER_CACHE "Use ccache/sccache as the compiler launcher when available" ON)
+if(AGENTTY_COMPILER_CACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(AGENTTY_CCACHE NAMES ccache sccache)
+    if(AGENTTY_CCACHE)
+        set(CMAKE_C_COMPILER_LAUNCHER   "${AGENTTY_CCACHE}" CACHE STRING "" FORCE)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${AGENTTY_CCACHE}" CACHE STRING "" FORCE)
+        message(STATUS "agentty: compiler cache enabled (${AGENTTY_CCACHE}) — "
+                       "content-hashed rebuilds; header-only submodule syncs stay fast")
+    else()
+        message(STATUS "agentty: no ccache/sccache found — install ccache to speed up "
+                       "rebuilds after submodule syncs (brew/apt/pacman install ccache)")
+    endif()
+endif()
+
 # CMake (as of 4.2) has no /std:c++26 mapping for MSVC yet. Ask for C++23
 # there and opt into /std:c++latest so MSVC 14.50+ exposes available C++26
 # library bits (std::expected, std::format, etc). Other compilers get C++26.
