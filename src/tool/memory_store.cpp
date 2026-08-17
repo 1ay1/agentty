@@ -13,6 +13,7 @@
 
 #include "agentty/tool/memory_store.hpp"
 
+#include "agentty/scope/scope.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/utf8.hpp"
 
@@ -403,24 +404,33 @@ std::optional<Scope> parse_scope(std::string_view s) noexcept {
 }
 
 fs::path path_for(Scope s) {
-    if (s == Scope::User) {
-        auto h = home_dir();
-        if (h.empty()) return {};
-        return h / ".agentty" / "memory.jsonl";
+    // Memory is the first consumer of agentty::scope. It owns edge resolution
+    // (its home_dir() carries a getpwuid_r fallback scope's doesn't) and hands
+    // scope a fabricated Env; scope::plan() then centralises the Locus ×
+    // Dialect layout + the project-clamp/writability guard that used to live
+    // inline here. Behaviour is identical: User → ~/.agentty/memory.jsonl,
+    // Project → <project-root>/.agentty/memory.jsonl (empty at "/" or when
+    // unwritable). Memory only uses the native .agentty dialect, so we take
+    // the Agentty source for the requested locus.
+    const scope::Layout layout{.leaf = "memory.jsonl"};
+    scope::Env env;
+    env.home             = home_dir();       // richer than scope's own
+    env.project_root     = util::project_root();
+    env.project_writable = dir_path_writable(env.project_root / ".agentty");
+
+    const scope::Locus want =
+        (s == Scope::User) ? scope::Locus::User : scope::Locus::Project;
+
+    for (const scope::Source& src : scope::plan(layout, env)) {
+        if (src.locus != want || src.dialect != scope::Dialect::Agentty)
+            continue;
+        // Project scope must be writable to be a valid store target (a
+        // project fact silently promoted to user scope would bleed across
+        // workspaces). User scope only needs a resolved base.
+        if (want == scope::Locus::Project && !src.writable) return {};
+        return src.base / layout.leaf;
     }
-    // Scope::Project — anchored on the ACTIVE PROJECT (cwd clamped inside the
-    // access boundary) so subprocess calls that cd around don't shift where
-    // memory lives, AND `--workspace /` (explicit "unrestricted tools" mode,
-    // not a claim that the project IS the filesystem root) stores memory in
-    // agentty's stable process cwd rather than /.agentty. project_root()
-    // centralises exactly this cwd-vs-boundary resolution. Without it the
-    // remember tool advertised only user scope and every model-generated
-    // `scope:"project"` call failed, despite agentty being launched inside a
-    // perfectly writable repository.
-    fs::path root = util::project_root();
-    if (root.empty() || root == fs::path{"/"}) return {};
-    if (!dir_path_writable(root / ".agentty")) return {};
-    return root / ".agentty" / "memory.jsonl";
+    return {};
 }
 
 AppendResult append(Scope s, std::string_view text, AppendOptions opts) {

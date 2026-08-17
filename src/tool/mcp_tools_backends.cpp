@@ -15,6 +15,7 @@
 
 #include "agentty/tool/mcp_tools_backends.hpp"
 
+#include "agentty/scope/scope.hpp"
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -516,13 +517,20 @@ void refresh_user_agents_locked(UserAgentStore& store) {
         if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
         return fs::path{};
     }();
-    const fs::path roots[] = {
-        fs::path{".agentty"} / "agents", fs::path{".agents"} / "agents",
-        fs::path{".claude"}  / "agents",
-        home.empty() ? fs::path{} : home / ".agentty" / "agents",
-        home.empty() ? fs::path{} : home / ".agents"  / "agents",
-        home.empty() ? fs::path{} : home / ".claude"  / "agents",
-    };
+    // Root ladder from scope::plan (Locus-major, Dialect-minor): project
+    // .agentty ▷ .agents ▷ .claude ▷ the same three under ~. Same order the
+    // hand-written array had; project stays cwd-relative. Built-ins still win
+    // over any user agent of the same name (enforced in the load loop below).
+    std::vector<fs::path> roots;
+    {
+        scope::Env env;
+        env.home             = home;
+        env.project_root     = fs::path{"."};
+        env.project_writable = true;
+        const scope::Layout layout{.leaf = "agents"};
+        for (const scope::Source& src : scope::plan(layout, env))
+            roots.push_back(src.base / layout.leaf);
+    }
     for (const auto& r : roots) if (!r.empty()) scan_root(r);
 
     if (sig == store.sig) return;

@@ -3,6 +3,7 @@
 
 #include "agentty/tool/skills.hpp"
 
+#include "agentty/scope/scope.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 
 #include <algorithm>
@@ -275,22 +276,21 @@ const std::vector<Skill>& all() {
     // rescan only when it changed (cheap stat vs full parse per turn).
     std::string sig;
     std::vector<Skill> fresh;
-    // Precedence order — see header. Project shadows user; within a
-    // scope the native dir shadows the interop conventions.
-    const fs::path home = home_dir();
-    const fs::path project_roots[] = {
-        fs::path{".agentty"} / "skills",
-        fs::path{".agents"}  / "skills",
-        fs::path{".claude"}  / "skills",
-    };
-    for (const auto& r : project_roots) scan_root(r, "project", fresh, sig);
-    if (!home.empty()) {
-        const fs::path user_roots[] = {
-            home / ".agentty" / "skills",
-            home / ".agents"  / "skills",
-            home / ".claude"  / "skills",
-        };
-        for (const auto& r : user_roots) scan_root(r, "user", fresh, sig);
+    // Precedence order comes from scope::plan (Locus-major, Dialect-minor):
+    // project .agentty ▷ .agents ▷ .claude ▷ user .agentty ▷ .agents ▷
+    // .claude — exactly the ladder this used to hand-write. scan_root does the
+    // shadow (earlier roots win) + mtime-sig + Tier-3 allowlist per root.
+    // NOTE: project stays cwd-relative here (unlike memory's project_root()
+    // clamp) — skills has always resolved ".agentty/skills" against cwd, so
+    // env.project_root = "." preserves that exactly.
+    scope::Env env;
+    env.home             = home_dir();
+    env.project_root     = fs::path{"."};
+    env.project_writable = true;   // discovery reads all dialects; unused here
+    const scope::Layout layout{.leaf = "skills"};
+    for (const scope::Source& src : scope::plan(layout, env)) {
+        scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
+                  fresh, sig);
     }
 
     if (sig != cached_sig) {
