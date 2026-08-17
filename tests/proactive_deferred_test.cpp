@@ -19,10 +19,11 @@
 // This drives the REAL stream_update reducer with stub deps (no provider I/O;
 // the returned launch Cmd is inspected, never executed).
 
-#include <cstdio>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
@@ -40,12 +41,6 @@ namespace store = agentty::store;
 namespace provider = agentty::provider;
 
 static int g_checks = 0;
-static int g_fails  = 0;
-static void check(bool ok, const char* what) {
-    ++g_checks;
-    if (!ok) { ++g_fails; std::printf("FAIL: %s\n", what); }
-    else     { std::printf("ok:   %s\n", what); }
-}
 
 // A Model shaped exactly as submit_message leaves it on a hedge MISS: the
 // user turn + trailing empty assistant placeholder, phase Streaming, and the
@@ -70,7 +65,7 @@ static Model make_deferred_model() {
     return m;
 }
 
-int main() {
+TEST_CASE("proactive deferred") {
     // Stub deps — launch_stream (built inside the handler) reads deps() and
     // walks the tool registry; it must not touch the network. The returned
     // Cmd is inspected, never run.
@@ -166,9 +161,4 @@ int main() {
         check(m2.s.is_idle(),
               "deferred(stale): phase stays Idle");
     }
-
-    std::printf("%d checks, %d failures\n", g_checks, g_fails);
-    if (g_fails == 0) { std::printf("PASSED\n"); return 0; }
-    std::printf("FAILED\n");
-    return 1;
 }

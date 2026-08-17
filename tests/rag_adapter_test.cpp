@@ -17,10 +17,11 @@
 //   4. warm()/retrieve() are safe to call repeatedly (idempotent reindex).
 //   5. retrieve_code() indexes the cwd source tree and finds a symbol.
 
+#include "agtest.hpp"
+
 #include "agentty/rag/rag_adapter.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -29,18 +30,13 @@
 
 namespace fs = std::filesystem;
 
-static int g_fails = 0;
-static void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_fails;
-}
 
 static void write_file(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
     std::ofstream(p) << body;
 }
 
-int main() {
+TEST_CASE("rag adapter") {
     std::printf("rag_adapter_test\n");
 
     // Isolated temp workspace: a docs/ folder + an env pointing at it.
@@ -356,7 +352,4 @@ int main() {
 
     fs::current_path(old_cwd);
     fs::remove_all(tmp);
-
-    std::printf("%s\n", g_fails == 0 ? "ALL PASS" : "FAILURES");
-    return g_fails == 0 ? 0 : 1;
 }

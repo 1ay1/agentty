@@ -12,12 +12,13 @@
 // stdio MCP server. It must complete with a stable snapshot and no crash /
 // TSan complaint (the suite runs it under the sanitizer label).
 
+#include "agtest.hpp"
+
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"
 
 #include <atomic>
 #include <csignal>
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -30,11 +31,6 @@
 namespace fs = std::filesystem;
 using namespace agentty;
 
-static int g_fails = 0;
-static void check(bool ok, const std::string& what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what.c_str());
-    if (!ok) ++g_fails;
-}
 
 // A minimal stdio MCP server as a shell script — echoes canned JSON-RPC
 // replies. Enough for the connect handshake (initialize + tools/list) so the
@@ -58,7 +54,7 @@ done
     return sh;
 }
 
-int main() {
+TEST_CASE("mcp reload race") {
     // Same global SIGPIPE ignore agentty installs — a spawned server dying
     // during the handshake must not kill us (this test spawns /usr/bin/false
     // which exits before the handshake write).
@@ -136,7 +132,4 @@ int main() {
           + std::to_string(final.servers.size()) + ")");
 
     fs::remove_all(tmp);
-    if (g_fails == 0) { std::printf("\nAll mcp-reload-race tests passed.\n"); return 0; }
-    std::printf("\n%d mcp-reload-race test(s) FAILED.\n", g_fails);
-    return 1;
 }

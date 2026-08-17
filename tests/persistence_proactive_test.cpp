@@ -9,9 +9,10 @@
 // + flush_pending_saves + load_thread_file) against an isolated $HOME so it
 // touches real disk, not a mock.
 
+#include "agtest.hpp"
+
 #include "agentty/io/persistence.hpp"
 
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -21,13 +22,8 @@
 namespace fs = std::filesystem;
 using namespace agentty;
 
-static int g_fails = 0;
-static void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_fails;
-}
 
-int main() {
+TEST_CASE("persistence proactive") {
     // Isolate the data dir: persistence::data_dir() resolves $HOME/.agentty.
     auto tmp = fs::temp_directory_path()
              / ("agentty_persist_test_" + std::to_string(::getpid()));
@@ -86,11 +82,11 @@ int main() {
 
     auto loaded = persistence::load_thread_file(path);
     check(loaded.has_value(), "thread reloaded without error");
-    if (!loaded) { std::printf("FAILED\n"); return 1; }
+    if (!loaded) { REQUIRE(loaded.has_value()); return; }
 
     const auto& msgs = loaded->messages;
     check(msgs.size() == 4, "all four messages survived");
-    if (msgs.size() != 4) { std::printf("FAILED\n"); return 1; }
+    if (msgs.size() != 4) { REQUIRE(msgs.size() == 4); return; }
 
     // The proactive turn kept its identity.
     check(msgs[1].proactive_context, "proactive_context flag survived reload");
@@ -116,7 +112,4 @@ int main() {
           "fork_note did not leak onto other turns");
 
     fs::remove_all(tmp);
-
-    std::printf("%s\n", g_fails == 0 ? "PASSED" : "FAILED");
-    return g_fails == 0 ? 0 : 1;
 }
