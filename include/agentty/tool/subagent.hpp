@@ -98,4 +98,12 @@ inline constexpr int kMaxTurns = 24;
 void push_depth() noexcept;
 void pop_depth() noexcept;
 
+// Provenance of an agent persona by name, for the task card's transparency
+// tag: "builtin" (explorer/reviewer/…), "user" (~/.agentty/agents), or
+// "project" (a workspace-local .agentty/agents that rode in on the repo).
+// Returns "builtin" for an unknown name (the safe default — no tag shown).
+// A PROJECT agent's role prompt is attacker-controllable via a clone, so the
+// UI surfaces it; it is NOT blocked (its tools stay gated like any other).
+[[nodiscard]] std::string_view agent_origin(std::string_view name) noexcept;
+
 } // namespace agentty::tools::subagent

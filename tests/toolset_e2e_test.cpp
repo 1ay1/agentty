@@ -32,6 +32,7 @@
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
+#include "agentty/tool/subagent.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
@@ -570,6 +571,29 @@ int main() {
               || text_of(r).find("not configured") != std::string::npos
               || text_of(r).find("no ") != std::string::npos,
               "task: names the missing backend");
+    }
+
+    // ── agent provenance: a PROJECT-defined persona is flagged ───────────
+    // A repo can ship .agentty/agents/*.md whose role prompt is
+    // attacker-controllable, so the task card tags it "project agent".
+    // Built-ins and (would-be) user agents get no tag. Transparency only —
+    // the agent still runs, tools stay gated.
+    {
+        write_file(root / ".agentty" / "agents" / "helper.md",
+                   "---\ndescription: a project helper\n---\n"
+                   "Your role: help with project tasks.\n");
+        namespace sub = tools::subagent;
+        // User-agent discovery is cwd-relative (project_root()), so run this
+        // check from inside the sandbox root, restored after.
+        auto prev_cwd = fs::current_path();
+        fs::current_path(root);
+        check(sub::agent_origin("helper") == "project",
+              "agent provenance: a project-shipped agent is 'project'");
+        check(sub::agent_origin("explorer") == "builtin",
+              "agent provenance: a built-in agent is 'builtin' (no tag)");
+        check(sub::agent_origin("nonexistent") == "builtin",
+              "agent provenance: an unknown name is 'builtin' (safe default)");
+        fs::current_path(prev_cwd);
     }
 
     // ── web tools: offline arg/error paths only ──────────────────────────

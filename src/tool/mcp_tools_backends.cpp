@@ -413,12 +413,22 @@ public:
 //   The native task tool's `display_description` arg is UI-only and stays in
 //   the shell's schema; run() never needs it.
 
+// Where an agent persona came from — the provenance the task card surfaces
+// so a repo-injected agent is never invisible (transparency, not a gate).
+enum class AgentOrigin : std::uint8_t { Builtin, User, Project };
+
 struct AgentType {
     std::string_view              name;
     bool                          read_only;
     std::string_view              role;
     std::vector<std::string_view> allow;   // empty ⇒ all (minus task)
     smart::ModelRole              model_role = smart::ModelRole::Utility;
+    // Where this persona came from. Built-ins and the user's OWN
+    // ~/.agentty/agents are trusted-by-authorship; a PROJECT-scoped agent
+    // rode in on the workspace (a clone could inject its role prompt), so the
+    // task card surfaces "project agent" — not a block, just so an injected
+    // persona is never invisible. Mirrors the plugins picker's scope badge.
+    AgentOrigin                   origin = AgentOrigin::Builtin;
 };
 
 // ── User-defined agents (.agentty/agents/*.md) ─────────────────────
@@ -461,7 +471,7 @@ UserAgentStore& user_agents() {
 
 // Frontmatter subset parser (same lenient rules as commands/skills).
 void parse_user_agent(const std::string& raw, const std::string& slug,
-                      UserAgentStore& store) {
+                      AgentOrigin origin, UserAgentStore& store) {
     auto trim = [](std::string_view v) -> std::string {
         std::size_t b = 0, e = v.size();
         while (b < e && std::isspace(static_cast<unsigned char>(v[b]))) ++b;
@@ -500,6 +510,7 @@ void parse_user_agent(const std::string& raw, const std::string& slug,
     at->read_only = read_only;
     at->model_role = read_only ? smart::ModelRole::Utility
                                : smart::ModelRole::Implementation;
+    at->origin = origin;
     // Whitespace-split tools allowlist — each token stored owned.
     std::istringstream ts(tools_line);
     std::string tok;
@@ -545,17 +556,22 @@ void refresh_user_agents_locked(UserAgentStore& store) {
     // .agentty ▷ .agents ▷ .claude ▷ the same three under ~. Same order the
     // hand-written array had; project stays cwd-relative. Built-ins still win
     // over any user agent of the same name (enforced in the load loop below).
-    std::vector<fs::path> roots;
+    // Each root carries its scope origin so the task card can surface a
+    // "project agent" tag (a repo-shipped persona is never invisible).
+    std::vector<std::pair<fs::path, AgentOrigin>> roots;
     {
         scope::Env env;
         env.home             = home;
         env.project_root     = fs::path{"."};
         env.project_writable = true;
         const scope::Layout layout{.leaf = "agents"};
-        for (const scope::Source& src : scope::plan(layout, env))
-            roots.push_back(src.base / layout.leaf);
+        for (const scope::Source& src : scope::plan(layout, env)) {
+            const AgentOrigin org = src.locus == scope::Locus::User
+                ? AgentOrigin::User : AgentOrigin::Project;
+            roots.emplace_back(src.base / layout.leaf, org);
+        }
     }
-    for (const auto& r : roots) if (!r.empty()) scan_root(r);
+    for (const auto& [r, org] : roots) if (!r.empty()) scan_root(r);
 
     if (sig == store.sig) return;
     store.sig = sig;
@@ -573,7 +589,7 @@ void refresh_user_agents_locked(UserAgentStore& store) {
     constexpr std::size_t kMaxAgentBytes = 32 * 1024;
     static const char* kBuiltins[] = {"explorer","reviewer","tester",
                                       "coder","general"};
-    for (const auto& r : roots) {
+    for (const auto& [r, org] : roots) {
         if (r.empty()) continue;
         std::error_code ec;
         if (!fs::is_directory(r, ec) || ec) continue;
@@ -599,7 +615,7 @@ void refresh_user_agents_locked(UserAgentStore& store) {
             std::string raw(static_cast<std::size_t>(sz), '\0');
             f.read(raw.data(), static_cast<std::streamsize>(sz));
             raw.resize(static_cast<std::size_t>(f.gcount()));
-            parse_user_agent(raw, slug, store);
+            parse_user_agent(raw, slug, org, store);
         }
     }
 }
@@ -1550,5 +1566,21 @@ proactive_retrieve_blocking(const std::string& query, int k) {
             proactive_mark_injected_(key);
     return hit;
 }
+
+namespace subagent {
+// Provenance query for the task card (declared in subagent.hpp). Resolves the
+// type through the SAME lookup the runner uses, then maps its origin to a
+// stable label. Unknown → "builtin" (no tag shown). Defined at end-of-TU so
+// it doesn't shadow the subagent::current() calls used earlier in the file.
+std::string_view agent_origin(std::string_view name) noexcept {
+    const AgentType& t = resolve_agent_type(name);
+    switch (t.origin) {
+        case AgentOrigin::User:    return "user";
+        case AgentOrigin::Project: return "project";
+        case AgentOrigin::Builtin: break;
+    }
+    return "builtin";
+}
+}  // namespace subagent
 
 } // namespace agentty::tools
