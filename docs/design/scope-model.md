@@ -129,20 +129,24 @@ Adopted smallest-first, each change **behaviour-preserving**:
 |---------|----------|--------|
 | memory | override (locus × native) | ✅ migrated |
 | skills / commands / agents | union ladder | ✅ migrated |
-| **MCP** | union + provenance | ✅ read + edit-routing; trust (Stage C) pending |
+| **MCP** | union + provenance + trust | ✅ fully migrated |
 
-MCP folded through scope in stages. **Stage A+B (done):**
-`read_config_servers()` now *unions* project + user mcp.json via
-`scope::plan` (first-writer-wins shadow) instead of picking one winning
-file, each server tagged with its `Source`; the plugin picker shows both
-scopes, badges provenance, and routes every edit (remove / toggle server /
-toggle tool) to the server's *own* `Source::base` — fixing the
-long-standing "toggled a project server, silently edited the user file"
-bug. It also fixes the false `no "command"` error on HTTP/SSE servers
-(url-only transports are valid). **Stage C (pending):** replace the
-`AGENTTY_MCP_ALLOW_PROJECT` connect-gate with `scope::trust_of` +
-content-hash `Approvals` — kept separate because it's the RCE-sensitive
-change.
+MCP folded through scope in stages. **Stage A+B:** `read_config_servers()`
+*unions* project + user mcp.json via `scope::plan` (first-writer-wins
+shadow) instead of picking one winning file, each server tagged with its
+`Source`; the plugin picker shows both scopes, badges provenance, and
+routes every edit (remove / toggle server / toggle tool) to the server's
+*own* `Source::base` — fixing the long-standing "toggled a project server,
+silently edited the user file" bug, and the false `no "command"` error on
+HTTP/SSE servers. **Stage C:** the `AGENTTY_MCP_ALLOW_PROJECT`-only
+connect-gate is replaced with content-bound trust — a workspace-local
+config's stdio servers connect only when the human has vouched for it,
+either via the env opt-in (back-compat) or an approval of the file's
+content hash (`scope::content_hash` + a user-root `Approvals` store, via
+`load_approvals`/`save_approvals`). Editing the file changes the hash and
+re-gates it — the MCPoison fix, live. `plugin::is_project_config_trusted()`
+/ `approve_project_config()` are the grant/query API; an untrusted project
+server shows "untrusted project config — approve to enable" in the picker.
 
 ## Where it lives
 

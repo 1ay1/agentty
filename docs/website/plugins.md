@@ -63,7 +63,7 @@ The **Plugins** picker shows servers from both, badged with the scope they came 
 Every edit in the picker — enable/disable a server, toggle a tool, remove — writes back to the **file that server actually came from**, so toggling a project server edits the project `mcp.json` and a user server edits yours; the two never cross. Adding a new plugin inline writes to your user config by default.
 
 :::note
-Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you opt in with `AGENTTY_MCP_ALLOW_PROJECT=1` — a clone can't run arbitrary commands the first time you open it. They still appear in the picker so you can see what a repo declares.
+Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you vouch for the config — either set `AGENTTY_MCP_ALLOW_PROJECT=1`, or approve the file's exact contents (recorded under `~/.agentty`, so a clone can't approve itself). Edit the `mcp.json` afterwards and the approval is voided — you re-approve the new contents, so a swapped command can never ride in on an old trust. Untrusted project servers still show in the picker (labelled *untrusted project config — approve to enable*) so you can see what a repo declares. HTTP/SSE servers spawn no local command and aren't gated this way.
 :::
 
 ## The tool budget

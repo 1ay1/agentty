@@ -28,7 +28,7 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `AGENTTY_AIRGAP_SSH` | Extra flags injected into the ssh invocation for airgap (laptop side). |
 | `AGENTTY_CLIPBOARD_CMD` | Shell command that writes image bytes to stdout — used for Ctrl+V image paste over SSH. |
 | `AGENTTY_MCP_CONFIG` | Explicit path to an mcp.json, overriding the project/user lookup. |
-| `AGENTTY_MCP_ALLOW_PROJECT` | Set truthy to trust a project-local .agentty/mcp.json (gated off by default). |
+| `AGENTTY_MCP_ALLOW_PROJECT` | Blanket-trust a project-local .agentty/mcp.json so its stdio servers connect (gated off by default). Alternative to per-file [content-hash approval](/docs/plugins#config-scope). |
 | `AGENTTY_DOCS_DIR` | Folder of documents to index for the search_docs [retrieval](/docs/retrieval) tool. Auto-discovers `./docs` then `./.agentty/knowledge` when unset. Even with no docs, `search_docs` still searches your installed **skills** and **learned memory**. |
 | `AGENTTY_EMBED_MODEL / AGENTTY_OLLAMA_HOST` | Embedding model (default `nomic-embed-text`) + Ollama host (`host:port`, default `127.0.0.1:11434`) for the dense half of the hybrid RAG pipeline. No Ollama → dense falls back to a local hash embedder and hybrid still runs. |
 | `AGENTTY_RAG_SKILLS / AGENTTY_RAG_MEMORY` | Fold installed skills / learned memory into the search_docs corpus. **On by default**; set `=0` to disable. |
