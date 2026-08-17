@@ -117,6 +117,7 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         // user file. A user-scope server needs no badge (the common case).
         i.scope_label = std::string{agentty::mcp::to_string(s.origin)};
         i.config_dir  = s.config_dir;
+        i.untrusted   = s.untrusted;
         const std::string scope_tag =
             (s.origin == agentty::mcp::Origin::User) ? "" : (i.scope_label + " · ");
         // A tool is EFFECTIVELY inactive unless its plugin is enabled AND
@@ -141,8 +142,15 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         }
         // Enter toggles the WHOLE plugin on/off (reversible). Remove is the
         // deliberate `d` key — destructive actions aren't the default Enter.
-        i.action    = Action::TogglePlugin;
-        i.hint      = s.disabled ? "enable" : "disable";
+        // But an UNTRUSTED project server can't be toggled into life at all
+        // until its config is vouched for, so there Enter APPROVES instead.
+        if (s.untrusted) {
+            i.action = Action::ApprovePlugin;
+            i.hint   = "trust & enable";
+        } else {
+            i.action = Action::TogglePlugin;
+            i.hint   = s.disabled ? "enable" : "disable";
+        }
         out.push_back(std::move(i));
 
         for (const auto& t : s.tools) {

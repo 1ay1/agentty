@@ -48,6 +48,7 @@ struct ServerState {
     std::string error;           // why not connected (empty if connected/ok)
     Origin      origin = Origin::User;   // which scope this entry came from
     std::string config_dir;      // the .agentty dir holding this entry's mcp.json
+    bool        untrusted = false;   // project config not vouched for — won't connect
     std::vector<ToolState> tools;
 
     [[nodiscard]] std::size_t enabled_count() const noexcept {

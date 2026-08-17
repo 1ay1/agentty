@@ -1308,6 +1308,7 @@ PluginModel plugin_model() {
                 // approve, instead of a permanent "connecting…" that never
                 // resolves. HTTP/SSE (url) servers spawn nothing, so they're
                 // not gated here.
+                ss.untrusted = true;
                 ss.error = "untrusted project config — approve to enable";
             } else if (auto eit = errors.find(name); eit != errors.end()) {
                 ss.error = eit->second;
