@@ -132,7 +132,36 @@ std::string provider_display_name(const Selection& s) {
     // registry display name; fall back to the raw label for a custom host.
     const std::string& lbl = s.openai_endpoint.label;
     if (const auto* p = preset_for(lbl)) return std::string{p->label};
-    return lbl.empty() ? std::string{"OpenAI"} : lbl;
+    if (lbl.empty()) return std::string{"OpenAI"};
+    // URL-form custom hosts (https://host/path, http://host:port/path) carry
+    // the full spec as their label (see Endpoint::from_spec). The badge and
+    // the switch toast should show host[:port], not the long URL. ep.label itself
+    // is untouched — preset lookup and the openai_transport_test label
+    // round-trip assertion still see the full spec.
+    if (lbl.starts_with("https://") || lbl.starts_with("http://")) {
+        const bool tls = lbl.starts_with("https://");
+        std::string_view s = lbl;
+        s.remove_prefix(tls ? 8 : 7);   // "https://" = 8, "http://" = 7
+        // Strip path at first '/' (everything after the authority).
+        if (auto slash = s.find('/'); slash != std::string_view::npos)
+            s = s.substr(0, slash);
+        // Split host / port at the last ':'.
+        std::string out;
+        std::uint16_t port = tls ? 443 : 80;
+        if (auto colon = s.rfind(':'); colon != std::string_view::npos) {
+            out = std::string{s.substr(0, colon)};
+            try {
+                int p = std::stoi(std::string{s.substr(colon + 1)});
+                if (p > 0 && p <= 65535) port = static_cast<std::uint16_t>(p);
+            } catch (...) {}
+        } else {
+            out = std::string{s};
+        }
+        // Omit the port when it's the scheme default.
+        if (port != (tls ? 443 : 80)) out += ":" + std::to_string(port);
+        return out;
+    }
+    return lbl;
 }
 
 PrewarmTarget prewarm_target(const Selection& s) {
