@@ -129,13 +129,20 @@ Adopted smallest-first, each change **behaviour-preserving**:
 |---------|----------|--------|
 | memory | override (locus × native) | ✅ migrated |
 | skills / commands / agents | union ladder | ✅ migrated |
-| **MCP** | union + trust | ⏳ **next** — the one that *gains* behaviour |
+| **MCP** | union + provenance | ✅ read + edit-routing; trust (Stage C) pending |
 
-MCP is deliberately last: it's where scope stops being a refactor and
-starts fixing real bugs — merging project+user servers (`resolve_union`
-instead of one-file-wins), routing edits to `Source::base` (the wrong-file
-bug), and replacing `AGENTTY_MCP_ALLOW_PROJECT` with `trust_of()` +
-content-hash approvals (the MCPoison-class exposure).
+MCP folded through scope in stages. **Stage A+B (done):**
+`read_config_servers()` now *unions* project + user mcp.json via
+`scope::plan` (first-writer-wins shadow) instead of picking one winning
+file, each server tagged with its `Source`; the plugin picker shows both
+scopes, badges provenance, and routes every edit (remove / toggle server /
+toggle tool) to the server's *own* `Source::base` — fixing the
+long-standing "toggled a project server, silently edited the user file"
+bug. It also fixes the false `no "command"` error on HTTP/SSE servers
+(url-only transports are valid). **Stage C (pending):** replace the
+`AGENTTY_MCP_ALLOW_PROJECT` connect-gate with `scope::trust_of` +
+content-hash `Approvals` — kept separate because it's the RCE-sensitive
+change.
 
 ## Where it lives
 
