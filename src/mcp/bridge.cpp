@@ -30,6 +30,7 @@
 #include "agentty/mcp/client.hpp"
 #include "agentty/mcp/http_server.hpp"
 #include "agentty/scope/scope.hpp"
+#include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -199,6 +200,7 @@ struct ConfigServer {
     std::string command;
     std::string url;             // HTTP/SSE transport (no command)
     std::string type;            // "stdio" | "http" | "sse" | "" (inferred)
+    std::vector<std::string> args;   // stdio command args (part of spawn identity)
     std::unordered_set<std::string> exclude;
     bool disabled = false;
     scope::Source source;        // WHERE this entry was read from (provenance)
@@ -246,6 +248,9 @@ void read_one_config(const fs::path& file, const scope::Source& src,
         cs.url     = e.value("url", std::string{});   // HTTP/SSE servers have no command
         cs.type    = e.value("type", std::string{});
         cs.source  = src;
+        if (e.contains("args") && e["args"].is_array())
+            for (const auto& a : e["args"])
+                if (a.is_string()) cs.args.push_back(a.get<std::string>());
         // A hand-edited non-bool `disabled` (e.g. the string "true") must not
         // throw type_error and take down the whole config read — treat any
         // non-bool as "not disabled".
@@ -1015,19 +1020,16 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // A project-local ./.agentty/mcp.json can ride in on a cloned repo, and
     // its stdio servers spawn ARBITRARY commands at registry-build time with
     // no per-tool permission prompt — bypassing the Exec gate every other
-    // code path honors. So when the config is workspace-local we require the
-    // human to have vouched for it — either AGENTTY_MCP_ALLOW_PROJECT=1 or an
-    // approval of THIS file's content hash (see project_config_trusted).
-    // $AGENTTY_MCP_CONFIG and ~/.agentty/mcp.json are trusted (the user
-    // placed them) and never gated.
-    if (project_local && !project_config_trusted(cfg)) {
-        std::fprintf(stderr,
-            "mcp: ignoring workspace-local %s (it can spawn arbitrary\n"
-            "     commands). Set AGENTTY_MCP_ALLOW_PROJECT=1 to enable it, or\n"
-            "     move trusted servers to ~/.agentty/mcp.json.\n",
-            cfg.string().c_str());
-        return out;
-    }
+    // code path honors. So a workspace-local config's stdio servers connect
+    // only when the human has vouched for them. Trust is now PER-SERVER (see
+    // the connect loop below): each server is gated on its own spec hash, so
+    // approving one doesn't bless a later-added one, and editing one server's
+    // command re-gates only that server. $AGENTTY_MCP_CONFIG and
+    // ~/.agentty/mcp.json are user-placed and never gated. A whole-file
+    // approval or AGENTTY_MCP_ALLOW_PROJECT=1 still blanket-trusts everything
+    // (back-compat), short-circuited here to skip the per-server work.
+    const bool project_all_trusted =
+        !project_local || project_config_trusted(cfg);
 
     json doc;
     try {
@@ -1076,10 +1078,42 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
         std::shared_future<std::shared_ptr<::mcp::cap::CapabilityProvider>> fut;
     };
     std::vector<Pending> pending;
+    // Per-server trust set, loaded once. For a workspace-local config that
+    // isn't blanket-trusted, a stdio server connects only if its own spec
+    // hash is in the user-root approvals store (see project_config_trusted /
+    // plugin::server_spec_hash).
+    const scope::Approvals approvals =
+        project_all_trusted ? scope::Approvals{}
+                            : scope::load_approvals(kMcpApprovalsLeaf);
     for (auto it = servers->begin(); it != servers->end(); ++it) {
         const std::string sname = it.key();
         const json spec = it.value();   // copy: detached worker outlives `doc`
         if (json_flag(spec, "disabled")) continue;
+
+        // Untrusted-workspace spawn gate, PER SERVER. A stdio server (has a
+        // command, no url) from a not-yet-trusted project config is skipped
+        // unless its exact spec hash is approved. HTTP/SSE servers spawn no
+        // local command, so they're not gated. plugin_model() shows the
+        // skipped server as "untrusted — approve to enable".
+        if (!project_all_trusted) {
+            const std::string command = spec.value("command", std::string{});
+            const std::string url     = spec.value("url", std::string{});
+            if (!command.empty() && url.empty()) {
+                std::vector<std::string> args;
+                if (spec.contains("args") && spec["args"].is_array())
+                    for (const auto& a : spec["args"])
+                        if (a.is_string()) args.push_back(a.get<std::string>());
+                const std::string h =
+                    tools::plugin::server_spec_hash(command, url, args);
+                if (h.empty() || !approvals.approved(h)) {
+                    std::fprintf(stderr,
+                        "mcp: skipping untrusted project server '%s' — approve it\n"
+                        "     in the Plugins picker or set AGENTTY_MCP_ALLOW_PROJECT=1.\n",
+                        sname.c_str());
+                    continue;
+                }
+            }
+        }
 
         ServerPolicy policy;
         policy.trust_annotations = spec.value("trustAnnotations", false);
@@ -1267,12 +1301,15 @@ PluginModel plugin_model() {
     }
 
     // Build one ServerState per configured server, unifying config + live.
-    // Compute project-config trust ONCE (the RCE gate): a workspace-local
-    // config's stdio servers only connect once the human has vouched for it.
-    // Used below to flag untrusted project servers instead of leaving them in
-    // a permanent "connecting…".
-    const bool project_trusted =
+    // Per-server trust (the RCE gate): a workspace-local config's stdio
+    // servers only connect once vouched for. Blanket trust (env or whole-file
+    // approval) short-circuits; otherwise each server is checked on its own
+    // spec hash, so one untrusted server doesn't taint the rest.
+    const bool project_all_trusted =
         project_config_trusted(fs::path{".agentty"} / "mcp.json");
+    const scope::Approvals approvals =
+        project_all_trusted ? scope::Approvals{}
+                            : scope::load_approvals(kMcpApprovalsLeaf);
     std::size_t enabled_mcp = 0;
     for (const auto& [name, cs] : cfg) {
         ServerState ss;
@@ -1302,12 +1339,16 @@ PluginModel plugin_model() {
             if (cs.command.empty() && cs.url.empty()) {
                 ss.error = "no \"command\" or \"url\" in mcp.json";
             } else if (cs.source.locus == scope::Locus::Project
-                       && !cs.command.empty() && !project_trusted) {
-                // A project (workspace-local) stdio server that hasn't been
-                // vouched for won't connect (the RCE gate). Say so, and how to
-                // approve, instead of a permanent "connecting…" that never
-                // resolves. HTTP/SSE (url) servers spawn nothing, so they're
-                // not gated here.
+                       && !cs.command.empty() && cs.url.empty()
+                       && !project_all_trusted
+                       && !approvals.approved(
+                              tools::plugin::server_spec_hash(
+                                  cs.command, cs.url, cs.args))) {
+                // A project (workspace-local) stdio server whose OWN spec
+                // hasn't been approved won't connect (the per-server RCE
+                // gate). Same spec hash (command+url+args) the connect loop
+                // uses, so picker and wire agree. HTTP/SSE (url) servers spawn
+                // nothing and aren't gated.
                 ss.untrusted = true;
                 ss.error = "untrusted project config — approve to enable";
             } else if (auto eit = errors.find(name); eit != errors.end()) {

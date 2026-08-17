@@ -170,6 +170,62 @@ bool approve_project_config() {
     return scope::save_approvals(kMcpApprovalsLeaf, a);
 }
 
+// The spawn-identity hash for one server: the command + url + args that would
+// actually run. Canonical + stable so the file side (plugin.cpp) and the live
+// side (bridge connect loop) agree. Empty command AND url → empty hash.
+std::string server_spec_hash(const std::string& command,
+                             const std::string& url,
+                             const std::vector<std::string>& args) {
+    if (command.empty() && url.empty()) return {};
+    std::string blob;
+    blob += "cmd";  blob.push_back('\0'); blob += command; blob.push_back('\0');
+    blob += "url";  blob.push_back('\0'); blob += url;
+    for (const auto& a : args) { blob.push_back('\0'); blob += a; }
+    return scope::content_hash(blob);
+}
+
+namespace {
+// Adapt a JSON server entry into the string-based hash.
+[[nodiscard]] std::string spec_hash_of_entry(const nlohmann::json& entry) {
+    if (!entry.is_object()) return {};
+    std::vector<std::string> args;
+    if (entry.contains("args") && entry["args"].is_array())
+        for (const auto& a : entry["args"])
+            if (a.is_string()) args.push_back(a.get<std::string>());
+    return server_spec_hash(entry.value("command", std::string{}),
+                            entry.value("url", std::string{}), args);
+}
+
+// Load one server entry's spec hash from a config file, or empty if absent.
+[[nodiscard]] std::string server_hash_from_file(const fs::path& path,
+                                                const std::string& name) {
+    Loaded l = load(path);
+    if (!l.ok || !l.existed) return {};
+    const char* key = servers_key(l.doc);
+    if (!l.doc.contains(key) || !l.doc[key].is_object()
+        || !l.doc[key].contains(name))
+        return {};
+    return spec_hash_of_entry(l.doc[key][name]);
+}
+}  // namespace
+
+bool is_server_trusted(const fs::path& path, const std::string& name) {
+    // Blanket grants first: the env opt-in, then a whole-file approval — both
+    // keep working, so nothing that trusted a config before regresses.
+    if (is_project_config_trusted()) return true;
+    const std::string h = server_hash_from_file(path, name);
+    if (h.empty()) return false;   // http/no-command server — not gated here
+    return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
+}
+
+bool approve_server(const fs::path& path, const std::string& name) {
+    const std::string h = server_hash_from_file(path, name);
+    if (h.empty()) return false;   // nothing spawnable to vouch for
+    scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
+    a.approve(h);
+    return scope::save_approvals(kMcpApprovalsLeaf, a);
+}
+
 EditResult add_server(const fs::path& path, const ServerSpec& spec,
                       bool force) {
     std::lock_guard<std::mutex> lk(mutation_mutex());

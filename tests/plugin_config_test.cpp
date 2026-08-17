@@ -412,6 +412,59 @@ void project_trust_gate(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// Per-server trust: approving ONE server must not bless another, and editing
+// one server's command re-gates only that server.
+void per_server_trust(const fs::path& dir) {
+    std::println("--- per_server_trust ---");
+    const fs::path home = dir / "ps_home";
+    const fs::path work = dir / "ps_work";
+    fs::create_directories(home);
+    fs::create_directories(work / ".agentty");
+    const std::string prev_home = std::getenv("HOME") ? std::getenv("HOME") : "";
+    const fs::path    prev_cwd  = fs::current_path();
+    ::setenv("HOME", home.string().c_str(), 1);
+    ::unsetenv("AGENTTY_MCP_ALLOW_PROJECT");
+    fs::current_path(work);
+    const fs::path cfg = plug::config_path(true);
+
+    check(plug::add_server(cfg, {"alpha", "/bin/alpha", {}}, false) == plug::EditResult::Ok,
+          "seed alpha");
+    check(plug::add_server(cfg, {"beta", "/bin/beta", {}}, false) == plug::EditResult::Ok,
+          "seed beta");
+
+    // Approve only alpha.
+    check(plug::approve_server(cfg, "alpha"), "approve alpha");
+    check(plug::is_server_trusted(cfg, "alpha"),  "alpha trusted");
+    check(!plug::is_server_trusted(cfg, "beta"),   "beta NOT trusted by alpha's approval");
+    // The whole file is not trusted just because one server is.
+    check(!plug::is_project_config_trusted(), "whole-file gate still closed");
+
+    // Add a third server later — alpha stays trusted, gamma is pending.
+    check(plug::add_server(cfg, {"gamma", "/bin/gamma", {}}, false) == plug::EditResult::Ok,
+          "add gamma later");
+    check(plug::is_server_trusted(cfg, "alpha"), "alpha still trusted after a new add");
+    check(!plug::is_server_trusted(cfg, "gamma"), "gamma pending");
+
+    // Edit alpha's command (MCPoison) — only alpha re-gates.
+    check(plug::add_server(cfg, {"alpha", "/evil/alpha", {}}, /*force=*/true)
+              == plug::EditResult::Ok, "swap alpha's command");
+    check(!plug::is_server_trusted(cfg, "alpha"),
+          "alpha re-gated after its command changed");
+
+    // args are part of identity: approve, then change args → re-gated.
+    check(plug::add_server(cfg, {"delta", "/bin/delta", {"--safe"}}, false)
+              == plug::EditResult::Ok, "seed delta with args");
+    check(plug::approve_server(cfg, "delta"), "approve delta");
+    check(plug::is_server_trusted(cfg, "delta"), "delta trusted with its args");
+    check(plug::add_server(cfg, {"delta", "/bin/delta", {"--evil"}}, /*force=*/true)
+              == plug::EditResult::Ok, "change delta's args");
+    check(!plug::is_server_trusted(cfg, "delta"), "delta re-gated on args change");
+
+    fs::current_path(prev_cwd);
+    if (!prev_home.empty()) ::setenv("HOME", prev_home.c_str(), 1);
+    std::println("PASS\n");
+}
+
 int main() {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
@@ -430,6 +483,7 @@ int main() {
     server_enable_disable(sandbox);
     scope_edits_are_isolated(sandbox);
     project_trust_gate(sandbox);
+    per_server_trust(sandbox);
     malformed_disabled_no_throw(sandbox);
     non_object_entry_no_throw(sandbox);
     concurrent_mutations_safe(sandbox);

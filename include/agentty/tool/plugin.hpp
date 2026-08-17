@@ -114,6 +114,28 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
 [[nodiscard]] bool is_project_config_trusted();
 [[nodiscard]] bool approve_project_config();
 
+// Per-server trust — finer than the whole-file gate. Trust is bound to ONE
+// server's spec (its command + args), so approving `date` doesn't bless a
+// later-added `db`, and editing `date`'s command re-gates only `date`. A
+// server counts as trusted if the blanket env opt-in is set, OR the whole
+// project file is approved, OR this server's own spec hash is approved.
+//   is_server_trusted(name) — would THIS project server connect right now?
+//   approve_server(name)    — record trust for this server's current spec;
+//                             false if the server/config is absent or unwritable.
+[[nodiscard]] bool is_server_trusted(const std::filesystem::path& path,
+                                     const std::string& name);
+[[nodiscard]] bool approve_server(const std::filesystem::path& path,
+                                  const std::string& name);
+
+// The spawn-identity hash for one server's spec (command + url + args) — the
+// bytes that would actually run. The bridge's connect loop builds these from
+// the LIVE spec and checks the result against the approvals store, so
+// file-side and live-side agree on identity. Empty when command AND url are
+// both empty (nothing spawnable to trust).
+[[nodiscard]] std::string server_spec_hash(const std::string& command,
+                                           const std::string& url,
+                                           const std::vector<std::string>& args);
+
 // The `agentty plugin` CLI: verb ∈ {add, remove, list} with the argv tail
 // after the verb. Returns a process exit code. Prints results/errors and,
 // after a successful add, a short "restart to connect / trust gate" note.
