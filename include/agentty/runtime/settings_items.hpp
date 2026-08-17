@@ -56,6 +56,12 @@ struct Item {
     // stored toggle state) so the toggle stays correct while the group reads
     // as off. Only set on tool sub-rows.
     bool        inactive = false;
+    // Provenance for a plugin/server row: which scope it came from ("project"
+    // / "user" / "explicit") for the badge, and the .agentty dir holding its
+    // mcp.json so an edit (remove/toggle) routes to the RIGHT file instead of
+    // always the user config. Empty on non-server rows.
+    std::string scope_label;
+    std::string config_dir;
 };
 
 // The rows for one category, live. `m` supplies profile/RAG/Smart state

@@ -29,6 +29,7 @@
 
 #include "agentty/mcp/client.hpp"
 #include "agentty/mcp/http_server.hpp"
+#include "agentty/scope/scope.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -158,10 +159,18 @@ fs::path resolve_config() {
 // Parsed per-server config the model needs: command + the exclude set.
 // One place that reads mcp.json, so every consumer (projection, model,
 // picker) agrees on the same bytes. Missing/invalid config → empty map.
+//
+// Now a UNION of project + user configs (via agentty::scope), not one
+// winning file: a project server and a user server are BOTH visible, each
+// tagged with the scope::Source it came from so an editor can write back to
+// the right file (Source::base) and the trust gate can see its locus.
 struct ConfigServer {
     std::string command;
+    std::string url;             // HTTP/SSE transport (no command)
+    std::string type;            // "stdio" | "http" | "sse" | "" (inferred)
     std::unordered_set<std::string> exclude;
     bool disabled = false;
+    scope::Source source;        // WHERE this entry was read from (provenance)
 };
 // Read a boolean flag from a JSON object WITHOUT throwing on a malformed
 // value. A hand-edited non-bool (e.g. `"disabled": "true"`) would make
@@ -173,25 +182,39 @@ struct ConfigServer {
     return it != obj.end() && it->is_boolean() && it->get<bool>();
 }
 
-[[nodiscard]] std::unordered_map<std::string, ConfigServer>
-read_config_servers() {
-    std::unordered_map<std::string, ConfigServer> out;
-    const fs::path cfg = resolve_config();
-    if (cfg.empty()) return out;
-    std::ifstream in(cfg);
+// The scope Layout for MCP config: the mcp.json leaf, with $AGENTTY_MCP_CONFIG
+// as the Explicit-locus override. Built once; scope::plan derives the ordered
+// source list (Explicit ▷ Project×dialect ▷ User×dialect) from it.
+[[nodiscard]] scope::Layout mcp_layout() noexcept {
+    return scope::Layout{.leaf = "mcp.json", .explicit_env = "AGENTTY_MCP_CONFIG"};
+}
+
+// Parse one mcp.json file's server entries into `out`, tagging each with
+// `src`. First-writer-wins shadow: a server name already present (from a
+// higher-precedence source) is NOT overwritten — project shadows user, exactly
+// like skills/agents/commands. Missing/invalid file → no-op.
+void read_one_config(const fs::path& file, const scope::Source& src,
+                     std::unordered_map<std::string, ConfigServer>& out) {
+    if (file.empty()) return;
+    std::ifstream in(file);
+    if (!in) return;
     json doc = json::parse(in, nullptr, /*throw=*/false);
-    if (!doc.is_object()) return out;
+    if (!doc.is_object()) return;
     const json* servers = nullptr;
     if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
         servers = &doc["mcpServers"];
     else if (doc.contains("servers") && doc["servers"].is_object())
         servers = &doc["servers"];
-    if (!servers) return out;
+    if (!servers) return;
     for (auto it = servers->begin(); it != servers->end(); ++it) {
+        if (out.count(it.key())) continue;   // shadowed by a higher-precedence source
         const json& e = it.value();
         if (!e.is_object()) continue;
         ConfigServer cs;
-        cs.command  = e.value("command", std::string{});
+        cs.command = e.value("command", std::string{});
+        cs.url     = e.value("url", std::string{});   // HTTP/SSE servers have no command
+        cs.type    = e.value("type", std::string{});
+        cs.source  = src;
         // A hand-edited non-bool `disabled` (e.g. the string "true") must not
         // throw type_error and take down the whole config read — treat any
         // non-bool as "not disabled".
@@ -205,6 +228,25 @@ read_config_servers() {
                     if (v.is_string()) cs.exclude.insert(v.get<std::string>());
         }
         out.emplace(it.key(), std::move(cs));
+    }
+}
+
+[[nodiscard]] std::unordered_map<std::string, ConfigServer>
+read_config_servers() {
+    std::unordered_map<std::string, ConfigServer> out;
+    const scope::Env env = scope::current_env(mcp_layout());
+    // scope::plan yields sources in precedence order; MCP only uses the native
+    // .agentty dialect (mcp.json isn't an .agents/.claude convention), so we
+    // read the Agentty source for each locus. Higher precedence read first =
+    // first-writer-wins shadow in read_one_config.
+    for (const scope::Source& src : scope::plan(mcp_layout(), env)) {
+        if (src.dialect != scope::Dialect::Agentty) continue;
+        // Explicit source's base is the file's parent; its leaf is the exact
+        // env-named file. Project/User join the standard leaf onto the base.
+        const fs::path file = (src.locus == scope::Locus::Explicit && env.explicit_config)
+            ? *env.explicit_config
+            : src.base / "mcp.json";
+        read_one_config(file, src, out);
     }
     return out;
 }
@@ -1201,6 +1243,16 @@ PluginModel plugin_model() {
         ServerState ss;
         ss.name    = name;
         ss.command = cs.command;
+        ss.url     = cs.url;
+        // Provenance from the scope::Source this entry was read from, mapped
+        // to the value-header Origin so the picker can badge scope and a
+        // reducer can route an edit to cs.source.base (the right mcp.json).
+        switch (cs.source.locus) {
+            case scope::Locus::Project:  ss.origin = Origin::Project;  break;
+            case scope::Locus::Explicit: ss.origin = Origin::Explicit; break;
+            default:                     ss.origin = Origin::User;     break;
+        }
+        ss.config_dir = cs.source.base.string();
         auto lit = live.find(name);
         ss.connected = (lit != live.end() && !lit->second.empty());
         ss.disabled  = cs.disabled;
@@ -1208,11 +1260,12 @@ PluginModel plugin_model() {
         // so it carries no error and no live tools — disabled wins over any
         // stale connect-error entry from a previous session.
         if (!ss.disabled) {
-            if (cs.command.empty()) {
-                // No command — it can NEVER connect (make_provider skips it).
-                // Surface that as an error instead of a permanent
-                // "connecting…" row that waits forever.
-                ss.error = "no \"command\" in mcp.json";
+            // A server with a `url` is HTTP/SSE and legitimately has no
+            // `command` — only a stdio server (no url) missing its command
+            // can never connect. This is the fix for the false "no command"
+            // error every remote server used to show.
+            if (cs.command.empty() && cs.url.empty()) {
+                ss.error = "no \"command\" or \"url\" in mcp.json";
             } else if (auto eit = errors.find(name); eit != errors.end()) {
                 ss.error = eit->second;
             }

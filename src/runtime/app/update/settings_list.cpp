@@ -25,6 +25,19 @@ using maya::overload;
 namespace se = agentty::settings;
 namespace cmdf = agentty::app::cmd;   // cmd_factory (local vars named `cmd` shadow the ns)
 
+namespace {
+// The mcp.json an edit on THIS row should write. A server row carries the
+// .agentty dir it was read from (scope provenance from PluginModel), so a
+// remove/toggle lands in the RIGHT file — a project server edits the project
+// config, a user server the user config. Empty config_dir (add-mode, or a
+// pre-provenance row) falls back to the user config, the historical default.
+[[nodiscard]] std::filesystem::path edit_target(const se::Item& row) {
+    if (!row.config_dir.empty())
+        return std::filesystem::path{row.config_dir} / "mcp.json";
+    return tools::plugin::config_path(/*project=*/false);
+}
+}  // namespace
+
 Step settings_list_update(Model m, msg::SettingsListMsg sm) {
     return std::visit(overload{
         [&](OpenSettingsList& e) -> Step {
@@ -140,7 +153,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     m.ui.settings_list = se::ListClosed{};
                     return agentty::app::update(std::move(m), Msg{OpenSmartMode{}});
                 case se::Action::RemovePlugin: {
-                    auto path = tools::plugin::config_path(/*project=*/false);
+                    auto path = edit_target(row);
                     auto r = tools::plugin::remove_server(path, row.arg);
                     maya::Cmd<Msg> cmd;
                     if (r == tools::plugin::EditResult::Ok) {
@@ -177,7 +190,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     // Enabling spawns + handshakes; disabling drops the
                     // connection. Either way it changes the live process set,
                     // so reconnect=true, off the UI thread.
-                    auto path = tools::plugin::config_path(/*project=*/false);
+                    auto path = edit_target(row);
                     const bool want_disabled = row.on;   // on → turn off
                     auto r = tools::plugin::set_server_disabled(
                         path, row.arg, want_disabled);
@@ -215,7 +228,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     // exclude. This is synchronous + race-free (the earlier
                     // reload-on-toggle re-spawned the server and hung on
                     // rapid disable→re-enable).
-                    auto path = tools::plugin::config_path(/*project=*/false);
+                    auto path = edit_target(row);
                     const bool want_enabled = !row.on;   // toggle
                     auto r = tools::plugin::set_tool_enabled(
                         path, row.arg, row.arg2, want_enabled);
@@ -270,7 +283,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             if (row.action != se::Action::TogglePlugin || row.arg.empty())
                 return done(std::move(m));   // not a server row
 
-            auto path = tools::plugin::config_path(/*project=*/false);
+            auto path = edit_target(row);
             auto r = tools::plugin::remove_server(path, row.arg);
             maya::Cmd<Msg> cmd;
             if (r == tools::plugin::EditResult::Ok) {

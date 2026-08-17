@@ -331,6 +331,37 @@ void symlink_written_through(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// Scope edit-routing: an edit targeted at one scope's mcp.json must NOT touch
+// the other's. This is the invariant behind the plugin picker's fix — a row
+// carries the .agentty dir it was read from, and remove/toggle route there
+// (edit_target(row) in the settings reducer), so toggling a PROJECT server
+// leaves the USER config untouched and vice-versa.
+void scope_edits_are_isolated(const fs::path& dir) {
+    std::println("--- scope_edits_are_isolated ---");
+    const fs::path proj = dir / "proj" / ".agentty" / "mcp.json";
+    const fs::path user = dir / "user" / ".agentty" / "mcp.json";
+    // Same server name in both scopes, different commands.
+    check(plug::add_server(proj, {"date", "/project/date", {}}, false) == plug::EditResult::Ok,
+          "seed project-scope server");
+    check(plug::add_server(user, {"date", "/user/date", {}}, false) == plug::EditResult::Ok,
+          "seed user-scope server");
+
+    // Disable ONLY the project server (mirrors a picker toggle on a project row).
+    check(plug::set_server_disabled(proj, "date", true) == plug::EditResult::Ok,
+          "disable project server");
+    check(plug::is_server_disabled(proj, "date"),  "project server now disabled");
+    check(!plug::is_server_disabled(user, "date"), "USER server untouched by project edit");
+    check(read_json(user)["mcpServers"]["date"]["command"] == "/user/date",
+          "user command preserved across a project-scope edit");
+
+    // Remove ONLY the user server (mirrors `d` on a user row).
+    check(plug::remove_server(user, "date") == plug::EditResult::Ok, "remove user server");
+    check(!read_json(user)["mcpServers"].contains("date"), "user entry gone");
+    check(read_json(proj)["mcpServers"].contains("date"),
+          "PROJECT entry survives a user-scope removal");
+    std::println("PASS\n");
+}
+
 int main() {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
@@ -347,6 +378,7 @@ int main() {
     list_reads_back(sandbox);
     tool_enable_disable(sandbox);
     server_enable_disable(sandbox);
+    scope_edits_are_isolated(sandbox);
     malformed_disabled_no_throw(sandbox);
     non_object_entry_no_throw(sandbox);
     concurrent_mutations_safe(sandbox);
