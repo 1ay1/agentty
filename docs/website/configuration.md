@@ -77,7 +77,8 @@ Credentials live under XDG config; everything else lives under `~/.agentty`.
 - `~/.agentty/threads/<id>.json` — one JSON file per thread (flat, keyed by thread id).
 - `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts. Which file a fact lands in is chosen by [memory scope](#memory-scope), below.
 - `~/.agentty/skills/`, `~/.agents/skills/`, `~/.claude/skills/` — personal [Agent Skills](/docs/skills); the same three dirs under `<project>/` shadow them.
-- `~/.agentty/mcp.json` (trusted) and `<project>/.agentty/mcp.json` (gated behind `AGENTTY_MCP_ALLOW_PROJECT`) — [MCP servers](/docs/mcp) to connect on startup. `AGENTTY_MCP_CONFIG` overrides both.
+- `~/.agentty/mcp.json` (your servers, trusted) and `<project>/.agentty/mcp.json` (repo servers — command-spawning ones need [per-server approval](/docs/plugin-trust) or `AGENTTY_MCP_ALLOW_PROJECT`) — [MCP servers](/docs/mcp) to connect. `AGENTTY_MCP_CONFIG` overrides both.
+- `~/.agentty/mcp_approvals.json` — content hashes of the project MCP servers you've approved (see [Plugin Trust](/docs/plugin-trust)); hooks use the sibling `hooks_approved.json`. A repo can't write to either, so it can't approve itself.
 - `<project>/.agentty/rag_docs.ragdb` — the persisted [retrieval](/docs/retrieval) index (hybrid + dense vectors), so a later session opens warm without re-walking + re-embedding the docs folder. Rebuilt automatically when the corpus changes; delete to force a cold rebuild. Disable with `AGENTTY_RAG_PERSIST=0`.
 - `<project>/.agentty/rag_feedback.tsv` — the [retrieval](/docs/retrieval) learning loop's per-passage use/win counts (human-inspectable TSV). Delete to forget.
 

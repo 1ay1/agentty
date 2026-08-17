@@ -30,7 +30,7 @@ The effect compounds. In a gnarly systems codebase, "fix the build" is almost al
 Learned routing is only as good as the signal feeding it. **Outcome feedback** grounds it in what actually *worked*, using signals a query-only router structurally can't observe:
 
 - **A failed build or test in the turn** — a `bash` / `diagnostics` / `test` / `edit` tool call that failed is evidence the turn was harder than it was routed for. The router marks that signature as under-rated.
-- **A correction on the very next turn** — if you reply "no", "that's wrong", "actually…", "undo", "revert", "doesn't work", agentty reads it as ground truth that the previous turn's route was too weak, and re-rates *that* turn's signature.
+- **A correction on the very next turn** — if you reply with dissatisfaction ("no, that doesn't work", "that's wrong", "undo", "revert", "still failing"), agentty reads it as ground truth that the previous turn's route was too weak, and re-rates *that* turn's signature. It's deliberately precise: a redirection ("wrong file, look elsewhere"), an additive request ("actually, also add tests"), or praise ("actually that's perfect") is **not** a correction — so normal follow-ups don't ratchet the prior.
 
 This is counterfactual routing evaluation from the agent's own trajectory — the router learns from real outcomes, not from how hard the prompt merely *looked*.
 
