@@ -18,6 +18,7 @@ Two ways, same result — an entry in `mcp.json`:
 
 ```bash
 agentty plugin add       # interactive: name + command/url
+agentty plugin add <name> --http <url>    # remote HTTP/SSE server
 agentty plugin list      # show configured plugins (--project marks ✓/— trust)
 agentty plugin approve <name> --project   # trust a project server (per-server)
 agentty plugin remove <name>
@@ -46,7 +47,7 @@ Plugins are lazy and opt-in. With no `mcp.json` present, startup is a single `st
 
 Open the command palette with [[Ctrl+K]] and choose **Plugins** to see every configured server, its connection state, and its tools. From there you can:
 
-- **Add** a plugin inline — press [[a]] and type a `name command args…` spec (e.g. `playwright npx -y @playwright/mcp`); it's written to `mcp.json` and the server connects immediately, no restart.
+- **Add** a plugin inline — press [[a]] and type a `name command args…` spec (e.g. `playwright npx -y @playwright/mcp`); it's written to `mcp.json` and the server connects immediately, no restart. For a remote server, use `name --http https://…` (or `--sse`); add `--project` to write the repo config instead of yours.
 - **Enable/disable individual tools** per server.
 - **Approve** an untrusted project server ([[Enter]] on a *trust & enable* row) to let its config connect.
 - **Remove** a plugin.
