@@ -16,11 +16,12 @@
 // live tail) to a Canvas and read the cells back as text.
 
 #include <algorithm>
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include <maya/render/canvas.hpp>
 #include <maya/render/renderer.hpp>
@@ -44,19 +45,6 @@ using agentty::ToolName;
 using agentty::ToolUse;
 using std::chrono::steady_clock;
 using std::chrono::milliseconds;
-
-static int g_failures = 0;
-static int g_checks   = 0;
-
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
 
 // Render the whole conversation (frozen + live tail) and dump painted
 // rows as ASCII-folded text.
@@ -146,7 +134,7 @@ static Model active_run(int n) {
 
 // 1. During an active run NOTHING beyond the User is frozen (the whole
 //    run is live, agent_session-style); at settle the run freezes whole.
-static void test_live_bounded() {
+TEST_CASE("live bounded") {
     Model m = active_run(40);
     CHECK(m.ui.frozen_through == 1,
           "mid-run freeze fired during an active run — the single freeze "
@@ -166,7 +154,7 @@ static void test_live_bounded() {
 }
 
 // 2. Every completed sub-turn renders in full (nothing hidden).
-static void test_all_content_present() {
+TEST_CASE("all content present") {
     constexpr int N = 40;
     Model m = active_run(N);
     auto txt = render_dump(m);
@@ -183,7 +171,7 @@ static void test_all_content_present() {
 //    frozen↔live continuation seam). The assistant label is the model
 //    badge; we count the meta "turn N" marker which only the HEADER row
 //    carries — a continuation suppresses it.
-static void test_single_turn_header() {
+TEST_CASE("single turn header") {
     Model m = active_run(20);
     auto txt = render_dump(m);
     // The turn meta carries "turn N". For one logical assistant turn it
@@ -196,7 +184,7 @@ static void test_single_turn_header() {
 // 4. Compare a SETTLED+frozen render of the run against the same
 //    messages rendered fully live: the freeze changes WHERE rows render
 //    (frozen vs live), never WHICH rows.
-static void test_split_preserves_content() {
+TEST_CASE("split preserves content") {
     constexpr int N = 15;
     Model split = active_run(N);
     // Settle + freeze whole (production path).
@@ -236,7 +224,7 @@ static void test_split_preserves_content() {
 //    tool in the tail, freeze_through stops at the run start; once the
 //    run is fully terminal it freezes whole. (run_is_freezable — the
 //    only mid-run safety the single-freeze discipline still needs.)
-static void test_trailing_tool_batch_freezes() {
+TEST_CASE("trailing tool batch freezes") {
     Model m;
     m.d.current.id = agentty::ThreadId{"trailing"};
     Message u; u.role = Role::User; u.text = "write a file";
@@ -307,7 +295,7 @@ static int leading_blank_rows(const Model& m) {
 //    continuation — the top of the canvas must be a real turn header.
 //    (The reported bug: saved threads render with a blank hole / a
 //    turn whose header was cut off.)
-static void test_rehydrate_top_is_header() {
+TEST_CASE("rehydrate top is header") {
     Model m;
     m.d.current.id = agentty::ThreadId{"saved"};
     // Several complete user+assistant exchanges, then one GIANT final
@@ -360,7 +348,7 @@ static void test_rehydrate_top_is_header() {
 // 7. Trim must never strand a leading blank gap row. After
 //    trim_frozen_if_oversized drops front entries, the new first frozen
 //    entry must be a turn, not the inter-turn gap_row that preceded it.
-static void test_trim_no_leading_gap() {
+TEST_CASE("trim no leading gap") {
     Model m;
     m.d.current.id = agentty::ThreadId{"trim"};
     // Many complete idle exchanges so freeze pushes [turn][gap][turn]...
@@ -402,7 +390,7 @@ static void test_trim_no_leading_gap() {
 //    lockstep so the next render aligns and the boundary lands once.
 //    CONTRACT: the trim mutates the model AND returns
 //    commit_scrollback(removed_rows).
-static void test_trim_commits_exact_dropped_rows() {
+TEST_CASE("trim commits exact dropped rows") {
     Model m;
     m.d.current.id = agentty::ThreadId{"trimrows"};
     // A handful of tall write turns, each well over a viewport, so the
@@ -486,7 +474,7 @@ static void test_trim_commits_exact_dropped_rows() {
 //     entry and stranding a committed-scrollback ghost band (the bash-card
 //     overlap bug). Assert the stored estimate stays close to the real
 //     rendered height for a bash card with a huge output.
-static void test_output_elided_tool_row_estimate_matches_render() {
+TEST_CASE("output elided tool row estimate matches render") {
     Model m;
     m.d.current.id = agentty::ThreadId{"bashcap"};
     Message u; u.role = Role::User; u.text = "run a noisy command";
@@ -525,21 +513,4 @@ static void test_output_elided_tool_row_estimate_matches_render() {
     CHECK(txt.find("file199.cpp") != std::string::npos
           || txt.find("file19") != std::string::npos,
           "bash tail rows missing from the render");
-}
-
-int main() {
-    std::printf("midrun_freeze_test\n");
-    test_live_bounded();
-    test_all_content_present();
-    test_single_turn_header();
-    test_split_preserves_content();
-    test_trailing_tool_batch_freezes();
-    test_rehydrate_top_is_header();
-    test_trim_no_leading_gap();
-    test_trim_commits_exact_dropped_rows();
-    test_output_elided_tool_row_estimate_matches_render();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures) { std::printf("FAILED\n"); return 1; }
-    std::printf("PASSED\n");
-    return 0;
 }

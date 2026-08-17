@@ -10,6 +10,8 @@
 #include "agentty/tool/hooks.hpp"
 #include "agentty/auth/auth.hpp"
 
+#include "agtest.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
@@ -29,11 +31,6 @@ namespace fs = std::filesystem;
 namespace hooks = agentty::tools::hooks;
 
 namespace {
-
-int g_failed = 0;
-void check(bool cond, const std::string& msg) {
-    if (!cond) { std::println("  FAIL: {}", msg); ++g_failed; }
-}
 
 void write_file(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
@@ -152,7 +149,7 @@ void kill_switch(const fs::path& sandbox, const fs::path& home) {
 
 } // namespace
 
-int main() {
+TEST_CASE("hooks_gate") {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_hooks_test_" +
                                      std::to_string(::getpid()));
@@ -174,8 +171,4 @@ int main() {
     std::error_code ec;
     fs::current_path(fs::temp_directory_path(), ec);
     fs::remove_all(sandbox, ec);
-
-    if (g_failed) { std::println("{} check(s) FAILED", g_failed); return 1; }
-    std::println("All hooks consent-gate tests passed.");
-    return 0;
 }

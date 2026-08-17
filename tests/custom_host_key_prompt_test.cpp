@@ -31,10 +31,6 @@ namespace login = agentty::ui::login;
 namespace msg = agentty::msg;
 namespace app = agentty::app;
 
-static void check(bool ok, const char* what) {
-    CHECK_MESSAGE(ok, what);
-}
-
 // Helper: install deps() with an in-memory Settings captured by reference.
 // The other Deps members are stubbed to no-ops since login_submit's
 // CustomHostInput arm only calls deps().load_settings() and deps().auth.

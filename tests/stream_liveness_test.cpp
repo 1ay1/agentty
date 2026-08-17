@@ -35,6 +35,8 @@
 #include <string>
 #include <vector>
 
+#include "agtest.hpp"
+
 #include <maya/app/app.hpp>            // maya::detail::animation_requested_
 #include <maya/core/anim_clock.hpp>     // maya::testing::advance_anim_clock_ms
 #include <maya/render/canvas.hpp>
@@ -49,19 +51,6 @@
 using agentty::Model;
 using agentty::Message;
 using agentty::Role;
-
-static int g_failures = 0;
-static int g_checks   = 0;
-
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
 
 // Render the CONVERSATION region only (frozen + live tail) and report
 // whether any widget in it requested an animation frame during build.
@@ -107,7 +96,7 @@ static void drain_reveal(Pred still_animating, Step step,
 
 // ── (1) The caret must stay armed across an arbitrarily long inter-
 //        delta gap while the phase says Streaming. ──────────────────────
-static void test_caret_armed_across_delta_gap() {
+TEST_CASE("caret armed across delta gap") {
     std::printf("test_caret_armed_across_delta_gap\n");
 
     Model m;
@@ -187,7 +176,7 @@ static void test_caret_armed_across_delta_gap() {
 
 // ── (2) After settle, the caret must disarm once the finalize ramp
 //        completes — idle must not burn frames forever. ────────────────
-static void test_caret_disarms_after_settle() {
+TEST_CASE("caret disarms after settle") {
     std::printf("test_caret_disarms_after_settle\n");
 
     Model m;
@@ -247,7 +236,7 @@ static void test_caret_disarms_after_settle() {
 //        freeze taken on a still-animating turn snapshots a shape that
 //        diverges from the live frame in maya's prev_cells, re-emitting
 //        the whole turn over committed scrollback. ────────────────────
-static void test_freeze_gated_on_reveal_drain() {
+TEST_CASE("freeze gated on reveal drain") {
     std::printf("test_freeze_gated_on_reveal_drain\n");
 
     Model m;
@@ -337,7 +326,7 @@ static void test_freeze_gated_on_reveal_drain() {
 //        the phase gate (wire_streaming_here) does NOT cover it; the
 //        is_live() term must. Reproduces "md feels stuck in the middle
 //        when the stream is slow / pauses for a tool". ──────────────────
-static void test_caret_armed_when_live_but_phase_not_streaming() {
+TEST_CASE("caret armed when live but phase not streaming") {
     std::printf("test_caret_armed_when_live_but_phase_not_streaming\n");
 
     Model m;
@@ -412,7 +401,7 @@ static void test_caret_armed_when_live_but_phase_not_streaming() {
 //        rebuild the run under FrozenBuildScope (show_all) at a possibly
 //        different height, and strand a duplicate in scrollback. This locks
 //        the two gates' predicate sets together so they can't drift. ─────
-static void test_freeze_gate_blocks_while_widget_live() {
+TEST_CASE("freeze gate blocks while widget live") {
     std::printf("test_freeze_gate_blocks_while_widget_live\n");
 
     Model m;
@@ -480,7 +469,7 @@ static void test_freeze_gate_blocks_while_widget_live() {
 //        for would never re-run, the RAF would never re-arm, and the
 //        typewriter would freeze mid-turn at ~0% CPU until an unrelated
 //        hash axis flips. This asserts the edge stays armed. ────────────
-static void test_deep_run_live_edge_stays_armed() {
+TEST_CASE("deep run live edge stays armed") {
     std::printf("test_deep_run_live_edge_stays_armed\n");
 
     Model m;
@@ -540,17 +529,4 @@ static void test_deep_run_live_edge_stays_armed() {
     }
 }
 
-int main() {
-    std::printf("stream_liveness_test — the caret must never look "
-                "frozen while a response is in flight\n\n");
 
-    test_caret_armed_across_delta_gap();
-    test_caret_disarms_after_settle();
-    test_caret_armed_when_live_but_phase_not_streaming();
-    test_freeze_gated_on_reveal_drain();
-    test_freeze_gate_blocks_while_widget_live();
-    test_deep_run_live_edge_stays_armed();
-
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
-}

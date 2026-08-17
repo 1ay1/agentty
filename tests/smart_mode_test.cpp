@@ -3,23 +3,16 @@
 // Pure mapping: role + parent model + effort + catalog + config → RoleProfile.
 // No I/O, no wire. Verifies zero-config auto-fill, overrides, the off
 // pass-through, and the single-tier no-regression guarantee.
+#include "agtest.hpp"
+
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/domain/catalog.hpp"   // ModelCapabilities
-
-#include <cstdio>
 
 namespace sm = agentty::smart;
 using agentty::Effort;
 using agentty::ModelInfo;
 using agentty::ModelId;
 using agentty::ModelCapabilities;
-
-static int g_fail = 0;
-#define CHECK(cond, msg)                                                       \
-    do {                                                                       \
-        if (!(cond)) { std::printf("  FAIL: %s\n", msg); ++g_fail; }           \
-        else         { std::printf("  ok:   %s\n", msg); }                     \
-    } while (0)
 
 static ModelInfo mi(const char* id, int ctx = 200000) {
     ModelInfo m;
@@ -29,9 +22,7 @@ static ModelInfo mi(const char* id, int ctx = 200000) {
     return m;
 }
 
-int main() {
-    std::printf("[smart_mode]\n");
-
+TEST_CASE("smart_mode") {
     // A realistic Claude catalog: Opus (flagship), Sonnet (mid), Haiku (cheap).
     std::vector<ModelInfo> claude = {
         mi("claude-opus-4-20250514"),
@@ -212,7 +203,4 @@ int main() {
               "sessions must not discard the learned relax-effort signal");
         CHECK(sm::blend_bias(-1, -1) == -1, "blend: negative same-sign → no double-down");
     }
-
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }

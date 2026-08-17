@@ -18,9 +18,10 @@
 //
 // This locks the behaviour so a future edit can't silently re-diverge.
 
-#include <cstdio>
 #include <string>
 #include <string_view>
+
+#include "agtest.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -28,15 +29,6 @@
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
-
-static int g_failures = 0;
-#define CHECK(cond)                                                          \
-    do {                                                                     \
-        if (!(cond)) {                                                       \
-            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-            ++g_failures;                                                    \
-        }                                                                    \
-    } while (0)
 
 using namespace agentty;
 using agentty::provider::parse_retry_after;
@@ -48,7 +40,7 @@ static http::Headers hdrs(std::initializer_list<std::pair<const char*, const cha
     return h;
 }
 
-static void test_retry_after() {
+TEST_CASE("retry after") {
     // Whole-second integer → parsed.
     {
         auto r = parse_retry_after(hdrs({{"retry-after", "42"}}));
@@ -91,7 +83,7 @@ static void test_retry_after() {
     }
 }
 
-static void test_scrub_utf8_strict() {
+TEST_CASE("scrub utf8 strict") {
     // Valid ASCII + multi-byte pass through unchanged (zero-copy fast path).
     CHECK(wire::is_valid_utf8("hello"));
     CHECK(wire::is_valid_utf8("caf\xC3\xA9"));           // café
@@ -133,7 +125,7 @@ static void test_scrub_utf8_strict() {
     CHECK(wire::scrub_utf8("ok\xC3\xA9""\x80""done") == "ok\xC3\xA9" + repl + "done");
 }
 
-static void test_could_be_tool_json() {
+TEST_CASE("could be tool json") {
     // Ambiguous / still-resolving prefixes stay OPEN (return true) so the
     // transport keeps holding rather than flushing a half-formed call as prose.
     CHECK(wire::could_be_tool_json(""));               // nothing yet
@@ -161,7 +153,7 @@ static void test_could_be_tool_json() {
     CHECK(!wire::could_be_tool_json("hello {world}")); // prose containing braces
 }
 
-static void test_usage_extractors() {
+TEST_CASE("usage extractors") {
     using nlohmann::json;
     namespace usage = agentty::provider::usage;
 
@@ -212,15 +204,4 @@ static void test_usage_extractors() {
     CHECK(!usage::from_ollama(json::parse(R"({"done":true})")).has_value());
 }
 
-int main() {
-    test_retry_after();
-    test_scrub_utf8_strict();
-    test_could_be_tool_json();
-    test_usage_extractors();
-    if (g_failures == 0) {
-        std::printf("wire_shared_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "wire_shared_test: %d check(s) failed\n", g_failures);
-    return 1;
-}
+

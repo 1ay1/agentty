@@ -6,8 +6,9 @@
 // chip-aware boundary that removes a whole attachment token in one
 // stroke.
 
-#include <cstdio>
 #include <string>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -28,12 +29,9 @@ using agentty::ComposerCursorWordRight;
 using agentty::ComposerKillToEndOfLine;
 
 namespace {
-int failures = 0, total = 0;
 
-void check(const char* name, bool cond, const std::string& got = {}) {
-    ++total;
-    if (cond) std::printf("  ok   %s\n", name);
-    else { ++failures; std::printf("  FAIL %s — got: [%s]\n", name, got.c_str()); }
+void check_edit(const char* name, bool cond, const std::string& got = {}) {
+    CHECK_MESSAGE(cond, name << " — got: [" << got << "]");
 }
 
 // Run one ComposerMsg through the reducer, return the resulting model.
@@ -49,36 +47,34 @@ Model with_text(std::string text, int cursor) {
 }
 } // namespace
 
-int main() {
-    std::printf("composer_edit_test — Ctrl+W / Alt+D word delete\n\n");
-
+TEST_CASE("composer_edit") {
     // ── Ctrl+W: delete word backward ──────────────────────────────────
     {
         // cursor at end → drop the last word ("baz") + its leading space.
         auto m = step(with_text("foo bar baz", 11), ComposerDeleteWordBack{});
-        check("ctrl-w drops trailing word", m.ui.composer.text == "foo bar ",
+        check_edit("ctrl-w drops trailing word", m.ui.composer.text == "foo bar ",
               m.ui.composer.text);
-        check("ctrl-w cursor follows", m.ui.composer.cursor == 8,
+        check_edit("ctrl-w cursor follows", m.ui.composer.cursor == 8,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor mid-buffer (after "bar ") → delete "bar " back to "foo ".
         auto m = step(with_text("foo bar baz", 8), ComposerDeleteWordBack{});
-        check("ctrl-w mid-buffer", m.ui.composer.text == "foo baz",
+        check_edit("ctrl-w mid-buffer", m.ui.composer.text == "foo baz",
               m.ui.composer.text);
-        check("ctrl-w mid cursor", m.ui.composer.cursor == 4,
+        check_edit("ctrl-w mid cursor", m.ui.composer.cursor == 4,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor at 0 → no-op, no crash.
         auto m = step(with_text("foo", 0), ComposerDeleteWordBack{});
-        check("ctrl-w at start no-op", m.ui.composer.text == "foo" &&
+        check_edit("ctrl-w at start no-op", m.ui.composer.text == "foo" &&
               m.ui.composer.cursor == 0, m.ui.composer.text);
     }
     {
         // empty buffer → no-op.
         auto m = step(with_text("", 0), ComposerDeleteWordBack{});
-        check("ctrl-w empty no-op", m.ui.composer.text.empty() &&
+        check_edit("ctrl-w empty no-op", m.ui.composer.text.empty() &&
               m.ui.composer.cursor == 0, m.ui.composer.text);
     }
 
@@ -86,15 +82,15 @@ int main() {
     {
         // cursor at 0 → drop the first word ("foo") + the gap after it.
         auto m = step(with_text("foo bar baz", 0), ComposerDeleteWordForward{});
-        check("alt-d drops leading word", m.ui.composer.text == "bar baz",
+        check_edit("alt-d drops leading word", m.ui.composer.text == "bar baz",
               m.ui.composer.text);
-        check("alt-d cursor stays", m.ui.composer.cursor == 0,
+        check_edit("alt-d cursor stays", m.ui.composer.cursor == 0,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor at end → no-op.
         auto m = step(with_text("foo bar", 7), ComposerDeleteWordForward{});
-        check("alt-d at end no-op", m.ui.composer.text == "foo bar" &&
+        check_edit("alt-d at end no-op", m.ui.composer.text == "foo bar" &&
               m.ui.composer.cursor == 7, m.ui.composer.text);
     }
 
@@ -117,14 +113,14 @@ int main() {
         // The chip token is gone; "see " (or "see") remains, chip removed.
         const bool chip_gone =
             m.ui.composer.text.find(static_cast<char>(0x01)) == std::string::npos;
-        check("ctrl-w removes whole chip token", chip_gone, m.ui.composer.text);
+        check_edit("ctrl-w removes whole chip token", chip_gone, m.ui.composer.text);
     }
 
     // ── Undo restores ctrl-w. ─────────────────────────────────────────
     {
         auto m = step(with_text("foo bar baz", 11), ComposerDeleteWordBack{});
         m = step(std::move(m), ComposerUndo{});
-        check("undo restores ctrl-w", m.ui.composer.text == "foo bar baz",
+        check_edit("undo restores ctrl-w", m.ui.composer.text == "foo bar baz",
               m.ui.composer.text);
     }
 
@@ -135,11 +131,11 @@ int main() {
         Model m;  // start empty
         for (char c : std::string("hello"))
             m = step(std::move(m), ComposerCharInput{static_cast<char32_t>(c)});
-        check("typed run present", m.ui.composer.text == "hello",
+        check_edit("typed run present", m.ui.composer.text == "hello",
               m.ui.composer.text);
         // One undo should wipe the WHOLE coalesced word, back to empty.
         m = step(std::move(m), ComposerUndo{});
-        check("one undo rewinds the whole typed word",
+        check_edit("one undo rewinds the whole typed word",
               m.ui.composer.text.empty(), m.ui.composer.text);
     }
     {
@@ -149,7 +145,7 @@ int main() {
         for (char c : std::string("foo bar"))
             m = step(std::move(m), ComposerCharInput{static_cast<char32_t>(c)});
         m = step(std::move(m), ComposerUndo{});
-        check("undo peels one word across a space boundary",
+        check_edit("undo peels one word across a space boundary",
               m.ui.composer.text == "foo ", m.ui.composer.text);
     }
 
@@ -157,13 +153,13 @@ int main() {
     {
         // cursor after "))))" → word-left jumps the whole run at once.
         auto m = step(with_text("a))))", 5), ComposerCursorWordLeft{});
-        check("word-left eats punctuation run", m.ui.composer.cursor == 1,
+        check_edit("word-left eats punctuation run", m.ui.composer.cursor == 1,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor before "((((" → word-right jumps the whole run.
         auto m = step(with_text("((((a", 0), ComposerCursorWordRight{});
-        check("word-right eats punctuation run", m.ui.composer.cursor == 4,
+        check_edit("word-right eats punctuation run", m.ui.composer.cursor == 4,
               std::to_string(m.ui.composer.cursor));
     }
 
@@ -176,7 +172,7 @@ int main() {
         m.ui.composer.text = "queued msg";
         m.ui.composer.cursor = 10;
         m = step(std::move(m), ComposerCharInput{U'!'});
-        check("typing while peeking drops queue_peek_idx",
+        check_edit("typing while peeking drops queue_peek_idx",
               m.ui.composer.queue_peek_idx == -1,
               std::to_string(m.ui.composer.queue_peek_idx));
     }
@@ -185,22 +181,19 @@ int main() {
     //    global-palette clash). ───────────────────────────────────────
     {
         auto m = step(with_text("foo bar baz", 4), ComposerKillToEndOfLine{});
-        check("kill-to-end deletes from cursor to EOL",
+        check_edit("kill-to-end deletes from cursor to EOL",
               m.ui.composer.text == "foo ", m.ui.composer.text);
     }
     {
         // Multi-line: kill-to-end stops at the newline, keeping it.
         auto m = step(with_text("foo\nbar", 1), ComposerKillToEndOfLine{});
-        check("kill-to-end stops at newline", m.ui.composer.text == "f\nbar",
+        check_edit("kill-to-end stops at newline", m.ui.composer.text == "f\nbar",
               m.ui.composer.text);
     }
     {
         // At EOL already — no-op.
         auto m = step(with_text("foo", 3), ComposerKillToEndOfLine{});
-        check("kill-to-end at EOL is a no-op", m.ui.composer.text == "foo",
+        check_edit("kill-to-end at EOL is a no-op", m.ui.composer.text == "foo",
               m.ui.composer.text);
     }
-
-    std::printf("\n%d/%d checks passed\n", total - failures, total);
-    return failures == 0 ? 0 : 1;
 }
