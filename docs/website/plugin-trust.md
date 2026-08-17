@@ -109,8 +109,17 @@ At no point does code from the repo run without a deliberate keypress from you, 
 | Command edited after approval | Re-gated automatically (hash no longer matches) |
 | Approvals stored at | `~/.agentty/mcp_approvals.json` (a list of hashes) |
 
+## A related case: project-defined agents
+
+A repo can also ship **agent personas** in `.agentty/agents/*.md` — a file whose body becomes a subagent's system prompt. That's untrusted content from a clone too, but it's a *different* risk than a plugin, and it gets a *different* response.
+
+A plugin **names a command to run**, and spawns it outside the tool gate — that's why it needs a hard approval. An agent persona names **no command**; it's a prompt plus a tool *allowlist* that can only ever *narrow* what the agent may do (it can't grant capability your session doesn't already have). When that subagent calls `bash` or `edit`, those go through the **same permission profile and sandbox** as everything else. So the sandbox already covers the execution path — the residual risk is prompt *injection* (a repo steering an agent with gated-but-real tools), not code execution.
+
+Because the risk is lower and already mediated, agentty's response is **transparency, not a gate**: a project-defined agent simply shows a quiet `project agent` tag on its task card, so an injected persona is never invisible. It runs without an approval step — over-gating a low-risk surface would just train reflexive "approve" clicks and dull the gate that matters (plugins). Built-in agents and your own `~/.agentty/agents` show no tag.
+
 ## Related
 
 - [Plugins](/docs/plugins) — adding, managing, and the tool budget.
+- [Subagents](/docs/subagents) — the task tool and agent personas.
 - [MCP](/docs/mcp) — the protocol and consuming/serving MCP.
 - [Sandboxing](/docs/sandboxing) — the gate on the *other* execution path, `bash`.
