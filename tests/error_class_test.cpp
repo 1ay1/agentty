@@ -14,7 +14,7 @@
 
 #include <string_view>
 
-#include <doctest/doctest.h>
+#include "agtest.hpp"
 
 #include "agentty/provider/error_class.hpp"
 

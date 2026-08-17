@@ -20,22 +20,19 @@
 #include "agentty/store/store.hpp"
 #include "agentty/provider/selection.hpp"
 
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+
+#include "agtest.hpp"
 
 namespace fs = std::filesystem;
 namespace login = agentty::ui::login;
 namespace msg = agentty::msg;
 namespace app = agentty::app;
 
-static int g_checks = 0;
-static int g_fails  = 0;
 static void check(bool ok, const char* what) {
-    ++g_checks;
-    if (!ok) { ++g_fails; std::printf("FAIL: %s\n", what); }
-    else     { std::printf("ok:   %s\n", what); }
+    CHECK_MESSAGE(ok, what);
 }
 
 // Helper: install deps() with an in-memory Settings captured by reference.
@@ -55,8 +52,7 @@ static void install_stub_deps(agentty::store::Settings& s) {
     });
 }
 
-int main() {
-    std::printf("custom_host_key_prompt_test\n");
+TEST_CASE("custom host key prompt transitions") {
 
     // Redirect XDG_CONFIG_HOME to a temp dir with no agentty/ subdir so
     // auth::load_credentials() returns nullopt (no credentials.json exists).
@@ -178,9 +174,4 @@ int main() {
     // Cleanup the temp XDG dir.
     std::error_code ec;
     fs::remove_all(tmp_xdg, ec);
-
-    std::printf("%d checks, %d failures\n", g_checks, g_fails);
-    if (g_fails == 0) { std::printf("PASSED\n"); return 0; }
-    std::printf("FAILED\n");
-    return 1;
 }

@@ -2,23 +2,19 @@
 // Verifies capture, exact + tier-fallback recall, dedup, and disk round-trip
 // against an isolated temp workspace.
 
-#include "agentty/domain/decomposition_memory.hpp"
-#include "agentty/domain/routing_memory.hpp"   // turn_signature
-
 #include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <string>
+
+#include "agtest.hpp"
+
+#include "agentty/domain/decomposition_memory.hpp"
+#include "agentty/domain/routing_memory.hpp"   // turn_signature
 
 namespace fs = std::filesystem;
 using namespace agentty::smart;
 
-static int g_fail = 0;
-#define CHECK(cond, msg) do { \
-    if (!(cond)) { std::printf("FAIL: %s\n", msg); ++g_fail; } \
-} while (0)
-
-int main() {
+TEST_CASE("decomposition_memory capture, recall, dedup, round-trip") {
     auto root = fs::temp_directory_path() /
                 ("agentty_dm_" + std::to_string(
                     std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -58,6 +54,4 @@ int main() {
     CHECK(!dm.recall(sig).empty(), "record survives reload from disk");
 
     fs::remove_all(root);
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }

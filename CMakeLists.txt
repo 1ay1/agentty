@@ -1539,7 +1539,44 @@ if(AGENTTY_BUILD_TESTS)
     # registers the ctest entry. Replaces ~40 lines of boilerplate per
     # test with one call. Pass extra source files after the name; pass
     # extra link libs after the keyword LIBS.
+    # Tests migrated to doctest live in the single `agentty_tests` binary
+    # (declared below). agentty_add_full_test() consults this list: for a
+    # migrated name it appends the source to agentty_tests (via a global
+    # property collected after the loop) and skips building a standalone exe,
+    # so the ONLY change to migrate a test is: add its name here + convert the
+    # .cpp to TEST_CASE form. Non-migrated names keep the legacy per-exe path.
+    set(AGENTTY_MIGRATED_TESTS
+        error_class_test
+        accounts_registry_test
+        acp_agents_test
+        acp_integration_test
+        custom_host_key_prompt_test
+        decomposition_memory_test
+        dispatch_route_test
+        model_label_test
+    )
+    define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
+        BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
+
+    # set_tests_properties() for a test that has been migrated into the single
+    # agentty_tests binary would fail (its standalone ctest entry no longer
+    # exists). This wrapper no-ops for migrated names; per-case timeouts for
+    # the consolidated binary are handled by doctest_discover_tests defaults.
+    function(agentty_test_timeout name seconds)
+        if(name IN_LIST AGENTTY_MIGRATED_TESTS)
+            return()
+        endif()
+        set_tests_properties(${name} PROPERTIES TIMEOUT ${seconds})
+    endfunction()
+
     function(agentty_add_full_test name)
+        # Migrated: fold the source into the consolidated agentty_tests binary
+        # and skip the standalone executable + its add_test entirely.
+        if(name IN_LIST AGENTTY_MIGRATED_TESTS)
+            set_property(GLOBAL APPEND PROPERTY AGENTTY_TEST_SOURCES
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}.cpp")
+            return()
+        endif()
         set(_extra_srcs "")
         set(_extra_libs "")
         set(_no_test FALSE)
@@ -1722,33 +1759,9 @@ if(AGENTTY_BUILD_TESTS)
     # registers each TEST_CASE as its own ctest entry so `ctest -j` parallelism
     # and per-case reporting are preserved. Sources are appended as tests are
     # migrated off the per-exe model.
-    add_executable(agentty_tests EXCLUDE_FROM_ALL
-        tests/test_main.cpp
-        tests/error_class_test.cpp
-        ${AGENTTY_SHARED_OBJECTS}
-    )
-    target_include_directories(agentty_tests PRIVATE include)
-    target_compile_definitions(agentty_tests PRIVATE
-        AGENTTY_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(agentty_tests PRIVATE
-        doctest::doctest
-        maya::maya
-        nlohmann_json::nlohmann_json
-        simdjson::simdjson
-        nghttp2::nghttp2
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        Threads::Threads
-    )
-    if(TARGET mcp::mcp)
-        target_link_libraries(agentty_tests PRIVATE mcp::mcp)
-    endif()
-    if(TARGET mcp::tools)
-        target_link_libraries(agentty_tests PRIVATE mcp::tools)
-    endif()
-    # Per-TEST_CASE ctest registration (parallelism + filtering preserved).
-    include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
-    doctest_discover_tests(agentty_tests)
+    # NOTE: the consolidated `agentty_tests` binary is defined at the END of
+    # this block (after all agentty_add_full_test calls have populated the
+    # AGENTTY_TEST_SOURCES global property with the migrated sources).
 
     # error_class_test — the retry classifier's status-preferring dispatch.
     # provider::classify_stream_error(message, http_status) prefers the typed,
@@ -1935,7 +1948,7 @@ if(AGENTTY_BUILD_TESTS)
     # switcher UI depends on (newest-active, no-duplicate upsert, active
     # promotion on remove, empty-input rejection).
     agentty_add_full_test(accounts_registry_test)
-    set_tests_properties(accounts_registry_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(accounts_registry_test 30)
 
     # keystore_test — OS keystore round-trip (store/retrieve/remove/notfound).
     # SKIPS with success when no backend is available/enabled (headless CI),
@@ -2211,7 +2224,7 @@ if(AGENTTY_BUILD_TESTS)
     # long-lived route. No network, no concrete transport. Guards against a
     # future edit silently misrouting a backend.
     agentty_add_full_test(dispatch_route_test)
-    set_tests_properties(dispatch_route_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(dispatch_route_test 30)
 
     # rag_adapter_test — locks the agentty↔rag-cpp adapter contract: the
     # engine (rag::Engine, submodule rag-cpp) is driven through the compact
@@ -2386,7 +2399,7 @@ if(AGENTTY_BUILD_TESTS)
     # commits keyless as before. Esc at the key prompt cancels the switch.
     # Pure reducer test: stubs deps() with an in-memory store::Settings.
     agentty_add_full_test(custom_host_key_prompt_test)
-    set_tests_properties(custom_host_key_prompt_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(custom_host_key_prompt_test 30)
 
     # command_palette_test — the Ctrl+K palette catalog + filter UX. Pure
     # header logic (kCommands + filtered_commands): pins the enum⇄row
@@ -2435,7 +2448,7 @@ if(AGENTTY_BUILD_TESTS)
     # (smart::DecompositionMemory): capture successful decompositions, recall
     # by exact signature then same-tier fallback, dedup, disk round-trip.
     agentty_add_full_test(decomposition_memory_test)
-    set_tests_properties(decomposition_memory_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(decomposition_memory_test 30)
 
     # smart_cascade_gate_test — drives finalize_turn through a simulated
     # multi-round-trip orchestrated turn and asserts the cascade side-effects
@@ -2481,7 +2494,7 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(acp_integration_test
         $<TARGET_OBJECTS:agentty_acp_obj>
         LIBS acp::acp)
-    set_tests_properties(acp_integration_test PROPERTIES TIMEOUT 60)
+    agentty_test_timeout(acp_integration_test 60)
 
     # external_acp_backend_test — the INBOUND ACP boundary. Drives
     # ExternalAcpBackend against an in-memory FAKE agent (acp::ClientConnection
@@ -2505,7 +2518,7 @@ if(AGENTTY_BUILD_TESTS)
     # parse_selection() routes an agent id → Kind::ExternalAcp with the id
     # stamped. Reuses the shared object set (selection.cpp + acp_agents.cpp).
     agentty_add_full_test(acp_agents_test)
-    set_tests_properties(acp_agents_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(acp_agents_test 30)
 
     # mcp_bridge_test — e2e for the agentty↔mcp-cpp capability bridge. Spawns
     # the mcp-cpp example server and drives mcp::mcp_tools() end to end. The
@@ -2669,6 +2682,52 @@ if(AGENTTY_BUILD_TESTS)
         keystore_test
         PROPERTIES LABELS sanitizer)
 
+    # ── agentty_tests: the single consolidated unit-test binary ────────────
+    # Defined HERE, after every agentty_add_full_test() call has populated the
+    # AGENTTY_TEST_SOURCES global property with the migrated sources. Every
+    # migrated doctest TEST_CASE compiles into this ONE executable, which links
+    # the shared object set once (vs one exe per test — that link fan-out was
+    # the dominant CI cost). doctest supplies main() via test_main.cpp;
+    # doctest_discover_tests() registers each TEST_CASE as its own ctest entry
+    # so `ctest -j` parallelism and per-case failure reporting are preserved.
+    get_property(_migrated_srcs GLOBAL PROPERTY AGENTTY_TEST_SOURCES)
+    add_executable(agentty_tests EXCLUDE_FROM_ALL
+        tests/test_main.cpp
+        tests/error_class_test.cpp   # migrated directly (never used the helper)
+        ${_migrated_srcs}
+        ${AGENTTY_SHARED_OBJECTS}
+        $<TARGET_OBJECTS:agentty_acp_obj>   # acp_integration_test needs AgentServer
+    )
+    target_include_directories(agentty_tests PRIVATE include)
+    target_compile_definitions(agentty_tests PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(agentty_tests PRIVATE
+        doctest::doctest
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(TARGET mcp::mcp)
+        target_link_libraries(agentty_tests PRIVATE mcp::mcp)
+    endif()
+    if(TARGET mcp::tools)
+        target_link_libraries(agentty_tests PRIVATE mcp::tools)
+    endif()
+    # Extra deps pulled in by specific migrated tests (their standalone
+    # registrations passed these via LIBS): acp_integration_test needs acp.
+    if(TARGET acp::acp)
+        target_link_libraries(agentty_tests PRIVATE acp::acp)
+    endif()
+    if(TARGET ragcpp::ragcpp)
+        target_link_libraries(agentty_tests PRIVATE ragcpp::ragcpp)
+    endif()
+    include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
+    doctest_discover_tests(agentty_tests)
+
     # Build-only aggregate for the sanitizer gate: `cmake --build build-asan
     # --target sanitizer_tests` compiles exactly the labelled set (not the
     # whole `tests` target, which pulls maya-renderer tests that don't
@@ -2699,11 +2758,9 @@ if(AGENTTY_BUILD_TESTS)
         sandbox_escape_test
         scope_test
         concurrency_primitives_test
-        model_label_test
         skills_engine_test
         cred_crypt_test
         cross_process_lock_test
-        accounts_registry_test
         keystore_test
         midrun_freeze_test
         midrun_seam_test
@@ -2730,7 +2787,6 @@ if(AGENTTY_BUILD_TESTS)
         copilot_token_test
         chatgpt_bundled_models_test
         ollama_transport_test
-        dispatch_route_test
         rag_adapter_test
         reveal_freeze_gate_probe
         visual_hash_coverage_test
@@ -2751,21 +2807,17 @@ if(AGENTTY_BUILD_TESTS)
         mcp_reload_race_test
         plugin_disabled_tools_test
         codex_login_flow_test
-        custom_host_key_prompt_test
         command_palette_test
         code_block_extract_test
         smart_mode_test
         complexity_test
         routing_memory_test
-        decomposition_memory_test
         smart_cascade_gate_test
         settings_default_test
         dup_tool_call_id_test
         salvage_dedup_test
         doom_loop_test
-        acp_integration_test
         external_acp_backend_test
-        acp_agents_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz
         reveal_scrollback_test

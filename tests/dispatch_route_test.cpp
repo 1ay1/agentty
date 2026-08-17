@@ -11,24 +11,16 @@
 // this test asserts the erased-route arms plus the is_chatgpt() predicate that
 // selects between them within Kind::OpenAI.
 
-#include <cstdio>
 #include <memory>
 #include <string>
+
+#include "agtest.hpp"
 
 #include "agentty/provider/dispatch.hpp"
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 
 using namespace agentty;
-
-static int g_failures = 0;
-#define CHECK(cond)                                                         \
-    do {                                                                    \
-        if (!(cond)) {                                                      \
-            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);     \
-            ++g_failures;                                                   \
-        }                                                                   \
-    } while (0)
 
 // A router whose two long-lived arms just record which one fired. Each arm
 // returns a DISTINCT StreamResult so the test can prove dispatch propagates the
@@ -71,13 +63,13 @@ static provider::StreamResult result_for(const provider::Selection& sel) {
                                      provider::EventSink{});
 }
 
-static void test_anthropic_selection_hits_anthropic_route() {
+TEST_CASE("anthropic selection hits anthropic route") {
     provider::Selection sel;                 // defaults to Kind::Anthropic
     sel.kind = provider::Kind::Anthropic;
     CHECK(route_for(sel) == "anthropic");
 }
 
-static void test_chatgpt_selection_hits_chatgpt_route() {
+TEST_CASE("chatgpt selection hits chatgpt route") {
     provider::Selection sel;
     sel.kind = provider::Kind::OpenAI;
     sel.openai_endpoint.label = "chatgpt";   // the native OAuth Codex backend
@@ -85,7 +77,7 @@ static void test_chatgpt_selection_hits_chatgpt_route() {
     CHECK(route_for(sel) == "chatgpt");
 }
 
-static void test_is_chatgpt_predicate() {
+TEST_CASE("is_chatgpt predicate") {
     provider::Selection a;
     a.kind = provider::Kind::Anthropic;
     CHECK(!a.is_chatgpt());
@@ -112,7 +104,7 @@ static void test_is_chatgpt_predicate() {
 // purely from registry data (oauth_native flag + Anthropic dialect), never a
 // label ladder. This locks that derivation so a future edit can't route a
 // ChatGPT turn to the Anthropic transport or vice versa.
-static void test_long_lived_slot_derivation() {
+TEST_CASE("long lived slot derivation") {
     provider::Selection anth;
     anth.kind = provider::Kind::Anthropic;
     CHECK(provider::long_lived_slot(anth) == provider::LongLived::Anthropic);
@@ -139,7 +131,7 @@ static void test_long_lived_slot_derivation() {
 // The prewarm ROUTING table, locked as a pure function (no socket opened).
 // prewarm_target(sel) is registry-driven, so these assertions prove the
 // warm-host derivation for every backend shape.
-static void test_prewarm_target_table() {
+TEST_CASE("prewarm target table") {
     // Anthropic → the transport's fixed host from the registry row.
     {
         provider::Selection s;
@@ -207,7 +199,7 @@ static void test_prewarm_target_table() {
 // The seam propagates the transport's StreamResult back to the caller — the
 // outcome is a VALUE that survives the type-erased boundary, not just a side
 // effect on the sink.
-static void test_dispatch_propagates_stream_result() {
+TEST_CASE("dispatch propagates stream result") {
     provider::Selection anth;
     anth.kind = provider::Kind::Anthropic;
     auto ra = result_for(anth);
@@ -229,7 +221,7 @@ static void test_dispatch_propagates_stream_result() {
 // check) would silently turn a user's Esc during a 500 into a spurious
 // "HTTP 500" error instead of a clean cancel. The fixed order is:
 //   already-terminated > user-cancel > http-error > transport-error > clean.
-static void test_classify_stream_end_precedence() {
+TEST_CASE("classify stream end precedence") {
     auto tok   = std::make_shared<agentty::http::CancelToken>();
     auto fresh = std::make_shared<agentty::http::CancelToken>();
 
@@ -261,7 +253,7 @@ static void test_classify_stream_end_precedence() {
           == provider::StreamEnd::CleanClose);
 }
 
-static void test_hosted_models_share_agent_prompt_policy() {
+TEST_CASE("hosted models share agent prompt policy") {
     const auto anthropic = provider::parse_selection("anthropic");
     const auto chatgpt   = provider::parse_selection("chatgpt");
     const auto local     = provider::parse_selection("llama.cpp");
@@ -272,20 +264,3 @@ static void test_hosted_models_share_agent_prompt_policy() {
     CHECK(provider::system_prompt_for(local) != full);
 }
 
-int main() {
-    test_anthropic_selection_hits_anthropic_route();
-    test_chatgpt_selection_hits_chatgpt_route();
-    test_is_chatgpt_predicate();
-    test_long_lived_slot_derivation();
-    test_prewarm_target_table();
-    test_dispatch_propagates_stream_result();
-    test_classify_stream_end_precedence();
-    test_hosted_models_share_agent_prompt_policy();
-
-    if (g_failures == 0) {
-        std::printf("dispatch_route_test: all checks passed\n");
-        return 0;
-    }
-    std::printf("dispatch_route_test: %d failure(s)\n", g_failures);
-    return 1;
-}

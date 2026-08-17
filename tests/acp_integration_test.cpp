@@ -32,6 +32,8 @@
 
 #include <unistd.h>
 
+#include "agtest.hpp"
+
 #include "agentty/acp/server.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -40,11 +42,7 @@
 using namespace acp;
 namespace ag = agentty;
 
-#define CHECK(cond) do { if (!(cond)) { \
-    std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    std::exit(1); } } while (0)
-
-int main() {
+TEST_CASE("acp integration end-to-end") {
     namespace fs = std::filesystem;
     // The write tool's sandbox refuses paths outside the workspace root.
     // Point the root at a tmp dir we own so the scripted `write` succeeds.
@@ -443,5 +441,4 @@ int main() {
                  completions.load(), perm_requests.load(), tool_calls.load(),
                  tool_completed.load(), usage_updates.load(), agent_text_chunks.load());
     std::printf("acp_integration OK\n");
-    return 0;
 }
