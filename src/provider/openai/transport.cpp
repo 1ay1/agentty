@@ -42,6 +42,7 @@
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"   // util::project_root — AGENTS.md anchor
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -1601,11 +1602,20 @@ namespace {
 // prompts (a 14b answered "hi" with "I didn't understand" once the learned
 // facts were present). Local models get the concise user-authored CLAUDE.md
 // guidance and nothing else. The user/project/local wrapper is the shared
-// wire::claude_md_blocks (also used by the Ollama transport).
+// wire::claude_md_blocks (also used by the Ollama transport). AGENTS.md
+// (AAIF standard, project-scoped) is prepended via wire::agents_md_block
+// so the standardized public project guidance appears BEFORE the personal
+// CLAUDE.md tiers — same ordering the Anthropic prompt uses.
 [[nodiscard]] std::string local_memory_blocks() {
-    return wire::claude_md_blocks(
-        "Project-specific guidance the user has authored. Treat these as "
-        "persistent context for THIS workspace and user.");
+    return wire::agents_md_block(
+               "Project guidance following the open AGENTS.md standard "
+               "(agents.md, stewarded by the Agentic AI Foundation under "
+               "the Linux Foundation). Treat as authoritative public "
+               "project conventions.",
+               tools::util::project_root())
+         + wire::claude_md_blocks(
+               "Project-specific guidance the user has authored. Treat these as "
+               "persistent context for THIS workspace and user.");
 }
 
 } // namespace
