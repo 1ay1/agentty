@@ -9,7 +9,9 @@
 // plugin-model.md and docs/design/plugin-model-in-model.md.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace agentty::mcp {
@@ -22,13 +24,30 @@ struct ToolState {
     bool        over_budget = false; // enabled but trimmed from the wire
 };
 
+// Where a server's config entry was read from — enough for the picker to
+// badge scope and for a reducer to route an edit back to the right file,
+// without pulling the whole scope algebra into this value header.
+enum class Origin : std::uint8_t { User, Project, Explicit };
+
+[[nodiscard]] constexpr std::string_view to_string(Origin o) noexcept {
+    switch (o) {
+        case Origin::User:     return "user";
+        case Origin::Project:  return "project";
+        case Origin::Explicit: return "explicit";
+    }
+    return "user";
+}
+
 // One configured MCP server + its live connection state.
 struct ServerState {
     std::string name;            // config key
-    std::string command;         // config command
+    std::string command;         // config command (empty for HTTP/SSE)
+    std::string url;             // config url (empty for stdio)
     bool        connected = false;   // handshake succeeded this session
     bool        disabled = false;    // config `disabled:true` — not connected on purpose
     std::string error;           // why not connected (empty if connected/ok)
+    Origin      origin = Origin::User;   // which scope this entry came from
+    std::string config_dir;      // the .agentty dir holding this entry's mcp.json
     std::vector<ToolState> tools;
 
     [[nodiscard]] std::size_t enabled_count() const noexcept {

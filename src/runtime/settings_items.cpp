@@ -112,23 +112,30 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         i.primary   = s.name;
         i.on        = !s.disabled;
         i.arg       = s.name;
+        // Provenance: badge the scope and carry the config dir so a
+        // remove/toggle edits THIS server's actual mcp.json, not always the
+        // user file. A user-scope server needs no badge (the common case).
+        i.scope_label = std::string{agentty::mcp::to_string(s.origin)};
+        i.config_dir  = s.config_dir;
+        const std::string scope_tag =
+            (s.origin == agentty::mcp::Origin::User) ? "" : (i.scope_label + " · ");
         // A tool is EFFECTIVELY inactive unless its plugin is enabled AND
         // connected — a disabled or still-connecting plugin can run nothing,
         // so its whole subtree renders dimmed (but keeps individual state).
         const bool subtree_inactive = s.disabled || !s.connected;
         if (s.disabled) {
-            i.secondary = "disabled · " + std::to_string(s.tools.size())
+            i.secondary = scope_tag + "disabled · " + std::to_string(s.tools.size())
                         + (s.tools.size() == 1 ? " tool" : " tools")
                         + " — Enter to enable";
             i.status    = Item::Status::Neutral;   // off on purpose — not an error
         } else if (!s.error.empty()) {
-            i.secondary = s.error;
+            i.secondary = scope_tag + s.error;
             i.status    = Item::Status::Bad;
         } else if (!s.connected) {
-            i.secondary = "connecting…";
+            i.secondary = scope_tag + "connecting…";
             i.status    = Item::Status::Pending;
         } else {
-            i.secondary = std::to_string(s.enabled_count()) + " of " +
+            i.secondary = scope_tag + std::to_string(s.enabled_count()) + " of " +
                           std::to_string(s.tools.size()) + " tools active";
             i.status    = Item::Status::Ok;
         }
@@ -148,6 +155,7 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
             ti.action    = Action::ToggleTool;
             ti.arg       = s.name;
             ti.arg2      = t.name;
+            ti.config_dir = s.config_dir;   // route the exclude edit to THIS server's file
             ti.indented  = true;
             ti.on        = t.enabled;
             ti.inactive  = subtree_inactive;
