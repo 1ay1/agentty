@@ -6,6 +6,8 @@
 // Runs in a temp sandbox CWD + HOME so the real user's commands never
 // leak in. Pure filesystem + string logic — no Model, no network.
 
+#include "agtest.hpp"
+
 #include "agentty/tool/commands.hpp"
 
 #include <cstdlib>
@@ -26,10 +28,6 @@ namespace cmds = agentty::tools::commands;
 
 namespace {
 
-int g_failed = 0;
-void check(bool cond, const std::string& msg) {
-    if (!cond) { std::println("  FAIL: {}", msg); ++g_failed; }
-}
 
 void write_file(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
@@ -141,7 +139,8 @@ void try_expand_shapes(const fs::path& sandbox) {
 
 } // namespace
 
-int main() {
+TEST_CASE("slash commands") {
+    agtest::ScopedEnvSandbox _env_guard;
     // Sandbox CWD + HOME.
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_cmds_test_" +
@@ -165,8 +164,4 @@ int main() {
     std::error_code ec;
     fs::current_path(fs::temp_directory_path(), ec);
     fs::remove_all(sandbox, ec);
-
-    if (g_failed) { std::println("{} check(s) FAILED", g_failed); return 1; }
-    std::println("All slash-command tests passed.");
-    return 0;
 }

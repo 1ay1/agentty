@@ -4,6 +4,8 @@
 // config the user wrote by hand (other servers' env blocks, the "servers"
 // spelling, unknown top-level keys).
 
+#include "agtest.hpp"
+
 #include "agentty/tool/plugin.hpp"
 
 #include <nlohmann/json.hpp>
@@ -28,10 +30,6 @@ using nlohmann::json;
 
 namespace {
 
-int g_failed = 0;
-void check(bool cond, const std::string& msg) {
-    if (!cond) { std::println("  FAIL: {}", msg); ++g_failed; }
-}
 
 void write_file(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
@@ -498,7 +496,8 @@ void per_server_trust(const fs::path& dir) {
     std::println("PASS\n");
 }
 
-int main() {
+TEST_CASE("plugin config") {
+    agtest::ScopedEnvSandbox _env_guard;
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
                                      std::to_string(::getpid()));
@@ -525,8 +524,4 @@ int main() {
 
     std::error_code ec;
     fs::remove_all(sandbox, ec);
-
-    if (g_failed) { std::println("{} check(s) FAILED", g_failed); return 1; }
-    std::println("All plugin-config tests passed.");
-    return 0;
 }

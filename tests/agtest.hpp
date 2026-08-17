@@ -59,4 +59,35 @@ inline void check(bool ok, const std::string& what) {
 } // namespace agtest
 using agtest::check;
 
+// Scoped process-global sandbox: saves HOME and the current working directory
+// on construction and restores them on destruction. Tests that point the
+// process at a temp HOME/cwd (setenv/chdir) MUST wrap that in one of these at
+// the top of their TEST_CASE, so the mutation doesn't leak into sibling cases
+// once every test shares one binary. RAII — restores even if a CHECK throws.
+#include <cstdlib>
+#include <filesystem>
+namespace agtest {
+class ScopedEnvSandbox {
+public:
+    ScopedEnvSandbox() {
+        if (const char* h = std::getenv("HOME")) old_home_ = h, had_home_ = true;
+        std::error_code ec;
+        old_cwd_ = std::filesystem::current_path(ec);
+    }
+    ~ScopedEnvSandbox() {
+        if (had_home_) ::setenv("HOME", old_home_.c_str(), 1);
+        else           ::unsetenv("HOME");
+        std::error_code ec;
+        std::filesystem::current_path(old_cwd_, ec);
+    }
+    ScopedEnvSandbox(const ScopedEnvSandbox&) = delete;
+    ScopedEnvSandbox& operator=(const ScopedEnvSandbox&) = delete;
+private:
+    std::string old_home_;
+    bool had_home_ = false;
+    std::filesystem::path old_cwd_;
+};
+} // namespace agtest
+using agtest::ScopedEnvSandbox;
+
 #endif // AGENTTY_TESTS_AGTEST_HPP
