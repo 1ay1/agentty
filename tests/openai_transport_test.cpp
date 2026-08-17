@@ -606,6 +606,24 @@ static void test_endpoint_presets() {
         CHECK(noscheme.models_path == "/v1/models");
         CHECK(noscheme.label == "my.host:8080");
     }
+    {
+        // IPv6 literal with a port: the port colon is the one AFTER ']', and
+        // the dialed host has the brackets stripped.
+        auto url = oai::Endpoint::from_spec("http://[::1]:8080/api");
+        CHECK(url.host == "::1");
+        CHECK(url.port == 8080);
+        CHECK(!url.use_tls);
+        CHECK(url.path == "/api/chat/completions");
+    }
+    {
+        // IPv6 literal with NO port: rfind(':') would have split inside the
+        // address — the bracket parse keeps the whole address as the host.
+        auto url = oai::Endpoint::from_spec("https://[2001:db8::1]/v1");
+        CHECK(url.host == "2001:db8::1");
+        CHECK(url.port == 443);
+        CHECK(url.use_tls);
+        CHECK(url.path == "/v1/chat/completions");
+    }
 
     // Registry ↔ from_spec consistency: EVERY OpenAI-family preset id must
     // resolve to a usable endpoint (non-empty host + chat/models paths).
@@ -684,6 +702,22 @@ static void test_provider_display_name_url_label() {
         s.openai_endpoint = Endpoint::from_spec("my.host:8080");
         CHECK(s.openai_endpoint.label == "my.host:8080");
         CHECK(P::provider_display_name(s) == "my.host:8080");
+    }
+    {
+        // IPv6 literal collapses to the bracketed authority (a valid form),
+        // keeping the port after ']'. Without bracket-awareness the label
+        // would be split inside the address.
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("http://[::1]:8080/api");
+        CHECK(P::provider_display_name(s) == "[::1]:8080");
+    }
+    {
+        // Portless IPv6: default port omitted, brackets kept.
+        P::Selection s;
+        s.kind = P::Kind::OpenAI;
+        s.openai_endpoint = Endpoint::from_spec("https://[2001:db8::1]/v1");
+        CHECK(P::provider_display_name(s) == "[2001:db8::1]");
     }
 }
 
