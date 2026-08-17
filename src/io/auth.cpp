@@ -5,6 +5,7 @@
 #include "agentty/provider/anthropic/oauth.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/util/dbglog.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -780,13 +781,22 @@ TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
     auto tr = refresh_access_token(RefreshToken{rt});
     if (!tr) return tr;
 
-    // Persist under the lock so the next instance's re-read sees it.
+    // Persist under the lock so the next instance's re-read sees it. This is
+    // best-effort for the CURRENT process (we return `tr` regardless, so this
+    // session keeps working with the in-memory token) — BUT Anthropic rotates
+    // refresh tokens, so a failed write means the on-disk refresh token is now
+    // stale server-side and the NEXT process's refresh will fail into a forced
+    // re-login. That used to be completely silent; log it (terminal-safe,
+    // opt-in) so it's diagnosable instead of a mystery re-login.
     Credentials refreshed{cred::OAuth{
         tr->access_token,
         tr->refresh_token.empty() ? rt : tr->refresh_token,
         tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0,
     }};
-    save_credentials(refreshed);   // best-effort
+    if (!save_credentials(refreshed))
+        util::dbglog("auth.refresh.save",
+                     "failed to persist rotated OAuth token; next launch may "
+                     "require re-login (keystore locked / disk full / perms?)");
     return tr;
 }
 
