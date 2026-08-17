@@ -6,9 +6,10 @@
 // Cases mirror Zed's StreamingFuzzyMatcher test suite — they're the
 // regressions we want to keep passing.
 
+#include "agtest.hpp"
+
 #include <mcp/tools/util/fuzzy_match.hpp>
 
-#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -18,44 +19,38 @@ using mcp::tools::util::fuzzy_find;
 
 namespace {
 
-int failures = 0;
-int total = 0;
-
-void check(const char* name, bool cond, std::string_view detail = {}) {
-    ++total;
-    if (cond) {
-        std::printf("  ok   %s\n", name);
-    } else {
-        ++failures;
-        std::printf("  FAIL %s — %.*s\n", name,
-                    static_cast<int>(detail.size()), detail.data());
-    }
+void expect(const char* name, bool cond, std::string_view detail = {}) {
+    std::string m = detail.empty() ? std::string{name}
+                                    : std::string{name} + " — " + std::string{detail};
+    CHECK_MESSAGE(cond, m);
 }
 
-void test_exact_unique() {
+}  // namespace (helper)
+
+TEST_CASE("exact unique") {
     std::string_view file = "alpha\nbeta\ngamma\n";
     auto r = fuzzy_find(file, "beta");
-    check("exact unique",
+    expect("exact unique",
           r.ok && r.pos == 6 && r.len == 4,
           "expected pos=6 len=4");
 }
 
-void test_exact_ambiguous_no_hint() {
+TEST_CASE("exact ambiguous no hint") {
     std::string_view file = "foo\nfoo\nfoo\n";
     auto r = fuzzy_find(file, "foo");
-    check("ambiguous without hint",
+    expect("ambiguous without hint",
           !r.ok && r.count >= 2);
 }
 
-void test_exact_ambiguous_with_hint() {
+TEST_CASE("exact ambiguous with hint") {
     std::string_view file = "fn first(){}\nfn second(){}\nfn third(){}\n";
     auto r = fuzzy_find(file, "fn second(){}", "", 1u /* 0-based line of `fn second` */);
-    check("ambiguous resolved by hint",
+    expect("ambiguous resolved by hint",
           r.ok && r.pos == 13 && r.len == 13,
           "expected pos=13 len=13");
 }
 
-void test_typo_tolerated() {
+TEST_CASE("typo tolerated") {
     std::string_view file =
         "fn foo1(a: usize) -> usize {\n"
         "    40\n"
@@ -67,12 +62,12 @@ void test_typo_tolerated() {
     // Needle has a typo: u32 instead of usize.
     std::string_view needle = "fn foo1(a: usize) -> u32 {\n40\n}";
     auto r = fuzzy_find(file, needle);
-    check("typo in keyword tolerated",
+    expect("typo in keyword tolerated",
           r.ok && r.pos == 0,
           "expected the foo1 block");
 }
 
-void test_indent_drift() {
+TEST_CASE("indent drift") {
     std::string_view file =
         "class C {\n"
         "    fn m() {\n"
@@ -83,25 +78,25 @@ void test_indent_drift() {
     std::string_view needle = "fn m() {\n    return 1;\n}";
     std::string_view new_t  = "fn m() {\n    return 2;\n}";
     auto r = fuzzy_find(file, needle, new_t);
-    check("indent drift detected",
+    expect("indent drift detected",
           r.ok,
           "expected fuzzy match");
     // Indent-fixup should have prepended 4 spaces to each non-blank line.
     bool reindented = !r.adjusted_new_text.empty()
         && r.adjusted_new_text.find("    fn m() {") != std::string::npos
         && r.adjusted_new_text.find("        return 2;") != std::string::npos;
-    check("indent fixup applied", reindented,
+    expect("indent fixup applied", reindented,
           r.adjusted_new_text);
 }
 
-void test_no_match() {
+TEST_CASE("no match") {
     std::string_view file = "alpha\nbeta\ngamma\n";
     auto r = fuzzy_find(file, "totally unrelated content that doesnt belong");
-    check("genuine no-match rejected",
+    expect("genuine no-match rejected",
           !r.ok && r.count == 0);
 }
 
-void test_trailing_whitespace_drift() {
+TEST_CASE("trailing whitespace drift") {
     // File has trailing spaces on each line.
     std::string_view file =
         "fn first() {    \n"
@@ -110,18 +105,18 @@ void test_trailing_whitespace_drift() {
     // Needle is the clean version.
     std::string_view needle = "fn first() {\n    body();\n}";
     auto r = fuzzy_find(file, needle);
-    check("trailing-ws drift matched",
+    expect("trailing-ws drift matched",
           r.ok && r.pos == 0,
           "expected match from start of file");
 }
 
-void test_crlf() {
+TEST_CASE("crlf") {
     std::string_view file = "alpha\r\nbeta\r\ngamma\r\n";
     auto r = fuzzy_find(file, "beta");
-    check("CRLF tolerated", r.ok);
+    expect("CRLF tolerated", r.ok);
 }
 
-void test_crlf_multiline_dp() {
+TEST_CASE("crlf multiline dp") {
     // File has CRLF line endings, needle has LF only.
     // The DP should still match because trimmed_of strips \r.
     std::string_view file =
@@ -136,21 +131,21 @@ void test_crlf_multiline_dp() {
         "    return 2;\n"
         "}";
     auto r = fuzzy_find(file, needle);
-    check("CRLF multi-line DP", r.ok,
+    expect("CRLF multi-line DP", r.ok,
           "DP should match CRLF file against LF needle");
 }
 
-void test_smart_quotes() {
+TEST_CASE("smart quotes") {
     // U+2018 / U+2019 are 3-byte UTF-8 curly single quotes.
     // With smart-quote normalization in fuzzy_eq, these are converted to
     // ASCII ' before Levenshtein comparison, so the lines match exactly.
     std::string_view file = "print(\xe2\x80\x98hello\xe2\x80\x99)\n";
     auto r = fuzzy_find(file, "print('hello')");
-    check("smart-quotes normalized", r.ok,
+    expect("smart-quotes normalized", r.ok,
           "expected smart-quote normalization to match curly quotes to ASCII");
 }
 
-void test_class_methods() {
+TEST_CASE("class methods") {
     // Zed's test_resolve_location_class_methods — the needle skips a line
     // (three() returns 333) so it must use INSERTION_COST.
     std::string_view file =
@@ -170,26 +165,8 @@ void test_class_methods() {
         "five() { return 5555; }\n"
         "six() { return 6666; }\n";
     auto r = fuzzy_find(file, needle);
-    check("multi-line match with skipped line",
+    expect("multi-line match with skipped line",
           r.ok,
           "expected DP to align query lines across an inserted line");
 }
 
-} // namespace
-
-int main() {
-    std::printf("fuzzy_match smoke tests:\n");
-    test_exact_unique();
-    test_exact_ambiguous_no_hint();
-    test_exact_ambiguous_with_hint();
-    test_typo_tolerated();
-    test_indent_drift();
-    test_no_match();
-    test_trailing_whitespace_drift();
-    test_crlf();
-    test_crlf_multiline_dp();
-    test_smart_quotes();
-    test_class_methods();
-    std::printf("\n%d/%d passed\n", total - failures, total);
-    return failures == 0 ? 0 : 1;
-}

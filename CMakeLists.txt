@@ -1757,14 +1757,9 @@ if(AGENTTY_BUILD_TESTS)
     # fuzzy matcher used by the edit tool. Standalone (no maya / no
     # runtime): compiles directly against the mcp-cpp fuzzy_match TU,
     # which is the SINGLE source of truth for the matcher.
-    add_executable(fuzzy_match_smoke EXCLUDE_FROM_ALL
-        tests/fuzzy_match_smoke.cpp
-        mcp-cpp/src/tools/util/fuzzy_match.cpp
-    )
-    target_include_directories(fuzzy_match_smoke PRIVATE mcp-cpp/include)
-    target_link_libraries(fuzzy_match_smoke PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME fuzzy_match_smoke COMMAND fuzzy_match_smoke)
+    # fuzzy_match_smoke — correctness for mcp's line-DP fuzzy matcher.
+    # MIGRATED to doctest — now TEST_CASEs in agentty_tests (fuzzy_find comes
+    # from the linked mcp::tools).
 
     # param_tag_repair_test — regression for the XML-in-JSON tool-call
     # recovery (model leaks `<parameter name="…">` into the JSON tool
@@ -2597,7 +2592,6 @@ if(AGENTTY_BUILD_TESTS)
     # the compile-time static_assert proofs. (maya-renderer tests stay on the
     # normal build; the renderer has its own CI.)
     set_tests_properties(
-        fuzzy_match_smoke
         concurrency_primitives_test
         cred_crypt_test
         keystore_test
@@ -2634,6 +2628,7 @@ if(AGENTTY_BUILD_TESTS)
         tests/plugin_config_test.cpp
         tests/skills_engine_test.cpp
         tests/slash_commands_test.cpp
+        tests/fuzzy_match_smoke.cpp   # doctest cases; fuzzy_find via mcp::tools
         ${_migrated_srcs}
         ${AGENTTY_SHARED_OBJECTS}
         $<TARGET_OBJECTS:agentty_acp_obj>   # acp_integration_test needs AgentServer
@@ -2673,7 +2668,6 @@ if(AGENTTY_BUILD_TESTS)
     # whole `tests` target, which pulls maya-renderer tests that don't
     # instrument cleanly). CI then runs `ctest -L sanitizer`.
     add_custom_target(sanitizer_tests DEPENDS
-        fuzzy_match_smoke
         agentty_tests
         concurrency_primitives_test
         cred_crypt_test
@@ -2682,7 +2676,6 @@ if(AGENTTY_BUILD_TESTS)
     add_custom_target(tests DEPENDS
         long_session_bench
         anthropic_md_stream
-        fuzzy_match_smoke
         agentty_tests
         concurrency_primitives_test
         cred_crypt_test
