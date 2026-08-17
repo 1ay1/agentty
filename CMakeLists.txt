@@ -757,6 +757,7 @@ set(AGENTTY_RAG_SOURCES
 set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
     src/scope/scope.cpp
+    src/scope/trust.cpp
     src/tool/progress.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
@@ -1760,9 +1761,21 @@ if(AGENTTY_BUILD_TESTS)
     add_executable(plugin_config_test EXCLUDE_FROM_ALL
         tests/plugin_config_test.cpp
         src/tool/plugin.cpp
+        src/scope/scope.cpp
+        src/scope/trust.cpp
+        src/tool/util/fs_helpers.cpp
+        src/io/auth.cpp
+        src/util/base64.cpp
     )
     target_include_directories(plugin_config_test PRIVATE include)
-    target_link_libraries(plugin_config_test PRIVATE nlohmann_json::nlohmann_json)
+    target_link_libraries(plugin_config_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json
+        OpenSSL::SSL
+        OpenSSL::Crypto)
+    if(TARGET mcp::tools)
+        target_link_libraries(plugin_config_test PRIVATE mcp::tools)
+    endif()
     add_test(NAME plugin_config_test COMMAND plugin_config_test)
     set_tests_properties(plugin_config_test PROPERTIES TIMEOUT 30)
 

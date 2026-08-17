@@ -186,6 +186,19 @@ struct Approvals {
     std::vector<std::string> shas;  // sorted; small — a handful of entries
 };
 
+// Persistence for an Approvals store, under the USER root (~/.agentty/<leaf>).
+// A cloned repo cannot write here, so it cannot pre-approve its own content.
+// load() returns an empty store when the file is missing/malformed (fail
+// closed: no approvals → project config stays Pending). save() is best-effort;
+// returns false on an IO error.
+[[nodiscard]] Approvals load_approvals(std::string_view leaf) noexcept;
+[[nodiscard]] bool      save_approvals(std::string_view leaf, const Approvals&) noexcept;
+
+// A stable content hash for a config blob — the identity trust is bound to.
+// Change the bytes (swap a command under an approved name) and the hash
+// changes, so the approval no longer matches: the MCPoison re-gate.
+[[nodiscard]] std::string content_hash(std::string_view bytes) noexcept;
+
 // Total: (source, content, approvals) → Trust. Explicit/User are implicitly
 // Trusted (the human placed them). Project/Local carrying executable config
 // start Pending and become Trusted only when THIS content hash is approved.

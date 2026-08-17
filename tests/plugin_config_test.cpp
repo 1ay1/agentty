@@ -362,6 +362,56 @@ void scope_edits_are_isolated(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// Project-config trust gate: a workspace-local mcp.json is untrusted until
+// approved by CONTENT HASH; editing it re-gates (the MCPoison fix). Runs in
+// its own HOME + cwd sandbox so the approvals store and the project file are
+// both isolated.
+void project_trust_gate(const fs::path& dir) {
+    std::println("--- project_trust_gate ---");
+    const fs::path home = dir / "trust_home";
+    const fs::path work = dir / "trust_work";
+    fs::create_directories(home);
+    fs::create_directories(work / ".agentty");
+
+    // Redirect HOME (approvals store) + cwd (project config lookup). Make sure
+    // the env opt-in isn't set, so we're testing the content-hash path.
+    const std::string prev_home = std::getenv("HOME") ? std::getenv("HOME") : "";
+    const fs::path    prev_cwd  = fs::current_path();
+    ::setenv("HOME", home.string().c_str(), 1);
+    ::unsetenv("AGENTTY_MCP_ALLOW_PROJECT");
+    fs::current_path(work);
+
+    // Seed a project stdio server.
+    check(plug::add_server(plug::config_path(true), {"date", "/bin/date", {}}, false)
+              == plug::EditResult::Ok, "seed project server");
+
+    // Untrusted by default — a clone can't auto-run its own commands.
+    check(!plug::is_project_config_trusted(), "project config untrusted by default");
+
+    // Approve THIS content → trusted.
+    check(plug::approve_project_config(), "approve records trust");
+    check(plug::is_project_config_trusted(), "approved project config is trusted");
+
+    // MCPoison: swap the command under the same name. The bytes change, so
+    // the hash changes, so the old approval no longer matches → re-gated.
+    check(plug::set_server_disabled(plug::config_path(true), "date", false)
+              == plug::EditResult::Ok, "touch the config");
+    check(plug::add_server(plug::config_path(true), {"date", "/evil/date", {}}, /*force=*/true)
+              == plug::EditResult::Ok, "swap the command (attacker edit)");
+    check(!plug::is_project_config_trusted(),
+          "changed content RE-GATES trust (MCPoison fix)");
+
+    // The env opt-in still works as a blanket override.
+    ::setenv("AGENTTY_MCP_ALLOW_PROJECT", "1", 1);
+    check(plug::is_project_config_trusted(), "env opt-in overrides the gate");
+    ::unsetenv("AGENTTY_MCP_ALLOW_PROJECT");
+
+    // Restore.
+    fs::current_path(prev_cwd);
+    if (!prev_home.empty()) ::setenv("HOME", prev_home.c_str(), 1);
+    std::println("PASS\n");
+}
+
 int main() {
     const fs::path sandbox =
         fs::temp_directory_path() / ("agentty_plugin_test_" +
@@ -379,6 +429,7 @@ int main() {
     tool_enable_disable(sandbox);
     server_enable_disable(sandbox);
     scope_edits_are_isolated(sandbox);
+    project_trust_gate(sandbox);
     malformed_disabled_no_throw(sandbox);
     non_object_entry_no_throw(sandbox);
     concurrent_mutations_safe(sandbox);
