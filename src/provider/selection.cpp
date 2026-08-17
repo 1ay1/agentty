@@ -145,10 +145,26 @@ std::string provider_display_name(const Selection& s) {
         // Strip path at first '/' (everything after the authority).
         if (auto slash = s.find('/'); slash != std::string_view::npos)
             s = s.substr(0, slash);
-        // Split host / port at the last ':'.
         std::string out;
         std::uint16_t port = tls ? 443 : 80;
-        if (auto colon = s.rfind(':'); colon != std::string_view::npos) {
+        // IPv6 literals are bracketed ("[::1]" / "[::1]:8080") — the port colon
+        // is the one after "]", and the brackets are kept in the label so it
+        // round-trips as a valid authority.
+        if (!s.empty() && s.front() == '[') {
+            auto close = s.find(']');
+            if (close != std::string_view::npos) {
+                out = std::string{s.substr(0, close + 1)};   // keep [ ... ]
+                auto rest = s.substr(close + 1);
+                if (rest.size() > 1 && rest.front() == ':') {
+                    try {
+                        int p = std::stoi(std::string{rest.substr(1)});
+                        if (p > 0 && p <= 65535) port = static_cast<std::uint16_t>(p);
+                    } catch (...) {}
+                }
+            } else {
+                out = std::string{s};
+            }
+        } else if (auto colon = s.rfind(':'); colon != std::string_view::npos) {
             out = std::string{s.substr(0, colon)};
             try {
                 int p = std::stoi(std::string{s.substr(colon + 1)});

@@ -1142,9 +1142,27 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
             if (prefix == "/") prefix.clear();
         }
 
-        // Split host from port at the last ':' in the authority.
-        auto colon = authority.rfind(':');
-        if (colon != std::string_view::npos) {
+        // Split host from port. IPv6 literals are bracketed — "[::1]" or
+        // "[::1]:8080" — so the port colon is the one AFTER "]", never a colon
+        // inside the address. For a plain host the port is after the last ':'.
+        if (!authority.empty() && authority.front() == '[') {
+            auto close = authority.find(']');
+            if (close != std::string_view::npos) {
+                ep.host = std::string{authority.substr(1, close - 1)};  // strip [ ]
+                auto rest = authority.substr(close + 1);                // "" or ":8080"
+                if (rest.size() > 1 && rest.front() == ':') {
+                    try {
+                        int port_int = std::stoi(std::string{rest.substr(1)});
+                        ep.port = (port_int > 0 && port_int <= 65535)
+                            ? static_cast<std::uint16_t>(port_int)
+                            : (tls ? 443 : 80);
+                    } catch (...) { ep.port = tls ? 443 : 80; }
+                }
+            } else {
+                ep.host = std::string{authority};  // malformed; dial as-is
+            }
+        } else if (auto colon = authority.rfind(':');
+                   colon != std::string_view::npos) {
             ep.host = std::string{authority.substr(0, colon)};
             try {
                 int port_int = std::stoi(std::string{authority.substr(colon + 1)});
