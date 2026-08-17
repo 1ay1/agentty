@@ -67,6 +67,8 @@ export AGENTTY_EMBED_MODEL=nomic-embed-text
 
 At startup, agentty performs one bounded embedding probe. If the server or model is unavailable, the session stays BM25-only instead of paying a long failed network timeout on every search. The result header reports `bm25` or `hybrid` truthfully.
 
+When a search returns **no hits**, the result says so with the reason folded in rather than a bare blank — e.g. `no matches (bm25)` (the search ran but nothing was relevant; the mode reveals the dense half was down), or `no matches (no docs indexed — set AGENTTY_DOCS_DIR …)` when there was nothing to search. So "the corpus is irrelevant" is never confused with "the index isn't built" or "Ollama is down."
+
 `AGENTTY_RAG_BM25_WEIGHT` and `AGENTTY_RAG_DENSE_WEIGHT` control weighted RRF directly. Setting dense weight to zero removes dense influence; the knobs are not ignored by a separate fusion alpha.
 
 ## Persistence and freshness

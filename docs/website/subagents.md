@@ -52,6 +52,10 @@ issue with the file and line and a safer rewrite.
 
 The file name (without `.md`) is the type name you pass as `agent_type`. Search roots, project first: `.agentty/agents`, `.agents/agents`, `.claude/agents`, then the same three under your home directory. **Built-ins always win** — a `general.md` can't silently replace the built-in `general`. Files are picked up live (no restart); up to 32 custom agents, 32 KiB each.
 
+:::note
+A persona defined in a **project** `.agentty/agents/` can ride in on a cloned repo, and its role prompt steers a subagent that wields real (sandboxed) tools. That's a lower risk than a plugin — an agent names no command, its tools stay gated, and it runs only when invoked — so it isn't blocked, just **surfaced**: the task card tags a project-defined agent as `project agent` so an injected persona is never invisible. Built-in and your own `~/.agentty` agents show no tag. See [Plugin Trust](/docs/plugin-trust#a-related-case-project-defined-agents).
+:::
+
 ## Managing subagents in the app
 
 [[Ctrl+K]] → **Subagents** lists the built-in types and every custom agent it discovered, and can drop a starter template into `.agentty/agents/` to author from. Authoring is a file you edit; the panel is for browsing what's available.
