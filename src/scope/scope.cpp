@@ -142,6 +142,12 @@ void Approvals::approve(std::string_view content_sha) {
     if (!approved(content_sha)) shas.emplace_back(content_sha);
 }
 
+// content_hash / load_approvals / save_approvals live in src/scope/trust.cpp
+// — they depend on auth (SHA-256) and nlohmann/json, which the lean scope
+// core (and the standalone scope/skills/commands tests that link only this
+// TU) must not pull in. trust_of() below stays here: it's pure.
+
+
 Trust trust_of(const Source& src,
                std::string_view content_sha,
                const Approvals& approvals) noexcept {

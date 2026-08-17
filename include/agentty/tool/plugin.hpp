@@ -99,6 +99,21 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
 // project → ./.agentty/mcp.json.
 [[nodiscard]] std::filesystem::path config_path(bool project);
 
+// ── Project-config trust (the RCE gate) ─────────────────────────────────
+// A workspace-local ./.agentty/mcp.json can ride in on a clone and spawn
+// arbitrary commands, so its servers don't connect until the human vouches
+// for it: either AGENTTY_MCP_ALLOW_PROJECT=1, or an approval of the file's
+// CONTENT HASH recorded here. Editing the file changes the hash and re-gates
+// it (the MCPoison fix). Approvals persist under ~/.agentty, so a clone can
+// neither approve itself nor keep an approval valid after its bytes change.
+//
+// is_project_config_trusted() — would the project config connect right now?
+// approve_project_config()    — record trust for the CURRENT project config's
+//                               content; returns false if there's no project
+//                               config or the store can't be written.
+[[nodiscard]] bool is_project_config_trusted();
+[[nodiscard]] bool approve_project_config();
+
 // The `agentty plugin` CLI: verb ∈ {add, remove, list} with the argv tail
 // after the verb. Returns a process exit code. Prints results/errors and,
 // after a successful add, a short "restart to connect / trust gate" note.

@@ -156,6 +156,37 @@ fs::path resolve_config() {
     return resolve_config(ignore);
 }
 
+// The approvals store leaf under ~/.agentty (scope::load/save_approvals).
+inline constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+
+// May a WORKSPACE-LOCAL config spawn its (stdio) servers this session?
+// A project mcp.json rides in on a clone and can spawn arbitrary commands
+// with no per-tool prompt, so it stays untrusted until the human vouches for
+// it. Two ways to grant trust, both preserved here:
+//   1. AGENTTY_MCP_ALLOW_PROJECT=1 — the original coarse env opt-in (back-compat).
+//   2. The file's CONTENT HASH is in the user-root approvals store — the
+//      MCPoison-safe path: approve THIS exact file; edit its bytes (swap a
+//      command) and the hash changes, so the approval no longer matches and
+//      it re-gates. Approvals live under ~/.agentty, unreachable by the clone.
+// Non-project configs ($AGENTTY_MCP_CONFIG / ~/.agentty) are always trusted.
+[[nodiscard]] bool env_allows_project() noexcept {
+    const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
+    return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T'
+              || e[0] == 'y' || e[0] == 'Y');
+}
+
+[[nodiscard]] bool project_config_trusted(const fs::path& cfg) noexcept {
+    if (env_allows_project()) return true;
+    // Hash the file bytes and check the user-root approvals store.
+    std::error_code ec;
+    std::ifstream in(cfg, std::ios::binary);
+    if (!in) return false;
+    std::string bytes((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+    const std::string h = scope::content_hash(bytes);
+    return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
+}
+
 // Parsed per-server config the model needs: command + the exclude set.
 // One place that reads mcp.json, so every consumer (projection, model,
 // picker) agrees on the same bytes. Missing/invalid config → empty map.
@@ -924,10 +955,10 @@ std::vector<ServerLaunch> configured_servers_for_delegation() {
     bool project_local = false;
     const fs::path path = resolve_config(project_local);
     if (path.empty()) return {};
-    const char* allow = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
-    const bool project_allowed = allow && (allow[0] == '1' || allow[0] == 't'
-        || allow[0] == 'T' || allow[0] == 'y' || allow[0] == 'Y');
-    if (project_local && !project_allowed) return {};
+    // Same trust gate as mcp_tools(): a workspace-local config only exposes
+    // its servers for delegation once the human has vouched for it (env opt-in
+    // or a content-hash approval of THIS file).
+    if (project_local && !project_config_trusted(path)) return {};
 
     json document;
     try { std::ifstream input(path); input >> document; }
@@ -984,14 +1015,12 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // A project-local ./.agentty/mcp.json can ride in on a cloned repo, and
     // its stdio servers spawn ARBITRARY commands at registry-build time with
     // no per-tool permission prompt — bypassing the Exec gate every other
-    // code path honors. So when the config is workspace-local we require an
-    // explicit opt-in (AGENTTY_MCP_ALLOW_PROJECT=1). $AGENTTY_MCP_CONFIG and
-    // ~/.agentty/mcp.json are trusted (the user placed them) and never gated.
-    bool allow_project = false;
-    if (const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
-        e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y'))
-        allow_project = true;
-    if (project_local && !allow_project) {
+    // code path honors. So when the config is workspace-local we require the
+    // human to have vouched for it — either AGENTTY_MCP_ALLOW_PROJECT=1 or an
+    // approval of THIS file's content hash (see project_config_trusted).
+    // $AGENTTY_MCP_CONFIG and ~/.agentty/mcp.json are trusted (the user
+    // placed them) and never gated.
+    if (project_local && !project_config_trusted(cfg)) {
         std::fprintf(stderr,
             "mcp: ignoring workspace-local %s (it can spawn arbitrary\n"
             "     commands). Set AGENTTY_MCP_ALLOW_PROJECT=1 to enable it, or\n"
@@ -1238,6 +1267,12 @@ PluginModel plugin_model() {
     }
 
     // Build one ServerState per configured server, unifying config + live.
+    // Compute project-config trust ONCE (the RCE gate): a workspace-local
+    // config's stdio servers only connect once the human has vouched for it.
+    // Used below to flag untrusted project servers instead of leaving them in
+    // a permanent "connecting…".
+    const bool project_trusted =
+        project_config_trusted(fs::path{".agentty"} / "mcp.json");
     std::size_t enabled_mcp = 0;
     for (const auto& [name, cs] : cfg) {
         ServerState ss;
@@ -1266,6 +1301,14 @@ PluginModel plugin_model() {
             // error every remote server used to show.
             if (cs.command.empty() && cs.url.empty()) {
                 ss.error = "no \"command\" or \"url\" in mcp.json";
+            } else if (cs.source.locus == scope::Locus::Project
+                       && !cs.command.empty() && !project_trusted) {
+                // A project (workspace-local) stdio server that hasn't been
+                // vouched for won't connect (the RCE gate). Say so, and how to
+                // approve, instead of a permanent "connecting…" that never
+                // resolves. HTTP/SSE (url) servers spawn nothing, so they're
+                // not gated here.
+                ss.error = "untrusted project config — approve to enable";
             } else if (auto eit = errors.find(name); eit != errors.end()) {
                 ss.error = eit->second;
             }

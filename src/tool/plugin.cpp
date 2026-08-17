@@ -4,6 +4,8 @@
 
 #include "agentty/tool/plugin.hpp"
 
+#include "agentty/scope/scope.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -132,6 +134,40 @@ fs::path config_path(bool project) {
     if (project) return fs::path{".agentty"} / "mcp.json";
     auto h = home_dir();
     return (h.empty() ? fs::path{".agentty"} : h / ".agentty") / "mcp.json";
+}
+
+namespace {
+// Must match the bridge's kMcpApprovalsLeaf + hashing exactly — both sides
+// read/write the SAME user-root store keyed by the SAME content hash.
+constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+
+// The current project mcp.json's content hash, or empty if there's no file.
+[[nodiscard]] std::string project_config_hash() {
+    const fs::path cfg = config_path(/*project=*/true);
+    std::ifstream in(cfg, std::ios::binary);
+    if (!in) return {};
+    std::string bytes((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+    return scope::content_hash(bytes);
+}
+}  // namespace
+
+bool is_project_config_trusted() {
+    if (const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
+        e && (e[0] == '1' || e[0] == 't' || e[0] == 'T'
+           || e[0] == 'y' || e[0] == 'Y'))
+        return true;
+    const std::string h = project_config_hash();
+    if (h.empty()) return false;
+    return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
+}
+
+bool approve_project_config() {
+    const std::string h = project_config_hash();
+    if (h.empty()) return false;   // nothing to approve
+    scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
+    a.approve(h);
+    return scope::save_approvals(kMcpApprovalsLeaf, a);
 }
 
 EditResult add_server(const fs::path& path, const ServerSpec& spec,
