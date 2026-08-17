@@ -12,26 +12,16 @@
 // "429" as "Too Many Requests" (no digits) still retry, and stops a terminal
 // 400 whose message contains "connection" from being mis-retried as transient.
 
-#include <cstdio>
 #include <string_view>
+
+#include <doctest/doctest.h>
 
 #include "agentty/provider/error_class.hpp"
 
 using namespace agentty::provider;
 
-static int g_failures = 0;
-
-#define CHECK(cond)                                                      \
-    do {                                                                 \
-        if (!(cond)) {                                                   \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n",                     \
-                         __FILE__, __LINE__, #cond);                     \
-            ++g_failures;                                                \
-        }                                                                \
-    } while (0)
-
-// ── Status-set: the typed path wins, message text is ignored ────────────────
-static void test_status_beats_message() {
+// ── Status-set: the typed path wins, message text is ignored ───────────────
+TEST_CASE("status wins over message prose") {
     // 429 with a prose-only body (no digits) → RateLimit via the typed path.
     // The old string sniff would have missed this (no "429"/"rate_limit").
     CHECK(classify_stream_error("Too Many Requests", 429) == ErrorClass::RateLimit);
@@ -53,7 +43,7 @@ static void test_status_beats_message() {
 }
 
 // ── Status-zero: fall back to the substring sniff (unchanged behaviour) ─────
-static void test_no_status_falls_back_to_string() {
+TEST_CASE("status-zero falls back to substring sniff") {
     // User cancel: StreamError{"cancelled"} carries no status → Cancelled.
     CHECK(classify_stream_error("cancelled", 0) == ErrorClass::Cancelled);
 
@@ -75,22 +65,9 @@ static void test_no_status_falls_back_to_string() {
 // classify_stream_error(msg, status) with a status must equal the direct typed
 // call, and with status 0 must equal the direct string call — it's a pure
 // dispatcher, no logic of its own.
-static void test_dispatcher_is_pure() {
+TEST_CASE("classify_stream_error is a pure dispatcher") {
     using K = agentty::http::HttpErrorKind;
     CHECK(classify_stream_error("whatever", 503)
           == classify(agentty::http::HttpError{K::Status, 503, ""}));
     CHECK(classify_stream_error("Overloaded", 0) == classify("Overloaded"));
-}
-
-int main() {
-    test_status_beats_message();
-    test_no_status_falls_back_to_string();
-    test_dispatcher_is_pure();
-
-    if (g_failures == 0) {
-        std::printf("error_class_test: all checks passed\n");
-        return 0;
-    }
-    std::printf("error_class_test: %d failure(s)\n", g_failures);
-    return 1;
 }

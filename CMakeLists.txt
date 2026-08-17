@@ -455,6 +455,29 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(nlohmann_json simdjson)
 
+# doctest — unit-test framework backing the single-binary test model. Chosen
+# for the lowest compile overhead of the mainstream C++ frameworks, and its
+# assertion macro is already named CHECK (matching every repo's hand-rolled
+# harness), so migration is mechanical. Every test TU becomes a TEST_CASE
+# auto-registered into ONE `agentty_tests` executable that links the shared
+# object set once — instead of ~70 executables each re-linking it (that link
+# fan-out was the dominant CI cost). Fetched only when tests are built.
+if(AGENTTY_BUILD_TESTS)
+    FetchContent_Declare(
+        doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG        v2.4.11
+        GIT_SHALLOW    TRUE
+    )
+    set(DOCTEST_WITH_TESTS OFF CACHE INTERNAL "")
+    set(DOCTEST_NO_INSTALL ON CACHE INTERNAL "")
+    # doctest 2.4.11 declares cmake_minimum_required(VERSION 3.0), which CMake
+    # 4.x rejects. Allow the old floor just for this dependency.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE INTERNAL "")
+    FetchContent_MakeAvailable(doctest)
+    unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
+endif()
+
 # Mark third-party headers SYSTEM so their warnings don't pollute our build.
 # nlohmann_json v3.11.3's binary_writer.hpp uses std::is_trivial which GCC 15
 # deprecates under C++26 — the upstream fix is on master but unreleased, and we
@@ -1692,19 +1715,47 @@ if(AGENTTY_BUILD_TESTS)
         nlohmann_json::nlohmann_json maya::maya)
     add_test(NAME compaction_threshold_test COMMAND compaction_threshold_test)
 
+    # ── agentty_tests: the single consolidated unit-test binary ────────────
+    # POC scaffold. Every migrated doctest TEST_CASE compiles into THIS one
+    # executable, which links the shared object set once (vs one exe per test).
+    # doctest supplies main() via test_main.cpp; doctest_discover_tests below
+    # registers each TEST_CASE as its own ctest entry so `ctest -j` parallelism
+    # and per-case reporting are preserved. Sources are appended as tests are
+    # migrated off the per-exe model.
+    add_executable(agentty_tests EXCLUDE_FROM_ALL
+        tests/test_main.cpp
+        tests/error_class_test.cpp
+        ${AGENTTY_SHARED_OBJECTS}
+    )
+    target_include_directories(agentty_tests PRIVATE include)
+    target_compile_definitions(agentty_tests PRIVATE
+        AGENTTY_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(agentty_tests PRIVATE
+        doctest::doctest
+        maya::maya
+        nlohmann_json::nlohmann_json
+        simdjson::simdjson
+        nghttp2::nghttp2
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        Threads::Threads
+    )
+    if(TARGET mcp::mcp)
+        target_link_libraries(agentty_tests PRIVATE mcp::mcp)
+    endif()
+    if(TARGET mcp::tools)
+        target_link_libraries(agentty_tests PRIVATE mcp::tools)
+    endif()
+    # Per-TEST_CASE ctest registration (parallelism + filtering preserved).
+    include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
+    doctest_discover_tests(agentty_tests)
+
     # error_class_test — the retry classifier's status-preferring dispatch.
     # provider::classify_stream_error(message, http_status) prefers the typed,
     # compile-time-proven classify(HttpError) path when the transport stamped a
     # real status on the StreamError Msg, and only string-sniffs when there is
-    # none (SSE event:error / socket failure / cancel / stall). Header-only
-    # (error_class.hpp + http.hpp structs); no link, sanitizer-clean.
-    add_executable(error_class_test EXCLUDE_FROM_ALL
-        tests/error_class_test.cpp
-    )
-    target_include_directories(error_class_test PRIVATE include)
-    target_link_libraries(error_class_test PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME error_class_test COMMAND error_class_test)
+    # none (SSE event:error / socket failure / cancel / stall). MIGRATED to
+    # doctest — now a set of TEST_CASEs in the agentty_tests binary above.
 
     # fsm_test — generic typestate machinery (include/agentty/io/fsm.hpp):
     # compile-time edge legality from in-class `fsm_to` successor lists,
@@ -2610,7 +2661,6 @@ if(AGENTTY_BUILD_TESTS)
         model_caps_test
         copilot_token_test
         compaction_threshold_test
-        error_class_test
         wire_shared_test
         fsm_test
         concurrency_primitives_test
@@ -2629,7 +2679,7 @@ if(AGENTTY_BUILD_TESTS)
         model_caps_test
         copilot_token_test
         compaction_threshold_test
-        error_class_test
+        agentty_tests
         wire_shared_test
         fsm_test
         concurrency_primitives_test
@@ -2644,7 +2694,7 @@ if(AGENTTY_BUILD_TESTS)
         param_tag_repair_test
         model_caps_test
         compaction_threshold_test
-        error_class_test
+        agentty_tests
         fsm_test
         sandbox_escape_test
         scope_test
