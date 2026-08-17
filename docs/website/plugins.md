@@ -10,79 +10,83 @@ A **plugin** is an external [MCP](https://modelcontextprotocol.io) server that a
 
 Under the hood a plugin *is* an MCP server — this page is the practical "add a tool to my agent" guide; [MCP Server](/docs/mcp) covers the full protocol, OAuth, and serving agentty's own tools the other way.
 
-## Adding a plugin
+There are two ways to configure plugins and they edit the same files — pick whichever fits: the **TUI** for the common cases (add / enable / disable / remove / approve, no JSON), or **editing `mcp.json`** directly for full control (env vars, headers, per-tool filters, timeouts).
 
-Two ways, same result — an entry in `mcp.json`:
+## Where plugins live
 
-**From the CLI:**
+agentty reads **both** of these and unions them (a project server and a user server are both active; on a name clash the project one wins):
 
-```bash
-agentty plugin add       # interactive: name + command/url
-agentty plugin add <name> --http <url>    # remote HTTP/SSE server
-agentty plugin list      # show configured plugins (--project marks ✓/— trust)
-agentty plugin approve <name> --project   # trust a project server (per-server)
-agentty plugin remove <name>
-```
+- `~/.agentty/mcp.json` — **user** scope: your servers, on every project.
+- `<project>/.agentty/mcp.json` — **project** scope: committed with the repo, shared with your team.
 
-**By hand** — drop a `.agentty/mcp.json` in your project (or `~/.agentty/mcp.json` for all projects):
-
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@playwright/mcp"]
-    }
-  }
-}
-```
-
-agentty connects on startup, and the server's tools become available in the thread with stable provenance names like `mcp__playwright__browser_click` — they can never collide with or impersonate a native tool. Live `tools/list_changed` updates (including removals) are honoured without a restart.
+`$AGENTTY_MCP_CONFIG` points at an explicit file that overrides both. A project `mcp.json` can ride in on a clone, so its command-spawning servers are gated — see [Trust](#trust).
 
 :::note
 Plugins are lazy and opt-in. With no `mcp.json` present, startup is a single `stat()` that finds nothing — zero overhead when you aren't using any.
 :::
 
-## Managing plugins in the app
+## Configure from the TUI
 
-Open the command palette with [[Ctrl+K]] and choose **Plugins** to see every configured server, its connection state, and its tools. From there you can:
+Open the command palette with [[Ctrl+K]] and choose **Plugins**. The picker lists every configured server (from both scopes), its live connection state, and its tools — read from the same model the agent uses, so it's never stale. No restart is needed for anything you do here.
 
-- **Add** a plugin inline — press [[a]] and type a `name command args…` spec (e.g. `playwright npx -y @playwright/mcp`); it's written to `mcp.json` and the server connects immediately, no restart. For a remote server, use `name --http https://…` (or `--sse`); add `--project` to write the repo config instead of yours.
-- **Enable/disable individual tools** per server.
-- **Approve** an untrusted project server ([[Enter]] on a *trust & enable* row) to let its config connect.
-- **Remove** a plugin.
+**What each row shows**
 
-A warning appears if you've left an unusually large number of tools active — too many tool schemas dilute the model's tool choice (see the tool-budget note below). The `agentty plugin add` CLI does the same thing from a shell.
+- A health badge: **●** connected · **◌** connecting · **⚠** error / needs attention · dim = disabled.
+- A scope tag on non-user rows (`project · …`); your own user servers are unbadged.
+- The tool count and, expanded beneath a connected server, each tool with its own on/off state (dimmed when the parent is off).
 
-## Config scope
+**Keys**
 
-Plugins can be declared in two places, and agentty reads **both at once**:
+| Key | Action |
+|-----|--------|
+| [[↑]] [[↓]] | move between rows |
+| [[a]] | **add** a plugin inline (spec formats below) |
+| [[Enter]] | on a server: **enable / disable** · on a tool sub-row: **toggle that tool** · on an untrusted project server: **approve** it (*trust & enable*) |
+| [[d]] | **remove** the server — press once to arm (row turns ⚠ *press d again to remove*), again to confirm |
+| [[esc]] | close |
 
-- `~/.agentty/mcp.json` — **user** scope: your servers, on every project.
-- `<project>/.agentty/mcp.json` — **project** scope: committed with the repo, shared with your team.
+Every edit writes back to the **file the server actually came from** — toggling a project server edits the project `mcp.json`, a user server edits yours; the two never cross. A fresh inline add goes to your user config unless you pass `--project`.
 
-The **Plugins** picker shows servers from both, badged with the scope they came from (a project server reads `project · …`; user servers are unbadged, the common case). On a name collision, the project entry wins. `$AGENTTY_MCP_CONFIG` points at an explicit file that overrides both.
+**Adding inline** — press [[a]], type a `name`, then one recipe:
 
-Every edit in the picker — enable/disable a server, toggle a tool, remove — writes back to the **file that server actually came from**, so toggling a project server edits the project `mcp.json` and a user server edits yours; the two never cross. Adding a new plugin inline writes to your user config by default.
+```text
+weather --uvx mcp-weather           # PyPI package, via uv
+today --python scripts/today.py     # a local Python script
+playwright --npx @playwright/mcp    # an npm package (npx -y …)
+docs --http https://mcp.acme.dev    # a remote HTTP server (or --sse)
+mydb -- /usr/local/bin/db-mcp --port 5432   # any command, verbatim after --
+```
 
-:::note
-Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you vouch for them. Trust is **per-server**: in the **Plugins** picker each untrusted project server is labelled *untrusted project config — approve to enable*; press [[Enter]] on it (*trust & enable*) to approve **that one server** and connect it. Approving one server doesn't trust a different one, so a repo can't smuggle a new server in behind one you already approved. (Headless? `agentty plugin approve <name> --project` does the same, and `agentty plugin list --project` shows each server's ✓/— trust state.) Approvals are recorded under `~/.agentty` (a clone can't approve itself), keyed by the server's exact command + args — edit them and that server re-gates, so a swapped command can never ride in on an old approval. `AGENTTY_MCP_ALLOW_PROJECT=1` still blanket-trusts a whole project config. HTTP/SSE servers spawn no local command and aren't gated this way.
-:::
+Append `--project` to write the repo config. The server connects immediately.
 
-## The tool budget
+The same operations work headless from a shell, for scripts / CI / SSH-without-TUI:
 
-A model chooses worse when it's handed hundreds of tool schemas. agentty sends **all native and pinned tools plus at most 16 MCP tools**, ranked for the current request. The always-available `mcp_search_tools` / `mcp_call` broker exposes the long tail on demand, so a big plugin (Playwright alone has dozens of tools) never floods every turn. Use `pin` to force an important tool into every turn regardless of ranking.
+```bash
+agentty plugin add weather --uvx mcp-weather
+agentty plugin add docs --http https://mcp.acme.dev
+agentty plugin list [--project]          # ✓ trusted · — pending approval
+agentty plugin approve <name> --project  # per-server trust
+agentty plugin remove <name>
+```
 
-## Per-plugin policy
+The inline add covers the common shapes. For a server that needs **environment variables, HTTP headers, per-tool filters, or custom timeouts**, edit the file directly — next.
 
-Every server entry accepts explicit policy:
+## Configure by editing `mcp.json`
+
+Everything the TUI writes is plain JSON you can hand-edit; agentty picks up changes on the next connect (start a new session, or toggle the server in the picker). Edits are **round-trip safe** — keys agentty doesn't own, other servers, and the `servers` vs `mcpServers` spelling are all preserved byte-for-byte.
+
+The top-level key is `mcpServers` (the `servers` spelling is also read). Each entry is one server, keyed by the name you'll see in tool names (`mcp__<name>__<tool>`).
+
+### A stdio server (a local command)
 
 ```json
 {
   "mcpServers": {
     "playwright": {
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@playwright/mcp"],
+      "env": { "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright" },
       "disabled": false,
       "timeoutMs": 30000,
       "connectTimeoutMs": 10000,
@@ -98,24 +102,53 @@ Every server entry accepts explicit policy:
 }
 ```
 
-| Field | Effect |
-|-------|--------|
-| `disabled` | keep a server configured but off, without deleting it |
-| `trustAnnotations` | default `false` — a remote server's read-only hints can't silently weaken your [permission checks](/docs/sandboxing); enable only for a server you trust |
-| `tools.include` / `exclude` | filter which of the server's tools are advertised |
-| `tools.pin` | keep a tool in every turn regardless of the 16-tool ranking |
-| `timeoutMs` / `connectTimeoutMs` | per-call and connect deadlines |
-| `maxOutputChars` | cap a tool's output before it enters context |
-
-## HTTP & OAuth plugins
-
-A plugin can be a hosted HTTP server, not just a local command:
+### An HTTP / SSE server (a remote url, no command)
 
 ```json
-{ "mcpServers": { "acme": { "url": "https://mcp.acme.dev/mcp" } } }
+{
+  "mcpServers": {
+    "acme": {
+      "type": "http",
+      "url": "https://mcp.acme.dev/mcp",
+      "headers": { "X-Tenant": "acme-prod" },
+      "tools": { "exclude": ["delete_everything"] }
+    }
+  }
+}
 ```
 
-If the server requires OAuth, authorize once with `agentty mcp-login acme` — agentty runs the full OAuth 2.1 + PKCE flow, stores the token encrypted, and refreshes it transparently. See [MCP Server → Authorizing an OAuth-gated server](/docs/mcp#authorizing-an-oauth-gated-server) for the details, including servers without dynamic registration.
+Use `"type": "sse"` for a Server-Sent-Events endpoint. HTTP/SSE servers spawn no local command, so they're never trust-gated. If the server needs OAuth rather than a static header, omit `headers` and authorize once with `agentty mcp-login acme` (see [Authorizing an OAuth-gated server](/docs/mcp#authorizing-an-oauth-gated-server)).
+
+### Every field
+
+| Field | Applies to | Effect |
+|-------|-----------|--------|
+| `type` | all | `stdio` (default when `command` is set), `http`, or `sse`. |
+| `command` | stdio | the executable to spawn. |
+| `args` | stdio | argument vector passed to `command`. |
+| `env` | stdio | extra environment variables for the spawned process (merged over the inherited env) — the place for an API key or path a local server needs. |
+| `url` | http/sse | the server endpoint. |
+| `headers` | http/sse | extra HTTP headers on every request — e.g. a static bearer token or tenant id. |
+| `disabled` | all | `true` keeps a server configured but off, without deleting it (what the picker's disable toggle writes). |
+| `trustAnnotations` | all | default `false` — a server's read-only tool *hints* can't silently weaken your [permission checks](/docs/sandboxing); set `true` only for a server you trust to self-declare effects. |
+| `tools.include` | all | allow-list: advertise only these tools (omit to advertise all). |
+| `tools.exclude` | all | deny-list: hide these tools (applied after `include`). The picker's per-tool toggle edits this set. |
+| `tools.pin` | all | keep these tools in every turn regardless of the 16-tool ranking (see [the tool budget](#the-tool-budget)). |
+| `timeoutMs` | all | per-call deadline (default 30 s; override globally with `AGENTTY_MCP_TIMEOUT_MS`). |
+| `connectTimeoutMs` | all | handshake / connect deadline. |
+| `maxOutputChars` | all | cap a tool's output before it enters context. |
+
+Unknown keys are ignored (and preserved), so a config shared with Claude Desktop / Cursor / VS Code works as-is — they read the same `mcpServers` shape. Connected tools carry stable provenance names (`mcp__playwright__browser_click`) that can't collide with or impersonate a native tool, and live `tools/list_changed` updates are honoured without a restart.
+
+## Trust
+
+A **project** `mcp.json` can arrive inside a repo you cloned, and an stdio server is a command agentty would spawn. So project stdio servers don't auto-connect — each is untrusted until you approve it, per-server, by content hash. Approve from the picker ([[Enter]] on the *trust & enable* row) or the CLI (`agentty plugin approve <name> --project`); edit the command afterwards and it re-gates. Your own `~/.agentty` servers and remote HTTP/SSE servers are never gated. Full rationale: [Plugin Trust](/docs/plugin-trust).
+
+`AGENTTY_MCP_ALLOW_PROJECT=1` is the blanket alternative — it trusts every server in a project config at once (fine for a repo you fully control, not for a fresh clone).
+
+## The tool budget
+
+A model chooses worse when it's handed hundreds of tool schemas. agentty sends **all native and pinned tools plus at most 16 MCP tools**, ranked for the current request. The always-available `mcp_search_tools` / `mcp_call` broker exposes the long tail on demand, so a big plugin (Playwright alone has dozens of tools) never floods every turn. Use `pin` (in a server's `tools.pin`) to force an important tool into every turn regardless of ranking.
 
 ## Safety
 
@@ -126,7 +159,6 @@ If the server requires OAuth, authorize once with `agentty mcp-login acme` — a
 ## Related
 
 - [Plugin Trust](/docs/plugin-trust) — why project servers need approval, and how content-hash trust works.
-
 - [Build a Plugin](/docs/build-a-plugin) — write your own MCP server (Python & C++ walkthroughs + the protocol).
 - [MCP Server](/docs/mcp) — the full protocol: serving agentty's tools, resources, OAuth, ACP pass-through.
 - [Retrieval](/docs/retrieval) — fold a plugin's MCP **resources** into `search_docs` with `AGENTTY_RAG_MCP=1`.
