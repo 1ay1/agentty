@@ -13,11 +13,12 @@
 // Asserts the breaker FIRES on a genuine doom loop and STAYS QUIET on healthy
 // progress, on success, and across a User-turn boundary (each run is fresh).
 
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -32,11 +33,6 @@ using nlohmann::json;
 
 namespace {
 
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 enum class Term { Done, Failed, Rejected };
 
@@ -73,8 +69,10 @@ Message user(std::string s = "go") {
     return m;
 }
 
-// ── 1. REPEAT: same failing call 3x → break ─────────────────────────────────
-void test_repeat_failing_call_breaks() {
+}  // namespace (helpers)
+
+// ── 1. REPEAT: same failing call 3x → break ─────────────────────────
+TEST_CASE("repeat failing call breaks") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "https://x.com/jokes"}};
@@ -89,7 +87,7 @@ void test_repeat_failing_call_breaks() {
 }
 
 // ── 2. Two failures is below the limit → no break (give it a chance) ─────────
-void test_two_failures_no_break() {
+TEST_CASE("two failures no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "x"}};
@@ -100,7 +98,7 @@ void test_two_failures_no_break() {
 }
 
 // ── 3. Same call but SUCCEEDING → never break (legit re-read) ────────────────
-void test_repeat_succeeding_no_break() {
+TEST_CASE("repeat succeeding no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "log.txt"}};
@@ -111,7 +109,7 @@ void test_repeat_succeeding_no_break() {
 }
 
 // ── 4. Different args each time → not the same dead call ─────────────────────
-void test_distinct_failing_calls_no_break() {
+TEST_CASE("distinct failing calls no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     // 3 failing reads but each a DIFFERENT path — exploring, not stuck.
@@ -123,7 +121,7 @@ void test_distinct_failing_calls_no_break() {
 }
 
 // ── 5. RUNAWAY: 25 healthy tool turns → break on step cap ────────────────────
-void test_runaway_step_cap_breaks() {
+TEST_CASE("runaway step cap breaks") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     for (int i = 0; i < 25; ++i)
@@ -138,7 +136,7 @@ void test_runaway_step_cap_breaks() {
 // ── 5b. CAPABLE model (enforce_step_cap=false): 25 healthy turns do NOT break.
 //       Matches Claude Code (max_turns unlimited) / aider (no step cap). A
 //       long, legitimate run on Claude must never be cut off by the count.
-void test_runaway_step_cap_skipped_for_capable() {
+TEST_CASE("runaway step cap skipped for capable") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     for (int i = 0; i < 40; ++i)
@@ -155,7 +153,7 @@ void test_runaway_step_cap_skipped_for_capable() {
 // ── 5c. REPEAT-FAILURE is UNIVERSAL: fires even when the step cap is OFF.
 //       aider/MindStudio apply the repeated-dead-call cap to every model;
 //       a capable model stuck re-trying an identical failing call still stops.
-void test_repeat_failure_breaks_even_for_capable() {
+TEST_CASE("repeat failure breaks even for capable") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "/nope"}};
@@ -171,7 +169,7 @@ void test_repeat_failure_breaks_even_for_capable() {
 
 // ── 5d. Only the CURRENT consecutive streak counts. Earlier failures that
 //       were followed by success are recovery history, not a doom loop.
-void test_success_resets_failure_streak() {
+TEST_CASE("success resets failure streak") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "flaky.txt"}};
@@ -186,7 +184,7 @@ void test_success_resets_failure_streak() {
 
 // Rejections are terminal failures for loop purposes: repeatedly refusing the
 // same permission cannot make progress and should receive the same breaker.
-void test_rejection_streak_breaks() {
+TEST_CASE("rejection streak breaks") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"command", "dangerous"}};
@@ -198,7 +196,7 @@ void test_rejection_streak_breaks() {
 }
 
 // ── 6. A modest healthy multi-step task does NOT break ───────────────────────
-void test_healthy_progress_no_break() {
+TEST_CASE("healthy progress no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     msgs.push_back(asst_call("bash",  json{{"command", "ls"}}, Term::Done));
@@ -211,7 +209,7 @@ void test_healthy_progress_no_break() {
 
 // ── 7. User boundary resets the run: a prior doom loop in an EARLIER turn
 //      doesn't count against the current one. ──────────────────────────────
-void test_user_boundary_resets_run() {
+TEST_CASE("user boundary resets run") {
     std::vector<Message> msgs;
     // Earlier turn: a doom loop (3 failing reads).
     msgs.push_back(user("first"));
@@ -227,7 +225,7 @@ void test_user_boundary_resets_run() {
 }
 
 // ── 8. Empty / no-tool history is safe ───────────────────────────────────────
-void test_empty_and_text_only_no_break() {
+TEST_CASE("empty and text only no break") {
     check(!agent_loop_should_break({}).has_value(), "empty history no break");
     std::vector<Message> msgs;
     msgs.push_back(user());
@@ -235,26 +233,3 @@ void test_empty_and_text_only_no_break() {
     check(!agent_loop_should_break(msgs).has_value(), "text-only turn no break");
 }
 
-} // namespace
-
-int main() {
-    test_repeat_failing_call_breaks();
-    test_two_failures_no_break();
-    test_repeat_succeeding_no_break();
-    test_distinct_failing_calls_no_break();
-    test_runaway_step_cap_breaks();
-    test_runaway_step_cap_skipped_for_capable();
-    test_repeat_failure_breaks_even_for_capable();
-    test_success_resets_failure_streak();
-    test_rejection_streak_breaks();
-    test_healthy_progress_no_break();
-    test_user_boundary_resets_run();
-    test_empty_and_text_only_no_break();
-
-    if (g_fails == 0) {
-        std::printf("doom_loop_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "doom_loop_test: %d check(s) failed\n", g_fails);
-    return 1;
-}
