@@ -403,6 +403,102 @@ std::optional<Scope> parse_scope(std::string_view s) noexcept {
     return std::nullopt;
 }
 
+// ── suggest_scope: a scored signal model over the fact text ───────────────
+// Not a keyword grab-bag: each cue is a weighted piece of EVIDENCE pulling
+// toward User (fact about the human) or Project (fact about the codebase).
+// We sum the evidence, take the margin, and squash it into [0,1] confidence.
+// A tie or no-evidence text lands at confidence 0 → caller keeps its default.
+ScopeSuggestion suggest_scope(std::string_view text) noexcept {
+    // Lowercased, space-padded copy so word-boundary probes are simple and
+    // don't match inside longer tokens (" i " vs "api").
+    std::string t;
+    t.reserve(text.size() + 2);
+    t.push_back(' ');
+    for (char c : text) t.push_back(static_cast<char>(std::tolower((unsigned char)c)));
+    t.push_back(' ');
+    auto has = [&](std::string_view needle) {
+        return t.find(needle) != std::string_view::npos;
+    };
+
+    struct Cue { std::string_view probe; float w; std::string_view why; bool boundary; };
+
+    // USER evidence — the fact is ABOUT THE HUMAN. First-person self-
+    // reference and identity/preference verbs are the strong separators.
+    static constexpr Cue kUser[] = {
+        {" i ",         0.45f, "first-person 'I'",           false},
+        {" i'm ",       0.45f, "first-person 'I'm'",         false},
+        {" my ",        0.40f, "possessive 'my'",            false},
+        {" me ",        0.25f, "first-person 'me'",          false},
+        {"call me",     0.60f, "identity ('call me')",       false},
+        {"my name",     0.70f, "identity ('my name')",       false},
+        {"i prefer",    0.65f, "stated preference",          false},
+        {"i like",      0.50f, "stated preference",          false},
+        {"i use",       0.55f, "personal tooling",           false},
+        {"i always",    0.45f, "personal habit",             false},
+        {"i work",      0.35f, "personal context",           false},
+        {"personal",    0.40f, "'personal'",                 false},
+        {"pronoun",     0.35f, "identity (pronouns)",        false},
+    };
+    // PROJECT evidence — the fact is ABOUT THIS CODEBASE. Repo deixis, team
+    // 'we', and concrete build/path/command tokens.
+    static constexpr Cue kProject[] = {
+        {"this project",  0.65f, "repo deixis ('this project')", false},
+        {"this repo",     0.65f, "repo deixis ('this repo')",    false},
+        {"this codebase", 0.65f, "repo deixis ('this codebase')",false},
+        {"the project",   0.35f, "project reference",            false},
+        {" we ",          0.40f, "team 'we'",                    false},
+        {" our ",         0.35f, "team 'our'",                   false},
+        {"build command", 0.60f, "build workflow",               false},
+        {"the build",     0.45f, "build workflow",               false},
+        {"to build",      0.40f, "build workflow",               false},
+        {"cmake",         0.45f, "build tool token",             false},
+        {"the test",      0.35f, "test workflow",                false},
+        {"convention",    0.40f, "project convention",           false},
+        {" src/",         0.45f, "source path",                  false},
+        {".cpp",          0.35f, "source file",                  false},
+        {".hpp",          0.35f, "source file",                  false},
+        {"the api",       0.30f, "code surface",                 false},
+        {"module",        0.25f, "code structure",               false},
+    };
+
+    float user = 0.0f, proj = 0.0f;
+    std::string_view user_why, proj_why;
+    for (const auto& c : kUser)
+        if (has(c.probe) && c.w > user) { user = c.w; user_why = c.why; }
+    for (const auto& c : kProject)
+        if (has(c.probe) && c.w > proj) { proj = c.w; proj_why = c.why; }
+    // Accumulate a little for MULTIPLE independent cues on a side (a second,
+    // weaker hit adds a fraction) so "I prefer, and my name is" reads louder
+    // than either alone — without letting one class run away.
+    auto bump = [&]<std::size_t N>(const Cue (&cues)[N], float& top) {
+        float extra = 0.0f;
+        for (const auto& c : cues) if (has(c.probe)) extra += c.w * 0.25f;
+        top = std::min(1.0f, top + std::max(0.0f, extra - top * 0.25f));
+    };
+    bump(kUser, user);
+    bump(kProject, proj);
+
+    ScopeSuggestion s;
+    const float margin = user - proj;
+    if (margin > 0.0f) {
+        s.scope = Scope::User;
+        s.confidence = std::min(1.0f, margin);
+        s.reason = std::string{user_why};
+    } else if (margin < 0.0f) {
+        s.scope = Scope::Project;
+        s.confidence = std::min(1.0f, -margin);
+        s.reason = std::string{proj_why};
+    } else {
+        // No evidence, or a genuine tie → ambiguous. Project is the neutral
+        // prior (matches the prompt's documented default) at zero confidence,
+        // so confident() is false and the caller keeps its own default.
+        s.scope = Scope::Project;
+        s.confidence = 0.0f;
+        s.reason = user == 0.0f ? "no signal" : "conflicting signals";
+    }
+    return s;
+}
+
 fs::path path_for(Scope s) {
     // Memory is the first consumer of agentty::scope. It owns edge resolution
     // (its home_dir() carries a getpwuid_r fallback scope's doesn't) and hands

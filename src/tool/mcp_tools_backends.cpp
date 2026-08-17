@@ -109,6 +109,27 @@ public:
         if (!scope)
             return mt::MemoryAppendResult{.error = "unknown scope '" + req.scope + "'"};
 
+        // Smart scope: the shell defaults an omitted `scope` to scopes()[0]
+        // ("project" when writable), so a fact that's plainly about the HUMAN
+        // — "my name is…", "I use fish" — lands in project by default and then
+        // bleeds into every repo. suggest_scope() reads the fact text; on a
+        // CONFIDENT user signal against a project write we correct it and say
+        // so in the note. We only ever redirect project→user this way (never
+        // the reverse, and never when project was genuinely intended for a
+        // codebase fact): the risk is one-directional — a personal fact
+        // escaping into shared project memory is the harm; a project fact in
+        // user memory is merely narrow. An UNAVAILABLE user scope is left
+        // alone (append's own guard handles reachability).
+        std::string smart_note;
+        if (*scope == memory::Scope::Project) {
+            const auto hint = memory::suggest_scope(req.text);
+            if (hint.confident() && hint.scope == memory::Scope::User
+                && !memory::path_for(memory::Scope::User).empty()) {
+                *scope = memory::Scope::User;
+                smart_note = "scope→user (" + hint.reason + ")";
+            }
+        }
+
         memory::AppendOptions opts;
         opts.pinned        = req.pinned;
         opts.tags          = req.tags;
@@ -118,10 +139,13 @@ public:
         // Bridge the agentty result onto the mcp result. Named designated
         // initialisers so a renamed/removed field is a compile error rather
         // than a silent miscopy; the static_assert above catches size drift.
+        std::string note = r.note;
+        if (!smart_note.empty())
+            note = note.empty() ? smart_note : (smart_note + "; " + note);
         return mt::MemoryAppendResult{
             .id      = r.id,
             .error   = r.error,
-            .note    = r.note,
+            .note    = note,
             .rolled  = r.rolled,
             .deduped = r.deduped,
         };

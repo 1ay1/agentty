@@ -228,4 +228,35 @@ struct PromptSelection {
 [[nodiscard]] std::optional<std::pair<Record, Scope>>
     find_by_id(std::string_view id);
 
+// ── Smart scope inference ─────────────────────────────────────────────────
+// Which scope does a fact BELONG in? The prompt asks the model to default to
+// project and reach for user only when the fact is about the human. But
+// "project vs user" is a linguistic call the model gets wrong under load —
+// it stores "I use fish" as project, or a build command as user — and once
+// mis-scoped a fact bleeds (a personal preference re-asserted in every repo,
+// or a project convention lost when you `cd` away).
+//
+// suggest_scope() gives the tool a GROUNDED default: a small scored signal
+// model over the fact text, not a keyword grab-bag. It weighs the signals
+// that actually separate the two classes — first-person self-reference ("I
+// prefer", "my …", "call me") pulls toward User; codebase/repo deixis ("this
+// project", "the build", "we use", a path, a command) pulls toward Project —
+// and reports its confidence + the winning cue so the caller can act on a
+// STRONG signal and stay out of the way on a weak one. It never decides:
+// the model's explicit `scope` always wins; this only fills the blank the
+// model left, and only when confident.
+struct ScopeSuggestion {
+    Scope       scope = Scope::Project;  // the leaning (Project is the neutral prior)
+    float       confidence = 0.0f;       // 0 = no signal … 1 = unambiguous
+    std::string reason;                  // the cue that tipped it (for notes/tests)
+
+    // Below this, treat the text as genuinely ambiguous — fall back to the
+    // caller's static default rather than overriding on noise.
+    static constexpr float kActThreshold = 0.30f;
+    [[nodiscard]] bool confident() const noexcept {
+        return confidence >= kActThreshold;
+    }
+};
+[[nodiscard]] ScopeSuggestion suggest_scope(std::string_view text) noexcept;
+
 } // namespace agentty::tools::memory
