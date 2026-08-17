@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/tool/subagent.hpp"   // subagent::agent_origin (provenance tag)
 #include "agentty/tool/util/utf8.hpp"
 
 namespace agentty::ui {
@@ -512,6 +513,14 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         // turns):") so the card doubles as a compact result log.
         std::string type = safe("agent_type");
         if (type.empty()) type = "general";
+        // Provenance: a PROJECT-scoped persona rode in on the workspace (a
+        // clone could author its role prompt), so tag it so an injected agent
+        // is never invisible. Built-in and the user's own agents get no tag —
+        // the clean common case. Transparency, not a gate: the agent still
+        // runs, its tools still pass the normal permission/sandbox checks.
+        std::string type_tag = type;
+        if (tools::subagent::agent_origin(type) == "project")
+            type_tag += " (project agent)";
         std::string what = safe("display_description");
         if (what.empty()) {
             what = safe("prompt");
@@ -522,7 +531,7 @@ std::string tool_timeline_detail(const ToolUse& tc) {
                 what += "\xe2\x80\xa6";
             }
         }
-        std::string detail = type;
+        std::string detail = type_tag;
         if (!what.empty()) detail += "  \xc2\xb7  " + what;
         if (tc.is_terminal()) {
             const auto& out = tc.output();
