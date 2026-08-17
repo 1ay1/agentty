@@ -121,6 +121,38 @@ int main() {
 #endif
     }
 
+    // ── is_routing_correction: the outcome-learning regret signal ─────────
+    // TRUE = a dissatisfaction follow-up that should bias the turn-class's
+    // effort up. The false-positive cases are the whole point of the fix.
+    {
+        using agentty::smart::is_routing_correction;
+        // Genuine regrets.
+        CHECK(is_routing_correction("no, that doesn't work"), "'no, doesn't work' is a regret");
+        CHECK(is_routing_correction("that's wrong"), "'that's wrong' is a regret");
+        CHECK(is_routing_correction("undo that"), "'undo' is a regret");
+        CHECK(is_routing_correction("revert it"), "'revert' is a regret");
+        CHECK(is_routing_correction("still failing after your change"), "'still failing' is a regret");
+        CHECK(is_routing_correction("actually that's not right"), "'actually not right' is a regret");
+        CHECK(is_routing_correction("nope, still broken"), "'nope still broken' is a regret");
+        CHECK(is_routing_correction("that broke the build"), "'that broke' is a regret");
+
+        // False positives the naive prefix scan used to hit — must be FALSE.
+        CHECK(!is_routing_correction("actually, let's also add tests"),
+              "additive 'actually' is NOT a regret");
+        CHECK(!is_routing_correction("actually that's perfect"),
+              "praise 'actually that's perfect' is NOT a regret");
+        CHECK(!is_routing_correction("wrong file, look at src/foo instead"),
+              "redirection 'wrong file' is NOT a regret");
+        CHECK(!is_routing_correction("no worries, carry on"),
+              "'no worries' is NOT a regret");
+        CHECK(!is_routing_correction("now add error handling"),
+              "a plain new request is NOT a regret");
+        CHECK(!is_routing_correction("thanks, that works"),
+              "gratitude is NOT a regret");
+        CHECK(!is_routing_correction("looks good, ship it"),
+              "approval is NOT a regret");
+    }
+
     std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
     return g_fail ? 1 : 0;
 }

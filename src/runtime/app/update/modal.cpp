@@ -372,22 +372,11 @@ Step submit_message(Model m) {
     // too weak — attribute a regret to its signature so this class of turn
     // escalates next time. Cheap prefix/keyword scan on the trimmed text.
     if (m.d.smart.outcome_learning() && !m.s.smart_turn_signature.empty()) {
-        std::string low;
-        low.reserve(user.text.size());
-        for (char c : user.text) {
-            if (low.size() >= 40) break;   // only the opening matters
-            low.push_back((c >= 'A' && c <= 'Z') ? char(c + 32) : c);
-        }
-        auto starts = [&](std::string_view p){ return low.rfind(p, 0) == 0; };
-        const bool correction =
-               starts("no,") || starts("no ") || low == "no"
-            || starts("that's wrong") || starts("thats wrong")
-            || starts("wrong") || starts("actually") || starts("not quite")
-            || starts("that's not") || starts("undo") || starts("revert")
-            || starts("that broke") || starts("you broke") || starts("nope")
-            || low.find("doesn't work") != std::string::npos
-            || low.find("still broken") != std::string::npos
-            || low.find("still fail") != std::string::npos;
+        // A genuine routing regret is DISSATISFACTION with the previous turn's
+        // result — not a redirection, an additive request, or praise. The
+        // classifier is a pure, unit-tested function (smart::) so this hot
+        // reduce path just asks it.
+        const bool correction = smart::is_routing_correction(user.text);
         if (correction)
             smart::RoutingMemory::instance().note_regret(m.s.smart_turn_signature, +1);
         else if (m.s.smart_turn_complexity != smart::Complexity::Complex

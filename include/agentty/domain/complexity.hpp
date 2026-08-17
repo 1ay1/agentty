@@ -106,4 +106,13 @@ struct ComplexityScore {
     return s;
 }
 
+// Does this follow-up user message express DISSATISFACTION with the previous
+// turn's result — i.e. a routing regret the learned prior should note (bias
+// that turn-class's effort up)? Deliberately narrow: it must NOT fire on a
+// redirection ("wrong file, look elsewhere"), an additive request ("actually,
+// also add tests"), or praise ("actually that's perfect") — those aren't
+// complaints about how much effort the router spent. Pure + turn-local so the
+// outcome-learning loop can be unit-tested. Only the opening ~48 chars matter.
+[[nodiscard]] bool is_routing_correction(std::string_view text) noexcept;
+
 } // namespace agentty::smart
