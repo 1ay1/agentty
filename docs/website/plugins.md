@@ -51,6 +51,21 @@ Open the command palette with [[Ctrl+K]] and choose **Plugins** to see every con
 
 A warning appears if you've left an unusually large number of tools active — too many tool schemas dilute the model's tool choice (see the tool-budget note below). The `agentty plugin add` CLI does the same thing from a shell.
 
+## Config scope
+
+Plugins can be declared in two places, and agentty reads **both at once**:
+
+- `~/.agentty/mcp.json` — **user** scope: your servers, on every project.
+- `<project>/.agentty/mcp.json` — **project** scope: committed with the repo, shared with your team.
+
+The **Plugins** picker shows servers from both, badged with the scope they came from (a project server reads `project · …`; user servers are unbadged, the common case). On a name collision, the project entry wins. `$AGENTTY_MCP_CONFIG` points at an explicit file that overrides both.
+
+Every edit in the picker — enable/disable a server, toggle a tool, remove — writes back to the **file that server actually came from**, so toggling a project server edits the project `mcp.json` and a user server edits yours; the two never cross. Adding a new plugin inline writes to your user config by default.
+
+:::note
+Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you opt in with `AGENTTY_MCP_ALLOW_PROJECT=1` — a clone can't run arbitrary commands the first time you open it. They still appear in the picker so you can see what a repo declares.
+:::
+
 ## The tool budget
 
 A model chooses worse when it's handed hundreds of tool schemas. agentty sends **all native and pinned tools plus at most 16 MCP tools**, ranked for the current request. The always-available `mcp_search_tools` / `mcp_call` broker exposes the long tail on demand, so a big plugin (Playwright alone has dozens of tools) never floods every turn. Use `pin` to force an important tool into every turn regardless of ranking.
