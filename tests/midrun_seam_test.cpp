@@ -20,7 +20,6 @@
 // already on screen. Any divergence in the committed prefix is a
 // duplication bug.
 
-#include <cstdio>
 #include <algorithm>
 #include <chrono>
 #include <string>
@@ -34,6 +33,8 @@
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/widget/app_layout.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -52,18 +53,8 @@ using agentty::ToolUse;
 using std::chrono::steady_clock;
 using std::chrono::milliseconds;
 
-static int g_failures = 0;
 static int g_checks   = 0;
 
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
 
 static std::string code_block(int n) {
     std::string out;
@@ -164,7 +155,7 @@ static int first_committed_divergence(const std::vector<std::string>& prev,
 // settle-freeze the whole run once at the end. Assert the committed
 // prefix never changes between consecutive snapshots, INCLUDING across
 // the final settle-time freeze.
-static void test_incremental_freeze_prefix_stable() {
+TEST_CASE("incremental freeze prefix stable") {
     constexpr int N = 30;
     // A realistic viewport: maya keeps the bottom `term_h` rows on
     // screen; everything above has overflowed into native scrollback
@@ -262,7 +253,7 @@ static void test_incremental_freeze_prefix_stable() {
 //   frame B: edit Done    (terminal GitDiff body)
 //   frame C: turn settles — the single settle-time freeze fires
 // and assert the committed prefix is stable A->B and B->C.
-static void test_single_edit_stream_to_freeze() {
+TEST_CASE("single edit stream to freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -375,7 +366,7 @@ static void test_single_edit_stream_to_freeze() {
 // frame B: read DONE (full body) — card grows by ~12 rows
 // frame C: mid-run freeze fires
 // The committed prefix must be byte-stable A->B and B->C.
-static void test_read_then_edit_batch_freeze() {
+TEST_CASE("read then edit batch freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -477,7 +468,7 @@ static void test_read_then_edit_batch_freeze() {
 // rows above the viewport, any height/shape change across the settle
 // strands the streaming copy in scrollback and the settled card paints
 // below it — the duplicated Actions box the user reports.
-static void test_single_write_stream_to_freeze() {
+TEST_CASE("single write stream to freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -633,7 +624,7 @@ static std::string assembled_body(const Model& m) {
 //   (1) the committed scrollback prefix never mutates (no duplication),
 //   (2) the assembled body equals the original bytes at every step,
 //   (3) the settle-time freeze (the ONLY freeze) is row-stable too.
-static void test_streaming_text_prefix_freeze() {
+TEST_CASE("streaming text prefix freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -737,7 +728,7 @@ static void test_streaming_text_prefix_freeze() {
 // assistant_run_hash_id, so the handoff must be a pure cache hit — any
 // row shift across the freeze strands the live copy in scrollback and
 // the card duplicates.
-static void test_tall_card_live_to_frozen_seam() {
+TEST_CASE("tall card live to frozen seam") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -829,7 +820,7 @@ static void test_tall_card_live_to_frozen_seam() {
 // lands at up_to_index == frozen_through (compaction does NOT mutate
 // messages), and a tall post-compaction turn streams LIVE then settles.
 // See INLINE_SCROLLBACK.md pin #3 (divider symmetry).
-static void test_compaction_boundary_live_to_frozen_seam() {
+TEST_CASE("compaction boundary live to frozen seam") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -957,7 +948,7 @@ static void test_compaction_boundary_live_to_frozen_seam() {
 // freeze must not shift a committed row. (Distinct from the unit-level
 // symmetry test above, which forces the boundary into the live tail to
 // exercise build_live_tail's divider+number code directly.)
-static void test_compaction_submit_freezes_divider() {
+TEST_CASE("compaction submit freezes divider") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -1121,7 +1112,7 @@ static void push_write_turn(Model& m, const std::string& tag, int rows) {
 //   settle-time freeze_through (the single freeze). Then the next
 //   submit. At turn 3 we snapshot every step and assert turn 2's
 //   committed rows are byte-stable across the whole turn-3 sequence.
-static void test_multi_turn_write_pairs_seam() {
+TEST_CASE("multi turn write pairs seam") {
     constexpr int kTermH = 40;
     constexpr int kRows  = 60;   // each write overflows a 40-row viewport
 
@@ -1269,7 +1260,7 @@ static void test_multi_turn_write_pairs_seam() {
 //    the row output must be identical frame-to-frame as the prefix grows
 //    (a hoisted card silently vanishing, or a stale cache blitting an
 //    old prefix, is the "sometimes not working" bug this guards).
-static void test_prefix_hoist_all_cards_present() {
+TEST_CASE("prefix hoist all cards present") {
     Model m;
     m.d.current.id = agentty::ThreadId{"hoist"};
     Message u; u.role = Role::User; u.text = "do many edits";
@@ -1372,7 +1363,7 @@ static ToolUse running_edit(const std::string& tag) {
     return t;
 }
 
-static void test_running_tool_then_followup_user_turn() {
+TEST_CASE("running tool then followup user turn") {
     constexpr int kTermH = 40;
     Model m;
     m.d.current.id = agentty::ThreadId{"run+followup"};
@@ -1474,30 +1465,3 @@ static void test_running_tool_then_followup_user_turn() {
     }
 }
 
-int main() {
-    std::printf("midrun_seam_test\n");
-    // Pin the animation clock: this test drives frames synchronously and
-    // asserts the committed-scrollback prefix never mutates. The render
-    // path's reveal/finalize timing reads maya::anim_now_ms(); without a
-    // freeze, real wall-clock between synchronous render_rows() calls would
-    // cross the quiet/finalize thresholds at a scheduler-dependent step and
-    // the "immutable" prefix would shift under load. Frozen -> render is a
-    // pure function of the model.
-    maya::testing::freeze_anim_clock();
-    test_incremental_freeze_prefix_stable();
-    test_prefix_hoist_all_cards_present();
-    test_running_tool_then_followup_user_turn();
-    test_single_edit_stream_to_freeze();
-
-    test_single_write_stream_to_freeze();
-    test_read_then_edit_batch_freeze();
-    test_streaming_text_prefix_freeze();
-    test_tall_card_live_to_frozen_seam();
-    test_compaction_boundary_live_to_frozen_seam();
-    test_compaction_submit_freezes_divider();
-    test_multi_turn_write_pairs_seam();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures) { std::printf("FAILED\n"); return 1; }
-    std::printf("PASSED\n");
-    return 0;
-}
