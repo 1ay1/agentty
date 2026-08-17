@@ -24,6 +24,7 @@ enum class Action : std::uint8_t {
     RemovePlugin,  // Plugins: remove this server from mcp.json (deliberate; `d`)
     TogglePlugin,  // Plugins: enable/disable the WHOLE server (Enter, reversible)
     ToggleTool,    // Plugins: enable/disable one tool (arg=server, arg2=bare)
+    ApprovePlugin, // Plugins: trust this project config so its servers connect
     ApproveHooks,  // Hooks: approve the active hooks file
 };
 
@@ -62,6 +63,10 @@ struct Item {
     // always the user config. Empty on non-server rows.
     std::string scope_label;
     std::string config_dir;
+    // A project-scope server whose config isn't trusted yet — it won't connect
+    // until approved. On such a row, Enter APPROVES (grants trust) rather than
+    // toggling, and the view shows the approve affordance.
+    bool        untrusted = false;
 };
 
 // The rows for one category, live. `m` supplies profile/RAG/Smart state

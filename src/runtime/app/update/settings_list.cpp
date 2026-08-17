@@ -255,6 +255,29 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     }
                     return {std::move(m), std::move(cmd)};
                 }
+                case se::Action::ApprovePlugin: {
+                    // Enter on an untrusted project server = a deliberate
+                    // "trust this repo's mcp.json" — the row is explicitly
+                    // labelled "trust & enable", so the keypress IS the
+                    // consent (unlike hooks, which needs a y/N review). Record
+                    // the content-hash approval, then reconnect so the
+                    // now-trusted stdio servers actually spawn.
+                    if (m.ui.plugins_loading)
+                        return done(std::move(m));
+                    const bool ok = tools::plugin::approve_project_config();
+                    maya::Cmd<Msg> cmd;
+                    if (ok) {
+                        m.ui.plugins_loading = true;
+                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
+                            cmdf::load_plugins_async(/*reconnect=*/true),
+                            set_status_toast(m,
+                                "trusted project config — connecting…")});
+                    } else {
+                        cmd = set_status_toast(m,
+                            "could not record approval (no project mcp.json?)");
+                    }
+                    return {std::move(m), std::move(cmd)};
+                }
                 case se::Action::ApproveHooks:
                     // Consent MUST be a deliberate terminal action — the
                     // picker can't safely own the y/N prompt while it holds
@@ -280,7 +303,12 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
                 return done(std::move(m));
             const se::Item& row = rows[static_cast<std::size_t>(o->index)];
-            if (row.action != se::Action::TogglePlugin || row.arg.empty())
+            // A server row is either TogglePlugin (normal) or ApprovePlugin
+            // (untrusted project) — both are removable with `d`. Tool sub-rows
+            // and every other category are not.
+            if ((row.action != se::Action::TogglePlugin
+                 && row.action != se::Action::ApprovePlugin)
+                || row.arg.empty())
                 return done(std::move(m));   // not a server row
 
             auto path = edit_target(row);
