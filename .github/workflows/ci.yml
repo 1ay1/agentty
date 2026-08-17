@@ -76,12 +76,26 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: linux-gcc14-release
-          max-size: 900M
+          max-size: 2G
 
+      - name: ccache tuning
+        # LTO emits GIMPLE bytecode whose cache key is sensitive to absolute
+        # paths and __TIME__/__DATE__; without these, warm-cache hit rate on a
+        # fresh checkout dir craters. BASEDIR makes paths relative; the sloppy
+        # flags let time-macro TUs still hit.
+        run: |
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_SLOPPINESS=locale,time_macros,include_file_ctime,include_file_mtime" >> "$GITHUB_ENV"
+          echo "CCACHE_NOHASHDIR=1" >> "$GITHUB_ENV"
       - name: Configure
         env:
           CC: gcc-14
           CXX: g++-14
+        # Stays Release + LTO so CI exercises the SAME optimized codegen the
+        # shipped binary uses (an -O3/LTO-only miscompile must fail here, not
+        # in release.yml). Speed comes from ccache: on a warm cache only the
+        # changed TUs recompile, so the 39-min cold build collapses to the
+        # edited delta + the final LTO link.
         run: |
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
@@ -255,7 +269,7 @@ jobs:
           restore-keys: windows-mingw-ucrt64-ccache-
       - name: Configure + build (compile only)
         run: |
-          export CCACHE_MAXSIZE=900M
+          export CCACHE_MAXSIZE=2G
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
