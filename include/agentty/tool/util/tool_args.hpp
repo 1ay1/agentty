@@ -22,7 +22,7 @@
 #include <functional>
 #include <utility>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // adapt<> only forwards const json&; full type at instantiation sites
 
 namespace agentty::tools::util {
 

@@ -11,7 +11,7 @@
 #include <utility>
 
 #include <maya/maya.hpp>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // only json declarations here; full type lives in the .cpp
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"

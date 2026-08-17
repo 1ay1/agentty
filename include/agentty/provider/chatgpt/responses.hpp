@@ -11,7 +11,7 @@
 
 #include "agentty/provider/provider.hpp"
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // only json signatures below; full type lives in responses.cpp
 #include <string>
 #include <string_view>
 #include <vector>
