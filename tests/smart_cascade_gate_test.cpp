@@ -14,9 +14,10 @@
 // a Complex turn's decomposition exactly once) against an isolated temp root.
 
 #include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <string>
+
+#include "agtest.hpp"
 
 #include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/domain/routing_memory.hpp"
@@ -37,11 +38,6 @@ using agentty::ToolCallId;
 using agentty::ToolName;
 using agentty::ToolUse;
 using nlohmann::json;
-
-static int g_fail = 0;
-#define CHECK(cond, msg) do { \
-    if (!(cond)) { std::printf("FAIL: %s\n", msg); ++g_fail; } \
-} while (0)
 
 // A `task` delegation call in a given terminal state.
 static ToolUse task_call(const std::string& agent_type, bool done) {
@@ -90,7 +86,7 @@ static Model make_turn(bool tools_done) {
     return m;
 }
 
-int main() {
+TEST_CASE("smart cascade decomposition gate") {
     // Isolate both stores in a temp workspace.
     auto root = fs::temp_directory_path() /
                 ("agentty_cascade_" + std::to_string(
@@ -152,6 +148,4 @@ int main() {
     }
 
     fs::remove_all(root);
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }

@@ -1562,6 +1562,11 @@ if(AGENTTY_BUILD_TESTS)
         stream_liveness_test
         wire_golden_test
         wire_shared_test
+        complexity_test
+        copilot_token_test
+        routing_memory_test
+        smart_cascade_gate_test
+        chatgpt_bundled_models_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2206,7 +2211,7 @@ if(AGENTTY_BUILD_TESTS)
     # expired() refresh decision. These are exactly the spots every other
     # Copilot integration got subtly wrong (mid-turn 401s, 404s).
     agentty_add_full_test(copilot_token_test)
-    set_tests_properties(copilot_token_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(copilot_token_test 30)
 
     # chatgpt_bundled_models_test — regression guard for the retired
     # `gpt-5.1-codex` slug. When unsigned (the CI state) the ChatGPT provider's
@@ -2215,7 +2220,7 @@ if(AGENTTY_BUILD_TESTS)
     # supported when using Codex with a ChatGPT account") and must default to
     # the stable `gpt-5`. No network.
     agentty_add_full_test(chatgpt_bundled_models_test)
-    set_tests_properties(chatgpt_bundled_models_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(chatgpt_bundled_models_test 30)
 
     # ollama_transport_test — verifies the DEDICATED Ollama /api/chat
     # transport: native build_messages (object-form tool args + role:tool
@@ -2444,13 +2449,13 @@ if(AGENTTY_BUILD_TESTS)
     # (smart::classify_complexity): the conservative Trivial/Simple/Standard/
     # Complex calibration that drives Smart-Mode effort scaling. Pure, no I/O.
     agentty_add_full_test(complexity_test)
-    set_tests_properties(complexity_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(complexity_test 30)
 
     # routing_memory_test — the per-workspace learned routing prior
     # (smart::RoutingMemory): Beta-smoothed regret accounting keyed by turn
     # signature, persisted to .agentty/routing_memory.tsv. Isolated temp root.
     agentty_add_full_test(routing_memory_test)
-    set_tests_properties(routing_memory_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(routing_memory_test 30)
 
     # decomposition_memory_test — retrieval-augmented orchestration store
     # (smart::DecompositionMemory): capture successful decompositions, recall
@@ -2463,7 +2468,7 @@ if(AGENTTY_BUILD_TESTS)
     # (decomposition record, bias decay) fire ONCE at the final settle, never
     # on an intermediate StopReason::ToolUse or a still-pending-tools settle.
     agentty_add_full_test(smart_cascade_gate_test)
-    set_tests_properties(smart_cascade_gate_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(smart_cascade_gate_test 30)
 
     # settings_default_test — pins the SHIPPED default permission profile: a
     # fresh install (no settings.json) and a legacy config missing the
@@ -2680,7 +2685,6 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
-        copilot_token_test
         compaction_threshold_test
         fsm_test
         concurrency_primitives_test
@@ -2743,7 +2747,6 @@ if(AGENTTY_BUILD_TESTS)
         fuzzy_match_smoke
         param_tag_repair_test
         model_caps_test
-        copilot_token_test
         compaction_threshold_test
         agentty_tests
         fsm_test
@@ -2786,8 +2789,6 @@ if(AGENTTY_BUILD_TESTS)
         table_render_test
         openai_transport_test
         codex_responses_test
-        copilot_token_test
-        chatgpt_bundled_models_test
         ollama_transport_test
         rag_adapter_test
         reveal_freeze_gate_probe
@@ -2808,9 +2809,6 @@ if(AGENTTY_BUILD_TESTS)
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
-        complexity_test
-        routing_memory_test
-        smart_cascade_gate_test
         settings_default_test
         dup_tool_call_id_test
         salvage_dedup_test

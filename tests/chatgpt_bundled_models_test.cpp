@@ -16,9 +16,10 @@
 //
 // Run: build the `chatgpt_bundled_models_test` target, execute. Exit 0 = pass.
 
-#include <cstdio>
 #include <string>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
@@ -26,16 +27,7 @@
 using namespace agentty;
 namespace cc = agentty::provider::chatgpt;
 
-static int g_failures = 0;
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-            ++g_failures;                                                      \
-        }                                                                      \
-    } while (0)
-
-int main() {
+TEST_CASE("chatgpt bundled model catalog") {
     const bool signed_in = cc::responses_available();
 
     auto models = cc::list_models();
@@ -66,12 +58,5 @@ int main() {
         CHECK(def == "gpt-5");
     }
 
-    if (g_failures) {
-        std::fprintf(stderr, "chatgpt_bundled_models_test: %d failure(s) "
-                     "(signed_in=%d)\n", g_failures, (int)signed_in);
-        return 1;
-    }
-    std::printf("chatgpt_bundled_models_test: OK (signed_in=%d)\n",
-                (int)signed_in);
-    return 0;
+    (void)signed_in;
 }

@@ -6,8 +6,9 @@
 // 401s, or ignoring endpoints.api → 404s on Business/Enterprise). Also pins
 // that Copilot-fronted model ids resolve to sane capabilities.
 
-#include <cstdio>
 #include <string>
+
+#include "agtest.hpp"
 
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/domain/catalog.hpp"
@@ -15,12 +16,7 @@
 using namespace agentty;
 using namespace agentty::provider::copilot;
 
-static int g_fail = 0;
-#define CHECK(cond, msg) do { \
-    if (!(cond)) { std::printf("FAIL: %s\n", msg); ++g_fail; } \
-} while (0)
-
-int main() {
+TEST_CASE("copilot token exchange + expiry") {
     constexpr std::int64_t kNow = 1'000'000'000'000;   // fixed "now" in ms
 
     // ── refresh_in drives a skew-safe LOCAL expiry (now + refresh_in + 60s) ──
@@ -120,7 +116,4 @@ int main() {
         (void)gpt; (void)claude;   // from_id must not crash on these ids
         CHECK(true, "from_id handles Copilot model ids without crashing");
     }
-
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }
