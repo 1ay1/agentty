@@ -475,30 +475,70 @@ Step login_submit(Model m) {
         while (!spec.empty() && (spec.back() == '\r' || spec.back() == '\n'
                                || spec.back() == ' ' || spec.back() == '\t'))
             spec.pop_back();
-        // Strip a leading scheme if the user pasted a URL — from_spec wants
-        // a bare host[:port].
-        for (std::string_view pfx : {"http://", "https://"})
-            if (spec.rfind(pfx, 0) == 0) { spec.erase(0, pfx.size()); break; }
-        // Trim a trailing slash / path — only host[:port] is meaningful.
-        if (auto slash = spec.find('/'); slash != std::string::npos)
-            spec.erase(slash);
         if (spec.empty()) {
             m.ui.login = login::Failed{"no host entered"};
             return done(std::move(m));
         }
 
-        // Custom hosts are treated as keyless local/compatible endpoints;
-        // resolve_auth_for still consults the OPENAI_API_KEY chain in case
-        // the user is fronting a keyed proxy. Load Anthropic creds fresh from
-        // disk (NOT deps().auth) so resolve_auth_for never echoes the current
-        // provider's empty key — same footgun the picker guards against.
+        // Remote (TLS) custom hosts need an API key — local servers
+        // (http://, bare host:port) conventionally don't. For TLS hosts,
+        // hand off to the ApiKeyInput modal instead of committing immediately:
+        // the user pastes a key, it's saved to provider_keys[spec], and the
+        // existing ApiKeyInput arm commits the switch. Esc at the key prompt
+        // dispatches CloseLogin → no switch (matching how Esc works for
+        // every other login sub-state). For non-TLS hosts, fall through to
+        // the keyless commit path below.
+        const bool needs_key = provider::parse_selection(spec)
+                                   .openai_endpoint.use_tls;
+        if (needs_key) {
+            std::string label = provider::provider_display_name(
+                provider::parse_selection(spec));
+            // Pre-fill the key field with any key already saved for this
+            // spec so re-entering a known host shows its current key (masked)
+            // for confirmation/edit, not a blank field.
+            std::string existing_key;
+            {
+                auto settings = deps().load_settings();
+                if (auto it = settings.provider_keys.find(spec);
+                    it != settings.provider_keys.end())
+                    existing_key = it->second;
+            }
+            // Capture size BEFORE the move: designated initializers evaluate
+            // in declaration order (key_input before cursor), so
+            // std::move(existing_key) into .key_input would leave
+            // existing_key moved-from when .cursor reads .size().
+            const int key_len = static_cast<int>(existing_key.size());
+            m.ui.login = login::ApiKeyInput{
+                .key_input      = std::move(existing_key),
+                .cursor         = key_len,
+                .provider       = spec,
+                .provider_label = std::move(label),
+            };
+            return done(std::move(m));
+        }
+
+        // Non-TLS (local) host: no key needed. Resolve auth (will be empty
+        // for local servers, which is correct — list_models only short-
+        // circuits on use_tls && is_empty(auth)) and commit immediately.
+        // Reuse provider_keys[spec] if present (a keyed local proxy the
+        // user previously configured); otherwise the OPENAI_API_KEY chain
+        // is consulted as a fallback.
         auth::AuthHeader anthropic_creds = deps().auth;
         if (auto saved = auth::load_credentials())
             anthropic_creds = auth::make_auth_header(*saved);
-        auth::AuthHeader new_auth =
-            provider::resolve_auth_for(spec, anthropic_creds);
+        std::string saved_provider_key;
+        {
+            auto settings = deps().load_settings();
+            if (auto it = settings.provider_keys.find(spec);
+                it != settings.provider_keys.end())
+                saved_provider_key = it->second;
+        }
+        auth::AuthHeader new_auth = provider::resolve_auth_for(
+            spec, anthropic_creds, /*cli_key=*/{}, saved_provider_key);
         m.ui.login = login::Closed{};
-        return commit_provider_switch(std::move(m), spec, std::move(new_auth), spec);
+        return commit_provider_switch(std::move(m), spec, std::move(new_auth),
+                                      provider::provider_display_name(
+                                          provider::parse_selection(spec)));
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
         std::string key = std::move(api->key_input);

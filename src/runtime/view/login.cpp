@@ -381,7 +381,9 @@ Element panel_custom_host(const login::CustomHostInput& s) {
         "Enter a host or host:port for any server that speaks the OpenAI "
         "chat API \xe2\x80\x94 llama.cpp, vLLM, LM Studio, a proxy, or a "
         "remote box. A non-443 port uses plain HTTP (the local-server "
-        "convention); a bare host uses HTTPS on 443.",
+        "convention); a bare host uses HTTPS on 443. For a server that "
+        "serves on a path prefix instead of /v1, paste the full URL "
+        "(https://host/path) and the prefix will be honoured.",
         fg_dim(muted)));
     rows.push_back(text(""));
     rows.push_back(input_row(s.host_input, s.cursor, /*secret=*/false,
@@ -389,7 +391,7 @@ Element panel_custom_host(const login::CustomHostInput& s) {
     rows.push_back(text(""));
     rows.push_back(body_text(
         "Examples:  localhost:8080  \xc2\xb7  127.0.0.1:1234  \xc2\xb7  "
-        "inference.example.com",
+        "inference.example.com  \xc2\xb7  https://inference.example.com/api",
         fg_dim(muted)));
     rows.push_back(text(""));
     rows.push_back(key_hints({{"Enter", "connect"}, {"Esc", "cancel"}}));
