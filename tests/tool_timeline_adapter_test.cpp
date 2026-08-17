@@ -3,12 +3,13 @@
 
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/runtime/model.hpp"
@@ -21,16 +22,7 @@ namespace A = agentty;
 namespace U = agentty::ui;
 using Kind = maya::ToolBodyPreview::Kind;
 
-static int checks = 0;
-static int failures = 0;
 
-static void check(bool ok, const std::string& label) {
-    ++checks;
-    if (!ok) {
-        ++failures;
-        std::printf("FAIL: %s\n", label.c_str());
-    }
-}
 
 static A::ToolUse make_tool(std::string name, A::ToolUse::Status status,
                             nlohmann::json args = nlohmann::json::object()) {
@@ -52,7 +44,7 @@ static bool visible(const maya::ToolBodyPreview::Config& body) {
     }
 }
 
-int main() {
+TEST_CASE("tool timeline adapter") {
     static constexpr std::array<const char*, 33> native_tools = {
         "read", "edit", "write", "move", "remove", "bash",
         "process_start", "process_poll", "process_stop",
@@ -385,7 +377,4 @@ int main() {
     if (old_lines_raw) setenv("LINES", old_lines.c_str(), 1);
     else unsetenv("LINES");
 #endif
-
-    std::printf("%d checks, %d failures\n", checks, failures);
-    return failures == 0 ? 0 : 1;
 }

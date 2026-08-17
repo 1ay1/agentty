@@ -1570,6 +1570,10 @@ if(AGENTTY_BUILD_TESTS)
         settings_default_test
         dup_tool_call_id_test
         salvage_dedup_test
+        compaction_wire_test
+        plugins_in_model_test
+        tool_stream_snapshot_test
+        tool_timeline_adapter_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2348,7 +2352,7 @@ if(AGENTTY_BUILD_TESTS)
     # ACP rawInput updates are full replacement snapshots, not append deltas.
     # Drive the real stream reducer with interleaved IDs and snapshot rewrites.
     agentty_add_full_test(tool_stream_snapshot_test)
-    set_tests_properties(tool_stream_snapshot_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(tool_stream_snapshot_test 30)
 
     # persistence_proactive_test — the proactive-context marker + retrieval
     # confidence survive a real save→disk→load round-trip (public
@@ -2376,7 +2380,7 @@ if(AGENTTY_BUILD_TESTS)
     # uncompacted; a compacted fork's summary subsumes the note, still
     # User-first). Companion to compaction_threshold_test (the WHEN).
     agentty_add_full_test(compaction_wire_test)
-    set_tests_properties(compaction_wire_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(compaction_wire_test 30)
 
     # plugins_in_model_test — the Plugins panel is a pure function of the Model
     # (m.ui.plugins), connection driven by Cmd→Msg. Locks the redesign that
@@ -2384,7 +2388,7 @@ if(AGENTTY_BUILD_TESTS)
     # loading + returns a Cmd; PluginsUpdated stores the snapshot; items_for is
     # a pure projection (no live pool call).
     agentty_add_full_test(plugins_in_model_test)
-    set_tests_properties(plugins_in_model_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(plugins_in_model_test 30)
 
     # mcp_reload_race_test — concurrent connect+snapshot must not crash. Locks
     # the SIGSEGV fix where connect_initial_mcp() and mcp_reload() could run
@@ -2775,7 +2779,6 @@ if(AGENTTY_BUILD_TESTS)
         cross_process_lock_test
         keystore_test
         midrun_seam_test
-        tool_timeline_adapter_test
         midrun_wire_test
         turn_settle_test
         fork_test
@@ -2802,11 +2805,8 @@ if(AGENTTY_BUILD_TESTS)
         subagent_report_test
         tool_wedge_liveness_test
         proactive_deferred_test
-        tool_stream_snapshot_test
         persistence_proactive_test
         transcript_bound_test
-        compaction_wire_test
-        plugins_in_model_test
         mcp_reload_race_test
         plugin_disabled_tools_test
         codex_login_flow_test

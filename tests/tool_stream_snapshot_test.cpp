@@ -1,9 +1,10 @@
 // tool_stream_snapshot_test — canonical ID-addressed append/snapshot semantics.
 
 #include <chrono>
-#include <cstdio>
 #include <string>
 #include <utility>
+
+#include "agtest.hpp"
 
 #include "agentty/io/http.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
@@ -13,17 +14,6 @@
 namespace A = agentty;
 namespace D = agentty::app::detail;
 
-static int checks = 0;
-static int failures = 0;
-
-static void check(bool ok, const char* label) {
-    ++checks;
-    if (!ok) {
-        ++failures;
-        std::printf("FAIL: %s\n", label);
-    }
-}
-
 static A::Model apply(A::Model m, A::msg::StreamMsg event) {
     auto [next, cmd] = D::stream_update(std::move(m), std::move(event));
     (void)cmd;
@@ -32,7 +22,7 @@ static A::Model apply(A::Model m, A::msg::StreamMsg event) {
     return std::move(next);
 }
 
-int main() {
+TEST_CASE("tool stream snapshot") {
     {
         auto decoded = A::http::test::decode_chunked({
             "4\r\nWi", "ki\r\n5;ext=yes\r\nped", "ia\r\n0\r\n", "\r\n"});
@@ -137,7 +127,4 @@ int main() {
           "append deltas are assembled by call id across interleaving");
     check(interleaved[3].args_streaming == R"({"command":"true"})",
           "a sibling delta never appends to the newest call implicitly");
-
-    std::printf("%d checks, %d failures\n", checks, failures);
-    return failures == 0 ? 0 : 1;
 }

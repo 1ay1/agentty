@@ -19,19 +19,15 @@
 //      later compacted, the summary subsumes the fork_note prefix and the
 //      wire still starts with a User.
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/domain/conversation.hpp"
 
-#include <cstdio>
 #include <string>
 
 using namespace agentty;
 
-static int g_fails = 0;
-static void check(bool ok, const std::string& what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what.c_str());
-    if (!ok) ++g_fails;
-}
 
 static Message umsg(std::string t) {
     Message m; m.role = Role::User; m.text = std::move(t); return m;
@@ -40,7 +36,7 @@ static Message amsg(std::string t) {
     Message m; m.role = Role::Assistant; m.text = std::move(t); return m;
 }
 
-int main() {
+TEST_CASE("compaction wire") {
     // ── 1: no compaction → raw transcript verbatim ──
     {
         Thread t;
@@ -165,8 +161,4 @@ int main() {
         check(wire.back().text == "a2",
               "fork+compaction: raw tail after the boundary preserved");
     }
-
-    if (g_fails == 0) { std::printf("\nAll compaction-wire tests passed.\n"); return 0; }
-    std::printf("\n%d compaction-wire test(s) FAILED.\n", g_fails);
-    return 1;
 }
