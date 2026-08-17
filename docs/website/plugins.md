@@ -47,6 +47,7 @@ Open the command palette with [[Ctrl+K]] and choose **Plugins** to see every con
 
 - **Add** a plugin inline — press [[a]] and type a `name command args…` spec (e.g. `playwright npx -y @playwright/mcp`); it's written to `mcp.json` and the server connects immediately, no restart.
 - **Enable/disable individual tools** per server.
+- **Approve** an untrusted project server ([[Enter]] on a *trust & enable* row) to let its config connect.
 - **Remove** a plugin.
 
 A warning appears if you've left an unusually large number of tools active — too many tool schemas dilute the model's tool choice (see the tool-budget note below). The `agentty plugin add` CLI does the same thing from a shell.
@@ -63,7 +64,7 @@ The **Plugins** picker shows servers from both, badged with the scope they came 
 Every edit in the picker — enable/disable a server, toggle a tool, remove — writes back to the **file that server actually came from**, so toggling a project server edits the project `mcp.json` and a user server edits yours; the two never cross. Adding a new plugin inline writes to your user config by default.
 
 :::note
-Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you vouch for the config — either set `AGENTTY_MCP_ALLOW_PROJECT=1`, or approve the file's exact contents (recorded under `~/.agentty`, so a clone can't approve itself). Edit the `mcp.json` afterwards and the approval is voided — you re-approve the new contents, so a swapped command can never ride in on an old trust. Untrusted project servers still show in the picker (labelled *untrusted project config — approve to enable*) so you can see what a repo declares. HTTP/SSE servers spawn no local command and aren't gated this way.
+Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you vouch for the config — either set `AGENTTY_MCP_ALLOW_PROJECT=1`, or approve the file's exact contents. In the **Plugins** picker an untrusted project server is labelled *untrusted project config — approve to enable*; press [[Enter]] on it (*trust & enable*) to record the approval and connect. Approvals are recorded under `~/.agentty` so a clone can't approve itself, and editing the `mcp.json` afterwards voids the approval — you re-approve the new contents, so a swapped command can never ride in on an old trust. HTTP/SSE servers spawn no local command and aren't gated this way.
 :::
 
 ## The tool budget
