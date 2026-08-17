@@ -14,25 +14,18 @@
 //
 // Run: build the `ollama_transport_test` target, execute. Exit 0 = pass.
 
-#include <cstdio>
 #include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/provider/ollama/transport.hpp"
 
 using namespace agentty;
 namespace oll = agentty::provider::ollama;
 
-static int g_failures = 0;
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-            ++g_failures;                                                      \
-        }                                                                      \
-    } while (0)
 
 template <class Leaf>
 const Leaf* get_leaf(const Msg& m) {
@@ -63,7 +56,7 @@ static std::string joined_text(const std::vector<Msg>& msgs) {
 static std::string joined_tool_args(const std::vector<Msg>& msgs);
 
 // ── 1. build_messages ────────────────────────────────────────────────────────
-static void test_build_messages_text() {
+TEST_CASE("build messages text") {
     std::vector<Message> msgs;
     Message u; u.role = Role::User; u.text = "hello"; msgs.push_back(u);
     Message a; a.role = Role::Assistant; a.text = "hi there"; msgs.push_back(a);
@@ -77,7 +70,7 @@ static void test_build_messages_text() {
     CHECK(arr[1]["content"] == "hi there");
 }
 
-static void test_build_messages_tool_calls() {
+TEST_CASE("build messages tool calls") {
     // Assistant message with a terminal tool call → assistant msg carries
     // tool_calls[{id, function:{name, arguments:OBJECT}}] AND a separate
     // role:"tool" message with tool_name + content follows it.
@@ -115,7 +108,7 @@ static void test_build_messages_tool_calls() {
 // models have the SMALLEST context windows, so a stale 60 KiB dump replaying
 // in full every turn hurts most here. Exercised on BOTH the native role:"tool"
 // path and the JSON-protocol "TOOL RESULT (name):" user-turn path.
-static void test_build_messages_age_tiering() {
+TEST_CASE("build messages age tiering") {
     std::string big = "HEAD_SENTINEL_AAAA\n";
     big.append(60 * 1024, 'x');
     big += "\nTAIL_SENTINEL_ZZZZ";
@@ -170,7 +163,7 @@ static void test_build_messages_age_tiering() {
     }
 }
 
-static void test_build_messages_images() {
+TEST_CASE("build messages images") {
     std::vector<Message> msgs;
     Message u; u.role = Role::User; u.text = "what is this?";
     ImageContent img; img.media_type = "image/png"; img.bytes = "abc";
@@ -186,7 +179,7 @@ static void test_build_messages_images() {
 }
 
 // ── 2. parse_ndjson ──────────────────────────────────────────────────────────
-static void test_ndjson_plain_text() {
+TEST_CASE("ndjson plain text") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello \"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Ayush\"}}\n"
@@ -201,7 +194,7 @@ static void test_ndjson_plain_text() {
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
-static void test_ndjson_structured_tool_call() {
+TEST_CASE("ndjson structured tool call") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\","
         "\"tool_calls\":[{\"id\":\"call_x\",\"function\":{\"name\":\"read\","
@@ -224,7 +217,7 @@ static void test_ndjson_structured_tool_call() {
     CHECK(tool_stop);
 }
 
-static void test_ndjson_content_salvage_to_tool() {
+TEST_CASE("ndjson content salvage to tool") {
     // A weak model leaks a tool call as bare JSON in CONTENT. With the tool
     // advertised, it is salvaged into a STRUCTURED call (not shown as text).
     std::string nd =
@@ -245,7 +238,7 @@ static void test_ndjson_content_salvage_to_tool() {
     CHECK(joined_text(msgs).find("\"name\"") == std::string::npos);
 }
 
-static void test_ndjson_no_tools_means_no_salvage() {
+TEST_CASE("ndjson no tools means no salvage") {
     // With NO tools advertised, JSON-looking content is plain text — there's
     // nothing to salvage to, so don't swallow legitimate prose.
     std::string nd =
@@ -258,7 +251,7 @@ static void test_ndjson_no_tools_means_no_salvage() {
     CHECK(joined_text(msgs).find("\"name\"") != std::string::npos);
 }
 
-static void test_ndjson_footgun_tool_swallowed() {
+TEST_CASE("ndjson footgun tool swallowed") {
     // A leaked `remember` call (footgun tool) is NEVER auto-run AND never
     // surfaced as garbage text — it is silently swallowed.
     std::string nd =
@@ -272,7 +265,7 @@ static void test_ndjson_footgun_tool_swallowed() {
     CHECK(joined_text(msgs).find("remember") == std::string::npos);  // not shown
 }
 
-static void test_ndjson_explicit_memory_tool_salvaged() {
+TEST_CASE("ndjson explicit memory tool salvaged") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"name\\\":\\\"remember\\\",\\\"arguments\\\":"
@@ -287,7 +280,7 @@ static void test_ndjson_explicit_memory_tool_salvaged() {
     CHECK(joined_tool_args(msgs) == std::string{"{\"text\":\"hi\"}"});
 }
 
-static void test_ndjson_rescue_tool_from_prose() {
+TEST_CASE("ndjson rescue tool from prose") {
     // qwen narrates prose AND buries a tool call in a ```sh fenced block. The
     // terminal rescue scan must find it and salvage it into a real call.
     std::string nd =
@@ -306,7 +299,7 @@ static void test_ndjson_rescue_tool_from_prose() {
     CHECK(saw_args);
 }
 
-static void test_ndjson_unknown_tool_in_prose_not_salvaged() {
+TEST_CASE("ndjson unknown tool in prose not salvaged") {
     // A fenced block naming a NON-advertised tool (qwen hallucinates `git`)
     // must NOT be salvaged — there's no such tool to call.
     std::string nd =
@@ -319,7 +312,7 @@ static void test_ndjson_unknown_tool_in_prose_not_salvaged() {
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
-static void test_ndjson_error_frame() {
+TEST_CASE("ndjson error frame") {
     std::string nd = "{\"error\":\"model not found\"}\n";
     auto msgs = oll::parse_ndjson_for_test(nd);
     bool saw_err = false;
@@ -345,7 +338,7 @@ static std::string first_tool_name(const std::vector<Msg>& msgs) {
 }
 
 // Clean single-object {thoughts, tool_name, tool_args} → one tool call.
-static void test_jp_clean_object() {
+TEST_CASE("jp clean object") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"thoughts\\\":[\\\"list files\\\"],\\\"tool_name\\\":"
@@ -360,7 +353,7 @@ static void test_jp_clean_object() {
 }
 
 // Leading narration before the object ("Sure! {...}") still salvages.
-static void test_jp_object_with_leading_prose() {
+TEST_CASE("jp object with leading prose") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"Sure, here goes: {\\\"tool_name\\\":\\\"bash\\\","
@@ -373,7 +366,7 @@ static void test_jp_object_with_leading_prose() {
 }
 
 // `tool`/`args` aliases (loose schema) are accepted.
-static void test_jp_tool_args_aliases() {
+TEST_CASE("jp tool args aliases") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"tool\\\":\\\"write\\\",\\\"args\\\":"
@@ -386,7 +379,7 @@ static void test_jp_tool_args_aliases() {
 }
 
 // tool_name with a `tool:action` suffix → args.action injected.
-static void test_jp_action_suffix() {
+TEST_CASE("jp action suffix") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"tool_name\\\":\\\"bash:run\\\",\\\"tool_args\\\":"
@@ -399,7 +392,7 @@ static void test_jp_action_suffix() {
 }
 
 // Plain chat (no tool) in JSON-protocol mode → prose, no phantom call.
-static void test_jp_plain_chat_no_tool() {
+TEST_CASE("jp plain chat no tool") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello! How can I help?\"},"
         "\"done\":true,\"done_reason\":\"stop\"}\n";
@@ -410,7 +403,7 @@ static void test_jp_plain_chat_no_tool() {
 
 // A tool_args object that itself contains a `}` inside a quoted string must
 // not truncate the balanced-object extraction.
-static void test_jp_brace_in_string_value() {
+TEST_CASE("jp brace in string value") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"tool_name\\\":\\\"bash\\\",\\\"tool_args\\\":"
@@ -422,7 +415,7 @@ static void test_jp_brace_in_string_value() {
 }
 
 // An unknown tool_name in JSON-protocol mode is NOT salvaged into a call.
-static void test_jp_unknown_tool_not_salvaged() {
+TEST_CASE("jp unknown tool not salvaged") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"tool_name\\\":\\\"frobnicate\\\",\\\"tool_args\\\":{}}\"},"
@@ -433,7 +426,7 @@ static void test_jp_unknown_tool_not_salvaged() {
 
 // Grammar `response` pseudo-tool: tool_name=="response" with text in tool_args
 // is unwrapped into a plain text delta — no phantom tool call, no raw JSON.
-static void test_jp_response_pseudo_tool() {
+TEST_CASE("jp response pseudo tool") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"thoughts\\\":[\\\"hi\\\"],\\\"tool_name\\\":\\\"response\\\","
@@ -448,7 +441,7 @@ static void test_jp_response_pseudo_tool() {
 
 // Grammar-forced tool call: tool_name=="bash" with command in tool_args fires
 // a real bash tool-use start/delta/end carrying the args.
-static void test_jp_grammar_tool_call() {
+TEST_CASE("jp grammar tool call") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"thoughts\\\":[\\\"list files\\\"],\\\"tool_name\\\":\\\"bash\\\","
@@ -463,7 +456,7 @@ static void test_jp_grammar_tool_call() {
 
 // The `response` text may also be carried under the `response` key in
 // tool_args (some models pick that alias instead of `text`).
-static void test_jp_response_alias_key() {
+TEST_CASE("jp response alias key") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"{\\\"tool_name\\\":\\\"response\\\","
@@ -480,7 +473,7 @@ static void test_jp_response_alias_key() {
 // reveal_fx animates the typewriter — and the full reply text must appear
 // EXACTLY ONCE (no duplication at the done/freeze handoff). This is the fix
 // for the qwen2.5-coder "Hi Ayush!Hi Ayush!" duplication + frozen-md bug.
-static void test_jp_response_streamed_incrementally() {
+TEST_CASE("jp response streamed incrementally") {
     // {"tool_name":"response","tool_args":{"text":"Hello Ayush!"}}
     // delivered char-by-char like Ollama's grammar-constrained stream.
     auto frame = [](const std::string& c) {
@@ -522,7 +515,7 @@ static void test_jp_response_streamed_incrementally() {
 
 // Escaped characters inside the streamed reply (\n, \", \\) must be decoded
 // correctly even when the escape straddles a frame boundary.
-static void test_jp_response_streamed_escapes() {
+TEST_CASE("jp response streamed escapes") {
     // tool_args.text == 'line1\nsay "hi"'  (a newline + an escaped quote)
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
@@ -538,7 +531,7 @@ static void test_jp_response_streamed_escapes() {
 
 // A REAL tool call streamed char-by-char must NOT be hijacked by the
 // progressive-response path — it still fires a tool-use, no text leaks.
-static void test_jp_streamed_tool_call_not_hijacked() {
+TEST_CASE("jp streamed tool call not hijacked") {
     auto frame = [](const std::string& esc) {
         return "{\"message\":{\"role\":\"assistant\",\"content\":\""
              + esc + "\"}}\n";
@@ -562,7 +555,7 @@ static void test_jp_streamed_tool_call_not_hijacked() {
 // emitted char-by-char, INCLUDING the model's trailing " }" frame that used to
 // leak a stray brace onto the reply. This replays the exact bytes off the wire
 // so the fix is proven against the model, not just a hand-written fixture.
-static void test_jp_live_capture_qwen() {
+TEST_CASE("jp live capture qwen") {
     static const char* kFrames[] = {
         "{\"message\":{\"role\":\"assistant\",\"content\":\"{\"}}",
         "{\"message\":{\"role\":\"assistant\",\"content\":\" \\\"\"}}",
@@ -606,7 +599,7 @@ static void test_jp_live_capture_qwen() {
 }
 
 // ── 5. build_options (num_ctx / num_predict / sampling) ──────────────────────
-static void test_options_unknown_window_default() {
+TEST_CASE("options unknown window default") {
     // No probed context window → safe agent-sized default 8192, well above
     // Ollama's 2k/4k floor that silently truncates long conversations.
     oll::Request r;
@@ -618,7 +611,7 @@ static void test_options_unknown_window_default() {
     CHECK(o["num_predict"].get<int>() == 4096);
 }
 
-static void test_options_probed_window() {
+TEST_CASE("options probed window") {
     // A real 32768-window model gets that window (clamped to the 32768 ceiling).
     oll::Request r;
     r.max_tokens = 16384;
@@ -628,7 +621,7 @@ static void test_options_probed_window() {
     CHECK(o["num_predict"].get<int>() == 16384);  // half of 32768, == max_tokens
 }
 
-static void test_options_huge_window_clamped() {
+TEST_CASE("options huge window clamped") {
     // A 128k-window model is clamped to the agent ceiling so we don't try to
     // allocate a giant KV cache and OOM the local Ollama server.
     oll::Request r;
@@ -638,7 +631,7 @@ static void test_options_huge_window_clamped() {
     CHECK(o["num_ctx"].get<int>() == 32768);
 }
 
-static void test_options_small_window_floored() {
+TEST_CASE("options small window floored") {
     // A model that reports a tiny window still gets the agent floor.
     oll::Request r;
     r.max_tokens = 16384;
@@ -647,7 +640,7 @@ static void test_options_small_window_floored() {
     CHECK(o["num_ctx"].get<int>() == 8192);
 }
 
-static void test_options_json_protocol_sampling() {
+TEST_CASE("options json protocol sampling") {
     // Weak/json-protocol path gets a low temperature for tool-call reliability.
     oll::Request r;
     r.max_tokens = 16384;
@@ -665,7 +658,7 @@ static void test_options_json_protocol_sampling() {
 }
 
 // ── 6. <think> reasoning stripping ───────────────────────────────────────────
-static void test_think_block_stripped_from_prose() {
+TEST_CASE("think block stripped from prose") {
     // A reasoning model inlines <think>…</think> then answers. Only the answer
     // is shown; the reasoning never reaches the user.
     std::string nd =
@@ -679,7 +672,7 @@ static void test_think_block_stripped_from_prose() {
     CHECK(joined_text(msgs).find("<think>") == std::string::npos);
 }
 
-static void test_think_then_tool_call_salvaged() {
+TEST_CASE("think then tool call salvaged") {
     // The model thinks, then leaks a tool call in content. The <think> block
     // must NOT defeat the hold/salvage path — the tool call still fires.
     std::string nd =
@@ -696,7 +689,7 @@ static void test_think_then_tool_call_salvaged() {
 }
 
 // ── 3. system_prompt ─────────────────────────────────────────────────────────
-static void test_system_prompt_shape() {
+TEST_CASE("system prompt shape") {
     auto p = oll::system_prompt();
     CHECK(p.find("agentty") != std::string::npos);
     CHECK(p.find("CONVERSATION MEMORY") != std::string::npos);
@@ -711,7 +704,7 @@ static void test_system_prompt_shape() {
 // model's own {tool_name,tool_args} object (assistant role) and the result as
 // a plain USER "TOOL RESULT (name):" turn — NOT the native tool_calls[]/
 // role:"tool" shape a prose-only model can't read.
-static void test_build_messages_json_protocol_roundtrip() {
+TEST_CASE("build messages json protocol roundtrip") {
     std::vector<Message> msgs;
     Message a; a.role = Role::Assistant; a.text = "";
     ToolUse tc;
@@ -741,7 +734,7 @@ static void test_build_messages_json_protocol_roundtrip() {
 // ── NEW: arg-key repair on the NATIVE structured channel ─────────────────────
 // A weak model on the native channel emits `bash` with {"cmd":...} instead of
 // {"command":...}; the parser must remap it to the canonical key.
-static void test_ndjson_native_arg_key_repair() {
+TEST_CASE("ndjson native arg key repair") {
     const char* nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\","
         "\"tool_calls\":[{\"function\":{\"name\":\"bash\","
@@ -760,7 +753,7 @@ static void test_ndjson_native_arg_key_repair() {
 // ── NEW: arg-key repair on the SALVAGE channel ───────────────────────────────
 // A leaked {"tool_name":"read","tool_args":{"file":"x.c"}} must land as
 // {"path":"x.c"} so the read tool actually finds its argument.
-static void test_jp_salvage_arg_key_repair() {
+TEST_CASE("jp salvage arg key repair") {
     const char* nd =
         "{\"message\":{\"role\":\"assistant\","
         "\"content\":\"{\\\"tool_name\\\":\\\"read\\\","
@@ -779,7 +772,7 @@ static void test_jp_salvage_arg_key_repair() {
 // ── Never-blank-turn safety net (Aider's `if not received_content`) ──────────
 // A qwen `response` object whose `text` is empty but whose `thoughts` carry
 // the real words must surface the thoughts as prose — never a blank turn.
-static void test_jp_response_empty_text_falls_back_to_thoughts() {
+TEST_CASE("jp response empty text falls back to thoughts") {
     // Single content frame carrying the whole {thoughts,tool_name:response,
     // tool_args:{text:""}} object, then a separate done frame. text is empty
     // so the fallback must surface `thoughts` as prose.
@@ -799,7 +792,7 @@ static void test_jp_response_empty_text_falls_back_to_thoughts() {
 // A JSON-protocol turn that produced NOTHING usable (model emitted only
 // whitespace) must still render a visible turn: Aider's exact
 // `(empty response)` placeholder, never a silent void.
-static void test_jp_truly_empty_shows_placeholder() {
+TEST_CASE("jp truly empty shows placeholder") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"   \"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},"
@@ -811,7 +804,7 @@ static void test_jp_truly_empty_shows_placeholder() {
 
 // Plain prose that merely STARTED life looking like it could be JSON but is
 // not a tool call must STILL reach the user — never a silent blank turn.
-static void test_prose_starting_with_brace_not_dropped() {
+TEST_CASE("prose starting with brace not dropped") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"Here is the answer: 42.\"}}\n"
@@ -831,7 +824,7 @@ static std::uint64_t oll_fnv1a(const std::string& s) {
     return h;
 }
 
-static void test_wire_body_golden() {
+TEST_CASE("wire body golden") {
     auto done = [](const char* id, const char* name, nlohmann::json args,
                    const std::string& out) {
         ToolUse tc; tc.id = ToolCallId{id}; tc.name = ToolName{name};
@@ -874,56 +867,3 @@ static void test_wire_body_golden() {
         CHECK(got == kGolden);
 }
 
-int main() {
-    test_build_messages_text();
-    test_build_messages_tool_calls();
-    test_build_messages_age_tiering();
-    test_build_messages_images();
-    test_ndjson_plain_text();
-    test_ndjson_structured_tool_call();
-    test_ndjson_content_salvage_to_tool();
-    test_ndjson_no_tools_means_no_salvage();
-    test_ndjson_footgun_tool_swallowed();
-    test_ndjson_explicit_memory_tool_salvaged();
-    test_ndjson_rescue_tool_from_prose();
-    test_ndjson_unknown_tool_in_prose_not_salvaged();
-    test_ndjson_error_frame();
-    test_jp_clean_object();
-    test_jp_object_with_leading_prose();
-    test_jp_tool_args_aliases();
-    test_jp_action_suffix();
-    test_jp_plain_chat_no_tool();
-    test_jp_brace_in_string_value();
-    test_jp_unknown_tool_not_salvaged();
-    test_jp_response_pseudo_tool();
-    test_jp_grammar_tool_call();
-    test_jp_response_alias_key();
-    test_jp_response_streamed_incrementally();
-    test_jp_response_streamed_escapes();
-    test_jp_streamed_tool_call_not_hijacked();
-    test_jp_live_capture_qwen();
-    test_options_unknown_window_default();
-    test_options_probed_window();
-    test_options_huge_window_clamped();
-    test_options_small_window_floored();
-    test_options_json_protocol_sampling();
-    test_think_block_stripped_from_prose();
-    test_think_then_tool_call_salvaged();
-    test_system_prompt_shape();
-    test_build_messages_json_protocol_roundtrip();
-    test_ndjson_native_arg_key_repair();
-    test_jp_salvage_arg_key_repair();
-    test_jp_response_empty_text_falls_back_to_thoughts();
-    test_jp_truly_empty_shows_placeholder();
-    test_prose_starting_with_brace_not_dropped();
-
-    // Byte-identity guard for the request serializer.
-    test_wire_body_golden();
-
-    if (g_failures == 0) {
-        std::printf("ollama_transport_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "ollama_transport_test: %d check(s) failed\n", g_failures);
-    return 1;
-}
