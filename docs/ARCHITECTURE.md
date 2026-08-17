@@ -66,6 +66,11 @@ types and inline logic; `src/` carries the heavier implementations.
 - **`tool/`** — the `Tool` concept, the registry, the permission policy, and
   one file per tool under `tool/tools/`. `memory_store.cpp` backs
   `remember`/`forget`.
+- **`scope/`** — the config-resolution algebra (`Locus × Dialect` precedence,
+  provenance-carrying `Source`, `resolve_first`/`resolve_union` folds,
+  content-bound `Trust`). One pure primitive that memory, skills, agents, and
+  slash-command discovery all fold through instead of hand-rolling roots. See
+  [`design/scope-model.md`](design/scope-model.md).
 - **`io/`** — `http`, `tls` (certificate pinning), `auth` (OAuth + PKCE),
   `persistence` (atomic writes), `clipboard`.
 - **`airgap/`** — SOCKS5-over-SSH so the agent can run on a host with no direct

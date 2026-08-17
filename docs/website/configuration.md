@@ -75,11 +75,21 @@ Credentials live under XDG config; everything else lives under `~/.agentty`.
 - `~/.config/agentty/credentials.json` — Claude OAuth token or API key, mode `0600` (honours `$XDG_CONFIG_HOME`). Plaintext JSON by default; optionally sealed with AES-256-GCM (`AGENTTY_ENCRYPT_PASSPHRASE`) and/or stored in the OS keystore (`AGENTTY_USE_KEYSTORE`). See [Authentication](/docs/authentication) for the hardening options.
 - `~/.agentty/settings.json` — persisted provider, model, per-provider models, reasoning effort, favourite models, permission profile, auto-compaction depth, and in-app-pasted provider keys.
 - `~/.agentty/threads/<id>.json` — one JSON file per thread (flat, keyed by thread id).
-- `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts.
+- `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts. Which file a fact lands in is chosen by [memory scope](#memory-scope), below.
 - `~/.agentty/skills/`, `~/.agents/skills/`, `~/.claude/skills/` — personal [Agent Skills](/docs/skills); the same three dirs under `<project>/` shadow them.
 - `~/.agentty/mcp.json` (trusted) and `<project>/.agentty/mcp.json` (gated behind `AGENTTY_MCP_ALLOW_PROJECT`) — [MCP servers](/docs/mcp) to connect on startup. `AGENTTY_MCP_CONFIG` overrides both.
 - `<project>/.agentty/rag_docs.ragdb` — the persisted [retrieval](/docs/retrieval) index (hybrid + dense vectors), so a later session opens warm without re-walking + re-embedding the docs folder. Rebuilt automatically when the corpus changes; delete to force a cold rebuild. Disable with `AGENTTY_RAG_PERSIST=0`.
 - `<project>/.agentty/rag_feedback.tsv` — the [retrieval](/docs/retrieval) learning loop's per-passage use/win counts (human-inspectable TSV). Delete to forget.
+
+## Memory scope
+
+A `remember`ed fact lives in one of two files: **project** (`<project>/.agentty/memory.jsonl`, this codebase only) or **user** (`~/.agentty/memory.jsonl`, every workspace). Project is the default — most facts you keep are about the repo in front of you.
+
+agentty routes a fact **smartly** so a personal preference never bleeds into every repo. When you (or the model) don't pin a scope, it reads the fact text: a fact plainly about *you* — first-person “I prefer” / “my name is”, personal tooling — is auto-routed to **user** scope, and the reply notes `scope→user (reason)`. A fact about the codebase — a build command, a source path, “in this project we…” — stays **project**.
+
+The correction is **one-directional and conservative**: it only ever nudges project→user (a personal fact escaping into shared project memory is the harm; the reverse is merely narrow), only when the signal is confident, and an explicit scope always wins. It's a deterministic guardrail on the model's judgment, not a second model call.
+
+Both files are plain JSONL you can inspect or hand-edit. Project scope is only offered when the project directory is writable — under `--workspace /` (no containing project) everything falls back to user scope. The same underlying scope-resolution logic also drives skills, agents, and slash-command discovery (project shadows user, native `.agentty` shadows the `.agents`/`.claude` interop dirs).
 
 ## CLAUDE.md guidance
 
