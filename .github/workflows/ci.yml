@@ -72,12 +72,20 @@ jobs:
             g++-14 cmake ninja-build pkg-config \
             libssl-dev libnghttp2-dev zlib1g-dev
 
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-gcc14-release
+          max-size: 900M
+
       - name: Configure
         env:
           CC: gcc-14
           CXX: g++-14
         run: |
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
             -DAGENTTY_BUILD_TESTS=ON
@@ -86,7 +94,7 @@ jobs:
         run: cmake --build build -j"$(nproc)" --target all tests
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)"
 
   # Rust-grade memory-safety gate. Builds agentty's OWN-logic test set under
   # -fsanitize=address,undefined and runs it: proves those paths are free of
@@ -124,12 +132,19 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             g++-14 cmake ninja-build pkg-config \
             libssl-dev libnghttp2-dev zlib1g-dev
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-gcc14-asan-ubsan
+          max-size: 600M
       - name: Configure (ASan + UBSan)
         env:
           CC: gcc-14
           CXX: g++-14
         run: |
           cmake -S . -B build-san -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
             -DAGENTTY_BUILD_TESTS=ON \
@@ -140,7 +155,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build-san -L sanitizer --output-on-failure
+        run: ctest --test-dir build-san -L sanitizer --output-on-failure -j"$(nproc)"
 
   # Compile-only Windows gate. Mirrors release.yml's build-windows configure
   # (vcpkg static openssl+nghttp2, MSVC, Release) but stops at the build:
@@ -168,8 +183,17 @@ jobs:
             sleep $((attempt * 10))
           done
           git submodule update --init --recursive --force
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\vcpkg\archives
+          key: vcpkg-x64-windows-static-openssl-nghttp2-v1
+          restore-keys: vcpkg-x64-windows-static-
       - name: Install deps (vcpkg static)
         shell: pwsh
+        env:
+          # Reuse cached .zip package archives; only rebuild on a cache miss.
+          VCPKG_BINARY_SOURCES: "clear;files,C:\\Users\\runneradmin\\AppData\\Local\\vcpkg\\archives,readwrite"
         run: |
           git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth 1 origin master
           git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
@@ -219,14 +243,25 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-ccache
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-nghttp2
             git
+      - name: ccache dir
+        uses: actions/cache@v4
+        with:
+          path: D:\a\_temp\msys64\home\runneradmin\.ccache
+          key: windows-mingw-ucrt64-ccache-${{ github.sha }}
+          restore-keys: windows-mingw-ucrt64-ccache-
       - name: Configure + build (compile only)
         run: |
+          export CCACHE_MAXSIZE=900M
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF
           cmake --build build -j
+          ccache -s
 
       # Runtime smoke test. Compile-only cannot catch MSYS2/mintty's runtime
       # path: mintty gives a native executable PIPE-backed stdio handles, not
