@@ -13,6 +13,27 @@ namespace agentty::tools::util::sandbox {
 
 namespace fs = std::filesystem;
 
+// Escape a path for safe interpolation into the macOS sandbox-exec (SBPL)
+// profile string. The workspace root is user/attacker-influenceable (via
+// --workspace / cwd) and macOS/APFS permits ", \, and control chars in
+// directory names — interpolating such a path raw would terminate the
+// (subpath "…") string early and let the remainder be reparsed as SBPL
+// (profile rejection at best, an injected (allow …) clause at worst). Escaping
+// \ and " makes the literal inert; a control char can't be represented in an
+// SBPL string at all, so such a path yields empty → the caller omits the
+// clause and fails closed. Exported (not anon-namespace) so it's unit-tested.
+std::string sbpl_escape(std::string_view path) {
+    std::string out;
+    out.reserve(path.size() + 8);
+    for (char c : path) {
+        if (c == '\0' || c == '\n' || c == '\r' || c == '\t')
+            return {};                       // uncleanable → fail closed
+        if (c == '\\' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
 namespace {
 
 // Single-process state. Set by init() at startup, read by every bash
@@ -230,8 +251,13 @@ std::atomic<Backend> g_backend{Backend::None};
     p += "(allow signal (target same-sandbox))\n";
     // Reads: broad — same rationale as bwrap's ro-bind on system dirs.
     p += "(allow file-read*)\n";
-    // Writes: workspace + tmp/cache regions only.
-    p += "(allow file-write* (subpath \"" + std::string{workspace} + "\"))\n";
+    // Writes: workspace + tmp/cache regions only. The workspace path is
+    // SBPL-escaped (see sbpl_escape). If it can't be represented safely (a
+    // control char), the workspace write clause is OMITTED entirely rather
+    // than risk a broken/injected profile — sandboxed bash then gets no
+    // workspace write access, which is safe (fail closed), not a bypass.
+    if (std::string ws = sbpl_escape(workspace); !ws.empty())
+        p += "(allow file-write* (subpath \"" + ws + "\"))\n";
     p += "(allow file-write* (subpath \"/tmp\"))\n";
     p += "(allow file-write* (subpath \"/private/tmp\"))\n";
     p += "(allow file-write* (subpath \"/private/var/folders\"))\n";   // user caches
