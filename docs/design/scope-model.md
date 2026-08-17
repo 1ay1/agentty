@@ -148,6 +148,13 @@ re-gates it — the MCPoison fix, live. `plugin::is_project_config_trusted()`
 / `approve_project_config()` are the grant/query API; an untrusted project
 server shows "untrusted project config — approve to enable" in the picker.
 
+Trust is **per-server**: it's bound to each server's own spawn identity
+(`plugin::server_spec_hash` over command + url + args), so approving one
+server doesn't bless a later-added one, and editing one server's command
+re-gates only that server. The connect loop skips each untrusted stdio
+server individually; a blanket grant (the env opt-in or a whole-file
+approval) still trusts everything and short-circuits the per-server work.
+
 ## Where it lives
 
 - `include/agentty/scope/scope.hpp` — the types + the two inline fold
