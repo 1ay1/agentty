@@ -286,4 +286,48 @@ Complexity classify_complexity(std::string_view text) noexcept {
     return classify_score(text).tier;
 }
 
+bool is_routing_correction(std::string_view text) noexcept {
+    // Lowercase only the opening — the sentiment lives at the start of a
+    // follow-up, and a bounded scan keeps this cheap on the hot reduce path.
+    std::string low;
+    low.reserve(48);
+    for (char c : text) {
+        if (low.size() >= 48) break;
+        low.push_back((c >= 'A' && c <= 'Z') ? char(c + 32) : c);
+    }
+    auto starts = [&](std::string_view p){ return low.rfind(p, 0) == 0; };
+    auto has    = [&](std::string_view p){
+        return low.find(p) != std::string_view::npos; };
+
+    // Explicit praise vetoes a correction outright ("actually that's perfect").
+    const bool positive =
+           has("perfect") || has("great") || has("thanks") || has("thank you")
+        || has("looks good") || has("lgtm") || has("nice") || has("works now")
+        || has("that works") || has("awesome") || has("exactly");
+    if (positive) return false;
+
+    // Unambiguous dissatisfaction — matches wherever it appears in the opener.
+    const bool hard_negative =
+           starts("that's wrong") || starts("thats wrong")
+        || starts("that's not")  || starts("thats not")
+        || starts("that broke")  || starts("you broke")
+        || starts("undo") || starts("revert") || starts("not quite")
+        || has("doesn't work") || has("does not work") || has("didn't work")
+        || has("still broken") || has("still fail") || has("still doesn't")
+        || has("that's incorrect") || has("is wrong") || has("was wrong");
+    if (hard_negative) return true;
+
+    // Soft openers count ONLY with a corroborating negative cue — so a bare
+    // "actually, also add tests" (additive) or "no worries" doesn't ratchet
+    // the prior. "wrong" is intentionally NOT a soft opener ("wrong file" is a
+    // redirection); genuine wrong-ness is in hard_negative above.
+    const bool soft_opener =
+           starts("no,") || starts("no ") || low == "no" || starts("nope")
+        || starts("actually");
+    const bool soft_negative_cue =
+           has(" not ") || has("n't") || has("broke") || has("fail")
+        || has("error") || has("still") || has("instead") || has("bug");
+    return soft_opener && soft_negative_cue;
+}
+
 } // namespace agentty::smart
