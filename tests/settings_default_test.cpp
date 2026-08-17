@@ -16,11 +16,12 @@
 #include "agentty/domain/profile.hpp"
 
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+
+#include "agtest.hpp"
 
 #include <unistd.h>   // getpid
 
@@ -34,13 +35,7 @@ static_assert(static_cast<std::uint8_t>(Profile::Write) == 0,
               "Profile::Write must remain the enum's zero value — the settings "
               "loader defaults a missing 'profile' key to 0, which must == Write.");
 
-static int g_fails = 0;
-static void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_fails;
-}
-
-int main() {
+TEST_CASE("settings defaults + persistence round-trip") {
     // Isolate the data dir: persistence::data_dir() resolves $HOME/.agentty.
     auto tmp = fs::temp_directory_path()
              / ("agentty_settings_test_" + std::to_string(::getpid()));
@@ -85,7 +80,4 @@ int main() {
           "save/load round-trips Minimal");
 
     fs::remove_all(tmp);
-
-    std::printf("%s\n", g_fails == 0 ? "PASSED" : "FAILED");
-    return g_fails == 0 ? 0 : 1;
 }

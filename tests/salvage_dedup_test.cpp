@@ -17,11 +17,12 @@
 //   4. The FIRST salvaged call (no prior terminal twin) is left Pending.
 //   5. Dedup scope is the current turn — a User boundary resets it.
 
-#include <cstdio>
 #include <string>
 #include <string_view>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -36,11 +37,6 @@ using nlohmann::json;
 
 namespace {
 
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 ToolUse make_call(const std::string& id, const std::string& name,
                   json args, bool terminal) {
@@ -69,8 +65,10 @@ Message user() {
     return m;
 }
 
-// ── 1. Re-leaked salvaged call (same name+args) is deduped ──────────────────
-void test_releak_same_turn_deduped() {
+} // namespace (helpers)
+
+// ── 1. Re-leaked salvaged call (same name+args) is deduped ─────────────────
+TEST_CASE("releak same turn deduped") {
     Model m;
     // One assistant message: a prior Done salvaged read + a re-leaked
     // Pending salvaged read with identical args.
@@ -89,7 +87,7 @@ void test_releak_same_turn_deduped() {
 }
 
 // ── 2. Structured duplicate is NOT deduped (deliberate intent) ──────────────
-void test_structured_duplicate_not_deduped() {
+TEST_CASE("structured duplicate not deduped") {
     Model m;
     json a = {{"path", "/tmp/x"}};
     m.d.current.messages.push_back(user());
@@ -105,7 +103,7 @@ void test_structured_duplicate_not_deduped() {
 }
 
 // ── 3. Salvaged call with DIFFERENT args is NOT deduped ─────────────────────
-void test_salvaged_different_args_not_deduped() {
+TEST_CASE("salvaged different args not deduped") {
     Model m;
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
@@ -122,7 +120,7 @@ void test_salvaged_different_args_not_deduped() {
 }
 
 // ── 4. First salvaged call (no prior twin) is left Pending ──────────────────
-void test_first_salvaged_call_runs() {
+TEST_CASE("first salvaged call runs") {
     Model m;
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
@@ -137,7 +135,7 @@ void test_first_salvaged_call_runs() {
 }
 
 // ── 5. Dedup is scoped to the current turn (User boundary resets) ───────────
-void test_prior_turn_not_counted() {
+TEST_CASE("prior turn not counted") {
     Model m;
     json a = {{"path", "/x"}};
     // Turn 1: salvaged read ran Done.
@@ -162,7 +160,7 @@ void test_prior_turn_not_counted() {
 // The real loop: assistant sub-turn A runs the salvaged call Done; a post-tool
 // sub-turn B (no intervening User) re-leaks it Pending. Both are Assistant
 // messages in the same turn.
-void test_cross_subturn_releak_deduped() {
+TEST_CASE("cross subturn releak deduped") {
     Model m;
     json a = {{"path", "/tmp/x"}};
     m.d.current.messages.push_back(user());
@@ -185,7 +183,7 @@ void test_cross_subturn_releak_deduped() {
 // sub-turn (e.g. remember with scope flipping project/user), defeating the
 // exact-match dedup. After the per-turn salvage budget is spent, any further
 // pending salvaged call is failed without running so the loop terminates.
-void test_salvage_budget_bounds_drifting_loop() {
+TEST_CASE("salvage budget bounds drifting loop") {
     Model m;
     m.d.current.messages.push_back(user());
     // 8 prior salvaged calls already ran terminal this turn (the budget), each
@@ -212,7 +210,7 @@ void test_salvage_budget_bounds_drifting_loop() {
 // ── 8. A STRUCTURED call is never capped by the salvage budget ──────────────
 // The budget only governs synthetic salvaged leaks. A real structured tool
 // call after many salvaged ones is deliberate intent and must still run.
-void test_structured_call_not_budget_capped() {
+TEST_CASE("structured call not budget capped") {
     Model m;
     m.d.current.messages.push_back(user());
     std::vector<ToolUse> calls;
@@ -238,7 +236,7 @@ void test_structured_call_not_budget_capped() {
 // to a memory tool is never the user's intent — it must be failed WITHOUT
 // running, even as the FIRST salvaged call of the turn (no dedup twin, budget
 // not spent).
-void test_salvaged_memory_tool_blocked() {
+TEST_CASE("salvaged memory tool blocked") {
     for (const char* name : {"remember", "forget", "wipe_memory"}) {
         Model m;
         m.d.current.messages.push_back(user());
@@ -254,7 +252,7 @@ void test_salvaged_memory_tool_blocked() {
 }
 
 // ── 10. A STRUCTURED memory tool is NOT blocked (deliberate / slash path) ──
-void test_structured_memory_tool_allowed() {
+TEST_CASE("structured memory tool allowed") {
     Model m;
     m.d.current.messages.push_back(user());
     m.d.current.messages.push_back(asst({
@@ -265,26 +263,4 @@ void test_structured_memory_tool_allowed() {
     check(n == 0, "structured memory tool not blocked");
     check(m.d.current.messages.back().tool_calls[0].is_pending(),
           "structured memory tool stays Pending");
-}
-
-} // namespace
-
-int main() {
-    test_releak_same_turn_deduped();
-    test_structured_duplicate_not_deduped();
-    test_salvaged_different_args_not_deduped();
-    test_first_salvaged_call_runs();
-    test_prior_turn_not_counted();
-    test_cross_subturn_releak_deduped();
-    test_salvage_budget_bounds_drifting_loop();
-    test_structured_call_not_budget_capped();
-    test_salvaged_memory_tool_blocked();
-    test_structured_memory_tool_allowed();
-
-    if (g_fails == 0) {
-        std::printf("salvage_dedup_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "salvage_dedup_test: %d check(s) failed\n", g_fails);
-    return 1;
 }

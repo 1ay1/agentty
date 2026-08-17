@@ -1567,6 +1567,9 @@ if(AGENTTY_BUILD_TESTS)
         routing_memory_test
         smart_cascade_gate_test
         chatgpt_bundled_models_test
+        settings_default_test
+        dup_tool_call_id_test
+        salvage_dedup_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2478,7 +2481,7 @@ if(AGENTTY_BUILD_TESTS)
     # silent flip from an enum reorder or a Settings-struct-default change.
     # Drives public load_settings/save_settings against an isolated $HOME.
     agentty_add_full_test(settings_default_test)
-    set_tests_properties(settings_default_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(settings_default_test 30)
 
     # dup_tool_call_id_test — duplicate tool-call id ingest (stream.cpp
     # `uniquify` + ToolUse::wire_id). OpenAI-compatible gateways that mint a
@@ -2809,9 +2812,6 @@ if(AGENTTY_BUILD_TESTS)
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
-        settings_default_test
-        dup_tool_call_id_test
-        salvage_dedup_test
         doom_loop_test
         external_acp_backend_test
         frozen_invariant_fuzz
