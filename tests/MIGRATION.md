@@ -101,7 +101,15 @@ surfaces cross-file collisions that only appear when linked together.
 
 ## Submodules
 
-maya / mcp-cpp / rag-cpp / acp-cpp each get the same treatment: vendor doctest
-(or reuse this one), a `<repo>_tests` single binary + `test_main.cpp`, the same
-`agtest.hpp` shim, `doctest_discover_tests`. They're separate repos with their
-own CI, so they land as follow-up PRs using this identical recipe.
+DONE. Each submodule got the same treatment (its own tests/agtest.hpp shim +
+tests/test_main.cpp + single `<repo>_tests` binary + doctest_discover_tests):
+- **acp-cpp**: 9 assert()-based tests → acp_tests (bench_transport standalone).
+- **mcp-cpp**: 17 tests → mcp_tests (subprocess_tty + process_tools standalone
+  — they fork / spawn sh -c children).
+- **maya**: 31 unit tests → maya_tests (470 cases). Multi-main files, the
+  reveal/lag streaming probes SHARED verbatim with agentty's suite, the
+  benchmark, and POSIX-only PTY tests stay standalone. Note the printf-style
+  CHECK(cond, fmt, args...) in test_render_scaling needed a variadic shim, and
+  a duplicated file-scope get_row() helper needed `static` to avoid an ODR
+  collision once the TUs shared a binary.
+- **rag-cpp**: already single-binary via its own TEST() registry — left as-is.
