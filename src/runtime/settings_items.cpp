@@ -24,13 +24,6 @@ namespace agentty::settings {
 
 namespace {
 
-std::string plugins_config_display() {
-    // Prefer whichever config actually exists, mirroring the manager's
-    // default (user scope).
-    auto user = tools::plugin::config_path(/*project=*/false);
-    return user.string();
-}
-
 std::vector<Item> general(const Model& m) {
     std::vector<Item> out;
 
@@ -101,7 +94,7 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
         } else {
             w.primary   = std::to_string(model.wire_tool_count) +
                           " tools on the wire";
-            w.secondary = "◉ on / ○ off · Enter toggles a tool or removes a plugin";
+            w.secondary = "◉ on / ○ off · Enter toggles · d removes · a adds";
             w.status    = Item::Status::Neutral;
         }
         out.push_back(std::move(w));

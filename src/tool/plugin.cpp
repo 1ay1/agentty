@@ -274,6 +274,7 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
         s.name = name;
         if (entry.is_object()) {
             s.command = entry.value("command", std::string{});
+            s.url     = entry.value("url", std::string{});
             if (entry.contains("args") && entry["args"].is_array())
                 for (const auto& a : entry["args"])
                     if (a.is_string()) s.args.push_back(a.get<std::string>());
@@ -433,15 +434,19 @@ int cli(const std::vector<std::string>& argv) {
         }
         std::printf("%s:\n", path.string().c_str());
         for (const auto& s : servers) {
-            std::string cmdline = s.command;
-            for (const auto& a : s.args) cmdline += " " + a;
+            // Show the command line for stdio servers, or the url for HTTP/SSE
+            // servers (which have no command) so the row isn't blank.
+            std::string detail = s.command;
+            for (const auto& a : s.args) detail += " " + a;
+            if (detail.empty() && !s.url.empty()) detail = s.url;
             // For a project config, show whether each server is trusted to
             // connect (✓) or is gated pending approval (—). User configs are
-            // always trusted, so no marker there.
+            // always trusted, so no marker there. HTTP/SSE (url, no command)
+            // servers spawn nothing and aren't gated, so no mark either.
             const char* mark = "";
             if (project && !s.command.empty())
                 mark = is_server_trusted(path, s.name) ? "\u2713 " : "\u2014 ";
-            std::printf("  %s%-16s %s\n", mark, s.name.c_str(), cmdline.c_str());
+            std::printf("  %s%-16s %s\n", mark, s.name.c_str(), detail.c_str());
         }
         if (project)
             std::printf("\n\u2713 trusted · \u2014 pending approval "
