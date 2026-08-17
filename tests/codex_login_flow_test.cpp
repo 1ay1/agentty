@@ -19,8 +19,9 @@
 // needs a fully-installed Deps + process-global provider registry; it's
 // covered by the live provider-switch tests, not here.
 
-#include <cstdio>
 #include <string>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/login.hpp"
@@ -32,14 +33,8 @@ namespace login = agentty::ui::login;
 namespace msg = agentty::msg;
 
 static int g_checks = 0;
-static int g_fails  = 0;
-static void check(bool ok, const char* what) {
-    ++g_checks;
-    if (!ok) { ++g_fails; std::printf("FAIL: %s\n", what); }
-    else     { std::printf("ok:   %s\n", what); }
-}
 
-int main() {
+TEST_CASE("codex login flow") {
     std::printf("codex_login_flow_test\n");
 
     // A. Picking + key '3' → ChatGptWaiting, with a launch Cmd.
@@ -192,9 +187,4 @@ int main() {
               "I: Esc cancels the active ChatGPT login worker");
         check(cmd.is_none(), "I: close launches no command");
     }
-
-    std::printf("%d checks, %d failures\n", g_checks, g_fails);
-    if (g_fails == 0) { std::printf("PASSED\n"); return 0; }
-    std::printf("FAILED\n");
-    return 1;
 }

@@ -1574,6 +1574,13 @@ if(AGENTTY_BUILD_TESTS)
         plugins_in_model_test
         tool_stream_snapshot_test
         tool_timeline_adapter_test
+        anthropic_sse_golden_test
+        codex_login_flow_test
+        mcp_reload_race_test
+        persistence_proactive_test
+        plugin_disabled_tools_test
+        proactive_deferred_test
+        rag_adapter_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2347,7 +2354,7 @@ if(AGENTTY_BUILD_TESTS)
     # Cmd, and DROPS a stale arrival after a cancel-to-Idle. Proves the
     # retrieve-then-launch UX end to end without provider I/O.
     agentty_add_full_test(proactive_deferred_test)
-    set_tests_properties(proactive_deferred_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(proactive_deferred_test 30)
 
     # ACP rawInput updates are full replacement snapshots, not append deltas.
     # Drive the real stream reducer with interleaved IDs and snapshot rewrites.
@@ -2361,7 +2368,7 @@ if(AGENTTY_BUILD_TESTS)
     # serialized, so a reloaded thread leaked the raw <retrieved-context>
     # block as a plain user turn.
     agentty_add_full_test(persistence_proactive_test)
-    set_tests_properties(persistence_proactive_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(persistence_proactive_test 30)
 
     # transcript_bound_test — write_thread_transcript_md is BOUNDED, recency-
     # biased, and correct. A fork's on-disk parent memory must stay a small,
@@ -2396,14 +2403,14 @@ if(AGENTTY_BUILD_TESTS)
     # plugin_model() reader. Hammers 8 reloaders + 8 snappers against a tiny
     # stdio server; must finish with a coherent snapshot and zero crashes.
     agentty_add_full_test(mcp_reload_race_test)
-    set_tests_properties(mcp_reload_race_test PROPERTIES TIMEOUT 60)
+    agentty_test_timeout(mcp_reload_race_test 60)
 
     # plugin_disabled_tools_test — a disabled server keeps its tool list.
     # Drives the real plugin_model() producer: connect (records advertised
     # tools) → disable → the snapshot still lists them (from the last-seen
     # cache) instead of collapsing the tree. Locks the disable→vanish bug.
     agentty_add_full_test(plugin_disabled_tools_test)
-    set_tests_properties(plugin_disabled_tools_test PROPERTIES TIMEOUT 60)
+    agentty_test_timeout(plugin_disabled_tools_test 60)
 
     # codex_login_flow_test — the in-app ChatGPT (Codex) login reducer arms:
     # LoginPickMethod{'3'} enters ChatGptWaiting + launches the async login,
@@ -2411,7 +2418,7 @@ if(AGENTTY_BUILD_TESTS)
     # dropped. Pure branches only (the success path runs commit_provider_
     # switch, covered by the live provider-switch tests).
     agentty_add_full_test(codex_login_flow_test)
-    set_tests_properties(codex_login_flow_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(codex_login_flow_test 30)
 
     # custom_host_key_prompt_test — the CustomHostInput → ApiKeyInput handoff
     # for TLS custom hosts: a remote https://host/path prompts for an API key
@@ -2796,20 +2803,13 @@ if(AGENTTY_BUILD_TESTS)
         openai_transport_test
         codex_responses_test
         ollama_transport_test
-        rag_adapter_test
         reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test
-        anthropic_sse_golden_test
         toolset_e2e_test
         subagent_report_test
         tool_wedge_liveness_test
-        proactive_deferred_test
-        persistence_proactive_test
         transcript_bound_test
-        mcp_reload_race_test
-        plugin_disabled_tools_test
-        codex_login_flow_test
         command_palette_test
         code_block_extract_test
         doom_loop_test

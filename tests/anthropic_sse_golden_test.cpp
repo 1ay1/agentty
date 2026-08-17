@@ -12,22 +12,18 @@
 // Drives parse_sse_for_test, which runs the SAME feed_sse → dispatch_event
 // path the live on_chunk uses.
 
-#include <cstdio>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace {
 
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 using namespace agentty;
 using agentty::msg::StreamMsg;
@@ -90,7 +86,7 @@ std::uint64_t fnv1a(const std::string& s) {
 
 } // namespace
 
-int main() {
+TEST_CASE("anthropic sse golden") {
     namespace ap = agentty::provider::anthropic;
 
     // A realistic stream: usage-bearing start, a text block, a tool_use block,
@@ -157,8 +153,4 @@ int main() {
                          static_cast<unsigned long long>(kGoldenHash),
                          static_cast<unsigned long long>(got), rendered.c_str());
     }
-
-    if (g_fails == 0) std::fprintf(stderr, "\nanthropic_sse_golden_test: ALL PASS\n");
-    else              std::fprintf(stderr, "\n%d FAILURE(S)\n", g_fails);
-    return g_fails == 0 ? 0 : 1;
 }
