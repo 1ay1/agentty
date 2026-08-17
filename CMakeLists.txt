@@ -2259,6 +2259,14 @@ if(AGENTTY_BUILD_TESTS)
     agentty_add_full_test(codex_login_flow_test)
     set_tests_properties(codex_login_flow_test PROPERTIES TIMEOUT 30)
 
+    # custom_host_key_prompt_test — the CustomHostInput → ApiKeyInput handoff
+    # for TLS custom hosts: a remote https://host/path prompts for an API key
+    # before committing the switch; a local http://host:port or bare host:port
+    # commits keyless as before. Esc at the key prompt cancels the switch.
+    # Pure reducer test: stubs deps() with an in-memory store::Settings.
+    agentty_add_full_test(custom_host_key_prompt_test)
+    set_tests_properties(custom_host_key_prompt_test PROPERTIES TIMEOUT 30)
+
     # command_palette_test — the Ctrl+K palette catalog + filter UX. Pure
     # header logic (kCommands + filtered_commands): pins the enum⇄row
     # bijection (no dead palette entries), that every row has a label +
@@ -2622,6 +2630,7 @@ if(AGENTTY_BUILD_TESTS)
         mcp_reload_race_test
         plugin_disabled_tools_test
         codex_login_flow_test
+        custom_host_key_prompt_test
         command_palette_test
         code_block_extract_test
         smart_mode_test
