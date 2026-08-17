@@ -12,11 +12,12 @@
 //   • SHORT thread: no anchor; the classic rolling PAIR (≤ 2 pins).
 //   • message breakpoints never exceed 2.
 
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
@@ -30,12 +31,6 @@ using agentty::ToolName;
 using agentty::ToolUse;
 
 namespace {
-
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 // A thread of `pairs` User/Assistant text turns → 2*pairs messages.
 Thread make_thread(int pairs) {
@@ -71,7 +66,7 @@ std::vector<Pin> collect_pins(const std::string& wire) {
 
 } // namespace
 
-int main() {
+TEST_CASE("cache_anchor") {
     namespace ap = agentty::provider::anthropic;
 
     // ── 1. Long thread: exactly one 1h anchor + the two rolling 5m pins ──
@@ -135,8 +130,4 @@ int main() {
         auto pins = collect_pins(wire);
         check(pins.empty(), "empty thread has no cache breakpoints");
     }
-
-    if (g_fails == 0) std::fprintf(stderr, "\nALL PASS\n");
-    else              std::fprintf(stderr, "\n%d FAILURE(S)\n", g_fails);
-    return g_fails == 0 ? 0 : 1;
 }

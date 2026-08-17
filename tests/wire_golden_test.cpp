@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "agtest.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include "agentty/domain/conversation.hpp"
@@ -31,12 +33,6 @@ using agentty::ToolName;
 using agentty::ToolUse;
 
 namespace {
-
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 ToolUse done_read(const char* id, const char* path, const std::string& out) {
     ToolUse tc;
@@ -113,7 +109,7 @@ std::uint64_t fnv1a(const std::string& s) {
 
 } // namespace
 
-int main() {
+TEST_CASE("wire_golden") {
     namespace ap = agentty::provider::anthropic;
 
     const std::string wire = ap::messages_json_string(golden_thread(),
@@ -161,8 +157,4 @@ int main() {
                 static_cast<unsigned long long>(kGoldenHash),
                 static_cast<unsigned long long>(got));
     }
-
-    if (g_fails == 0) std::fprintf(stderr, "\nwire_golden_test: ALL PASS\n");
-    else              std::fprintf(stderr, "\n%d FAILURE(S)\n", g_fails);
-    return g_fails == 0 ? 0 : 1;
 }

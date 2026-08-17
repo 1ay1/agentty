@@ -16,6 +16,8 @@
 
 #include <doctest/doctest.h>
 
+#include <string>
+
 // Legacy two-arg CHECK(cond, msg) → doctest CHECK_MESSAGE; one-arg CHECK(cond)
 // → doctest CHECK. Both wrap the predicate in an extra paren pair so doctest
 // does NOT try to decompose it — the legacy suite freely uses `CHECK(a && b)`
@@ -41,5 +43,20 @@
 #define AGTEST_REQUIRE_PICK(_1, _2, NAME, ...) NAME
 #define REQUIRE(...) \
     AGTEST_REQUIRE_PICK(__VA_ARGS__, AGTEST_REQUIRE_2, AGTEST_REQUIRE_1)(__VA_ARGS__)
+
+// Many legacy tests assert through a hand-rolled `void check(bool, const char*)`
+// helper + a g_fails counter instead of a macro. Provide that function here so
+// those tests migrate by DELETING their local check()/g_fails and wrapping the
+// old main() body in a TEST_CASE — the check(...) calls in the body then route
+// into doctest unchanged. Overloaded for the (bool) and (bool, msg) forms and
+// the occasional (bool, std::string).
+namespace agtest {
+inline void check(bool ok) { DOCTEST_CHECK(ok); }
+inline void check(bool ok, const char* what) { DOCTEST_CHECK_MESSAGE(ok, what); }
+inline void check(bool ok, const std::string& what) {
+    DOCTEST_CHECK_MESSAGE(ok, what);
+}
+} // namespace agtest
+using agtest::check;
 
 #endif // AGENTTY_TESTS_AGTEST_HPP

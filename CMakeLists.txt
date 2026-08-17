@@ -1554,6 +1554,14 @@ if(AGENTTY_BUILD_TESTS)
         decomposition_memory_test
         dispatch_route_test
         model_label_test
+        cache_anchor_test
+        composer_edit_test
+        hooks_gate_test
+        midrun_freeze_test
+        smart_mode_test
+        stream_liveness_test
+        wire_golden_test
+        wire_shared_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2011,7 +2019,7 @@ if(AGENTTY_BUILD_TESTS)
     # (commit a9760e7); a fixed byte-recency timeout would fail it.
     # stream_liveness_test
     agentty_add_full_test(stream_liveness_test)
-    set_tests_properties(stream_liveness_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(stream_liveness_test 30)
 
     # turn_settle_test — byte-CONSERVATION + settle-shape invariants across
     # the turn-ending transitions (finalize_turn). fsm_test covers the
@@ -2039,7 +2047,7 @@ if(AGENTTY_BUILD_TESTS)
     # Temp-sandboxed CWD+HOME; hook commands drop marker files so absence
     # of execution is observable.
     agentty_add_full_test(hooks_gate_test)
-    set_tests_properties(hooks_gate_test PROPERTIES TIMEOUT 60)
+    agentty_test_timeout(hooks_gate_test 60)
 
     # stream_md_lag_test — long-turn markdown LAG regression. Drives maya's
     # StreamingMarkdown exactly as turn.cpp::cached_markdown_for does
@@ -2430,7 +2438,7 @@ if(AGENTTY_BUILD_TESTS)
     # no-regression. Pulls catalog.hpp (→ nlohmann/json via id.hpp), so it
     # links the shared object set for the include dirs.
     agentty_add_full_test(smart_mode_test)
-    set_tests_properties(smart_mode_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(smart_mode_test 30)
 
     # complexity_test — the turn-complexity classifier
     # (smart::classify_complexity): the conservative Trivial/Simple/Standard/
@@ -2674,7 +2682,6 @@ if(AGENTTY_BUILD_TESTS)
         model_caps_test
         copilot_token_test
         compaction_threshold_test
-        wire_shared_test
         fsm_test
         concurrency_primitives_test
         skills_engine_test
@@ -2739,7 +2746,6 @@ if(AGENTTY_BUILD_TESTS)
         copilot_token_test
         compaction_threshold_test
         agentty_tests
-        wire_shared_test
         fsm_test
         concurrency_primitives_test
         skills_engine_test
@@ -2762,14 +2768,11 @@ if(AGENTTY_BUILD_TESTS)
         cred_crypt_test
         cross_process_lock_test
         keystore_test
-        midrun_freeze_test
         midrun_seam_test
         tool_timeline_adapter_test
         midrun_wire_test
-        stream_liveness_test
         turn_settle_test
         fork_test
-        hooks_gate_test
         slash_commands_test
         plugin_config_test
         stream_md_lag_test
@@ -2779,7 +2782,6 @@ if(AGENTTY_BUILD_TESTS)
         reveal_smoothness_probe
         md_shape_sweep
         md_cache_probe
-        composer_edit_test
         scheduler_path_test
         table_render_test
         openai_transport_test
@@ -2791,9 +2793,6 @@ if(AGENTTY_BUILD_TESTS)
         reveal_freeze_gate_probe
         visual_hash_coverage_test
         tool_result_budget_test
-        wire_shared_test
-        cache_anchor_test
-        wire_golden_test
         anthropic_sse_golden_test
         toolset_e2e_test
         subagent_report_test
@@ -2809,7 +2808,6 @@ if(AGENTTY_BUILD_TESTS)
         codex_login_flow_test
         command_palette_test
         code_block_extract_test
-        smart_mode_test
         complexity_test
         routing_memory_test
         smart_cascade_gate_test
