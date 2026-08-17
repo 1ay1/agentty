@@ -8,25 +8,17 @@
 
 #include "agentty/auth/accounts.hpp"
 
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <unistd.h>   // getpid
 
+#include "agtest.hpp"
+
 namespace fs = std::filesystem;
 namespace acc = agentty::auth::accounts;
 
-static int g_fail = 0;
-#define CHECK(cond, msg)                                                       \
-    do {                                                                       \
-        if (!(cond)) { std::printf("  FAIL: %s\n", msg); ++g_fail; }           \
-        else         { std::printf("  ok:   %s\n", msg); }                     \
-    } while (0)
-
-int main() {
-    std::printf("accounts_registry_test\n");
-
+TEST_CASE("accounts registry list/upsert/get/remove/set_active") {
     // Sandbox: a PID-unique config dir so the suite stays hermetic under -j.
     auto root = fs::temp_directory_path() /
                 ("agentty_accounts_" + std::to_string(::getpid()));
@@ -96,7 +88,4 @@ int main() {
     CHECK(!acc::upsert("anthropic", "", "s"), "upsert rejects empty label");
 
     fs::remove_all(root);
-    if (g_fail) { std::printf("FAILED (%d)\n", g_fail); return 1; }
-    std::printf("PASSED\n");
-    return 0;
 }

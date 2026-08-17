@@ -8,30 +8,23 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 
-#include <cstdio>
 #include <string>
 #include <string_view>
 
-namespace {
+#include "agtest.hpp"
 
-int failures = 0;
+namespace {
 
 void check(std::string_view id, std::string_view want) {
     std::string got = agentty::ui::pretty_model_label(id);
-    if (got != want) {
-        std::fprintf(stderr, "FAIL  pretty_model_label(\"%.*s\")\n"
-                             "        got  \"%s\"\n"
-                             "        want \"%.*s\"\n",
-                     static_cast<int>(id.size()), id.data(),
-                     got.c_str(),
-                     static_cast<int>(want.size()), want.data());
-        ++failures;
-    }
+    CHECK_MESSAGE(got == want, "pretty_model_label(\"" << std::string(id)
+                                  << "\") got \"" << got << "\" want \""
+                                  << std::string(want) << "\"");
 }
 
 } // namespace
 
-int main() {
+TEST_CASE("pretty_model_label normalizes real-world ids") {
     // ── Ollama: drop :latest, keep meaningful size/quant tags ──────────
     check("codellama:latest",        "Codellama");
     check("llama3.2:latest",         "Llama3.2");
@@ -75,11 +68,4 @@ int main() {
     check(":latest",                 "");      // family empty, tag dropped
     check("model",                   "Model");
     check("a",                       "A");
-
-    if (failures == 0) {
-        std::puts("model_label_test: OK");
-        return 0;
-    }
-    std::fprintf(stderr, "model_label_test: %d failure(s)\n", failures);
-    return 1;
 }

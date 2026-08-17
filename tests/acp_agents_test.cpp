@@ -14,15 +14,12 @@
 #include <unistd.h>
 #endif
 
+#include "agtest.hpp"
+
 namespace fs = std::filesystem;
 namespace P = agentty::provider;
 
-static int failures = 0;
-#define CHECK(cond) do { if (!(cond)) { \
-    std::cerr << "CHECK failed: " #cond " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
-    ++failures; } } while (0)
-
-static void test_no_builtin_agents() {
+TEST_CASE("no builtin acp agents when unconfigured") {
     ::unsetenv("AGENTTY_ACP_AGENTS");
 
     CHECK(!P::is_acp_agent_id("claude-agent-acp"));
@@ -40,7 +37,7 @@ static void test_no_builtin_agents() {
     CHECK(P::parse_selection("openai").kind == P::Kind::OpenAI);
 }
 
-static void test_configured_agents() {
+TEST_CASE("configured acp agents resolve") {
     fs::path tmp = fs::temp_directory_path() /
         ("acp-agents-" + std::to_string(::getpid()) + ".json");
     {
@@ -92,13 +89,4 @@ static void test_configured_agents() {
     ::unsetenv("AGENTTY_ACP_AGENTS");
     std::error_code ec;
     fs::remove(tmp, ec);
-}
-
-int main() {
-    test_no_builtin_agents();
-    test_configured_agents();
-
-    if (failures == 0) { std::cout << "acp_agents_test OK\n"; return 0; }
-    std::cerr << "acp_agents_test FAILED (" << failures << " check(s))\n";
-    return 1;
 }
