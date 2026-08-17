@@ -63,6 +63,15 @@ normal test.
 - **Test-body setup that a per-process exe got for free** (e.g. a frozen
   animation clock, a chdir into a temp dir): make sure it runs INSIDE the
   TEST_CASE, not at former file scope, or the shared binary won't set it up.
+- **TEST_CASE inside an anonymous namespace does NOT register.** Some files
+  put their helpers (and formerly their test fns) in a `namespace { ... }`.
+  doctest auto-registration relies on external linkage, so CLOSE the anon
+  namespace (`} // namespace`) after the helpers and BEFORE the first
+  TEST_CASE. The helpers stay visible (same TU).
+- **Scripted main() removal is unreliable** when main() has nested braces (a
+  regex like `int main\(\)\s*\{[^}]*\}` stops at the first inner `}` and
+  leaves a tail fragment). Delete `int main(){...}` by hand, or verify no
+  orphaned `return`/`printf` lines remain after the last TEST_CASE.
 
 ## Keep STANDALONE (do NOT consolidate)
 

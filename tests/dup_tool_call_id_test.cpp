@@ -34,9 +34,10 @@
 //      swallow a genuinely distinct later call's result.
 //   5. Unique ids route to their own call, untouched.
 
-#include <cstdio>
 #include <string>
 #include <utility>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -56,11 +57,6 @@ using agentty::app::detail::stream_update;
 using agentty::app::detail::with_live_tool;
 namespace msg = agentty::msg;
 
-static int g_fails = 0;
-static void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 static Message asst_placeholder() {
     Message m;
@@ -113,7 +109,7 @@ static ToolUse::Done done_status(const char* out) {
 }
 
 // ── 1. with_live_tool prefers the first non-terminal carrier ───────────────
-static void test_with_live_tool_prefers_non_terminal() {
+TEST_CASE("with live tool prefers non terminal") {
     Model m;
     // Two live assistant messages, both carrying "bash:0": the first Done
     // (previous sub-turn), the second Pending (current). The raw lookup must
@@ -143,7 +139,7 @@ static void test_with_live_tool_prefers_non_terminal() {
 }
 
 // ── 2. Cross-sub-turn: result lands on the live call, Done card untouched ──
-static void test_result_routes_across_sub_turns() {
+TEST_CASE("result routes across sub turns") {
     Model m;
     // Turn 1: stream bash:0, finish it, drive it Done with its own output.
     m.d.current.messages.push_back(asst_placeholder());
@@ -175,7 +171,7 @@ static void test_result_routes_across_sub_turns() {
 }
 
 // ── 3. find_streaming_tool is scoped to the current sub-turn ───────────────
-static void test_streaming_isolated_to_current_sub_turn() {
+TEST_CASE("streaming isolated to current sub turn") {
     Model m;
     // Turn 1: a fully-streamed bash:0 with args "{A}".
     m.d.current.messages.push_back(asst_placeholder());
@@ -200,7 +196,7 @@ static void test_streaming_isolated_to_current_sub_turn() {
 }
 
 // ── 4. A hanging first call doesn't swallow a distinct later call ──────────
-static void test_hanging_first_call_does_not_swallow() {
+TEST_CASE("hanging first call does not swallow") {
     Model m;
     // One message, two DISTINCT ids (normal parallel calls). The first never
     // terminates; the second gets its own result.
@@ -219,7 +215,7 @@ static void test_hanging_first_call_does_not_swallow() {
 }
 
 // ── 5. Unique ids route to their own call ──────────────────────────────────
-static void test_unique_ids_untouched() {
+TEST_CASE("unique ids untouched") {
     Model m;
     m.d.current.messages.push_back(asst_placeholder());
     Step s = start(std::move(m), "call_a", "bash");
@@ -236,18 +232,4 @@ static void test_unique_ids_untouched() {
           "T5: call_a got its own args");
     check(calls[1].args_streaming.find("\"y\":2") != std::string::npos,
           "T5: call_b got its own args");
-}
-
-int main() {
-    test_with_live_tool_prefers_non_terminal();
-    test_result_routes_across_sub_turns();
-    test_streaming_isolated_to_current_sub_turn();
-    test_hanging_first_call_does_not_swallow();
-    test_unique_ids_untouched();
-    if (g_fails) {
-        std::fprintf(stderr, "%d check(s) failed\n", g_fails);
-        return 1;
-    }
-    std::fprintf(stderr, "all checks passed\n");
-    return 0;
 }
