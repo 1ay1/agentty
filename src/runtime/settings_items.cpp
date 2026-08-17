@@ -76,7 +76,7 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
             i.primary   = "(no plugins configured)";
             i.secondary = "press `a` to add one, or agentty plugin add <name> …";
         }
-        i.hint      = "docs/PLUGINS.md";
+        i.hint      = "docs: plugins";
         out.push_back(std::move(i));
         return out;
     }
@@ -183,7 +183,7 @@ std::vector<Item> commands() {
         Item i;
         i.primary   = "(no slash commands)";
         i.secondary = "author one: .agentty/commands/<name>.md";
-        i.hint      = "docs/PLUGINS.md";
+        i.hint      = "docs: slash-commands";
         out.push_back(std::move(i));
     }
     return out;
@@ -204,7 +204,7 @@ std::vector<Item> agents() {
     hint.primary   = "+ user agents";
     hint.secondary = "author one: .agentty/agents/<name>.md "
                      "(frontmatter: tools, read-only)";
-    hint.hint      = "docs/PLUGINS.md";
+    hint.hint      = "docs: subagents";
     out.push_back(std::move(hint));
     return out;
 }
@@ -217,7 +217,7 @@ std::vector<Item> hooks() {
         i.primary   = "(no hooks file)";
         i.secondary = "author one: .agentty/hooks.json "
                       "(pre_tool / post_tool)";
-        i.hint      = "docs/PLUGINS.md";
+        i.hint      = "docs: hooks";
         out.push_back(std::move(i));
         return out;
     }
