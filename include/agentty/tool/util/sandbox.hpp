@@ -98,4 +98,13 @@ enum class Backend : std::uint8_t {
     std::size_t max_bytes,
     std::chrono::seconds timeout);
 
+// Escape a path for safe interpolation into the macOS sandbox-exec (SBPL)
+// profile string. Exposed for testing the injection-hardening: `\` and `"`
+// are backslash-escaped; a path containing a control character (which SBPL
+// string literals can't represent) yields an EMPTY string so the caller
+// omits the clause and fails closed. A path with no special chars is returned
+// unchanged. On non-Apple builds this is a trivial passthrough of the same
+// rules (kept cross-platform so the test compiles everywhere).
+[[nodiscard]] std::string sbpl_escape(std::string_view path);
+
 } // namespace agentty::tools::util::sandbox

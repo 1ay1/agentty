@@ -1669,6 +1669,30 @@ if(AGENTTY_BUILD_TESTS)
     target_include_directories(fsm_test PRIVATE include)
     add_test(NAME fsm_test COMMAND fsm_test)
 
+    # sandbox_escape_test — the macOS sandbox-exec (SBPL) profile injection
+    # guard. The workspace root is interpolated into the (subpath "…") write
+    # clause; sbpl_escape() must neutralise " and \ (the injection vector) and
+    # fail closed (empty) on control chars a path can't legally carry into an
+    # SBPL string. Standalone: just the sandbox TU + its subprocess/fs/utf8/
+    # progress deps. Sanitizer-clean (pure logic).
+    add_executable(sandbox_escape_test EXCLUDE_FROM_ALL
+        tests/sandbox_escape_test.cpp
+        src/tool/util/sandbox.cpp
+        src/tool/util/subprocess.cpp
+        src/tool/util/fs_helpers.cpp
+        src/tool/util/utf8.cpp
+        src/tool/progress.cpp
+    )
+    target_include_directories(sandbox_escape_test PRIVATE include)
+    target_link_libraries(sandbox_escape_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json)
+    if(TARGET mcp::tools)
+        target_link_libraries(sandbox_escape_test PRIVATE mcp::tools)
+    endif()
+    add_test(NAME sandbox_escape_test COMMAND sandbox_escape_test)
+    set_tests_properties(sandbox_escape_test PROPERTIES TIMEOUT 30)
+
     # scope_test — the config-resolution algebra (agentty::scope). Pure fold
     # over fabricated Env values: plan() precedence ordering (Locus-major,
     # Dialect-minor; "/" and no-HOME guards; Explicit wins), the two monoids
@@ -2576,6 +2600,7 @@ if(AGENTTY_BUILD_TESTS)
         compaction_threshold_test
         error_class_test
         fsm_test
+        sandbox_escape_test
         scope_test
         concurrency_primitives_test
         model_label_test
