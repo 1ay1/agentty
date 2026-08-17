@@ -74,8 +74,14 @@ normal test.
   orphaned `return`/`printf` lines remain after the last TEST_CASE.
 
 ## Keep STANDALONE (do NOT consolidate)
-
 Their process/ODR isolation is load-bearing:
+- **Cross-test global-state contamination**: a test that `chdir`s into a temp
+  dir, sets `HOME`/env, or otherwise mutates process-global state can pass
+  alone but CORRUPT later cases in the shared binary (they inherit the changed
+  cwd/env). Symptom: cases pass with `--test-case=X` in isolation but fail when
+  the whole binary runs. Such e2e/integration tests (toolset_e2e,
+  subagent_report, plugin_disabled_tools) stay standalone. ALWAYS run the full
+  `agentty_tests` binary after a batch, not just the new cases, to catch this.
 - **fork/exec/posix_spawn** tests (cred_crypt, concurrency_primitives,
   cross_process_lock, external_acp_backend, fork_test).
 - **PTY / openpty** tests (scrollback_oracle, reveal_scrollback).

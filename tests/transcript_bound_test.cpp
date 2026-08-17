@@ -14,9 +14,10 @@
 //   6. Output is valid UTF-8 even from arbitrary input bytes.
 //   7. A tiny thread round-trips verbatim (no elision when it fits).
 
+#include "agtest.hpp"
+
 #include "agentty/io/persistence.hpp"
 
-#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -28,11 +29,6 @@
 namespace fs = std::filesystem;
 using namespace agentty;
 
-static int g_fails = 0;
-static void check(bool ok, const std::string& what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what.c_str());
-    if (!ok) ++g_fails;
-}
 
 static std::string slurp(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -55,7 +51,7 @@ static Message asst_msg(std::string text) {
     return m;
 }
 
-int main() {
+TEST_CASE("transcript bound") {
     auto tmp = fs::temp_directory_path()
              / ("agentty_transcript_test_" + std::to_string(::getpid()));
     fs::remove_all(tmp);
@@ -200,7 +196,4 @@ int main() {
     }
 
     fs::remove_all(tmp);
-    if (g_fails == 0) { std::printf("\nAll transcript-bound tests passed.\n"); return 0; }
-    std::printf("\n%d transcript-bound test(s) FAILED.\n", g_fails);
-    return 1;
 }

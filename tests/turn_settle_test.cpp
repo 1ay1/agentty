@@ -25,6 +25,8 @@
 //
 // Pure reducer calls on a hand-built Model; no network, no view.
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -42,10 +44,6 @@ namespace detail = agentty::app::detail;
 
 namespace {
 
-int g_failed = 0;
-void check(bool cond, const std::string& msg) {
-    if (!cond) { std::println("  FAIL: {}", msg); ++g_failed; }
-}
 
 // finalize_turn touches deps() (store/provider seam) even though this test
 // never runs the returned Cmd. Install inert stubs once — no network, no IO.
@@ -177,14 +175,11 @@ void reaches_settled_shape() {
 
 } // namespace
 
-int main() {
+TEST_CASE("turn settle") {
     std::println("=== turn_settle_test ===");
     install_stub_deps();
     conservation(/*glide=*/true);
     conservation(/*glide=*/false);
     empty_pending_is_safe();
     reaches_settled_shape();
-    if (g_failed) { std::println("{} check(s) FAILED", g_failed); return 1; }
-    std::println("All turn-settle transition tests passed.");
-    return 0;
 }

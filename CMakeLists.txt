@@ -1578,9 +1578,13 @@ if(AGENTTY_BUILD_TESTS)
         codex_login_flow_test
         mcp_reload_race_test
         persistence_proactive_test
-        plugin_disabled_tools_test
         proactive_deferred_test
         rag_adapter_test
+        scheduler_path_test
+        tool_result_budget_test
+        tool_wedge_liveness_test
+        transcript_bound_test
+        turn_settle_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2049,7 +2053,7 @@ if(AGENTTY_BUILD_TESTS)
     # Pins: no byte dropped or double-committed, finalize is idempotent,
     # and the turn actually reaches a settled shape (freeze gate opens).
     agentty_add_full_test(turn_settle_test)
-    set_tests_properties(turn_settle_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(turn_settle_test 30)
 
     # fork_test — the fork reducer (ForkThread). Pins that a fork ALWAYS
     # summarizes to reclaim context (not just the RAG-off choice, the old
@@ -2322,7 +2326,7 @@ if(AGENTTY_BUILD_TESTS)
     # backends, and the git quartet over a real temp repo. Offline: web
     # tools only on refusal paths, search_docs on the BM25-only fallback.
     agentty_add_full_test(toolset_e2e_test)
-    set_tests_properties(toolset_e2e_test PROPERTIES TIMEOUT 120)
+    agentty_test_timeout(toolset_e2e_test 120)
 
     # subagent_report_test — locks the `task` tool's report-extraction
     # contract. Drives the REAL AgenttySubagentRunner (registry `task` tool)
@@ -2332,7 +2336,7 @@ if(AGENTTY_BUILD_TESTS)
     # opening sentence), that a clean final-prose turn is returned verbatim,
     # and that the wrap-up nudge is delivered before the cap. No network.
     agentty_add_full_test(subagent_report_test)
-    set_tests_properties(subagent_report_test PROPERTIES TIMEOUT 60)
+    agentty_test_timeout(subagent_report_test 60)
 
     # tool_wedge_liveness_test — the hung-syscall wedge net (update/meta.cpp
     # Tick) measures liveness from the LAST PROGRESS event, not from launch.
@@ -2344,7 +2348,7 @@ if(AGENTTY_BUILD_TESTS)
     # the cap fails it; stale progress past the cap fails it; below the cap a
     # silent tool is left alone. No maya / no I/O (no-op Deps installed).
     agentty_add_full_test(tool_wedge_liveness_test)
-    set_tests_properties(tool_wedge_liveness_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(tool_wedge_liveness_test 30)
 
     # proactive_deferred_test — the DEFERRED same-turn grounding reducer path.
     # Drives the REAL stream_update reducer with the ProactiveContextReady Msg
@@ -2377,7 +2381,7 @@ if(AGENTTY_BUILD_TESTS)
     # never written, smart_routing skipped, UTF-8-safe. Drives the public
     # writer against an isolated $HOME and asserts on the produced .md.
     agentty_add_full_test(transcript_bound_test)
-    set_tests_properties(transcript_bound_test PROPERTIES TIMEOUT 30)
+    agentty_test_timeout(transcript_bound_test 30)
 
     # compaction_wire_test — the compaction WIRE SUBSTITUTION (wire_messages_for
     # / estimate_wire_tokens) and its interaction with fork provenance. Pins:
@@ -2787,7 +2791,6 @@ if(AGENTTY_BUILD_TESTS)
         keystore_test
         midrun_seam_test
         midrun_wire_test
-        turn_settle_test
         fork_test
         slash_commands_test
         plugin_config_test
@@ -2798,18 +2801,12 @@ if(AGENTTY_BUILD_TESTS)
         reveal_smoothness_probe
         md_shape_sweep
         md_cache_probe
-        scheduler_path_test
         table_render_test
         openai_transport_test
         codex_responses_test
         ollama_transport_test
         reveal_freeze_gate_probe
         visual_hash_coverage_test
-        tool_result_budget_test
-        toolset_e2e_test
-        subagent_report_test
-        tool_wedge_liveness_test
-        transcript_bound_test
         command_palette_test
         code_block_extract_test
         doom_loop_test
