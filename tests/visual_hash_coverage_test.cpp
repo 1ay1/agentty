@@ -45,10 +45,11 @@
 // ignores, add a row to kInvariantAxes.
 
 #include <chrono>
-#include <cstdio>
 #include <functional>
 #include <string>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/model.hpp"
@@ -59,15 +60,7 @@ using agentty::app::AgenttyApp;
 namespace {
 
 int g_checks = 0;
-int g_failures = 0;
 
-void check(bool cond, const std::string& what) {
-    ++g_checks;
-    if (!cond) {
-        ++g_failures;
-        std::fprintf(stderr, "  FAIL: %s\n", what.c_str());
-    }
-}
 
 std::uint64_t hash_of(const Model& m) { return AgenttyApp::visual_hash(m); }
 
@@ -335,7 +328,9 @@ const std::vector<Axis>& invariant_axes() {
     return axes;
 }
 
-void test_visual_axes_advance_hash() {
+}  // namespace (helpers)
+
+TEST_CASE("visual axes advance hash") {
     std::printf("visual_hash: each view axis advances the hash\n");
     for (const auto& ax : visual_axes()) {
         Model before = baseline();
@@ -351,7 +346,7 @@ void test_visual_axes_advance_hash() {
     }
 }
 
-void test_invariant_axes_preserve_hash() {
+TEST_CASE("invariant axes preserve hash") {
     std::printf("visual_hash: non-visual axes do NOT advance the hash\n");
     for (const auto& ax : invariant_axes()) {
         Model before = baseline();
@@ -369,7 +364,7 @@ void test_invariant_axes_preserve_hash() {
 
 // Sanity: the baseline itself is stable across two calls (no time term
 // leaking for a settled/idle model — regime (c): nothing animating).
-void test_idle_settled_is_stable() {
+TEST_CASE("idle settled is stable") {
     std::printf("visual_hash: settled idle model is hash-stable across calls\n");
     Model m = baseline();
     const std::uint64_t a = hash_of(m);
@@ -380,21 +375,4 @@ void test_idle_settled_is_stable() {
     check(a == b,
           "idle settled model produced two different hashes — a time "
           "term is leaking into a regime (c) state (should be none).");
-}
-
-}  // namespace
-
-int main() {
-    std::printf("visual_hash_coverage_test\n");
-    test_idle_settled_is_stable();
-    test_visual_axes_advance_hash();
-    test_invariant_axes_preserve_hash();
-
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures == 0) {
-        std::printf("PASSED\n");
-        return 0;
-    }
-    std::printf("FAILED\n");
-    return 1;
 }

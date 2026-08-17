@@ -1587,6 +1587,9 @@ if(AGENTTY_BUILD_TESTS)
         turn_settle_test
         midrun_seam_test
         midrun_wire_test
+        codex_responses_test
+        doom_loop_test
+        visual_hash_coverage_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2803,13 +2806,10 @@ if(AGENTTY_BUILD_TESTS)
         md_cache_probe
         table_render_test
         openai_transport_test
-        codex_responses_test
         ollama_transport_test
         reveal_freeze_gate_probe
-        visual_hash_coverage_test
         command_palette_test
         code_block_extract_test
-        doom_loop_test
         external_acp_backend_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz

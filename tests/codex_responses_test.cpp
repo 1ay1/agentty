@@ -11,13 +11,14 @@
 //
 // Run: build the `codex_responses_test` target, execute. Exit 0 = pass.
 
-#include <cstdio>
 #include <map>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/error_class.hpp"
@@ -26,14 +27,6 @@ using namespace agentty;
 namespace cc = agentty::provider::chatgpt;
 using json = nlohmann::json;
 
-static int g_failures = 0;
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-            ++g_failures;                                                      \
-        }                                                                      \
-    } while (0)
 
 template <class Leaf>
 static const Leaf* leaf(const Msg& m) {
@@ -48,7 +41,7 @@ static const Leaf* leaf(const Msg& m) {
 }
 
 // ── 1. Request body ─────────────────────────────────────────────────────────
-static void test_build_body() {
+TEST_CASE("build body") {
     provider::Request req;
     req.model         = "gpt-5-codex";
     req.system_prompt = "You are a coding agent.";
@@ -108,7 +101,7 @@ static void test_build_body() {
     CHECK(in[2]["output"] == "file1\nfile2");
 }
 
-static void test_build_body_with_images() {
+TEST_CASE("build body with images") {
     provider::Request req;
     req.model = "gpt-5.4";
 
@@ -144,7 +137,7 @@ static void test_build_body_with_images() {
 }
 
 // ── 2. SSE → Msg mapping ─────────────────────────────────────────────────────
-static void test_sse_text_and_usage() {
+TEST_CASE("sse text and usage") {
     std::vector<std::string> sse = {
         R"({"type":"response.created","response":{}})",
         R"({"type":"response.output_item.added","item":{"type":"message","role":"assistant"}})",
@@ -174,7 +167,7 @@ static void test_sse_text_and_usage() {
     CHECK(saw_usage);
 }
 
-static void test_sse_tool_call() {
+TEST_CASE("sse tool call") {
     std::vector<std::string> sse = {
         R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_9","name":"read"}})",
         R"({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":"})",
@@ -208,7 +201,7 @@ static void test_sse_tool_call() {
     CHECK(stop == StopReason::ToolUse);    // a function_call ⇒ ToolUse stop
 }
 
-static void test_sse_parallel_tool_calls_are_id_addressed() {
+TEST_CASE("sse parallel tool calls are id addressed") {
     std::vector<std::string> sse = {
         R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
         R"({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"path\":\"a.cpp\","})",
@@ -235,7 +228,7 @@ static void test_sse_parallel_tool_calls_are_id_addressed() {
     CHECK(ends["call_2"] == 1);
 }
 
-static void test_sse_reasoning() {
+TEST_CASE("sse reasoning") {
     std::vector<std::string> sse = {
         R"({"type":"response.reasoning_summary_text.delta","delta":"thinking…"})",
         R"({"type":"response.completed","response":{"usage":{}}})",
@@ -249,7 +242,7 @@ static void test_sse_reasoning() {
 
 // A completed reasoning output item yields StreamReasoning carrying its opaque
 // encrypted_content — the blob the reducer stashes for cross-round replay.
-static void test_sse_reasoning_encrypted_capture() {
+TEST_CASE("sse reasoning encrypted capture") {
     std::vector<std::string> sse = {
         R"({"type":"response.reasoning_summary_text.delta","delta":"planning"})",
         R"({"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1","encrypted_content":"ENC_BLOB_123"}})",
@@ -263,7 +256,7 @@ static void test_sse_reasoning_encrypted_capture() {
 }
 
 // build_body must OPT IN to encrypted reasoning so the backend returns it.
-static void test_build_body_requests_encrypted_reasoning() {
+TEST_CASE("build body requests encrypted reasoning") {
     provider::Request req;
     req.model = "gpt-5-codex";
     Message u; u.role = Role::User; u.text = "hi";
@@ -279,7 +272,7 @@ static void test_build_body_requests_encrypted_reasoning() {
 
 // An assistant turn carrying reasoning_encrypted replays a `reasoning` item
 // AHEAD of its function_call — with encrypted_content and NO server id.
-static void test_build_input_replays_reasoning() {
+TEST_CASE("build input replays reasoning") {
     provider::Request req;
     req.model = "gpt-5-codex";
 
@@ -309,7 +302,7 @@ static void test_build_input_replays_reasoning() {
     CHECK(in[4]["type"] == "function_call_output");
 }
 
-static void test_sse_error() {
+TEST_CASE("sse error") {
     std::vector<std::string> sse = {
         R"({"type":"response.failed","response":{"error":{"message":"boom"}}})",
     };
@@ -324,7 +317,7 @@ static void test_sse_error() {
 // text so the runtime's classify() can route it to auto-retry (native Codex
 // parity with Anthropic/OpenAI). Without the type, "Rate limited" alone would
 // be classified Terminal and the turn would fail instead of backing off.
-static void test_sse_error_type_is_retryable() {
+TEST_CASE("sse error type is retryable") {
     {
         std::vector<std::string> sse = {
             R"({"type":"response.failed","response":{"error":)"
@@ -357,7 +350,7 @@ static void test_sse_error_type_is_retryable() {
     }
 }
 
-static void test_http_error_details() {
+TEST_CASE("http error details") {
     CHECK(cc::format_http_error_for_test(
         400, R"({"error":{"type":"invalid_request_error","message":"input is too long"}})")
         == "invalid_request_error: input is too long");
@@ -368,7 +361,7 @@ static void test_http_error_details() {
         == "Codex backend returned HTTP 400: plain edge rejection");
 }
 
-static void test_session_id_is_stable_per_conversation() {
+TEST_CASE("session id is stable per conversation") {
     // Caching hinges on the same conversation carrying the SAME session_id
     // every turn (a fresh random id each turn defeats the backend prompt
     // cache). Derivation must be deterministic per key and differ across keys.
@@ -384,7 +377,7 @@ static void test_session_id_is_stable_per_conversation() {
     CHECK(!cc::session_id_for_test("").empty());
 }
 
-static void test_stale_tool_result_is_budget_capped() {
+TEST_CASE("stale tool result is budget capped") {
     // A giant tool output from an OLD call must NOT ship verbatim every turn
     // (it would replay on the wire and burn tokens). The newest result keeps
     // the full budget; stale successful ones fade to a tight head+tail via
@@ -432,22 +425,3 @@ static void test_stale_tool_result_is_budget_capped() {
     CHECK(old_output.size() < 8192);         // tight head+tail budget
 }
 
-int main() {
-    test_build_body();
-    test_build_body_with_images();
-    test_session_id_is_stable_per_conversation();
-    test_stale_tool_result_is_budget_capped();
-    test_sse_text_and_usage();
-    test_sse_tool_call();
-    test_sse_parallel_tool_calls_are_id_addressed();
-    test_sse_reasoning();
-    test_sse_reasoning_encrypted_capture();
-    test_build_body_requests_encrypted_reasoning();
-    test_build_input_replays_reasoning();
-    test_sse_error();
-    test_sse_error_type_is_retryable();
-    test_http_error_details();
-    if (g_failures) { std::fprintf(stderr, "\n%d check(s) failed\n", g_failures); return 1; }
-    std::puts("codex_responses_test: all checks passed");
-    return 0;
-}
