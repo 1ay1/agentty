@@ -397,12 +397,15 @@ int usage() {
         "  options for add: --project (write ./.agentty/mcp.json instead of\n"
         "        ~/.agentty/mcp.json), --force (overwrite an existing name)\n"
         "\n"
-        "  list  [--project]      show configured plugins\n"
+        "  list  [--project]      show configured plugins (\u2713/\u2014 trust marks)\n"
+        "  approve <name> --project   trust a project server (per-server)\n"
         "  remove <name> [--project]\n"
         "\n"
         "Connected at startup; restart agentty (or start a new session) to\n"
-        "pick up changes. Project-scope configs additionally require\n"
-        "AGENTTY_MCP_ALLOW_PROJECT=1 before agentty connects to them.\n");
+        "pick up changes. Project-scope stdio servers can spawn arbitrary\n"
+        "commands, so they connect only once trusted: approve each one\n"
+        "(agentty plugin approve <name> --project, or the Plugins picker), or\n"
+        "set AGENTTY_MCP_ALLOW_PROJECT=1 to blanket-trust the whole config.\n");
     return 2;
 }
 
@@ -432,9 +435,44 @@ int cli(const std::vector<std::string>& argv) {
         for (const auto& s : servers) {
             std::string cmdline = s.command;
             for (const auto& a : s.args) cmdline += " " + a;
-            std::printf("  %-16s %s\n", s.name.c_str(), cmdline.c_str());
+            // For a project config, show whether each server is trusted to
+            // connect (✓) or is gated pending approval (—). User configs are
+            // always trusted, so no marker there.
+            const char* mark = "";
+            if (project && !s.command.empty())
+                mark = is_server_trusted(path, s.name) ? "\u2713 " : "\u2014 ";
+            std::printf("  %s%-16s %s\n", mark, s.name.c_str(), cmdline.c_str());
         }
+        if (project)
+            std::printf("\n\u2713 trusted · \u2014 pending approval "
+                        "(agentty plugin approve <name> --project)\n");
         return 0;
+    }
+
+    if (verb == "approve") {
+        // Grant per-server trust for a project stdio server: record its spec
+        // hash so agentty will spawn it. Only meaningful for --project (user
+        // configs are already trusted). Headless equivalent of the picker's
+        // "trust & enable".
+        if (rest.size() != 1) return usage();
+        if (!project) {
+            std::fprintf(stderr, "approve applies to project configs "
+                         "(pass --project); user servers are already trusted\n");
+            return 1;
+        }
+        if (is_server_trusted(path, rest[0])) {
+            std::printf("'%s' is already trusted\n", rest[0].c_str());
+            return 0;
+        }
+        if (approve_server(path, rest[0])) {
+            std::printf("approved %s — restart agentty to connect it\n",
+                        rest[0].c_str());
+            return 0;
+        }
+        std::fprintf(stderr, "could not approve '%s' (no such server, no "
+                     "spawnable command, or the approvals store is unwritable)\n",
+                     rest[0].c_str());
+        return 1;
     }
 
     if (verb == "remove") {
@@ -503,8 +541,9 @@ int cli(const std::vector<std::string>& argv) {
             std::printf("restart agentty to connect (tools appear as "
                         "mcp__%s__<tool>)\n", spec.name.c_str());
             if (project)
-                std::printf("note: project configs need "
-                            "AGENTTY_MCP_ALLOW_PROJECT=1 to connect\n");
+                std::printf("note: project servers are untrusted until"
+                            " approved — run\n      agentty plugin approve %s"
+                            " --project\n", spec.name.c_str());
             return 0;
         }
         case EditResult::AlreadyExists:
