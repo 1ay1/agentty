@@ -8,12 +8,13 @@
 //   exec / blind-writer cases still serialise. Pure planner — no maya, no
 //   phase machinery.
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -31,11 +32,10 @@ using agentty::app::cmd::kick_pending_tools;
 using agentty::app::cmd::schedule_parallel_batch;
 
 namespace {
-int failures = 0, total = 0;
-void check(const char* name, bool cond, const std::string& detail = {}) {
-    ++total;
-    if (cond) std::printf("  ok   %s\n", name);
-    else { ++failures; std::printf("  FAIL %s — %s\n", name, detail.c_str()); }
+void expect(const char* name, bool cond, const std::string& detail = {}) {
+    std::string msg = detail.empty() ? std::string{name}
+                                     : std::string{name} + " — " + detail;
+    CHECK_MESSAGE(cond, msg);
 }
 
 // A PENDING tool call with the given name + args.
@@ -66,7 +66,7 @@ bool has(const std::vector<std::size_t>& v, std::size_t i) {
 }
 } // namespace
 
-int main() {
+TEST_CASE("scheduler path") {
     std::printf("scheduler_path_test — path-aware parallel scheduling\n\n");
 
     namespace fs = std::filesystem;
@@ -80,7 +80,7 @@ int main() {
             pending("write", {{"file_path", "b.cpp"}, {"content", "y"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("disjoint writes both run", d.promote.size() == 2,
+        expect("disjoint writes both run", d.promote.size() == 2,
               promoted_str(d.promote));
     }
 
@@ -91,7 +91,7 @@ int main() {
             pending("edit",  {{"path", "same.cpp"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("same-file writes serialise", d.promote.size() == 1 && has(d.promote, 0),
+        expect("same-file writes serialise", d.promote.size() == 1 && has(d.promote, 0),
               promoted_str(d.promote));
     }
 
@@ -103,7 +103,7 @@ int main() {
             pending("write", {{"file_path", "b.cpp"}, {"content", "y"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("read + disjoint write run together", d.promote.size() == 2,
+        expect("read + disjoint write run together", d.promote.size() == 2,
               promoted_str(d.promote));
     }
 
@@ -114,7 +114,7 @@ int main() {
             pending("write", {{"file_path", "a.cpp"}, {"content", "y"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("read + same-file write serialise", d.promote.size() == 1 && has(d.promote, 0),
+        expect("read + same-file write serialise", d.promote.size() == 1 && has(d.promote, 0),
               promoted_str(d.promote));
     }
 
@@ -125,7 +125,7 @@ int main() {
             pending("write", {{"file_path", "src"}, {"content", "x"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("dir-prefix overlap serialises", d.promote.size() == 1,
+        expect("dir-prefix overlap serialises", d.promote.size() == 1,
               promoted_str(d.promote));
     }
 
@@ -136,7 +136,7 @@ int main() {
             pending("write", {{"file_path", "srcfoo"}, {"content", "y"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("srcfoo not under src", d.promote.size() == 2, promoted_str(d.promote));
+        expect("srcfoo not under src", d.promote.size() == 2, promoted_str(d.promote));
     }
 
     // (g) bash (Exec) anywhere in the batch → it serialises against everything.
@@ -151,7 +151,7 @@ int main() {
         // 0 (read) runs; 1 (bash) conflicts with the running read → stays
         // pending; 2 (read) would be read-safe but bash hasn't run — it's
         // read-compatible with the active read so it ALSO runs. bash alone defers.
-        check("bash defers, reads run", has(d.promote, 0) && has(d.promote, 2)
+        expect("bash defers, reads run", has(d.promote, 0) && has(d.promote, 2)
               && !has(d.promote, 1), promoted_str(d.promote));
     }
 
@@ -162,7 +162,7 @@ int main() {
             pending("write", {{"content", "no path here"}}),   // no file_path
         };
         auto d = schedule_parallel_batch(b);
-        check("blind writer serialises", d.promote.size() == 1 && has(d.promote, 0),
+        expect("blind writer serialises", d.promote.size() == 1 && has(d.promote, 0),
               promoted_str(d.promote));
     }
 
@@ -175,7 +175,7 @@ int main() {
             pending("grep", {{"pattern", "foo"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("read fan-out all parallel", d.promote.size() == 4, promoted_str(d.promote));
+        expect("read fan-out all parallel", d.promote.size() == 4, promoted_str(d.promote));
     }
 
     // (j) A RUNNING write to a.cpp blocks a pending read of a.cpp but not a
@@ -187,7 +187,7 @@ int main() {
             pending("read",  {{"path", "b.cpp"}}),   // free
         };
         auto d = schedule_parallel_batch(b);
-        check("running write blocks overlapping read only",
+        expect("running write blocks overlapping read only",
               !has(d.promote, 1) && has(d.promote, 2), promoted_str(d.promote));
     }
 
@@ -201,7 +201,7 @@ int main() {
             pending("task", {{"prompt", "review the diff"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("task fan-out all parallel", d.promote.size() == 3,
+        expect("task fan-out all parallel", d.promote.size() == 3,
               promoted_str(d.promote));
     }
 
@@ -213,7 +213,7 @@ int main() {
             pending("grep", {{"pattern", "foo"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("task + reads run together", d.promote.size() == 3,
+        expect("task + reads run together", d.promote.size() == 3,
               promoted_str(d.promote));
     }
 
@@ -225,7 +225,7 @@ int main() {
             pending("task", {{"prompt", "explore while building"}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("bash excludes task", d.promote.size() == 1 && has(d.promote, 0),
+        expect("bash excludes task", d.promote.size() == 1 && has(d.promote, 0),
               promoted_str(d.promote));
     }
 
@@ -237,7 +237,7 @@ int main() {
             pending("read",  {{"path", (workspace / "src/a.cpp").string()}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("lexical and absolute aliases serialise",
+        expect("lexical and absolute aliases serialise",
               d.promote.size() == 1 && has(d.promote, 0), promoted_str(d.promote));
     }
 
@@ -248,7 +248,7 @@ int main() {
             pending("read",  {{"path", 42}}),
         };
         auto d = schedule_parallel_batch(b);
-        check("uncertain path serialises with writer",
+        expect("uncertain path serialises with writer",
               d.promote.size() == 1 && has(d.promote, 0), promoted_str(d.promote));
     }
 
@@ -269,12 +269,9 @@ int main() {
         auto ignored = kick_pending_tools(m);
         (void)ignored;
         const auto& calls = m.d.current.messages.back().tool_calls;
-        check("permission preflight leaves earlier tool Pending",
+        expect("permission preflight leaves earlier tool Pending",
               calls[0].is_pending() && calls[1].is_pending());
-        check("permission preflight selects later guarded tool",
+        expect("permission preflight selects later guarded tool",
               m.d.pending_permission && m.d.pending_permission->id == permission_id);
     }
-
-    std::printf("\n%d/%d checks passed\n", total - failures, total);
-    return failures == 0 ? 0 : 1;
 }

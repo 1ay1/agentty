@@ -21,9 +21,10 @@
 //      progress doesn't rescue a since-gone-silent tool).
 
 #include <chrono>
-#include <cstdio>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
@@ -36,12 +37,6 @@ using std::chrono::seconds;
 
 namespace {
 
-int g_checks = 0, g_fails = 0;
-void check(bool ok, const char* what) {
-    ++g_checks;
-    if (ok) std::printf("ok:   %s\n", what);
-    else  { std::printf("FAIL: %s\n", what); ++g_fails; }
-}
 
 // A model parked in ExecutingTool with one Running tool whose launch and
 // last-progress times we control. `progress_ago` < 0 means "no progress yet".
@@ -90,7 +85,7 @@ Model tick(Model m) {
 
 } // namespace
 
-int main() {
+TEST_CASE("tool wedge liveness") {
     // The wedge path calls kick_pending_tools, which reaches deps(). Install a
     // no-op Deps so the reducer runs without a real Provider/Store.
     app::install_deps(app::Deps{
@@ -139,7 +134,4 @@ int main() {
         m = tick(std::move(m));
         check(tool_running(m), "D: below the cap, a silent tool is left alone");
     }
-
-    std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
-    return g_fails == 0 ? 0 : 1;
 }

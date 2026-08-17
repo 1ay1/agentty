@@ -12,11 +12,12 @@
 //   4. a SMALL result is byte-identical (no marker, no truncation)
 //   5. the cut lands on a UTF-8 boundary (no mojibake / no invalid json)
 
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
@@ -31,11 +32,6 @@ using agentty::ToolUse;
 
 namespace {
 
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 // Build a one-turn thread: User prompt + Assistant turn with a single
 // Done tool_call carrying `output` as its result.
@@ -101,7 +97,7 @@ Thread make_thread_with_n_tool_turns(int n, const std::string& big) {
 
 } // namespace
 
-int main() {
+TEST_CASE("tool result budget") {
     namespace ap = agentty::provider::anthropic;
 
     // ── 1. Small result: byte-identical passthrough, no marker ──
@@ -378,8 +374,4 @@ int main() {
         check(foo2.size() > 40 * 1024,
               "the newest read of a file is never collapsed");
     }
-
-    if (g_fails == 0) std::fprintf(stderr, "\nALL PASS\n");
-    else              std::fprintf(stderr, "\n%d FAILURE(S)\n", g_fails);
-    return g_fails == 0 ? 0 : 1;
 }
