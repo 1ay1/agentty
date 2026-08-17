@@ -18,7 +18,8 @@ Two ways, same result — an entry in `mcp.json`:
 
 ```bash
 agentty plugin add       # interactive: name + command/url
-agentty plugin list      # show configured plugins
+agentty plugin list      # show configured plugins (--project marks ✓/— trust)
+agentty plugin approve <name> --project   # trust a project server (per-server)
 agentty plugin remove <name>
 ```
 
@@ -64,7 +65,7 @@ The **Plugins** picker shows servers from both, badged with the scope they came 
 Every edit in the picker — enable/disable a server, toggle a tool, remove — writes back to the **file that server actually came from**, so toggling a project server edits the project `mcp.json` and a user server edits yours; the two never cross. Adding a new plugin inline writes to your user config by default.
 
 :::note
-Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you vouch for them. Trust is **per-server**: in the **Plugins** picker each untrusted project server is labelled *untrusted project config — approve to enable*; press [[Enter]] on it (*trust & enable*) to approve **that one server** and connect it. Approving one server doesn't trust a different one, so a repo can't smuggle a new server in behind one you already approved. Approvals are recorded under `~/.agentty` (a clone can't approve itself), keyed by the server's exact command + args — edit them and that server re-gates, so a swapped command can never ride in on an old approval. `AGENTTY_MCP_ALLOW_PROJECT=1` still blanket-trusts a whole project config. HTTP/SSE servers spawn no local command and aren't gated this way.
+Project-scoped **stdio** servers spawn a command from a file that rode in with the repo, so they don't auto-connect until you vouch for them. Trust is **per-server**: in the **Plugins** picker each untrusted project server is labelled *untrusted project config — approve to enable*; press [[Enter]] on it (*trust & enable*) to approve **that one server** and connect it. Approving one server doesn't trust a different one, so a repo can't smuggle a new server in behind one you already approved. (Headless? `agentty plugin approve <name> --project` does the same, and `agentty plugin list --project` shows each server's ✓/— trust state.) Approvals are recorded under `~/.agentty` (a clone can't approve itself), keyed by the server's exact command + args — edit them and that server re-gates, so a swapped command can never ride in on an old approval. `AGENTTY_MCP_ALLOW_PROJECT=1` still blanket-trusts a whole project config. HTTP/SSE servers spawn no local command and aren't gated this way.
 :::
 
 ## The tool budget
