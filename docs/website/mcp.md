@@ -41,11 +41,11 @@ Any MCP client can launch agentty as a stdio server. For a client that reads a J
 
 ## Consuming other MCP servers
 
-The reverse also works: drop a `.agentty/mcp.json` in your project (or `~/.agentty/mcp.json` for all projects) and agentty connects to those servers. External tools receive stable provenance names such as `mcp__playwright__browser_click`; they can never collide with or impersonate native tools. `tools/list_changed` is honoured live, including removals and schema replacements.
+The reverse of serving is **consuming** — agentty adds tools to a thread by connecting to external MCP servers listed in an `mcp.json`, which is exactly what a **[plugin](/docs/plugins)** is. See that page for the practical how-to (`agentty plugin add`, the Plugins picker, project vs user scope, and the [trust gate](/docs/plugin-trust) on repo-shipped servers). The rest of this section is the protocol-level behaviour:
 
-A **project** `mcp.json` can ride in on a cloned repo, so its command-spawning (stdio) servers don't auto-connect — each is untrusted until you approve it (per-server, by content hash). See [Plugin Trust](/docs/plugin-trust) for why and how. Your own `~/.agentty/mcp.json` and remote HTTP/SSE servers are not gated.
-
-To keep provider requests fast and tool choice accurate, agentty sends all native and pinned tools plus at most 16 MCP tools ranked for the current user request. The always-available `mcp_search_tools` and `mcp_call` broker exposes the long tail without injecting hundreds of schemas into every turn.
+- **Provenance naming.** External tools get stable, namespaced names such as `mcp__playwright__browser_click`; they can never collide with or impersonate native tools.
+- **Live catalog.** `tools/list_changed` is honoured live, including removals and schema replacements.
+- **Tool budget / brokering.** To keep provider requests fast and tool choice accurate, agentty sends all native and pinned tools plus at most 16 MCP tools ranked for the current request. The always-available `mcp_search_tools` and `mcp_call` broker exposes the long tail without injecting hundreds of schemas into every turn.
 
 ```json
 {
