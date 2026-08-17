@@ -1590,6 +1590,7 @@ if(AGENTTY_BUILD_TESTS)
         codex_responses_test
         doom_loop_test
         visual_hash_coverage_test
+        ollama_transport_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2806,7 +2807,6 @@ if(AGENTTY_BUILD_TESTS)
         md_cache_probe
         table_render_test
         openai_transport_test
-        ollama_transport_test
         reveal_freeze_gate_probe
         command_palette_test
         code_block_extract_test
