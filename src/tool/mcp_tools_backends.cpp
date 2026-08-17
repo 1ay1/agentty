@@ -360,6 +360,19 @@ private:
         auto res = shared_retriever().retrieve(q.query, q.k);
         if (!res.error.empty()) { err = res.error; return out; }
         mode = res.mode;
+        // A successful search that matched NOTHING is not a failure — but a
+        // bare empty result makes "corpus is irrelevant" indistinguishable
+        // from "index empty / Ollama down / no docs configured". Fold a short
+        // reason into the MODE label (which the shell renders as context, not
+        // as an error) so the model/user can tell why. err is left empty: a
+        // genuine failure already comes back via res.error above.
+        if (res.passages.empty()) {
+            mode = res.mode.empty()
+                 ? "no matches (no docs indexed — set AGENTTY_DOCS_DIR, or none "
+                   "of your skills/memory matched)"
+                 : ("no matches (" + res.mode + ")");
+            return out;
+        }
         out.reserve(res.passages.size());
         for (auto& p : res.passages) {
             mt::DocPassage d;
