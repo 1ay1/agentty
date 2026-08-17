@@ -180,6 +180,81 @@ int main() {
         }
     }
 
+    // ── 4: scope provenance, trust, and HTTP rows (post-scope-migration) ──
+    {
+        // A PROJECT-scope server is badged with its scope; a USER server is
+        // not (the common case reads clean).
+        Model m;
+        mcp::ServerState proj;
+        proj.name = "repo-tool";
+        proj.connected = true;
+        proj.origin = mcp::Origin::Project;
+        proj.config_dir = ".agentty";
+        proj.tools.push_back({"t", "", true, false});
+        m.ui.plugins.servers.push_back(std::move(proj));
+
+        mcp::ServerState usr;
+        usr.name = "my-tool";
+        usr.connected = true;
+        usr.origin = mcp::Origin::User;
+        usr.config_dir = "/home/u/.agentty";
+        m.ui.plugins.servers.push_back(std::move(usr));
+
+        for (const auto& r : settings::items_for(m, settings::Category::Plugins)) {
+            if (r.primary == "repo-tool") {
+                check(r.scope_label == "project", "scope: project row labelled 'project'");
+                check(r.config_dir == ".agentty",
+                      "scope: project row carries its config dir (edit routing)");
+                check(r.secondary.find("project") != std::string::npos,
+                      "scope: project badge shows in the row text");
+            }
+            if (r.primary == "my-tool") {
+                check(r.secondary.find("project") == std::string::npos
+                      && r.secondary.find("user") == std::string::npos,
+                      "scope: a user row is NOT badged (clean common case)");
+            }
+        }
+
+        // An UNTRUSTED project server: Enter APPROVES (not toggles), the row
+        // is flagged untrusted, and the hint invites trust.
+        Model u;
+        mcp::ServerState untrusted;
+        untrusted.name = "risky";
+        untrusted.origin = mcp::Origin::Project;
+        untrusted.untrusted = true;
+        untrusted.error = "untrusted project config — approve to enable";
+        untrusted.config_dir = ".agentty";
+        u.ui.plugins.servers.push_back(std::move(untrusted));
+        for (const auto& r : settings::items_for(u, settings::Category::Plugins)) {
+            if (r.primary == "risky") {
+                check(r.untrusted, "trust: untrusted flag set on the row");
+                check(r.action == settings::Action::ApprovePlugin,
+                      "trust: Enter on an untrusted server APPROVES, not toggles");
+                check(r.hint == "trust & enable",
+                      "trust: hint invites approval");
+                check(r.status == settings::Item::Status::Bad,
+                      "trust: untrusted reads as attention (Bad)");
+            }
+        }
+
+        // An HTTP/SSE server (url, no command) connects fine and is NOT
+        // flagged 'no command' — the false-error fix.
+        Model h;
+        mcp::ServerState http;
+        http.name = "remote";
+        http.url = "https://mcp.example.com";
+        http.connected = true;
+        h.ui.plugins.servers.push_back(std::move(http));
+        for (const auto& r : settings::items_for(h, settings::Category::Plugins)) {
+            if (r.primary == "remote") {
+                check(r.status == settings::Item::Status::Ok,
+                      "http: a connected url-only server is healthy");
+                check(r.secondary.find("no \"command\"") == std::string::npos,
+                      "http: a url-only server is NOT flagged 'no command'");
+            }
+        }
+    }
+
     if (g_fails == 0) { std::printf("\nAll plugins-in-model tests passed.\n"); return 0; }
     std::printf("\n%d plugins-in-model test(s) FAILED.\n", g_fails);
     return 1;
