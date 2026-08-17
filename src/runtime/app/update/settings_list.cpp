@@ -257,14 +257,15 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 }
                 case se::Action::ApprovePlugin: {
                     // Enter on an untrusted project server = a deliberate
-                    // "trust this repo's mcp.json" — the row is explicitly
-                    // labelled "trust & enable", so the keypress IS the
-                    // consent (unlike hooks, which needs a y/N review). Record
-                    // the content-hash approval, then reconnect so the
-                    // now-trusted stdio servers actually spawn.
+                    // "trust this server" — the row is explicitly labelled
+                    // "trust & enable", so the keypress IS the consent (unlike
+                    // hooks, which needs a y/N review). Approve just THIS
+                    // server's spec (not the whole file), then reconnect so it
+                    // spawns; a later-added server stays pending.
                     if (m.ui.plugins_loading)
                         return done(std::move(m));
-                    const bool ok = tools::plugin::approve_project_config();
+                    const bool ok = tools::plugin::approve_server(
+                        edit_target(row), row.arg);
                     maya::Cmd<Msg> cmd;
                     if (ok) {
                         m.ui.plugins_loading = true;
