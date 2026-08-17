@@ -10,20 +10,16 @@
 // clause and FAILS CLOSED (no workspace write access) rather than emitting a
 // broken/injected profile.
 
+#include "agtest.hpp"
+
 #include "agentty/tool/util/sandbox.hpp"
 
-#include <cstdio>
 #include <string>
 
 namespace sb = agentty::tools::util::sandbox;
 
-static int g_fails = 0;
-static void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_fails;
-}
 
-int main() {
+TEST_CASE("sandbox escape") {
     std::printf("=== sandbox_escape_test ===\n");
 
     // Ordinary paths pass through unchanged.
@@ -68,8 +64,4 @@ int main() {
     check(sb::sbpl_escape("/tmp/a\tb").empty(), "tab → empty");
     check(sb::sbpl_escape(std::string("/tmp/a\0b", 8)).empty(),
           "embedded NUL → empty");
-
-    if (g_fails) { std::printf("%d check(s) FAILED\n", g_fails); return 1; }
-    std::printf("All sandbox escape tests passed.\n");
-    return 0;
 }

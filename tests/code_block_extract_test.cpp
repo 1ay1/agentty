@@ -5,21 +5,16 @@
 // extract_closed_code_blocks: it must drop a trailing block whose fence is
 // still open, keep every closed block, and report `had_open` so the reducer
 // can say "still streaming" vs "no blocks".
+#include "agtest.hpp"
+
 #include "agentty/runtime/code_block_picker.hpp"
 
-#include <cstdio>
 #include <string_view>
 
 namespace cbp = agentty::code_block_picker;
 
-static int g_fail = 0;
-#define CHECK(cond, msg)                                                       \
-    do {                                                                       \
-        if (!(cond)) { std::printf("  FAIL: %s\n", msg); ++g_fail; }           \
-        else         { std::printf("  ok:   %s\n", msg); }                     \
-    } while (0)
 
-int main() {
+TEST_CASE("code block extract") {
     std::printf("[code_block_extract]\n");
 
     // 1. A closed block followed by an OPEN one (still streaming): only the
@@ -82,7 +77,4 @@ int main() {
         CHECK(closed.size() == 1, "closed extract drops the open one");
         CHECK(closed.size() < all.size(), "closed <= raw, strictly here");
     }
-
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }

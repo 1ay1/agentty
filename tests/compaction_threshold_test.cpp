@@ -17,10 +17,11 @@
 //   • bigger window ⇒ higher (never earlier) absolute trigger;
 //   • 0 means "window unknown, never fire".
 
+#include "agtest.hpp"
+
 #include "agentty/domain/session.hpp"
 
 #include <cassert>
-#include <cstdio>
 
 using agentty::StreamState;
 
@@ -34,7 +35,7 @@ int threshold_for(int context_max) {
 
 } // namespace
 
-int main() {
+TEST_CASE("compaction threshold") {
     constexpr int kFloor = StreamState::kMinOutputHeadroom;  // 20000
     constexpr int kPct   = StreamState::kSoftFillPct;        // 95
 
@@ -131,7 +132,4 @@ int main() {
                                         StreamState::kIdleCompactMinTokens));
         std::puts("idle-compaction: fires only on large prefix + near-TTL idle");
     }
-
-    std::puts("ALL COMPACTION-THRESHOLD TESTS PASSED");
-    return 0;
 }

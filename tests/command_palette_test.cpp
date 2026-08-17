@@ -9,19 +9,15 @@
 //   2. FILTER UX — matching spans label + description + shortcut (discovery by
 //      intent), and label hits rank above description-only hits.
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/command_palette.hpp"
 
 #include <array>
-#include <cstdio>
 #include <string_view>
 
 using namespace agentty;
 
-static int g_fails = 0;
-static void check(bool ok, const char* what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
-    if (!ok) ++g_fails;
-}
 
 // Every enum value, so we can assert the catalog covers each exactly once.
 static constexpr std::array kAll = {
@@ -42,7 +38,7 @@ static bool has_id(const std::vector<const CommandDef*>& v, Command id) {
     return false;
 }
 
-int main() {
+TEST_CASE("command palette") {
     // ── 1. catalog completeness (enum ⇄ kCommands bijection) ──────────────
     check(kCommands.size() == kAll.size(),
           "kCommands has exactly one row per Command enum value");
@@ -127,9 +123,4 @@ int main() {
     // ── 8. no match → empty ───────────────────────────────────────────────
     check(filtered_commands("zznotacommandzz").empty(),
           "a non-matching query returns no rows");
-
-    std::printf("\n%s (%d failure%s)\n",
-                g_fails == 0 ? "ALL COMMAND-PALETTE TESTS PASSED" : "FAILED",
-                g_fails, g_fails == 1 ? "" : "s");
-    return g_fails == 0 ? 0 : 1;
 }

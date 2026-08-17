@@ -5,29 +5,21 @@
 // flip a hosted/strong model into degraded mode (or vice-versa).
 
 #include <algorithm>
-#include <cstdio>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "agtest.hpp"
 
 #include "agentty/domain/catalog.hpp"
 
 using namespace agentty;
 
-static int g_failures = 0;
 
-#define CHECK(cond)                                                      \
-    do {                                                                 \
-        if (!(cond)) {                                                   \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n",                     \
-                         __FILE__, __LINE__, #cond);                     \
-            ++g_failures;                                                \
-        }                                                                \
-    } while (0)
 
 static bool weak(std::string_view id) { return is_weak_model(id); }
 
-static void test_claude_never_weak() {
+TEST_CASE("claude never weak") {
     // Every hosted Claude family is strong, all generations.
     CHECK(!weak("claude-opus-4-5"));
     CHECK(!weak("claude-sonnet-4-5-20250101"));
@@ -36,7 +28,7 @@ static void test_claude_never_weak() {
     CHECK(!weak("claude-opus-4-5[1m]"));      // 1m suffix stripped first
 }
 
-static void test_small_local_coder_weak() {
+TEST_CASE("small local coder weak") {
     // The model from the bug report and its small siblings.
     CHECK(weak("qwen2.5-coder:7b"));
     CHECK(weak("qwen2.5-coder:3b"));
@@ -50,13 +42,13 @@ static void test_small_local_coder_weak() {
     CHECK(weak("smollm2:1.7b"));
 }
 
-static void test_large_models_strong() {
+TEST_CASE("large models strong") {
     // Large models with NO weak-family signal follow tool schemas reliably.
     CHECK(!weak("llama3.1:70b"));
     CHECK(!weak("mixtral:8x22b"));            // 22b matched, no weak family
 }
 
-static void test_weak_family_wins_over_size() {
+TEST_CASE("weak family wins over size") {
     // Known weak / coder-only families leak tool JSON at ANY size — the
     // weak-family signal beats the raw >= 14B size shortcut.
     CHECK(weak("qwen2.5-coder:14b"));         // the live case
@@ -65,7 +57,7 @@ static void test_weak_family_wins_over_size() {
     CHECK(weak("deepseek-coder:33b"));
 }
 
-static void test_tool_trained_families_strong() {
+TEST_CASE("tool trained families strong") {
     // Tool-trained families are strong even at smaller sizes.
     CHECK(!weak("qwen3:8b"));
     CHECK(!weak("llama3.1:8b"));
@@ -84,14 +76,14 @@ static void test_tool_trained_families_strong() {
     CHECK(!weak("deepseek-r1:32b"));
 }
 
-static void test_tiny_strong_family_still_weak() {
+TEST_CASE("tiny strong family still weak") {
     // Even a tool-trained family is unreliable when explicitly tiny (<= 3B).
     CHECK(weak("llama3.1:1b"));
     CHECK(weak("qwen3:1.7b"));               // 1b matched from "1.7b"? see note
     CHECK(weak("granite3.1-moe:3b"));
 }
 
-static void test_unknown_id_defaults_strong() {
+TEST_CASE("unknown id defaults strong") {
     // A hosted OpenAI-family id with no size/family signal is assumed capable.
     CHECK(!weak("gpt-4o"));
     CHECK(!weak("gpt-4o-mini"));
@@ -101,7 +93,7 @@ static void test_unknown_id_defaults_strong() {
     CHECK(!weak("some-random-hosted-model"));
 }
 
-static void test_bare_size_signal() {
+TEST_CASE("bare size signal") {
     // No recognised family but a small size tag → weak; large → strong.
     CHECK(weak("mystery:7b"));
     CHECK(!weak("mystery:70b"));
@@ -110,7 +102,7 @@ static void test_bare_size_signal() {
     CHECK(!weak("bigbird"));                 // no leading digits
 }
 
-static void test_max_output_tokens() {
+TEST_CASE("max output tokens") {
     // Claude 4.x Sonnet/Opus → 64000 (the edit-truncation fix).
     CHECK(max_output_tokens_for("claude-sonnet-4-5") == 64000);
     CHECK(max_output_tokens_for("claude-opus-4-5") == 64000);
@@ -134,7 +126,7 @@ static void test_max_output_tokens() {
     CHECK(max_output_tokens_for("claude-fable-5[1m]") == 64000);
 }
 
-static void test_flagship_lane_caps() {
+TEST_CASE("flagship lane caps") {
     using agentty::ModelCapabilities;
     // Fable/Mythos 5 must decode as a KNOWN Claude family (else they'd be
     // treated as unknown/non-Claude: wrong output cap, no effort, no betas).
@@ -155,7 +147,7 @@ static void test_flagship_lane_caps() {
     CHECK(ModelCapabilities::from_id("claude-fable-5[1m]").extended_context_1m);
 }
 
-static void test_gpt5_codex_caps() {
+TEST_CASE("gpt5 codex caps") {
     using agentty::ModelCapabilities;
     using agentty::Effort;
     using agentty::effort_wire_for;
@@ -208,7 +200,7 @@ static void test_gpt5_codex_caps() {
     }
 }
 
-static void test_capability_tiers() {
+TEST_CASE("capability tiers") {
     using T = ModelCapabilities::Tier;
     auto tier = [](std::string_view id) { return ModelCapabilities::tier_for(id); };
     // Anthropic lane ordering matches the vendor's own naming.
@@ -235,7 +227,7 @@ static ModelInfo mi(std::string_view id) {
     return m;
 }
 
-static void test_router_hardening_nonchat_and_oseries() {
+TEST_CASE("router hardening nonchat and oseries") {
     using T = ModelCapabilities::Tier;
     // Non-chat assets a raw OpenAI /v1/models dump lists must NEVER be picked.
     for (const char* asset : {"text-embedding-3-small", "text-embedding-3-large",
@@ -275,7 +267,7 @@ static void test_router_hardening_nonchat_and_oseries() {
     CHECK(cheapest_capable_model("gpt-5", assets_only) == "gpt-5");
 }
 
-static void test_cheapest_capable_router() {
+TEST_CASE("cheapest capable router") {
     // Typical Anthropic pool: parent Opus, cheaper Sonnet + Haiku available.
     std::vector<ModelInfo> pool = {
         mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
@@ -319,7 +311,7 @@ static void test_cheapest_capable_router() {
 // whole fan-out. run_one_completion derives req.model as
 // `wire_model_id(<cheapest-or-parent>)`; this locks that the marker is gone in
 // every branch (cheaper-found, kept-parent, write-role, single-model).
-static void test_subagent_model_never_1m() {
+TEST_CASE("subagent model never 1m") {
     using agentty::wire_model_id;
     auto has_1m = [](std::string_view s) {
         return s.find("[1m]") != std::string_view::npos
@@ -351,7 +343,7 @@ static void test_subagent_model_never_1m() {
           == "claude-haiku-4-5");
 }
 
-static void test_context_window_detection() {
+TEST_CASE("context window detection") {
     using agentty::ModelCapabilities;
     auto win = [](std::string_view id) {
         return ModelCapabilities::from_id(id).context_window();
@@ -402,7 +394,7 @@ static void test_context_window_detection() {
     }
 }
 
-static void test_wire_model_id_strip() {
+TEST_CASE("wire model id strip") {
     using agentty::wire_model_id;
     // The `[1m]`/`[2m]` picker marker must NEVER reach the wire (the API 404s
     // on `claude-sonnet-5[1m]`). wire_model_id strips it, mirroring Claude
@@ -419,7 +411,7 @@ static void test_wire_model_id_strip() {
     CHECK(wire_model_id("") == "");
 }
 
-static void test_model_picker_ordering() {
+TEST_CASE("model picker ordering") {
     using agentty::ModelInfo;
     using agentty::ModelId;
     using agentty::model_picker_less;
@@ -467,32 +459,4 @@ static void test_model_picker_ordering() {
     CHECK((flagship_order == std::vector<std::string>{
         "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
         "claude-opus-4-6", "claude-opus-4-5"}));
-}
-
-int main() {
-    test_claude_never_weak();
-    test_small_local_coder_weak();
-    test_large_models_strong();
-    test_weak_family_wins_over_size();
-    test_tool_trained_families_strong();
-    test_tiny_strong_family_still_weak();
-    test_unknown_id_defaults_strong();
-    test_bare_size_signal();
-    test_max_output_tokens();
-    test_flagship_lane_caps();
-    test_gpt5_codex_caps();
-    test_capability_tiers();
-    test_router_hardening_nonchat_and_oseries();
-    test_cheapest_capable_router();
-    test_subagent_model_never_1m();
-    test_context_window_detection();
-    test_wire_model_id_strip();
-    test_model_picker_ordering();
-
-    if (g_failures == 0) {
-        std::printf("model_caps_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "model_caps_test: %d check(s) failed\n", g_failures);
-    return 1;
 }
