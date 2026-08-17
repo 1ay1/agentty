@@ -38,6 +38,7 @@ struct ServerSpec {
     std::string              command;
     std::vector<std::string> args;
     std::string              url;   // HTTP/SSE transport (no command)
+    std::string              type;  // "http" | "sse" | "" (default http for url)
 };
 
 enum class EditResult : std::uint8_t {

@@ -206,6 +206,39 @@ void tool_enable_disable(const fs::path& dir) {
     std::println("PASS\n");
 }
 
+// An HTTP/SSE server is written as {type, url} — no command — and reads back
+// with its url. This is the transport the inline `--http`/`--sse` add uses.
+void http_server_add(const fs::path& dir) {
+    std::println("--- http_server_add ---");
+    const fs::path cfg = dir / "http" / "mcp.json";
+    plug::ServerSpec http;
+    http.name = "remote";
+    http.url  = "https://mcp.example.com/api";
+    http.type = "http";
+    check(plug::add_server(cfg, http, false) == plug::EditResult::Ok,
+          "http server add succeeds");
+    json e = read_json(cfg)["mcpServers"]["remote"];
+    check(e["type"] == "http", "type is http");
+    check(e["url"] == "https://mcp.example.com/api", "url stored");
+    check(!e.contains("command"), "no command key on a url server");
+
+    plug::ServerSpec sse;
+    sse.name = "events";
+    sse.url  = "https://x.example.com/sse";
+    sse.type = "sse";
+    check(plug::add_server(cfg, sse, false) == plug::EditResult::Ok, "sse add succeeds");
+    check(read_json(cfg)["mcpServers"]["events"]["type"] == "sse", "type is sse");
+
+    // list_servers reads the url back.
+    bool found = false;
+    for (const auto& s : plug::list_servers(cfg))
+        if (s.name == "remote") { found = true;
+            check(s.url == "https://mcp.example.com/api", "list_servers reads url");
+            check(s.command.empty(), "url server has no command"); }
+    check(found, "http server is listed");
+    std::println("PASS\n");
+}
+
 void server_enable_disable(const fs::path& dir) {
     std::println("--- server_enable_disable ---");
     const fs::path cfg = dir / "srv" / "mcp.json";
@@ -481,6 +514,7 @@ int main() {
     list_reads_back(sandbox);
     tool_enable_disable(sandbox);
     server_enable_disable(sandbox);
+    http_server_add(sandbox);
     scope_edits_are_isolated(sandbox);
     project_trust_gate(sandbox);
     per_server_trust(sandbox);

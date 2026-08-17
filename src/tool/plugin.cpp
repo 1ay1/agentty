@@ -237,15 +237,21 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
     auto& servers = l.doc[key];
     if (servers.contains(spec.name) && !force)
         return EditResult::AlreadyExists;
-    // `type: stdio` is the emerging cross-client convention (MCP config
-    // standard proposals; Claude Code / VS Code / Cursor tag it). agentty's
-    // add flow is command-based, so it's always stdio; writing it explicitly
-    // makes the file portable to stricter clients that require the tag.
-    json entry = {{"type", "stdio"}, {"command", spec.command}};
-    if (!spec.args.empty()) entry["args"] = spec.args;
-    // Overwrite-in-place (force) keeps any extra keys the user added to
-    // THIS entry only when the command is unchanged in spirit — simplest
-    // correct rule: force replaces the entry wholesale (documented).
+    json entry;
+    if (!spec.url.empty()) {
+        // HTTP/SSE server: a `url` transport, no local command. `type`
+        // defaults to "http" but honours an explicit spec.type ("sse").
+        entry = {{"type", spec.type.empty() ? "http" : spec.type},
+                 {"url", spec.url}};
+    } else {
+        // `type: stdio` is the emerging cross-client convention (MCP config
+        // standard proposals; Claude Code / VS Code / Cursor tag it). agentty's
+        // command-based add flow is stdio; writing it explicitly makes the
+        // file portable to stricter clients that require the tag.
+        entry = {{"type", "stdio"}, {"command", spec.command}};
+        if (!spec.args.empty()) entry["args"] = spec.args;
+    }
+    // Overwrite-in-place (force) replaces the entry wholesale (documented).
     servers[spec.name] = std::move(entry);
     return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
 }
@@ -392,6 +398,8 @@ int usage() {
         "        Local Python script: command = python3 <script> …\n"
         "  add <name> --npx <npm-pkg> [extra args…]\n"
         "        Node plugin from npm: command = npx -y <pkg> …\n"
+        "  add <name> --http <url>   (or --sse <url>)\n"
+        "        Remote server over HTTP/SSE — a url, no local command.\n"
         "  add <name> -- <command> [args…]\n"
         "        Anything else, verbatim argv.\n"
         "\n"
@@ -529,6 +537,15 @@ int cli(const std::vector<std::string>& argv) {
             spec.command = "npx";
             spec.args.push_back("-y");
             for (auto& t : tail) spec.args.push_back(std::move(t));
+        } else if (recipe == "--http" || recipe == "--sse") {
+            // Remote transport — a url, no local command (so not trust-gated).
+            if (tail.empty()) return usage();
+            if (tail[0].rfind("http://", 0) != 0 && tail[0].rfind("https://", 0) != 0) {
+                std::fprintf(stderr, "url must start with http:// or https://\n");
+                return 1;
+            }
+            spec.url  = tail[0];
+            spec.type = (recipe == "--sse") ? "sse" : "http";
         } else if (recipe == "--") {
             if (tail.empty()) return usage();
             spec.command = tail[0];
@@ -539,13 +556,17 @@ int cli(const std::vector<std::string>& argv) {
 
         switch (add_server(path, spec, force)) {
         case EditResult::Ok: {
-            std::string cmdline = spec.command;
-            for (const auto& a : spec.args) cmdline += " " + a;
+            const std::string detail = spec.url.empty()
+                ? [&]{ std::string c = spec.command;
+                       for (const auto& a : spec.args) c += " " + a; return c; }()
+                : spec.url;
             std::printf("added %-16s %s\n  → %s\n", spec.name.c_str(),
-                        cmdline.c_str(), path.string().c_str());
+                        detail.c_str(), path.string().c_str());
             std::printf("restart agentty to connect (tools appear as "
                         "mcp__%s__<tool>)\n", spec.name.c_str());
-            if (project)
+            // A url server spawns no local command, so it's never trust-gated;
+            // only stdio project servers need approval.
+            if (project && spec.url.empty())
                 std::printf("note: project servers are untrusted until"
                             " approved — run\n      agentty plugin approve %s"
                             " --project\n", spec.name.c_str());
