@@ -16,22 +16,18 @@
 // visual_hash_coverage_test) and the panel repaints on every change with no
 // nonce hack — that invariant is what makes the old bug class impossible.
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/settings_items.hpp"
 #include "agentty/mcp/plugin_model.hpp"
 
-#include <cstdio>
 #include <string>
 
 using namespace agentty;
 
-static int g_fails = 0;
-static void check(bool ok, const std::string& what) {
-    std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what.c_str());
-    if (!ok) ++g_fails;
-}
 
-int main() {
+TEST_CASE("plugins in model") {
     // ── 1: opening Plugins arms loading + returns a connect Cmd ──
     {
         Model m;
@@ -254,8 +250,4 @@ int main() {
             }
         }
     }
-
-    if (g_fails == 0) { std::printf("\nAll plugins-in-model tests passed.\n"); return 0; }
-    std::printf("\n%d plugins-in-model test(s) FAILED.\n", g_fails);
-    return 1;
 }
