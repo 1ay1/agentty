@@ -5,6 +5,8 @@
 
 #include "agentty/tool/commands.hpp"
 
+#include "agentty/scope/scope.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -197,20 +199,19 @@ const std::vector<Command>& all() {
 
     std::string sig;
     std::vector<Command> fresh;
-    const fs::path home = home_dir();
-    const fs::path project_roots[] = {
-        fs::path{".agentty"} / "commands",
-        fs::path{".agents"}  / "commands",
-        fs::path{".claude"}  / "commands",
-    };
-    for (const auto& r : project_roots) scan_root(r, "project", fresh, sig);
-    if (!home.empty()) {
-        const fs::path user_roots[] = {
-            home / ".agentty" / "commands",
-            home / ".agents"  / "commands",
-            home / ".claude"  / "commands",
-        };
-        for (const auto& r : user_roots) scan_root(r, "user", fresh, sig);
+    // Root ladder from scope::plan (Locus-major, Dialect-minor): project
+    // .agentty ▷ .agents ▷ .claude ▷ the same three under ~. scan_root does
+    // the first-name-wins shadow + mtime-sig per root. Project stays cwd-
+    // relative (env.project_root = ".") — commands has always resolved
+    // ".agentty/commands" against cwd.
+    scope::Env env;
+    env.home             = home_dir();
+    env.project_root     = fs::path{"."};
+    env.project_writable = true;
+    const scope::Layout layout{.leaf = "commands"};
+    for (const scope::Source& src : scope::plan(layout, env)) {
+        scan_root(src.base / layout.leaf,
+                  std::string{scope::to_string(src.locus)}, fresh, sig);
     }
 
     if (sig != cached_sig()) {

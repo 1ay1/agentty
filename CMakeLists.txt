@@ -756,6 +756,7 @@ set(AGENTTY_RAG_SOURCES
 
 set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
+    src/scope/scope.cpp
     src/tool/progress.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
@@ -1667,6 +1668,28 @@ if(AGENTTY_BUILD_TESTS)
     target_include_directories(fsm_test PRIVATE include)
     add_test(NAME fsm_test COMMAND fsm_test)
 
+    # scope_test — the config-resolution algebra (agentty::scope). Pure fold
+    # over fabricated Env values: plan() precedence ordering (Locus-major,
+    # Dialect-minor; "/" and no-HOME guards; Explicit wins), the two monoids
+    # (resolve_first override + provenance, resolve_union shadow), and
+    # content-bound trust_of (the MCPoison re-gate). Standalone: scope.cpp +
+    # fs_helpers.cpp (for util::project_root). Links maya/mcp::tools only for
+    # fs_helpers' include propagation, like skills_engine_test.
+    add_executable(scope_test EXCLUDE_FROM_ALL
+        tests/scope_test.cpp
+        src/scope/scope.cpp
+        src/tool/util/fs_helpers.cpp
+    )
+    target_include_directories(scope_test PRIVATE include)
+    target_link_libraries(scope_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json)
+    if(TARGET mcp::tools)
+        target_link_libraries(scope_test PRIVATE mcp::tools)
+    endif()
+    add_test(NAME scope_test COMMAND scope_test)
+    set_tests_properties(scope_test PROPERTIES TIMEOUT 30)
+
     # concurrency_primitives_test — proves the two BEATS-RUST concurrency
     # primitives actually FIRE at runtime, not just compile: the ranked-lock
     # order tripwire abort()s on an out-of-order acquisition (checked in a
@@ -1695,6 +1718,7 @@ if(AGENTTY_BUILD_TESTS)
     add_executable(skills_engine_test EXCLUDE_FROM_ALL
         tests/skills_engine_test.cpp
         src/tool/skills.cpp
+        src/scope/scope.cpp
         src/tool/util/fs_helpers.cpp
     )
     target_include_directories(skills_engine_test PRIVATE include)
@@ -1715,8 +1739,16 @@ if(AGENTTY_BUILD_TESTS)
     add_executable(slash_commands_test EXCLUDE_FROM_ALL
         tests/slash_commands_test.cpp
         src/tool/commands.cpp
+        src/scope/scope.cpp
+        src/tool/util/fs_helpers.cpp
     )
     target_include_directories(slash_commands_test PRIVATE include)
+    target_link_libraries(slash_commands_test PRIVATE
+        maya::maya
+        nlohmann_json::nlohmann_json)
+    if(TARGET mcp::tools)
+        target_link_libraries(slash_commands_test PRIVATE mcp::tools)
+    endif()
     add_test(NAME slash_commands_test COMMAND slash_commands_test)
     set_tests_properties(slash_commands_test PROPERTIES TIMEOUT 30)
 
@@ -2523,6 +2555,7 @@ if(AGENTTY_BUILD_TESTS)
         compaction_threshold_test
         error_class_test
         fsm_test
+        scope_test
         concurrency_primitives_test
         model_label_test
         skills_engine_test
