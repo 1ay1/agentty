@@ -8,12 +8,16 @@
 //   • Hook commands run through run_shell_command — the SAME bwrap /
 //     sandbox-exec wrapper the bash tool uses — so an approved hook is
 //     workspace-confined exactly like model-driven shell.
-//   • Approval store: ~/.agentty/hooks_approved.json, a flat
-//     {abs_path: sha256_hex} map. Any byte change re-gates.
+//   • Approval store: content-hash trust via the SHARED scope::Approvals
+//     primitive (the same one plugins use), persisted at
+//     ~/.agentty/hooks_approved.json as a list of approved file hashes. Any
+//     byte change to a hooks file yields a new hash → re-gated. A pre-scope
+//     {path: hash} store is migrated transparently on first read.
 
 #include "agentty/tool/hooks.hpp"
 
-#include "agentty/auth/auth.hpp"            // auth::sha256_hex
+#include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
+#include "agentty/scope/scope.hpp"          // scope::Approvals (shared trust store)
 #include "agentty/tool/util/sandbox.hpp"    // run_shell_command
 #include "agentty/tool/util/subprocess.hpp"
 
@@ -127,30 +131,46 @@ struct HooksFile {
     return h / ".agentty" / "hooks_approved.json";
 }
 
+// Hooks trust now rides on the SHARED content-hash primitive
+// (scope::Approvals) instead of a bespoke store — one trust mechanism for
+// every executable-from-untrusted-origin surface (plugins, hooks). The hash
+// is the same value either way (scope::content_hash == auth::sha256_hex, and
+// hf.hash is already sha256_hex(raw)), so nothing about the security property
+// changes: approve a file's exact bytes; any byte change yields a new hash
+// that isn't in the approved set, so it re-gates.
+//
+// The store leaf stays "hooks_approved.json" for continuity. scope::Approvals
+// is a flat hash LIST; the pre-scope format was a {abs_path: hash} OBJECT.
+// load_hook_approvals() reads either — an object is migrated in place by
+// taking its hash VALUES — so nobody loses an approval across the upgrade.
+constexpr char kHooksApprovalsLeaf[] = "hooks_approved.json";
+
+[[nodiscard]] scope::Approvals load_hook_approvals() {
+    // Fast path: the scope loader handles the new array form (and returns
+    // empty on the legacy object form, which it can't parse as an array).
+    scope::Approvals a = scope::load_approvals(kHooksApprovalsLeaf);
+    if (!a.shas.empty()) return a;
+    // Legacy {path: hash} object — migrate its values into the list.
+    const auto p = approvals_path();
+    std::string raw = read_all(p, kMaxHooksFileBytes);
+    if (raw.empty()) return a;
+    json j = json::parse(raw, nullptr, /*throw=*/false);
+    if (j.is_object())
+        for (auto it = j.begin(); it != j.end(); ++it)
+            if (it->is_string()) a.approve(it->get<std::string>());
+    return a;
+}
+
 [[nodiscard]] bool is_approved(const HooksFile& hf) {
     if (hf.path.empty() || hf.hash.empty()) return false;
-    std::string raw = read_all(approvals_path(), kMaxHooksFileBytes);
-    if (raw.empty()) return false;
-    json j = json::parse(raw, nullptr, /*throw=*/false);
-    if (!j.is_object()) return false;
-    auto it = j.find(hf.path);
-    return it != j.end() && it->is_string() &&
-           it->get<std::string>() == hf.hash;
+    return load_hook_approvals().approved(hf.hash);
 }
 
 void store_approval(const HooksFile& hf) {
-    auto p = approvals_path();
-    if (p.empty()) return;
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    json j = json::object();
-    if (std::string raw = read_all(p, kMaxHooksFileBytes); !raw.empty()) {
-        json prev = json::parse(raw, nullptr, /*throw=*/false);
-        if (prev.is_object()) j = std::move(prev);
-    }
-    j[hf.path] = hf.hash;
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    f << j.dump(2) << '\n';
+    if (hf.hash.empty()) return;
+    scope::Approvals a = load_hook_approvals();   // includes any migrated legacy hashes
+    a.approve(hf.hash);
+    (void)scope::save_approvals(kHooksApprovalsLeaf, a);   // rewrites as the array form
 }
 
 [[nodiscard]] bool name_matches(const std::string& ere, std::string_view tool) {
