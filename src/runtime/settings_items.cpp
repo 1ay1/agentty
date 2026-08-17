@@ -281,17 +281,26 @@ bool valid_name(const std::string& n) {
 
 AddResult add_plugin_from_line(const std::string& line) {
     auto tok = split_ws(line);
-    if (tok.size() < 2)
-        return {false, "usage: <name> <command> [args…]  — or  "
-                       "<name> --python file.py / --uvx pkg / --npx pkg"};
-    const std::string name = tok[0];
+    // Pull an optional --project flag from anywhere in the line; the rest is
+    // the <name> <recipe> [args…] spec.
+    bool project = false;
+    std::vector<std::string> pos;
+    for (auto& t : tok) {
+        if (t == "--project") project = true;
+        else pos.push_back(std::move(t));
+    }
+    if (pos.size() < 2)
+        return {false, "usage: <name> <command> [args…]  ·  <name> --http <url>  ·  "
+                       "<name> --python file.py / --uvx pkg / --npx pkg  "
+                       "[--project]"};
+    const std::string name = pos[0];
     if (!valid_name(name))
         return {false, "plugin name may use letters, digits, _ - : only"};
 
     tools::plugin::ServerSpec spec;
     spec.name = name;
-    const std::string& recipe = tok[1];
-    std::vector<std::string> rest(tok.begin() + 2, tok.end());
+    const std::string& recipe = pos[1];
+    std::vector<std::string> rest(pos.begin() + 2, pos.end());
 
     if (recipe == "--python") {
         if (rest.empty()) return {false, "--python needs a script path"};
@@ -309,15 +318,24 @@ AddResult add_plugin_from_line(const std::string& line) {
         spec.command = "npx";
         spec.args.push_back("-y");
         for (auto& t : rest) spec.args.push_back(std::move(t));
+    } else if (recipe == "--http" || recipe == "--sse") {
+        // Remote transport — a url, no local command. Not trust-gated (it
+        // spawns nothing) and connects on the next reload.
+        if (rest.empty()) return {false, std::string{recipe} + " needs a url"};
+        if (rest[0].rfind("http://", 0) != 0 && rest[0].rfind("https://", 0) != 0)
+            return {false, "url must start with http:// or https://"};
+        spec.url  = rest[0];
+        spec.type = (recipe == "--sse") ? "sse" : "http";
     } else {
         spec.command = recipe;
         spec.args = std::move(rest);
     }
 
-    const auto path = tools::plugin::config_path(/*project=*/false);
+    const auto path = tools::plugin::config_path(project);
     switch (tools::plugin::add_server(path, spec, /*force=*/false)) {
         case tools::plugin::EditResult::Ok:
-            return {true, "added plugin '" + name + "'"};
+            return {true, "added " + std::string{project ? "project " : ""}
+                          + "plugin '" + name + "'"};
         case tools::plugin::EditResult::AlreadyExists:
             return {false, "'" + name + "' already exists"};
         case tools::plugin::EditResult::ParseError:
