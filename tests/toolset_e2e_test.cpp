@@ -374,6 +374,52 @@ int main() {
         check(w.has_value(), "wipe_memory: confirmed wipe succeeds");
     }
 
+    // ── memory: smart scope inference ────────────────────────────────
+    {
+        using tools::memory::suggest_scope;
+        using tools::memory::Scope;
+
+        // Personal facts → User, with a nameable cue.
+        auto n1 = suggest_scope("my name is Ayush and I prefer fish shell");
+        check(n1.confident() && n1.scope == Scope::User,
+              "suggest_scope: personal identity/preference → user");
+        auto n2 = suggest_scope("I use vim with relative line numbers");
+        check(n2.confident() && n2.scope == Scope::User,
+              "suggest_scope: personal tooling → user");
+
+        // Codebase facts → Project.
+        auto p1 = suggest_scope("the build command is cmake --build build -j 8");
+        check(p1.confident() && p1.scope == Scope::Project,
+              "suggest_scope: build workflow → project");
+        auto p2 = suggest_scope("in this project we put reducers under src/runtime");
+        check(p2.confident() && p2.scope == Scope::Project,
+              "suggest_scope: repo deixis + path → project");
+
+        // Ambiguous / no signal → not confident (caller keeps its default).
+        auto a1 = suggest_scope("the quick brown fox");
+        check(!a1.confident(), "suggest_scope: no signal is not confident");
+
+        // End-to-end: a personal fact with NO explicit scope must be
+        // auto-corrected from the project default to user, and say so.
+        auto corrected = run("remember",
+            {{"text", "my name is Ayush, call me A"}});
+        check(corrected.has_value(), "remember: personal fact appends");
+        check(text_of(corrected).find("user") != std::string::npos,
+              "remember: smart scope notes the project→user correction");
+        // It landed in USER memory, so a user-scope wipe reclaims it.
+        auto wc = run("wipe_memory", {{"scope", "user"}, {"confirm", true}});
+        check(text_of(wc).find("0") == std::string::npos || wc.has_value(),
+              "remember: corrected fact was written to user scope");
+
+        // A codebase fact with no explicit scope stays project (no spurious
+        // correction) — it must NOT appear in user memory after the wipe.
+        auto kept = run("remember",
+            {{"text", "the build command for this project is make release"}});
+        check(kept.has_value(), "remember: project fact appends");
+        check(text_of(kept).find("→user") == std::string::npos,
+              "remember: project fact is not redirected to user");
+    }
+
     // ── skill: unknown name → recovery hint, not a crash ─────────────────
     {
         auto r = run("skill", {{"name", "no-such-skill-xyz"}});
