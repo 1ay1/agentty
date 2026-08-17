@@ -1591,6 +1591,15 @@ if(AGENTTY_BUILD_TESTS)
         doom_loop_test
         visual_hash_coverage_test
         ollama_transport_test
+        code_block_extract_test
+        command_palette_test
+        compaction_threshold_test
+        fsm_test
+        model_caps_test
+        param_tag_repair_test
+        sandbox_escape_test
+        scope_test
+        table_render_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -1761,33 +1770,12 @@ if(AGENTTY_BUILD_TESTS)
     # recovery (model leaks `<parameter name="…">` into the JSON tool
     # input). Header-only logic, so it links against just nlohmann + the
     # header-only tool spec catalog.
-    add_executable(param_tag_repair_test EXCLUDE_FROM_ALL
-        tests/param_tag_repair_test.cpp
-    )
-    target_include_directories(param_tag_repair_test PRIVATE include)
-    target_link_libraries(param_tag_repair_test PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME param_tag_repair_test COMMAND param_tag_repair_test)
 
     # model_caps_test — ModelCapabilities weak-model inference (header-only).
-    add_executable(model_caps_test EXCLUDE_FROM_ALL
-        tests/model_caps_test.cpp
-    )
-    target_include_directories(model_caps_test PRIVATE include)
-    target_link_libraries(model_caps_test PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME model_caps_test COMMAND model_caps_test)
 
     # compaction_threshold_test — StreamState::compaction_threshold(): the
     # smart auto-compaction trigger (percent-of-window + output-headroom
     # floor + pct clamp). Header-only (session.hpp); no link.
-    add_executable(compaction_threshold_test EXCLUDE_FROM_ALL
-        tests/compaction_threshold_test.cpp
-    )
-    target_include_directories(compaction_threshold_test PRIVATE include)
-    target_link_libraries(compaction_threshold_test PRIVATE
-        nlohmann_json::nlohmann_json maya::maya)
-    add_test(NAME compaction_threshold_test COMMAND compaction_threshold_test)
 
     # ── agentty_tests: the single consolidated unit-test binary ────────────
     # POC scaffold. Every migrated doctest TEST_CASE compiles into THIS one
@@ -1812,55 +1800,20 @@ if(AGENTTY_BUILD_TESTS)
     # the assert_legal_edge guard, and move-only RAII cleanup-exactly-once.
     # Pure header, zero deps — the same machinery that drives the HTTP/2
     # connection lifecycle's Dialing→TcpConnected→TlsUp→H2Ready pipeline.
-    add_executable(fsm_test EXCLUDE_FROM_ALL tests/fsm_test.cpp)
-    target_include_directories(fsm_test PRIVATE include)
-    add_test(NAME fsm_test COMMAND fsm_test)
 
     # sandbox_escape_test — the macOS sandbox-exec (SBPL) profile injection
     # guard. The workspace root is interpolated into the (subpath "…") write
     # clause; sbpl_escape() must neutralise " and \ (the injection vector) and
     # fail closed (empty) on control chars a path can't legally carry into an
-    # SBPL string. Standalone: just the sandbox TU + its subprocess/fs/utf8/
-    # progress deps. Sanitizer-clean (pure logic).
-    add_executable(sandbox_escape_test EXCLUDE_FROM_ALL
-        tests/sandbox_escape_test.cpp
-        src/tool/util/sandbox.cpp
-        src/tool/util/subprocess.cpp
-        src/tool/util/fs_helpers.cpp
-        src/tool/util/utf8.cpp
-        src/tool/progress.cpp
-    )
-    target_include_directories(sandbox_escape_test PRIVATE include)
-    target_link_libraries(sandbox_escape_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json)
-    if(TARGET mcp::tools)
-        target_link_libraries(sandbox_escape_test PRIVATE mcp::tools)
-    endif()
-    add_test(NAME sandbox_escape_test COMMAND sandbox_escape_test)
-    set_tests_properties(sandbox_escape_test PROPERTIES TIMEOUT 30)
+    # SBPL string. Migrated into agentty_tests (needs mcp::tools, already
+    # linked there).
 
     # scope_test — the config-resolution algebra (agentty::scope). Pure fold
     # over fabricated Env values: plan() precedence ordering (Locus-major,
     # Dialect-minor; "/" and no-HOME guards; Explicit wins), the two monoids
     # (resolve_first override + provenance, resolve_union shadow), and
-    # content-bound trust_of (the MCPoison re-gate). Standalone: scope.cpp +
-    # fs_helpers.cpp (for util::project_root). Links maya/mcp::tools only for
-    # fs_helpers' include propagation, like skills_engine_test.
-    add_executable(scope_test EXCLUDE_FROM_ALL
-        tests/scope_test.cpp
-        src/scope/scope.cpp
-        src/tool/util/fs_helpers.cpp
-    )
-    target_include_directories(scope_test PRIVATE include)
-    target_link_libraries(scope_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json)
-    if(TARGET mcp::tools)
-        target_link_libraries(scope_test PRIVATE mcp::tools)
-    endif()
-    add_test(NAME scope_test COMMAND scope_test)
-    set_tests_properties(scope_test PROPERTIES TIMEOUT 30)
+    # content-bound trust_of (the MCPoison re-gate). Migrated into
+    # agentty_tests (fs_helpers include propagation via the shared object set).
 
     # concurrency_primitives_test — proves the two BEATS-RUST concurrency
     # primitives actually FIRE at runtime, not just compile: the ranked-lock
@@ -2118,9 +2071,6 @@ if(AGENTTY_BUILD_TESTS)
     # is a Table block; a malformed one with lead-in prose on the header
     # line is a Paragraph (the wall-of-pipes a model produced). Standalone
     # against maya only — no agentty sources needed.
-    add_executable(table_render_test EXCLUDE_FROM_ALL tests/table_render_test.cpp)
-    target_link_libraries(table_render_test PRIVATE maya::maya)
-    add_test(NAME table_render_test COMMAND table_render_test)
 
     # reveal_pacing_test — guards the streaming-reveal CONSTANT-GLIDE
     # invariant against the long-turn BURST regression. Drives
@@ -2443,11 +2393,6 @@ if(AGENTTY_BUILD_TESTS)
     # bijection (no dead palette entries), that every row has a label +
     # description, and the filter's multi-field matching (label/description/
     # shortcut) with label-first ranking. Standalone: header-only, no deps.
-    add_executable(command_palette_test EXCLUDE_FROM_ALL
-        tests/command_palette_test.cpp)
-    target_include_directories(command_palette_test PRIVATE include)
-    add_test(NAME command_palette_test COMMAND command_palette_test)
-    set_tests_properties(command_palette_test PROPERTIES TIMEOUT 30)
 
     # code_block_extract_test — the Ctrl+G fenced-block extractor, focused on
     # the mid-stream-safe path: extract_closed_code_blocks must drop a
@@ -2455,11 +2400,6 @@ if(AGENTTY_BUILD_TESTS)
     # command is unsafe), keep every closed block, handle tilde fences, and
     # report had_open so the reducer can say "still streaming" vs "no blocks".
     # Header-only (code_block_picker.hpp), no deps.
-    add_executable(code_block_extract_test EXCLUDE_FROM_ALL
-        tests/code_block_extract_test.cpp)
-    target_include_directories(code_block_extract_test PRIVATE include)
-    add_test(NAME code_block_extract_test COMMAND code_block_extract_test)
-    set_tests_properties(code_block_extract_test PROPERTIES TIMEOUT 30)
 
     # smart_mode_test — the role resolver (Smart Mode Step 1): role +
     # parent-model + effort + catalog + config → (model, effort) profile.
@@ -2707,10 +2647,6 @@ if(AGENTTY_BUILD_TESTS)
     # normal build; the renderer has its own CI.)
     set_tests_properties(
         fuzzy_match_smoke
-        param_tag_repair_test
-        model_caps_test
-        compaction_threshold_test
-        fsm_test
         concurrency_primitives_test
         skills_engine_test
         cred_crypt_test
@@ -2729,6 +2665,18 @@ if(AGENTTY_BUILD_TESTS)
     add_executable(agentty_tests EXCLUDE_FROM_ALL
         tests/test_main.cpp
         tests/error_class_test.cpp   # migrated directly (never used the helper)
+        # Migrated tests that were registered with a bare add_executable (not
+        # the agentty_add_full_test helper), so they're listed explicitly here
+        # rather than collected via the AGENTTY_TEST_SOURCES property.
+        tests/code_block_extract_test.cpp
+        tests/command_palette_test.cpp
+        tests/compaction_threshold_test.cpp
+        tests/fsm_test.cpp
+        tests/model_caps_test.cpp
+        tests/param_tag_repair_test.cpp
+        tests/sandbox_escape_test.cpp
+        tests/scope_test.cpp
+        tests/table_render_test.cpp
         ${_migrated_srcs}
         ${AGENTTY_SHARED_OBJECTS}
         $<TARGET_OBJECTS:agentty_acp_obj>   # acp_integration_test needs AgentServer
@@ -2769,11 +2717,7 @@ if(AGENTTY_BUILD_TESTS)
     # instrument cleanly). CI then runs `ctest -L sanitizer`.
     add_custom_target(sanitizer_tests DEPENDS
         fuzzy_match_smoke
-        param_tag_repair_test
-        model_caps_test
-        compaction_threshold_test
         agentty_tests
-        fsm_test
         concurrency_primitives_test
         skills_engine_test
         cred_crypt_test
@@ -2783,13 +2727,7 @@ if(AGENTTY_BUILD_TESTS)
         long_session_bench
         anthropic_md_stream
         fuzzy_match_smoke
-        param_tag_repair_test
-        model_caps_test
-        compaction_threshold_test
         agentty_tests
-        fsm_test
-        sandbox_escape_test
-        scope_test
         concurrency_primitives_test
         skills_engine_test
         cred_crypt_test
@@ -2805,11 +2743,8 @@ if(AGENTTY_BUILD_TESTS)
         reveal_smoothness_probe
         md_shape_sweep
         md_cache_probe
-        table_render_test
         openai_transport_test
         reveal_freeze_gate_probe
-        command_palette_test
-        code_block_extract_test
         external_acp_backend_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz

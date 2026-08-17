@@ -5,6 +5,8 @@
 // in plan(), the two fold monoids (resolve_first override, resolve_union
 // shadow+provenance), and content-bound trust (the MCPoison fix).
 
+#include "agtest.hpp"
+
 #include "agentty/scope/scope.hpp"
 
 #include <cassert>
@@ -190,7 +192,7 @@ static void trust_project_pending_until_approved() {
            && "changed content must re-gate trust");
 }
 
-int main() {
+TEST_CASE("scope") {
     plan_orders_by_precedence();
     plan_rejects_filesystem_root();
     plan_explicit_wins();
@@ -205,5 +207,4 @@ int main() {
 
     trust_user_is_implicit();
     trust_project_pending_until_approved();
-    return 0;
 }

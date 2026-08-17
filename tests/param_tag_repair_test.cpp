@@ -7,9 +7,10 @@
 // required field is buried inside a stray string value. Standalone (no
 // maya / no runtime) — compiles against the header + nlohmann + spec.
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/app/update/param_tag_repair.hpp"
 
-#include <cstdio>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -18,16 +19,14 @@ using json = nlohmann::json;
 using agentty::app::detail::repair_param_tag_leak;
 
 namespace {
-int failures = 0;
-int total    = 0;
-void check(const char* name, bool cond, const std::string& detail = {}) {
-    ++total;
-    if (cond) std::printf("  ok   %s\n", name);
-    else { ++failures; std::printf("  FAIL %s — %s\n", name, detail.c_str()); }
+void expect(const char* name, bool cond, const std::string& detail = {}) {
+    std::string msg = detail.empty() ? std::string{name}
+                                     : std::string{name} + " — " + detail;
+    CHECK_MESSAGE(cond, msg);
 }
 } // namespace
 
-int main() {
+TEST_CASE("param tag repair") {
     // ── Case 1: the exact shape seen on the wire ──────────────────────
     // {"path","display_description","edit":"\n<parameter name=\"old_text\">OLD",
     //  "new_text":"NEW"}  — note `edit` (singular) and old_text hidden inside.
@@ -39,22 +38,22 @@ int main() {
             {"path", "src/foo.cpp"},
         };
         bool changed = repair_param_tag_leak("edit", args);
-        check("case1: repaired", changed, args.dump());
-        check("case1: edits array present",
+        expect("case1: repaired", changed, args.dump());
+        expect("case1: edits array present",
               args.contains("edits") && args["edits"].is_array()
                   && args["edits"].size() == 1, args.dump());
-        check("case1: stray `edit` key removed", !args.contains("edit"));
+        expect("case1: stray `edit` key removed", !args.contains("edit"));
         if (args.contains("edits") && !args["edits"].empty()) {
             auto& e = args["edits"][0];
-            check("case1: old_text recovered byte-exact",
+            expect("case1: old_text recovered byte-exact",
                   e.value("old_text", "") == "    constexpr int k = 1;\n",
                   e.value("old_text", ""));
-            check("case1: new_text from clean key",
+            expect("case1: new_text from clean key",
                   e.value("new_text", "") == "    constexpr int k = 2;\n",
                   e.value("new_text", ""));
         }
-        check("case1: path preserved", args.value("path", "") == "src/foo.cpp");
-        check("case1: display_description preserved",
+        expect("case1: path preserved", args.value("path", "") == "src/foo.cpp");
+        expect("case1: display_description preserved",
               args.value("display_description", "") == "probe edit");
     }
 
@@ -66,14 +65,14 @@ int main() {
                       "<parameter name=\"new_text\">BBB</parameter>"},
         };
         bool changed = repair_param_tag_leak("edit", args);
-        check("case2: repaired", changed, args.dump());
+        expect("case2: repaired", changed, args.dump());
         if (args.contains("edits") && args["edits"].is_array()
             && !args["edits"].empty()) {
             auto& e = args["edits"][0];
-            check("case2: old_text", e.value("old_text", "") == "AAA");
-            check("case2: new_text", e.value("new_text", "") == "BBB");
+            expect("case2: old_text", e.value("old_text", "") == "AAA");
+            expect("case2: new_text", e.value("new_text", "") == "BBB");
         } else {
-            check("case2: edits is array", false, args.dump());
+            expect("case2: edits is array", false, args.dump());
         }
     }
 
@@ -85,8 +84,8 @@ int main() {
         };
         json before = args;
         bool changed = repair_param_tag_leak("edit", args);
-        check("case3: not repaired", !changed);
-        check("case3: unchanged", args == before, args.dump());
+        expect("case3: not repaired", !changed);
+        expect("case3: unchanged", args == before, args.dump());
     }
 
     // ── Case 4: write leak — content smuggled into a stray key ─────────
@@ -96,11 +95,11 @@ int main() {
             {"write", "<parameter name=\"content\">hello\nworld\n"},
         };
         bool changed = repair_param_tag_leak("write", args);
-        check("case4: repaired", changed, args.dump());
-        check("case4: content recovered",
+        expect("case4: repaired", changed, args.dump());
+        expect("case4: content recovered",
               args.value("content", "") == "hello\nworld\n",
               args.value("content", ""));
-        check("case4: path preserved", args.value("path", "") == "new.txt");
+        expect("case4: path preserved", args.value("path", "") == "new.txt");
     }
 
     // ── Case 5: a well-formed edit whose new_text legitimately contains
@@ -123,10 +122,7 @@ int main() {
         bool usable = args.contains("edits") && args["edits"].is_array()
                       && !args["edits"].empty()
                       && args["edits"][0].value("old_text","") == "real old";
-        check("case5: genuine old_text preferred over in-content marker",
+        expect("case5: genuine old_text preferred over in-content marker",
               usable, args.dump());
     }
-
-    std::printf("\n%d/%d checks passed\n", total - failures, total);
-    return failures ? 1 : 0;
 }
