@@ -1585,6 +1585,8 @@ if(AGENTTY_BUILD_TESTS)
         tool_wedge_liveness_test
         transcript_bound_test
         turn_settle_test
+        midrun_seam_test
+        midrun_wire_test
     )
     define_property(GLOBAL PROPERTY AGENTTY_TEST_SOURCES
         BRIEF_DOCS "migrated doctest TU sources" FULL_DOCS "see AGENTTY_MIGRATED_TESTS")
@@ -2789,8 +2791,6 @@ if(AGENTTY_BUILD_TESTS)
         cred_crypt_test
         cross_process_lock_test
         keystore_test
-        midrun_seam_test
-        midrun_wire_test
         fork_test
         slash_commands_test
         plugin_config_test
