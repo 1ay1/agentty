@@ -5,21 +5,17 @@
 
 #include "agentty/domain/routing_memory.hpp"
 
-#include <cstdio>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
+#include "agtest.hpp"
+
 namespace fs = std::filesystem;
 using namespace agentty::smart;
 
-static int g_fail = 0;
-#define CHECK(cond, msg) do { \
-    if (!(cond)) { std::printf("FAIL: %s\n", msg); ++g_fail; } \
-} while (0)
-
-int main() {
+TEST_CASE("routing memory persistence + recall") {
     // Isolated workspace so we never touch a real .agentty/.
     auto root = fs::temp_directory_path() /
                 ("agentty_rm_" + std::to_string(
@@ -131,6 +127,4 @@ int main() {
     CHECK(rm.learned_count() == 0, "reset() zeroes the count");
 
     fs::remove_all(root);
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }

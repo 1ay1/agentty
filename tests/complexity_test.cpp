@@ -4,17 +4,11 @@
 
 #include "agentty/domain/complexity.hpp"
 
-#include <cstdio>
-#include <cstdlib>
+#include "agtest.hpp"
 
 using namespace agentty::smart;
 
-static int g_fail = 0;
-#define CHECK(cond, msg) do { \
-    if (!(cond)) { std::printf("FAIL: %s\n", msg); ++g_fail; } \
-} while (0)
-
-int main() {
+TEST_CASE("classify_complexity buckets prompts") {
     // Trivial: short acknowledgements / one-word imperatives, no question.
     CHECK(classify_complexity("yes") == Complexity::Trivial, "yes → trivial");
     CHECK(classify_complexity("go ahead") == Complexity::Trivial, "go ahead → trivial");
@@ -152,7 +146,4 @@ int main() {
         CHECK(!is_routing_correction("looks good, ship it"),
               "approval is NOT a regret");
     }
-
-    std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
-    return g_fail ? 1 : 0;
 }
