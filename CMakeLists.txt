@@ -325,14 +325,11 @@ endif()
 # Call AFTER add_subdirectory(<sub>) so the library target exists to depend on.
 #   agentty_pull_submodule_latest(<dir> <branch> <library-target>)
 option(AGENTTY_AUTO_PULL_SUBMODULES
-       "Sync every in-tree submodule to its tracking branch on every build" ON)
+       "Sync every in-tree submodule to its tracking branch on every build" OFF)
 # Back-compat: the old maya-only switch still disables maya's pull when OFF.
-option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" ON)
+option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" OFF)
 
 function(agentty_pull_submodule_latest sub branch lib)
-    if(NOT AGENTTY_AUTO_PULL_SUBMODULES)
-        return()
-    endif()
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
         return()
     endif()
@@ -349,10 +346,14 @@ function(agentty_pull_submodule_latest sub branch lib)
     #   • local commits not on origin (HEAD != origin/<branch> after fetch,
     #     with local commits reachable only from HEAD)
     # Only a perfectly clean tree sitting on (or behind) origin gets fast-
-    # forwarded. `git pull --ff-only` after the clean-tree check does exactly
+    # forwarded. `git merge --ff-only` after the clean-tree check does exactly
     # that: it advances to the newest commit but ERRORS OUT (harmlessly, the
     # || branch swallows it) rather than discarding your local history.
-    add_custom_target(${sub}_pull_latest ALL
+    #
+    # This target is NEVER part of `all`. It runs only when you ask for it,
+    # either via the aggregate `submodules_sync` target (see below) or, when
+    # AGENTTY_AUTO_PULL_SUBMODULES=ON, as a per-build dependency of ${lib}.
+    add_custom_target(${sub}_pull_latest
         COMMAND ${CMAKE_COMMAND} -E echo "[${sub}] checking origin/${branch}…"
         COMMAND ${GIT_EXECUTABLE} -C ${_sd} diff --quiet
             && ${GIT_EXECUTABLE} -C ${_sd} diff --cached --quiet
@@ -364,10 +365,27 @@ function(agentty_pull_submodule_latest sub branch lib)
         VERBATIM
         USES_TERMINAL
     )
-    # Build the pull BEFORE the library compiles so any changed sources are
-    # picked up in the same build. Ordering only; actual recompile depends on
-    # whether the git reset touched file timestamps.
-    if(TARGET ${lib})
+    # Aggregate on-demand sync: `cmake --build <dir> --target submodules_sync`
+    # (or `ninja submodules_sync`) pulls EVERY submodule at once. Created lazily
+    # on the first submodule so we don't need to know the full set up front.
+    if(NOT TARGET submodules_sync)
+        add_custom_target(submodules_sync
+            COMMENT "Fast-forwarding all in-tree submodules to their tracking branches")
+    endif()
+    add_dependencies(submodules_sync ${sub}_pull_latest)
+    # Opt-in per-build auto-pull. OFF by default: a normal build must never
+    # fetch or reset a submodule (that perturbs header mtimes and needlessly
+    # rebuilds the ~64 TUs that include it). When ON, the pull runs before the
+    # library compiles so freshly-pulled sources are picked up the same build.
+    # rag-cpp additionally honours its own AGENTTY_AUTO_PULL_RAGCPP override.
+    set(_auto_pull ${AGENTTY_AUTO_PULL_SUBMODULES})
+    if(sub STREQUAL "rag-cpp" AND AGENTTY_AUTO_PULL_RAGCPP)
+        set(_auto_pull ON)
+    endif()
+    if(sub STREQUAL "maya" AND AGENTTY_AUTO_PULL_MAYA)
+        set(_auto_pull ON)
+    endif()
+    if(_auto_pull AND TARGET ${lib})
         add_dependencies(${lib} ${sub}_pull_latest)
     endif()
 endfunction()
@@ -375,9 +393,9 @@ endfunction()
 # Prefer the in-tree submodule when present; only fall back to fetch.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
     add_subdirectory(maya)
-    if(AGENTTY_AUTO_PULL_MAYA)
-        agentty_pull_submodule_latest(maya master maya)
-    endif()
+    # Called unconditionally so maya joins the on-demand `submodules_sync`
+    # target; per-build auto-pull stays gated inside the function.
+    agentty_pull_submodule_latest(maya master maya)
 else()
     FetchContent_Declare(
         maya
@@ -615,11 +633,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
     set(AGENTTY_HAS_RAGCPP TRUE)
     # Opt-in upstream tracking, off by default so local rag-cpp edits compile
-    # without CMake changing the submodule checkout.
+    # without CMake changing the submodule checkout. Called UNCONDITIONALLY so
+    # rag-cpp is always part of the on-demand `submodules_sync` target; the
+    # per-build auto-pull stays gated inside the function by
+    # AGENTTY_AUTO_PULL_SUBMODULES (and the rag-specific override below).
     option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward rag-cpp/ to origin/master on every build" OFF)
-    if(AGENTTY_AUTO_PULL_RAGCPP)
-        agentty_pull_submodule_latest(rag-cpp master ragcpp)
-    endif()
+    agentty_pull_submodule_latest(rag-cpp master ragcpp)
 else()
     message(FATAL_ERROR "agentty: rag-cpp/ submodule is empty. Run "
                         "`git submodule update --init --recursive` to vendor "

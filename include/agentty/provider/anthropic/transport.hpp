@@ -8,7 +8,7 @@
 #include <variant>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // only json signatures below; full type lives in transport.cpp
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"

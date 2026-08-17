@@ -6,7 +6,7 @@
 #include <initializer_list>
 #include <string>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // only const json& params below; full type lives in the .cpp
 
 #include "agentty/domain/conversation.hpp"
 
