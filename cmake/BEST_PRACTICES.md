@@ -114,7 +114,43 @@ builds cleanly on its own" goal.
 
 **Net:** the two genuinely-valuable moves (C structural test isolation, A canonical alias) landed; D was implemented-and-measured to an honest OFF default; B was already done; E was correctly declined. No cargo-culting.
 
-## 7. Bonus — CMakePresets.json (modern reproducible configs)
+## 8. Deep build-time profiling (why PCH loses, what actually costs)
+
+Ran `-ftime-trace` on the heaviest TUs + parsed the ninja log. The numbers
+settle the design questions rigorously:
+
+**Per-TU cost (Release, no ccache):** 124 TUs, 903 TU-seconds, mean 7.3 s; tail
+is brutal (server.cpp 26.6 s, bridge.cpp 23 s, external_acp_backend 22.8 s).
+
+**Where the frontend 8 s/TU goes (server.cpp trace):**
+- Header PARSING: ~0 s. Headers are cheap; every `Source` event is sub-ms.
+- Template INSTANTIATION: 30 s cumulative `InstantiateFunction`, dominated by
+  `std::variant` machinery (~11 s: `__union`, `__visitation::__make_fdiagonal`,
+  `__dispatcher`, `__ctor`/`__dtor`) + `std::function` + `std::vector`. This is
+  maya's wide `Element` variant × `std::visit` everywhere: `std::visit`
+  generates O(N²) dispatch matrices clang re-instantiates PER TU.
+
+**Consequence — PCH is the WRONG tool here, rigorously:** a PCH caches parsed
+*headers*, but header parsing is ~0 s and the cost is *this-TU* template
+instantiation, which a PCH cannot cache. That's why the measured PCH was
+net-negative (19 MB load cost, zero instantiation savings). Confirmed OFF.
+
+**What actually makes it fast (all already in place):**
+- **ccache**: a warm full rebuild (rm all objects, rebuild) is **2.5 s** — the
+  frontend cost is paid ONCE per unique content, never again on pull/switch.
+- **Object libraries**: the 124-TU set compiles once, links into ~25 binaries.
+- **`dev` preset** (`-O0` Debug): skips the ~10 s/TU `-O3` backend for iteration.
+
+**The one lever deliberately NOT taken:** `extern template` for the hot
+`std::variant`/`std::visit` instantiations would cut COLD frontend time, but
+(a) it's deep, correctness-risky surgery in maya's core Element type, (b) it
+only helps the cold build — which ccache already makes a one-time cost, and
+(c) the payoff (~90 s→60 s cold, once) doesn't justify risking a green,
+shipping renderer. Data-driven decline, not an oversight. If cold-build time
+ever becomes a real pain (e.g. CI without ccache), the highest-ROI move is
+`extern template std::visit`/variant dispatch in maya, NOT a PCH.
+
+## 9. CMakePresets.json (modern reproducible configs)
 
 Added `CMakePresets.json` (schema v6): named configure/build/test presets that
 replace the `-D` flag soup with `cmake --preset dev|release|ci|sanitizer|
