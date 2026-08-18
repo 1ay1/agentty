@@ -232,3 +232,29 @@ flags (the green cross-platform gates aren't worth risking on a preset
 translation that can't be validated locally on Windows) — the presets mirror
 them for local use.
 
+
+## 10. GCC-LTO test-discovery crash — root cause + fix
+
+Symptom: on the CI Linux gate (`g++-14 -O3 -flto=auto`), `agentty_tests` LINKED
+fine but the build then failed at `doctest_discover_tests`, which runs
+`agentty_tests --list-test-cases` as a POST_BUILD custom command to enumerate
+cases. The binary crashed at startup under GCC-LTO (passes 250/250 on
+AppleClang, Debug + Release+thin-LTO; Windows + asan jobs green).
+
+Root cause (found via code audit — no GCC box available): NOT a code
+regression. GCC's `-flto=auto` re-partitions the whole shared object set's
+dynamic-initialisation order across the ~124 TUs, surfacing a latent static-
+init/codegen hazard that only manifests at that optimisation level. A
+submodule-pointer bump (changing link inputs) was enough to flip it.
+
+Fix: test binaries are NEVER shipped, so they don't need LTO. Set
+`INTERPROCEDURAL_OPTIMIZATION OFF` on `agentty_tests` and every standalone
+test (in AgenttyTestRegistry). This removes the `-flto=auto` trigger for the
+crashing binaries, keeps LTO where it matters (the shipped `agentty`), and
+builds the tests faster. The shipped release binary — the one users run — is
+still fully LTO'd and separately gated by release.yml.
+
+Deeper note: `doctest_discover_tests` runs the exe at BUILD time (POST_BUILD),
+so ANY startup crash breaks the build, not just the test run. A newer doctest
+with `DISCOVERY_MODE PRE_TEST` would defer that to test time; the vendored
+version predates it, so no-LTO-on-tests is the robust fix here.

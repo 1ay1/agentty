@@ -126,6 +126,10 @@ function(agentty_test name)
         ${_primary} ${T_SRCS} ${AGENTTY_SHARED_OBJECTS} ${T_OBJS})
     _agentty_test_link_full(${name})
     target_link_libraries(${name} PRIVATE ${T_LIBS})
+    # Test binaries are never shipped: no LTO (faster + avoids the GCC
+    # -flto=auto init-order hazard that bit agentty_tests). LTO stays on the
+    # shipped `agentty` only.
+    set_target_properties(${name} PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     if(T_UNIX_LIBS AND UNIX AND NOT APPLE)
         target_link_libraries(${name} PRIVATE ${T_UNIX_LIBS})
     endif()
@@ -177,6 +181,15 @@ function(agentty_finalize_tests)
     if(TARGET acp::acp)
         target_link_libraries(agentty_tests PRIVATE acp::acp)
     endif()
+    # Test binaries are never shipped, so they don't need LTO — and GCC's
+    # -flto=auto re-partitions the whole shared object set's dynamic-init
+    # sequence, which surfaced a latent static-init/codegen hazard that CRASHED
+    # agentty_tests at startup (doctest_discover_tests runs it POST_BUILD to
+    # enumerate cases, so a startup crash broke the whole build — "links fine,
+    # dies at discovery"). Turning IPO off for the test binary removes the LTO
+    # trigger, keeps LTO where it matters (the shipped `agentty`), and builds
+    # the test faster. See cmake/BEST_PRACTICES.md.
+    set_target_properties(agentty_tests PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
     doctest_discover_tests(agentty_tests)
 
