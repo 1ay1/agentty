@@ -72,7 +72,7 @@ const char* add_prompt(se::Category c) {
             return "name command args\xe2\x80\xa6  (or --http url / --python f.py / "
                    "--uvx pkg / --npx pkg; add --project for the repo)";
         case se::Category::Commands: return "new command name (creates .agentty/commands/<name>.md)";
-        case se::Category::Agents:   return "new agent name (creates .agentty/agents/<name>.md)";
+        case se::Category::Agents:   return "new subagent name (creates .agentty/agents/<name>.md)";
         default:                     return "";
     }
 }

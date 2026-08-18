@@ -201,7 +201,7 @@ std::vector<Item> agents() {
     // User agents are discovered by the task backend; surface the authoring
     // path so the pane is self-documenting even before any exist.
     Item hint;
-    hint.primary   = "+ user agents";
+    hint.primary   = "+ user subagents";
     hint.secondary = "author one: .agentty/agents/<name>.md "
                      "(frontmatter: tools, read-only)";
     hint.hint      = "docs: subagents";

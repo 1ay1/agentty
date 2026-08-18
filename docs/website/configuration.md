@@ -110,6 +110,8 @@ When AGENTS.md is present, agentty injects it as its own `<agents-md>` block in 
 
 Coexistence with CLAUDE.md is intentional: AGENTS.md is the cross-tool public standard (works with Codex, Cursor, Jules, Aider, opencode, and many others — see the [full list](https://agents.md)), while CLAUDE.md remains agentty's personal/team memory hierarchy. A repo can ship AGENTS.md for cross-agent conventions and individual users can keep CLAUDE.md / CLAUDE.local.md for their own notes; both are injected, AGENTS.md first.
 
+> **`AGENTS.md` is not the same as agentty's subagents.** Despite the similar name, `AGENTS.md` is a *document* — project guidance injected into the system prompt. It is unrelated to agentty's **subagents** (the delegate personas in `.agentty/agents/*.md` that the `task` tool spawns, shown in the command palette's *Subagents* entry). One is a project rulebook read into the prompt; the other defines *who* you can delegate to. AGENTS.md also does **not** apply to subagents — they run on a lean prompt that excludes both AGENTS.md and CLAUDE.md memory.
+
 ## Persisted settings
 
 `--provider`, `-m`/`--model`, the reasoning effort tier, favourited models, your permission profile, and your compaction depth are written to `~/.agentty/settings.json` whenever you change them in-app — so the next launch resumes exactly where you left off. There is nothing to hand-edit; the picker (`^P` / `^/`) and `S-Tab` manage it. Compaction depth is set from the command palette's *Compaction depth* entry — see [Providers](/docs/providers#1m-context-models) for why you'd raise it on a 1M-context model.
