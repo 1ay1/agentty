@@ -170,10 +170,26 @@ endif()
 # -DAGENTTY_PCH=ON and re-measure. The REUSE_FROM wiring in agentty_objlib is
 # correct either way. See cmake/BEST_PRACTICES.md §2 (Gap D).
 option(AGENTTY_PCH "Share a precompiled STL/maya-core header prefix across the object libraries. Measured net-negative on 8-core Apple clang (see comment); opt-in for other toolchains/CI." OFF)
+
+# Unity (jumbo) build. This tree is INSTANTIATION-bound (std::variant/std::visit
+# over maya's wide Element tree — see cmake/BEST_PRACTICES.md §8): the same
+# template machinery is re-instantiated in every TU. Unity batches TUs so those
+# instantiations are shared within a batch — MEASURED 3.2x cold on the largest
+# objlib (runtime_obj 50.5s→15.6s). DEFAULT OFF because it PENALISES incremental
+# rebuilds (editing one file rebuilds its whole batch), so it's for COLD/CI/
+# fresh-clone builds, never the dev edit-loop (use the `dev` preset for that).
+# Batch size 8 balances instantiation sharing against incremental cost.
+option(AGENTTY_UNITY_BUILD "Unity/jumbo build of the object libraries (big COLD-build win on this instantiation-bound tree; hurts incremental — for CI/cold only)." OFF)
+set(AGENTTY_UNITY_BATCH 8 CACHE STRING "TUs per unity batch when AGENTTY_UNITY_BUILD=ON")
 function(agentty_objlib name)
     add_library(${name} OBJECT ${ARGN})
     target_include_directories(${name} PRIVATE include)
     target_compile_definitions(${name} PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+    if(AGENTTY_UNITY_BUILD)
+        set_target_properties(${name} PROPERTIES
+            UNITY_BUILD ON
+            UNITY_BUILD_BATCH_SIZE ${AGENTTY_UNITY_BATCH})
+    endif()
     # Precompiled header (opt-out via -DAGENTTY_PCH=OFF). The prefix
     # (cmake/agentty_pch.hpp) is the ~26 ubiquitous, stable STL/maya-core
     # headers included by 30-60% of TUs. Compiled ONCE on the first objlib and
@@ -249,6 +265,14 @@ agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
 # needs the acp::acp include dir (acp/acp.hpp) on top of the standard set.
 agentty_objlib(agentty_acp_obj       ${AGENTTY_ACP_SOURCES})
 target_link_libraries(agentty_acp_obj PRIVATE acp::acp)
+# src/acp/server.cpp opens `namespace agentty::acp` (the ACP SERVER). Batched
+# into a unity TU with its siblings (which use the GLOBAL `::acp` via bare
+# `acp::`), that name would rebind to agentty::acp and break. Keep this one
+# file out of unity batching — the rest of the objlib still batches.
+if(AGENTTY_UNITY_BUILD)
+    set_source_files_properties(src/acp/server.cpp PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON)
+endif()
 
 # MCP glue — only built when AGENTTY_MCP is on. Confines the heavy mcp-cpp
 # template instantiation to these two TUs; everything else just sees the

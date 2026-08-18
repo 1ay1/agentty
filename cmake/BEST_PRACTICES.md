@@ -150,6 +150,74 @@ shipping renderer. Data-driven decline, not an oversight. If cold-build time
 ever becomes a real pain (e.g. CI without ccache), the highest-ROI move is
 `extern template std::visit`/variant dispatch in maya, NOT a PCH.
 
+### 8a. UNITY BUILD — IMPLEMENTED (the fast lever, measured)
+
+Acted on the profiling: added `AGENTTY_UNITY_BUILD` (default OFF) which sets
+`UNITY_BUILD` on agentty's object libraries (batch 8). Because the cost is
+shared `std::variant`/`std::visit` instantiation, batching TUs so those
+instantiate ONCE per batch is a big win:
+
+| metric | non-unity | unity | Δ |
+|--------|-----------|-------|---|
+| cold full objlib compile (Release, no ccache) | 94.2 s | 43.5 s | **2.2×** |
+| largest single objlib (runtime, 63 TUs) | 50.5 s | 15.6 s | 3.2× |
+| warm 1-file incremental (ccache) | 0.23 s | 0.27 s | negligible |
+
+Modern C++ was PRESERVED — the only source changes were genuine improvements
+that unity surfaced as latent issues:
+  * `scope/trust.cpp`: an anonymous-namespace `home_dir()` that duplicated an
+    identical one in `scope.cpp` — renamed `trust_home_dir()` (real dedup).
+  * `provider/external_acp_backend.cpp`: bare `acp::` was ambiguous with
+    agentty's own `agentty::acp` (the ACP server ns) — pinned via
+    `namespace acp = ::acp;` (removes a real ambiguity).
+  * `src/acp/server.cpp` (the sole file opening `agentty::acp`) is excluded
+    from batching via `SKIP_UNITY_BUILD_INCLUSION` — CMake property, no code
+    change; the rest of the objlib still batches.
+No template/pattern/style changed. 250/250 tests pass under unity; binary
+identical behaviour.
+
+DEFAULT OFF (unity penalises the incremental dev loop — editing one file
+rebuilds its batch), scoped to agentty's objlibs only (maya builds normally, so
+no maya changes needed).
+
+**CI STATUS — NOT enabled on the gate (root-caused).** Enabling unity on the
+Linux CI job failed, and digging into the CI link line revealed WHY, precisely:
+`$<TARGET_OBJECTS:agentty_*_obj>` — how every binary here consumes the object
+libraries — **enumerates the ORIGINAL per-TU objects, which can bypass
+`UNITY_BUILD`.** On the dev box (clang, CMake 3.31) `TARGET_OBJECTS` remapped to
+the `Unity/unity_*.cxx.o` blobs and unity worked end-to-end; on the CI runner
+(g++-14, its CMake) the link pulled individual `http.cpp.o`… objects — unity
+SILENTLY NO-OP'd, so it delivered zero speedup there anyway — and the resulting
+(non-unity) `agentty_tests` then errored at doctest discovery under `-flto=auto`
+(a GCC-LTO interaction the clang box doesn't reproduce; 250/250 pass under
+clang, Debug AND Release+LTO).
+
+So the honest finding is architectural: **because this tree links everything via
+`$<TARGET_OBJECTS>`, target-level `UNITY_BUILD` on the object libraries is
+CMake-version-dependent and doesn't reliably reach the final binaries.** Unity
+stays a verified-on-clang OPT-IN (`-DAGENTTY_UNITY_BUILD=ON`, real 2.2× local
+cold win) but is NOT forced on CI — not for lack of a test box, but because it's
+ineffective + risky through the TARGET_OBJECTS linking model this repo uses. To
+ship it to CI properly would mean either (a) applying unity to the CONSUMING
+executables instead of the objlibs, or (b) dropping the objlib indirection —
+both larger changes than the win justifies while ccache already makes warm
+rebuilds 2.5 s. The source cleanups (home_dir dedup, acp:: disambiguation) are
+correct regardless and stay.
+
+**“Why not use clang everywhere (so unity/CI match the dev box)?”** Because you
+can't: agentty + maya target **C++26** (`std::expected`, …) and **AppleClang
+does NOT advertise C++26** — maya's configure fails on it, so the local dev
+build silently falls back to **C++23** (`-std=c++2b`). The SHIPPED release
+binaries are **GCC** everywhere (Alpine/musl GCC-14 on Linux, Homebrew GCC on
+macOS — see release.yml), built at true C++26. CI is GCC-14 on purpose: it must
+gate the toolchain USERS actually run. Switching CI to clang would (a) gate a
+compiler nobody ships and (b) hide GCC-C++26-only breakage until release —
+exactly the class of bug (the `-flto=auto` discovery failure) that would then
+escape. So the dev box (AppleClang/C++23) is the OUTLIER, and “verified on
+clang locally” is necessary-but-not-sufficient: the real gate is GCC/C++26.
+That's the deeper reason unity isn't forced on CI — it's unverified on the
+SHIPPING toolchain, not merely on “a” toolchain.
+
 ## 9. CMakePresets.json (modern reproducible configs)
 
 Added `CMakePresets.json` (schema v6): named configure/build/test presets that
