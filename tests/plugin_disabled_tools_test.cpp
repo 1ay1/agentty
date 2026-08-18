@@ -26,6 +26,7 @@
 namespace fs = std::filesystem;
 using namespace agentty;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_fails = 0;
 static void check(bool ok, const std::string& what) {
     std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what.c_str());
@@ -38,6 +39,8 @@ static std::size_t tool_count_for(const std::string& server) {
         if (s.name == server) return s.tools.size();
     return static_cast<std::size_t>(-1);   // server absent
 }
+
+}  // namespace (fold)
 
 int main() {
     std::signal(SIGPIPE, SIG_IGN);

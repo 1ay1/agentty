@@ -593,7 +593,11 @@ void test_spawn_real_subprocess(const std::string& self_path) {
 
     InitializeParams init;
     std::string err;
-    auto agent = P::spawn_acp_agent({self_path, "--acp-agent"}, init,
+    auto agent = P::spawn_acp_agent(
+        // Bundled into agentty_standalone_tests (argv-dispatched), so the child
+        // must carry the dispatch name before its own child-mode flag:
+        //   <exe> external_acp_backend_test --acp-agent
+        {self_path, "external_acp_backend_test", "--acp-agent"}, init,
                                     backend->make_handlers(), err);
     if (!agent.ok()) {
         std::cerr << "spawn_acp_agent failed: " << err << "\n";
@@ -622,7 +626,8 @@ void test_wedged_child_teardown_is_bounded(const std::string& self_path) {
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
     InitializeParams init;
     std::string err;
-    auto agent = P::spawn_acp_agent({self_path, "--acp-agent-wedged"}, init,
+    auto agent = P::spawn_acp_agent(
+        {self_path, "external_acp_backend_test", "--acp-agent-wedged"}, init,
                                     backend->make_handlers(), err);
     if (!agent.ok()) {
         std::cerr << "spawn wedged agent failed: " << err << "\n";

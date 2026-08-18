@@ -20,6 +20,7 @@
 namespace fs = std::filesystem;
 using namespace agentty;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_failures = 0;
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -45,6 +46,8 @@ static std::string find_server() {
         if (fs::is_regular_file(c, ec)) return fs::absolute(c, ec).string();
     return {};
 }
+
+}  // namespace (fold)
 
 int main() {
     // ── Robustness: a server whose command does NOT exist must be SKIPPED
