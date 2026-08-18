@@ -144,7 +144,37 @@ The registry functions in `AgenttyTestRegistry.cmake` are written repo-agnostic
 shape so all five repos read identically. Phase 1 ships agentty's; phase 2
 harmonises the submodules if we want the uniformity.
 
-## 6. Migration plan (safe, on `cmake-redesign` branch)
+## 7. Status (what shipped on `cmake-redesign`)
+
+| Step | State | Commit |
+|------|-------|--------|
+| Design doc | ✅ | 9620835 |
+| Each repo runs only its own tests (mcp `*_BUILD_TESTS=OFF`, drop 6 maya tests) | ✅ verified | ab27081 |
+| Single-declaration test registry; 4-list system deleted | ✅ verified | c2a9e9c |
+| Extract `AgenttyToolchain.cmake` | ✅ verified | b13210d |
+| Extract Standalone / Submodules / Sources / Hardening modules | ⏸ deferred | — |
+| Point CI at `tests_gating` | ⏸ deferred | — |
+
+**Root `CMakeLists.txt`: 2716 → 1447 lines.** The pain the redesign targeted —
+the 4-list drift that caused the "Not Run" CI break — is fully eliminated, and
+`tests_gating` exists for a leaner CI gate.
+
+### Why the remaining module extractions are deferred
+The toolchain block was self-contained and extracted cleanly (cache vars proven
+byte-identical). The Standalone / Submodule / Sources / Hardening blocks are
+**interleaved** (maya LTO toggles sit in the standalone section; per-target flag
+application is order-sensitive; acp/mcp/rag `add_subdirectory` are threaded
+through mimalloc + rag-GPU config). A mechanical cut there risks silently
+changing platform behavior (Windows static, Linux musl) that can't be verified
+on a macOS dev box. These should be extracted one-at-a-time behind CI on all
+three platforms, as a follow-up — the value (readability) is lower and the risk
+(cross-platform link regressions) is higher than the registry work already
+landed.
+
+---
+
+## Original plan
+
 
 1. Land this design doc (this commit).
 2. Extract modules **mechanically** — cut each section into its `cmake/*.cmake`
