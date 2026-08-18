@@ -1,5 +1,8 @@
-cmake_minimum_required(VERSION 3.28)
-project(agentty VERSION 0.3.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.28...3.31)
+project(agentty
+    VERSION     0.3.0
+    DESCRIPTION "A fast terminal coding agent (TUI) in modern C++"
+    LANGUAGES   CXX)
 
 # Project CMake modules (test registry, and — as the redesign lands — the
 # extracted toolchain/standalone/hardening includes) live under cmake/.
