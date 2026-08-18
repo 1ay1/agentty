@@ -28,7 +28,10 @@ std::string content_hash(std::string_view bytes) noexcept {
 }
 
 namespace {
-[[nodiscard]] fs::path home_dir() noexcept {
+// Renamed from home_dir() to keep internal linkage unique under a unity build
+// (scope.cpp defines an identical anonymous-namespace home_dir(); concatenated
+// into one TU they'd collide). Same behaviour, file-local name.
+[[nodiscard]] fs::path trust_home_dir() noexcept {
     if (const char* h = std::getenv("HOME"); h && *h) return fs::path{h};
 #if defined(_WIN32)
     if (const char* u = std::getenv("USERPROFILE"); u && *u) return fs::path{u};
@@ -39,7 +42,7 @@ namespace {
 // The approvals file lives under the USER .agentty dir — never the project's,
 // so a cloned repo can't write an approval for itself. Empty if no HOME.
 [[nodiscard]] fs::path approvals_path(std::string_view leaf) {
-    const fs::path h = home_dir();
+    const fs::path h = trust_home_dir();
     if (h.empty()) return {};
     return h / dir_name(Dialect::Agentty) / leaf;
 }
