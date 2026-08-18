@@ -292,6 +292,16 @@ git clone --recursive git@github.com:1ay1/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
 
+**Named presets** (reproducible configs, no `-D` soup):
+
+```bash
+cmake --preset dev        && cmake --build --preset dev        # fast Debug loop (no LTO, ccache)
+cmake --preset release    && cmake --build --preset release    # optimized -O3 + LTO binary
+ctest  --preset dev                                             # run the suite
+```
+
+`cmake --list-presets` shows them all (dev / release / ci / sanitizer / standalone / pch).
+
 All binaries are a single fully-static executable (x86_64 + aarch64 on Linux, Intel + Apple Silicon on macOS; Termux/Android builds from source). Packaging details: [`packaging/README.md`](packaging/README.md).
 
 </details>

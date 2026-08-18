@@ -160,10 +160,36 @@ endif()
 # during compilation (OBJECT libs don't link, but they DO need the
 # headers). maya/json/simdjson/nghttp2/openssl all expose their include
 # dirs through their imported targets.
+# Precompiled header. IMPLEMENTED + benchmarked, DEFAULT OFF: on the primary
+# dev target (8-core Apple Silicon, Apple clang) a shared PCH MEASURED NET-
+# NEGATIVE — cold objlib compile 89 s → 96-98 s. The libc++ prefix expands to a
+# ~19 MB PCH whose per-TU load cost + the serial anchor-compile + lost
+# parallelism exceed the parse savings, and even single-TU incremental rebuild
+# showed no win (1.70 s → 1.77 s). Kept as an opt-in: CI runners with fewer
+# cores / cold I/O, or a different toolchain, may still benefit — flip on with
+# -DAGENTTY_PCH=ON and re-measure. The REUSE_FROM wiring in agentty_objlib is
+# correct either way. See cmake/BEST_PRACTICES.md §2 (Gap D).
+option(AGENTTY_PCH "Share a precompiled STL/maya-core header prefix across the object libraries. Measured net-negative on 8-core Apple clang (see comment); opt-in for other toolchains/CI." OFF)
 function(agentty_objlib name)
     add_library(${name} OBJECT ${ARGN})
     target_include_directories(${name} PRIVATE include)
     target_compile_definitions(${name} PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+    # Precompiled header (opt-out via -DAGENTTY_PCH=OFF). The prefix
+    # (cmake/agentty_pch.hpp) is the ~26 ubiquitous, stable STL/maya-core
+    # headers included by 30-60% of TUs. Compiled ONCE on the first objlib and
+    # REUSE_FROM'd by the rest, so the whole shared object set shares one PCH.
+    # Biggest compile-time lever for this header/template-heavy tree.
+    if(AGENTTY_PCH)
+        if(NOT DEFINED AGENTTY_PCH_ANCHOR)
+            # First objlib owns the actual PCH compilation; set a global anchor.
+            set(AGENTTY_PCH_ANCHOR ${name} PARENT_SCOPE)
+            set(AGENTTY_PCH_ANCHOR ${name})   # local, for the reuse branch below
+            target_precompile_headers(${name} PRIVATE
+                ${CMAKE_SOURCE_DIR}/cmake/agentty_pch.hpp)
+        else()
+            target_precompile_headers(${name} REUSE_FROM ${AGENTTY_PCH_ANCHOR})
+        endif()
+    endif()
     # MCP integration is compile-gated. When ON, every objlib sees the macro
     # (registry.cpp branches on it) and the mcp-cpp INTERFACE include dir (so
     # the agentty-facing header chain resolves); only agentty_mcp_obj actually
