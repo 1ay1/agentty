@@ -100,6 +100,16 @@ On the Claude backend, agentty appends up to three user-authored guidance files 
 - `<project>/CLAUDE.md` — project tier.
 - `<project>/CLAUDE.local.md` — local tier (gitignore it for personal notes).
 
+## AGENTS.md guidance
+
+agentty also reads the [AGENTS.md](https://agents.md) open standard — stewarded by the [Agentic AI Foundation](https://aaif.io) under the Linux Foundation — for project-scoped agent guidance. Think of AGENTS.md as a README for agents: a dedicated, predictable place to provide build steps, test commands, and code-style conventions to AI coding agents. Over 60k open-source projects ship one.
+
+Per the published spec, AGENTS.md is **project-scoped only**: agentty reads a single file at `<project>/AGENTS.md` (resolved from `--workspace`, not the raw process cwd). There is no user tier and no local tier — those concerns stay with CLAUDE.md. agentty's workspace model is single-tier, so nested per-subpackage AGENTS.md files (allowed by the spec for monorepos) are not walked; only the project-root file is read.
+
+When AGENTS.md is present, agentty injects it as its own `<agents-md>` block in the system prompt — placed **before** the CLAUDE.md `<memory>` block, so standardized public project guidance lands first and personal/team memory layers on top. Each file is capped at 64 KiB and mtime-cached (same pipeline as CLAUDE.md). The block is elided entirely when the file is missing or empty, so adding AGENTS.md is purely additive — workspaces without one see no change.
+
+Coexistence with CLAUDE.md is intentional: AGENTS.md is the cross-tool public standard (works with Codex, Cursor, Jules, Aider, opencode, and many others — see the [full list](https://agents.md)), while CLAUDE.md remains agentty's personal/team memory hierarchy. A repo can ship AGENTS.md for cross-agent conventions and individual users can keep CLAUDE.md / CLAUDE.local.md for their own notes; both are injected, AGENTS.md first.
+
 ## Persisted settings
 
 `--provider`, `-m`/`--model`, the reasoning effort tier, favourited models, your permission profile, and your compaction depth are written to `~/.agentty/settings.json` whenever you change them in-app — so the next launch resumes exactly where you left off. There is nothing to hand-edit; the picker (`^P` / `^/`) and `S-Tab` manage it. Compaction depth is set from the command palette's *Compaction depth* entry — see [Providers](/docs/providers#1m-context-models) for why you'd raise it on a 1M-context model.

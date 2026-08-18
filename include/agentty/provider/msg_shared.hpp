@@ -86,4 +86,41 @@ namespace agentty::provider::wire {
     return m;
 }
 
+// AGENTS.md — the open standard for project-scoped agent guidance, stewarded
+// by the Agentic AI Foundation (AAIF) under the Linux Foundation. See
+// https://agents.md. Unlike CLAUDE.md (a personal memory hierarchy with
+// user/project/local tiers), AGENTS.md is intentionally PROJECT-SCOPED ONLY
+// per the published spec: a single file at <project_root>/AGENTS.md, no
+// user tier, no local tier. (The spec also describes nested monorepo files
+// for subpackages; agentty's workspace model is single-tier, so we read
+// only the project-root file — the user explicitly chose this scope.)
+//
+// `project_root` is passed in (rather than resolved here) so this helper
+// stays self-contained: msg_shared.hpp does NOT pull in the util/fs_helpers
+// machinery, leaving the wire layer free of the ToolError/registry surface.
+// Callers (anthropic/prompt.cpp, openai/transport.cpp, ollama/transport.cpp)
+// already link util and resolve project_root() from there.
+//
+// Returns "" when the file is missing/empty so callers elide the block
+// without emitting an empty wrapper tag. Same 64 KiB cap + trailing-
+// whitespace trim as CLAUDE.md, via the shared wire::read_capped_file.
+//
+// Wire shape: a SEPARATE top-level <agents-md>…</agents-md> block, injected
+// BEFORE the existing <memory> block. Keeping the standardized public
+// project guidance visually distinct from personal CLAUDE.md notes lets the
+// model tell them apart and apply precedence correctly.
+[[nodiscard]] inline std::string agents_md_block(
+    std::string_view               intro,
+    const std::filesystem::path&   project_root) {
+    const std::string content = read_capped_file(project_root / "AGENTS.md");
+    if (content.empty()) return {};
+
+    std::string m = "\n\n<agents-md>\n";
+    m += intro;
+    m += "\n";
+    m += content;
+    m += "\n</agents-md>";
+    return m;
+}
+
 } // namespace agentty::provider::wire
