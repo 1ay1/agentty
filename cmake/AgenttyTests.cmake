@@ -74,17 +74,6 @@ foreach(_p md_shape_sweep md_cache_probe)
     set_tests_properties(${_p} PROPERTIES TIMEOUT 120)
 endforeach()
 
-add_executable(tool_boundary_burst_probe EXCLUDE_FROM_ALL tests/tool_boundary_burst_probe.cpp)
-target_link_libraries(tool_boundary_burst_probe PRIVATE maya::maya)
-
-# Full-stack NO_TEST probes (perf diagnostics; some need libutil for the PTY).
-agentty_test(o1_probe               MODE standalone NO_TEST LABELS perf)
-agentty_test(realthread_probe       MODE standalone NO_TEST LABELS perf)
-agentty_test(tallcard_probe         MODE standalone NO_TEST LABELS perf)
-agentty_test(stream_cpu_probe       MODE standalone NO_TEST LABELS perf UNIX_LIBS util)
-agentty_test(loop_body_split_probe  MODE standalone NO_TEST LABELS perf UNIX_LIBS util)
-agentty_test(composer_flicker_probe MODE standalone NO_TEST LABELS perf UNIX_LIBS util)
-agentty_test(edit_turn_cpu_probe    MODE standalone NO_TEST LABELS perf)
 # anthropic_md_stream is a capture/replay HARNESS, not a perf probe: the
 # reveal_stream_gate* CORRECTNESS ctest entries run it. Keep it OUT of the perf
 # label so tests_gating still builds it (otherwise those gates are "Not Run").
