@@ -1,0 +1,25 @@
+// agentty_standalone_tests.def — the fold set + each test's original main()
+// arity. Included multiple times by agentty_standalone_tests_main.cpp with
+// FOLD_NOARGS / FOLD_ARGS redefined (X-macro). Keep in sync with the
+// agentty_standalone_tests source list in cmake/AgenttyTests.cmake.
+//
+// NOARGS = original was `int main()`.   ARGS = `int main(int, char**)`.
+
+FOLD_NOARGS(fork_test)
+FOLD_NOARGS(cross_process_lock_test)
+FOLD_NOARGS(reveal_freeze_gate_probe)
+FOLD_NOARGS(toolset_e2e_test)
+FOLD_NOARGS(subagent_report_test)
+FOLD_NOARGS(plugin_disabled_tools_test)
+FOLD_NOARGS(frozen_invariant_fuzz)
+FOLD_NOARGS(scrollback_wire_fuzz)
+FOLD_NOARGS(reveal_scrollback_test)
+FOLD_NOARGS(scrollback_oracle_test)
+FOLD_NOARGS(mcp_bridge_test)
+FOLD_NOARGS(mcp_http_test)
+FOLD_NOARGS(md_shape_sweep)
+
+FOLD_ARGS(external_acp_backend_test)
+FOLD_ARGS(long_session_bench)
+FOLD_ARGS(anthropic_md_stream)
+FOLD_ARGS(md_cache_probe)

@@ -51,6 +51,8 @@ using agentty::Message;
 using agentty::Role;
 using agentty::ToolUse;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
+
 static FILE* err = nullptr;
 static int g_failures = 0;
 // Ground-truth count of times maya's scrollback gate had to RECOVER
@@ -1244,6 +1246,8 @@ done:
     close(master);
     return 0;
 }
+
+}  // namespace (fold)
 
 int main() {
     // Debug-built libmaya ABORTS on any scrollback-gate firing (the loud
