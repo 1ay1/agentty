@@ -114,3 +114,17 @@ builds cleanly on its own" goal.
 
 **Net:** the two genuinely-valuable moves (C structural test isolation, A canonical alias) landed; D was implemented-and-measured to an honest OFF default; B was already done; E was correctly declined. No cargo-culting.
 
+## 7. Bonus — CMakePresets.json (modern reproducible configs)
+
+Added `CMakePresets.json` (schema v6): named configure/build/test presets that
+replace the `-D` flag soup with `cmake --preset dev|release|ci|sanitizer|
+standalone|pch`. Each pins its own `build/<preset>` dir + generator + option
+set; buildPresets bind targets (e.g. `ci` → `all;tests_gating`) and testPresets
+bind ctest filters (e.g. `ci` excludes the `perf` label, `sanitizer` includes
+the `sanitizer` label) so a contributor reproduces any CI/dev config in one
+command. Verified all six configure; `dev` is the fast Debug+ccache loop the
+workflow already used by hand. CI itself was deliberately LEFT on its explicit
+flags (the green cross-platform gates aren't worth risking on a preset
+translation that can't be validated locally on Windows) — the presets mirror
+them for local use.
+
