@@ -42,13 +42,14 @@
 
     {
       "name": "ci",
-      "displayName": "CI gate — mirrors the Linux job (Release, no mimalloc, tests on)",
+      "displayName": "CI gate — mirrors the Linux job (Release, no mimalloc, tests on, unity)",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "AGENTTY_AUTO_PULL_MAYA": "OFF",
         "AGENTTY_USE_MIMALLOC": "OFF",
-        "AGENTTY_BUILD_TESTS": "ON"
+        "AGENTTY_BUILD_TESTS": "ON",
+        "AGENTTY_UNITY_BUILD": "ON"
       }
     },
 

@@ -27,6 +27,14 @@
 
 namespace agentty::provider {
 
+// Pin the unqualified `acp::` in this TU to the GLOBAL ACP library namespace.
+// agentty has its OWN `agentty::acp` (the ACP *server* — src/acp/server.cpp),
+// so inside agentty::provider a bare `acp::` is ambiguous; under a unity build
+// (batched with a TU that opened agentty::acp) it wrongly bound to
+// agentty::acp. This alias makes every `acp::…` below resolve to ::acp
+// unconditionally — correct regardless of batching.
+namespace acp = ::acp;
+
 namespace {
 
 // ── Current host turn → ACP prompt blocks ───────────────────────────────────

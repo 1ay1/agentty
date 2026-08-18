@@ -102,6 +102,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
+            -DAGENTTY_UNITY_BUILD=ON \
             -DAGENTTY_BUILD_TESTS=ON
 
       - name: Build

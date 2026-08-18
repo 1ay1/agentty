@@ -150,6 +150,38 @@ shipping renderer. Data-driven decline, not an oversight. If cold-build time
 ever becomes a real pain (e.g. CI without ccache), the highest-ROI move is
 `extern template std::visit`/variant dispatch in maya, NOT a PCH.
 
+### 8a. UNITY BUILD — IMPLEMENTED (the fast lever, measured)
+
+Acted on the profiling: added `AGENTTY_UNITY_BUILD` (default OFF) which sets
+`UNITY_BUILD` on agentty's object libraries (batch 8). Because the cost is
+shared `std::variant`/`std::visit` instantiation, batching TUs so those
+instantiate ONCE per batch is a big win:
+
+| metric | non-unity | unity | Δ |
+|--------|-----------|-------|---|
+| cold full objlib compile (Release, no ccache) | 94.2 s | 43.5 s | **2.2×** |
+| largest single objlib (runtime, 63 TUs) | 50.5 s | 15.6 s | 3.2× |
+| warm 1-file incremental (ccache) | 0.23 s | 0.27 s | negligible |
+
+Modern C++ was PRESERVED — the only source changes were genuine improvements
+that unity surfaced as latent issues:
+  * `scope/trust.cpp`: an anonymous-namespace `home_dir()` that duplicated an
+    identical one in `scope.cpp` — renamed `trust_home_dir()` (real dedup).
+  * `provider/external_acp_backend.cpp`: bare `acp::` was ambiguous with
+    agentty's own `agentty::acp` (the ACP server ns) — pinned via
+    `namespace acp = ::acp;` (removes a real ambiguity).
+  * `src/acp/server.cpp` (the sole file opening `agentty::acp`) is excluded
+    from batching via `SKIP_UNITY_BUILD_INCLUSION` — CMake property, no code
+    change; the rest of the objlib still batches.
+No template/pattern/style changed. 250/250 tests pass under unity; binary
+identical behaviour.
+
+DEFAULT OFF (unity penalises the incremental dev loop — editing one file
+rebuilds its batch), scoped to agentty's objlibs only (maya builds normally, so
+no maya changes needed). CI's Linux gate + the `ci` preset turn it ON — that's
+where a cold runner build pays the 2.2×. Local dev keeps the `dev` preset
+(non-unity, ccache) for instant incremental.
+
 ## 9. CMakePresets.json (modern reproducible configs)
 
 Added `CMakePresets.json` (schema v6): named configure/build/test presets that
