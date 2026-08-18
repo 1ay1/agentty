@@ -20,7 +20,10 @@ enum class Category : std::uint8_t {
         case Category::General:  return "General";
         case Category::Plugins:  return "Plugins";
         case Category::Commands: return "Commands";
-        case Category::Agents:   return "Agents";
+        // "Subagents", not "Agents", to disambiguate from the AGENTS.md project-
+        // guidance standard (agents.md). These are the task tool's delegate
+        // PERSONAS (.agentty/agents/*.md); AGENTS.md is a project doc.
+        case Category::Agents:   return "Subagents";
         case Category::Hooks:    return "Hooks";
     }
     return "?";
