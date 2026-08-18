@@ -67,6 +67,9 @@ static unsigned long g_recoveries = 0;
 // Subset of g_recoveries that were NOT the one-time empty-state splash
 // teardown — i.e. genuine second-accountant events. Must be zero.
 static unsigned long g_bad_recoveries = 0;
+// Rows where the reveal scramble reached immutable scrollback (real,
+// user-visible corruption; report-only until the maya fix lands).
+static unsigned long g_scramble_garbage = 0;
 
 // ── Minimal ANSI terminal emulator with native scrollback ──────────────
 //
@@ -378,6 +381,72 @@ static bool check_transcript(TermEmu& emu, const std::string& tag,
         failed = true;
         std::fprintf(err, "  FAIL[%s]: composer chrome appears %d times in transcript\n",
                      tag.c_str(), composer_hits);
+    }
+
+    // ── SCRAMBLE GARBAGE in committed scrollback ────────────────────────
+    // The reveal's scramble→resolve effect paints random ASCII/box glyphs
+    // on freshly-typed codepoints. Those are fine in the LIVE viewport (they
+    // resolve a frame later), but if a row commits to the IMMUTABLE native
+    // scrollback while its scramble is unresolved, the junk is permanent —
+    // the user-visible "corrupted scrollback" bug. The duplicate-marker
+    // check above can't see it (the row isn't duplicated, it's mangled) and
+    // the gate self-heal was historically dismissed as a "benign style_id"
+    // difference, so this class shipped silently.
+    //
+    // Detect it structurally: this harness streams a FIXED prose sentence,
+    // so any committed row that contains its stable prefix but NOT its
+    // stable suffix has been corrupted mid-word (e.g.
+    //   "...exactly like real assistan8??/%8"  instead of
+    //   "...exactly like real assistant prose").
+    // Only scrollback rows are checked — a viewport row legitimately shows a
+    // mid-scramble tail while the reveal is still animating.
+    {
+        // The harness's fixed sentence: "...exactly like real assistant prose".
+        // A committed row may legitimately END mid-sentence (word wrap), so a
+        // prefix match alone is not corruption. Corruption is when the row
+        // continues past the prefix with something that ISN'T the real
+        // continuation — i.e. scramble junk spliced into the word.
+        static constexpr std::string_view kStem = "exactly like real assis";
+        for (std::size_t y = 0; y < emu.scrollback.size(); ++y) {
+            const std::string& ln = emu.scrollback[y];
+            const auto p = ln.find(kStem);
+            if (p == std::string::npos) continue;
+            // The text that follows the stem on this row.
+            const std::string tail = ln.substr(p + kStem.size());
+            // Legit possibilities: the row wrapped somewhere inside/after
+            // "tant prose" — so the tail must be a PREFIX of "tant prose"
+            // (possibly with trailing spaces already trimmed).
+            static constexpr std::string_view kRest = "tant prose";
+            const bool legit = kRest.compare(0, tail.size(), tail) == 0
+                            || tail.rfind(kRest, 0) == 0;   // tail starts with the rest
+            if (!legit) {
+                // KNOWN-FAILING (report-only until the maya fix lands).
+                // This is a REAL, user-visible bug: the reveal scramble is
+                // committed into immutable scrollback. Root cause is
+                // architectural — reveal_fx's overlay "can't see the
+                // viewport/scroll position" (reveal_fx.cpp:1221), so even the
+                // live BOTTOM row (the only one it believes is safe) becomes a
+                // scrolled-off row on the next frame, freezing its unresolved
+                // scramble glyphs in scrollback.
+                //
+                // Counted + printed loudly, but NOT failing the run yet:
+                // flipping it to ++g_failures today would red CI on a bug that
+                // predates this check. Set ORACLE_STRICT=1 to make it fail
+                // (use that while developing the fix); flip the default to
+                // hard-fail as soon as maya stops committing mid-scramble.
+                ++g_scramble_garbage;
+                std::fprintf(err,
+                    "  %s[%s]: SCRAMBLE GARBAGE committed to scrollback row %zu:\n"
+                    "           '%s'\n"
+                    "           (expected '...assistant prose' or a clean wrap; a\n"
+                    "            reveal scramble frame reached immutable scrollback\n"
+                    "            — see reveal_fx.cpp:1221 viewport-blindness note)\n",
+                    std::getenv("ORACLE_STRICT") ? "FAIL" : "KNOWN-BUG",
+                    tag.c_str(), y, ln.c_str());
+                if (std::getenv("ORACLE_STRICT")) { ++g_failures; failed = true; }
+                break;
+            }
+        }
     }
 
     if (failed && dump_on_fail) dump_transcript(emu);
@@ -1273,11 +1342,19 @@ int main() {
     }
     if (g_failures == 0)
         std::fprintf(err, "PASS: append-only oracle + markers + chrome intact "
-                          "(%lu benign gate self-heal/s, all shapes)\n",
-                     g_bad_recoveries);
+                          "(%lu benign gate self-heal/s, all shapes)%s\n",
+                     g_bad_recoveries,
+                     g_scramble_garbage
+                         ? "  \xe2\x9a\xa0 SCRAMBLE GARBAGE IN SCROLLBACK (known bug,"
+                           " report-only \xe2\x80\x94 see above; ORACLE_STRICT=1 to fail)"
+                         : "");
     else
         std::fprintf(err, "FAILED: %d corruption(s) detected (%lu benign gate "
                           "self-heal/s, %lu total incl. splash teardown)\n",
                      g_failures, g_bad_recoveries, g_recoveries);
+    if (g_scramble_garbage)
+        std::fprintf(err, "  [known-bug] scramble glyphs committed to immutable "
+                          "scrollback on %lu row(s) \xe2\x80\x94 reveal_fx overlay is "
+                          "viewport-blind (reveal_fx.cpp:1221)\n", g_scramble_garbage);
     return g_failures ? 1 : 0;
 }
