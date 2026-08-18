@@ -1,0 +1,117 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "AGENTTY_COMPILER_CACHE": "ON"
+      }
+    },
+
+    {
+      "name": "dev",
+      "displayName": "Dev (Debug, no LTO, ccache) — the fast edit-build-test loop",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AGENTTY_BUILD_TESTS": "ON"
+      }
+    },
+
+    {
+      "name": "release",
+      "displayName": "Release (-O3 + thin LTO) — the optimized local binary",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AGENTTY_BUILD_TESTS": "ON"
+      }
+    },
+
+    {
+      "name": "pch",
+      "displayName": "Release + shared PCH (opt-in; measured net-negative on 8-core Apple clang — for CI/low-core experiments)",
+      "inherits": "release",
+      "cacheVariables": { "AGENTTY_PCH": "ON" }
+    },
+
+    {
+      "name": "ci",
+      "displayName": "CI gate — mirrors the Linux job (Release, no mimalloc, tests on)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "AGENTTY_AUTO_PULL_MAYA": "OFF",
+        "AGENTTY_USE_MIMALLOC": "OFF",
+        "AGENTTY_BUILD_TESTS": "ON"
+      }
+    },
+
+    {
+      "name": "sanitizer",
+      "displayName": "ASan+UBSan gate — instruments agentty's own-logic set (mirrors CI)",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "AGENTTY_AUTO_PULL_MAYA": "OFF",
+        "AGENTTY_USE_MIMALLOC": "OFF",
+        "AGENTTY_BUILD_TESTS": "ON",
+        "AGENTTY_SANITIZE_ALL": "address,undefined"
+      }
+    },
+
+    {
+      "name": "standalone",
+      "displayName": "Standalone release — no third-party shared-lib deps (portable binary)",
+      "inherits": "release",
+      "cacheVariables": { "AGENTTY_STANDALONE": "ON" }
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "dev",        "configurePreset": "dev" },
+    { "name": "release",    "configurePreset": "release" },
+    { "name": "pch",        "configurePreset": "pch" },
+    { "name": "standalone", "configurePreset": "standalone" },
+
+    {
+      "name": "ci",
+      "displayName": "CI build — agentty + the gating test set (skips perf probes/benches)",
+      "configurePreset": "ci",
+      "targets": ["all", "tests_gating"]
+    },
+    {
+      "name": "sanitizer",
+      "configurePreset": "sanitizer",
+      "targets": ["sanitizer_tests"]
+    }
+  ],
+
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "jobs": 4 }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI test run — skips perf-labelled cases (matches tests_gating)",
+      "configurePreset": "ci",
+      "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "perf" } },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "sanitizer",
+      "configurePreset": "sanitizer",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "sanitizer" } }
+    }
+  ]
+}
