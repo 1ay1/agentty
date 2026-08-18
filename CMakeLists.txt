@@ -528,12 +528,11 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
         "agentty: the mcp-cpp submodule is missing but it now provides the "
         "entire tool set. Run `git submodule update --init --recursive`.")
 endif()
-# mcp-cpp's own test suite + example server ride along in agentty's ctest:
-# the tests prove the Tier-1 tool IMPLEMENTATIONS (fs/search/web/toolset/
-# codec/protocol/cap/scheduler) and the example server un-skips
-# mcp_bridge_test's real spawn+handshake e2e. Cheap (<1s total) and they
-# guard the layer every agentty tool now lives in.
-set(MCP_BUILD_TESTS    ON  CACHE BOOL "" FORCE)
+# mcp-cpp's EXAMPLE server rides along (mcp_bridge_test's real spawn+handshake
+# e2e needs it), but its TEST binaries do NOT: each repo runs its own tests.
+# mcp-cpp's own CI gates its fs/search/web/toolset/codec/protocol suite. agentty
+# only needs the mcp LIBRARY here, not mcp_tests in agentty's ctest run.
+set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(MCP_BUILD_EXAMPLES ON  CACHE BOOL "" FORCE)
 add_subdirectory(mcp-cpp)
 agentty_pull_submodule_latest(mcp-cpp master mcp)
@@ -1990,17 +1989,12 @@ if(AGENTTY_BUILD_TESTS)
     # renderer (the bug the user feels as streaming stutter on a big reply)
     # fails both the timing-ratio gate and the committed-progress assertion.
     # Standalone against maya only — no agentty sources needed.
-    add_executable(stream_md_lag_test EXCLUDE_FROM_ALL maya/tests/stream_md_lag_test.cpp)
-    target_link_libraries(stream_md_lag_test PRIVATE maya::maya)
-    add_test(NAME stream_md_lag_test COMMAND stream_md_lag_test)
-    set_tests_properties(stream_md_lag_test PROPERTIES TIMEOUT 60)
-
-    # reveal_lag_probe — dev probe (NOT a ctest entry). Traces the reveal
-    # cursor on a long turn ending in a big eager (code) block at agentty's
-    # production pacing to reproduce the "first char sticks, then bursts on
-    # the next tool use" stall. maya-only.
-    add_executable(reveal_lag_probe EXCLUDE_FROM_ALL maya/tests/reveal_lag_probe.cpp)
-    target_link_libraries(reveal_lag_probe PRIVATE maya::maya)
+    # NOTE: maya-owned reveal/stream widget-contract tests
+    # (stream_md_lag_test, reveal_lag_probe, reveal_pacing_test,
+    # reveal_resume_test, stream_async_freeze_test, reveal_smoothness_probe)
+    # are NOT rebuilt here. Their sources live in maya/tests/ and are gated by
+    # maya's OWN CI suite (MAYA_TEST_SOURCES). Each repo runs its own tests;
+    # agentty no longer duplicates maya's into its ctest run.
 
     # composer_edit_test — reducer-level coverage for the composer's
     # word-wise delete keys (Ctrl+W unix-word-rubout / Alt+D kill-word),
@@ -2016,69 +2010,11 @@ if(AGENTTY_BUILD_TESTS)
     # (cmd::schedule_parallel_batch) — no maya / no phase machinery.
     agentty_add_full_test(scheduler_path_test)
 
-    # table_render_test — pins maya's GFM table classification: a
-    # well-formed table (header line starts at '|', blank line before)
-    # is a Table block; a malformed one with lead-in prose on the header
-    # line is a Paragraph (the wall-of-pipes a model produced). Standalone
-    # against maya only — no agentty sources needed.
-
-    # reveal_pacing_test — guards the streaming-reveal CONSTANT-GLIDE
-    # invariant against the long-turn BURST regression. Drives
-    # maya::anim::RateCursor directly and asserts the auto-tuned cruise speed
-    # is clamped to a readable ceiling (no sprint to thousands of cp/s when a
-    # fast model outpaces the cruise), that a slow feed still tracks the wire,
-    # and that the finalize ramp still bypasses the cap to flush the tail.
-    # Header-only against maya — no agentty sources needed.
-    # NOTE: the reveal/stream widget-contract test SOURCES live in
-    # maya/tests/ (single source of truth — they pin StreamingMarkdown/
-    # RateCursor behavior and are also registered in maya's own suite).
-    # agentty builds them too so its ctest run gates on the same contract
-    # without enabling maya's full test build.
-    add_executable(reveal_pacing_test EXCLUDE_FROM_ALL maya/tests/reveal_pacing_test.cpp)
-    target_link_libraries(reveal_pacing_test PRIVATE maya::maya)
-    add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
-    set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
-
-    # reveal_resume_test — property test for the finalize-ramp DISARM and
-    # clock-carry seams from the reveal audit (docs/STREAMING_REVEAL.md
-    # "Audit fixes" #1/#2/#3): a mid-message finalize must disarm when the
-    # stream resumes at the edge (no wedged ramp-mode cruise), a hard
-    # snap_reveal_to_edge deadline must be honoured against a big backlog
-    # (no adaptive stretch), and a chunk arriving after a long FRAMELESS
-    # idle gap must glide out, not drain the stale µs clock as a paste.
-    # Drives the real StreamingMarkdown widget on the frozen test clock.
-    add_executable(reveal_resume_test EXCLUDE_FROM_ALL maya/tests/reveal_resume_test.cpp)
-    target_link_libraries(reveal_resume_test PRIVATE maya::maya)
-    add_test(NAME reveal_resume_test COMMAND reveal_resume_test)
-    set_tests_properties(reveal_resume_test PROPERTIES TIMEOUT 60)
-
-    # stream_async_freeze_test — reproduces the long-turn "md streaming
-    # stops partway, fine again next turn" freeze and pins the fix. Drives
-    # StreamingMarkdown directly at the cached_markdown_for seam: a >=16 KB
-    # divergent-prefix set_content_async DOES enter is_parsing() and returns
-    # stale content (the bug), while the same change via set_content (the
-    # live !settled path now) never parses async and is live in the same
-    # call (the fix). Header-driven against maya only.
-    add_executable(stream_async_freeze_test EXCLUDE_FROM_ALL
-        maya/tests/stream_async_freeze_test.cpp)
-    target_link_libraries(stream_async_freeze_test PRIVATE maya::maya)
-    add_test(NAME stream_async_freeze_test COMMAND stream_async_freeze_test)
-    set_tests_properties(stream_async_freeze_test PROPERTIES TIMEOUT 60)
-
-    # reveal_smoothness_probe — per-BLOCK-TYPE reveal-uniformity gate.
-    # Streams a mixed markdown doc (prose / heading / code fence / table /
-    # list / blockquote) through the production StreamingMarkdown config
-    # (reveal_fx on, 90 cps / 0.3 s pacing) on the virtual anim clock,
-    # renders every frame to a Canvas and counts newly-visible CONTENT
-    # cells per frame per section. FAILS on (1) any height shrink, or
-    # (2) any single frame revealing >60 content cells — the pre-gate
-    # regression (block commits outrunning the reveal cursor) popped
-    # whole blocks at +100..+196 cells/frame while prose glided at ~2.
-    add_executable(reveal_smoothness_probe EXCLUDE_FROM_ALL
-        maya/tests/reveal_smoothness_probe.cpp)
-    target_link_libraries(reveal_smoothness_probe PRIVATE maya::maya)
-    add_test(NAME reveal_smoothness_probe COMMAND reveal_smoothness_probe)
-    set_tests_properties(reveal_smoothness_probe PROPERTIES TIMEOUT 120)
+    # table_render_test / reveal_pacing_test / reveal_resume_test /
+    # stream_async_freeze_test / reveal_smoothness_probe are maya-owned
+    # widget-contract tests. Their sources live in maya/tests/ and maya's own
+    # CI gates them (MAYA_TEST_SOURCES). agentty no longer rebuilds them into
+    # its ctest run — each repo runs its own tests.
 
     # md_shape_sweep — streams a corpus of tricky markdown shapes at several
     # chunk sizes and fails on ANY frame where rendered height SHRINKS while
@@ -2695,11 +2631,6 @@ if(AGENTTY_BUILD_TESTS)
         cross_process_lock_test
         keystore_test
         fork_test
-        stream_md_lag_test
-        reveal_pacing_test
-        reveal_resume_test
-        stream_async_freeze_test
-        reveal_smoothness_probe
         md_shape_sweep
         md_cache_probe
         reveal_freeze_gate_probe
