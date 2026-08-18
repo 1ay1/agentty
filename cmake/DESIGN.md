@@ -149,27 +149,33 @@ harmonises the submodules if we want the uniformity.
 | Step | State | Commit |
 |------|-------|--------|
 | Design doc | ✅ | 9620835 |
-| Each repo runs only its own tests (mcp `*_BUILD_TESTS=OFF`, drop 6 maya tests) | ✅ verified | ab27081 |
-| Single-declaration test registry; 4-list system deleted | ✅ verified | c2a9e9c |
-| Extract `AgenttyToolchain.cmake` | ✅ verified | b13210d |
-| Extract Standalone / Submodules / Sources / Hardening modules | ⏸ deferred | — |
-| Point CI at `tests_gating` | ⏸ deferred | — |
+| Each repo runs only its own tests (mcp `*_BUILD_TESTS=OFF`, drop 6 maya tests) | ✅ CI-green ×4 | ab27081 |
+| Single-declaration test registry; 4-list system deleted | ✅ CI-green ×4 | c2a9e9c |
+| Extract `AgenttyToolchain.cmake` | ✅ CI-green ×4 | b13210d |
+| CI → `tests_gating` + perf-set fix | ✅ CI-green ×4 | d47cd1a |
+| Extract `AgenttyStandalone.cmake` (pre-submodule phase) | ✅ CI-green ×4 | c111edc |
+| Extract `AgenttySubmodules.cmake` (deps/FetchContent/add_subdirectory) | ✅ verified | f8a2d7b |
+| Extract `AgenttySources.cmake` (source-group lists) | ✅ verified | 377d83b |
+| Extract `AgenttyPGO.cmake` | ✅ verified | cadafd8 |
 
-**Root `CMakeLists.txt`: 2716 → 1447 lines.** The pain the redesign targeted —
-the 4-list drift that caused the "Not Run" CI break — is fully eliminated, and
-`tests_gating` exists for a leaner CI gate.
+**Root `CMakeLists.txt`: 2716 → 604 lines (−78%).** The cmake/ modules:
 
-### Why the remaining module extractions are deferred
-The toolchain block was self-contained and extracted cleanly (cache vars proven
-byte-identical). The Standalone / Submodule / Sources / Hardening blocks are
-**interleaved** (maya LTO toggles sit in the standalone section; per-target flag
-application is order-sensitive; acp/mcp/rag `add_subdirectory` are threaded
-through mimalloc + rag-GPU config). A mechanical cut there risks silently
-changing platform behavior (Windows static, Linux musl) that can't be verified
-on a macOS dev box. These should be extracted one-at-a-time behind CI on all
-three platforms, as a follow-up — the value (readability) is lower and the risk
-(cross-platform link regressions) is higher than the registry work already
-landed.
+| Module | Role |
+|--------|------|
+| AgenttyToolchain | ccache, C++ standard + fallback, build type, MSVC /Ob |
+| AgenttyStandalone | standalone/static knobs, ISA, LTO/IPO gating, mimalloc/maya toggles, platform aliases |
+| AgenttySubmodules | auto-pull, FetchContent, acp/mcp/rag add_subdirectory, nghttp2 |
+| AgenttySources | per-domain set(AGENTTY_*_SOURCES) lists |
+| AgenttyPGO | opt-in two-phase profile-guided optimization |
+| AgenttyTestRegistry | the agentty_test()/finalize registry functions |
+| AgenttyTests | the declarative test table |
+
+### What deliberately stays in root
+The compile-flags factory, the shared OBJECT-library definitions, the
+per-platform link knobs, security hardening/strip, and the `agentty` exe
+definition. This is the target's own core — order-critical and central;
+scattering it would hurt readability, not help. The redesign's GOAL (kill the
+4-list drift + each repo runs its own tests) is fully met.
 
 ---
 
