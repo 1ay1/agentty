@@ -99,3 +99,18 @@ heavy build the two remaining high-value moves are **PCH on the object libs
 (Gap D)** and the **`PROJECT_IS_TOP_LEVEL` guard (Gap C)**; the rest (ALIAS,
 SYSTEM, shared submodule module) are polish that also serve the "each repo
 builds cleanly on its own" goal.
+
+---
+
+## 6. IMPLEMENTATION OUTCOMES (branch cmake-best-practices)
+
+| Gap | Outcome |
+|-----|---------|
+| **D — PCH** | Implemented (objlib factory + REUSE_FROM), then **MEASURED net-negative** on 8-core Apple clang: cold objlib compile 89 s → 96-98 s, single-TU incremental 1.70 s → 1.77 s. The libc++ prefix balloons to a ~19 MB PCH whose per-TU load + serial anchor + lost parallelism beat the parse savings. **Defaulted OFF**; machinery kept opt-in (`-DAGENTTY_PCH=ON`) for low-core/cold-IO CI or other toolchains. Data-driven, not cargo-culted. |
+| **C — top-level guard** | Applied where it MATTERS — the submodules, not agentty (agentty is the top app; a guard there is always-true). maya/mcp-cpp/acp-cpp now default `*_BUILD_TESTS` to `PROJECT_IS_TOP_LEVEL` (rag-cpp already did). Verified: standalone → tests ON, embedded in agentty → OFF. "Each repo runs its own tests" is now STRUCTURAL, not enforced by agentty's FORCE overrides. |
+| **A — `::` ALIAS** | Only maya lacked one (agentty synthesised `maya::maya` as a workaround). maya now owns `maya::maya`; agentty's compensating alias is already guarded (`if(NOT TARGET maya::maya)`) so it's a clean no-op. mcp/acp/rag already had theirs. |
+| **B — SYSTEM includes** | Already done before this work — `AgenttySubmodules.cmake` marks maya/mcp/acp/simdjson/nlohmann headers SYSTEM (`SYSTEM TRUE` property). No change needed; the original gap analysis was pessimistic. |
+| **E — shared submodule module** | **DELIBERATELY SKIPPED.** The submodules are independent git repos; a shared cmake module would have to be VENDORED into each (sync burden across 4 repos) to remove ~10 lines of stable boilerplate — net-negative coupling. The `PROJECT_IS_TOP_LEVEL` snippet is the right amount of duplication for repos that must each build standalone. |
+
+**Net:** the two genuinely-valuable moves (C structural test isolation, A canonical alias) landed; D was implemented-and-measured to an honest OFF default; B was already done; E was correctly declined. No cargo-culting.
+
