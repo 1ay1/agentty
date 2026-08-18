@@ -169,6 +169,70 @@ function(agentty_mark_sanitizer)
     endforeach()
 endfunction()
 
+# ── The folded standalone-test binary ───────────────────────────────────────
+# agentty_standalone_tests: ONE exe holding the full-stack standalone tests
+# (forkers / PTY / fuzzers / e2e / benches) that can't be doctest cases in a
+# shared process. Each is still run in its OWN process per ctest entry via
+# argv dispatch (agentty_standalone_tests <name> [args]) — so fork/PTY/chdir
+# isolation is preserved — but ~16 heavy 100 MB+ links collapse into one.
+#
+#   agentty_fold_test(<name> [TIMEOUT n] [LABELS ..] [ARGS] [UNIX_LIBS ..])
+# records the test; agentty_finalize_fold() builds the single binary + the
+# per-test ctest entries. Extra link libs/objs the fold needs (mcp::mcp,
+# acp::acp, agentty_acp_obj) are added once on the binary in AgenttyTests.cmake.
+define_property(DIRECTORY PROPERTY AGENTTY_FOLD_NAMES
+    BRIEF_DOCS "folded standalone test names" FULL_DOCS "AgenttyTestRegistry")
+
+function(agentty_fold_test name)
+    cmake_parse_arguments(F "ARGS" "TIMEOUT" "LABELS;UNIX_LIBS" ${ARGN})
+    set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES ${name})
+    # Rename this TU's main() to <name>_main so the dispatcher can call it.
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/tests/${name}.cpp
+        PROPERTIES COMPILE_DEFINITIONS "main=${name}_main")
+    if(F_UNIX_LIBS)
+        set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_UNIX_LIBS ${F_UNIX_LIBS})
+    endif()
+    # ctest entry: run this test as its own process via the shared binary.
+    if(NOT F_TIMEOUT)
+        set(F_TIMEOUT 60)
+    endif()
+    add_test(NAME ${name} COMMAND agentty_standalone_tests ${name})
+    set_tests_properties(${name} PROPERTIES TIMEOUT ${F_TIMEOUT})
+    if(F_LABELS)
+        set_tests_properties(${name} PROPERTIES LABELS "${F_LABELS}")
+        if("perf" IN_LIST F_LABELS)
+            set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_PERF ${name})
+        endif()
+    endif()
+endfunction()
+
+# Build the one binary from all recorded fold TUs + the dispatcher. Extra
+# libs/objs are passed by the caller (union of every folded test's needs).
+function(agentty_finalize_fold)
+    cmake_parse_arguments(FF "" "" "OBJS;LIBS" ${ARGN})
+    get_property(_names DIRECTORY PROPERTY AGENTTY_FOLD_NAMES)
+    set(_srcs ${CMAKE_SOURCE_DIR}/tests/agentty_standalone_tests_main.cpp)
+    foreach(_n ${_names})
+        list(APPEND _srcs ${CMAKE_SOURCE_DIR}/tests/${_n}.cpp)
+    endforeach()
+    add_executable(agentty_standalone_tests EXCLUDE_FROM_ALL
+        ${_srcs} ${AGENTTY_SHARED_OBJECTS} ${FF_OBJS})
+    _agentty_test_link_full(agentty_standalone_tests)
+    target_link_libraries(agentty_standalone_tests PRIVATE ${FF_LIBS})
+    get_property(_ulibs DIRECTORY PROPERTY AGENTTY_FOLD_UNIX_LIBS)
+    if(_ulibs AND UNIX AND NOT APPLE)
+        target_link_libraries(agentty_standalone_tests PRIVATE ${_ulibs})
+    endif()
+    # Test binaries never ship — no LTO (faster + dodges the GCC init-order
+    # hazard, same rationale as agentty_tests).
+    set_target_properties(agentty_standalone_tests PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF)
+    # The dispatcher #includes tests/agentty_standalone_tests.def.
+    target_include_directories(agentty_standalone_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+    # It counts as one entry in the standalone aggregate.
+    set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_STANDALONE agentty_standalone_tests)
+endfunction()
+
 function(agentty_finalize_tests)
     get_property(_srcs DIRECTORY PROPERTY AGENTTY_T_CONSOLIDATED_SRCS)
     add_executable(agentty_tests EXCLUDE_FROM_ALL

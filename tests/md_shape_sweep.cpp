@@ -18,6 +18,7 @@
 
 using namespace maya;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static constexpr int kWidth = 80;
 static constexpr int kTermH = 40;
 
@@ -93,6 +94,8 @@ static std::vector<Shape> corpus() {
 }
 
 static int rows_of(const Canvas& c) { return c.max_content_row() + 1; }
+
+}  // namespace (fold)
 
 int main() {
     StylePool pool_dummy;

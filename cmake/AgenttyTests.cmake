@@ -38,46 +38,51 @@ endforeach()
 
 # ── Standalone full-stack tests ─────────────────────────────────────────────
 # Forkers / PTY / fuzzers / e2e / benches that can't share the doctest process.
-agentty_test(long_session_bench      MODE standalone TIMEOUT 600 LABELS perf)
-agentty_test(cross_process_lock_test MODE standalone TIMEOUT 30)
-agentty_test(fork_test               MODE standalone TIMEOUT 30)
-agentty_test(reveal_freeze_gate_probe MODE standalone TIMEOUT 30)
-agentty_test(toolset_e2e_test        MODE standalone TIMEOUT 120)
-agentty_test(subagent_report_test    MODE standalone TIMEOUT 60)
-# agents_md_test — locks wire::agents_md_block (AAIF AGENTS.md standard,
-# project-scoped). Standalone (own main(), touches fs:: for temp workspaces)
-# rather than consolidated; not sanitizer-labelled because it links the
-# shared object set that pulls maya::maya (ODR-clashes under asan).
+# ── Folded standalone tests ────────────────────────────────────────────
+# These can't be doctest cases in a shared process (fork/exec, PTY, fuzz seed
+# loops, subprocess e2e) — but they DON'T each need their own 100 MB+ link.
+# agentty_fold_test() puts them all in ONE binary (agentty_standalone_tests)
+# and gives each its own ctest entry that runs it as a separate PROCESS:
+#   add_test(NAME x COMMAND agentty_standalone_tests x)
+# so process isolation is identical to before, at 1 link instead of ~16.
+# Each TU's main() is renamed to <name>_main via a per-source -Dmain=; the
+# dispatcher (tests/agentty_standalone_tests_main.cpp + .def) calls it.
+agentty_fold_test(long_session_bench       TIMEOUT 600 LABELS perf)
+agentty_fold_test(cross_process_lock_test  TIMEOUT 30)
+agentty_fold_test(fork_test                TIMEOUT 30)
+agentty_fold_test(reveal_freeze_gate_probe TIMEOUT 30)
+agentty_fold_test(toolset_e2e_test         TIMEOUT 120)
+agentty_fold_test(subagent_report_test     TIMEOUT 60)
+agentty_fold_test(plugin_disabled_tools_test TIMEOUT 60)
+agentty_fold_test(frozen_invariant_fuzz)
+agentty_fold_test(scrollback_wire_fuzz     TIMEOUT 120)
+agentty_fold_test(reveal_scrollback_test   TIMEOUT 180 UNIX_LIBS util)
+agentty_fold_test(scrollback_oracle_test   TIMEOUT 600 UNIX_LIBS util)
+agentty_fold_test(external_acp_backend_test TIMEOUT 60)
+agentty_fold_test(md_shape_sweep           TIMEOUT 120)
+agentty_fold_test(md_cache_probe           TIMEOUT 120)
+if(AGENTTY_MCP)
+    agentty_fold_test(mcp_bridge_test      TIMEOUT 60)
+    set_tests_properties(mcp_bridge_test PROPERTIES ENVIRONMENT
+        "AGENTTY_MCP_E2E_SERVER=${CMAKE_BINARY_DIR}/mcp-cpp/examples/mcp_server_example")
+    agentty_fold_test(mcp_http_test        TIMEOUT 60)
+endif()
+# anthropic_md_stream is a capture/replay HARNESS, not a ctest entry of its own:
+# the reveal_stream_gate* arms below invoke it (with args) through the folded
+# binary. Registered in the .def; no add_test here.
+set_source_files_properties(${CMAKE_SOURCE_DIR}/tests/anthropic_md_stream.cpp
+    PROPERTIES COMPILE_DEFINITIONS "main=anthropic_md_stream_main")
+set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES anthropic_md_stream)
+
+# Build the one binary: union of every folded test's extra objs/libs.
+agentty_finalize_fold(
+    OBJS $<TARGET_OBJECTS:agentty_acp_obj>
+    LIBS acp::acp)
+
+# agents_md_test — locks wire::agents_md_block (AAIF AGENTS.md standard).
+# Kept as its OWN binary: it chdir()s into temp workspaces, and it's new enough
+# that folding it hasn't been validated.
 agentty_test(agents_md_test          MODE standalone TIMEOUT 30)
-agentty_test(plugin_disabled_tools_test MODE standalone TIMEOUT 60)
-agentty_test(frozen_invariant_fuzz   MODE standalone)
-agentty_test(scrollback_wire_fuzz    MODE standalone TIMEOUT 120)
-agentty_test(reveal_scrollback_test  MODE standalone TIMEOUT 180 UNIX_LIBS util)
-agentty_test(scrollback_oracle_test  MODE standalone TIMEOUT 600 UNIX_LIBS util)
-
-# ACP tests need the acp glue objects + acp::acp on top of the shared stack.
-agentty_test(external_acp_backend_test MODE standalone TIMEOUT 60
-    OBJS $<TARGET_OBJECTS:agentty_acp_obj> LIBS acp::acp)
-
-# MCP e2e — only when MCP is compiled in.
-agentty_test(mcp_bridge_test MODE standalone TIMEOUT 60 GATE AGENTTY_MCP LIBS mcp::mcp
-    ENV "AGENTTY_MCP_E2E_SERVER=${CMAKE_BINARY_DIR}/mcp-cpp/examples/mcp_server_example")
-agentty_test(mcp_http_test   MODE standalone TIMEOUT 60 GATE AGENTTY_MCP LIBS mcp::mcp)
-
-# ── Dev probes / capture tools (built, NOT ctest entries) ───────────────────
-# maya-linked probes: just maya::maya, no agentty sources.
-foreach(_p md_shape_sweep md_cache_probe)
-    agentty_test(${_p} MODE raw)
-    add_executable(${_p} EXCLUDE_FROM_ALL tests/${_p}.cpp)
-    target_link_libraries(${_p} PRIVATE maya::maya)
-    add_test(NAME ${_p} COMMAND ${_p})
-    set_tests_properties(${_p} PROPERTIES TIMEOUT 120)
-endforeach()
-
-# anthropic_md_stream is a capture/replay HARNESS, not a perf probe: the
-# reveal_stream_gate* CORRECTNESS ctest entries run it. Keep it OUT of the perf
-# label so tests_gating still builds it (otherwise those gates are "Not Run").
-agentty_test(anthropic_md_stream    MODE standalone NO_TEST)
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
 # They exercise agentty's own logic and link cleanly under asan/ubsan without
@@ -120,13 +125,13 @@ agentty_finalize_tests()
 # Regression gate on the live reveal glide over a recorded Anthropic stream.
 set(_RSG_FIXTURE ${CMAKE_SOURCE_DIR}/tests/fixtures/anthropic_md_smoke.jsonl)
 agentty_add_ctest(reveal_stream_gate COMMAND
-    anthropic_md_stream det ${_RSG_FIXTURE}
+    agentty_standalone_tests anthropic_md_stream det ${_RSG_FIXTURE}
     --assert-max-delta 40 --assert-finalize-max 40 --assert-finalize-ms 3600)
 agentty_add_ctest(reveal_stream_gate_prod COMMAND
-    anthropic_md_stream det ${_RSG_FIXTURE}
+    agentty_standalone_tests anthropic_md_stream det ${_RSG_FIXTURE}
     --cps 45 --drain 0.40 --adaptive
     --assert-max-delta 40 --assert-finalize-max 40 --assert-finalize-ms 3600)
 agentty_add_ctest(reveal_stream_gate_snap COMMAND
-    anthropic_md_stream det ${_RSG_FIXTURE}
+    agentty_standalone_tests anthropic_md_stream det ${_RSG_FIXTURE}
     --cps 45 --drain 0.40 --adaptive --snap-at 40 --snap-glide 150
     --assert-max-delta 40 --assert-finalize-max 40 --assert-finalize-ms 3600)

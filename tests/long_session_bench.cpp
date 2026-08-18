@@ -286,6 +286,10 @@ int s_id_counter = 0;
 // Scenario shape — declarative parametrisation
 // ─────────────────────────────────────────────────────────────────────────
 
+// Anonymous namespace: bundled into agentty_standalone_tests, where
+// md_shape_sweep declares its own `Shape` — internal linkage keeps the two
+// TU-local types from colliding (ODR).
+namespace {
 struct Shape {
     std::string name;
     int  n_turns           = 0;     // assistant turns; user turn paired with each
@@ -300,6 +304,7 @@ struct Shape {
     int  user_text_chars   = 80;    // user message length per turn
     int  iters             = 5;     // outer-loop iterations for stats
 };
+}  // namespace (fold: Shape is TU-local)
 
 [[nodiscard]] std::string user_prompt(int chars) {
     std::string s;

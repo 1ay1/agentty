@@ -59,6 +59,7 @@ using std::chrono::steady_clock;
 // to a constant instant (12:00 UTC — with TZ=UTC set in run_walk) so the
 // rendered header bytes are identical on every machine and a committed row's
 // content stays a pure function of model state.
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static const std::chrono::system_clock::time_point kFixedTs =
     std::chrono::system_clock::time_point{std::chrono::hours{12}};
 
@@ -635,6 +636,8 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
         }
     }
 }
+
+}  // namespace (fold)
 
 int main() {
     std::printf("scrollback_wire_fuzz\n");
