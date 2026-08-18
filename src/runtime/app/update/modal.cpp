@@ -671,6 +671,15 @@ commit_provider_switch(Model m, std::string_view spec,
         m.d.model_id    = ModelId{next};
         m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
         tools::subagent::set_model(m.d.model_id.value);
+    } else {
+        // No model resolvable for the new backend yet (ChatGPT catalog not
+        // reached, Ollama, …). CLEAR the model id — carrying the OUTGOING
+        // provider's model here would make persist_settings (step 5) file a
+        // cross-provider stale model under the new provider's id (the bug that
+        // wrote `codex → claude-opus-*`). An empty id is skipped by
+        // persist_settings and ModelsLoaded auto-selects the first available.
+        m.d.model_id = ModelId{""};
+        tools::subagent::set_model("");
     }
 
     // (4) Re-clamp the reasoning-effort tier to what the (possibly new)
