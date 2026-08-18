@@ -44,6 +44,11 @@ agentty_test(fork_test               MODE standalone TIMEOUT 30)
 agentty_test(reveal_freeze_gate_probe MODE standalone TIMEOUT 30)
 agentty_test(toolset_e2e_test        MODE standalone TIMEOUT 120)
 agentty_test(subagent_report_test    MODE standalone TIMEOUT 60)
+# agents_md_test — locks wire::agents_md_block (AAIF AGENTS.md standard,
+# project-scoped). Standalone (own main(), touches fs:: for temp workspaces)
+# rather than consolidated; not sanitizer-labelled because it links the
+# shared object set that pulls maya::maya (ODR-clashes under asan).
+agentty_test(agents_md_test          MODE standalone TIMEOUT 30)
 agentty_test(plugin_disabled_tools_test MODE standalone TIMEOUT 60)
 agentty_test(frozen_invariant_fuzz   MODE standalone)
 agentty_test(scrollback_wire_fuzz    MODE standalone TIMEOUT 120)

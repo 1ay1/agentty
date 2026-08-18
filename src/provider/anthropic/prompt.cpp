@@ -9,6 +9,7 @@
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"   // util::project_root — AGENTS.md anchor
 #include "agentty/util/dbglog.hpp"
 
 #include <cstdlib>
@@ -157,6 +158,40 @@ namespace {
     emit_learned("user",    std::move(learned_user));
     emit_learned("project", std::move(learned_project));
     m << "</memory>";
+    return m.str();
+}
+
+// AGENTS.md — the open AAIF/Linux-Foundation standard for project-scoped
+// agent guidance (https://agents.md). Project-scoped only per the published
+// spec: a single file at <project_root>/AGENTS.md, no user tier, no local
+// tier. agentty's workspace model is single-tier (no per-subpackage nested
+// files), so this is the only AGENTS.md read.
+//
+// Reuses read_memory_cached despite the name — that function is a generic
+// mtime-cached file reader (cache key is the path string, so AGENTS.md
+// gets its own cache entry independent of the CLAUDE.md tiers). Same 64 KiB
+// cap, same process-lifetime cache, same concurrency contract.
+//
+// Wire shape: a SEPARATE top-level <agents-md>…</agents-md> block, injected
+// BEFORE the existing <memory> block. Standardized public project guidance
+// is visually distinct from personal CLAUDE.md notes so the model can
+// apply precedence correctly (AGENTS.md is the public spec; CLAUDE.md
+// tiers are personal/team memory). Sits behind the same Anthropic cache
+// breakpoint as collect_memory_blocks, so the wire cost is paid once per
+// ~5 min cache_control TTL window regardless.
+[[nodiscard]] std::string collect_agents_md_block() {
+    const std::string content =
+        read_memory_cached(tools::util::project_root() / "AGENTS.md");
+    if (content.empty()) return {};
+
+    std::ostringstream m;
+    m << "\n\n<agents-md>\n"
+      << "Project guidance following the open AGENTS.md standard "
+         "(agents.md, stewarded by the Agentic AI Foundation under the "
+         "Linux Foundation). Treat as authoritative public project "
+         "conventions.\n"
+      << content
+      << "\n</agents-md>";
     return m.str();
 }
 
@@ -407,6 +442,11 @@ std::string default_system_prompt(bool lean) {
         << "waste \xe2\x89\xa5" "10 minutes rediscovering this? If yes, store it; "
         << "if it's routine or speculative, don't. Never store secrets.\n"
         << "</memory-tools>\n";
+    // Append AGENTS.md (AAIF standard, project-scoped) BEFORE the CLAUDE.md
+    // tiers. Standardized public project guidance lands first, personal
+    // memory layers on top — same end-of-prompt position so the always-on
+    // rules above still anchor first.
+    oss << collect_agents_md_block();
     // Append CLAUDE.md tiers (User + Project + Local) when present.
     // Lives at the END of the prompt so the always-on rules above
     // anchor first; user-authored memory then layers on top.
