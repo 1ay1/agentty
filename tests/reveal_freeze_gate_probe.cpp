@@ -55,6 +55,7 @@ using agentty::Message;
 using agentty::Role;
 using agentty::app::AgenttyApp;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_checks = 0, g_failures = 0;
 #define CHECK(cond, msg)                                                    \
     do {                                                                    \
@@ -242,6 +243,8 @@ static void test_settled_turn_is_hash_stable() {
           "settled idle turn — the fast reveal bucket is leaking and the "
           "loop will burn CPU at idle");
 }
+
+}  // namespace (fold)
 
 int main() {
     // Pin the sync-output classification so the reveal render bucket is the

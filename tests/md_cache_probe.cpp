@@ -22,6 +22,7 @@
 using namespace maya;
 using clk = std::chrono::steady_clock;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static constexpr int kWidth = 100;
 static constexpr int kTermH = 40;
 
@@ -78,6 +79,8 @@ static std::vector<ShapeGen> shapes() {
     }
     return v;
 }
+
+}  // namespace (fold)
 
 int main(int argc, char** argv) {
     const char* only = argc > 1 ? argv[1] : nullptr;

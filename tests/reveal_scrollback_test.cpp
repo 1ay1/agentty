@@ -79,6 +79,7 @@ using agentty::ToolUse;
 using namespace maya;
 using namespace maya::inline_frame;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_failures = 0;
 static int g_checks   = 0;
 
@@ -1421,6 +1422,8 @@ static void run_trimstorm_scenario(int width, int term_h) {
     }
     if (pty_master >= 0) close(pty_master);
 }
+
+}  // namespace (fold)
 
 int main() {
     // Each scenario dup2's a PTY over STDOUT to give term_dims() real

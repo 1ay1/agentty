@@ -68,6 +68,7 @@ using agentty::ToolUse;
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_failures = 0;
 static int g_checks   = 0;
 
@@ -409,6 +410,8 @@ static void run_walk(std::uint64_t seed, int width) {
         if (g_failures) return;  // stop on first failure for a clean trace
     }
 }
+
+}  // namespace (fold)
 
 int main() {
     std::printf("frozen_invariant_fuzz\n");
