@@ -113,7 +113,7 @@ function(agentty_test name)
     if("sanitizer" IN_LIST T_LABELS)
         set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_SANITIZER ${name})
     endif()
-    if("perf" IN_LIST T_LABELS OR T_NO_TEST)
+    if("perf" IN_LIST T_LABELS)
         set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_PERF ${name})
     endif()
 

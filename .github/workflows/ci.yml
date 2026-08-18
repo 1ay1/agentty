@@ -105,10 +105,15 @@ jobs:
             -DAGENTTY_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build -j"$(nproc)" --target all tests
+        # tests_gating = the correctness set (agentty_tests + every standalone
+        # test) MINUS the perf probes/benches, which never gate — see the
+        # derived aggregate in cmake/AgenttyTestRegistry.cmake.
+        run: cmake --build build -j"$(nproc)" --target all tests_gating
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j"$(nproc)"
+        # -LE perf skips the perf-labelled ctest entries (e.g. long_session_bench)
+        # that tests_gating deliberately didn't build.
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)" -LE perf
 
   # Rust-grade memory-safety gate. Builds agentty's OWN-logic test set under
   # -fsanitize=address,undefined and runs it: proves those paths are free of
