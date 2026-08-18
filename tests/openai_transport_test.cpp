@@ -17,6 +17,8 @@
 #include <variant>
 #include <vector>
 
+#include "agtest.hpp"
+
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -24,15 +26,6 @@
 
 using namespace agentty;
 namespace oai = agentty::provider::openai;
-
-static int g_failures = 0;
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        if (!(cond)) {                                                         \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-            ++g_failures;                                                      \
-        }                                                                      \
-    } while (0)
 
 // ── Msg inspection helpers ──────────────────────────────────────────────────
 // Msg is a variant of domain sub-variants; the leaf we want lives one level
@@ -74,7 +67,7 @@ static std::string joined_tool_args(const std::vector<Msg>& msgs) {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-static void test_build_tools() {
+TEST_CASE("test_build_tools") {
     std::vector<provider::ToolSpec> tools;
     tools.push_back({"read", "Read a file",
                      nlohmann::json{{"type", "object"},
@@ -89,7 +82,7 @@ static void test_build_tools() {
     CHECK(j[0]["function"]["parameters"]["type"] == "object");
 }
 
-static void test_build_messages_basic() {
+TEST_CASE("test_build_messages_basic") {
     Thread t;
     Message u;
     u.role = Role::User;
@@ -103,7 +96,7 @@ static void test_build_messages_basic() {
     CHECK(arr[0]["content"] == "hello");
 }
 
-static void test_build_messages_tool_roundtrip() {
+TEST_CASE("test_build_messages_tool_roundtrip") {
     // Assistant message with a completed tool call → one assistant message
     // carrying tool_calls + one separate role:"tool" result message.
     Thread t;
@@ -151,7 +144,7 @@ static std::string oai_tool_content(const nlohmann::json& arr, const char* id) {
     return {};
 }
 
-static void test_build_messages_age_tiering() {
+TEST_CASE("test_build_messages_age_tiering") {
     std::string big = "HEAD_SENTINEL_AAAA\n";
     big.append(60 * 1024, 'x');
     big += "\nTAIL_SENTINEL_ZZZZ";
@@ -196,7 +189,7 @@ static void test_build_messages_age_tiering() {
     CHECK(oai_tool_content(arr2, "call_0") == "3 matches\n");
 }
 
-static void test_sse_text_stream() {
+TEST_CASE("test_sse_text_stream") {
     // A plain text completion: two content deltas, finish_reason stop, [DONE].
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"
@@ -225,7 +218,7 @@ static void test_sse_text_stream() {
             CHECK(f->stop_reason == StopReason::EndTurn);
 }
 
-static void test_sse_tool_call_stream() {
+TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".
     std::string sse =
@@ -269,7 +262,7 @@ static void test_sse_tool_call_stream() {
     CHECK(start_idx >= 0 && last_delta_idx > start_idx && end_idx > last_delta_idx);
 }
 
-static void test_sse_two_tool_calls() {
+TEST_CASE("test_sse_two_tool_calls") {
     // Two parallel tool calls (index 0 then index 1). The second index
     // appearing must close the first call before opening the second.
     std::string sse =
@@ -290,7 +283,7 @@ static void test_sse_two_tool_calls() {
     CHECK(ids.size() == 2 && ids[0] == "c0" && ids[1] == "c1");
 }
 
-static void test_sse_error_frame() {
+TEST_CASE("test_sse_error_frame") {
     std::string sse =
         "data: {\"error\":{\"message\":\"rate limit exceeded\",\"type\":\"rate_limit\"}}\n\n";
     auto msgs = oai::parse_sse_for_test(sse);
@@ -306,7 +299,7 @@ static void test_sse_error_frame() {
 // ── Leaked-tool-call salvage (weak local models like qwen2.5-coder:7b) ──
 // These models emit the call as a bare JSON in `content` with
 // finish_reason "stop" instead of the structured tool_calls[] channel.
-static void test_sse_salvage_leaked_tool_call() {
+TEST_CASE("test_sse_salvage_leaked_tool_call") {
     // The exact shape Ollama returns for qwen2.5-coder:7b: one content
     // delta carrying {"name":..,"arguments":{..}} as a string.
     std::string sse =
@@ -335,7 +328,7 @@ static void test_sse_salvage_leaked_tool_call() {
 // The qwen2.5-coder template instructs the model to wrap calls in
 // <tool_call>…</tool_call>. When Ollama fails to strip those tags they
 // arrive in `content`; salvage must peel the tags and recover the call.
-static void test_sse_salvage_tool_call_tags() {
+TEST_CASE("test_sse_salvage_tool_call_tags") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"<tool_call>\\n{\\\"name\\\": \\\"echo\\\", "
@@ -354,7 +347,7 @@ static void test_sse_salvage_tool_call_tags() {
 
 // A ```json-fenced leak inside <tool_call> tags (belt-and-suspenders form
 // some templates produce) must also salvage cleanly.
-static void test_sse_salvage_fenced_tags() {
+TEST_CASE("test_sse_salvage_fenced_tags") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"<tool_call>```json\\n{\\\"name\\\": \\\"echo\\\", "
@@ -366,7 +359,7 @@ static void test_sse_salvage_fenced_tags() {
     CHECK(joined_text(msgs).empty());
 }
 
-static void test_sse_salvage_unknown_tool_stays_text() {
+TEST_CASE("test_sse_salvage_unknown_tool_stays_text") {
     // A complete JSON object SHAPED like a tool call ({"name","arguments"})
     // but naming a tool we did NOT advertise is a weak-model mistype (e.g.
     // "read_file" for "read"). It is never salvaged (we never invent a call)
@@ -385,7 +378,7 @@ static void test_sse_salvage_unknown_tool_stays_text() {
 
 // A non-tool-shaped JSON object (no name+arguments keys) naming nothing in
 // particular is genuine prose/data — it must still surface as text.
-static void test_sse_plain_object_stays_text() {
+TEST_CASE("test_sse_plain_object_stays_text") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"answer\\\": 42, \\\"unit\\\": \\\"none\\\"}\"}}]}\n\n"
@@ -397,7 +390,7 @@ static void test_sse_plain_object_stays_text() {
     CHECK(joined_text(msgs).find("answer") != std::string::npos);
 }
 
-static void test_sse_plain_json_prose_not_salvaged() {
+TEST_CASE("test_sse_plain_json_prose_not_salvaged") {
     // Ordinary prose that merely STARTS with text isn't held/mangled.
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Sure, here you go.\"}}]}\n\n"
@@ -408,7 +401,7 @@ static void test_sse_plain_json_prose_not_salvaged() {
     CHECK(count_leaf<StreamToolUseStart>(msgs) == 0);
 }
 
-static void test_sse_structured_tool_still_works_with_salvage_on() {
+TEST_CASE("test_sse_structured_tool_still_works_with_salvage_on") {
     // A REAL structured tool call must be unaffected by the salvage path.
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
@@ -423,7 +416,7 @@ static void test_sse_structured_tool_still_works_with_salvage_on() {
             CHECK(s->name.value == "read");
 }
 
-static void test_sse_truncated_leaked_tool_call_dropped() {
+TEST_CASE("test_sse_truncated_leaked_tool_call_dropped") {
     // qwen leaks the call into `content` but the wire cuts off mid-body
     // (no closing braces, no [DONE]). The half-written JSON must NOT surface
     // as visible prose — dumping it pollutes the assistant turn and the weak
@@ -443,7 +436,7 @@ static void test_sse_truncated_leaked_tool_call_dropped() {
     CHECK(!joined_text(msgs).empty());
 }
 
-static void test_sse_fence_only_leak_dropped() {
+TEST_CASE("test_sse_fence_only_leak_dropped") {
     // qwen answers a greeting with just a ```json fence (the leaked tool-call
     // wrapper) and no JSON body — the bug where "hi" was answered with the
     // literal text "json". The bare wrapper must NOT surface as prose; the
@@ -458,7 +451,7 @@ static void test_sse_fence_only_leak_dropped() {
     CHECK(joined_text(msgs).find('`') == std::string::npos);
 }
 
-static void test_sse_two_leaked_calls_unique_ids() {
+TEST_CASE("test_sse_two_leaked_calls_unique_ids") {
     // Two complete leaked calls in one stream must get DISTINCT synthesised
     // ids, or the reducer keys both onto the same card (duplicate stuck card).
     std::string sse =
@@ -476,7 +469,7 @@ static void test_sse_two_leaked_calls_unique_ids() {
             CHECK(s->id.value == "call_salvaged_0");
 }
 
-static void test_endpoint_presets() {
+TEST_CASE("test_endpoint_presets") {
     auto groq = oai::Endpoint::from_spec("groq");
     CHECK(groq.host == "api.groq.com");
     CHECK(groq.use_tls);
@@ -656,7 +649,7 @@ static void test_endpoint_presets() {
 // has Endpoint::label == the full URL (see Endpoint::from_spec, transport.cpp).
 // The badge/toast should read "chat.example.org", not the long URL. Default
 // port for the scheme is omitted; a non-default port is kept ("host:port").
-static void test_provider_display_name_url_label() {
+TEST_CASE("test_provider_display_name_url_label") {
     namespace P = agentty::provider;
     using oai::Endpoint;
 
@@ -727,7 +720,7 @@ static void test_provider_display_name_url_label() {
 // fix the raw spec flows into parse_selection → from_spec. This pins the
 // contract for the specs the TUI must accept: every URL form a CLI user
 // can pass via --provider, plus bare host[:port].
-static void test_tui_custom_host_specs() {
+TEST_CASE("test_tui_custom_host_specs") {
     namespace P = agentty::provider;
 
     // The exact spec the user reported broken.
@@ -781,7 +774,7 @@ static void find_header(const agentty::http::Headers& hs, std::string_view name,
         if (h.name == name) { *out = &h; return; }
 }
 
-static void test_build_request_headers() {
+TEST_CASE("test_build_request_headers") {
     oai::Endpoint def;   // no auth_header_name → Bearer
 
     // Default: both auth arms emit `authorization: Bearer <key>`.
@@ -828,7 +821,7 @@ static void test_build_request_headers() {
 //   • local (ollama/llama.cpp) → an EMPTY key (no auth), never the env chain.
 //   • hosted OpenAI-family → a bearer key, with precedence
 //     cli_key > saved_key > env chain.
-static void test_resolve_auth_per_preset() {
+TEST_CASE("test_resolve_auth_per_preset") {
     using namespace agentty::provider;
     // A distinctive Anthropic cred so we can prove it round-trips untouched.
     auth::AuthHeader anthropic{auth::BearerHeader{"anthropic-oauth-token"}};
@@ -883,7 +876,7 @@ static void test_resolve_auth_per_preset() {
 // ── Incremental salvage tests ──────────────────────────────────────────────────
 
 // Streamed JSON tokens (like real Ollama does) should salvage correctly.
-static void test_sse_salvage_streamed_tokens() {
+TEST_CASE("test_sse_salvage_streamed_tokens") {
     // Simulate how Ollama sends JSON one token at a time.
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n"
@@ -912,7 +905,7 @@ static void test_sse_salvage_streamed_tokens() {
 // Prose BEFORE a JSON object: once prose is detected, salvage is disabled.
 // This prevents false positives on code like "int main() {" or similar.
 // If a model emits prose followed by a tool call, the JSON is shown as text.
-static void test_sse_prose_then_tool_call() {
+TEST_CASE("test_sse_prose_then_tool_call") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check.\\n\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": {}}\"}}]}\n\n"
@@ -928,7 +921,7 @@ static void test_sse_prose_then_tool_call() {
 }
 
 // Array of tool calls: [{...}, {...}] should emit multiple tools.
-static void test_sse_salvage_array_of_calls() {
+TEST_CASE("test_sse_salvage_array_of_calls") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"[{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": {}}, "
@@ -948,7 +941,7 @@ static void test_sse_salvage_array_of_calls() {
 }
 
 // Multiple separate JSON objects in sequence (two calls, not an array).
-static void test_sse_salvage_two_sequential_calls() {
+TEST_CASE("test_sse_salvage_two_sequential_calls") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": {}}\"}}]}\n\n"
@@ -963,7 +956,7 @@ static void test_sse_salvage_two_sequential_calls() {
 }
 
 // Some models use "function" instead of "name" for the tool name key.
-static void test_sse_salvage_function_key() {
+TEST_CASE("test_sse_salvage_function_key") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"function\\\": \\\"echo\\\", \\\"arguments\\\": "
@@ -987,7 +980,7 @@ static void test_sse_salvage_function_key() {
 // transport: no card is ever born (we never auto-run memory tools on the
 // model's own initiative, and a flash-then-delete card is bad UX). The JSON is
 // consumed (not surfaced as prose) and the turn finishes without a tool call.
-static void test_sse_salvage_memory_tool_swallowed() {
+TEST_CASE("test_sse_salvage_memory_tool_swallowed") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"name\\\": \\\"remember\\\", \\\"arguments\\\": "
@@ -1005,7 +998,7 @@ static void test_sse_salvage_memory_tool_swallowed() {
 // explicitly asked to remember something. Weak/local models often lack a
 // working structured tool channel; swallowing this path made remember fail
 // 100% of the time for them.
-static void test_sse_salvage_memory_tool_explicit_request() {
+TEST_CASE("test_sse_salvage_memory_tool_explicit_request") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"name\\\": \\\"remember\\\", \\\"arguments\\\": "
@@ -1026,7 +1019,7 @@ static void test_sse_salvage_memory_tool_explicit_request() {
 // catalog block on a greeting — {"name":"skill","arguments":{"name":...}})
 // must be SWALLOWED, never executed. Surfacing it spawns a "skill not found"
 // card that then loops. The JSON is consumed, not shown as prose.
-static void test_sse_salvage_skill_swallowed() {
+TEST_CASE("test_sse_salvage_skill_swallowed") {
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":"
             "\"{\\\"name\\\": \\\"skill\\\", \\\"arguments\\\": "
@@ -1042,7 +1035,7 @@ static void test_sse_salvage_skill_swallowed() {
 // ── Native Ollama /api/chat (NDJSON) path ────────────────────────────────────
 
 // A clean greeting: content streams as plain text, no tool calls.
-static void test_ndjson_plain_greeting() {
+TEST_CASE("test_ndjson_plain_greeting") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello! \"}}\n"
         "{\"message\":{\"role\":\"assistant\",\"content\":\"How can I help?\"}}\n"
@@ -1059,7 +1052,7 @@ static void test_ndjson_plain_greeting() {
 
 // Structured native tool_calls (function.arguments as an object) become a
 // real tool call with a call_native_ id.
-static void test_ndjson_structured_tool_call() {
+TEST_CASE("test_ndjson_structured_tool_call") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"\","
             "\"tool_calls\":[{\"function\":{\"name\":\"read\","
@@ -1083,7 +1076,7 @@ static void test_ndjson_structured_tool_call() {
 // native message.content (its output doesn't match Ollama's <tool_call>
 // template wrapper, so the server leaves it in content). It must be SALVAGED
 // into a real tool call so the tool actually runs — NOT shown as raw JSON.
-static void test_ndjson_leaked_content_salvaged() {
+TEST_CASE("test_ndjson_leaked_content_salvaged") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
             "\"{\\\"name\\\": \\\"read\\\", \\\"arguments\\\": "
@@ -1104,7 +1097,7 @@ static void test_ndjson_leaked_content_salvaged() {
 }
 
 // Plain prose that merely mentions JSON is NOT salvaged.
-static void test_ndjson_prose_not_salvaged() {
+TEST_CASE("test_ndjson_prose_not_salvaged") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
             "\"Sure, here is what I think about your question.\"}}\n"
@@ -1118,7 +1111,7 @@ static void test_ndjson_prose_not_salvaged() {
 // Markdown code fences with a language tag (```cpp, ```python) must stream
 // immediately, NOT be held as potential tool-call JSON. This was a bug:
 // the model emitting a code block with {} inside would freeze the stream.
-static void test_sse_markdown_code_fence_not_held() {
+TEST_CASE("test_sse_markdown_code_fence_not_held") {
     // A ```cpp code block with braces inside.
     std::string sse =
         "data: {\"choices\":[{\"delta\":{\"content\":\"```cpp\\n\"}}]}\n\n"
@@ -1139,7 +1132,7 @@ static void test_sse_markdown_code_fence_not_held() {
 
 // Regression: qwen2.5-coder:14b outputs tool calls wrapped in ```json fence.
 // SIMPLE TEST: all content in one chunk.
-static void test_ndjson_fenced_tool_call_simple() {
+TEST_CASE("test_ndjson_fenced_tool_call_simple") {
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":"
         "\"```json\\n{\\n  \\\"name\\\": \\\"read\\\",\\n  \\\"arguments\\\": {\\n    \\\"path\\\": \\\"/tmp/test\\\"\\n  }\\n}\\n```\""
@@ -1150,7 +1143,7 @@ static void test_ndjson_fenced_tool_call_simple() {
 
 // Regression: qwen2.5-coder:14b outputs tool calls wrapped in ```json fence
 // via streaming tokens. Each token arrives separately.
-static void test_ndjson_fenced_tool_call_streaming() {
+[[maybe_unused]] static void test_ndjson_fenced_tool_call_streaming() {
     // Simulate the actual streaming from qwen2.5-coder:14b
     std::string nd =
         "{\"message\":{\"role\":\"assistant\",\"content\":\"```\"}}\n"
@@ -1214,7 +1207,7 @@ static void test_ndjson_fenced_tool_call_streaming() {
     CHECK(text.find('{') == std::string::npos);
 }
 
-void test_ndjson_empty_object_response() {
+TEST_CASE("test_ndjson_empty_object_response") {
     // qwen2.5-coder:14b outputs {} when tools are passed
     auto msgs = oai::parse_ndjson_for_test(
         R"({"message":{"role":"assistant","content":"{}"},"done":false}
@@ -1245,7 +1238,7 @@ static std::uint64_t fnv1a(const std::string& s) {
     return h;
 }
 
-static void test_wire_body_golden() {
+TEST_CASE("test_wire_body_golden") {
     namespace oai = agentty::provider::openai;
     using agentty::Message; using agentty::Role; using agentty::Thread;
     using agentty::ThreadId; using agentty::ToolCallId; using agentty::ToolName;
@@ -1300,62 +1293,3 @@ static void test_wire_body_golden() {
         CHECK(got == kGolden);
 }
 
-int main() {
-    test_build_tools();
-    test_build_messages_basic();
-    test_build_messages_tool_roundtrip();
-    test_build_messages_age_tiering();
-    test_sse_text_stream();
-    test_sse_tool_call_stream();
-    test_sse_two_tool_calls();
-    test_sse_error_frame();
-    test_sse_salvage_leaked_tool_call();
-    test_sse_salvage_tool_call_tags();
-    test_sse_salvage_fenced_tags();
-    test_sse_salvage_unknown_tool_stays_text();
-    test_sse_plain_object_stays_text();
-    test_sse_truncated_leaked_tool_call_dropped();
-    test_sse_fence_only_leak_dropped();
-    test_sse_two_leaked_calls_unique_ids();
-    test_sse_plain_json_prose_not_salvaged();
-    test_sse_structured_tool_still_works_with_salvage_on();
-    test_endpoint_presets();
-    test_provider_display_name_url_label();
-    test_tui_custom_host_specs();
-    test_build_request_headers();
-    test_resolve_auth_per_preset();
-    // Incremental salvage tests.
-    test_sse_salvage_streamed_tokens();
-    test_sse_prose_then_tool_call();
-    test_sse_salvage_array_of_calls();
-    test_sse_salvage_two_sequential_calls();
-    test_sse_salvage_function_key();
-    test_sse_salvage_memory_tool_swallowed();
-    test_sse_salvage_memory_tool_explicit_request();
-    test_sse_salvage_skill_swallowed();
-
-    // Native Ollama /api/chat NDJSON path.
-    test_ndjson_plain_greeting();
-    test_ndjson_structured_tool_call();
-    test_ndjson_leaked_content_salvaged();
-    test_ndjson_prose_not_salvaged();
-
-    // Markdown code fence regression.
-    test_sse_markdown_code_fence_not_held();
-
-    // Streaming fence regression (TODO: streaming case needs more work).
-    test_ndjson_fenced_tool_call_simple();
-    // test_ndjson_fenced_tool_call_streaming();
-
-    test_ndjson_empty_object_response();
-
-    // Byte-identity guard for the request serializer.
-    test_wire_body_golden();
-
-    if (g_failures == 0) {
-        std::printf("openai_transport_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "openai_transport_test: %d check(s) failed\n", g_failures);
-    return 1;
-}

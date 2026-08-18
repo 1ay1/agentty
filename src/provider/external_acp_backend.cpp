@@ -334,7 +334,7 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
         };
 
         h.on_terminal_kill =
-            [this](const acp::TerminalKillParams&) -> acp::Unit {
+            [](const acp::TerminalKillParams&) -> acp::Unit {
             // The command already ran synchronously; nothing to signal.
             return {};
         };
