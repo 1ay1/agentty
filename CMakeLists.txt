@@ -2704,6 +2704,9 @@ if(AGENTTY_BUILD_TESTS)
         md_cache_probe
         reveal_freeze_gate_probe
         external_acp_backend_test
+        toolset_e2e_test
+        subagent_report_test
+        plugin_disabled_tools_test
         frozen_invariant_fuzz
         scrollback_wire_fuzz
         reveal_scrollback_test
