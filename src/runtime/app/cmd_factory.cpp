@@ -1258,7 +1258,7 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
     auto effects_of = [](const ToolName& n) -> tools::EffectSet {
         if (const auto* def = tools::find(n.value))
             return def->scheduling_effects;
-        return tools::EffectSet{{tools::Effect::Exec}};
+        return tools::EffectSet{tools::Effect::Exec};
     };
     tools::EffectSet active_effects;
     std::vector<std::string> active_paths;

@@ -1442,7 +1442,10 @@ if(NOT MSVC AND NOT AGENTTY_SANITIZE)
         target_link_options(agentty PRIVATE
             -Wl,-z,relro,-z,now
             -Wl,-z,noexecstack)
-    elseif(NOT AGENTTY_FULLY_STATIC)
+    elseif(NOT APPLE AND NOT AGENTTY_FULLY_STATIC)
+        # Non-ELF, non-Apple UNIX. On Apple, PIE is the linker default and a
+        # bare -pie only trips clang's "argument unused during compilation"
+        # warning, so skip it there.
         target_link_options(agentty PRIVATE -pie)
     endif()
 endif()
@@ -1591,6 +1594,7 @@ if(AGENTTY_BUILD_TESTS)
         doom_loop_test
         visual_hash_coverage_test
         ollama_transport_test
+        openai_transport_test
         code_block_extract_test
         command_palette_test
         compaction_threshold_test
@@ -2660,6 +2664,15 @@ if(AGENTTY_BUILD_TESTS)
     if(TARGET ragcpp::ragcpp)
         target_link_libraries(agentty_tests PRIVATE ragcpp::ragcpp)
     endif()
+    # tls.cpp's load_system_roots() reads the macOS trust store via the
+    # Security / CoreFoundation frameworks; the shared object set drags it in,
+    # so the consolidated binary needs them just like every agentty_add_full_test
+    # target does.
+    if(APPLE)
+        target_link_libraries(agentty_tests PRIVATE
+            "-framework Security"
+            "-framework CoreFoundation")
+    endif()
     include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
     doctest_discover_tests(agentty_tests)
 
@@ -2689,7 +2702,6 @@ if(AGENTTY_BUILD_TESTS)
         reveal_smoothness_probe
         md_shape_sweep
         md_cache_probe
-        openai_transport_test
         reveal_freeze_gate_probe
         external_acp_backend_test
         frozen_invariant_fuzz

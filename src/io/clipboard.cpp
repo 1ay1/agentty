@@ -157,7 +157,7 @@ const char* pick_clipboard_image_type(std::string_view types) {
     return nullptr;
 }
 
-bool clipboard_has_qt_image_only(std::string_view types) {
+[[maybe_unused]] bool clipboard_has_qt_image_only(std::string_view types) {
     if (types.find("application/x-qt-image") == std::string_view::npos)
         return false;
     return pick_clipboard_image_type(types) == nullptr;
@@ -236,7 +236,8 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
         if (error_out) *error_out = msg;
         return std::nullopt;
     };
-    auto fail_owned = [&](std::string msg) -> std::optional<ClipboardImage> {
+    [[maybe_unused]] auto fail_owned =
+        [&](std::string msg) -> std::optional<ClipboardImage> {
         if (error_out) *error_out = std::move(msg);
         return std::nullopt;
     };
