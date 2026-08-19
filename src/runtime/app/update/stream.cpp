@@ -1730,7 +1730,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (next < 4000) next = 0;   // give up path below
                     const phase::Active* sctx = active_ctx(m.s.phase);
                     const int shrink_tries = sctx ? sctx->transient_retries : 0;
-                    if (next > 0 && shrink_tries < 6) {
+                    // Gate the retry on the ctx actually existing: sctx is
+                    // null-checked above because phase may NOT be Active here
+                    // (e.g. a late error after cancel dropped to Idle) —
+                    // taking .value() on that path was bad_optional_access →
+                    // std::terminate inside the reducer.
+                    if (next > 0 && shrink_tries < 6 && sctx) {
                         m.s.compaction_ceiling = next;
                         m.s.compaction_buffer.clear();
                         auto ctx = take_active_ctx(std::move(m.s.phase)).value();

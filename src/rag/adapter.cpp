@@ -659,7 +659,6 @@ struct Retriever::Impl {
     std::uint64_t warm_memory_gen = 0;
 
     std::atomic<bool> warming{false};
-    std::jthread warmer;
 
     // Optional LLM seam for HyDE / multi-query (agentty's provider).
     Retriever::Generator generator;
@@ -672,6 +671,13 @@ struct Retriever::Impl {
     bool          code_initialized = false;
     std::string code_root;
     std::unordered_map<std::string, std::uint64_t> code_files;
+
+    // LAST data member ON PURPOSE: members destroy in reverse declaration
+    // order, so the jthread's destructor (which JOINS the warm worker) runs
+    // FIRST in ~Impl — the worker can never observe a partially-destroyed
+    // Impl. Declaring it any earlier means everything below it dies while
+    // the worker may still be running. Keep it last.
+    std::jthread warmer;
 
     Impl() : engine(make_engine_config()) {
         probe_ollama();

@@ -130,7 +130,16 @@ public:
     [[nodiscard]] bool alive() const noexcept { return alive_.load(std::memory_order_acquire); }
 
     void stop() {
-        alive_.store(false, std::memory_order_release);
+        // alive_ flips under worker_mu_ so it forms a single atomic unit with
+        // the inflight_ accounting: dispatch() checks alive_ AND increments
+        // inflight_ under the same lock, so stop() can never slip between
+        // "alive check passed" and "inflight_ incremented" — that gap let
+        // stop() see inflight_==0, return, and free this object while the
+        // dispatcher went on to lock the (destroyed) mutex.
+        {
+            std::lock_guard<std::mutex> lk(worker_mu_);
+            alive_.store(false, std::memory_order_release);
+        }
         {
             std::lock_guard<std::mutex> lk(mu_);
             if (cancel_) cancel_->cancel();
@@ -156,8 +165,14 @@ private:
     }
 
     void dispatch(std::string frame) {
-        if (!alive_.load(std::memory_order_acquire)) return;   // stopped
-        { std::lock_guard<std::mutex> lk(worker_mu_); ++inflight_; }
+        // Check alive_ and claim an inflight slot as ONE atomic step (see
+        // stop() — this closes the check→increment gap a concurrent stop()
+        // could otherwise slice through and tear the object down under us).
+        {
+            std::lock_guard<std::mutex> lk(worker_mu_);
+            if (!alive_.load(std::memory_order_acquire)) return;   // stopped
+            ++inflight_;
+        }
         // POST on a worker thread: the calling thread is the engine's
         // request_raw, which immediately blocks on the response promise. If we
         // POSTed inline we'd never feed the response (the same thread is stuck).
