@@ -32,6 +32,7 @@
 #include "agentty/util/dbglog.hpp"
 
 #include <mcp/cap/client_provider.hpp>
+#include <mcp/cap/guarded.hpp>
 #include <mcp/client.hpp>
 #include <mcp/auth.hpp>
 
@@ -460,47 +461,72 @@ public:
         : name_(std::move(name)), url_(std::move(url)), headers_(std::move(headers)),
           client_info_(std::move(client_info)), handshake_timeout_(handshake_timeout),
           call_timeout_(call_timeout), integration_(std::move(integration)) {
-        start_();
+        conn_.use([&](Conn& c) { start_(c); });
     }
 
     [[nodiscard]] ::mcp::cap::Result execute(const ::mcp::cap::Request& request) override {
-        std::lock_guard<std::mutex> lock(reconnect_mu_);
-        if (!alive() || connection_poisoned()) {
-            if (transport_) transport_->stop();
-            reset_client();
-            transport_.reset();
-            try {
-                start_();
-                if (on_list_changed_) on_list_changed_();
-            } catch (const std::exception& error) {
-                return ::mcp::cap::Result::error(
-                    std::string{"HTTP MCP reconnect failed: "} + error.what());
-            }
-        }
+        // Reconnect runs entirely under the connection lock (Guarded::use);
+        // ~Guarded parks until it drains, so a quit-path destructor can
+        // never free the transport under a mid-handshake thread — the same
+        // structural guarantee as StdioServerProvider (field SIGSEGV class,
+        // crash report 2026-08-16; this class had the identical race).
+        if (auto err = conn_.use([&](Conn& c) -> std::string {
+                if (alive_(c) && !connection_poisoned()) return {};   // healthy
+                if (c.transport) c.transport->stop();
+                reset_client();
+                c.transport.reset();
+                try {
+                    start_(c);
+                    if (on_list_changed_) on_list_changed_();
+                } catch (const std::exception& error) {
+                    return std::string{"HTTP MCP reconnect failed: "} + error.what();
+                }
+                return {};
+            });
+            !err.empty())
+            return ::mcp::cap::Result::error(std::move(err));
         return ClientProvider::execute(request);
     }
 
     ~HttpServerProviderImpl() override {
-        if (transport_) transport_->stop();
-        reset_client();
-        transport_.reset();
+        // ~Guarded would park anyway; stopping explicitly keeps the base's
+        // engine alive while the transport worker is stopped (safe order).
+        conn_.use([&](Conn& c) {
+            if (c.transport) c.transport->stop();
+            reset_client();
+            c.transport.reset();
+        });
     }
 
     [[nodiscard]] bool alive() const noexcept override {
-        return transport_ && transport_->alive();
+        try {
+            return conn_.use([&](const Conn& c) { return alive_(c); });
+        } catch (...) { return false; }
     }
 
 protected:
     void on_teardown() noexcept override {
-        if (transport_) transport_->stop();
+        // Reached from the base's connect() failure path, which only runs
+        // inside one of our use() calls — the recursive lock re-enters.
+        try {
+            conn_.use([&](Conn& c) { if (c.transport) c.transport->stop(); });
+        } catch (...) {}
     }
 
 private:
-    void start_() {
-        transport_ = std::make_unique<HttpTransport>(url_, headers_, call_timeout_, name_);
-        auto client = std::make_unique<::mcp::Client>(transport_->sink());
-        transport_->bind(&client->engine());
-        transport_->set_protocol_version(std::string(::mcp::kProtocolVersion));
+    struct Conn {
+        std::unique_ptr<HttpTransport> transport;
+    };
+
+    [[nodiscard]] static bool alive_(const Conn& c) noexcept {
+        return c.transport && c.transport->alive();
+    }
+
+    void start_(Conn& c) {
+        c.transport = std::make_unique<HttpTransport>(url_, headers_, call_timeout_, name_);
+        auto client = std::make_unique<::mcp::Client>(c.transport->sink());
+        c.transport->bind(&client->engine());
+        c.transport->set_protocol_version(std::string(::mcp::kProtocolVersion));
         connect(name_, std::move(client), client_info_, handshake_timeout_,
                 call_timeout_, integration_);
     }
@@ -512,8 +538,7 @@ private:
     std::chrono::milliseconds handshake_timeout_;
     std::chrono::milliseconds call_timeout_;
     ::mcp::cap::ClientProvider::Integration integration_;
-    std::mutex reconnect_mu_;
-    std::unique_ptr<HttpTransport> transport_;
+    ::mcp::cap::Guarded<Conn> conn_;
 };
 
 } // namespace
