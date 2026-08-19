@@ -212,8 +212,14 @@ TEST_CASE("rag adapter") {
         // Source-aware code index returns a definition-shaped chunk and updates
         // one changed file without discarding the whole corpus.
         {
+            // Gate for OPPORTUNISTIC retrieval (structural zero-hit leads):
+            // cold — no in-memory index, no persisted ragdb — must report NOT
+            // warm so a side-effect query can't trigger the cold build…
+            check(!r.code_warm(), "code index reports cold before first build");
             auto code = r.retrieve_code("validate bearer token credentials", 5);
             check(code.error.empty() && !code.passages.empty(), "search_code finds source");
+            // …and warm right after the explicit build.
+            check(r.code_warm(), "code index reports warm after explicit build");
             if (!code.passages.empty()) {
                 check(code.passages.front().path.find("auth_guard.cpp") != std::string::npos,
                       "code result points at auth_guard.cpp");
