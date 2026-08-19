@@ -796,6 +796,27 @@ void rehydrate_frozen(Model& m) {
     }
     m.ui.frozen_turn = skipped_assistant_runs;
 
+    // Settle the kept window's markdown SYNCHRONOUSLY before freezing.
+    // freeze_range builds each turn through cached_markdown_for, which for
+    // a settled message routes large bodies to set_content_async — the
+    // sealed Element is then built BEFORE the async parse commits any
+    // blocks, so auto_fold_long_blocks has nothing to fold and the sealed
+    // body paints at full unfolded height (a 300-line fence ≈ 300 rows
+    // instead of the ~1-row fold stub). The budget walk above already
+    // assumed FOLDED heights (prose_rows mirrors the fold), so the frozen
+    // canvas came out 60× the budget — every subsequent frame (and every
+    // Ctrl+L recovery repaint, which is O(canvas rows)) paid for it.
+    // settle_message_md is the same sync set_content + finish + auto_fold
+    // the stream path applies at settle; after it, cached_markdown_for
+    // takes its settled fast-path and the sealed height matches the
+    // estimate. Only the kept window pays the sync parse; the skipped
+    // prefix [0, start) is never built at all.
+    for (std::size_t k = start; k < total; ++k) {
+        const Message& mm = msgs[k];
+        if (mm.role == Role::Assistant && !mm.text.empty())
+            settle_message_md(m, mm);
+    }
+
     freeze_range(m, start, total);
 
     // A mid-run cut (giant final run) can make the first frozen entry a
