@@ -96,6 +96,12 @@ int spawn_feed_stdin(const std::vector<std::string>& argv, const std::string& in
 #if AGENTTY_KS_HAVE_SPAWN
     int in_pipe[2];
     if (::pipe(in_pipe) != 0) return -1;
+    // CLOEXEC both ends. This pipe FEEDS A SECRET to the child's stdin: any
+    // concurrently-spawned unrelated child inheriting the read end could
+    // read the secret; one inheriting the write end pins it open. The
+    // file_actions adddup2 below clears the flag on the child's duplicate.
+    (void)::fcntl(in_pipe[0], F_SETFD, ::fcntl(in_pipe[0], F_GETFD) | FD_CLOEXEC);
+    (void)::fcntl(in_pipe[1], F_SETFD, ::fcntl(in_pipe[1], F_GETFD) | FD_CLOEXEC);
 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);

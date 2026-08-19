@@ -39,6 +39,7 @@
     #include <csignal>
     #include <cstdio>
     #include <ctime>
+    #include <fcntl.h>
     #include <poll.h>
     #include <sys/ioctl.h>
     #include <sys/wait.h>
@@ -251,6 +252,12 @@ namespace runner_ui {
         fin.exit_code = -1;
         return fin;
     }
+    // CLOEXEC both ends: another thread's fork/exec (MCP server spawn, tool
+    // subprocess) must not inherit this capture pipe — a long-lived sibling
+    // child pinning fds[1] open would starve the read loop of EOF forever.
+    // Our own child's dup2 onto stdout below clears the flag on the duplicate.
+    (void)::fcntl(fds[0], F_SETFD, ::fcntl(fds[0], F_GETFD) | FD_CLOEXEC);
+    (void)::fcntl(fds[1], F_SETFD, ::fcntl(fds[1], F_GETFD) | FD_CLOEXEC);
 
     const pid_t pid = ::fork();
     if (pid < 0) {
