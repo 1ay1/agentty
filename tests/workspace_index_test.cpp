@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <string>
+#include <thread>
 #include <vector>
 
 using agentty::filter_files;
@@ -84,4 +85,61 @@ TEST_CASE("filter_files: frecency floats referenced files to the top") {
         // gamma was referenced last → first among the .cpp matches.
         CHECK(files[m[0]] == "c/gamma.cpp");
     }
+}
+
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/subprocess.hpp"
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
+// The load-bearing "smart" behaviour: a git-DIRTY file outranks everything
+// else in a blank `@`, even a frecency entry — because the file you're
+// editing right now is almost always the one you want. Builds a real tiny
+// git repo so build_git_signals() (git status --porcelain) has something
+// to read.
+TEST_CASE("filter_files: git-dirty files lead the working set") {
+    namespace fs = std::filesystem;
+    auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    fs::path repo = fs::temp_directory_path() /
+                    ("agentty_gitrank_" + std::to_string(nonce));
+    fs::create_directories(repo);
+    auto sh = [&](const std::string& c) {
+        (void)agentty::tools::util::run_command_s(
+            "cd " + repo.string() + " && " + c, 8192, std::chrono::seconds{15});
+    };
+    auto write = [&](const std::string& rel, const std::string& body) {
+        std::ofstream f(repo / rel); f << body;
+    };
+
+    sh("git init -q && git config user.email t@t && git config user.name t");
+    write("clean_a.cpp", "int a() { return 1; }\n");
+    write("clean_b.cpp", "int b() { return 2; }\n");
+    write("hot.cpp",     "int hot() { return 3; }\n");
+    sh("git add -A && git commit -qm init");
+    // Now dirty ONE file after the commit.
+    write("hot.cpp", "int hot() { return 3; } // edited\n");
+
+    // Point project_root at the fixture and rebuild the git signal map
+    // synchronously (refresh_git_signals reads git status against the
+    // current project root — deterministic, no prewarm-ordering race).
+    auto prev = fs::current_path();
+    fs::current_path(repo);
+    agentty::tools::util::set_workspace_root(repo);
+    agentty::refresh_git_signals();
+
+    std::vector<std::string> files = {
+        "clean_a.cpp", "clean_b.cpp", "hot.cpp",
+    };
+    auto m = filter_files(files, "");
+    REQUIRE(m.size() == 3);
+    // hot.cpp is the only modified file → it must lead, ahead of the
+    // alphabetically-earlier clean_a/clean_b.
+    CHECK(files[m[0]] == "hot.cpp");
+    CHECK(agentty::file_git_tag("hot.cpp") == agentty::GitTag::Modified);
+
+    fs::current_path(prev);
+    std::error_code ec;
+    fs::remove_all(repo, ec);
 }

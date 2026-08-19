@@ -732,7 +732,8 @@ Element mention_palette(const Model& m) {
     cfg.selected   = matches.empty() ? -1 : o->index;
 
     cfg.header.push_back(h(text("@", fg_bold(info)),
-        text(o->query.empty() ? " type to filter files…" : (" " + o->query),
+        text(o->query.empty() ? " your changed files first · type to filter…"
+                              : (" " + o->query),
              o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
     cfg.header.push_back(sep);
@@ -753,6 +754,18 @@ Element mention_palette(const Model& m) {
             const auto& path = o->files[matches[static_cast<std::size_t>(i)]];
             auto [name, dir] = split_name_dir(path);
             Picker::Config::Row row;
+            // Git-status badge — the working-set signal, colour-coded so the
+            // file you're editing is unmistakable at a glance. Padded to a
+            // fixed width so leading text aligns across rows.
+            if (auto tag = file_git_tag(path); tag != GitTag::None) {
+                auto label = git_tag_label(tag);
+                row.badge = "● " + std::string{label};
+                row.badge_style =
+                    tag == GitTag::Modified          ? fg_of(maya::Color::yellow())
+                  : tag == GitTag::Staged            ? fg_of(maya::Color::green())
+                  : tag == GitTag::Untracked         ? fg_of(info)
+                  : /* RecentlyCommitted */            fg_dim(muted);
+            }
             row.leading        = std::string{name};
             row.leading_style  = fg_of(fg);
             row.trailing       = parent_segment(dir);
