@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 #include <variant>
+#include <vector>
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -120,11 +121,15 @@ std::string format_duration_compact(float secs) {
 }
 
 std::string pretty_model_label(std::string_view id) {
-    // Drop the agentty extended-context marker anywhere in the id.
-    if (auto pos = id.find("[1m]"); pos != std::string_view::npos) {
-        std::string stripped{id.substr(0, pos)};
-        stripped += id.substr(pos + 4);
-        return pretty_model_label(stripped);
+    // Drop the agentty extended-context markers anywhere in the id. Both
+    // spellings exist ([1m] today, [2m] reserved — wire_model_id strips both);
+    // a marker the wire strips must never leak into the UI either.
+    for (std::string_view marker : {"[1m]", "[2m]"}) {
+        if (auto pos = id.find(marker); pos != std::string_view::npos) {
+            std::string stripped{id.substr(0, pos)};
+            stripped += id.substr(pos + marker.size());
+            return pretty_model_label(stripped);
+        }
     }
 
     // Strip provider namespace: keep the segment after the last '/'.
@@ -181,6 +186,10 @@ std::string pretty_model_label(std::string_view id) {
                 is_lower(c) ? static_cast<char>(c - 'a' + 'A') : c);
             return;
         }
+        // Mixed-case brand names that read wrong plain title-cased.
+        if (lower_eq(w, "chatgpt"))  { out.append("ChatGPT");  return; }
+        if (lower_eq(w, "deepseek")) { out.append("DeepSeek"); return; }
+        if (lower_eq(w, "openai"))   { out.append("OpenAI");   return; }
         // Digit-led word: version/size run — keep letters lowercase.
         if (is_digit(w.front())) {
             for (char c : w) out.push_back(
@@ -202,24 +211,100 @@ std::string pretty_model_label(std::string_view id) {
         }
     };
 
-    std::string out;
-    out.reserve(id.size() + tag.size() + 1);
+    // Collect words FIRST so neighbor-aware rules (version joins, snapshot
+    // dates) can see the whole id instead of streaming blind.
+    std::vector<std::string_view> words;
     std::size_t w0 = 0;
     for (std::size_t i = 0; i <= id.size(); ++i) {
         const bool boundary =
             (i == id.size() || id[i] == '-' || id[i] == '_' || id[i] == ' ');
         if (!boundary) continue;
-        if (i > w0) {
-            if (!out.empty()) out.push_back(' ');
-            emit_word(out, id.substr(w0, i - w0));
-        }
+        if (i > w0) words.push_back(id.substr(w0, i - w0));
         w0 = i + 1;
+    }
+
+    auto all_digits = [&](std::string_view w) {
+        if (w.empty()) return false;
+        for (char c : w) if (!is_digit(c)) return false;
+        return true;
+    };
+
+    // Drop a trailing release SNAPSHOT — provenance, not identity. Two
+    // spellings in the wild:
+    //   claude-3-5-haiku-20241022   one 8-digit "20…" word
+    //   gpt-4o-2024-08-06           a 4-2-2 digit triple
+    if (!words.empty() && words.back().size() == 8 &&
+        all_digits(words.back()) && words.back().substr(0, 2) == "20") {
+        words.pop_back();
+    } else if (words.size() >= 4) {   // ≥4: never reduce an id to nothing
+        const auto y = words[words.size() - 3];
+        const auto m = words[words.size() - 2];
+        const auto d = words[words.size() - 1];
+        if (y.size() == 4 && all_digits(y) && y.substr(0, 2) == "20" &&
+            m.size() == 2 && all_digits(m) && d.size() == 2 && all_digits(d))
+            words.resize(words.size() - 3);
+    }
+    // A trailing literal "latest" is an alias pointer, not part of the name
+    // (chatgpt-4o-latest, codex-mini-latest) — same rule as the :latest tag.
+    if (words.size() > 1 && lower_eq(words.back(), "latest"))
+        words.pop_back();
+
+    std::string out;
+    out.reserve(id.size() + tag.size() + 1);
+    bool prev_short_number = false;
+    for (const auto& w : words) {
+        const bool short_number = all_digits(w) && w.size() <= 2;
+        // Version join: adjacent short pure-digit words are ONE dotted
+        // version, not two numbers — `claude-sonnet-4-5` is Sonnet 4.5,
+        // `claude-3-5-haiku` is 3.5. Size/quant words (9b, 8x7b) contain
+        // letters, so they never join; snapshot dates were dropped above.
+        if (short_number && prev_short_number) {
+            out.push_back('.');
+            out.append(w);
+        } else {
+            if (!out.empty()) out.push_back(' ');
+            emit_word(out, w);
+        }
+        prev_short_number = short_number;
     }
     if (out.empty()) out = std::string{id};   // pathological all-delim id
 
     if (!tag.empty()) {
-        out.push_back(' ');
-        out.append(tag);
+        // An Ollama tag can chain size + variant + quant: `70b-instruct-q4_K_M`.
+        // Keep the parts a human distinguishes models BY (size `70b`, variant
+        // `instruct`/`coder`) and drop pure quantization noise (`q4_K_M`,
+        // `Q8_0`, `fp16`) — the quant changes fidelity, not identity, and the
+        // raw spelling reads like line noise in a picker row.
+        auto is_quant = [](std::string_view p) {
+            if (p.size() < 2) return false;
+            const char c0 = p.front();
+            if ((c0 == 'q' || c0 == 'Q') &&
+                p.size() >= 2 && p[1] >= '0' && p[1] <= '9')
+                return true;                     // q4_K_M / Q8_0 / q5_1
+            return p == "fp16" || p == "fp32" || p == "bf16";
+        };
+        std::size_t p0 = 0;
+        std::string cleaned;
+        for (std::size_t i = 0; i <= tag.size(); ++i) {
+            if (i != tag.size() && tag[i] != '-') continue;
+            std::string_view part = tag.substr(p0, i - p0);
+            p0 = i + 1;
+            if (part.empty() || is_quant(part)) continue;
+            if (!cleaned.empty()) cleaned.push_back(' ');
+            // Title-case a variant word (instruct → Instruct); size runs
+            // (70b, 8x7b) are digit-led and stay lowercase.
+            if (part.front() >= 'a' && part.front() <= 'z' &&
+                !(part.front() >= '0' && part.front() <= '9')) {
+                cleaned.push_back(static_cast<char>(part.front() - 'a' + 'A'));
+                cleaned.append(part.substr(1));
+            } else {
+                cleaned.append(part);
+            }
+        }
+        if (!cleaned.empty()) {
+            out.push_back(' ');
+            out.append(cleaned);
+        }
     }
     return out;
 }
