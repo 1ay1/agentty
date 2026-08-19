@@ -209,6 +209,30 @@ std::size_t utf8_boundary(std::string_view text, std::size_t at) {
     return at;
 }
 
+// Re-read an exact 1-based inclusive line range [start,end] from live disk.
+// Powers RAG result verification: the index can lag an edit, but disk is
+// always current — so search_code re-reads the cited lines and serves the
+// disk truth. Returns "" on any error (missing file, out-of-range) so the
+// caller falls back to the indexed text.
+std::string read_disk_lines(const std::string& path, int start, int end) {
+    if (start < 1 || end < start) return {};
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) return {};
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::string line, out;
+    int n = 0;
+    while (std::getline(f, line)) {
+        ++n;
+        if (n < start) continue;
+        if (n > end) break;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        out += line;
+        out += '\n';
+    }
+    return (n >= start) ? out : std::string{};
+}
+
 std::string compress_passage(std::string_view query, std::string_view text,
                              std::size_t budget) {
     if (text.size() <= budget) return std::string{text};
@@ -1706,7 +1730,16 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
             const std::size_t allowance = std::min(want_bytes, remaining_budget);
             ++idx;
             if (allowance < 256) break;
-            p.text = compress_passage(query, r.text, allowance);
+            // ── Disk verification: RAG proposes, live disk disposes. ────────
+            // The index can lag an unindexed edit; re-read the cited line range
+            // from the CURRENT file on disk and serve that (the truth). Only
+            // fall back to the indexed chunk text when the disk read fails
+            // (file moved/deleted since the walk). Keeps search_code results
+            // correct-on-bytes, not just approximately-ranked.
+            std::string verified = read_disk_lines(
+                (root / fs::path{path}).string(), p.line_start, p.line_end);
+            const std::string& source_text = !verified.empty() ? verified : r.text;
+            p.text = compress_passage(query, source_text, allowance);
             remaining_budget -= std::min(remaining_budget, p.text.size());
             top = std::max(top, p.score);
             out.passages.push_back(std::move(p));
