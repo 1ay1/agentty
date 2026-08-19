@@ -42,5 +42,5 @@ Subprocesses use `posix_spawn` + `poll(2)` with in-process `SIGTERM → SIGKILL`
 The permission policy is a `constexpr` matrix guarded by `static_assert`s. Each tool declares its effect set at compile time; changing a policy cell breaks the build rather than silently weakening a guarantee.
 
 :::tip
-Going deeper? The repo's `docs/RENDERING.md` walks the view pipeline turn-by-turn and `docs/UI.md` is the per-widget Config reference.
+Going deeper? The repo's `docs/RENDERING.md` walks the view pipeline turn-by-turn and `docs/UI.md` is the per-widget Config reference. For how all of this stays fast — input-to-photon latency, render caching, connection warmth, and speculative tool execution — see **[Performance](/docs/performance)**.
 :::
