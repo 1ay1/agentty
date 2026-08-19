@@ -133,3 +133,76 @@ TEST_CASE("mcp reload race") {
 
     fs::remove_all(tmp);
 }
+
+// ── destroy-during-handshake ────────────────────────────────────────────────
+// Regression lock for the field SIGSEGV (crash report 2026-08-16): thread A
+// dropped the last ConnectionPool reference (→ ~StdioServerProvider →
+// teardown) while thread B was still INSIDE that provider's start_() →
+// connect() → RpcEngine::request handshake. Pre-fix, ~StdioServerProvider
+// did not take reconnect_mu_, so destruction proceeded concurrently with the
+// handshake and the engine was freed under the requesting thread's feet.
+// Post-fix the destructor serializes on reconnect_mu_ and parks until the
+// handshake resolves.
+//
+// Reproduction: a SLOW fake server (sleeps before answering initialize) so
+// the handshake window is wide, plus a connect deadline shorter than the
+// sleep so mcp_tools() abandons the pending future and returns — then we
+// immediately drop every pool handle while the abandoned worker is still
+// mid-handshake. Pre-fix this dies ~every run; post-fix the reaper thread
+// keeps the future's provider alive and its destructor waits for connect.
+static fs::path write_slow_server(const fs::path& dir) {
+    const fs::path sh = dir / "slow_mcp.sh";
+    std::ofstream f(sh);
+    f << R"SH(#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      sleep 1
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"slow","version":"1.0.0"}}}' ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping","description":"ping","inputSchema":{"type":"object","properties":{}}}]}}' ;;
+  esac
+done
+)SH";
+    f.close();
+    fs::permissions(sh, fs::perms::owner_all);
+    return sh;
+}
+
+TEST_CASE("mcp destroy during handshake") {
+    std::signal(SIGPIPE, SIG_IGN);
+    auto tmp = fs::temp_directory_path()
+             / ("agentty_mcp_dtor_race_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / ".agentty");
+    ::setenv("HOME", tmp.c_str(), 1);
+    ::unsetenv("USERPROFILE");
+
+    const fs::path server = write_slow_server(tmp);
+    {
+        std::ofstream cfg(tmp / ".agentty" / "mcp.json");
+        cfg << R"({"mcpServers":{"slow":{"command":")" << server.string()
+            << R"("}}})";
+    }
+    // Deadline (50ms) far shorter than the server's initialize sleep (1s):
+    // every round abandons a still-handshaking connect worker.
+    ::setenv("AGENTTY_MCP_CONNECT_TIMEOUT_MS", "50", 1);
+
+    for (int round = 0; round < 3; ++round) {
+        mcp::PoolHandle pool;
+        (void)mcp::mcp_tools(pool);      // abandons the pending handshake
+        pool.reset();                    // drop caller handle
+        mcp::release_servers();          // drop the process-wide handle NOW,
+                                         // while the worker is mid-handshake
+        // Pre-fix: the abandoned worker's provider could be destroyed under
+        // the handshaking thread → SIGSEGV here (no assertion needed — the
+        // crash IS the failure). Give the race a beat to fire.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    check(true, "no crash across 3 abandon+destroy rounds");
+
+    // Let the last worker's `sleep 1` handshake resolve before we delete the
+    // script out from under a still-running child.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    fs::remove_all(tmp);
+}

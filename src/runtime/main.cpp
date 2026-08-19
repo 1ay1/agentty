@@ -353,35 +353,20 @@ int main(int argc, char** argv) {
     auto args = parse_args(argc, argv);
     if (args.bad)                    { print_usage(); return 2; }
 
-    // ── Scrollback-gate abort: default OFF for the interactive app ──────
-    // Debug-built libmaya std::abort()s on ANY scrollback-invariant gate
-    // firing (the tripwire added in maya 8ce18ac), including a KNOWN-BENIGN
-    // class agentty provokes: the streaming-reveal conceal band restyles
-    // glyphs in rows that have already scrolled above the fold (a 's0->'X's17
-    // restyle of a committed row). maya's own recovery for that is
-    // non-destructive (commit the off-viewport rows + soft-repaint the
-    // viewport; host scrollback is preserved, no \x1b[3J wipe) — which is
-    // exactly what a RELEASE build (NDEBUG, tripwire compiled out) already
-    // does. So a Debug agentty aborting where Release quietly recovers is a
-    // dev-only footgun, not a real corruption. Make Debug behave like the
-    // binary users actually run. A maya developer chasing a genuine
-    // committed-prefix rewrite can still force the loud abort by exporting
-    // MAYA_NO_GATE_ABORT=0 (or =false) before launch — we only supply the
-    // default, never override an explicit choice.
+    // ── Scrollback-gate abort: opt-in for maya developers ──────────────────
+    // maya's debug-build invariant tripwires now default to SOFT-RECOVER
+    // (the same non-destructive recovery a Release build performs) and only
+    // std::abort() when MAYA_GATE_ABORT=1 is exported — two field SIGABRTs
+    // proved the old abort-by-default killed daily-driven Debug sessions on
+    // benign, self-healing gate trips. Back-compat: the previous opt-in
+    // spelling was MAYA_NO_GATE_ABORT=0/false; translate it so a maya
+    // developer's old launch alias still gets the loud abort.
     if (const char* g = std::getenv("MAYA_NO_GATE_ABORT");
-        !g || !*g) {
-        // Default it ON (soft-recover). Portable: POSIX setenv vs MSVC _putenv.
+        g && (std::string_view{g} == "0" || std::string_view{g} == "false")) {
 #if defined(_WIN32)
-        _putenv_s("MAYA_NO_GATE_ABORT", "1");
+        _putenv_s("MAYA_GATE_ABORT", "1");
 #else
-        setenv("MAYA_NO_GATE_ABORT", "1", /*overwrite=*/0);
-#endif
-    } else if (std::string_view sv{g}; sv == "0" || sv == "false") {
-        // Explicit opt-IN to the loud abort (maya developers).
-#if defined(_WIN32)
-        _putenv_s("MAYA_NO_GATE_ABORT", "");   // empty => libmaya getenv sees unset/blank
-#else
-        unsetenv("MAYA_NO_GATE_ABORT");
+        setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
 #endif
     }
 
