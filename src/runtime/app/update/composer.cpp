@@ -26,6 +26,7 @@
 #include "agentty/runtime/mention_palette.hpp"
 #include "agentty/runtime/symbol_palette.hpp"
 #include "agentty/workspace/files.hpp"
+#include "agentty/util/isolated_thread.hpp"
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
@@ -500,6 +501,14 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 // re-pulls once the background thread publishes.
                 if (files_ready()) o.files = list_workspace_files();
                 m.ui.mention_palette = std::move(o);
+                // Refresh git signals in the background so the working-set
+                // ranking reflects edits made since startup (the agent may
+                // have modified files this session). Cheap (~two git calls);
+                // this open uses the current map, the next keystroke the
+                // fresh one. Terminate-proof detach (a throw out of a bare
+                // detached thread is process death).
+                agentty::util::run_isolated_detached(
+                    "composer.git_refresh", []{ refresh_git_signals(); });
                 return done(std::move(m));
             }
             // '#' opens the symbol picker — mirrors '@'. Non-blocking:
