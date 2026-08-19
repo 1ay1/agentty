@@ -2,12 +2,17 @@
 
 #include "agentty/tool/subagent.hpp"
 
+#include <mutex>
 #include <stdexcept>
 
 namespace agentty::app {
 
 namespace {
 Deps* g_deps = nullptr;
+// Guards Deps::auth across the UI/worker thread split (same reason
+// provider::g_active has its lock): update_auth / switch_provider
+// move-assign on the UI thread while worker tasks (fetch_models) read.
+std::mutex g_auth_mu;
 }
 
 const Deps& deps() {
@@ -21,9 +26,17 @@ void install_deps(Deps d) {
     g_deps = &storage;
 }
 
+auth::AuthHeader auth_snapshot() {
+    std::lock_guard lk(g_auth_mu);
+    return g_deps ? g_deps->auth : auth::AuthHeader{};
+}
+
 void update_auth(auth::AuthHeader auth) {
     if (!g_deps) return;
-    g_deps->auth = std::move(auth);
+    {
+        std::lock_guard lk(g_auth_mu);
+        g_deps->auth = std::move(auth);
+    }
     tools::subagent::set_auth(g_deps->auth);
 }
 
@@ -34,7 +47,10 @@ void switch_provider(auth::AuthHeader auth) {
     // re-point Deps::auth at the new backend's credentials so the next
     // request authenticates correctly.
     if (!g_deps) return;
-    g_deps->auth = std::move(auth);
+    {
+        std::lock_guard lk(g_auth_mu);
+        g_deps->auth = std::move(auth);
+    }
     tools::subagent::set_auth(g_deps->auth);
 }
 

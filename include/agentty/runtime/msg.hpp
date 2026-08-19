@@ -357,6 +357,15 @@ struct ModelPickerCycleEffort { int delta; };
 struct ModelsLoaded {
     std::vector<ModelInfo> models;
     std::string            provider_id;
+    // Non-empty ⇒ the fetch FAILED and this is the human-readable reason.
+    // Carried here (not as a StreamError) because StreamError feeds the
+    // LIVE TURN's retry state machine: a catalog failure dispatched as
+    // StreamError while a stream is active would pop the assistant message
+    // receiving deltas, schedule RetryStream (racing a second worker into
+    // the session), or latch the healthy turn terminal — all for an error
+    // that has nothing to do with the stream. The reducer surfaces this as
+    // a transient status toast instead.
+    std::string            error;
 };
 
 // ── Provider picker ──────────────────────────────────────────────────────

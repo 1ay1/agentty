@@ -101,6 +101,14 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             // The fetch finished (success OR failure) — always clear the
             // in-flight flag so the picker leaves "Loading models…".
             m.s.models_loading = false;
+            // A failed fetch surfaces its reason as a transient toast —
+            // never as a StreamError, which would feed the live turn's
+            // retry machinery (see the ModelsLoaded msg comment).
+            if (!e.error.empty()) {
+                auto toast = set_status_toast(m, std::move(e.error),
+                                              std::chrono::seconds{6});
+                return {std::move(m), std::move(toast)};
+            }
             if (e.models.empty()) return done(std::move(m));
             auto settings = deps().load_settings();
             m.d.available_models.clear();
@@ -321,6 +329,9 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     auto& mi = m.d.available_models[
                         static_cast<std::size_t>(vis[static_cast<std::size_t>(p->index)])];
                     mi.favorite = !mi.favorite;
+                    // Persist NOW — a toggle that only reaches disk via some
+                    // later select/switch/quit is lost on a crash or kill.
+                    persist_settings(m);
                 }
             }
             return done(std::move(m));
