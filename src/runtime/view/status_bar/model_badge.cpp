@@ -4,6 +4,7 @@
 
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/runtime/view/helpers.hpp"  // pretty_model_label
 #include "agentty/runtime/view/palette.hpp"   // fg_dim / muted palette
 
 namespace agentty::ui {
@@ -19,6 +20,10 @@ maya::Element model_badge_config(const Model& m) {
     const std::string& model = m.d.model_id.value;
     maya::ModelBadge mb{model};
     mb.set_compact(true);
+    // Unknown family (new Claude line, local model, aggregator id): the badge
+    // must never fall back to the raw wire id — give it the same prettified
+    // label the picker and turn headers use.
+    mb.set_fallback_label(pretty_model_label(model));
 
     // Provider suffix: a dim "· Anthropic" so multi-provider users always see
     // WHICH backend the model runs on, without stealing the model's colour.
