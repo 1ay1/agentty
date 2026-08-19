@@ -420,30 +420,30 @@ static bool check_transcript(TermEmu& emu, const std::string& tag,
             const bool legit = kRest.compare(0, tail.size(), tail) == 0
                             || tail.rfind(kRest, 0) == 0;   // tail starts with the rest
             if (!legit) {
-                // KNOWN-FAILING (report-only until the maya fix lands).
-                // This is a REAL, user-visible bug: the reveal scramble is
-                // committed into immutable scrollback. Root cause is
-                // architectural — reveal_fx's overlay "can't see the
-                // viewport/scroll position" (reveal_fx.cpp:1221), so even the
-                // live BOTTOM row (the only one it believes is safe) becomes a
-                // scrolled-off row on the next frame, freezing its unresolved
-                // scramble glyphs in scrollback.
+                // HARD-FAIL. This is a REAL, user-visible bug when it fires:
+                // the reveal scramble was committed into immutable scrollback.
+                // Root cause was architectural — reveal_fx's overlay "can't
+                // see the viewport/scroll position" (reveal_fx.cpp:1221), so
+                // even the live BOTTOM row (the only one it believes is safe)
+                // becomes a scrolled-off row on the next frame, freezing its
+                // unresolved scramble glyphs in scrollback.
                 //
-                // Counted + printed loudly, but NOT failing the run yet:
-                // flipping it to ++g_failures today would red CI on a bug that
-                // predates this check. Set ORACLE_STRICT=1 to make it fail
-                // (use that while developing the fix); flip the default to
-                // hard-fail as soon as maya stops committing mid-scramble.
+                // FIXED in maya via TextRevealParams::scramble_glyph_safe:
+                // the churn keeps its flicker STYLING but always emits the
+                // REAL glyph, so every byte that can reach scrollback is
+                // already final. This detector went report-only → hard-fail
+                // the day that fix landed; if it fires again, the glyph-safe
+                // guarantee regressed.
                 ++g_scramble_garbage;
                 std::fprintf(err,
-                    "  %s[%s]: SCRAMBLE GARBAGE committed to scrollback row %zu:\n"
+                    "  FAIL[%s]: SCRAMBLE GARBAGE committed to scrollback row %zu:\n"
                     "           '%s'\n"
                     "           (expected '...assistant prose' or a clean wrap; a\n"
                     "            reveal scramble frame reached immutable scrollback\n"
-                    "            — see reveal_fx.cpp:1221 viewport-blindness note)\n",
-                    std::getenv("ORACLE_STRICT") ? "FAIL" : "KNOWN-BUG",
+                    "            — scramble_glyph_safe regressed, see\n"
+                    "            reveal_fx.cpp render_live_overlay_ / text_reveal.hpp)\n",
                     tag.c_str(), y, ln.c_str());
-                if (std::getenv("ORACLE_STRICT")) { ++g_failures; failed = true; }
+                ++g_failures; failed = true;
                 break;
             }
         }
@@ -1345,8 +1345,8 @@ int main() {
                           "(%lu benign gate self-heal/s, all shapes)%s\n",
                      g_bad_recoveries,
                      g_scramble_garbage
-                         ? "  \xe2\x9a\xa0 SCRAMBLE GARBAGE IN SCROLLBACK (known bug,"
-                           " report-only \xe2\x80\x94 see above; ORACLE_STRICT=1 to fail)"
+                         ? "  \xe2\x9a\xa0 SCRAMBLE GARBAGE IN SCROLLBACK"
+                           " (scramble_glyph_safe regressed \xe2\x80\x94 see above)"
                          : "");
     else
         std::fprintf(err, "FAILED: %d corruption(s) detected (%lu benign gate "
