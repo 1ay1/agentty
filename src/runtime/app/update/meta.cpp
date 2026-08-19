@@ -381,6 +381,30 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // stops. Decrement here so each rendered frame burns one.
             if (m.ui.settle_cooldown_ticks > 0) --m.ui.settle_cooldown_ticks;
 
+            // ── Deferred post-rehydrate trim ──────────────────────
+            // Armed by ThreadLoaded. The rehydrate budget walk ran on
+            // ESTIMATED heights; once the first paint has stamped every
+            // sealed block's REAL laid-out height (record_paint), re-run
+            // the trim so the frozen window is bounded by ground truth,
+            // not by estimate drift (tool-heavy threads under-estimate
+            // several-fold). Fires once; waits until every block has a
+            // recorded height so the drop provability gate in drop_front
+            // can actually release rows.
+            maya::Cmd<Msg> rehydrate_trim = maya::Cmd<Msg>::none();
+            if (m.ui.pending_rehydrate_trim) {
+                bool all_recorded = !m.ui.frozen.empty();
+                for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+                    if (!m.ui.frozen.recorded_at(k)) { all_recorded = false; break; }
+                if (all_recorded) {
+                    m.ui.pending_rehydrate_trim = false;
+                    rehydrate_trim = trim_frozen_if_oversized(m);
+                } else if (m.ui.frozen.empty()) {
+                    m.ui.pending_rehydrate_trim = false;   // nothing to trim
+                }
+                // Else: not painted yet — the Tick subscription stays armed
+                // on pending_rehydrate_trim (subscribe.cpp) until it is.
+            }
+
             // ── Deferred settle-freeze (post-stream redraw fix) ──────
             // finalize_turn settled the just-finished assistant message
             // (finish() on its StreamingMarkdown) but deferred the freeze
@@ -667,13 +691,19 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
-            if (!midrun_trim.is_none() && !settle_freeze_trim.is_none())
-                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                    std::move(midrun_trim), std::move(settle_freeze_trim)})};
-            if (!midrun_trim.is_none())
-                return {std::move(m), std::move(midrun_trim)};
-            if (!settle_freeze_trim.is_none())
-                return {std::move(m), std::move(settle_freeze_trim)};
+            {
+                std::vector<Cmd<Msg>> trims;
+                if (!rehydrate_trim.is_none())
+                    trims.push_back(std::move(rehydrate_trim));
+                if (!midrun_trim.is_none())
+                    trims.push_back(std::move(midrun_trim));
+                if (!settle_freeze_trim.is_none())
+                    trims.push_back(std::move(settle_freeze_trim));
+                if (trims.size() == 1)
+                    return {std::move(m), std::move(trims.front())};
+                if (!trims.empty())
+                    return {std::move(m), Cmd<Msg>::batch(std::move(trims))};
+            }
 
             // ── Idle cache-lapse pre-compaction ───────────────────────────
             // Deep-ride (95 %) is cheap only while the prompt cache holds the

@@ -863,6 +863,11 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // run loop pre-warms the component cache before the
             // wire-bound render — see Program::needs_warmup hook.
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
+            // Arm the one-shot post-paint trim: the rehydrate budget used
+            // ESTIMATED heights; the first paint records real ones into the
+            // ledger, and the Tick arm re-trims against those. The Tick
+            // subscription gates on this flag (subscribe.cpp) until it fires.
+            m.ui.pending_rehydrate_trim = !m.ui.frozen.empty();
             auto t2 = std::chrono::steady_clock::now();
             release_to_kernel();
             stamp("release_to_kernel", t2);

@@ -322,6 +322,18 @@ struct Model {
         // subscription stays armed while > 0.
         int                 settle_cooldown_ticks = 0;
 
+        // One-shot: re-run trim_frozen_if_oversized on the first Tick
+        // after a thread rehydrate. The rehydrate budget walk works on
+        // ESTIMATED heights; the first paint stamps every sealed block's
+        // REAL laid-out height into the ledger (record_paint), and on
+        // tool-heavy threads the real total can exceed the estimate
+        // several-fold (per-panel chrome the estimate's flat caps miss).
+        // The deferred trim closes the loop against ground truth — same
+        // provable drop_front + harvest + commit_scrollback path the
+        // settle-freeze trim uses. Set by ThreadLoaded (which also arms
+        // the Tick via settle_cooldown_ticks); consumed by the Tick arm.
+        bool                pending_rehydrate_trim = false;
+
         // One-shot hint to maya's run loop: "the next view() result
         // contains a heavy frozen scrollback that hasn't been painted
         // yet on this thread; please pre-warm the component cache
