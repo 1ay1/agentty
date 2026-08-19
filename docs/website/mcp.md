@@ -20,7 +20,7 @@ Just want to add a tool (a browser driver, a database client)? See **[Plugins](/
 agentty mcp-serve
 ```
 
-The served tools are the same native tools the TUI uses: file `read`/`write`/`edit`/`move`/`remove`, shell `bash`, long-running `process_*` sessions, focused `test`, code search (`grep`/`glob`/`find_definition`/`find_references`), web fetch/search, diagnostics, and the `git_*` family including `git_show` and `git_blame`. Filesystem tools stay sandboxed to the workspace boundary and shell/process calls run inside the OS sandbox, exactly as they do interactively.
+The served tools are the same native tools the TUI uses: file `read`/`write`/`edit`/`move`/`remove`, shell `bash`, long-running `process_*` sessions, focused `test`, code search (`grep`/`glob`/`find_definition`/`search_structural`/`repo_map`), web fetch/search, diagnostics, and the `git_*` family including `git_show` and `git_blame`. Filesystem tools stay sandboxed to the workspace boundary and shell/process calls run inside the OS sandbox, exactly as they do interactively.
 
 `mcp-serve` is deliberately **native-only**. A configured external MCP server is never re-exported implicitly, preventing credential leaks and recursive MCP proxy loops.
 

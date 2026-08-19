@@ -149,7 +149,6 @@ enum class Kind : std::uint8_t {
     WebFetch,
     WebSearch,
     FindDefinition,
-    FindReferences,
     Diagnostics,
     Test,
     GitStatus,
@@ -190,7 +189,6 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"web_fetch",       Kind::WebFetch,       {Effect::Net},                        false,   detail::sec{30},   30000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"web_search",      Kind::WebSearch,      {Effect::Net},                        false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::HeadTail},
-    ToolSpec{"find_references", Kind::FindReferences, {Effect::ReadFs},                     false,   detail::sec{30},   30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
     ToolSpec{"test",            Kind::Test,           {Effect::Exec},                       false,   detail::sec{0},    40000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only
     ToolSpec{"git_status",      Kind::GitStatus,      {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
@@ -354,7 +352,7 @@ consteval bool kinds_bijective() {
         Kind::Read, Kind::Edit, Kind::Write, Kind::Move, Kind::Remove,
         Kind::Bash, Kind::ProcessStart, Kind::ProcessPoll, Kind::ProcessStop,
         Kind::Grep, Kind::Glob, Kind::ListDir, Kind::Todo,
-        Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition, Kind::FindReferences,
+        Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition,
         Kind::Diagnostics, Kind::Test, Kind::GitStatus, Kind::GitDiff,
         Kind::GitLog, Kind::GitShow, Kind::GitBlame, Kind::GitCommit,
         Kind::GitBranch, Kind::GitStash, Kind::GitRebase, Kind::GitCherryPick,
@@ -434,7 +432,7 @@ static_assert(lookup("todo")->effects.empty());
 // Read-side tools must NOT have WriteFs / Net / Exec.
 consteval bool readonly_invariants() {
     constexpr std::string_view kReadOnly[] = {
-        "read","grep","glob","list_dir","find_definition","find_references","repo_map",
+        "read","grep","glob","list_dir","find_definition","repo_map",
         "git_status","git_diff","git_log","git_show","git_blame",
     };
     for (auto n : kReadOnly) {

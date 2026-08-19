@@ -36,7 +36,7 @@ std::string tool_display_name(const std::string& n) {
     if (n == "web_fetch")       return "Fetch";
     if (n == "web_search")      return "Search";
     if (n == "find_definition") return "Definition";
-    if (n == "find_references") return "References";
+    if (n == "search_structural") return "Structural";
     if (n == "diagnostics")     return "Diagnostics";
     if (n == "test")            return "Test";
     if (n == "git_status")      return "Git Status";
@@ -297,10 +297,12 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         }
         return detail;
     }
-    if (n == "find_references") {
-        auto symbol = safe("symbol");
-        if (symbol.empty()) symbol = "\xe2\x80\xa6";
-        return path_pp.empty() ? symbol : symbol + "  in  " + path_pp;
+    if (n == "search_structural") {
+        auto pattern = safe("pattern");
+        if (pattern.empty()) pattern = "\xe2\x80\xa6";
+        if (auto nl = pattern.find('\n'); nl != std::string::npos)
+            pattern = pattern.substr(0, nl) + " \xe2\x80\xa6";
+        return path_pp.empty() ? pattern : pattern + "  in  " + path_pp;
     }
     if (n == "repo_map") {
         auto focus = safe("focus");

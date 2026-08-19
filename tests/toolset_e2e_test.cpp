@@ -215,9 +215,12 @@ int main() {
     }
 
     {
-        auto r = run("find_references", {{"symbol", "answer"},
-                                         {"path", root.string()}});
-        check(has(r, "code.cpp"), "find_references: locates exact identifier uses");
+        // grep word=true absorbs the old find_references: whole-word uses of an
+        // identifier, no substring false positives.
+        auto r = run("grep", {{"pattern", "answer"},
+                              {"word", true},
+                              {"path", root.string()}});
+        check(has(r, "code.cpp"), "grep word=true: locates exact identifier uses");
     }
 
     // ── repo_map: ranked skeleton over the sandbox ────────────────────
