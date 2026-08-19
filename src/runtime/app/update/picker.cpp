@@ -88,6 +88,16 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             return {std::move(m), cmd::fetch_models()};
         },
         [&](ModelsLoaded& e) -> Step {
+            // STALENESS GATE: only accept a payload fetched FOR the provider
+            // that is active NOW. Two quick switches interleave their slow
+            // fetches; without this, provider A's late catalog lands under
+            // provider B and the picker offers models B cannot stream.
+            // (Empty provider_id = legacy/synthetic dispatch — accept.)
+            if (!e.provider_id.empty()
+                && e.provider_id != active_provider_id()) {
+                return done(std::move(m));   // keep models_loading: the
+                                             // newer fetch is still in flight
+            }
             // The fetch finished (success OR failure) — always clear the
             // in-flight flag so the picker leaves "Loading models…".
             m.s.models_loading = false;
@@ -285,6 +295,18 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // tool returns no report). Track the picker selection.
                     tools::subagent::set_model(m.d.model_id.value);
                     persist_settings(m);
+                    // Confirmation toast naming model AND provider — the
+                    // same feedback the provider switch gives. Without it a
+                    // pick is silent, and when a stale-catalog race (or a
+                    // provider the user forgot they were on) is in play,
+                    // "model changed but provider didn't" has no on-screen
+                    // contradiction the user can catch.
+                    m.ui.model_picker = pick::Closed{};
+                    auto toast = set_status_toast(m,
+                        ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
+                            + provider::provider_display_name(provider::active()),
+                        std::chrono::seconds{3});
+                    return {std::move(m), std::move(toast)};
                 }
             }
             m.ui.model_picker = pick::Closed{};

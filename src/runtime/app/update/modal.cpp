@@ -557,8 +557,17 @@ std::string model_for_provider(std::string_view spec) {
         // catalog here is what made selecting Copilot lag. The async
         // fetch_models refetch corrects a stale slug a moment later.
         if (is_copilot) return it->second;
-        for (const auto& mi : provider::chatgpt::list_models())
-            if (mi.id.value == it->second) return it->second;
+        // ChatGPT: validate the recall against the CACHED catalog only — the
+        // same UI-thread rule as Copilot. list_models() would block on a
+        // catalog HTTP fetch when the cache is cold (offline switch = full
+        // timeout freeze). Cold cache ⇒ trust the recall; the async refetch
+        // corrects a stale slug the moment ModelsLoaded lands.
+        {
+            auto cached = provider::chatgpt::list_models_cached();
+            if (cached.empty()) return it->second;
+            for (const auto& mi : cached)
+                if (mi.id.value == it->second) return it->second;
+        }
         // recalled slug is stale — drop through to default_model() below.
     }
 
@@ -569,13 +578,12 @@ std::string model_for_provider(std::string_view spec) {
     if (spec == "openai")                    return "gpt-4o";
     // Native ChatGPT (Codex Responses API) path — the account's model line-up
     // is server-driven and changes over time (e.g. gpt-5.4, not the stale
-    // gpt-5.1-codex we used to hardcode), so resolve it from the LIVE catalog
-    // instead of baking in a slug the account may not offer. If the catalog
-    // can't be reached yet, return empty and let the ModelsLoaded refetch
-    // auto-select the first available model (same as the Ollama path).
+    // gpt-5.1-codex we used to hardcode). Resolve from the CACHED catalog
+    // (never the network — UI thread); a cold cache returns empty and the
+    // ModelsLoaded refetch auto-selects the account's real default.
     if (is_chatgpt) {
-        auto def = provider::chatgpt::default_model();
-        return def;   // may be a real slug (catalog) or a safe "gpt-5" fallback
+        auto cached = provider::chatgpt::list_models_cached();
+        return cached.empty() ? std::string{} : cached.front().id.value;
     }
     if (is_copilot) {
         // Network-free default (this runs on the UI thread during a switch).

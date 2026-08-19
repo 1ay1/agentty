@@ -64,6 +64,11 @@ std::vector<ModelInfo> g_models_cache;   // empty until first successful fetch
 
 } // namespace
 
+std::vector<ModelInfo> list_models_cached() {
+    std::lock_guard<std::mutex> lk(g_models_mu);
+    return g_models_cache;   // empty until a live fetch has succeeded
+}
+
 std::vector<ModelInfo> list_models() {
     {
         std::lock_guard<std::mutex> lk(g_models_mu);

@@ -228,6 +228,15 @@ enum class StopReason : std::uint8_t {
 }
 
 struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
+
+// Non-fatal provider advisory, surfaced as a transient status toast while
+// the stream keeps running. The first honest use: Copilot's Auto session
+// SUBSTITUTES a concrete model server-side — the user picked X, the server
+// streams Y. Silently accepting that is exactly the "model switching is not
+// working" experience; a toast ("copilot auto → gpt-4o") makes the
+// substitution visible without interrupting the turn.
+struct StreamNotice { std::string text; };
+
 // Stream-level failure. `message` is human-readable (used for both the
 // status banner and `provider::classify(string)` fallback). `retry_after`
 // is the server's Retry-After hint when present — Anthropic sets it on
@@ -339,7 +348,16 @@ struct ModelPickerFilterBackspace {};
 // within the active model's supported efforts (wrapping); the new tier is
 // persisted immediately. No-op when the model doesn't support effort.
 struct ModelPickerCycleEffort { int delta; };
-struct ModelsLoaded { std::vector<ModelInfo> models; };
+// Result of a background model-catalog fetch. `provider_id` is the canonical
+// id of the provider the fetch was FOR (captured when the fetch launched):
+// the reducer drops the payload if the active provider has changed since —
+// without it, an in-flight fetch for provider A landing after a switch to B
+// installs A's catalog under B (picking from it then streams B with an
+// A-model id: the "model changed, provider didn't" bug).
+struct ModelsLoaded {
+    std::vector<ModelInfo> models;
+    std::string            provider_id;
+};
 
 // ── Provider picker ──────────────────────────────────────────────────────
 // Mirrors the model picker. Selecting a provider live-switches the active
@@ -736,7 +754,8 @@ using StreamMsg = std::variant<
     StreamThinkingDelta,
     StreamReasoning,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
-    StreamBufferedWait, CancelStream, RetryStream, ProactiveContextReady>;
+    StreamBufferedWait, CancelStream, RetryStream, ProactiveContextReady,
+    StreamNotice>;
 
 using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,

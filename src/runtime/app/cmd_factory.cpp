@@ -1628,13 +1628,18 @@ Cmd<Msg> kick_pending_tools(Model& m) {
 
 Cmd<Msg> fetch_models() {
     return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
+        // Stamp the fetch with the provider it is FOR. The reducer compares
+        // this against the provider active at DELIVERY time and drops a
+        // stale payload — two quick provider switches otherwise interleave
+        // (A's slow fetch lands after B's) and install the wrong catalog.
+        const std::string for_provider = detail::active_provider_id();
         try {
             // ONE model-list router (provider/selection.cpp), dispatched on the
             // same axes as the stream path. No is_chatgpt/OpenAI/Anthropic
             // ladder here — a new provider inherits its catalog from its row.
             auto models = provider::list_models_for(provider::active(),
                                                     deps().auth);
-            dispatch(ModelsLoaded{std::move(models)});
+            dispatch(ModelsLoaded{std::move(models), for_provider});
         } catch (const std::exception& e) {
             // Dispatch an EMPTY ModelsLoaded (not StreamError) so the
             // reducer always clears `models_loading` and the model
@@ -1643,10 +1648,10 @@ Cmd<Msg> fetch_models() {
             // the picker spinning forever after a failed provider switch.
             // Still surface the reason as a transient status toast.
             dispatch(StreamError{std::string{"models fetch: "} + e.what()});
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}});
+            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider});
         } catch (...) {
             dispatch(StreamError{"models fetch: unknown exception"});
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}});
+            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider});
         }
     });
 }
