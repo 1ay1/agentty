@@ -493,17 +493,22 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             };
             if (e.ch == U'@' && at_word_boundary()) {
                 mention::Open o;
-                o.files = list_workspace_files();
+                // Non-blocking: snapshot the file list ONLY if the prewarm
+                // has landed (files_ready()). If it's still indexing, open
+                // with an empty snapshot + "indexing…" hint rather than
+                // freezing the UI on an inline walk; the next keystroke
+                // re-pulls once the background thread publishes.
+                if (files_ready()) o.files = list_workspace_files();
                 m.ui.mention_palette = std::move(o);
                 return done(std::move(m));
             }
-            // '#' opens the symbol picker — mirrors '@'. The first
-            // open walks the workspace and is therefore noticeably
-            // slower than '@' on a cold cache; subsequent opens are
-            // instant.
+            // '#' opens the symbol picker — mirrors '@'. Non-blocking:
+            // snapshot only if the (parallel) symbol scan has landed;
+            // otherwise open with an empty snapshot + "indexing…" hint and
+            // fill on the first keystroke. Never blocks the UI on the scan.
             if (e.ch == U'#' && at_word_boundary()) {
                 symbol_palette::Open o;
-                o.entries = list_workspace_symbols();
+                if (symbols_ready()) o.entries = list_workspace_symbols();
                 m.ui.symbol_palette = std::move(o);
                 return done(std::move(m));
             }

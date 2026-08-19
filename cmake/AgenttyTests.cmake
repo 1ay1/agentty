@@ -22,6 +22,7 @@ set(_AGENTTY_CONSOLIDATED
     wire_shared_test complexity_test copilot_token_test routing_memory_test
     smart_cascade_gate_test chatgpt_bundled_models_test settings_default_test
     update_check_test
+    workspace_index_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test

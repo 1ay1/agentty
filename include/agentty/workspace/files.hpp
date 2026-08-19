@@ -24,6 +24,19 @@ namespace agentty {
 [[nodiscard]] std::vector<std::string>
 list_workspace_files(std::size_t cap = 5000);
 
+// Kick the workspace-file walk on a background thread (single-flight, safe
+// to call repeatedly). After it lands, list_workspace_files() and the
+// picker's first open are instant. Call at startup.
+void prewarm_workspace_files(std::size_t cap = 5000);
+
+// Non-blocking: has the file list been built yet? The composer opens the
+// `@` picker INSTANTLY and shows an "indexing…" hint until this is true.
+[[nodiscard]] bool files_ready();
+
+// Record that the user referenced `path` (selected it in the picker), so a
+// later `@` ranks it near the top. Frecency — recently-used-first.
+void note_file_referenced(std::string_view path);
+
 // Case-insensitive substring filter over a path list. Returned
 // indices point into the original `files` vector — the dispatcher
 // uses one to resolve cursor → path identically to how the view

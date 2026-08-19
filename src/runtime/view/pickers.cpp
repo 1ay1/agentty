@@ -738,7 +738,13 @@ Element mention_palette(const Model& m) {
     cfg.header.push_back(sep);
 
     if (o->files.empty()) {
-        cfg.items.push_back(text("  workspace empty (or no readable files)", fg_italic(muted)));
+        // Distinguish "still indexing" from "genuinely empty" — the walk
+        // runs on a background thread; if it hasn't landed the picker
+        // opened with an empty snapshot. files_ready() tells them apart.
+        cfg.items.push_back(text(
+            files_ready() ? "  workspace empty (or no readable files)"
+                          : "  indexing workspace… (type to filter as it fills)",
+            fg_italic(muted)));
     } else if (matches.empty()) {
         cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {
@@ -789,7 +795,10 @@ Element symbol_palette(const Model& m) {
     cfg.header.push_back(sep);
 
     if (o->entries.empty()) {
-        cfg.items.push_back(text("  no symbols indexed", fg_italic(muted)));
+        cfg.items.push_back(text(
+            symbols_ready() ? "  no symbols indexed"
+                            : "  indexing symbols… (type to filter as it fills)",
+            fg_italic(muted)));
     } else if (matches.empty()) {
         cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {
