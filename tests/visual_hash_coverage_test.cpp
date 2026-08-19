@@ -324,6 +324,9 @@ const std::vector<Axis>& invariant_axes() {
             m.s.tokens_in  = 12345;
             m.s.tokens_out = 67890;
         }},
+        {"pending rehydrate trim", [](Model& m) {
+            m.ui.pending_rehydrate_trim = true;
+        }},
     };
     return axes;
 }

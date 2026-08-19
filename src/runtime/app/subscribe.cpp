@@ -1020,6 +1020,7 @@ Sub<Msg> subscribe(const Model& m) {
     // and the deferred settle-freeze consult this predicate.
     if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
         || m.ui.settle_cooldown_ticks > 0
+        || m.ui.pending_rehydrate_trim
         || !detail::live_tail_reveal_settled(m)) {
         auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
         return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));

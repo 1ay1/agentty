@@ -718,6 +718,7 @@ void clear_frozen(Model& m) {
     m.ui.frozen_through = 0;
     m.ui.frozen_turn    = 0;
     m.ui.pending_settle_freeze   = false;
+    m.ui.pending_rehydrate_trim  = false;
 }
 
 void rehydrate_frozen(Model& m) {
@@ -891,6 +892,24 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m) {
         rows_after -= m.ui.frozen.block_rows(drop);
         --entries_after;
         ++drop;
+    }
+    // Degenerate keep-walk: the budget-crossing block is the OLDEST entry
+    // (a giant mid-run continuation — the rehydrate cut's kept run whose
+    // real painted height dwarfs its estimate). The walk then pins every
+    // entry (budget_entries == size ⇒ max_drop == 0) and the loop above
+    // drops nothing, leaving the canvas several× over budget forever.
+    // Dropping just that oldest giant is safe when the remaining trailing
+    // blocks still cover at least one viewport of context — the dropped
+    // rows commit to native scrollback through the same provable
+    // drop_front/harvest path as any other trim.
+    if (drop == 0 && over_rows && m.ui.frozen.size() > 2) {
+        const std::size_t first_rows = m.ui.frozen.block_rows(0);
+        const std::size_t rest       = m.ui.frozen.row_total() - first_rows;
+        const auto dims = term_dims();
+        const std::size_t viewport =
+            static_cast<std::size_t>(dims.rows > 0 ? dims.rows : 24);
+        if (first_rows > kFrozenMaxRows && rest >= viewport)
+            drop = 1;
     }
     if (drop == 0) return maya::Cmd<Msg>::none();
 
