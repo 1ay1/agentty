@@ -157,16 +157,35 @@ namespace agentty::provider::wire {
 // (same canonical path) to avoid duplication. Keeping the standardized public
 // project guidance visually distinct from personal CLAUDE.md notes lets the
 // model tell them apart and apply precedence correctly.
+//
+// `read_file` is the file-reader used for EVERY tier (global, root, nested).
+// It defaults to the uncapped-cache read_capped_file (fine for the local-model
+// prompts, which rebuild rarely). The Anthropic path — which rebuilds the
+// system prompt on every turn — injects its mtime-cached reader instead, so
+// the per-turn cost is a handful of stat()s + a memcpy of the cached body,
+// not N full file reads. Either way the reader must apply the 64 KiB cap and
+// trailing-whitespace trim so byte-identity across providers holds.
+using agents_md_reader = std::string (*)(const std::filesystem::path&);
+
+// Default reader: read_capped_file has a second (defaulted) cap parameter, so
+// its address is a 2-arg function pointer that won't bind to agents_md_reader.
+// This single-arg forwarder does — it applies the standard 64 KiB cap.
+[[nodiscard]] inline std::string read_capped_default(
+    const std::filesystem::path& p) {
+    return read_capped_file(p);
+}
+
 [[nodiscard]] inline std::string agents_md_block(
     std::string_view               intro,
     const std::filesystem::path&   workspace_root,
     const std::filesystem::path&   search_from = {},
-    const std::filesystem::path&   global_path = {}) {
+    const std::filesystem::path&   global_path = {},
+    agents_md_reader               read_file   = &read_capped_default) {
     // ── Global scope (user-level, applies across all projects) ──
     const std::string global_content =
-        global_path.empty() ? std::string{} : read_capped_file(global_path);
+        global_path.empty() ? std::string{} : read_file(global_path);
 
-    const std::string content = read_capped_file(workspace_root / "AGENTS.md");
+    const std::string content = read_file(workspace_root / "AGENTS.md");
     if (content.empty() && global_content.empty()) return {};
 
     std::string m;
@@ -211,12 +230,12 @@ namespace agentty::provider::wire {
             auto candidate_canon = std::filesystem::weakly_canonical(candidate, ec);
             if (!ec && std::filesystem::is_regular_file(candidate, ec) && !ec
                 && candidate_canon != root_agents) {
-                const std::string nested = read_capped_file(candidate);
+                const std::string nested = read_file(candidate);
                 if (!nested.empty()) {
                     m += "\n\n<agents-md-package>\n";
                     m += "Package-specific guidance from the nearest AGENTS.md "
                          "(https://agents.md). The closest AGENTS.md to the "
-                         "edited file wins; treat this as overriding the "
+                         "working directory wins; treat this as overriding the "
                          "root-level guidance above where they conflict.\n";
                     m += nested;
                     m += "\n</agents-md-package>";

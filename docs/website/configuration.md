@@ -129,7 +129,7 @@ The spec also describes nested files for monorepos: *"Place another AGENTS.md in
 - If the nearest `AGENTS.md` is the same file as the root (same canonical path — e.g. the cwd is at the workspace root), no `<agents-md-package>` block is emitted (dedup).
 - Capped at 64 KiB.
 
-The walk starts from the agent's **cwd** (`project_root()`), not from the directory of the currently edited file. This matches how Codex and OpenCode implement the spec in practice — both use the cwd as the reference point, not the edited file. In the common case (agent working inside a subpackage directory), the cwd and the edited file's directory coincide.
+The walk starts from the agent's **cwd** (`project_root()`), not from the directory of a specific edited file — a TUI agent has a working directory, not a single "file being edited." In the common case (agent working inside a subpackage directory), the cwd and the relevant package directory coincide, so the nearest `AGENTS.md` is the package's own.
 
 ### Wire shape
 
