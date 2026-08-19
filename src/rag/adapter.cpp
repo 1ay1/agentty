@@ -1788,6 +1788,17 @@ bool Retriever::warm() const {
     return !impl_->needs_reindex(root, /*skip_docs=*/false);
 }
 
+bool Retriever::code_warm() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (impl_->code_initialized) return true;
+    // A persisted code index from a prior session counts as warm: loading it
+    // is Engine::open() + a manifest stat-walk, not an embed-everything
+    // build. Its absence means an opportunistic query would pay the full
+    // cold build — refuse; only an explicit search_code call should do that.
+    std::error_code ec;
+    return fs::exists(impl_->code_ragdb_path(), ec) && !ec;
+}
+
 void Retriever::warm_async() {
     bool expected = false;
     if (!impl_->warming.compare_exchange_strong(expected, true)) return;
