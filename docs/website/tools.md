@@ -23,6 +23,7 @@ Each tool gets a purpose-built widget: diffs render as diffs, search results gro
 | `repo_map` | Read | Token-budgeted, PageRank-ranked skeleton of the codebase — top files with definition signatures, personalizable with `focus`. The walk stops at any nested repo/submodule boundary and never leaves the workspace, so sibling projects can't leak into the map. THE tool to call first in a large or unfamiliar repo. |
 | `find_definition` | Read | Locate a symbol definition across the codebase. |
 | `find_references` | Read | Find exact identifier references, with enclosing symbol and context. |
+| `search_structural` | Read | Structural (AST-shape) code search — the layer between `grep` (text) and `search_code` (meaning). Matches a code *shape* with metavariables (`$X` one node/group, `$$$X` many) and **never matches inside comments or string literals**, so it avoids grep's false positives from log strings, docstrings, and same-named-but-unrelated tokens. Dep-free (lexer + token matcher, no tree-sitter). Use for patterns like `foo($$$)`, `if ($C) return $X;`, `catch ($$$) {}`, `$X = $X`. |
 | `web_fetch` | Network | Fetch a URL (capped output) for docs and APIs. |
 | `web_search` | Network | Search the web and return result snippets. |
 | `todo` | Pure | Maintain a session todo / plan list, rendered as a checklist. |
