@@ -34,6 +34,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/isolated_thread.hpp"
 
 #include <mcp/cap/cap.hpp>
 
@@ -1204,8 +1205,12 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
                 pend.name.c_str());
             pool->connect_errors[pend.name] = "did not connect within deadline";
             // Detach so the still-handshaking worker can finish and clean up
-            // without blocking startup; its result is dropped.
-            std::thread([f = pend.fut]() mutable { f.wait(); }).detach();
+            // without blocking startup; its result is dropped. Terminate-proof
+            // wrapper: any throw out of a bare detached lambda is process
+            // death — the isolated runner logs and swallows instead.
+            agentty::util::run_isolated_detached(
+                "mcp.orphan_connect_waiter",
+                [f = pend.fut]() mutable { f.wait(); });
             continue;
         }
         auto p = pend.fut.get();

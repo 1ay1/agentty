@@ -1389,10 +1389,10 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // ToolExecOutput AFTER the user has cancelled (Esc → phase=Idle)
     // or after StreamError dropped to Idle. In those cases there's
     // no in-flight request to attach a sub-turn to, no ctx to take,
-    // and the result has nowhere to go. Pre-guard means we don't
-    // tumble into the take_active_ctx(...).value() sites below with
-    // an empty optional source and abort the process with
-    // bad_optional_access.
+    // and the result has nowhere to go. The phase transitions below are
+    // TOTAL (reschedule_streaming / optional-checked seats), so a slip
+    // past this guard degrades to a no-op rather than aborting — but the
+    // early return keeps the intent obvious and skips dead work.
     //
     // Tools that were Pending/Approved at cancel-time are already
     // marked Failed/Rejected by CancelStream's teardown loop, so
@@ -1443,8 +1443,10 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 tc.id, tc.name,
                 "Tool " + tc.name.value + " needs permission under "
                     + std::string{ui::profile_label(m.d.profile)} + " profile"};
-            auto ctx = take_active_ctx(std::move(m.s.phase));
-            m.s.phase = phase::AwaitingPermission{std::move(ctx).value()};
+            if (auto ctx = take_active_ctx(std::move(m.s.phase)); ctx)
+                m.s.phase = phase::AwaitingPermission{std::move(*ctx)};
+            else
+                m.s.phase = phase::Idle{};   // late arrival: stay Idle
             return Cmd<Msg>::none();
         }
     }
@@ -1507,8 +1509,10 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // tion stays armed, the spinner advances, the view's
                 // live elapsed timer keeps ticking — without that
                 // the UI looks frozen on long-running bash commands.
-                auto ctx = take_active_ctx(std::move(m.s.phase));
-                m.s.phase = phase::ExecutingTool{std::move(ctx).value()};
+                if (auto ctx = take_active_ctx(std::move(m.s.phase)); ctx)
+                    m.s.phase = phase::ExecutingTool{std::move(*ctx)};
+                else
+                    m.s.phase = phase::Idle{};   // total: never aborts
                 any_pending = true;
             }
         } else if (tc.is_running()) {
@@ -1521,8 +1525,10 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // the completion kick forever — a wedge. Same ctx handoff as
             // the promotion branch above.
             if (m.s.is_streaming()) {
-                auto ctx = take_active_ctx(std::move(m.s.phase));
-                m.s.phase = phase::ExecutingTool{std::move(ctx).value()};
+                if (auto ctx = take_active_ctx(std::move(m.s.phase)); ctx)
+                    m.s.phase = phase::ExecutingTool{std::move(*ctx)};
+                else
+                    m.s.phase = phase::Idle{};   // total: never aborts
             }
         }
     }
@@ -1609,7 +1615,6 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // boundary, producing two visual Turns where the user
             // should see one. The single freeze site is in
             // `finalize_turn` once `phase::Idle` is reached.
-            auto ctx = take_active_ctx(std::move(m.s.phase));
             // Re-arm the stall watchdog across the tool boundary. No SSE
             // events flow during ExecutingTool, so last_event_at is as
             // old as the last delta before the tool ran — minutes, for a
@@ -1617,10 +1622,11 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // a Tick land before the new sub-turn's StreamStarted resets
             // it, firing a spurious "stream stalled — no events for Ns".
             // The sub-turn is a fresh wire phase; start its clock now.
-            auto now = std::chrono::steady_clock::now();
-            ctx.value().last_event_at = now;
-            ctx.value().retry         = retry::Fresh{};
-            m.s.phase = phase::Streaming{std::move(ctx).value()};
+            if (!reschedule_streaming(m.s.phase, [](phase::Active& c) {
+                    c.last_event_at = std::chrono::steady_clock::now();
+                    c.retry         = retry::Fresh{};
+                }))
+                return Cmd<Msg>::batch(std::move(cmds));   // late arrival
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));

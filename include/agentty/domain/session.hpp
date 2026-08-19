@@ -200,6 +200,27 @@ using Phase = std::variant<phase::Idle, phase::Streaming,
     }, std::move(p));
 }
 
+// ── Reschedule combinator ───────────────────────────────────
+// The retry sites all perform the same dance: pull the ctx out of the
+// phase, bump its retry bookkeeping, and re-enter Streaming with the
+// Scheduled sentinel. Hand-rolled, that dance needs a `.value()` on the
+// take — a proof obligation ("phase IS active here") carried in a comment;
+// get it wrong (a late error after cancel dropped to Idle) and the reducer
+// throws bad_optional_access → std::terminate. This combinator makes the
+// operation TOTAL: the Idle case returns false (phase restored to Idle)
+// instead of aborting, and the caller branches on the bool. The mutator
+// runs exactly once, on a real ctx, before the phase is re-seated.
+template <class F>
+    requires std::invocable<F&, phase::Active&>
+[[nodiscard]] inline bool reschedule_streaming(Phase& p, F&& mutate) noexcept(
+    std::is_nothrow_invocable_v<F&, phase::Active&>) {
+    auto ctx = take_active_ctx(std::move(p));
+    if (!ctx) { p = phase::Idle{}; return false; }
+    mutate(*ctx);
+    p = phase::Streaming{std::move(*ctx)};
+    return true;
+}
+
 [[nodiscard]] constexpr std::string_view to_string(const Phase& p) noexcept {
     return std::visit([](const auto& v) -> std::string_view {
         using T = std::decay_t<decltype(v)>;
