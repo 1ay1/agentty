@@ -32,7 +32,7 @@ TEST_CASE("pretty_model_label normalizes real-world ids") {
     expect_label("llama3.1:70b",            "Llama3.1 70b");
     expect_label("mixtral:8x7b",            "Mixtral 8x7b");
     expect_label("phi3:3.8b",               "Phi3 3.8b");
-    expect_label("deepseek-coder:6.7b",     "Deepseek Coder 6.7b");
+    expect_label("deepseek-coder:6.7b",     "DeepSeek Coder 6.7b");
     expect_label("gemma2:9b",               "Gemma2 9b");
 
     // ── OpenAI / OpenAI-compat: title-case, keep GPT acronym + version ─
@@ -40,7 +40,11 @@ TEST_CASE("pretty_model_label normalizes real-world ids") {
     expect_label("gpt-4o-mini",             "GPT 4o Mini");
     expect_label("gpt-5",                   "GPT 5");
     expect_label("o4-mini",                 "o4 Mini");
-    expect_label("chatgpt-4o-latest",       "Chatgpt 4o Latest");
+    expect_label("chatgpt-4o-latest",       "ChatGPT 4o");     // brand case + alias drop
+    expect_label("gpt-4o-2024-08-06",       "GPT 4o");         // snapshot triple drop
+    expect_label("gpt-4.1-nano",            "GPT 4.1 Nano");
+    expect_label("gpt-5.1-codex-max",       "GPT 5.1 Codex Max");
+    expect_label("codex-mini-latest",       "Codex Mini");
 
     // ── Provider-namespaced ids (OpenRouter / aggregators) ────────────
     expect_label("openai/gpt-4o-mini",      "GPT 4o Mini");
@@ -48,16 +52,28 @@ TEST_CASE("pretty_model_label normalizes real-world ids") {
     expect_label("meta-llama/Llama-3.1-8B", "Llama 3.1 8B");
     expect_label("google/gemini-2.0-flash", "Gemini 2.0 Flash");
 
-    // ── Gemini / xAI / DeepSeek hosted ────────────────────────────────
+    // ── Gemini / xAI / DeepSeek hosted ────────────────────────────
     expect_label("gemini-1.5-pro",          "Gemini 1.5 Pro");
     expect_label("grok-2",                  "Grok 2");
     expect_label("grok-beta",               "Grok Beta");
-    expect_label("deepseek-r1",             "Deepseek R1");
-    expect_label("deepseek-chat",           "Deepseek Chat");
+    expect_label("deepseek-r1",             "DeepSeek R1");    // brand case
+    expect_label("deepseek-chat",           "DeepSeek Chat");
 
-    // ── agentty `[1m]` extended-context marker is stripped anywhere ───
-    expect_label("claude-sonnet-4-5[1m]",   "Claude Sonnet 4 5");
+    // ── Claude: adjacent version digits join with a dot; snapshots drop ─
+    expect_label("claude-sonnet-4-5",       "Claude Sonnet 4.5");
+    expect_label("claude-opus-4-1",         "Claude Opus 4.1");
+    expect_label("claude-3-5-haiku-20241022", "Claude 3.5 Haiku");
+    expect_label("claude-sonnet-4-20250514",  "Claude Sonnet 4");
+
+    // ── agentty `[1m]`/`[2m]` extended-context markers are stripped ───
+    expect_label("claude-sonnet-4-5[1m]",   "Claude Sonnet 4.5");
+    expect_label("claude-opus-4-5[2m]",     "Claude Opus 4.5");
     expect_label("gpt-4o[1m]",              "GPT 4o");
+
+    // ── Ollama quant tags: keep size + variant, drop quant noise ──────
+    expect_label("llama3.3:70b-instruct-q4_K_M", "Llama3.3 70b Instruct");
+    expect_label("phi4:Q8_0",               "Phi4");
+    expect_label("llama3:8b-fp16",          "Llama3 8b");
 
     // ── Acronym preservation + already-cased input ────────────────────
     expect_label("glm-4-9b",                "GLM 4 9b");

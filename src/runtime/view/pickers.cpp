@@ -243,15 +243,18 @@ Element model_picker(const Model& m) {
     ).build());
     cfg.header.push_back(sep);
 
-    // Build the filtered index list (case-insensitive substring over the
-    // display name). Empty query → every row, in order.
+    // Build the filtered index list. Matches the DISPLAY name or the RAW id
+    // (case-insensitive substring): users paste/remember wire ids like
+    // `claude-sonnet-4-5`, and the prettified label alone ("Claude Sonnet
+    // 4.5") would never contain that spelling.
     std::vector<int> vis;
     vis.reserve(m.d.available_models.size());
-    for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i)
-        if (pick::fuzzy_contains(
-                m.d.available_models[static_cast<std::size_t>(i)].display_name,
-                picker->query))
+    for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i) {
+        const auto& cand = m.d.available_models[static_cast<std::size_t>(i)];
+        if (pick::fuzzy_contains(cand.display_name, picker->query)
+            || pick::fuzzy_contains(cand.id.value, picker->query))
             vis.push_back(i);
+    }
 
     if (m.d.available_models.empty()) {
         cfg.items.push_back(text(
@@ -270,11 +273,36 @@ Element model_picker(const Model& m) {
             const bool active = mi.id == m.d.model_id;
             const auto caps   = ModelCapabilities::from_id(mi.id.value);
             Picker::Config::Row row;
-            row.leading        = mi.display_name;
+            // Anthropic/Copilot catalogs carry a server-provided display name
+            // ("Claude Sonnet 4.5"); OpenAI-compat and Ollama set
+            // display_name = raw id. Prettify exactly the fallback case — a
+            // real server-provided name passes through untouched, and the
+            // raw id stays searchable via the id-aware filter above.
+            row.leading        = (mi.display_name == mi.id.value)
+                                     ? pretty_model_label(mi.id.value)
+                                     : mi.display_name;
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
-            // Trailing: favourite star, plus the reasoning-effort tier on the
-            // highlighted row when the model supports it (←/→ cycles it).
-            std::string trailing = mi.favorite ? "\xe2\x98\x85" : "";
+            // Trailing: context window · favourite star · reasoning-effort
+            // tier (highlighted row only, ←/→ cycles). The window is the one
+            // spec that differentiates otherwise-similar rows (a 1M-context
+            // variant vs the 200k base; a 128k local vs an 8k one), so it
+            // earns the column; "unknown" (0) prints nothing rather than a
+            // made-up default.
+            std::string trailing;
+            if (const int win = mi.context_window; win > 0) {
+                if (win >= 1'000'000) {
+                    trailing += std::to_string(win / 1'000'000) + "M";
+                    if (win % 1'000'000 != 0) trailing += "+";   // 1.x M → "1M+"
+                } else if (win >= 1'000) {
+                    trailing += std::to_string(win / 1'000) + "k";
+                } else {
+                    trailing += std::to_string(win);
+                }
+            }
+            if (mi.favorite) {
+                if (!trailing.empty()) trailing += "  ";
+                trailing += "\xe2\x98\x85";
+            }
             if (sel && caps.supports_effort() && m.d.effort != Effort::None) {
                 if (!trailing.empty()) trailing += "  ";
                 trailing += "\xe2\x97\x87 " + std::string{effort_label(m.d.effort)};
