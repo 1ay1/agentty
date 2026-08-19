@@ -32,7 +32,7 @@ set(_AGENTTY_CONSOLIDATED
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
-    provider_model_switch_test)
+    provider_model_switch_test speculative_dispatch_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()

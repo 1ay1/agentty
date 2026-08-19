@@ -420,6 +420,17 @@ struct StreamState {
     std::chrono::steady_clock::time_point last_wire_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
+    // Prompt-cache telemetry for the LAST completed pricing (per turn).
+    // cache_hit_ratio = cache_read / (input + cache_read + cache_creation)
+    // — 1.0 means the whole prefix was served from cache (cheap + fast
+    // TTFT), ~0 means the prefix was re-priced cold (10-20x TTFT for a
+    // large context). A LOW ratio on an interior turn of a session is a
+    // bug signal: something (tool-catalog reorder, MCP reload, prompt
+    // nondeterminism) mutated the cached prefix and torched the cache.
+    // Surfaced via AGENTTY_CACHE_PROF=1 logging; -1 = no data yet.
+    double cache_hit_ratio = -1.0;
+    int    cache_read_tokens     = 0;
+    int    cache_creation_tokens = 0;
     int context_max = 200000;
     // Self-calibrating correction for the local byte-based token estimate.
     //
