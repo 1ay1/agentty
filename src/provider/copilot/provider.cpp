@@ -161,6 +161,14 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
                     if (auto_chat_compatible(m)) { picked = m; break; }
             if (picked.empty() && !as->available_models.empty())
                 picked = as->available_models.front();
+            // SURFACE the substitution: the user picked `requested`, the
+            // Auto session is streaming `picked`. Silence here reads as
+            // "model switching is broken"; one toast makes the server-side
+            // routing visible. Auto itself always "substitutes" — only
+            // notify when a CONCRETE pick was rerouted.
+            if (requested != kAutoId && !picked.empty() && picked != requested)
+                sink(StreamNotice{"copilot auto: " + requested + " \xe2\x86\x92 "
+                                  + picked});
             oreq.model    = picked;
             oreq.endpoint = make_auto_endpoint(as->endpoint_api, as->session_token);
         } else {

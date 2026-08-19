@@ -43,6 +43,13 @@ private:
 // process. Falls back to a small bundled list when offline / not signed in.
 [[nodiscard]] std::vector<ModelInfo> list_models();
 
+// Snapshot of the already-fetched catalog — NEVER touches the network.
+// Empty until the first live list_models() succeeds. This is what UI-thread
+// call sites (provider switch, recall validation) must use: list_models()
+// blocks on a catalog HTTP round-trip when the cache is cold, which froze
+// the reducer for the full timeout when switching to ChatGPT offline.
+[[nodiscard]] std::vector<ModelInfo> list_models_cached();
+
 // The account's default model slug (first catalog entry). Callers that need a
 // concrete model id — e.g. provider-switch defaulting — should use this instead
 // of hardcoding a slug the account may not offer.
