@@ -69,7 +69,15 @@ jobs:
       - name: Resolve version + tag
         id: meta
         run: |
-          V=$(grep -m1 'project(agentty' CMakeLists.txt | sed -E 's/.*VERSION ([0-9.]+).*/\1/')
+          # The project() call spans multiple lines, so grep the VERSION line
+          # directly (the first `VERSION X.Y.Z` after `project(agentty`) rather
+          # than the project( line — which has no version and made sed a no-op,
+          # yielding TAG="vproject(agentty".
+          V=$(sed -nE '/project\(agentty/,/\)/ s/.*VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt | head -n1)
+          if ! printf '%s' "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "FATAL: could not parse a semver from CMakeLists.txt project() (got: '$V')" >&2
+            exit 1
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # Blank input → derive the tag from the CMake project version.
