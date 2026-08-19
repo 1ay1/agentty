@@ -33,7 +33,11 @@ struct Closed {};
 // One-axis picker (model list, thread list). `query` is an optional
 // incremental-search buffer — only the model picker uses it today; pickers
 // that don't touch it leave it empty and behave exactly as before.
-struct OpenAt { int index = 0; std::string query; };
+// `confirm_remove` carries the label/id of the row pending a two-press
+// delete (thread picker only, mirroring SettingsListRemove / AccountRemove).
+// Any move/select/new/close clears it, so a stray `d` can never delete
+// a thread with no way back.
+struct OpenAt { int index = 0; std::string query; std::string confirm_remove; };
 using OneAxis = std::variant<Closed, OpenAt>;
 
 // Two-axis picker (diff review: file × hunk).

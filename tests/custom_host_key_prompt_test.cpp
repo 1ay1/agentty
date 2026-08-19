@@ -38,6 +38,7 @@ static void install_stub_deps(agentty::store::Settings& s) {
     app::install_deps(app::Deps{
         .stream         = [](auto, auto) {},
         .save_thread    = [](const auto&) {},
+        .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<agentty::Thread>{}; },
         .load_thread    = [](const auto&) -> std::optional<agentty::Thread> { return std::nullopt; },
         .load_settings  = [&s] { return s; },

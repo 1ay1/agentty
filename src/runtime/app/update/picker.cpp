@@ -610,6 +610,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             if (m.d.threads.empty()) return done(std::move(m));
             auto* p = pick::opened(m.ui.thread_list);
             if (!p) return done(std::move(m));
+            p->confirm_remove.clear();   // moving disarms a pending `d`
             int sz = static_cast<int>(m.d.threads.size());
             p->index = (p->index + e.delta + sz) % sz;
             return done(std::move(m));
@@ -618,6 +619,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             if (m.d.threads.empty()) return done(std::move(m));
             auto* p = pick::opened(m.ui.thread_list);
             if (!p) return done(std::move(m));
+            p->confirm_remove.clear();   // jumping disarms a pending `d`
             int sz = static_cast<int>(m.d.threads.size());
             using W = ThreadListJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
@@ -674,6 +676,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         [&](ThreadListSelect) -> Step {
             auto* p = pick::opened(m.ui.thread_list);
             Cmd<Msg> cmd = Cmd<Msg>::none();
+            if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
                 const Thread& meta = m.d.threads[p->index];
                 // Same-thread re-select — closing the picker is the
@@ -688,6 +691,52 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             }
             m.ui.thread_list = pick::Closed{};
             return {std::move(m), std::move(cmd)};
+        },
+        [&](ThreadListDelete) -> Step {
+            // `d` / `D` in the thread picker — two-press delete with
+            // confirm_remove, mirroring SettingsListRemove / AccountRemove.
+            // First press on a row marks it pending (⚠ badge in the view);
+            // second press on the SAME row commits via deps().delete_thread().
+            // Any move/jump/select/new/close disarms the pending state.
+            auto* p = pick::opened(m.ui.thread_list);
+            if (!p || m.d.threads.empty()) return done(std::move(m));
+            const int idx = p->index;
+            const Thread& target = m.d.threads[static_cast<std::size_t>(idx)];
+            // Use the thread id as the confirm key — stable across title edits.
+            const std::string key = target.id.value;
+            if (p->confirm_remove != key) {
+                p->confirm_remove = key;
+                return done(std::move(m));
+            }
+            // Second press — commit the delete.
+            p->confirm_remove.clear();
+            deps().delete_thread(target.id);
+            const bool was_current = (target.id == m.d.current.id);
+            m.d.threads.erase(m.d.threads.begin() + idx);
+            // Clamp the cursor so it stays valid after removal.
+            const int sz = static_cast<int>(m.d.threads.size());
+            if (sz == 0) {
+                p->index = 0;
+            } else if (p->index >= sz) {
+                p->index = sz - 1;
+            }
+            std::string label = target.title.empty() ? "(untitled)" : target.title;
+            std::string msg = "deleted \"" + label + "\"";
+            if (was_current) msg += " \xe2\x80\x94 started a new thread";
+            auto toast = set_status_toast(m, std::move(msg));
+            // If the deleted thread was the active one, start fresh.
+            if (was_current) {
+                m.ui.view_cache.clear();
+                m.d.current = Thread{};
+                m.d.current.id = deps().new_thread_id();
+                m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
+                clear_frozen(m);
+                m.ui.thread_list = pick::Closed{};
+                reset_composer_draft(m.ui.composer);
+                return {std::move(m),
+                        Cmd<Msg>::batch(cmd::load_threads_async(), std::move(toast))};
+            }
+            return {std::move(m), std::move(toast)};
         },
         [&](ThreadCycle& e) -> Step {
             // Alt+←/→ — jump to the adjacent thread without the picker.

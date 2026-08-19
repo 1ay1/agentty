@@ -394,6 +394,8 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key))
         if (ck->codepoint == 'n' || ck->codepoint == 'N') return NewThread{};
+    if (auto* ck = std::get_if<CharKey>(&ev.key))
+        if (ck->codepoint == 'd' || ck->codepoint == 'D') return ThreadListDelete{};
     return std::nullopt;
 }
 
