@@ -9,7 +9,7 @@
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/skills.hpp"
-#include "agentty/tool/util/fs_helpers.hpp"   // util::project_root — AGENTS.md anchor
+#include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
 #include "agentty/util/dbglog.hpp"
 
 #include <cstdlib>
@@ -163,16 +163,26 @@ namespace {
 
 // AGENTS.md — the open AAIF/Linux-Foundation standard for project-scoped
 // agent guidance (https://agents.md). Project-scoped only per the published
-// spec: a single file at <project_root>/AGENTS.md, no user tier, no local
-// tier. agentty's workspace model is single-tier (no per-subpackage nested
-// files), so this is the only AGENTS.md read.
+// spec: no user tier, no local tier. The root file lives at
+// <project_root>/AGENTS.md.
+//
+// Nested monorepo walk: the spec also says "Place another AGENTS.md inside
+// each package. Agents automatically read the nearest file in the directory
+// tree, so the closest one takes precedence." When the agent's cwd is inside
+// a subpackage, we walk upward looking for a second AGENTS.md that is NOT
+// the root file. If found, its content is emitted in a separate
+// <agents-md-package> block so the model can distinguish root-level guidance
+// from package-specific guidance and apply precedence (nearest wins).
 //
 // Reuses read_memory_cached despite the name — that function is a generic
 // mtime-cached file reader (cache key is the path string, so AGENTS.md
 // gets its own cache entry independent of the CLAUDE.md tiers). Same 64 KiB
 // cap, same process-lifetime cache, same concurrency contract.
 //
-// Wire shape: a SEPARATE top-level <agents-md>…</agents-md> block, injected
+// Wire shape: a SEPARATE top-level <agents-md>…</agents-md> block (root),
+// optionally followed by <agents-md-package>…</agents-md-package> (nearest
+// nested file). The nested block is skipped when the nearest AGENTS.md is
+// the root file (same canonical path) to avoid duplication. Both are injected
 // BEFORE the existing <memory> block. Standardized public project guidance
 // is visually distinct from personal CLAUDE.md notes so the model can
 // apply precedence correctly (AGENTS.md is the public spec; CLAUDE.md
@@ -180,18 +190,78 @@ namespace {
 // breakpoint as collect_memory_blocks, so the wire cost is paid once per
 // ~5 min cache_control TTL window regardless.
 [[nodiscard]] std::string collect_agents_md_block() {
-    const std::string content =
-        read_memory_cached(tools::util::project_root() / "AGENTS.md");
-    if (content.empty()) return {};
+    namespace fs = std::filesystem;
+    // workspace_root() is the fixed access boundary (where AGENTS.md root
+    // lives). project_root() is the agent's cwd clamped inside that boundary
+    // — the walk start point for finding nested AGENTS.md files.
+    const fs::path ws_root   = tools::util::workspace_root();
+    const fs::path cwd_root  = tools::util::project_root();
+
+    // Global scope: ~/.agentty/AGENTS.md or ~/.agents/AGENTS.md (first wins).
+    const fs::path global_path = wire::resolve_global_agents_md();
+    const std::string global_content =
+        global_path.empty() ? std::string{} : read_memory_cached(global_path);
+
+    const std::string content = read_memory_cached(ws_root / "AGENTS.md");
+    if (content.empty() && global_content.empty()) return {};
 
     std::ostringstream m;
-    m << "\n\n<agents-md>\n"
-      << "Project guidance following the open AGENTS.md standard "
-         "(agents.md, stewarded by the Agentic AI Foundation under the "
-         "Linux Foundation). Treat as authoritative public project "
-         "conventions.\n"
-      << content
-      << "\n</agents-md>";
+
+    // Global block first (lowest precedence).
+    if (!global_content.empty()) {
+        m << "\n\n<agents-md-global>\n"
+          << "Global guidance from ~/.agentty/AGENTS.md (or ~/.agents/AGENTS.md). "
+             "Applies across all projects; overridden by project-level guidance "
+             "below.\n"
+          << global_content
+          << "\n</agents-md-global>";
+    }
+
+    // Root project block.
+    if (!content.empty()) {
+        m << "\n\n<agents-md>\n"
+          << "Project guidance following the open AGENTS.md standard "
+             "(agents.md, stewarded by the Agentic AI Foundation under the "
+             "Linux Foundation). Treat as authoritative public project "
+             "conventions.\n"
+          << content
+          << "\n</agents-md>";
+    }
+
+    // ── Nested monorepo walk: find nearest AGENTS.md below workspace_root ──
+    // Walk upward from the agent's cwd (clamped inside the workspace by
+    // project_root()) looking for an AGENTS.md that is NOT the root file.
+    // Stops at workspace_root — never escapes the workspace boundary.
+    std::error_code ec;
+    const auto root_canon   = fs::weakly_canonical(ws_root, ec);
+    const auto root_agents  = root_canon / "AGENTS.md";
+    // If cwd_root == ws_root (the common case), the loop condition
+    // dir != root_canon fails immediately and no nested block is emitted.
+    auto dir = fs::weakly_canonical(cwd_root, ec);
+    if (ec) dir = cwd_root;
+
+    while (dir.has_parent_path()
+       && dir != root_canon
+       && fs::is_directory(dir, ec) && !ec) {
+        auto candidate      = dir / "AGENTS.md";
+        auto candidate_canon = fs::weakly_canonical(candidate, ec);
+        if (!ec && fs::is_regular_file(candidate, ec) && !ec
+            && candidate_canon != root_agents) {
+            const std::string nested = read_memory_cached(candidate);
+            if (!nested.empty()) {
+                m << "\n\n<agents-md-package>\n"
+                  << "Package-specific guidance from the nearest AGENTS.md "
+                     "(https://agents.md). The closest AGENTS.md to the "
+                     "edited file wins; treat this as overriding the "
+                     "root-level guidance above where they conflict.\n"
+                  << nested
+                  << "\n</agents-md-package>";
+            }
+            break;  // nearest found — stop walking
+        }
+        dir = dir.parent_path();
+    }
+
     return m.str();
 }
 

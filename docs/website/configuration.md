@@ -104,11 +104,48 @@ On the Claude backend, agentty appends up to three user-authored guidance files 
 
 agentty also reads the [AGENTS.md](https://agents.md) open standard — stewarded by the [Agentic AI Foundation](https://aaif.io) under the Linux Foundation — for project-scoped agent guidance. Think of AGENTS.md as a README for agents: a dedicated, predictable place to provide build steps, test commands, and code-style conventions to AI coding agents. Over 60k open-source projects ship one.
 
-Per the published spec, AGENTS.md is **project-scoped only**: agentty reads a single file at `<project>/AGENTS.md` (resolved from `--workspace`, not the raw process cwd). There is no user tier and no local tier — those concerns stay with CLAUDE.md. agentty's workspace model is single-tier, so nested per-subpackage AGENTS.md files (allowed by the spec for monorepos) are not walked; only the project-root file is read.
+agentty resolves AGENTS.md in three tiers (lowest precedence → highest):
 
-When AGENTS.md is present, agentty injects it as its own `<agents-md>` block in the system prompt — placed **before** the CLAUDE.md `<memory>` block, so standardized public project guidance lands first and personal/team memory layers on top. Each file is capped at 64 KiB and mtime-cached (same pipeline as CLAUDE.md). The block is elided entirely when the file is missing or empty, so adding AGENTS.md is purely additive — workspaces without one see no change.
+### Global scope (~/.agentty/AGENTS.md)
 
-Coexistence with CLAUDE.md is intentional: AGENTS.md is the cross-tool public standard (works with Codex, Cursor, Jules, Aider, opencode, and many others — see the [full list](https://agents.md)), while CLAUDE.md remains agentty's personal/team memory hierarchy. A repo can ship AGENTS.md for cross-agent conventions and individual users can keep CLAUDE.md / CLAUDE.local.md for their own notes; both are injected, AGENTS.md first.
+Not part of the published spec (which is project-scoped only), but a pragmatic extension that major tools like Codex (`~/.codex/AGENTS.md`) and OpenCode (`~/.config/opencode/AGENTS.md`) implement. agentty checks two candidates in priority order — the first non-empty file wins:
+
+1. `~/.agentty/AGENTS.md` — agentty-specific global guidance (highest priority).
+2. `~/.agents/AGENTS.md` — shared global guidance for any agent tool (fallback).
+
+When present, the content is injected as an `<agents-md-global>` block **before** the project-level block, so project guidance overrides global. Capped at 64 KiB.
+
+### Project root (<project>/AGENTS.md)
+
+Per the published spec, this is the primary file. agentty reads `<project>/AGENTS.md` (resolved from `--workspace`, not the raw process cwd). There is no local tier — that concern stays with CLAUDE.md. When present, the content is injected as an `<agents-md>` block in the system prompt, placed **before** the CLAUDE.md `<memory>` block, so standardized public project guidance lands first and personal/team memory layers on top. Capped at 64 KiB and mtime-cached (same pipeline as CLAUDE.md).
+
+### Nested monorepo walk (nearest AGENTS.md)
+
+The spec also describes nested files for monorepos: *"Place another AGENTS.md inside each package. Agents automatically read the nearest file in the directory tree, so the closest one takes precedence."* agentty implements this as an upward directory walk:
+
+- When the agent's cwd (clamped inside the workspace via `project_root()`) is a subdirectory of `workspace_root`, agentty walks **upward** from the cwd toward the workspace root, looking for the closest `AGENTS.md` that is **not** the root file.
+- The walk stops at the first file found (nearest wins) — it does not collect all files along the path. The nearest file's content is injected as an `<agents-md-package>` block, after the root block, so the model applies package-specific overrides where they conflict with root-level guidance.
+- The walk never escapes the workspace boundary.
+- If the nearest `AGENTS.md` is the same file as the root (same canonical path — e.g. the cwd is at the workspace root), no `<agents-md-package>` block is emitted (dedup).
+- Capped at 64 KiB.
+
+The walk starts from the agent's **cwd** (`project_root()`), not from the directory of the currently edited file. This matches how Codex and OpenCode implement the spec in practice — both use the cwd as the reference point, not the edited file. In the common case (agent working inside a subpackage directory), the cwd and the edited file's directory coincide.
+
+### Wire shape
+
+When AGENTS.md files are present, agentty injects them as separate blocks in the system prompt (low → high precedence):
+
+```
+<agents-md-global>    ← ~/.agentty/AGENTS.md or ~/.agents/AGENTS.md (optional)
+<agents-md>           ← <workspace_root>/AGENTS.md (project root)
+<agents-md-package>   ← nearest nested AGENTS.md (monorepo walk, optional)
+```
+
+All three tiers are elided when their content is missing or empty, so adding AGENTS.md is purely additive — workspaces without one see no change. Each file is capped at 64 KiB.
+
+### Coexistence with CLAUDE.md
+
+AGENTS.md is the cross-tool public standard (works with Codex, Cursor, Jules, Aider, opencode, and many others — see the [full list](https://agents.md)), while CLAUDE.md remains agentty's personal/team memory hierarchy. A repo can ship AGENTS.md for cross-agent conventions and individual users can keep CLAUDE.md / CLAUDE.local.md for their own notes; both are injected, AGENTS.md first.
 
 > **`AGENTS.md` is not the same as agentty's subagents.** Despite the similar name, `AGENTS.md` is a *document* — project guidance injected into the system prompt. It is unrelated to agentty's **subagents** (the delegate personas in `.agentty/agents/*.md` that the `task` tool spawns, shown in the command palette's *Subagents* entry). One is a project rulebook read into the prompt; the other defines *who* you can delegate to. AGENTS.md also does **not** apply to subagents — they run on a lean prompt that excludes both AGENTS.md and CLAUDE.md memory.
 
