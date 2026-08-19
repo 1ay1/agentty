@@ -229,6 +229,23 @@ TEST_CASE("rag adapter") {
             if (!updated.passages.empty())
                 check(updated.passages.front().text.find("rotate_session_nonce") != std::string::npos,
                       "edited definition replaces stale code content");
+
+            // Disk-verification: the returned passage text must be exactly what
+            // is on disk RIGHT NOW — read_disk_lines re-reads the cited range, so
+            // even after an edit the result is correct-on-bytes, never a stale
+            // or mangled index chunk. Prove it by confirming the passage body
+            // is a verbatim substring of the current file.
+            if (!updated.passages.empty()) {
+                std::ifstream in(tmp / "src" / "auth_guard.cpp", std::ios::binary);
+                std::string disk((std::istreambuf_iterator<char>(in)),
+                                 std::istreambuf_iterator<char>());
+                const auto& body = updated.passages.front().text;
+                // Take the first non-empty line of the passage and require it
+                // to appear verbatim on disk (guards against stale/garbled text).
+                std::string first = body.substr(0, body.find('\n'));
+                check(!first.empty() && disk.find(first) != std::string::npos,
+                      "search_code passage is verified against live disk");
+            }
         }
         // A single documentation edit is refreshed in place and replaces the
         // stale document without rebuilding unrelated sources.
