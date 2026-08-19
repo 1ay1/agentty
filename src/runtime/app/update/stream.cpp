@@ -650,8 +650,8 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             // same ctx — the just-incremented truncation_retries
             // counter persists so the kMaxTruncationRetries cap
             // works across retries within the turn.
-            auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-            m.s.phase = phase::Streaming{std::move(ctx)};
+            if (!reschedule_streaming(m.s.phase, [](phase::Active&) {}))
+                return Cmd<Msg>::none();   // late event from Idle: no-op
             m.s.status = "retrying (upstream cut off)…";
             return cmd::launch_stream(m);
         }
@@ -1689,11 +1689,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // rebuilds the same compaction request shape on
                     // RetryStream.
                     m.s.compaction_buffer.clear();
-                    auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                    ctx.transient_retries = prior + 1;
-                    ctx.last_failure_at   = std::chrono::steady_clock::now();
-                    ctx.retry             = retry::Scheduled{};
-                    m.s.phase = phase::Streaming{std::move(ctx)};
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior + 1;
+                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return done(std::move(m));
                     return {std::move(m),
                             Cmd<Msg>::after(delay, Msg{RetryStream{}})};
                 }
@@ -1738,10 +1739,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (next > 0 && shrink_tries < 6 && sctx) {
                         m.s.compaction_ceiling = next;
                         m.s.compaction_buffer.clear();
-                        auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                        ctx.transient_retries = shrink_tries + 1;
-                        ctx.retry = retry::Scheduled{};
-                        m.s.phase = phase::Streaming{std::move(ctx)};
+                        if (!reschedule_streaming(m.s.phase,
+                                [&](phase::Active& c) {
+                                    c.transient_retries = shrink_tries + 1;
+                                    c.retry = retry::Scheduled{};
+                                }))
+                            return done(std::move(m));
                         m.s.status = "forking \xc2\xb7 trimming to fit…";
                         m.s.status_until = {};
                         return {std::move(m),
@@ -1906,11 +1909,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 std::erase_if(m.d.available_models, [](const ModelInfo& mi) {
                     return mi.id.value.find("[1m]") != std::string::npos;
                 });
-                auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                ctx.transient_retries = prior_transient + 1;
-                ctx.last_failure_at   = std::chrono::steady_clock::now();
-                ctx.retry             = retry::Scheduled{};
-                m.s.phase = phase::Streaming{std::move(ctx)};
+                if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                        c.transient_retries = prior_transient + 1;
+                        c.last_failure_at   = std::chrono::steady_clock::now();
+                        c.retry             = retry::Scheduled{};
+                    }))
+                    return done(std::move(m));
                 auto toast = set_status_toast(m,
                     "this account lacks the 1M-context beta — fell back to "
                     "the standard 200K window and retried",
@@ -1953,11 +1957,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // cancel token was already reset at the top of this
                     // handler; we just rebuild the ctx with bumped
                     // counters and the Scheduled retry sentinel.
-                    auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                    ctx.transient_retries = prior_transient + 1;
-                    ctx.last_failure_at   = std::chrono::steady_clock::now();
-                    ctx.retry             = retry::Scheduled{};
-                    m.s.phase = phase::Streaming{std::move(ctx)};
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior_transient + 1;
+                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return done(std::move(m));
                     if (last) {
                         // Drop before pop — an uncommitted (textless)
                         // placeholder may hold a cache entry (pinned or
@@ -2049,12 +2054,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                            + "/" + std::to_string(retry_cap) + ")…";
                 m.s.status_until = std::chrono::steady_clock::now()
                                  + delay + std::chrono::milliseconds{1500};
-                auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                ctx.transient_retries = attempt + 1;
-                if (mid_stream) ctx.mid_stream_failures = mid_prior + 1;
-                ctx.last_failure_at   = std::chrono::steady_clock::now();
-                ctx.retry             = retry::Scheduled{};
-                m.s.phase = phase::Streaming{std::move(ctx)};
+                if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                        c.transient_retries = attempt + 1;
+                        if (mid_stream) c.mid_stream_failures = mid_prior + 1;
+                        c.last_failure_at   = std::chrono::steady_clock::now();
+                        c.retry             = retry::Scheduled{};
+                    }))
+                    return done(std::move(m));
                 if (last) {
                     // Drop before pop — see the auth-retry pop above.
                     m.ui.view_cache.drop(m.d.current.id, last->id);

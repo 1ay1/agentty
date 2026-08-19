@@ -1296,8 +1296,8 @@ struct Retriever::Impl {
     }
 };
 
-Retriever::Retriever() : impl_(new Impl()) {}
-Retriever::~Retriever() { delete impl_; }
+Retriever::Retriever() : impl_(std::make_unique<Impl>()) {}
+Retriever::~Retriever() = default;
 
 void Retriever::set_generator(Generator g) {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -1808,18 +1808,27 @@ bool Retriever::code_warm() const {
 void Retriever::warm_async() {
     bool expected = false;
     if (!impl_->warming.compare_exchange_strong(expected, true)) return;
-    if (impl_->warmer.joinable()) impl_->warmer.join();
-    Impl* state = impl_;
-    impl_->warmer = std::jthread([state] {
-        try {
-            std::lock_guard<std::mutex> lock(state->mu);
-            auto root = resolve_docs_root(state->cfg.docs_root);
-            if (state->engine.corpus().chunk_count() == 0)
-                (void)state->try_load_persisted(root);
-            state->refresh_docs(root);
-        } catch (...) { /* best-effort */ }
-        state->warming.store(false);
-    });
+    // Reap a finished previous warmer + seat the new one under mu: even
+    // though today's callers are all on the UI thread, the join/assign of
+    // `warmer` must never race a concurrent warm_async — the atomic gate
+    // above only guarantees one LOGICAL warm at a time, not that the
+    // handle handoff itself is synchronized. mu makes it airtight from
+    // any thread, at the cost of a lock the warm path pays anyway.
+    Impl* state = impl_.get();
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->warmer.joinable()) impl_->warmer.join();
+        impl_->warmer = std::jthread([state] {
+            try {
+                std::lock_guard<std::mutex> lock(state->mu);
+                auto root = resolve_docs_root(state->cfg.docs_root);
+                if (state->engine.corpus().chunk_count() == 0)
+                    (void)state->try_load_persisted(root);
+                state->refresh_docs(root);
+            } catch (...) { /* best-effort */ }
+            state->warming.store(false);
+        });
+    }
 }
 
 // Replace the live configuration. Anything that changes the CORPUS shape
@@ -2197,7 +2206,7 @@ Config Config::from_env() {
 struct Retriever::Impl {};
 
 Retriever::Retriever() : impl_(nullptr) {}
-Retriever::~Retriever() { delete impl_; }
+Retriever::~Retriever() = default;
 
 void Retriever::set_generator(Generator /*g*/) {}
 

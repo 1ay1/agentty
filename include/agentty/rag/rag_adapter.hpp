@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -176,7 +177,10 @@ public:
 
 private:
     struct Impl;
-    Impl* impl_;   // owned; raw so the header pulls in no rag:: type
+    // Owned. unique_ptr with the destructor defined in adapter.cpp (where
+    // Impl is complete) — the type system carries the ownership instead of
+    // a comment; the header still pulls in no rag:: type.
+    std::unique_ptr<Impl> impl_;
 };
 
 // ── Learning loop (write side) ─────────────────────────────────────────
