@@ -40,12 +40,21 @@ struct Deps {
     std::function<ThreadId()>                    new_thread_id;
     std::function<std::string(std::string_view)> title_from;
 
-    // ── Auth context (immutable for the session) ─────────────────────────
+    // ── Auth context (swapped live by update_auth / switch_provider) ─────
+    // UI-THREAD readers may use this field directly (all writers run on the
+    // UI thread, inside reducers). A WORKER thread must go through
+    // auth_snapshot() instead — a bare read here races the UI thread's
+    // move-assign during a live provider switch / login (torn std::string).
     auth::AuthHeader auth;
 };
 
 [[nodiscard]] const Deps& deps();
 void install_deps(Deps d);
+
+// Mutex-guarded copy of Deps::auth for WORKER-thread readers (e.g. the
+// background model-catalog fetch). Same UI/worker split that gives
+// provider::active() its lock — see selection.cpp.
+[[nodiscard]] auth::AuthHeader auth_snapshot();
 
 // Live-replace just the auth context after install. Used by the in-app
 // login modal: when the user finishes signing in, the reducer dispatches

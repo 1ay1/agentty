@@ -1637,21 +1637,27 @@ Cmd<Msg> fetch_models() {
             // ONE model-list router (provider/selection.cpp), dispatched on the
             // same axes as the stream path. No is_chatgpt/OpenAI/Anthropic
             // ladder here — a new provider inherits its catalog from its row.
+            // auth_snapshot(), not deps().auth: this runs on a WORKER thread
+            // and a bare read races the UI thread's auth swap mid-switch.
             auto models = provider::list_models_for(provider::active(),
-                                                    deps().auth);
+                                                    auth_snapshot());
             dispatch(ModelsLoaded{std::move(models), for_provider});
         } catch (const std::exception& e) {
-            // Dispatch an EMPTY ModelsLoaded (not StreamError) so the
-            // reducer always clears `models_loading` and the model
-            // picker drops out of "Loading models…" into a "no models"
-            // state the user can escape. A StreamError here would leave
-            // the picker spinning forever after a failed provider switch.
-            // Still surface the reason as a transient status toast.
-            dispatch(StreamError{std::string{"models fetch: "} + e.what()});
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider});
+            // Dispatch an EMPTY ModelsLoaded carrying the reason (NOT a
+            // StreamError) so the reducer always clears `models_loading`
+            // and the model picker drops out of "Loading models…" into a
+            // "no models" state the user can escape. A StreamError here
+            // would be routed into the LIVE TURN's retry state machine:
+            // opened mid-stream (Ctrl+/ is not gated on turn_active), a
+            // failed catalog fetch would pop the assistant message that is
+            // receiving deltas and race a RetryStream worker into the
+            // session — or latch a healthy turn terminal. The reducer
+            // surfaces `error` as a transient status toast instead.
+            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
+                                  std::string{"models fetch: "} + e.what()});
         } catch (...) {
-            dispatch(StreamError{"models fetch: unknown exception"});
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider});
+            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
+                                  "models fetch: unknown exception"});
         }
     });
 }

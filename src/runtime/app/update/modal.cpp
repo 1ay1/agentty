@@ -615,9 +615,21 @@ void persist_settings(const Model& m) {
     auto s = deps().load_settings();
     s.model_id = m.d.model_id;
     s.profile  = m.d.profile;
-    s.favorite_models.clear();
-    for (const auto& mi : m.d.available_models)
-        if (mi.favorite) s.favorite_models.push_back(mi.id);
+    // MERGE favorites, don't rebuild: `favorite_models` is one GLOBAL list
+    // spanning every provider, but m.d.available_models only holds the
+    // catalog of the provider loaded right now. Rebuilding the list from
+    // that vector alone would silently erase every favorite belonging to
+    // another backend (favorite Claude models → switch to Ollama → quit
+    // persists → Anthropic favorites gone). So: reconcile only the ids
+    // present in the live catalog; keep the rest untouched on disk.
+    for (const auto& mi : m.d.available_models) {
+        auto it = std::find(s.favorite_models.begin(),
+                            s.favorite_models.end(), mi.id);
+        if (mi.favorite && it == s.favorite_models.end())
+            s.favorite_models.push_back(mi.id);
+        else if (!mi.favorite && it != s.favorite_models.end())
+            s.favorite_models.erase(it);
+    }
     // Record this model as the active provider's last-used selection so a
     // later switch back to it restores exactly this model.
     if (!m.d.model_id.empty())
