@@ -170,6 +170,15 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             return done(std::move(m));
         },
         [&](CloseModelPicker) -> Step {
+            // Flush any effort-tier cycling to disk ONCE on close (see the
+            // CycleEffort arm — persisting per arrow keystroke was a
+            // synchronous load+fsync+rename on the UI thread per keypress).
+            // Select persists on its own arm; Quit persists globally; this
+            // covers the Esc path.
+            if (m.ui.effort_dirty) {
+                persist_settings(m);
+                m.ui.effort_dirty = false;
+            }
             m.ui.model_picker = pick::Closed{};
             m.ui.smart_assign_slot = -1;   // abandon a slot-assign on Esc
             return done(std::move(m));
@@ -269,6 +278,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                         }
                         m.ui.smart_assign_slot = -1;
                         persist_settings(m);
+                        m.ui.effort_dirty = false;
                         m.ui.model_picker = pick::Closed{};
                         auto toast = set_status_toast(m,
                             "Smart Mode slot set");
@@ -303,6 +313,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                     // tool returns no report). Track the picker selection.
                     tools::subagent::set_model(m.d.model_id.value);
                     persist_settings(m);
+                    m.ui.effort_dirty = false;
                     // Confirmation toast naming model AND provider — the
                     // same feedback the provider switch gives. Without it a
                     // pick is silent, and when a stale-catalog race (or a
@@ -339,8 +350,12 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
         [&](ModelPickerCycleEffort& e) -> Step {
             // Step the reasoning-effort tier within what the highlighted
             // model supports (cycle_effort wraps and returns None for a
-            // model that can't reason). Persist immediately so the pick
-            // survives a restart; the request path re-clamps at send time.
+            // model that can't reason). The new tier takes effect in live
+            // state immediately; the DISK persist is deferred to picker
+            // close/select (effort_dirty) — persisting here meant a
+            // synchronous load+fsync+rename (~5ms on btrfs) per arrow
+            // keystroke, which is UI-thread jank under key repeat. The
+            // request path re-clamps at send time.
             auto* p = pick::opened(m.ui.model_picker);
             if (p) {
                 const auto vis = model_filtered(m.d.available_models, p->query);
@@ -355,7 +370,7 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
                                 .id.value);
                         m.d.effort = cycle_effort(m.d.effort, e.delta, caps);
                     }
-                    persist_settings(m);
+                    m.ui.effort_dirty = true;
                 }
             }
             return done(std::move(m));

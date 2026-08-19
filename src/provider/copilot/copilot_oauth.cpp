@@ -365,9 +365,32 @@ bool clear_credentials() {
 }
 
 bool signed_in() {
+    // Called by the provider-picker VIEW once per rendered frame. The naive
+    // implementation (read file → unseal → JSON parse) costs disk + AES/KDF
+    // work per frame while the picker is open. Cache the boolean keyed on
+    // the file's (mtime, size): a stat is ~1µs and invalidates correctly on
+    // sign-in, sign-out, and cross-process credential changes alike.
     std::scoped_lock lk(store_mutex());
-    auto s = load_unlocked();
-    return s && !s->github.access_token.empty();
+    static bool cached = false;
+    static std::filesystem::file_time_type cached_mtime{};
+    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
+    std::error_code ec;
+    const auto p = creds_path();
+    const auto mtime = fs::last_write_time(p, ec);
+    const auto size  = ec ? 0 : fs::file_size(p, ec);
+    if (ec) {   // missing/unreadable → signed out; remember that cheaply
+        cached = false;
+        cached_mtime = {};
+        cached_size = static_cast<std::uintmax_t>(-1);
+        return false;
+    }
+    if (mtime != cached_mtime || size != cached_size) {
+        auto s = load_unlocked();
+        cached = s && !s->github.access_token.empty();
+        cached_mtime = mtime;
+        cached_size  = size;
+    }
+    return cached;
 }
 
 void invalidate_cached_token() { g_force_refresh.store(true); }

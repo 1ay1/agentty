@@ -5,6 +5,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <string>
@@ -498,8 +500,34 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
 } // namespace
 
 bool responses_available() {
-    auto c = load_codex_credentials();
-    return c && !c->access_token.empty();
+    // Called by the provider-picker VIEW once per rendered frame. The naive
+    // path (read codex_credentials.json → unseal → JSON parse) costs disk +
+    // AES work per frame while the picker is open. Cache the boolean keyed
+    // on the file's (mtime, size): a stat is ~1µs and invalidates correctly
+    // on sign-in, sign-out, and cross-process refreshes alike.
+    namespace fs = std::filesystem;
+    static std::mutex mu;
+    static bool cached = false;
+    static fs::file_time_type cached_mtime{};
+    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
+    std::scoped_lock lk(mu);
+    std::error_code ec;
+    const auto p = codex_credentials_path();
+    const auto mtime = fs::last_write_time(p, ec);
+    const auto size  = ec ? 0 : fs::file_size(p, ec);
+    if (ec) {   // missing/unreadable → signed out; remember that cheaply
+        cached = false;
+        cached_mtime = {};
+        cached_size = static_cast<std::uintmax_t>(-1);
+        return false;
+    }
+    if (mtime != cached_mtime || size != cached_size) {
+        auto c = load_codex_credentials();
+        cached = c && !c->access_token.empty();
+        cached_mtime = mtime;
+        cached_size  = size;
+    }
+    return cached;
 }
 
 // ── Live model catalog ─────────────────────────────────────────────────────

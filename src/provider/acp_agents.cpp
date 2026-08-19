@@ -5,8 +5,10 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string_view>
 
 #include <nlohmann/json.hpp>
@@ -57,7 +59,7 @@ fs::path resolve_config(bool& out_project_local) {
 // Parse the whole config file into `out` keyed by id. Returns false (and leaves
 // out untouched) on a missing / untrusted / malformed config — a built-in
 // default can still satisfy the lookup.
-bool load_config(std::vector<AcpAgentSpec>& out) {
+bool load_config_uncached(std::vector<AcpAgentSpec>& out) {
     bool project_local = false;
     fs::path cfg = resolve_config(project_local);
     if (cfg.empty()) return false;
@@ -112,6 +114,42 @@ bool load_config(std::vector<AcpAgentSpec>& out) {
         a.cwd = spec.value("cwd", std::string{});
         out.push_back(std::move(a));
     }
+    return true;
+}
+
+// Cached front-door. The provider-picker VIEW calls enumerate_acp_agents()
+// once per rendered frame, and is_acp_agent_id() sits on parse_selection's
+// path — re-reading + JSON-parsing acp-agents.json each time is disk work
+// per frame. Key the parsed vector on (resolved path, mtime, size): a stat
+// is ~1µs and picks up edits, deletion, and env-var retargeting alike.
+bool load_config(std::vector<AcpAgentSpec>& out) {
+    static std::mutex mu;
+    static std::vector<AcpAgentSpec> cached;
+    static bool cached_ok = false;
+    static fs::path cached_path;
+    static fs::file_time_type cached_mtime{};
+    static std::uintmax_t cached_size = 0;
+
+    bool project_local = false;
+    fs::path cfg = resolve_config(project_local);
+
+    std::scoped_lock lk(mu);
+    std::error_code ec;
+    fs::file_time_type mtime{};
+    std::uintmax_t size = 0;
+    if (!cfg.empty()) {
+        mtime = fs::last_write_time(cfg, ec);
+        size  = ec ? 0 : fs::file_size(cfg, ec);
+    }
+    if (cfg != cached_path || mtime != cached_mtime || size != cached_size) {
+        cached.clear();
+        cached_ok    = load_config_uncached(cached);
+        cached_path  = cfg;
+        cached_mtime = mtime;
+        cached_size  = size;
+    }
+    if (!cached_ok) return false;
+    out.insert(out.end(), cached.begin(), cached.end());
     return true;
 }
 
