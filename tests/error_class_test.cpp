@@ -61,7 +61,7 @@ TEST_CASE("status-zero falls back to substring sniff") {
           == ErrorClass::Terminal);
 }
 
-// ── The two paths agree where they overlap ──────────────────────────────────
+// ── The two paths agree where they overlap ────────────────────────────
 // classify_stream_error(msg, status) with a status must equal the direct typed
 // call, and with status 0 must equal the direct string call — it's a pure
 // dispatcher, no logic of its own.
@@ -70,4 +70,33 @@ TEST_CASE("classify_stream_error is a pure dispatcher") {
     CHECK(classify_stream_error("whatever", 503)
           == classify(agentty::http::HttpError{K::Status, 503, ""}));
     CHECK(classify_stream_error("Overloaded", 0) == classify("Overloaded"));
+}
+
+// ── Long-context entitlement rejection: the [1m] self-heal trigger ───────
+// Anthropic 400s the whole request when the context-1m beta rides on an
+// unentitled subscription. The reducer strips the `[1m]` marker and retries;
+// this detector is its gate, so lock its shape: the real message matches (any
+// casing / suffix rewording), unrelated 400s and non-400s don't.
+TEST_CASE("is_long_context_rejection") {
+    using agentty::provider::is_long_context_rejection;
+    // The exact wire message observed in production.
+    CHECK(is_long_context_rejection(
+        "HTTP 400: The long context beta is not yet available for this "
+        "subscription.", 400));
+    // SSE event:error path carries no status (0) — must still match.
+    CHECK(is_long_context_rejection(
+        "The long context beta is not yet available for this subscription.", 0));
+    // Upstream rewording of the tail keeps matching (stable prefix).
+    CHECK(is_long_context_rejection(
+        "the Long Context Beta is not enabled for this organization", 400));
+    // Future drift naming the beta id directly.
+    CHECK(is_long_context_rejection(
+        "unsupported beta: context-1m-2025-08-07", 400));
+    // Unrelated 400s must NOT trigger the fallback.
+    CHECK(!is_long_context_rejection("invalid request: missing field", 400));
+    CHECK(!is_long_context_rejection("prompt is too long", 400));
+    // The right words on the wrong status must NOT trigger it either
+    // (a 529/503 mentioning "long context" in prose is not the beta gate).
+    CHECK(!is_long_context_rejection(
+        "long context beta is not available", 503));
 }

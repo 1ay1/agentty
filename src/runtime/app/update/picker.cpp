@@ -113,6 +113,16 @@ Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
             auto settings = deps().load_settings();
             m.d.available_models.clear();
             for (auto& mi : e.models) {
+                // DISCOVERED entitlement: this account already 400'd on the
+                // context-1m beta ("long context beta is not available for
+                // this subscription"), so offering the `[1m]` rows would
+                // just sell a window the wire will reject. OAuth alone can't
+                // tell us (the token carries no entitlement field) — the
+                // flag is learned from the first rejection and cleared on
+                // sign-out/account switch.
+                if (settings.context_1m_blocked
+                    && mi.id.value.find("[1m]") != std::string::npos)
+                    continue;
                 for (const auto& fav : settings.favorite_models)
                     if (mi.id == fav) mi.favorite = true;
                 m.d.available_models.push_back(std::move(mi));

@@ -166,6 +166,38 @@ enum class ErrorClass {
     return classify(message);
 }
 
+// Does this error mean "this account's subscription is not entitled to the
+// context-1m long-context beta"? Anthropic 400s the whole request with a
+// distinctive message when the `context-1m-2025-08-07` beta header rides on
+// an unentitled account. This is a MODEL-CAPABILITY discovery, not a real
+// failure: the identical request without the beta (i.e. on the plain 200K
+// window) succeeds. The reducer uses this to strip the `[1m]` picker marker
+// and retry immediately instead of surfacing a dead-end terminal error on
+// every turn. Matched case-insensitively on the stable fragment of the
+// message ("long context beta is not") plus the status, so minor upstream
+// rewording ("...for this subscription" → "...for this organization")
+// keeps matching.
+[[nodiscard]] inline bool is_long_context_rejection(
+        std::string_view message, int http_status) noexcept {
+    if (http_status != 0 && http_status != 400) return false;
+    auto lower_contains = [&](std::string_view needle) noexcept -> bool {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < needle.size(); ++j) {
+                char a = message[i + j], b = needle[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                if (a != b) { ok = false; break; }
+            }
+            if (ok) return true;
+        }
+        return false;
+    };
+    return lower_contains("long context beta is not")
+        || lower_contains("context-1m");   // future error-shape drift
+}
+
 // Backoff duration for the Nth retry attempt (0-indexed). Caps at 6
 // attempts; longer schedules for RateLimit since Anthropic's per-minute
 // window doesn't reset on demand. Returning `std::chrono::milliseconds`
