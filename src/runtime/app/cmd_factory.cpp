@@ -1513,6 +1513,17 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             }
         } else if (tc.is_running()) {
             any_pending = true;
+            // A SPECULATIVE read-only tool (launched mid-stream at
+            // StreamToolUseEnd) is still running now that the stream has
+            // finished. Adopt it: without this transition the phase stays
+            // Streaming after StreamFinished, and the ToolExecOutput
+            // guard (which suppresses kicks while streaming) would block
+            // the completion kick forever — a wedge. Same ctx handoff as
+            // the promotion branch above.
+            if (m.s.is_streaming()) {
+                auto ctx = take_active_ctx(std::move(m.s.phase));
+                m.s.phase = phase::ExecutingTool{std::move(ctx).value()};
+            }
         }
     }
 

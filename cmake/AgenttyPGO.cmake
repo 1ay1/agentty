@@ -3,9 +3,10 @@
 # -DAGENTTY_PGO=generate|use. See the header comment for the workflow.
 
 # ── Profile-guided optimization (opt-in, two phases) ────────────────────
-# Phase 1: `cmake -B build-pgogen -DAGENTTY_PGO=generate` → build + run the
-#          app through a realistic workload (a couple of chat turns + tool
-#          calls is enough; the counters are written on exit).
+# Phase 1: `cmake -B build-pgogen -DAGENTTY_PGO=generate` → build, then run
+#          `scripts/pgo-train.sh build-pgogen/agentty` — a scripted PTY
+#          workload covering boot, typing, pickers, redraw, and quit (the
+#          CPU-bound hot paths; network-free, no credentials needed).
 # Phase 2: `cmake -B build-pgouse -DAGENTTY_PGO=use` → rebuild using the
 #          counters — typical gain on streaming + layout hot paths is
 #          8–12% wall-clock, 3–6% binary size on MSVC/GCC/Clang.

@@ -15,6 +15,7 @@
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/io/http.hpp"   // http::CancelTokenPtr (run_tool)
 
 namespace agentty::app::cmd {
 
@@ -50,7 +51,8 @@ namespace agentty::app::cmd {
 
 [[nodiscard]] maya::Cmd<Msg> run_tool(ToolCallId id,
                                       ToolName tool_name,
-                                      nlohmann::json args);
+                                      nlohmann::json args,
+                                      http::CancelTokenPtr cancel = {});
 
 // Inspect the latest assistant turn and either fire off pending tool calls,
 // request permission, or kick the follow-up stream once tool results are in.

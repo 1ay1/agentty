@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,6 +19,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/clipboard.hpp"
+#include "agentty/provider/selection.hpp"   // prewarm_active_provider
 #include "agentty/util/env.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -429,6 +431,28 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // (the single entry point for all composer msgs) covers every path
     // without touching each arm.
     m.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
+    // ── Idle-lapse connection re-warm ──────────────────────────
+    // The pool's warm socket dies after ~90 s idle (http idle_ttl), so a
+    // submit after any longer pause pays a cold TCP+TLS+H2 dial (~150-400
+    // ms) on top of TTFT. Typing is the earliest reliable "a request is
+    // coming" signal — fire an opportunistic prewarm on the FIRST composer
+    // event after the warm window lapsed. Throttled to one dial per idle
+    // TTL so key-repeat can't spawn dial threads; prewarm itself is
+    // tracked + cancel-safe and swallows errors.
+    {
+        static std::chrono::steady_clock::time_point last_warm{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool wire_stale =
+            m.s.last_wire_at.time_since_epoch().count() == 0
+            || now - m.s.last_wire_at > std::chrono::seconds(85);
+        const bool warm_throttled =
+            last_warm.time_since_epoch().count() != 0
+            && now - last_warm < std::chrono::seconds(85);
+        if (wire_stale && !warm_throttled && !m.s.active()) {
+            last_warm = now;
+            provider::prewarm_active_provider();
+        }
+    }
     return std::visit(overload{
         [&](ComposerCharInput e) -> Step {
             // '/' opens the command palette when it's LINE-LEADING —
