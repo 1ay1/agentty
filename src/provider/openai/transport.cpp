@@ -42,7 +42,7 @@
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
-#include "agentty/tool/util/fs_helpers.hpp"   // util::project_root — AGENTS.md anchor
+#include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -1612,7 +1612,9 @@ namespace {
                "(agents.md, stewarded by the Agentic AI Foundation under "
                "the Linux Foundation). Treat as authoritative public "
                "project conventions.",
-               tools::util::project_root())
+               tools::util::workspace_root(),
+               tools::util::project_root(),
+               wire::resolve_global_agents_md())
          + wire::claude_md_blocks(
                "Project-specific guidance the user has authored. Treat these as "
                "persistent context for THIS workspace and user.");
