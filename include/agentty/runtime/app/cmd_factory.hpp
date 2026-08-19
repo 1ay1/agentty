@@ -122,6 +122,13 @@ struct LoopBreak {
 
 [[nodiscard]] maya::Cmd<Msg> fetch_models();
 
+// ── Self-update ─────────────────────────────────────────────
+// Background release check (24h-cached, never blocks a frame): dispatches
+// UpdateCheckDone. check_for_update() is safe to fire on every launch.
+[[nodiscard]] maya::Cmd<Msg> check_for_update();
+// Download + atomically install the given version; dispatches UpdateApplied.
+[[nodiscard]] maya::Cmd<Msg> perform_self_update(std::string version);
+
 // ── In-app login modal ──────────────────────────────────────────────────
 // Fire-and-forget: shells out to the platform browser opener. Wrapped in
 // Cmd::task so a wedged xdg-open / open / ShellExecute can never block

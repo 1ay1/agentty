@@ -659,7 +659,7 @@ Element command_palette(const Model& m) {
     auto* o = opened(m.ui.command_palette);
     if (!o) return nothing();
 
-    auto matches = filtered_commands(o->query);
+    auto matches = filtered_commands(o->query, !m.s.update_latest.empty());
 
     Picker::Config cfg;
     cfg.title      = " Command Palette ";
