@@ -199,6 +199,11 @@ struct Model {
         // ModelPickerSelect writes the chosen model into that slot and
         // clears this instead of switching models. -1 = normal model switch.
         int                 smart_assign_slot = -1;   // -1 | 0=Strategic 1=Impl 2=Utility
+        // Effort tier changed via ←/→ in the model picker but not yet
+        // flushed to disk. Persisting per keystroke is a synchronous
+        // load+fsync+rename on the UI thread; instead the CycleEffort arm
+        // sets this and CloseModelPicker/Select flush once.
+        bool                effort_dirty = false;
         ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
         ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
         ui::pick::OneAxis   smart_mode;        // Closed | OpenAt{row} — Smart Mode config overlay
