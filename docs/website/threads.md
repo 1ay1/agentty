@@ -39,6 +39,8 @@ Open the command palette ([[Ctrl+K]]) and pick **Rewind to checkpoint** to reach
 
 A rewind is a destructive double restore: the worktree files *and* the transcript both return to the instant before that turn was submitted, and the original prompt is refilled into the composer so you can edit and resend. It's gated on an idle session and a real git repo (a friendly toast explains why otherwise). Checkpoints key off the project directory agentty was launched from, so they keep working even under `--workspace /`.
 
+The worktree restore is exact in both directions: files the agent **edited** are rewound to their snapshot contents, files it **deleted** are recreated, and files it **created after** that point are removed — so the tree really is bit-for-bit what it was, not merely "the touched files put back." Anything git already ignores (build output, caches, `node_modules`) is never part of a snapshot and is left completely alone. The snapshots live in an out-of-band ref namespace (`refs/agentty/checkpoints/…`) with no parent commits, so they never touch your branch, your index, or `HEAD`, and the most recent 64 are kept per project.
+
 ## Atomic writes
 
 Thread and credential writes are atomic: agentty writes to a temp file, calls `fsync`/`_commit`, then `rename`s into place (`MoveFileExW` on Windows). A crash mid-write can't leave you with a half-written, corrupt thread.

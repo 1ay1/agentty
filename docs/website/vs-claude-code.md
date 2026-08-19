@@ -27,6 +27,7 @@ If you already like Claude Code's workflow but want it faster, dependency-free, 
 | **License** | MIT (open source) | Proprietary |
 | **MCP tools** | Yes | Yes |
 | **Compaction cost** | Background summarization runs on the cheapest capable model on your provider | Not publicly documented |
+| **Tool execution** | Independent calls run in parallel; read-only tools start speculatively mid-stream ([details](/docs/performance#speculative-tool-execution)) | Sequential per turn |
 
 ## Where agentty is different
 

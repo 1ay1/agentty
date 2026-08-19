@@ -38,6 +38,28 @@ Statically links OpenSSL + nghttp2 + libstdc++ + libgcc when their `.a` archives
 
 The prebuilt Linux release binaries are **true standalone executables**: linked `-static -no-pie` into a classic `ET_EXEC` with no `NEEDED` entry and no `PT_INTERP`, so one file runs on glibc (Debian/Ubuntu/Fedora), musl (Alpine), and 64-bit Raspberry Pi OS alike. A build-time ELF-shape assertion (`cmake/assert_static_pie.cmake`) hard-fails the compile if the artifact ever regains a dynamic dependency. Termux/Android needs a PIE — build that with the opt-in `-DAGENTTY_STATIC_PIE=ON` on a musl toolchain.
 
+## Optimized builds
+
+Release builds already ship with link-time optimization and a stripped symbol table. Two opt-in levers squeeze out more, for a local build you run yourself:
+
+```bash
+# mimalloc allocator — measurable keystroke-latency win on the
+# allocation-heavy render/parse paths. Not enabled on the fully-static
+# release binaries (allocator override under static musl is a hazard).
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DAGENTTY_USE_MIMALLOC=ON
+
+# Profile-guided optimization (two phases). Phase 1 builds an instrumented
+# binary and runs a scripted PTY workload over the hot paths; phase 2
+# rebuilds using the collected counters.
+cmake -B build-pgogen -DCMAKE_BUILD_TYPE=Release -DAGENTTY_PGO=generate
+cmake --build build-pgogen -j$(nproc) --target agentty
+scripts/pgo-train.sh build-pgogen/agentty
+cmake -B build-pgouse -DCMAKE_BUILD_TYPE=Release -DAGENTTY_PGO=use
+cmake --build build-pgouse -j$(nproc) --target agentty
+```
+
+See [Performance](/docs/performance) for what each buys you.
+
 ## Cutting a release (maintainers)
 
 ```bash

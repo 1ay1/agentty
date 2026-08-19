@@ -33,8 +33,8 @@ First launch opens auth — **paste an API key** (Anthropic `sk-ant-…`, or any
 <tr>
 <td width="50%">
 
-### ⚡ Instant startup
-Cold start under 1ms. No Node, no Python, no npm install. Just a static binary.
+### ⚡ Instant, all the way through
+Cold start under 1 ms; keystroke-to-pixel about 1 ms. No Node, no Python, no npm install — just a static binary. Independent tool calls run in parallel and read-only tools start while the model is still typing, so tool-heavy turns finish sooner.
 
 ### 🔌 Any model
 Claude, GPT, Groq, OpenRouter, Ollama, or any OpenAI-compatible endpoint. Switch live with `^P`.
