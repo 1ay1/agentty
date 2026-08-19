@@ -32,6 +32,7 @@
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/dbglog.hpp"
 
 #include <mcp/cap/cap.hpp>
@@ -453,7 +454,14 @@ std::string render_result(const ::mcp::cap::Result& r) {
         if (!out.empty() && out.back() != '\n') out += '\n';
         out += "```json\n" + r.structured.dump(2) + "\n```\n";
     }
-    return out;
+    // TRUST BOUNDARY. An MCP server is an arbitrary external process; its
+    // bytes go into the conversation the model reads and the TUI renders.
+    // Strip terminal control sequences (a malicious/buggy server could
+    // otherwise inject cursor-moves/OSC into the terminal via the transcript)
+    // and force valid UTF-8 (invalid sequences 400 the provider API on the
+    // next turn — poisoning the whole session, not just this call).
+    return tools::util::to_valid_utf8(
+        tools::util::strip_terminal_controls(out));
 }
 
 std::string canonical_mcp_name(std::string_view exposed) {
@@ -496,6 +504,16 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
     def.origin_id = mcp_origin_id(exposed);
 
     std::string desc = t.description.has_value() ? *t.description : std::string{};
+    // Trust boundary: the DESCRIPTION rides in the tool list of every turn's
+    // system-side payload — an adversarial server could inject control bytes
+    // or a wall of text there. Scrub + cap it (a useful description fits in
+    // 1 KiB; the full text was never rendered anyway).
+    desc = tools::util::to_valid_utf8(tools::util::strip_terminal_controls(desc));
+    if (desc.size() > 1024) {
+        desc.resize(1024);
+        desc = tools::util::to_valid_utf8(std::move(desc));   // re-seal the cut edge
+        desc += "…";
+    }
     def.description = "[MCP " + def.origin_id + "] " +
         (desc.empty() ? ("Remote tool '" + def.name.value + "'.") : desc);
 
@@ -522,7 +540,9 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
                 tools::cancellation::current()});
             if (r.is_error)
                 return std::unexpected(tools::ToolError::subprocess(
-                    r.text.empty() ? "MCP tool reported an error" : r.text));
+                    r.text.empty() ? "MCP tool reported an error"
+                                   : tools::util::to_valid_utf8(
+                                         tools::util::strip_terminal_controls(r.text))));
             std::string text = render_result(r);
             return tools::ToolOutput{text.empty() ? "(no output)" : text, std::nullopt};
         } catch (const std::exception& e) {
@@ -797,7 +817,18 @@ tools::ToolDef make_search_tools_tool(PoolHandle pool) {
         for (int i = 0; i < k && i < static_cast<int>(ranked.size()); ++i) {
             const auto& tool = ranked[static_cast<std::size_t>(i)].second;
             out += "- `" + canonical_mcp_name(tool.name) + "`";
-            if (tool.description && !tool.description->empty()) out += " — " + *tool.description;
+            if (tool.description && !tool.description->empty()) {
+                // Server-supplied bytes — scrub + one-line clip per row.
+                std::string d = tools::util::to_valid_utf8(
+                    tools::util::strip_terminal_controls(*tool.description));
+                for (auto& c : d) if (c == '\n' || c == '\r') c = ' ';
+                if (d.size() > 200) {
+                    d.resize(200);
+                    d = tools::util::to_valid_utf8(std::move(d));
+                    d += "…";
+                }
+                out += " — " + d;
+            }
             out += '\n';
         }
         return tools::ToolOutput{out.empty() ? "(no MCP tools available)" : out, std::nullopt};
@@ -839,7 +870,9 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
             tools::cancellation::current()});
         if (result.is_error)
             return std::unexpected(tools::ToolError::subprocess(
-                result.text.empty() ? "MCP tool reported an error" : result.text));
+                result.text.empty() ? "MCP tool reported an error"
+                                    : tools::util::to_valid_utf8(
+                                          tools::util::strip_terminal_controls(result.text))));
         auto text = render_result(result);
         return tools::ToolOutput{text.empty() ? "(no output)" : text, std::nullopt};
     };
