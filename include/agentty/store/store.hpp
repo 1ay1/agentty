@@ -154,6 +154,7 @@ concept Store = requires(S& s, const Thread& t, const ThreadId& id,
     { s.load_threads() }     -> std::same_as<std::vector<Thread>>;
     { s.load_thread(id) }    -> std::same_as<std::optional<Thread>>;
     { s.save_thread(t) }     -> std::same_as<void>;
+    { s.delete_thread(id) }  -> std::same_as<void>;
     { s.load_settings() }    -> std::same_as<Settings>;
     { s.save_settings(settings) } -> std::same_as<void>;
     { s.new_id() }           -> std::convertible_to<ThreadId>;
