@@ -39,6 +39,7 @@ enum class Command : std::uint8_t {
     OpenRagSettings,
     OpenLogin,
     SignOut,
+    UpdateAgentty,
     Quit,
 };
 
@@ -73,6 +74,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::OpenRagSettings,"RAG",               "How proactive retrieval behaves: on / first turn only / off", ""},
     CommandDef{Command::OpenLogin,     "Sign in / add account", "Sign in — or add another OAuth / API-key account", ""},
     CommandDef{Command::SignOut,       "Sign out",           "Remove saved credentials and re-open sign-in", ""},
+    CommandDef{Command::UpdateAgentty, "Update agentty",     "Download + install the new release (shown when one is available)", ""},
     CommandDef{Command::Quit,          "Quit",               "Exit agentty", "Ctrl+C"},
 };
 
@@ -88,7 +90,7 @@ inline constexpr std::array kCommands = std::array{
 // visible row 1, but row 1 in the unfiltered enum was `ReviewChanges` \u2014
 // pressing Enter ran the wrong command.
 [[nodiscard]] inline std::vector<const CommandDef*>
-filtered_commands(std::string_view query) {
+filtered_commands(std::string_view query, bool update_available = true) {
     auto lower = [](unsigned char c) -> char {
         return static_cast<char>(std::tolower(c));
     };
@@ -99,6 +101,9 @@ filtered_commands(std::string_view query) {
     std::vector<const CommandDef*> out;
     out.reserve(kCommands.size());
     for (const auto& cmd : kCommands) {
+        // "Update agentty" only exists while an update is actually known —
+        // a permanent-but-dead palette row would train users to ignore it.
+        if (cmd.id == Command::UpdateAgentty && !update_available) continue;
         if (needle.empty()) { out.push_back(&cmd); continue; }
         // Match against label + description + shortcut so discovery works by
         // intent, not just the exact command name: "diff" finds "Review
