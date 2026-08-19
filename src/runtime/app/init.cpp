@@ -8,6 +8,8 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/symbols.hpp"
 
 #include <cstdlib>
 #include <vector>
@@ -210,6 +212,13 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // AGENTTY_NO_UPDATE_CHECK=1 (or airgap mode) disables it entirely.
     if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
         cmds.push_back(cmd::check_for_update());
+
+    // Prewarm the composer's `@` (files) and `#` (symbols) indices on
+    // background threads NOW, so by the time the user types either trigger
+    // the picker opens instantly instead of blocking the UI thread on a
+    // multi-thousand-path walk / multi-second regex scan.
+    prewarm_workspace_files();
+    prewarm_workspace_symbols();
 
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }

@@ -30,6 +30,15 @@ struct SymbolEntry {
 [[nodiscard]] const std::vector<SymbolEntry>&
 list_workspace_symbols(std::size_t cap = 50000);
 
+// Kick the (parallel) symbol scan on a background thread pool — single-
+// flight, safe to call repeatedly. Call at startup so the first `#` is
+// instant instead of freezing the UI for a multi-second regex scan.
+void prewarm_workspace_symbols(std::size_t cap = 50000);
+
+// Non-blocking: is the symbol index built yet? The composer opens the
+// `#` picker INSTANTLY and shows "indexing…" until this returns true.
+[[nodiscard]] bool symbols_ready();
+
 // Case-insensitive substring filter on the symbol NAME (not path).
 // Returns indices into `entries` so the dispatcher resolves the
 // cursor → (name, path, line) using the same view the picker

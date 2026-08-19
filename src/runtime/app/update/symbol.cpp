@@ -39,6 +39,9 @@ Step symbol_update(Model m, msg::SymbolPaletteMsg sm) {
             auto* o = symbol_palette_opened(m.ui.symbol_palette);
             if (o && static_cast<uint32_t>(e.ch) < 0x80
                   && e.ch >= 0x20) {
+                // Fill a cold-opened snapshot once the parallel scan lands.
+                if (o->entries.empty() && symbols_ready())
+                    o->entries = list_workspace_symbols();
                 o->query.push_back(static_cast<char>(e.ch));
                 o->index = 0;
             }
