@@ -19,6 +19,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/util/update.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/prompt_policy.hpp"
@@ -1641,6 +1642,41 @@ Cmd<Msg> kick_pending_tools(Model& m) {
         }
     }
     return Cmd<Msg>::batch(std::move(cmds));
+}
+
+// ── Self-update ────────────────────────────────────────────────
+
+Cmd<Msg> check_for_update() {
+    return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
+        // 24h-cached; the fast path is one small file read. Errors are
+        // swallowed — an update NOTICE must never surface as a failure.
+        try {
+            auto c = update::check_latest(/*force=*/false);
+            if (c.error.empty() && c.update_available) {
+                dispatch(Msg{UpdateCheckDone{true, std::move(c.latest),
+                                             std::move(c.url)}});
+                return;
+            }
+        } catch (...) {}
+        dispatch(Msg{UpdateCheckDone{}});
+    });
+}
+
+Cmd<Msg> perform_self_update(std::string version) {
+    return Cmd<Msg>::task([version = std::move(version)](
+                              std::function<void(Msg)> dispatch) {
+        try {
+            auto err = update::perform_update(version);
+            if (err.empty())
+                dispatch(Msg{UpdateApplied{true, version}});
+            else
+                dispatch(Msg{UpdateApplied{false, std::move(err)}});
+        } catch (const std::exception& e) {
+            dispatch(Msg{UpdateApplied{false, e.what()}});
+        } catch (...) {
+            dispatch(Msg{UpdateApplied{false, "unknown error"}});
+        }
+    });
 }
 
 Cmd<Msg> fetch_models() {

@@ -804,6 +804,35 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             }
             return done(std::move(m));
         },
+        [&](UpdateCheckDone& e) -> Step {
+            // Background release check landed. Store the signal — the
+            // status bar's version chip and the palette entry both read
+            // update_latest. No toast, no banner: an update NOTICE must
+            // never interrupt; the chip is the whole announcement.
+            if (e.update_available && !e.latest.empty()) {
+                m.s.update_latest = std::move(e.latest);
+                m.s.update_url    = std::move(e.url);
+            }
+            return done(std::move(m));
+        },
+        [&](UpdateApplied& e) -> Step {
+            m.s.update_in_flight = false;
+            if (e.ok) {
+                // Updated on disk; the running process is the old image.
+                // Persistent (no-expiry) banner — restarting is the one
+                // thing the user must know to do.
+                m.s.update_latest.clear();   // chip disappears
+                m.s.status = "✓ updated to v" + e.detail +
+                             " — restart agentty to use it";
+                m.s.status_until = {};       // sticky until overwritten
+                return done(std::move(m));
+            }
+            auto toast = set_status_toast(
+                m, "update failed: " + e.detail +
+                   " — try `agentty update` from a shell",
+                std::chrono::seconds{8});
+            return {std::move(m), std::move(toast)};
+        },
     }, mm);
 }
 

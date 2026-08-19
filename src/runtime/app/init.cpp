@@ -9,6 +9,7 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 
+#include <cstdlib>
 #include <vector>
 
 namespace agentty::app {
@@ -201,6 +202,14 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         m.s.status_until = {};
         cmds.push_back(cmd::refresh_oauth(std::move(*refresh)));
     }
+
+    // Background release check — 24h-cached (the fast path is one small
+    // file read on a worker), so this is effectively free on most
+    // launches; when a newer release exists, the status bar grows an
+    // unobtrusive "⬆ vX.Y.Z" chip and the palette gains "Update agentty".
+    // AGENTTY_NO_UPDATE_CHECK=1 (or airgap mode) disables it entirely.
+    if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
+        cmds.push_back(cmd::check_for_update());
 
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }

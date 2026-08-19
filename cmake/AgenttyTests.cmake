@@ -21,6 +21,7 @@ set(_AGENTTY_CONSOLIDATED
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
     wire_shared_test complexity_test copilot_token_test routing_memory_test
     smart_cascade_gate_test chatgpt_bundled_models_test settings_default_test
+    update_check_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test

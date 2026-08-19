@@ -664,6 +664,16 @@ struct StreamState {
     // cleared by the `ModelsLoaded` handler, which fetch_models()
     // dispatches on BOTH success and failure.
     bool models_loading = false;
+
+    // ── Self-update signal ──────────────────────────────────
+    // Filled by UpdateCheckDone (background release check). Non-empty
+    // update_latest ⇒ the status bar shows an unobtrusive "⬆ vX.Y.Z" chip
+    // and the palette surfaces "Update agentty". update_in_flight gates
+    // double-launch from the palette while a download runs.
+    std::string update_latest;    // "" = up to date / not checked
+    std::string update_url;       // release page for the toast
+    bool        update_in_flight = false;
+
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
     // banner once now() passes this point and the reducer treats the
