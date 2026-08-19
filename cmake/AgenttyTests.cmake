@@ -84,6 +84,7 @@ agentty_finalize_fold(
 # Kept as its OWN binary: it chdir()s into temp workspaces, and it's new enough
 # that folding it hasn't been validated.
 agentty_test(agents_md_test          MODE standalone TIMEOUT 30)
+agentty_test(checkpoint_test         MODE standalone TIMEOUT 60)
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
 # They exercise agentty's own logic and link cleanly under asan/ubsan without
