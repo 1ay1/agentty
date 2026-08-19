@@ -186,7 +186,7 @@ strategies:
 
 The shipped tools: `read`, `write`, `edit`, `move`, `remove`, `bash`,
 `process_start`/`process_poll`/`process_stop`, `grep`, `glob`, `list_dir`,
-`repo_map`, `find_definition`, `find_references`, `web_fetch`, `web_search`,
+`repo_map`, `find_definition`, `search_structural`, `web_fetch`, `web_search`,
 `todo`, `diagnostics`, `test`, `git_status`, `git_diff`, `git_log`,
 `git_show`, `git_blame`, `git_commit`, `remember`, `forget`, `wipe_memory`,
 `search_docs`, `search_code`, `task` (subagent dispatch), `skill` (load a

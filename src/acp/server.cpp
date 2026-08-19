@@ -87,7 +87,6 @@ a::ToolKind acp_tool_kind(std::string_view tool_name) {
         case sp::Kind::Grep:           return a::ToolKind::Search;
         case sp::Kind::Glob:           return a::ToolKind::Search;
         case sp::Kind::FindDefinition: return a::ToolKind::Search;
-        case sp::Kind::FindReferences: return a::ToolKind::Search;
         case sp::Kind::SearchDocs:     return a::ToolKind::Search;
         case sp::Kind::SearchCode:     return a::ToolKind::Search;
         case sp::Kind::RepoMap:        return a::ToolKind::Search;
@@ -252,11 +251,9 @@ std::string tool_title(const ToolUse& tc, std::string_view cwd = {}) {
             if (!p.empty())    label += " `" + p + "`";
             return label;
         }
-        case sp::Kind::FindDefinition:
-        case sp::Kind::FindReferences: {
+        case sp::Kind::FindDefinition: {
             std::string s = str("symbol");
-            const std::string label = kind == sp::Kind::FindDefinition
-                ? "Find definition" : "Find references";
+            const std::string label = "Find definition";
             return s.empty() ? label : label + " `" + s + "`";
         }
         case sp::Kind::SearchDocs:

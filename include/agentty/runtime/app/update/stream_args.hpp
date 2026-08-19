@@ -152,7 +152,6 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             if (!is_nonempty_string("pattern")) return "pattern";
             return {};
         case K::FindDefinition:
-        case K::FindReferences:
             if (!is_nonempty_string("symbol")) return "symbol";
             return {};
         case K::SearchDocs:
