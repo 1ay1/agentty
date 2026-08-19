@@ -103,6 +103,13 @@ Step sign_out(Model m) {
     } else if (sel.kind == provider::Kind::Anthropic) {
         auth::clear_credentials();
         what = "Anthropic";
+        // The 1M-context entitlement block was learned FOR the account being
+        // dropped; the next sign-in may be entitled. Re-arm discovery.
+        auto settings = deps().load_settings();
+        if (settings.context_1m_blocked) {
+            settings.context_1m_blocked = false;
+            deps().save_settings(settings);
+        }
     } else if (sel.kind == provider::Kind::OpenAI) {
         // Drop the in-app-pasted key for this endpoint; env keys are the
         // process env and can't be unset from here.
@@ -240,6 +247,15 @@ Step account_select(Model m) {
     if (provider == "anthropic") {
         if (auto c = auth::load_credentials())
             agentty::app::update_auth(auth::make_auth_header(*c));
+        // The 1M-context entitlement block was learned for the PREVIOUS
+        // account; this one may be entitled. Re-arm discovery so the picker
+        // offers `[1m]` variants again (a wrong guess self-heals via the
+        // StreamError fallback, which re-learns the block for this account).
+        auto settings = deps().load_settings();
+        if (settings.context_1m_blocked) {
+            settings.context_1m_blocked = false;
+            deps().save_settings(settings);
+        }
     } else if (provider == "chatgpt" || provider == "copilot") {
         // The Codex / Copilot transports read their token from the store on
         // each turn; clearing the cached header forces a fresh read next turn.

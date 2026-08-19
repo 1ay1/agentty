@@ -4,6 +4,7 @@
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
@@ -40,6 +41,12 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
+    // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
+    // prior session. A persisted `[1m]` model id would re-send the beta on
+    // the very first turn and dead-end again — strip the marker up front.
+    if (settings.context_1m_blocked
+        && settings.model_id.value.find("[1m]") != std::string::npos)
+        settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
     if (!settings.model_id.empty()) {
         // Guard against a cross-provider model id collision. A persisted
         // model id belongs to whatever provider was active when it was
