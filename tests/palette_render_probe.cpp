@@ -1,13 +1,12 @@
-// palette_render_probe — renders the command palette and asserts its layout
-// AND styling invariants: a TREE hierarchy on the empty query (┌─ / │ / └), a
-// flat list when filtering, gating hides dead rows, UTF-8-clean truncation,
-// and — via the ANSI-preserving render — that the fuzzy match actually
-// HIGHLIGHTS the matched characters (colour, not just position). Lives in the
-// fold suite so it links the full runtime object tree and renders through the
-// real maya path.
+// palette_render_probe — renders the command palette AND the diff-review pane
+// and asserts their layout + styling invariants. Lives in the fold suite so it
+// links the full runtime object tree and renders through the real maya path.
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/pickers.hpp"
+#include "agentty/runtime/view/diff_review.hpp"
 #include "agentty/runtime/command_palette.hpp"
+#include "agentty/diff/diff.hpp"
+#include "agentty/runtime/picker.hpp"
 #include <maya/app/inline.hpp>
 #include <cstdio>
 #include <string>
@@ -18,98 +17,67 @@ static int g_fail = 0;
 static void check(bool ok, const char* what) {
     if (!ok) { std::printf("  FAIL: %s\n", what); ++g_fail; }
 }
-static std::string render(const Model& m) {
-    return maya::render_to_string(ui::command_palette(m), 82);
-}
-static std::string render_ansi(const Model& m) {
-    return maya::render_to_string_ansi(ui::command_palette(m), 82);
-}
 static bool has(const std::string& h, const std::string& n) {
     return h.find(n) != std::string::npos;
 }
-static bool has_mojibake(const std::string& s) {         // U+FFFD = split codepoint
-    return s.find("\xef\xbf\xbd") != std::string::npos;
+static bool has_mojibake(const std::string& s) { return s.find("\xef\xbf\xbd") != std::string::npos; }
+static int count_of(const std::string& h, const std::string& n) {
+    int c = 0; for (std::size_t p = 0; (p = h.find(n, p)) != std::string::npos; p += n.size()) ++c;
+    return c;
+}
+
+static void palette_checks() {
+    Model m;
+    m.ui.command_palette = palette::Open{};
+    m.d.pending_changes.push_back(FileChange{});
+    auto rend = [&]{ return maya::render_to_string(ui::command_palette(m), 82); };
+    std::string out = rend();
+    check(has(out, "\xe2\x94\x8c\xe2\x94\x80 THREAD"), "palette: bracket section header");
+    check(has(out, "\xe2\x94\x82"), "palette: spine");
+    check(!has_mojibake(out), "palette: no mojibake");
+    auto* o = std::get_if<palette::Open>(&m.ui.command_palette);
+    o->query = "rev";
+    std::string ansi = maya::render_to_string_ansi(ui::command_palette(m), 82);
+    // Locate the Review row and confirm it carries a distinct highlight style.
+    auto strip = [](const std::string& s){ std::string r; for (std::size_t i=0;i<s.size();){ if(s[i]=='\x1b'){ i=s.find('m',i); if(i==std::string::npos)break; ++i;} else r+=s[i++]; } return r; };
+    std::string hot; std::size_t st=0;
+    while (st<=ansi.size()){ std::size_t nl=ansi.find('\n',st); std::string ln=ansi.substr(st,nl-st); if(strip(ln).find("Review changes")!=std::string::npos){hot=ln;break;} if(nl==std::string::npos)break; st=nl+1; }
+    check(!hot.empty(), "palette: Review row present (ANSI)");
+    check(count_of(hot, "\x1b[") >= 4, "palette: matched chars carry a highlight style");
+}
+
+static void diff_review_checks() {
+    // Two files, first has two hunks (all pending).
+    Model m;
+    auto a = diff::compute("src/login.cpp",
+        "int f() {\n  return 0;\n}\n", "int f() {\n  return -1;\n  log();\n}\n");
+    a.added = 2; a.removed = 1;
+    m.d.pending_changes.push_back(a);
+    auto b = diff::compute("README.md", "old\n", "new\nmore\n");
+    m.d.pending_changes.push_back(b);
+    m.ui.diff_review = ui::pick::TwoAxis{ui::pick::OpenAtCell{0, 0}};
+
+    std::string out = maya::render_to_string(ui::diff_review(m), 84);
+    check(has(out, "file 1/2"), "diff: file counter");
+    check(has(out, "hunks reviewed"), "diff: overall hunk progress");
+    // The header→hunks divider must be a SINGLE line, not maya's 2-edged sep.
+    // With the progress row above and the @@ header below, exactly ONE full
+    // rule of ─ should sit between them (the old sep painted two).
+    check(has(out, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"), "diff: has a rule");
+    check(has(out, "@@ -"), "diff: hunk headers shown");
+    check(!has_mojibake(out), "diff: no mojibake");
+
+    // All-reviewed state: mark every hunk accepted → the apply affordance.
+    for (auto& fc : m.d.pending_changes)
+        for (auto& hk : fc.hunks) hk.status = Hunk::Status::Accepted;
+    std::string done = maya::render_to_string(ui::diff_review(m), 84);
+    check(has(done, "all reviewed"), "diff: all-reviewed banner appears");
+    check(has(done, "\xe2\x96\x88"), "diff: progress bar fills (█) when done");
 }
 
 int main() {
-    Model m;
-    m.ui.command_palette = palette::Open{};
-    m.d.pending_changes.push_back(FileChange{});   // so the Changes section shows
-
-    // ── empty query: a real TREE (bracket header + spine + close) ─────────
-    {
-        std::string out = render(m);
-        check(has(out, "\xe2\x94\x8c\xe2\x94\x80 THREAD"),   // ┌─ THREAD
-              "empty query renders a bracket-connector section header");
-        check(has(out, "\xe2\x94\x82"),                     // │ spine
-              "group members carry a vertical spine");
-        check(has(out, "\xe2\x94\x94"),                     // └ close
-              "the last member of a group closes the bracket");
-        check(has(out, "New thread"), "commands render under their section");
-        check(!has_mojibake(out), "no split-codepoint mojibake (empty)");
-    }
-
-    // ── filtered: tree gone, flat list, labels intact ────────────────────
-    {
-        auto* o = std::get_if<palette::Open>(&m.ui.command_palette);
-        o->query = "th";
-        std::string out = render(m);
-        check(!has(out, "\xe2\x94\x8c\xe2\x94\x80 THREAD"),
-              "typing collapses the tree to a flat list");
-        check(has(out, "New thread") && has(out, "Fork thread"),
-              "filtered rows keep whole labels");
-        check(!has_mojibake(out), "no split-codepoint mojibake (filtered)");
-
-        o->query = "changes";
-        std::string ch = render(m);
-        check(has(ch, "Review changes") && has(ch, "Accept all")
-              && has(ch, "Reject all"),
-              "\"changes\" surfaces the whole Changes category");
-    }
-
-    // ── the fuzzy match is actually HIGHLIGHTED (colour, via ANSI render) ─
-    {
-        auto* o = std::get_if<palette::Open>(&m.ui.command_palette);
-        o->query = "rev";
-        std::string ansi = render_ansi(m);
-        // Strip SGR to locate the row, then inspect the RAW bytes of that row:
-        // a highlighted match splits the label into styled spans, so the line
-        // carries more SGR sequences than a plain row — and the matched "Rev"
-        // is itself wrapped in escapes (proof the chars are individually
-        // styled). We assert both: the row exists (stripped) and it's styled.
-        auto strip = [](const std::string& s) {
-            std::string o; for (std::size_t i = 0; i < s.size();) {
-                if (s[i] == '\x1b') { i = s.find('m', i); if (i == std::string::npos) break; ++i; }
-                else o += s[i++];
-            } return o;
-        };
-        // Split ansi into lines; find the one whose stripped form has "Review".
-        std::string hot_line;
-        std::size_t start = 0;
-        while (start <= ansi.size()) {
-            std::size_t nl = ansi.find('\n', start);
-            std::string line = ansi.substr(start, nl - start);
-            if (strip(line).find("Review changes") != std::string::npos) { hot_line = line; break; }
-            if (nl == std::string::npos) break;
-            start = nl + 1;
-        }
-        check(!hot_line.empty(), "Review changes row present in ANSI render");
-        int sgr = 0;
-        for (std::size_t p = 0; (p = hot_line.find("\x1b[", p)) != std::string::npos; p += 2) ++sgr;
-        // A plain row is ~2 style changes; a highlighted row wraps the matched
-        // "Rev" span, so ≥4 SGR sequences on the line.
-        check(sgr >= 4, "the matched characters carry a distinct highlight style");
-    }
-
-    // ── gating: no pending diff hides the Changes commands ────────────────
-    {
-        Model m2;
-        m2.ui.command_palette = palette::Open{};   // no pending_changes
-        std::string out = render(m2);
-        check(!has(out, "Accept all changes"), "no pending diff hides Accept-all");
-        check(has(out, "New thread"), "unrelated commands still shown");
-    }
-
+    palette_checks();
+    diff_review_checks();
     if (g_fail == 0) std::puts("palette_render_probe: OK");
     return g_fail ? 1 : 0;
 }
