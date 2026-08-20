@@ -184,7 +184,7 @@ TEST_CASE("command palette — categories, gating, danger") {
               "no update hides Update agentty");
     }
 
-    // ── command_visible predicate agrees with the filter ──────────────────
+    // ── command_visible predicate agrees with the filter ─────────────────
     {
         PaletteContext ctx;
         ctx.has_pending_changes = false;
@@ -193,5 +193,57 @@ TEST_CASE("command palette — categories, gating, danger") {
             check(in_filter == command_visible(c, ctx),
                   "filter visibility == command_visible predicate");
         }
+    }
+}
+
+TEST_CASE("command palette — scored fuzzy ranking") {
+    auto rank_of = [&](const std::vector<CommandMatch>& v, Command id) -> int {
+        for (int i = 0; i < (int)v.size(); ++i) if (v[(std::size_t)i].cmd->id == id) return i;
+        return -1;
+    };
+
+    // ── "re": label PREFIX hits rank above a description-only match ──────
+    {
+        auto r = match_commands("re", PaletteContext{});
+        int rev = rank_of(r, Command::ReviewChanges);
+        int rew = rank_of(r, Command::RewindCheckpoint);
+        int rej = rank_of(r, Command::RejectAll);
+        int nt  = rank_of(r, Command::NewThread);   // matches "f-re-sh" in desc
+        check(rev >= 0 && rew >= 0 && rej >= 0, "the Re* commands all match");
+        check(nt < 0 || (rev < nt && rew < nt && rej < nt),
+              "label 're' prefix hits outrank a description-only 're'");
+    }
+
+    // ── acronym typing: "rcb" → Run Code Block via word boundaries ───────
+    {
+        auto r = match_commands("rcb", PaletteContext{});
+        check(!r.empty() && r.front().cmd->id == Command::RunCodeBlock,
+              "'rcb' acronym-matches 'Run Code Block' first");
+    }
+
+    // ── positions point at the matched label characters ──────────────────
+    {
+        auto r = match_commands("new", PaletteContext{});
+        check(!r.empty() && r.front().cmd->id == Command::NewThread,
+              "'new' → New thread first");
+        // "New thread": 'n','e','w' at offsets 0,1,2.
+        const auto& pos = r.front().positions;
+        check(pos.size() == 3 && pos[0] == 0 && pos[1] == 1 && pos[2] == 2,
+              "positions mark the matched leading characters");
+    }
+
+    // ── exact label wins over a longer label that also matches ──────────
+    {
+        auto r = match_commands("quit", PaletteContext{});
+        check(!r.empty() && r.front().cmd->id == Command::Quit,
+              "'quit' → Quit ranks first (exact label)");
+    }
+
+    // ── empty query: catalog order, no positions ───────────────────────
+    {
+        auto r = match_commands("", PaletteContext{});
+        check(r.front().cmd->id == kCommands.front().id,
+              "empty query preserves catalog order");
+        check(r.front().positions.empty(), "empty query has no highlight positions");
     }
 }

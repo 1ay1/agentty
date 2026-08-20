@@ -683,7 +683,10 @@ Element command_palette(const Model& m) {
                 return true;
         return false;
     }();
-    auto matches = filtered_commands(o->query, pctx);
+    auto scored = match_commands(o->query, pctx);
+    std::vector<const CommandDef*> matches;
+    matches.reserve(scored.size());
+    for (const auto& s : scored) matches.push_back(s.cmd);
 
     Picker::Config cfg;
     cfg.title      = " Command Palette ";
@@ -783,6 +786,13 @@ Element command_palette(const Model& m) {
                 label += m.d.smart.enabled ? "  (on)" : "  (off)";
             row.leading = std::move(label);
             row.leading_style = cmd.danger ? fg_of(danger) : fg_of(fg);
+            // Highlight the fuzzy-matched characters (Raycast-style) so the
+            // ranking is legible: with "re" typed, the "Re" in Review/Reject
+            // lights up. Positions came from the scored matcher.
+            if (!o->query.empty()) {
+                row.highlight    = scored[static_cast<std::size_t>(i)].positions;
+                row.highlight_fg = cmd.danger ? danger : highlight;
+            }
 
             // ── Trailing: description · shortcut (teaches the fast path) ──
             // The LABEL is what you select, so it must never lose the space
