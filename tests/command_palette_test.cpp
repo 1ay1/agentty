@@ -120,7 +120,78 @@ TEST_CASE("command palette") {
         check(ok, "label matches rank above description-only matches");
     }
 
-    // ── 8. no match → empty ───────────────────────────────────────────────
+    // ── 8. no match → empty ──────────────────────────────────────────────
     check(filtered_commands("zznotacommandzz").empty(),
           "a non-matching query returns no rows");
+}
+
+TEST_CASE("command palette — categories, gating, danger") {
+    // ── every row has a category; danger rows are exactly the destructive set
+    {
+        // The commands that discard work or mutate the worktree.
+        auto is_expected_danger = [](Command c) {
+            return c == Command::RejectAll || c == Command::RewindCheckpoint
+                || c == Command::ResetSmartLearning || c == Command::SignOut;
+        };
+        for (const auto& c : kCommands) {
+            check(c.danger == is_expected_danger(c.id),
+                  "danger flag matches the destructive-action set");
+            // category_label is empty only for General (Quit / Update).
+            bool general = (c.category == Category::General);
+            check(category_label(c.category).empty() == general,
+                  "only General rows have no category badge");
+        }
+    }
+
+    // ── category name is searchable (discovery by section) ────────────────
+    {
+        auto r = filtered_commands("changes");
+        // The Changes cluster surfaces as a group.
+        check(has_id(r, Command::ReviewChanges) && has_id(r, Command::AcceptAll)
+              && has_id(r, Command::RejectAll),
+              "\"changes\" surfaces the whole Changes category");
+    }
+
+    // ── visibility gating: dead rows are hidden ───────────────────────────
+    {
+        // No pending diff → Review / Accept-all / Reject-all disappear.
+        PaletteContext no_diff;
+        no_diff.has_pending_changes = false;
+        auto r = filtered_commands("", no_diff);
+        check(!has_id(r, Command::AcceptAll) && !has_id(r, Command::RejectAll)
+              && !has_id(r, Command::ReviewChanges),
+              "no pending changes hides the Changes commands");
+        check(has_id(r, Command::NewThread), "unrelated commands stay visible");
+
+        // With a diff they come back.
+        PaletteContext with_diff;
+        with_diff.has_pending_changes = true;
+        check(has_id(filtered_commands("", with_diff), Command::AcceptAll),
+              "pending changes shows Accept-all");
+    }
+    {
+        // No fenced reply → Run code block hidden.
+        PaletteContext no_block;
+        no_block.has_code_block = false;
+        check(!has_id(filtered_commands("", no_block), Command::RunCodeBlock),
+              "no code block hides Run code block");
+    }
+    {
+        // No update available → Update agentty hidden (pre-existing contract).
+        PaletteContext no_update;
+        no_update.update_available = false;
+        check(!has_id(filtered_commands("", no_update), Command::UpdateAgentty),
+              "no update hides Update agentty");
+    }
+
+    // ── command_visible predicate agrees with the filter ──────────────────
+    {
+        PaletteContext ctx;
+        ctx.has_pending_changes = false;
+        for (const auto& c : kCommands) {
+            bool in_filter = has_id(filtered_commands("", ctx), c.id);
+            check(in_filter == command_visible(c, ctx),
+                  "filter visibility == command_visible predicate");
+        }
+    }
 }
