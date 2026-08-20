@@ -1197,7 +1197,7 @@ store::Settings load_settings() {
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
-        s.show_changes_strip = j.value("show_changes_strip", true);
+        s.show_changes_strip = j.value("show_changes_strip", false);
         if (j.contains("rag") && j["rag"].is_object()) {
             const auto& r = j["rag"];
             auto& c = s.rag;
@@ -1273,8 +1273,8 @@ void save_settings(const store::Settings& s) {
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
     if (s.context_1m_blocked) j["context_1m_blocked"] = true;
-    // Only persisted when turned OFF (default is on), keeping fresh configs clean.
-    if (!s.show_changes_strip) j["show_changes_strip"] = false;
+    // Only persisted when turned ON (default is off), keeping fresh configs clean.
+    if (s.show_changes_strip) j["show_changes_strip"] = true;
     if (s.rag.configured) {
         const auto& c = s.rag;
         // The picker only sets `mode`; the rest are internal defaults, still

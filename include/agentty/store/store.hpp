@@ -151,10 +151,10 @@ struct Settings {
     std::string          smart_utility_model,        smart_utility_effort;
 
     // Show the persistent "N changes" review strip after the agent edits
-    // files (the banner above the composer). On by default — it's the review
-    // affordance. Users who prefer edits to apply quietly can turn it off
-    // (Ctrl+K → "Changes strip"); Ctrl+R still opens the review pane on demand.
-    bool                 show_changes_strip = true;
+    // files (the banner above the composer). OFF by default — edits apply
+    // quietly; turn it on (Ctrl+K → "Changes strip") for the always-on review
+    // banner. Ctrl+R / "Review changes" opens the review pane either way.
+    bool                 show_changes_strip = false;
 };
 
 template <class S>
