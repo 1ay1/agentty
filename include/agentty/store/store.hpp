@@ -149,6 +149,12 @@ struct Settings {
     std::string          smart_strategic_model,      smart_strategic_effort;
     std::string          smart_impl_model,           smart_impl_effort;
     std::string          smart_utility_model,        smart_utility_effort;
+
+    // Show the persistent "N changes" review strip after the agent edits
+    // files (the banner above the composer). On by default — it's the review
+    // affordance. Users who prefer edits to apply quietly can turn it off
+    // (Ctrl+K → "Changes strip"); Ctrl+R still opens the review pane on demand.
+    bool                 show_changes_strip = true;
 };
 
 template <class S>

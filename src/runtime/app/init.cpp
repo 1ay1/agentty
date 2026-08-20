@@ -123,6 +123,8 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     load_slot(m.d.smart.strategic,      settings.smart_strategic_model, settings.smart_strategic_effort);
     load_slot(m.d.smart.implementation, settings.smart_impl_model,      settings.smart_impl_effort);
     load_slot(m.d.smart.utility,        settings.smart_utility_model,   settings.smart_utility_effort);
+    // Review UI: whether the persistent changes strip renders after edits.
+    m.d.show_changes_strip = settings.show_changes_strip;
     // Rehydrate persisted "always allow" tool grants (Zed's always_allow
     // rules). PermissionApproveAlways appends to this list; loading it here
     // means a grant given last week still suppresses the prompt today.
