@@ -254,7 +254,8 @@ void resync_live_tool_viewer(Model& m) {
 
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result,
-                       std::optional<FileChange>&& change) {
+                       std::optional<FileChange>&& change,
+                       std::vector<FileChange>&& changes) {
     with_live_tool(m, id, [&](ToolUse& tc) {
         // Idempotent: a tool already in a terminal state
         // (Done / Failed / Rejected) keeps that state. Realistic
@@ -295,23 +296,27 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         }
         release_streaming_buffers(tc);
     });
-    // Queue the structured change (edit / write / apply_patch / replace) for
-    // diff-review. DEDUP per file: successive edits to the SAME path collapse
-    // into one review entry showing net original→latest (not a stack of
-    // intermediate diffs), so the pane reads as "here's what changed in
-    // login.cpp", not five overlapping hunks. Only queue on success — a failed
-    // tool wrote nothing.
-    if (change && result) {
-        auto& q = m.d.pending_changes;
-        auto it = std::ranges::find(q, change->path, &FileChange::path);
-        if (it != q.end()) {
-            // Recompute the net diff from the ORIGINAL (first-seen) contents
-            // to the newest, so the entry always reflects the whole journey.
-            std::string original = it->original_contents;
-            *it = diff::compute(change->path, original, change->new_contents);
-        } else {
-            q.push_back(std::move(*change));
-        }
+    // Queue the structured change(s) (edit / write / apply_patch / replace)
+    // for diff-review. Multi-file tools (replace) fill `changes`; single-file
+    // tools fill `change`. DEDUP per file: successive edits to the SAME path
+    // collapse into one review entry showing net original→latest, so the pane
+    // reads as "here's what changed in login.cpp", not a stack of overlapping
+    // diffs. Only queue on success — a failed tool wrote nothing.
+    if (result) {
+        auto queue_one = [&](FileChange&& ch) {
+            auto& q = m.d.pending_changes;
+            auto it = std::ranges::find(q, ch.path, &FileChange::path);
+            if (it != q.end()) {
+                std::string original = it->original_contents;
+                *it = diff::compute(ch.path, original, ch.new_contents);
+            } else {
+                q.push_back(std::move(ch));
+            }
+        };
+        if (!changes.empty())
+            for (auto& ch : changes) queue_one(std::move(ch));
+        else if (change)
+            queue_one(std::move(*change));
     }
     // running spinner into the full output/error body — the card's
     // rendered height changes at this instant (a Failed card in
@@ -464,7 +469,8 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                         if (tc.id == e.id && tc.name == "todo")
                             sync_todo_state_from_args(m, tc.args);
             }
-            apply_tool_output(m, e.id, std::move(e.result), std::move(e.change));
+            apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
+                              std::move(e.changes));
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);

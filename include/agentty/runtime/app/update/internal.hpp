@@ -228,7 +228,8 @@ void resync_live_tool_viewer(Model& m);
 // ── update/tool.cpp helpers ──────────────────────────────────────────────
 void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result,
-                       std::optional<FileChange>&& change = std::nullopt);
+                       std::optional<FileChange>&& change = std::nullopt,
+                       std::vector<FileChange>&& changes = {});
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 

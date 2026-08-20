@@ -312,6 +312,10 @@ struct ToolExecOutput {
     // they're kept. Decoded from the tool's FileChange meta in the mcp bridge
     // (decode_result), which rebuilds structured hunks via diff::compute.
     std::optional<FileChange> change;
+    // Multi-file edits (replace) — one entry per written file. When non-empty
+    // it supersedes `change` for queuing; `change` remains its first element
+    // for single-file compatibility.
+    std::vector<FileChange> changes;
 };
 // Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can

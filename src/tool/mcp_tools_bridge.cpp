@@ -286,17 +286,19 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
     ToolOutput out;
     out.text = std::move(r.text);
 
-    if (auto ch = mt::read_change(r); ch.has_value()) {
-        // ch carries path/added/removed/before/after but no hunks; rebuild
-        // the structured hunks agentty's diff-review needs.
-        FileChange fc = diff::compute(ch->path, ch->before, ch->after);
-        // diff::compute recomputes added/removed identically; keep its
-        // structured result (authoritative) but trust the provider's
-        // before/after verbatim.
-        fc.original_contents = ch->before;
-        fc.new_contents      = ch->after;
-        out.change = std::move(fc);
+    // Decode EVERY file the tool changed — the single-file `change` (edit /
+    // write / apply_patch) and the multi-file `changes` array (replace). Each
+    // carries path/before/after but no hunks; rebuild the structured hunks the
+    // diff-review needs. All land in out.changes; out.change stays the
+    // first for any legacy single-file consumer.
+    auto raw = mt::read_changes(r);
+    for (const auto& ch : raw) {
+        FileChange fc = diff::compute(ch.path, ch.before, ch.after);
+        fc.original_contents = ch.before;
+        fc.new_contents      = ch.after;
+        out.changes.push_back(std::move(fc));
     }
+    if (!out.changes.empty()) out.change = out.changes.front();
     (void)tool_name;
     return out;
 }
