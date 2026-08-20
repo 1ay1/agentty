@@ -743,6 +743,23 @@ struct RedrawScreen {};
 // written a newer status, stamps won't match and this Msg is a no-op.
 struct ClearStatus { std::chrono::steady_clock::time_point stamp; };
 
+// ── Self-update ───────────────────────────────────────────
+// Background release check finished (worker thread → UI). Empty `latest`
+// or update_available=false = nothing to announce; the reducer stores the
+// state so the status-bar chip + palette entry appear. Check errors are
+// swallowed silently — an update NOTICE must never surface as an error.
+struct UpdateCheckDone {
+    bool        update_available = false;
+    std::string latest;   // "0.3.1"
+    std::string url;      // release page (used in the toast)
+};
+// In-TUI update finished (worker → UI). Success shows the restart toast;
+// failure shows the error + a hint to run `agentty update` from a shell.
+struct UpdateApplied {
+    bool        ok = false;
+    std::string detail;   // version on success, error text on failure
+};
+
 // ============================================================================
 // Domain variants — one per orthogonal slice of the runtime. Each is a
 // `std::variant` over its leaves; per-domain reducers visit on these.
@@ -849,7 +866,8 @@ using MetaMsg = std::variant<
     ScrollThread, ToggleToolExpanded, ToggleRetrievedExpanded,
     OpenSmartMode, CloseSmartMode, SmartModeMove, SmartModeSelect,
     SmartModeClearSlot,
-    Tick, Quit, NoOp, ClearStatus, RedrawScreen>;
+    Tick, Quit, NoOp, ClearStatus, RedrawScreen,
+    UpdateCheckDone, UpdateApplied>;
 
 } // namespace msg
 

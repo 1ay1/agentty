@@ -24,6 +24,45 @@ namespace agentty {
 [[nodiscard]] std::vector<std::string>
 list_workspace_files(std::size_t cap = 5000);
 
+// Kick the workspace-file walk on a background thread (single-flight, safe
+// to call repeatedly). After it lands, list_workspace_files() and the
+// picker's first open are instant. Call at startup.
+void prewarm_workspace_files(std::size_t cap = 5000);
+
+// Non-blocking: has the file list been built yet? The composer opens the
+// `@` picker INSTANTLY and shows an "indexing…" hint until this is true.
+[[nodiscard]] bool files_ready();
+
+// Record that the user referenced `path` (selected it in the picker), so a
+// later `@` ranks it near the top. Frecency — recently-used-first.
+void note_file_referenced(std::string_view path);
+
+// ── Git awareness ────────────────────────────────────────
+// A file's relationship to git — the strongest "this file matters right
+// now" signal. Computed once at prewarm; drives both ranking (dirty files
+// float to the top of a blank `@`) and the row tag the picker renders.
+enum class GitTag {
+    None,
+    Modified,           // worktree change (dirty)  — highest priority
+    Staged,             // index change (git add'd)
+    Untracked,          // new file, not yet tracked
+    RecentlyCommitted,  // touched in the last ~20 commits (weaker)
+};
+
+// The git tag for a workspace-relative path (None when clean/unknown or
+// the signal walk hasn't landed). Cheap map lookup, safe on any thread.
+[[nodiscard]] GitTag file_git_tag(std::string_view path);
+
+// Rebuild the git-status map SYNCHRONOUSLY against the current project
+// root. Prewarm calls this on a background thread; call it directly after
+// a run of tool edits so a follow-up `@` reflects the new working set, or
+// from a test that just mutated a fixture repo.
+void refresh_git_signals();
+
+// A one-word label + whether this path is "hot" (dirty/staged/untracked)
+// for the picker's row rendering. Empty label ⇒ no tag.
+[[nodiscard]] std::string_view git_tag_label(GitTag tag);
+
 // Case-insensitive substring filter over a path list. Returned
 // indices point into the original `files` vector — the dispatcher
 // uses one to resolve cursor → path identically to how the view

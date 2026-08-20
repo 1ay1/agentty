@@ -62,6 +62,7 @@
 #include "agentty/mcp/oauth.hpp"
 #include "agentty/mcp/client.hpp"   // mcp::release_servers
 #include "agentty/rag/rag_adapter.hpp"
+#include "agentty/util/update.hpp"
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
@@ -142,6 +143,8 @@ void print_usage() {
         "                    /docs/plugins\n"
         "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
         "                    (recall@k / MRR / nDCG per pipeline stage)\n"
+        "  update            Update agentty to the latest release\n"
+        "                    (--check: only report, don't install)\n"
         "  version           Print the agentty version and exit\n"
         "  help              Show this message\n"
         "\n"
@@ -215,6 +218,14 @@ Args parse_args(int argc, char** argv) {
         if (a == "login" || a == "logout" || a == "status" || a == "help"
          || a == "acp" || a == "skills" || a == "mcp-serve") {
             out.subcommand = std::move(a);
+        } else if (a == "update") {
+            // `agentty update [--check]` — --check rides in cli_run_agent
+            // (reused scratch; update has no agent).
+            out.subcommand = std::move(a);
+            if (i + 1 < argc && std::string{argv[i + 1]} == "--check") {
+                out.cli_run_agent = "--check";
+                ++i;
+            }
         } else if (a == "hooks") {
             // `agentty hooks [list|approve]` — verb rides in cli_run_agent
             // (reused scratch; hooks has no agent).
@@ -372,6 +383,48 @@ int main(int argc, char** argv) {
 
     if (args.subcommand == "help")    { print_usage();   return 0; }
     if (args.subcommand == "version") { print_version(); return 0; }
+    if (args.subcommand == "update") {
+        const bool check_only = args.cli_run_agent == "--check";
+        std::printf("agentty %s — checking for updates…\n",
+                    update::current_version().c_str());
+        auto c = update::check_latest(/*force=*/true);
+        if (!c.error.empty()) {
+            std::fprintf(stderr, "check failed: %s\n", c.error.c_str());
+            return 1;
+        }
+        if (!c.update_available) {
+            std::printf("✓ up to date (latest is v%s)\n", c.latest.c_str());
+            return 0;
+        }
+        std::printf("⬆ v%s available (you have v%s)\n  %s\n",
+                    c.latest.c_str(), c.current.c_str(), c.url.c_str());
+        if (check_only) return 0;
+
+        std::string why;
+        if (!update::self_update_possible(why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+        std::printf("downloading %s…\n", update::platform_asset().c_str());
+        auto err = update::perform_update(c.latest,
+            [](std::size_t got, std::size_t total) {
+                if (total > 0)
+                    std::printf("\r  %zu / %zu KiB (%d%%)   ",
+                                got / 1024, total / 1024,
+                                (int)(got * 100 / total));
+                else
+                    std::printf("\r  %zu KiB   ", got / 1024);
+                std::fflush(stdout);
+            });
+        std::printf("\n");
+        if (!err.empty()) {
+            std::fprintf(stderr, "update failed: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("✓ updated to v%s — restart agentty to use it\n",
+                    c.latest.c_str());
+        return 0;
+    }
     if (args.subcommand == "login")  return auth::cmd_login();
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();

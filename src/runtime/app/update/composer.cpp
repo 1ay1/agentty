@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,12 +19,14 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/clipboard.hpp"
+#include "agentty/provider/selection.hpp"   // prewarm_active_provider
 #include "agentty/util/env.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mention_palette.hpp"
 #include "agentty/runtime/symbol_palette.hpp"
 #include "agentty/workspace/files.hpp"
+#include "agentty/util/isolated_thread.hpp"
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
@@ -429,6 +432,28 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // (the single entry point for all composer msgs) covers every path
     // without touching each arm.
     m.ui.composer.last_edit_ms = maya::anim::default_clock().now_ms();
+    // ── Idle-lapse connection re-warm ──────────────────────────
+    // The pool's warm socket dies after ~90 s idle (http idle_ttl), so a
+    // submit after any longer pause pays a cold TCP+TLS+H2 dial (~150-400
+    // ms) on top of TTFT. Typing is the earliest reliable "a request is
+    // coming" signal — fire an opportunistic prewarm on the FIRST composer
+    // event after the warm window lapsed. Throttled to one dial per idle
+    // TTL so key-repeat can't spawn dial threads; prewarm itself is
+    // tracked + cancel-safe and swallows errors.
+    {
+        static std::chrono::steady_clock::time_point last_warm{};
+        const auto now = std::chrono::steady_clock::now();
+        const bool wire_stale =
+            m.s.last_wire_at.time_since_epoch().count() == 0
+            || now - m.s.last_wire_at > std::chrono::seconds(85);
+        const bool warm_throttled =
+            last_warm.time_since_epoch().count() != 0
+            && now - last_warm < std::chrono::seconds(85);
+        if (wire_stale && !warm_throttled && !m.s.active()) {
+            last_warm = now;
+            provider::prewarm_active_provider();
+        }
+    }
     return std::visit(overload{
         [&](ComposerCharInput e) -> Step {
             // '/' opens the command palette when it's LINE-LEADING —
@@ -469,17 +494,30 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             };
             if (e.ch == U'@' && at_word_boundary()) {
                 mention::Open o;
-                o.files = list_workspace_files();
+                // Non-blocking: snapshot the file list ONLY if the prewarm
+                // has landed (files_ready()). If it's still indexing, open
+                // with an empty snapshot + "indexing…" hint rather than
+                // freezing the UI on an inline walk; the next keystroke
+                // re-pulls once the background thread publishes.
+                if (files_ready()) o.files = list_workspace_files();
                 m.ui.mention_palette = std::move(o);
+                // Refresh git signals in the background so the working-set
+                // ranking reflects edits made since startup (the agent may
+                // have modified files this session). Cheap (~two git calls);
+                // this open uses the current map, the next keystroke the
+                // fresh one. Terminate-proof detach (a throw out of a bare
+                // detached thread is process death).
+                agentty::util::run_isolated_detached(
+                    "composer.git_refresh", []{ refresh_git_signals(); });
                 return done(std::move(m));
             }
-            // '#' opens the symbol picker — mirrors '@'. The first
-            // open walks the workspace and is therefore noticeably
-            // slower than '@' on a cold cache; subsequent opens are
-            // instant.
+            // '#' opens the symbol picker — mirrors '@'. Non-blocking:
+            // snapshot only if the (parallel) symbol scan has landed;
+            // otherwise open with an empty snapshot + "indexing…" hint and
+            // fill on the first keystroke. Never blocks the UI on the scan.
             if (e.ch == U'#' && at_word_boundary()) {
                 symbol_palette::Open o;
-                o.entries = list_workspace_symbols();
+                if (symbols_ready()) o.entries = list_workspace_symbols();
                 m.ui.symbol_palette = std::move(o);
                 return done(std::move(m));
             }

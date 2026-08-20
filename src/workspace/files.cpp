@@ -1,15 +1,22 @@
 #include "agentty/workspace/files.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
+#include <sstream>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/subprocess.hpp"
 
 namespace agentty {
 
@@ -249,65 +256,252 @@ struct Scored {
 
 } // namespace
 
-std::vector<std::string> list_workspace_files(std::size_t cap) {
-    // Cached for the process lifetime. The walk is ~5000 paths through a
-    // recursive_directory_iterator and ran on every `@` keystroke in the
-    // composer, producing visible lag on large repos. Mirrors the
-    // list_workspace_symbols() discipline: workspaces don't change shape
-    // often inside a single agentty session, and the user pays the cost
-    // once on first open rather than on every palette pop. The `cap`
-    // arg is honoured on the first call; subsequent calls return the
-    // already-built vector regardless of the requested cap (the picker
-    // tolerates a smaller-than-requested list).
-    static std::once_flag once;
-    static std::vector<std::string> cached;
-    std::call_once(once, [cap]{
-        cached.reserve(std::min<std::size_t>(cap, 1024));
-        const auto root = tools::util::project_root();
-        if (root.empty()) return;
+// ── Cache + async prewarm ───────────────────────────────────
+// The file list is built ONCE per process. Historically the build ran
+// synchronously on the first `@` keystroke — a recursive_directory_iterator
+// over thousands of paths blocking the UI thread for the whole walk. Now:
+//   • prewarm_workspace_files() kicks the walk on a detached thread at
+//     startup, so by the time the user reaches for `@` the list is ready;
+//   • the result is published behind a shared_ptr swapped under a mutex,
+//     so readers never block and never see a half-built vector;
+//   • files_ready() is a non-blocking probe the composer uses to open the
+//     picker INSTANTLY (empty + "indexing…") when the warm hasn't landed.
+namespace {
+std::mutex& files_mu() { static std::mutex m; return m; }
+std::shared_ptr<const std::vector<std::string>>& files_cache() {
+    static std::shared_ptr<const std::vector<std::string>> c;
+    return c;
+}
+std::atomic<bool>& files_building() { static std::atomic<bool> b{false}; return b; }
 
-        std::error_code ec;
-        for (auto it = fs::recursive_directory_iterator(
-                 root, fs::directory_options::skip_permission_denied, ec);
-             it != fs::recursive_directory_iterator() && cached.size() < cap;
-             it.increment(ec)) {
-            if (ec) { ec.clear(); continue; }
-            const auto& entry = *it;
-            auto fn = entry.path().filename().string();
-            const bool is_dir = entry.is_directory(ec);
+// Frecency: paths the user has referenced, most-recent-first-weighted.
+// A tiny recency list (not a full frecency decay) — the last-referenced
+// files are exactly what a follow-up `@` wants at the top.
+std::mutex& frecency_mu() { static std::mutex m; return m; }
+std::vector<std::string>& frecency_list() {
+    static std::vector<std::string> v; return v;
+}
 
-            // Same skip rules as list_dir.cpp's recursive walker — keep
-            // node_modules / build / .git / __pycache__ / etc. out of the
-            // candidate set. Otherwise the picker would be drowned in
-            // generated artefacts.
-            if (is_dir && tools::util::should_skip_dir(fn)) {
-                it.disable_recursion_pending();
-                continue;
-            }
-            if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
-                it.disable_recursion_pending();
-                continue;
-            }
-            if (is_dir) continue;
-            if (!entry.is_regular_file(ec)) continue;
+// ── Git signals ──────────────────────────────────────────
+// The single strongest "which file matters" signal is git: the files you
+// have modified / staged / just touched ARE your working set. FFF and Zed
+// both lead their pickers with these. We compute a status map once at
+// prewarm (git status --porcelain + recent commit touch history) and fold
+// it into ranking + row tags. path (workspace-relative) -> GitTag.
+std::mutex& git_mu() { static std::mutex m; return m; }
+std::unordered_map<std::string, GitTag>& git_status_map() {
+    static std::unordered_map<std::string, GitTag> m; return m;
+}
+std::atomic<bool>& git_ready_flag() { static std::atomic<bool> b{false}; return b; }
 
-            // Workspace-relative paths read better in the picker UI and
-            // round-trip cleanly through the FileRef chip caption.
-            std::error_code rec;
-            auto rel = fs::relative(entry.path(), root, rec);
-            cached.push_back(rec ? entry.path().string() : rel.string());
+void build_git_signals() {
+    const auto root = tools::util::project_root();
+    if (root.empty()) { git_ready_flag() = true; return; }
+    std::unordered_map<std::string, GitTag> tags;
+
+    // 1. Working-tree status. NEWLINE-separated (NOT -z: the subprocess
+    //    scrubber eats NUL bytes), quotePath off so unicode paths survive.
+    //    Porcelain v1 XY columns: X=index, Y=worktree.
+    auto st = tools::util::run_argv_s(
+        {"git", "-C", root.string(), "-c", "core.quotePath=false",
+         "status", "--porcelain", "--untracked-files=all"},
+        512 * 1024, std::chrono::seconds{8});
+    if (st.started && st.exit_code == 0) {
+        std::istringstream in(st.output);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.size() < 4) continue;
+            char x = line[0], y = line[1];
+            std::string path = line.substr(3);
+            // Rename form "old -> new": keep the new path.
+            if (auto arrow = path.find(" -> "); arrow != std::string::npos)
+                path = path.substr(arrow + 4);
+            GitTag tag = GitTag::None;
+            if (x == '?' && y == '?')            tag = GitTag::Untracked;
+            else if (x != ' ' && x != '?')       tag = GitTag::Staged;   // index change
+            else if (y != ' ')                   tag = GitTag::Modified; // worktree change
+            if (tag != GitTag::None) tags[path] = tag;
         }
-        std::sort(cached.begin(), cached.end());
-    });
-    return cached;
+    }
+
+    // 2. Recent-commit touch history: files changed in the last ~20 commits
+    //    are part of the current line of work even when clean now. Weaker
+    //    than a live dirty status — only tag files not already flagged.
+    auto touched = tools::util::run_argv_s(
+        {"git", "-C", root.string(), "-c", "core.quotePath=false",
+         "log", "--name-only", "--pretty=format:", "-n", "20"},
+        1024 * 1024, std::chrono::seconds{8});
+    if (touched.started && touched.exit_code == 0) {
+        std::istringstream in(touched.output);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.empty()) continue;
+            tags.emplace(line, GitTag::RecentlyCommitted);   // emplace = no override
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(git_mu());
+        git_status_map() = std::move(tags);
+    }
+    git_ready_flag() = true;
+}
+
+std::vector<std::string> build_file_list(std::size_t cap) {
+    std::vector<std::string> out;
+    out.reserve(std::min<std::size_t>(cap, 1024));
+    const auto root = tools::util::project_root();
+    if (root.empty()) return out;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied, ec);
+         it != fs::recursive_directory_iterator() && out.size() < cap;
+         it.increment(ec)) {
+        if (ec) { ec.clear(); continue; }
+        const auto& entry = *it;
+        auto fn = entry.path().filename().string();
+        const bool is_dir = entry.is_directory(ec);
+        if (is_dir && tools::util::should_skip_dir(fn)) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (is_dir) continue;
+        if (!entry.is_regular_file(ec)) continue;
+        std::error_code rec;
+        auto rel = fs::relative(entry.path(), root, rec);
+        out.push_back(rec ? entry.path().string() : rel.string());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+} // namespace
+
+void prewarm_workspace_files(std::size_t cap) {
+    // Single-flight: only the first caller spawns the walk.
+    bool expected = false;
+    if (!files_building().compare_exchange_strong(expected, true)) return;
+    {
+        std::lock_guard<std::mutex> lk(files_mu());
+        if (files_cache()) { files_building() = false; return; }   // already warm
+    }
+    std::thread([cap] {
+        // Git signals first (fast, ~two git invocations) so the file list is
+        // already git-aware the instant it publishes — a blank `@` leads
+        // with your dirty files from the very first open.
+        build_git_signals();
+        auto built = std::make_shared<std::vector<std::string>>(build_file_list(cap));
+        {
+            std::lock_guard<std::mutex> lk(files_mu());
+            files_cache() = std::move(built);
+        }
+        files_building() = false;
+    }).detach();
+}
+
+bool files_ready() {
+    std::lock_guard<std::mutex> lk(files_mu());
+    return static_cast<bool>(files_cache());
+}
+
+void note_file_referenced(std::string_view path) {
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> lk(frecency_mu());
+    auto& v = frecency_list();
+    std::erase(v, std::string{path});     // dedupe — move to front
+    v.insert(v.begin(), std::string{path});
+    if (v.size() > 64) v.resize(64);      // bounded recency window
+}
+
+GitTag file_git_tag(std::string_view path) {
+    std::lock_guard<std::mutex> lk(git_mu());
+    auto it = git_status_map().find(std::string{path});
+    return it == git_status_map().end() ? GitTag::None : it->second;
+}
+
+std::string_view git_tag_label(GitTag tag) {
+    switch (tag) {
+        case GitTag::Modified:          return "modified";
+        case GitTag::Staged:            return "staged";
+        case GitTag::Untracked:         return "new";
+        case GitTag::RecentlyCommitted: return "recent";
+        default:                        return "";
+    }
+}
+
+void refresh_git_signals() { build_git_signals(); }
+
+std::vector<std::string> list_workspace_files(std::size_t cap) {
+    // Fast path: warm cache → return it (a copy, cheap: it's paths).
+    {
+        std::lock_guard<std::mutex> lk(files_mu());
+        if (auto c = files_cache()) return *c;
+    }
+    // Cold and someone needs it NOW (synchronous caller, no prewarm yet):
+    // build inline and publish, so subsequent calls are instant.
+    auto built = std::make_shared<std::vector<std::string>>(build_file_list(cap));
+    {
+        std::lock_guard<std::mutex> lk(files_mu());
+        if (!files_cache()) files_cache() = built;
+        return *files_cache();
+    }
 }
 
 std::vector<std::size_t>
 filter_files(const std::vector<std::string>& files, std::string_view query) {
     std::vector<std::size_t> matches;
     matches.reserve(files.size());
+
+    // Frecency snapshot: path → recency rank (0 = most recent). Small map,
+    // read once per filter pass.
+    std::unordered_map<std::string, int> frec;
+    {
+        std::lock_guard<std::mutex> lk(frecency_mu());
+        const auto& v = frecency_list();
+        for (std::size_t i = 0; i < v.size(); ++i) frec.emplace(v[i], (int)i);
+    }
+    // Git-status snapshot: the STRONGEST signal. The file you're editing is
+    // almost always dirty/staged — lead with it.
+    std::unordered_map<std::string, GitTag> git;
+    {
+        std::lock_guard<std::mutex> lk(git_mu());
+        git = git_status_map();
+    }
+    auto git_bonus = [&](std::size_t i) -> int {
+        auto it = git.find(files[i]);
+        if (it == git.end()) return 0;
+        switch (it->second) {
+            case GitTag::Modified:          return 100000;   // actively editing
+            case GitTag::Staged:            return 90000;
+            case GitTag::Untracked:         return 80000;
+            case GitTag::RecentlyCommitted: return 30000;
+            default:                        return 0;
+        }
+    };
+    auto frec_bonus = [&](std::size_t i) -> int {
+        auto it = frec.find(files[i]);
+        if (it == frec.end()) return 0;
+        // Recent files get a big, rank-decaying bonus so "the file I just
+        // touched" floats to the top of both the no-query list and ties.
+        return 10000 - it->second * 100;
+    };
+    // Combined context score — git dominates, frecency breaks its ties,
+    // and both sit far above the fuzzy base so a working-set file never
+    // sinks below an alphabetically-earlier stranger with a marginally
+    // better fuzzy score.
+    auto ctx_bonus = [&](std::size_t i) { return git_bonus(i) + frec_bonus(i); };
+
     if (query.empty()) {
         for (std::size_t i = 0; i < files.size(); ++i) matches.push_back(i);
+        // Working-set first (git dirty → staged → new → recent → frecency),
+        // then the pre-sorted alphabetic order for everything untouched.
+        std::stable_sort(matches.begin(), matches.end(),
+            [&](std::size_t a, std::size_t b) {
+                return ctx_bonus(a) > ctx_bonus(b);
+            });
         return matches;
     }
 
@@ -322,6 +516,10 @@ filter_files(const std::vector<std::string>& files, std::string_view query) {
     }
     if (needle.empty()) {
         for (std::size_t i = 0; i < files.size(); ++i) matches.push_back(i);
+        std::stable_sort(matches.begin(), matches.end(),
+            [&](std::size_t a, std::size_t b) {
+                return ctx_bonus(a) > ctx_bonus(b);
+            });
         return matches;
     }
 
@@ -329,7 +527,7 @@ filter_files(const std::vector<std::string>& files, std::string_view query) {
     scored.reserve(files.size());
     for (std::size_t i = 0; i < files.size(); ++i) {
         int s = fuzzy_score(files[i], needle);
-        if (s != INT32_MIN) scored.push_back({s, i});
+        if (s != INT32_MIN) scored.push_back({s + ctx_bonus(i), i});
     }
 
     // Stable sort: equal scores fall back to the alphabetic order the

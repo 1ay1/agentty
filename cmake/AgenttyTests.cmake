@@ -21,6 +21,8 @@ set(_AGENTTY_CONSOLIDATED
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
     wire_shared_test complexity_test copilot_token_test routing_memory_test
     smart_cascade_gate_test chatgpt_bundled_models_test settings_default_test
+    update_check_test
+    workspace_index_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test
@@ -32,7 +34,7 @@ set(_AGENTTY_CONSOLIDATED
     command_palette_test compaction_threshold_test fsm_test model_caps_test
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
-    provider_model_switch_test)
+    provider_model_switch_test speculative_dispatch_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
@@ -84,6 +86,7 @@ agentty_finalize_fold(
 # Kept as its OWN binary: it chdir()s into temp workspaces, and it's new enough
 # that folding it hasn't been validated.
 agentty_test(agents_md_test          MODE standalone TIMEOUT 30)
+agentty_test(checkpoint_test         MODE standalone TIMEOUT 60)
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──
 # They exercise agentty's own logic and link cleanly under asan/ubsan without

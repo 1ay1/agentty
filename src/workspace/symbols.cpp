@@ -1,13 +1,17 @@
 #include "agentty/workspace/symbols.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <regex>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 #include "agentty/tool/util/fs_helpers.hpp"
 
@@ -116,45 +120,121 @@ bool scan_file(const fs::path& root, const fs::path& file,
 
 } // namespace
 
-const std::vector<SymbolEntry>& list_workspace_symbols(std::size_t cap) {
-    static std::once_flag once;
-    static std::vector<SymbolEntry> cached;
-    std::call_once(once, [cap]{
-        const auto root = tools::util::project_root();
-        if (root.empty()) return;
+// ── Cache + async prewarm (mirrors files.cpp) ─────────────────────
+// The symbol scan is the expensive one: std::regex across every line of up
+// to 5000 source files. Running that on the `#` keystroke froze the UI for
+// seconds on a large repo. Now the scan runs on a background thread pool
+// at startup, files fanned out across cores, published behind a swap.
+namespace {
+std::mutex& sym_mu() { static std::mutex m; return m; }
+std::shared_ptr<const std::vector<SymbolEntry>>& sym_cache() {
+    static std::shared_ptr<const std::vector<SymbolEntry>> c; return c;
+}
+std::atomic<bool>& sym_building() { static std::atomic<bool> b{false}; return b; }
+
+std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
+    std::vector<SymbolEntry> out;
+    const auto root = tools::util::project_root();
+    if (root.empty()) return out;
+
+    // 1. Collect candidate source files (cheap directory walk).
+    std::vector<fs::path> src;
+    {
         std::error_code ec;
-        std::size_t files_scanned = 0;
         constexpr std::size_t kFileCap = 5000;
         for (auto it = fs::recursive_directory_iterator(
                  root, fs::directory_options::skip_permission_denied, ec);
-             it != fs::recursive_directory_iterator() && cached.size() < cap
-                 && files_scanned < kFileCap;
+             it != fs::recursive_directory_iterator() && src.size() < kFileCap;
              it.increment(ec)) {
             if (ec) { ec.clear(); continue; }
             const auto& entry = *it;
             auto fn = entry.path().filename().string();
             const bool is_dir = entry.is_directory(ec);
             if (is_dir && tools::util::should_skip_dir(fn)) {
-                it.disable_recursion_pending();
-                continue;
+                it.disable_recursion_pending(); continue;
             }
             if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
-                it.disable_recursion_pending();
-                continue;
+                it.disable_recursion_pending(); continue;
             }
             if (is_dir) continue;
             if (!entry.is_regular_file(ec)) continue;
-            auto ext = entry.path().extension().string();
-            if (!is_source_ext(ext)) continue;
-            ++files_scanned;
-            if (!scan_file(root, entry.path(), cached, cap)) break;
+            if (!is_source_ext(entry.path().extension().string())) continue;
+            src.push_back(entry.path());
         }
-        std::sort(cached.begin(), cached.end(),
-                  [](const SymbolEntry& a, const SymbolEntry& b){
-                      return a.name < b.name;
-                  });
-    });
-    return cached;
+    }
+    if (src.empty()) return out;
+
+    // 2. Scan files in parallel — each worker builds a local vector, then
+    //    we merge. The regex pass is CPU-bound; fanning it out across cores
+    //    turns a multi-second cold scan into a fraction of it.
+    unsigned nthreads = std::thread::hardware_concurrency();
+    if (nthreads == 0) nthreads = 4;
+    nthreads = std::min<unsigned>(nthreads, 12);
+    nthreads = std::min<unsigned>(nthreads, (unsigned)src.size());
+
+    std::atomic<std::size_t> next{0};
+    std::vector<std::vector<SymbolEntry>> partials(nthreads);
+    {
+        std::vector<std::jthread> pool;
+        pool.reserve(nthreads);
+        for (unsigned t = 0; t < nthreads; ++t) {
+            pool.emplace_back([&, t] {
+                auto& local = partials[t];
+                for (;;) {
+                    std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= src.size()) return;
+                    if (local.size() >= cap) return;
+                    try { (void)scan_file(root, src[i], local, cap); }
+                    catch (...) { /* skip a file that trips the matcher */ }
+                }
+            });
+        }
+    }
+    for (auto& p : partials) {
+        for (auto& e : p) {
+            out.push_back(std::move(e));
+            if (out.size() >= cap) break;
+        }
+        if (out.size() >= cap) break;
+    }
+    std::sort(out.begin(), out.end(),
+              [](const SymbolEntry& a, const SymbolEntry& b){ return a.name < b.name; });
+    return out;
+}
+} // namespace
+
+void prewarm_workspace_symbols(std::size_t cap) {
+    bool expected = false;
+    if (!sym_building().compare_exchange_strong(expected, true)) return;
+    {
+        std::lock_guard<std::mutex> lk(sym_mu());
+        if (sym_cache()) { sym_building() = false; return; }
+    }
+    std::thread([cap] {
+        auto built = std::make_shared<std::vector<SymbolEntry>>(build_symbol_list(cap));
+        {
+            std::lock_guard<std::mutex> lk(sym_mu());
+            sym_cache() = std::move(built);
+        }
+        sym_building() = false;
+    }).detach();
+}
+
+bool symbols_ready() {
+    std::lock_guard<std::mutex> lk(sym_mu());
+    return static_cast<bool>(sym_cache());
+}
+
+const std::vector<SymbolEntry>& list_workspace_symbols(std::size_t cap) {
+    {
+        std::lock_guard<std::mutex> lk(sym_mu());
+        if (auto c = sym_cache()) return *c;
+    }
+    // Cold synchronous caller: build inline + publish.
+    auto built = std::make_shared<std::vector<SymbolEntry>>(build_symbol_list(cap));
+    std::lock_guard<std::mutex> lk(sym_mu());
+    if (!sym_cache()) sym_cache() = built;
+    return *sym_cache();
 }
 
 std::vector<std::size_t>

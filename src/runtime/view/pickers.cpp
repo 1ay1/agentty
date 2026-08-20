@@ -669,7 +669,7 @@ Element command_palette(const Model& m) {
     auto* o = opened(m.ui.command_palette);
     if (!o) return nothing();
 
-    auto matches = filtered_commands(o->query);
+    auto matches = filtered_commands(o->query, !m.s.update_latest.empty());
 
     Picker::Config cfg;
     cfg.title      = " Command Palette ";
@@ -742,13 +742,20 @@ Element mention_palette(const Model& m) {
     cfg.selected   = matches.empty() ? -1 : o->index;
 
     cfg.header.push_back(h(text("@", fg_bold(info)),
-        text(o->query.empty() ? " type to filter files…" : (" " + o->query),
+        text(o->query.empty() ? " your changed files first · type to filter…"
+                              : (" " + o->query),
              o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
     cfg.header.push_back(sep);
 
     if (o->files.empty()) {
-        cfg.items.push_back(text("  workspace empty (or no readable files)", fg_italic(muted)));
+        // Distinguish "still indexing" from "genuinely empty" — the walk
+        // runs on a background thread; if it hasn't landed the picker
+        // opened with an empty snapshot. files_ready() tells them apart.
+        cfg.items.push_back(text(
+            files_ready() ? "  workspace empty (or no readable files)"
+                          : "  indexing workspace… (type to filter as it fills)",
+            fg_italic(muted)));
     } else if (matches.empty()) {
         cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {
@@ -757,6 +764,18 @@ Element mention_palette(const Model& m) {
             const auto& path = o->files[matches[static_cast<std::size_t>(i)]];
             auto [name, dir] = split_name_dir(path);
             Picker::Config::Row row;
+            // Git-status badge — the working-set signal, colour-coded so the
+            // file you're editing is unmistakable at a glance. Padded to a
+            // fixed width so leading text aligns across rows.
+            if (auto tag = file_git_tag(path); tag != GitTag::None) {
+                auto label = git_tag_label(tag);
+                row.badge = "● " + std::string{label};
+                row.badge_style =
+                    tag == GitTag::Modified          ? fg_of(maya::Color::yellow())
+                  : tag == GitTag::Staged            ? fg_of(maya::Color::green())
+                  : tag == GitTag::Untracked         ? fg_of(info)
+                  : /* RecentlyCommitted */            fg_dim(muted);
+            }
             row.leading        = std::string{name};
             row.leading_style  = fg_of(fg);
             row.trailing       = parent_segment(dir);
@@ -799,7 +818,10 @@ Element symbol_palette(const Model& m) {
     cfg.header.push_back(sep);
 
     if (o->entries.empty()) {
-        cfg.items.push_back(text("  no symbols indexed", fg_italic(muted)));
+        cfg.items.push_back(text(
+            symbols_ready() ? "  no symbols indexed"
+                            : "  indexing symbols… (type to filter as it fills)",
+            fg_italic(muted)));
     } else if (matches.empty()) {
         cfg.items.push_back(text("  no matches", fg_italic(muted)));
     } else {

@@ -49,6 +49,15 @@ The **effect class** determines which permission profile auto-runs the tool. *Pu
 
 Each tool's effect set is declared at compile time and checked against the permission matrix via `static_assert`. A tool can't accidentally gain a side effect that the policy doesn't account for — the build catches it.
 
+## Parallel & speculative execution
+
+The effect classes above aren't just for permissions — they drive a scheduler that overlaps tool work to cut wall-clock time.
+
+- **Parallel batches.** When the model emits several tool calls in one turn, agentty runs the safe combinations *concurrently* and serializes only what genuinely conflicts. Two reads, a grep, and a web fetch all fire at once; a `write` waits for anything touching the same path, and a `bash` waits for exclusive access. The rule is a proven, effect- and path-aware invariant — a wide batch is never unsafe, so the model is encouraged to fan out.
+- **Speculative reads.** A pure *Read* tool starts the instant its arguments finish streaming — while the model is still writing the rest of the turn. Its I/O overlaps the remaining stream instead of waiting for the turn to finish, so a multi-tool turn hides seconds of file/search time inside the model's own generation. Read-only tools can't affect what the model is still saying, so this is always safe; anything that writes, executes, or hits the network waits for the normal end-of-turn scheduler.
+
+Neither behavior changes results — only when the work happens. You'll simply notice tool-heavy turns finishing faster.
+
 ## Extending the toolset
 
 The native tools are the floor, not the ceiling. Four mechanisms extend what the agent can do:

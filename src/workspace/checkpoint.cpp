@@ -174,34 +174,45 @@ void prune_old_checkpoints() {
 }
 
 // Repo-relative paths of every file recorded in the checkpoint tree.
+//
+// NEWLINE-separated, NOT -z: the subprocess runner scrubs terminal control
+// bytes from all captured output (strip_terminal_controls), and NUL is a
+// C0 control — every \0 separator was silently dropped, the parser found
+// no separators, and both listings came back EMPTY. Restore's delete-half
+// (remove files created after the checkpoint) never ran, and the summary
+// baseline was wrong. -c core.quotePath=false emits raw UTF-8 bytes (no
+// C-style quoting of non-ASCII names); a filename containing a NEWLINE is
+// still ambiguous in this format, so such entries are skipped defensively
+// (git quotes them even with quotePath=false, and a quoted entry starts
+// with '"' — filter those rather than mis-delete).
 bool snapshot_paths(const std::string& commit,
                     std::unordered_set<std::string>& out) {
-    // -z: NUL-separated, immune to quoting of unusual filenames.
-    auto r = run_git({"ls-tree", "-r", "-z", "--name-only", commit},
+    auto r = run_git({"-c", "core.quotePath=false",
+                      "ls-tree", "-r", "--name-only", commit},
                      16 * 1024 * 1024);
     if (!ok(r)) return false;
-    std::size_t start = 0;
-    while (start < r.output.size()) {
-        auto nul = r.output.find('\0', start);
-        if (nul == std::string::npos) break;
-        if (nul > start) out.emplace(r.output.substr(start, nul - start));
-        start = nul + 1;
+    std::istringstream in(r.output);
+    for (std::string line; std::getline(in, line); ) {
+        line = chomp(std::move(line));
+        if (line.empty() || line.front() == '"') continue;
+        out.emplace(std::move(line));
     }
     return true;
 }
 
-// Repo-relative paths of every CURRENT non-ignored file (tracked +
-// untracked, .gitignore respected) — the deletion candidate set.
+// Repo-relative paths of everything present in the worktree right now:
+// tracked (-c) plus untracked-but-not-ignored (-o --exclude-standard).
+// Same newline/quotePath rationale as snapshot_paths.
 bool current_paths(std::vector<std::string>& out) {
-    auto r = run_git({"ls-files", "-z", "-c", "-o", "--exclude-standard"},
+    auto r = run_git({"-c", "core.quotePath=false",
+                      "ls-files", "-c", "-o", "--exclude-standard"},
                      16 * 1024 * 1024);
     if (!ok(r)) return false;
-    std::size_t start = 0;
-    while (start < r.output.size()) {
-        auto nul = r.output.find('\0', start);
-        if (nul == std::string::npos) break;
-        if (nul > start) out.emplace_back(r.output.substr(start, nul - start));
-        start = nul + 1;
+    std::istringstream in(r.output);
+    for (std::string line; std::getline(in, line); ) {
+        line = chomp(std::move(line));
+        if (line.empty() || line.front() == '"') continue;
+        out.emplace_back(std::move(line));
     }
     return true;
 }

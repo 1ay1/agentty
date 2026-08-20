@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -515,6 +516,32 @@ int cli(const std::vector<std::string>& argv) {
         if (rest.size() < 2) return usage();
         ServerSpec spec;
         spec.name = rest[0];
+        // NAME VALIDATION. The server name becomes half of every projected
+        // tool identifier (`mcp__<server>__<tool>`) and a JSON object key.
+        // `__` inside it would make the server/tool split ambiguous; path
+        // separators / control bytes / an empty or giant name break the
+        // registry, provider APIs, or the config file itself. Reject early
+        // with an actionable message instead of writing a broken entry.
+        {
+            const std::string& n = spec.name;
+            auto bad = [&](const char* why) {
+                std::fprintf(stderr, "invalid plugin name '%s': %s\n"
+                             "names: 1-64 chars of [a-zA-Z0-9_-], no '__', "
+                             "must start with a letter or digit\n",
+                             n.c_str(), why);
+                return 1;
+            };
+            if (n.empty() || n.size() > 64)
+                return bad("must be 1-64 characters");
+            if (!std::isalnum(static_cast<unsigned char>(n.front())))
+                return bad("must start with a letter or digit");
+            for (unsigned char c : n)
+                if (!std::isalnum(c) && c != '_' && c != '-')
+                    return bad("contains a character outside [a-zA-Z0-9_-]");
+            if (n.find("__") != std::string::npos)
+                return bad("'__' is the server/tool separator in projected "
+                           "tool names (mcp__<server>__<tool>)");
+        }
         const std::string& recipe = rest[1];
         std::vector<std::string> tail(rest.begin() + 2, rest.end());
 
