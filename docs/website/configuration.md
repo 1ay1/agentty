@@ -56,6 +56,7 @@ agentty is configured through flags, environment variables, and two on-disk path
 | `BM25_USE_STEMMER / BM25_HEADING_BOOST` | Lexical tuning. Porter stemming ("run/runs/running" match) is **on by default**; set `BM25_USE_STEMMER=0` to disable (e.g. a code-symbol corpus). `BM25_HEADING_BOOST` (default 3) is how many times a chunk's heading breadcrumb is folded into its BM25 tokens — heading matches out-score body matches; 1 disables the boost. |
 | `AGENTTY_DEBUG_API / AGENTTY_DEBUG_FILE` | Set AGENTTY_DEBUG_API=1 to dump streaming provider events to AGENTTY_DEBUG_FILE. |
 | `AGENTTY_NO_TRANSFORMS` | Set to 1 to drop the transform/aggregate/structured-data tool family (`extract`, `aggregate`, `replace`, `read_filter`, `json_query`) — trims ~5 KB of tool schema off every request for a minimal or latency-sensitive profile, **without** losing `grep`/`read`/`edit`. On (family present) by default. |
+| `AGENTTY_TRACE_TOOLS` | Set to 1 to emit one `TOOL <name> <ok\|error>` line to **stderr** for each tool a headless `agentty run` (or subagent) executes — the stdout answer stays clean. Useful for debugging/scripting headless runs and for the agentic tool-selection evals. Off by default. |
 | `SSL_CERT_FILE / SSL_CERT_DIR / CURL_CA_BUNDLE` | Override the TLS root store agentty trusts (standard OpenSSL vars). |
 
 ### Smart Mode tuning

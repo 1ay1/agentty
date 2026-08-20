@@ -69,6 +69,18 @@ namespace mt  = ::mcp::tools;
 namespace fs  = std::filesystem;
 using json    = nlohmann::json;
 
+// AGENTTY_TRACE_TOOLS=1 — emit a `TOOL <name> <ok|error>` line to stderr for
+// each tool the headless agent loop executes. Read once (the env can't change
+// mid-process). Used by run_one_shot's runner and the Tier-2 agentic evals.
+[[nodiscard]] bool trace_tools_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("AGENTTY_TRACE_TOOLS");
+        return v && v[0] && v[0] != '0' && v[0] != 'f' && v[0] != 'F'
+                 && v[0] != 'n' && v[0] != 'N';
+    }();
+    return on;
+}
+
 // ── MemoryStore ────────────────────────────────────────────────────────
 //   Backs remember / forget / wipe. The shell owns the schema + dedup/pin/
 //   tag/supersede surface; this maps its requests onto agentty::tools::
@@ -1203,6 +1215,15 @@ public:
                     }
                     ran_a_tool = true;
                     auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
+                    // AGENTTY_TRACE_TOOLS=1 emits one machine-parseable line per
+                    // executed tool to STDERR (run/acp/mcp-serve keep stderr as
+                    // their diagnostic channel, so the stdout report stays
+                    // clean). Independently useful for debugging/scripting a
+                    // headless `agentty run`, and the observation hook the
+                    // Tier-2 agentic evals need to assert on tool SELECTION.
+                    if (trace_tools_enabled())
+                        std::fprintf(stderr, "TOOL %s %s\n", tc.name.value.c_str(),
+                                     res ? "ok" : "error");
                     if (res) {
                         // ECONOMY: a subagent is a focused, read-heavy burst
                         // (explorer/reviewer call read/grep/repo_map, whose
