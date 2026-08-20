@@ -40,6 +40,11 @@ struct Deps {
     std::function<void(const store::Settings&)> save_settings;
     std::function<ThreadId()>                    new_thread_id;
     std::function<std::string(std::string_view)> title_from;
+    // Persist a reviewed file's decided contents to disk. Used by diff-review
+    // when the user rejects hunks: the file is rewritten with only the
+    // ACCEPTED hunks kept (rejected ones reverted). (path, contents) — a
+    // small, user-initiated write, so it runs synchronously in the reducer.
+    std::function<void(const std::string&, const std::string&)> write_file;
 
     // ── Auth context (swapped live by update_auth / switch_provider) ─────
     // UI-THREAD readers may use this field directly (all writers run on the

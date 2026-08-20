@@ -253,7 +253,8 @@ void resync_live_tool_viewer(Model& m) {
 }
 
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::expected<std::string, tools::ToolError>&& result) {
+                       std::expected<std::string, tools::ToolError>&& result,
+                       std::optional<FileChange>&& change) {
     with_live_tool(m, id, [&](ToolUse& tc) {
         // Idempotent: a tool already in a terminal state
         // (Done / Failed / Rejected) keeps that state. Realistic
@@ -294,7 +295,24 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         }
         release_streaming_buffers(tc);
     });
-    // A tool reaching a terminal state SWAPS its card body from the
+    // Queue the structured change (edit / write / apply_patch / replace) for
+    // diff-review. DEDUP per file: successive edits to the SAME path collapse
+    // into one review entry showing net original→latest (not a stack of
+    // intermediate diffs), so the pane reads as "here's what changed in
+    // login.cpp", not five overlapping hunks. Only queue on success — a failed
+    // tool wrote nothing.
+    if (change && result) {
+        auto& q = m.d.pending_changes;
+        auto it = std::ranges::find(q, change->path, &FileChange::path);
+        if (it != q.end()) {
+            // Recompute the net diff from the ORIGINAL (first-seen) contents
+            // to the newest, so the entry always reflects the whole journey.
+            std::string original = it->original_contents;
+            *it = diff::compute(change->path, original, change->new_contents);
+        } else {
+            q.push_back(std::move(*change));
+        }
+    }
     // running spinner into the full output/error body — the card's
     // rendered height changes at this instant (a Failed card in
     // particular grows by its error rows). If that height change shifts
@@ -446,7 +464,7 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                         if (tc.id == e.id && tc.name == "todo")
                             sync_todo_state_from_args(m, tc.args);
             }
-            apply_tool_output(m, e.id, std::move(e.result));
+            apply_tool_output(m, e.id, std::move(e.result), std::move(e.change));
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);
