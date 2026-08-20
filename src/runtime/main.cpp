@@ -627,6 +627,7 @@ int main(int argc, char** argv) {
     app::install_deps(app::Deps{
         .stream        = stream_fn,
         .save_thread   = [&store](const Thread& t) { store.save_thread(t); },
+        .delete_thread = [&store](const ThreadId& id) { store.delete_thread(id); },
         .load_threads  = [&store] { return store.load_threads(); },
         .load_thread   = [&store](const ThreadId& id) { return store.load_thread(id); },
         .load_settings = [&store] { return store.load_settings(); },

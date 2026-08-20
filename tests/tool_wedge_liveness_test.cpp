@@ -91,6 +91,7 @@ TEST_CASE("tool wedge liveness") {
     app::install_deps(app::Deps{
         .stream        = [](provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
+        .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },
         .load_thread   = [](const ThreadId&) { return std::optional<Thread>{}; },
         .load_settings = [] { return store::Settings{}; },

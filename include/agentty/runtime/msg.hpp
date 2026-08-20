@@ -385,6 +385,12 @@ struct ThreadListMove { int delta; };
 // Absolute-jump nav for long thread histories. See ModelPickerJump.
 struct ThreadListJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ThreadListSelect {};
+// `d` / `D` in the thread picker — two-press delete with confirm_remove.
+// Mirrors the established SettingsListRemove / AccountRemove pattern:
+// first press marks the focused thread as pending-delete (⚠ badge),
+// second press on the SAME row commits via persistence::delete_thread().
+// Any move/select/new/close disarms the pending state.
+struct ThreadListDelete {};
 // Quick-cycle: switch to the adjacent thread (by recency order, the
 // same order the ^J picker shows) WITHOUT opening the picker. delta is
 // applied to the thread-list index: +1 = older, -1 = newer; wraps at
@@ -801,7 +807,7 @@ using ProviderPickerMsg = std::variant<
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
-    ThreadListSelect, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
+    ThreadListSelect, ThreadListDelete, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
 
 using CommandPaletteMsg = std::variant<
     OpenCommandPalette, CloseCommandPalette, CommandPaletteInput,

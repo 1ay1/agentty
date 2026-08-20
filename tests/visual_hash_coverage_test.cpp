@@ -180,6 +180,11 @@ const std::vector<Axis>& visual_axes() {
         {"thread_list cursor move", [](Model& m) {
             m.ui.thread_list = agentty::ui::pick::OpenAt{4};
         }},
+        {"thread_list delete confirm", [](Model& m) {
+            auto o = agentty::ui::pick::OpenAt{2};
+            o.confirm_remove = "abc123";
+            m.ui.thread_list = std::move(o);
+        }},
         {"diff_review opens at cell", [](Model& m) {
             m.ui.diff_review = agentty::ui::pick::OpenAtCell{0, 0};
         }},

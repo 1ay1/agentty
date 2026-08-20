@@ -108,6 +108,7 @@ public:
         return std::move(*loaded);
     }
     void save_thread(const Thread& t)            { persistence::save_thread(t); }
+    void delete_thread(const ThreadId& id)         { persistence::delete_thread(id); }
     [[nodiscard]] store::Settings load_settings()          { return persistence::load_settings(); }
     void save_settings(const store::Settings& s) { persistence::save_settings(s); }
     [[nodiscard]] ThreadId new_id()              { return persistence::new_id(); }

@@ -536,6 +536,7 @@ Element thread_list(const Model& m) {
         int i = 0;
         for (const auto& t : m.d.threads) {
             const bool is_current = (t.id == m.d.current.id);
+            const bool confirming = (picker->confirm_remove == t.id.value);
             Picker::Config::Row row;
             // "● " marks the thread you're IN — the anchor for both the
             // picker and the ^←→ / Alt+←→ quick-cycle. Non-current rows
@@ -543,8 +544,16 @@ Element thread_list(const Model& m) {
             row.leading        = (is_current ? "\xe2\x97\x8f " : "  ")
                                + (t.title.empty() ? "(untitled)" : t.title);
             row.leading_style  = is_current ? fg_bold(info) : fg_of(muted);
-            row.trailing       = timestamp_full(t.updated_at);
-            row.trailing_style = fg_dim(muted);
+            if (confirming) {
+                row.badge       = "\xe2\x9a\xa0";           // ⚠
+                row.badge_style = fg_of(warn);
+                row.leading_style = fg_bold(warn);
+                row.trailing       = "press d again to confirm";
+                row.trailing_style = fg_of(warn);
+            } else {
+                row.trailing       = timestamp_full(t.updated_at);
+                row.trailing_style = fg_dim(muted);
+            }
             row.selected = (i == picker->index);
             cfg.rows.push_back(std::move(row));
             ++i;
@@ -565,6 +574,7 @@ Element thread_list(const Model& m) {
         {"PgUp/PgDn", "page", 2},
         {"Enter", "open", 5},
         {"N", "new", 3},
+        {"D", picker->confirm_remove.empty() ? "remove" : "confirm", 3},
         {"^/Alt+\xe2\x86\x90\xe2\x86\x92", "cycle", 1},   // ^←→ / Alt+←→
         {"Esc", "close", 4},
     }));
