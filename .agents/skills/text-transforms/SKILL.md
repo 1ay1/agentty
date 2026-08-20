@@ -27,6 +27,7 @@ this one spot" (that's `edit`).
 | Read **one concern** out of a big file | `read_filter` | reading it whole |
 | Find where something *is* | `grep` | — |
 | Change a code *shape* (calls, control flow) | `rewrite_structural` | `replace` |
+| Apply a **unified diff** you already have | `apply_patch` | many `edit`s |
 | Change **one** spot | `edit` | `replace` |
 
 ## extract — project each match to a value
