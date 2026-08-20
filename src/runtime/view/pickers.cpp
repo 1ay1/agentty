@@ -758,6 +758,8 @@ Element command_palette(const Model& m) {
             std::string label{cmd.label};
             if (cmd.id == Command::SmartMode)
                 label += m.d.smart.enabled ? "  (on)" : "  (off)";
+            else if (cmd.id == Command::ToggleChangesStrip)
+                label += m.d.show_changes_strip ? "  (shown)" : "  (hidden)";
             row.leading = std::move(label);
             row.leading_style = cmd.danger ? fg_of(danger) : fg_of(fg);
             // Highlight the fuzzy-matched characters (Raycast-style) so the

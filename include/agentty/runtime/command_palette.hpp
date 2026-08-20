@@ -21,6 +21,7 @@ namespace agentty {
 enum class Command : std::uint8_t {
     NewThread,
     ReviewChanges,
+    ToggleChangesStrip,
     AcceptAll,
     RejectAll,
     CycleProfile,
@@ -88,6 +89,7 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::RewindCheckpoint,"Rewind to checkpoint","Restore files + conversation to any earlier turn", "", Category::Thread, /*danger=*/true},
     // ── Changes ─────────────────────────────────────────────────────────
     CommandDef{Command::ReviewChanges, "Review changes",     "Open the diff review pane", "Ctrl+R", Category::Changes},
+    CommandDef{Command::ToggleChangesStrip, "Changes strip",   "Show / hide the persistent \"N changes\" banner after edits", "", Category::Changes},
     CommandDef{Command::AcceptAll,     "Accept all changes", "Apply every pending hunk", "", Category::Changes},
     CommandDef{Command::RejectAll,     "Reject all changes", "Discard every pending hunk", "", Category::Changes, /*danger=*/true},
     // ── Go (navigate) ───────────────────────────────────────────────────

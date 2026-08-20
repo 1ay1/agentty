@@ -21,7 +21,8 @@ using namespace agentty;
 
 // Every enum value, so we can assert the catalog covers each exactly once.
 static constexpr std::array kAll = {
-    Command::NewThread, Command::ReviewChanges, Command::AcceptAll,
+    Command::NewThread, Command::ReviewChanges, Command::ToggleChangesStrip,
+    Command::AcceptAll,
     Command::RejectAll, Command::CycleProfile, Command::OpenModels,
     Command::OpenProviders, Command::OpenThreads, Command::OpenPlan,
     Command::RunCodeBlock, Command::InspectToolOutputs, Command::CompactContext,

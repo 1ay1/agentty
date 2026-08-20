@@ -180,6 +180,11 @@ struct Model {
         smart::RoleConfig      smart;
 
         std::vector<FileChange>          pending_changes;
+        // Whether the persistent "N changes" review strip renders after edits.
+        // Loaded from Settings at startup; toggled live via the palette. When
+        // off, edits still queue in pending_changes (Ctrl+R opens the pane),
+        // just without the always-on banner.
+        bool                             show_changes_strip = true;
         std::optional<PendingPermission> pending_permission;
 
         // Session-scoped "always allow" grants, keyed by tool name

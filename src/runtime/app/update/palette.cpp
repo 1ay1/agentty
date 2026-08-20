@@ -14,6 +14,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/code_block_picker.hpp"
 #include "agentty/domain/routing_memory.hpp"
 #include "agentty/domain/decomposition_memory.hpp"
@@ -87,6 +88,16 @@ template <class T, class V>
         add(Command::RewindCheckpoint, emit<OpenCheckpointPicker>());
         // ── Changes ──
         add(Command::ReviewChanges,    emit<OpenDiffReview>());
+        add(Command::ToggleChangesStrip, [](Model m) -> Step {
+            m.d.show_changes_strip = !m.d.show_changes_strip;
+            // Persist so it survives restarts.
+            auto s = deps().load_settings();
+            s.show_changes_strip = m.d.show_changes_strip;
+            deps().save_settings(s);
+            auto cmd = set_status_toast(m, m.d.show_changes_strip
+                ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
+            return {std::move(m), std::move(cmd)};
+        });
         add(Command::AcceptAll,        emit<AcceptAllChanges>());
         add(Command::RejectAll,        emit<RejectAllChanges>());
         // ── Go ──
