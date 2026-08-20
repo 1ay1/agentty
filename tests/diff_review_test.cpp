@@ -180,6 +180,22 @@ int main() {
         check(w.find("\n15\n") != std::string::npos, "rejected line restored to 15");
     }
 
+    // ── submitting a new message clears the review window ──────────────
+    // The strip covers ONE window (agent-edits → your next message); moving on
+    // implicitly accepts, so the queue must not linger across turns.
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("z.txt", before, after));
+        check(!m.d.pending_changes.empty(), "queued before submit");
+        m.ui.composer.text = "next question";
+        auto s = detail::submit_message(std::move(m));
+        check(s.first.d.pending_changes.empty(),
+              "submitting a new message clears the pending-changes queue");
+    }
+
     if (g_fail == 0) std::println("diff_review_test: OK");
     return g_fail ? 1 : 0;
 }
