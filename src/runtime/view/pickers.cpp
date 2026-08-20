@@ -768,28 +768,19 @@ Element command_palette(const Model& m) {
                 row.highlight_fg = cmd.danger ? danger : highlight;
             }
 
-            // ── Trailing: description · shortcut (teaches the fast path) ──
-            // The LABEL is what you select, so it must never lose the space
-            // fight to the description (the shared Picker row shrinks the
-            // leading cell 3× faster). Cap the description to a short budget
-            // and always keep the shortcut. Truncate on a UTF-8 codepoint
-            // boundary — a byte-resize would split a multibyte char (→ mojibake).
-            std::string desc{cmd.description};
-            constexpr std::size_t kDescCap = 44;
-            if (desc.size() > kDescCap) {
-                std::size_t cut = kDescCap - 1;
-                while (cut > 0 && (static_cast<unsigned char>(desc[cut]) & 0xC0) == 0x80)
-                    --cut;   // back up off a UTF-8 continuation byte
-                desc.resize(cut);
-                desc += "\xe2\x80\xa6";   // …
-            }
-            std::string trailing = std::move(desc);
+            // ── Trailing: description · shortcut. The LABEL is what you
+            // select, so mark the trailing SECONDARY — the widget shrinks it
+            // first and keeps a gap, so on a narrow (phone/SSH) terminal the
+            // description gracefully truncates (then vanishes) while the label
+            // and shortcut stay whole, instead of the label being eaten.
+            std::string trailing{cmd.description};
             if (cmd.shortcut && *cmd.shortcut) {
                 trailing += "  \xc2\xb7  ";
                 trailing += cmd.shortcut;
             }
-            row.trailing       = std::move(trailing);
-            row.trailing_style = fg_dim(muted);
+            row.trailing           = std::move(trailing);
+            row.trailing_style     = fg_dim(muted);
+            row.trailing_secondary = true;
             row.selected = (i == o->index);
             if (i == o->index) sel_display = display_row;
             cfg.rows.push_back(std::move(row));
