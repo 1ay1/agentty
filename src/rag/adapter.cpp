@@ -623,7 +623,14 @@ Config Config::from_env() {
     c.dense_weight = env_float("AGENTTY_RAG_DENSE_WEIGHT", 1.0f);
     c.bm25_weight  = env_float("AGENTTY_RAG_BM25_WEIGHT", 1.0f);
     // Proactive / "fork" behaviour (consumed by the tools backend).
-    c.proactive          = truthy_default_on("AGENTTY_RAG_PROACTIVE");
+    // Pre-turn injection is an EXPLICIT opt-in: it spends model-context
+    // tokens before every knowledge-shaped turn without the user asking,
+    // so it defaults OFF (matching the docs + proactive_enabled()'s
+    // "explicit opt-in" contract + the mcp_tools_backends header). The
+    // user turns it on via the Ctrl+K → RAG picker (persisted, which sets
+    // configured=true so this env default no longer governs) or
+    // AGENTTY_RAG_PROACTIVE=1 for a one-off run.
+    c.proactive          = truthy_default_off("AGENTTY_RAG_PROACTIVE");
     c.proactive_min_conf = static_cast<double>(env_float("AGENTTY_RAG_PROACTIVE_MIN", 0.35f));
     c.proactive_bytes    = static_cast<int>(env_float("AGENTTY_RAG_PROACTIVE_BYTES", 6144.0f));
     return c;
