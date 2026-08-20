@@ -305,6 +305,13 @@ struct RetryStream {};
 struct ToolExecOutput {
     ToolCallId id;
     std::expected<std::string, tools::ToolError> result;
+    // Structured filesystem mutation a file-touching tool (edit / write /
+    // apply_patch / replace) returns alongside its text; std::nullopt for
+    // every other tool. The reducer appends it to m.d.pending_changes so the
+    // diff-review pane (Ctrl+R) can walk / accept / reject the hunks before
+    // they're kept. Decoded from the tool's FileChange meta in the mcp bridge
+    // (decode_result), which rebuilds structured hunks via diff::compute.
+    std::optional<FileChange> change;
 };
 // Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can

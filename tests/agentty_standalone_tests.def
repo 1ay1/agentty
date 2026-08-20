@@ -8,6 +8,7 @@
 FOLD_NOARGS(fork_test)
 FOLD_NOARGS(palette_render_probe)
 FOLD_NOARGS(thread_delete_test)
+FOLD_NOARGS(diff_review_test)
 FOLD_NOARGS(cross_process_lock_test)
 FOLD_NOARGS(reveal_freeze_gate_probe)
 FOLD_NOARGS(toolset_e2e_test)

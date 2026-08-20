@@ -634,6 +634,12 @@ int main(int argc, char** argv) {
         .save_settings = [&store](const store::Settings& x) { store.save_settings(x); },
         .new_thread_id = [&store] { return store.new_id(); },
         .title_from    = [&store](std::string_view t) { return store.title_from(t); },
+        .write_file    = [](const std::string& path, const std::string& contents) {
+            // Diff-review reject: rewrite the file with only accepted hunks
+            // kept. Best-effort — an error is surfaced by the next read, and
+            // the review already applied its decision in-model.
+            (void)tools::util::write_file(std::filesystem::path{path}, contents);
+        },
         .auth          = provider_auth,
     });
 
