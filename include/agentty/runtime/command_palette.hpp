@@ -14,6 +14,8 @@
 #include <variant>
 #include <vector>
 
+#include "agentty/runtime/fuzzy.hpp"
+
 namespace agentty {
 
 enum class Command : std::uint8_t {
@@ -139,51 +141,11 @@ struct PaletteContext {
 }
 
 // ── Fuzzy matcher ────────────────────────────────────────────────────
-// A SCORED subsequence match against a command's LABEL (the thing you're
-// selecting), tuned so "re" → Review / Reject / Rewind, not "New th-re-ad".
-// Rewards word-boundary hits (acronym typing: "rcb" → Run Code Block),
-// consecutive runs, and a leading-prefix; rejects a non-subsequence. Returns
-// the matched LABEL character offsets so the view can highlight them.
-struct LabelMatch {
-    int              score = INT_MIN;    // higher = better; INT_MIN = no match
-    std::vector<int> positions;          // matched byte offsets into the label
-    [[nodiscard]] bool matched() const noexcept { return score != INT_MIN; }
-};
-
-[[nodiscard]] inline bool palette_word_boundary(std::string_view s, std::size_t i) noexcept {
-    if (i == 0) return true;
-    char p = s[i - 1];
-    return p == ' ' || p == '-' || p == '/' || p == '_' || p == '(';
-}
-
-// `needle` must already be lowercased.
-[[nodiscard]] inline LabelMatch fuzzy_label(std::string_view label,
-                                            std::string_view needle) {
-    LabelMatch m;
-    if (needle.empty()) { m.score = 0; return m; }
-    if (needle.size() > label.size()) return m;
-    auto lc = [](char c){ return static_cast<char>(std::tolower((unsigned char)c)); };
-
-    int score = 0, skipped = 0;
-    std::size_t li = 0, ni = 0;
-    bool prev = false;
-    m.positions.reserve(needle.size());
-    while (ni < needle.size() && li < label.size()) {
-        if (lc(label[li]) == needle[ni]) {
-            score += 16;
-            if (prev)                              score += 18;  // consecutive run
-            if (palette_word_boundary(label, li))  score += 30;  // acronym / word start
-            if (li == 0)                           score += 25;  // leading prefix
-            m.positions.push_back(static_cast<int>(li));
-            prev = true; ++ni; ++li;
-        } else { prev = false; ++skipped; ++li; }
-    }
-    if (ni < needle.size()) return {};        // not a subsequence of the label
-    score -= skipped;                          // mild gap penalty
-    if (label.size() == needle.size()) score += 40;   // exact label
-    m.score = score;
-    return m;
-}
+// Command LABELS are scored with the shared subsequence matcher (fuzzy.hpp)
+// so the palette ranks the way every other picker does: "re" → Review /
+// Reject / Rewind (label prefixes), not "New th-re-ad" (a "re" buried in a
+// description). Description/shortcut/category hits are kept but ranked below
+// every label hit.
 
 // Case-insensitive substring test over a field (description / shortcut /
 // category) — used only to KEEP a row whose label didn't match, ranked below
@@ -219,7 +181,7 @@ match_commands(std::string_view query, PaletteContext ctx) {
         if (!command_visible(cmd, ctx)) continue;
         if (needle.empty()) { out.push_back({&cmd, 0, {}}); continue; }
 
-        LabelMatch lm = fuzzy_label(cmd.label, needle);
+        fuzzy::Match lm = fuzzy::score(cmd.label, needle);
         if (lm.matched()) {
             out.push_back({&cmd, lm.score + 1000, std::move(lm.positions)});
         } else if (field_contains(cmd.description, needle)
