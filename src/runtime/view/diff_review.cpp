@@ -125,9 +125,8 @@ Element diff_review(const Model& m) {
     // so "reject" / "none" never read like "accept". Uses the shared key_hints
     // strip (drops low-priority hints first when the pane is narrow).
     rows.push_back(key_hints({
-        {"\xe2\x86\x91\xe2\x86\x93", "hunk", 6},                       // ↑↓
-        {"\xe2\x86\x90\xe2\x86\x92", "file", 5,
-            m.d.pending_changes.size() > 1 ? fg : muted},              // ←→
+        {"j/k", "hunk", 6},
+        {"h/l", "file", 5, m.d.pending_changes.size() > 1 ? fg : muted},
         {"Y", "accept", 7, success},
         {"N", "reject", 7, danger},
         {"A", "all",    4, success},
