@@ -721,45 +721,72 @@ Element command_palette(const Model& m) {
                              : "  no command matches \"" + o->query + "\"",
             fg_italic(muted)));
     } else {
-        // Pad every badge to a common width so the label column aligns into a
-        // clean vertical edge — same discipline as the code-block / tool-output
-        // pickers.
-        int badge_w = 0;
-        for (const auto* c : matches) {
-            auto lab = category_label(c->category);
-            if (!lab.empty())
-                badge_w = std::max(badge_w, string_width(std::string{lab}) + 2);
-        }
+        cfg.rows.reserve(matches.size() + 6);
+        // On the EMPTY query we render real SECTION HEADERS between category
+        // groups — true nesting, VS Code / Raycast style. The moment the user
+        // types, headers vanish and the list goes flat-with-ranking (empty
+        // categories would be noise, and label-hit ranking reorders anyway).
+        // Headers are non-selectable rows; the cursor (o->index) indexes the
+        // header-FREE `matches`, so we only set Row::selected on real rows and
+        // point cfg.selected at the header-adjusted display position — the
+        // reducer/dispatch stay entirely header-unaware.
+        const bool show_headers = o->query.empty();
+        Category   last_cat     = Category::General;
+        bool       first_group  = true;
+        int        display_row  = 0;   // position INCLUDING headers, for scroll
+        int        sel_display  = -1;
 
-        cfg.rows.reserve(matches.size());
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
+
+            if (show_headers && (first_group || cmd.category != last_cat)) {
+                if (auto lab = category_label(cmd.category); !lab.empty()) {
+                    Picker::Config::Row hdr;
+                    hdr.is_header     = true;
+                    // Uppercased section name — the classic palette group-header
+                    // look, distinct from the title-case command rows below it.
+                    std::string up{lab};
+                    for (char& ch : up) ch = static_cast<char>(std::toupper(
+                        static_cast<unsigned char>(ch)));
+                    hdr.leading       = std::move(up);
+                    hdr.leading_style = fg_of(category_hue(cmd.category));
+                    cfg.rows.push_back(std::move(hdr));
+                    ++display_row;
+                }
+                last_cat    = cmd.category;
+                first_group = false;
+            }
+
             Picker::Config::Row row;
 
-            // ── Category badge (hue-stable identity) ──
-            if (auto lab = category_label(cmd.category); !lab.empty()) {
-                std::string bd = " " + std::string{lab} + " ";
-                if (int bw = string_width(bd); bw < badge_w)
-                    bd.append(static_cast<std::size_t>(badge_w - bw), ' ');
-                row.badge       = std::move(bd);
-                row.badge_style = cmd.danger ? fg_dim(danger)
-                                             : fg_dim(category_hue(cmd.category));
-            } else if (badge_w > 0) {
-                // Keep General rows aligned under the badged ones.
-                row.badge = std::string(static_cast<std::size_t>(badge_w), ' ');
-            }
+            // Category is carried by the SECTION HEADER on the empty query and
+            // is implicit once you've filtered by intent, so we don't spend a
+            // badge column on it — the label + description get the full width,
+            // which keeps long labels ("Rewind to checkpoint") legible.
 
             // ── Label, with live toggle/mode state folded in ──
             std::string label{cmd.label};
             if (cmd.id == Command::SmartMode)
                 label += m.d.smart.enabled ? "  (on)" : "  (off)";
             row.leading = std::move(label);
-            // Destructive actions read in the danger hue so "Reject all" /
-            // "Rewind" / "Sign out" never look identical to a benign row.
             row.leading_style = cmd.danger ? fg_of(danger) : fg_of(fg);
 
             // ── Trailing: description · shortcut (teaches the fast path) ──
-            std::string trailing{cmd.description};
+            // The LABEL is what you select, so it must never lose the space
+            // fight to the description (the shared Picker row shrinks the
+            // leading cell 3× faster). Cap the description to a short budget
+            // and always keep the shortcut. Truncate on a UTF-8 codepoint
+            // boundary — a byte-resize would split a multibyte char (→ mojibake).
+            std::string desc{cmd.description};
+            constexpr std::size_t kDescCap = 44;
+            if (desc.size() > kDescCap) {
+                std::size_t cut = kDescCap - 1;
+                while (cut > 0 && (static_cast<unsigned char>(desc[cut]) & 0xC0) == 0x80)
+                    --cut;   // back up off a UTF-8 continuation byte
+                desc.resize(cut);
+                desc += "\xe2\x80\xa6";   // …
+            }
+            std::string trailing = std::move(desc);
             if (cmd.shortcut && *cmd.shortcut) {
                 trailing += "  \xc2\xb7  ";
                 trailing += cmd.shortcut;
@@ -767,8 +794,12 @@ Element command_palette(const Model& m) {
             row.trailing       = std::move(trailing);
             row.trailing_style = fg_dim(muted);
             row.selected = (i == o->index);
+            if (i == o->index) sel_display = display_row;
             cfg.rows.push_back(std::move(row));
+            ++display_row;
         }
+        // Scroll tracks the header-adjusted cursor position.
+        cfg.selected = sel_display;
     }
 
     cfg.footer.push_back(text(""));
