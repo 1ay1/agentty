@@ -18,6 +18,8 @@
 
 #include <mcp/tools/toolset.hpp>
 #include <mcp/tools/host.hpp>
+
+#include <cstdlib>   // std::getenv
 #include <mcp/tools/meta.hpp>
 #include <mcp/tools/util/fs_helpers.hpp>
 #include <mcp/tools/util/progress.hpp>
@@ -321,6 +323,13 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     install_host_backends(svc);
 
     mt::ToolsetConfig cfg;   // all Tier-1 families on by default
+    // AGENTTY_NO_TRANSFORMS=1 sheds the transform/aggregate/structured-data
+    // family (extract/aggregate/replace/read_filter/json_query) — ~5 KB of
+    // schema off every request — for a minimal or latency-sensitive profile,
+    // WITHOUT losing grep/read/edit. Mirrors AGENTTY_NO_HOOKS's convention.
+    if (const char* v = std::getenv("AGENTTY_NO_TRANSFORMS");
+        v && v[0] && v[0] != '0' && v[0] != 'f' && v[0] != 'F' && v[0] != 'n' && v[0] != 'N')
+        cfg.transforms = false;
     auto provider = mt::make_provider(svc, cfg, "local");
     ka.provider = provider;
 
