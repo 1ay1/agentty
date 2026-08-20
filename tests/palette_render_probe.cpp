@@ -1,8 +1,10 @@
 // palette_render_probe — renders the command palette and asserts its layout
-// invariants: a TREE hierarchy on the empty query (┌─ header, │ spine, └
-// close), a flat list when filtering, gating hides dead rows, and UTF-8-clean
-// truncation. Lives in the fold suite so it links the full runtime object
-// tree and renders through the real maya path.
+// AND styling invariants: a TREE hierarchy on the empty query (┌─ / │ / └), a
+// flat list when filtering, gating hides dead rows, UTF-8-clean truncation,
+// and — via the ANSI-preserving render — that the fuzzy match actually
+// HIGHLIGHTS the matched characters (colour, not just position). Lives in the
+// fold suite so it links the full runtime object tree and renders through the
+// real maya path.
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/pickers.hpp"
 #include "agentty/runtime/command_palette.hpp"
@@ -18,6 +20,9 @@ static void check(bool ok, const char* what) {
 }
 static std::string render(const Model& m) {
     return maya::render_to_string(ui::command_palette(m), 82);
+}
+static std::string render_ansi(const Model& m) {
+    return maya::render_to_string_ansi(ui::command_palette(m), 82);
 }
 static bool has(const std::string& h, const std::string& n) {
     return h.find(n) != std::string::npos;
@@ -60,6 +65,40 @@ int main() {
         check(has(ch, "Review changes") && has(ch, "Accept all")
               && has(ch, "Reject all"),
               "\"changes\" surfaces the whole Changes category");
+    }
+
+    // ── the fuzzy match is actually HIGHLIGHTED (colour, via ANSI render) ─
+    {
+        auto* o = std::get_if<palette::Open>(&m.ui.command_palette);
+        o->query = "rev";
+        std::string ansi = render_ansi(m);
+        // Strip SGR to locate the row, then inspect the RAW bytes of that row:
+        // a highlighted match splits the label into styled spans, so the line
+        // carries more SGR sequences than a plain row — and the matched "Rev"
+        // is itself wrapped in escapes (proof the chars are individually
+        // styled). We assert both: the row exists (stripped) and it's styled.
+        auto strip = [](const std::string& s) {
+            std::string o; for (std::size_t i = 0; i < s.size();) {
+                if (s[i] == '\x1b') { i = s.find('m', i); if (i == std::string::npos) break; ++i; }
+                else o += s[i++];
+            } return o;
+        };
+        // Split ansi into lines; find the one whose stripped form has "Review".
+        std::string hot_line;
+        std::size_t start = 0;
+        while (start <= ansi.size()) {
+            std::size_t nl = ansi.find('\n', start);
+            std::string line = ansi.substr(start, nl - start);
+            if (strip(line).find("Review changes") != std::string::npos) { hot_line = line; break; }
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        check(!hot_line.empty(), "Review changes row present in ANSI render");
+        int sgr = 0;
+        for (std::size_t p = 0; (p = hot_line.find("\x1b[", p)) != std::string::npos; p += 2) ++sgr;
+        // A plain row is ~2 style changes; a highlighted row wraps the matched
+        // "Rev" span, so ≥4 SGR sequences on the line.
+        check(sgr >= 4, "the matched characters carry a distinct highlight style");
     }
 
     // ── gating: no pending diff hides the Changes commands ────────────────

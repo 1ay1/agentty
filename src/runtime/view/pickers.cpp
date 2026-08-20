@@ -244,18 +244,36 @@ Element model_picker(const Model& m) {
     ).build());
     cfg.header.push_back(sep);
 
-    // Build the filtered index list. Matches the DISPLAY name or the RAW id
-    // (case-insensitive substring): users paste/remember wire ids like
-    // `claude-sonnet-4-5`, and the prettified label alone ("Claude Sonnet
-    // 4.5") would never contain that spelling.
-    std::vector<int> vis;
-    vis.reserve(m.d.available_models.size());
+    // Build the filtered + RANKED index list. We fuzzy-score the display name
+    // and the raw id (users paste wire ids like `claude-sonnet-4-5`, which the
+    // prettified label never contains) and keep the better of the two, so
+    // "s4" floats "claude-sonnet-4-5" up and "which chars matched" can be
+    // highlighted. Empty query → catalog order (score 0, no positions).
+    struct Vis { int idx; int score; std::vector<int> pos; bool pos_on_label; };
+    std::vector<Vis> vscored;
+    vscored.reserve(m.d.available_models.size());
+    const std::string q = picker->query;
     for (int i = 0; i < static_cast<int>(m.d.available_models.size()); ++i) {
         const auto& cand = m.d.available_models[static_cast<std::size_t>(i)];
-        if (pick::fuzzy_contains(cand.display_name, picker->query)
-            || pick::fuzzy_contains(cand.id.value, picker->query))
-            vis.push_back(i);
+        const std::string shown = (cand.display_name == cand.id.value)
+                                      ? pretty_model_label(cand.id.value)
+                                      : cand.display_name;
+        if (q.empty()) { vscored.push_back({i, 0, {}, true}); continue; }
+        auto ml = fuzzy::score(shown, q);
+        auto il = fuzzy::score(cand.id.value, q);
+        if (!ml.matched() && !il.matched()) continue;
+        // Prefer highlighting on the visible label; fall back to id score.
+        if (ml.score >= il.score)
+            vscored.push_back({i, ml.score, std::move(ml.positions), true});
+        else
+            vscored.push_back({i, il.score, {}, true});   // matched via id only
     }
+    if (!q.empty())
+        std::stable_sort(vscored.begin(), vscored.end(),
+            [](const Vis& a, const Vis& b){ return a.score > b.score; });
+    std::vector<int> vis;
+    vis.reserve(vscored.size());
+    for (const auto& v : vscored) vis.push_back(v.idx);
 
     if (m.d.available_models.empty()) {
         cfg.items.push_back(text(
@@ -283,6 +301,16 @@ Element model_picker(const Model& m) {
                                      ? pretty_model_label(mi.id.value)
                                      : mi.display_name;
             row.leading_style  = active ? fg_bold(fg) : fg_of(muted);
+            // Light up the fuzzy-matched characters of the label (when the
+            // match was on the label, not the raw id) so the ranking is
+            // legible — typing "son4" glows the s-o-n…4 in "Claude Sonnet 4.5".
+            if (!q.empty()) {
+                const auto& vp = vscored[static_cast<std::size_t>(vi)];
+                if (vp.pos_on_label) {
+                    row.highlight    = vp.pos;
+                    row.highlight_fg = highlight;
+                }
+            }
             // Trailing: context window · favourite star · reasoning-effort
             // tier (highlighted row only, ←/→ cycles). The window is the one
             // spec that differentiates otherwise-similar rows (a 1M-context
@@ -894,6 +922,14 @@ Element mention_palette(const Model& m) {
             }
             row.leading        = std::string{name};
             row.leading_style  = fg_of(fg);
+            // Light up the matched characters of the filename so the fuzzy
+            // rank is legible (re-score the name in-view against the query;
+            // the workspace scorer ranks but doesn't return positions).
+            if (!o->query.empty()) {
+                auto fm = fuzzy::score(name, o->query);
+                if (fm.matched()) { row.highlight = std::move(fm.positions);
+                                    row.highlight_fg = highlight; }
+            }
             row.trailing       = parent_segment(dir);
             row.trailing_style = fg_dim(muted);
             row.selected = (i == o->index);
@@ -952,6 +988,13 @@ Element symbol_palette(const Model& m) {
             row.leading        = sym.name + "  " + std::string{fname}
                                + ":" + std::to_string(sym.line_number);
             row.leading_style  = fg_of(fg);
+            // Highlight the matched chars of the symbol NAME (which is the
+            // leading segment, so its offsets map directly onto row.leading).
+            if (!o->query.empty()) {
+                auto fm = fuzzy::score(sym.name, o->query);
+                if (fm.matched()) { row.highlight = std::move(fm.positions);
+                                    row.highlight_fg = highlight; }
+            }
             row.trailing       = parent_segment(dir);
             row.trailing_style = fg_dim(muted);
             row.selected = (i == o->index);
