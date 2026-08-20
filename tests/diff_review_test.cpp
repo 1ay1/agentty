@@ -214,6 +214,28 @@ int main() {
               "the reducer forwarded the FileChange, not dropped it");
     }
 
+    // ── multi-file edit (replace) queues EVERY touched file for review ───
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        std::vector<FileChange> multi;
+        multi.push_back(make_change("a.ts", before, after));
+        multi.push_back(make_change("b.ts", before, after));
+        multi.push_back(make_change("c.ts", before, after));
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"replaced across 3 files"},
+            std::nullopt, std::move(multi));
+        check(m.d.pending_changes.size() == 3,
+              "a multi-file replace queues all 3 files");
+        bool a=false,b=false,c=false;
+        for (auto& fc : m.d.pending_changes) {
+            if (fc.path == "a.ts") a = true;
+            if (fc.path == "b.ts") b = true;
+            if (fc.path == "c.ts") c = true;
+        }
+        check(a && b && c, "every replaced file is in the review queue");
+    }
+
     if (g_fail == 0) std::println("diff_review_test: OK");
     return g_fail ? 1 : 0;
 }

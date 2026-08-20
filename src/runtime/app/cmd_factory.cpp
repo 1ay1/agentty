@@ -1149,11 +1149,12 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     // rewrite the result).
                     tools::hooks::run_post_tool(name.value, args_dump,
                                                 result->text);
-                    // Carry the structured FileChange (edit/write/apply_patch/
-                    // replace produce one; other tools leave it nullopt) into
-                    // the reducer so it can queue the change for diff-review.
+                    // Carry the structured FileChange(s) — single-file (edit/
+                    // write/apply_patch) via change, multi-file (replace) via
+                    // changes — into the reducer for diff-review.
                     dispatch(ToolExecOutput{id, std::move(result->text),
-                                            std::move(result->change)});
+                                            std::move(result->change),
+                                            std::move(result->changes)});
                 } else {
                     dispatch(ToolExecOutput{id,
                         std::unexpected(std::move(result).error())});

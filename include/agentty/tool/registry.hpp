@@ -21,6 +21,9 @@ namespace agentty::tools {
 struct ToolOutput {
     std::string text;
     std::optional<FileChange> change;
+    // Additional file changes for MULTI-FILE tools (replace); `change` above is
+    // the single-file case. Both feed the diff-review queue.
+    std::vector<FileChange> changes;
 };
 
 // Typed error kind. Lets the UI color / retry / suggest based on category
