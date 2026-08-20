@@ -224,8 +224,15 @@ Element diff_review(const Model& m) {
         const auto& hk = fc.hunks[static_cast<std::size_t>(hi)];
         const bool sel = hi == cursor->hunk_index;
 
-        // Hunk divider: "▸ hunk N/M  ●" — the cursor caret + a status dot, in
-        // the status hue. Selected hunk's caret is bright; others muted.
+        // Per-hunk diffstat for the collapsed summary.
+        int hadd = 0, hrem = 0;
+        for (const auto& dl : parse_hunk(hk.patch)) {
+            if (dl.sign == '+') ++hadd; else if (dl.sign == '-') ++hrem;
+        }
+
+        // Hunk header: "▸ hunk N/M  ● status   +A −R". The caret marks the
+        // focused hunk; collapsed hunks show only this one line so a huge
+        // changeset stays navigable instead of a 200-row wall.
         rows.push_back(h(
             text("  "),
             text(sel ? "\xe2\x96\xb8 " : "  ", sel ? fg_bold(accent) : fg_of(muted)),
@@ -235,17 +242,31 @@ Element diff_review(const Model& m) {
             text(" "),
             text(hk.status == Hunk::Status::Accepted ? "accepted"
                : hk.status == Hunk::Status::Rejected ? "rejected" : "pending",
-                 fg_of(status_color(hk.status)))
+                 fg_of(status_color(hk.status))),
+            text(std::format("   +{} ", hadd), fg_dim(success)),
+            text(std::format("-{}", hrem), fg_dim(danger))
         ).build());
 
-        for (const auto& dl : parse_hunk(hk.patch)) {
-            auto base = diff_code_line(dl, lang, gut_w) | padding(0, 0, 0, 4);
-            Element line = (hk.status != Hunk::Status::Pending && !sel)
-                         ? (std::move(base) | dim()).build()
-                         : base.build();
-            rows.push_back(std::move(line));
+        // Only the FOCUSED hunk expands. Others stay collapsed to the header
+        // above — the SOTA large-review model (GitHub/Zed): one hunk in view,
+        // j/k walks the list.
+        if (!sel) continue;
+
+        // Cap a single huge hunk's height so it can't blow past the viewport;
+        // show a "+N more lines" tail so nothing is silently hidden.
+        constexpr int kMaxHunkRows = 24;
+        auto lines = parse_hunk(hk.patch);
+        int shown = 0;
+        for (const auto& dl : lines) {
+            if (shown >= kMaxHunkRows) break;
+            rows.push_back((diff_code_line(dl, lang, gut_w) | padding(0, 0, 0, 4)).build());
+            ++shown;
         }
-        if (hi + 1 < static_cast<int>(fc.hunks.size())) rows.push_back(text(""));
+        if (static_cast<int>(lines.size()) > kMaxHunkRows)
+            rows.push_back(text(std::format(
+                "      \xe2\x80\xa6 {} more lines in this hunk",
+                static_cast<int>(lines.size()) - kMaxHunkRows), fg_dim(muted)));
+        rows.push_back(text(""));
     }
     rows.push_back(rule(muted));
 
