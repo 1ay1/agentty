@@ -237,8 +237,8 @@ Element diff_review(const Model& m) {
         {"h/l", "file", 5, m.d.pending_changes.size() > 1 ? fg : muted},
         {"Y", "accept", 7, success},
         {"N", "reject", 7, danger},
-        {"A", "all",    4, success},
-        {"X", "none",   3, danger},
+        {"^A", "all",  4, success},
+        {"^X", "none", 3, danger},
         {"Esc", all_done ? "apply" : "close", 8, all_done ? success : fg},
     }));
 
