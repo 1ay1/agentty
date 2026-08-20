@@ -196,6 +196,24 @@ int main() {
               "submitting a new message clears the pending-changes queue");
     }
 
+    // ── the FULL reducer path: ToolExecOutput → tool_update → pending_changes
+    // (my other tests call apply_tool_output directly; this proves the reducer
+    // arm actually forwards e.change, i.e. the dispatch-site wiring holds).
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        ToolExecOutput e{
+            ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"edited"},
+            make_change("wired.cpp", before, after)};
+        auto s = detail::tool_update(std::move(m), msg::ToolMsg{std::move(e)});
+        check(s.first.d.pending_changes.size() == 1,
+              "ToolExecOutput through the reducer queues the change");
+        check(!s.first.d.pending_changes.empty()
+              && s.first.d.pending_changes[0].path == "wired.cpp",
+              "the reducer forwarded the FileChange, not dropped it");
+    }
+
     if (g_fail == 0) std::println("diff_review_test: OK");
     return g_fail ? 1 : 0;
 }
