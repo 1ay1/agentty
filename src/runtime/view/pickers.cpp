@@ -13,6 +13,7 @@
 #include <maya/platform/io.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/view/hints.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/code_block_picker.hpp"  // extract_code_blocks (palette gating)
 #include "agentty/domain/routing_memory.hpp"
@@ -138,62 +139,7 @@ constexpr int kPickerChromeRows = 7;
 // One key-binding hint in a footer strip: a key glyph + a short label,
 // plus a priority that decides survival order when the picker is too
 // narrow to show them all (higher = kept longer).
-struct Hint {
-    std::string key;
-    std::string label;
-    int         priority = 0;
-};
-
-// Responsive key-hint footer. Renders the hints on a SINGLE line as
-// "key label   key label   …"; when the available width can't fit them
-// all, the lowest-priority hints drop out (rightmost wins ties) and the
-// survivors keep their original left-to-right order. Never wraps.
-//
-// The maya Picker already clips footers to one line, so this can't break
-// the modal even at width 1 — but dropping whole hints degrades far more
-// gracefully than truncating a binding mid-word. The component reads the
-// width maya allocated to the footer row, so the drop set re-evaluates
-// live as the terminal resizes.
-[[nodiscard]] Element key_hints(std::vector<Hint> hints) {
-    return component([hints = std::move(hints)](int w, int) -> Element {
-        if (w <= 0 || hints.empty()) return nothing();
-        constexpr int gap = 3;   // columns between adjacent hints
-        auto pair_w = [](const Hint& hn) {
-            return string_width(hn.key) + 1 + string_width(hn.label);
-        };
-        std::vector<bool> keep(hints.size(), true);
-        auto total = [&] {
-            int sum = 0, shown = 0;
-            for (std::size_t i = 0; i < hints.size(); ++i)
-                if (keep[i]) { sum += pair_w(hints[i]); ++shown; }
-            if (shown > 1) sum += gap * (shown - 1);
-            return sum;
-        };
-        // Greedily evict the lowest-priority kept hint until the strip
-        // fits (or nothing is left).
-        while (total() > w) {
-            int victim = -1;
-            for (std::size_t i = 0; i < hints.size(); ++i) {
-                if (!keep[i]) continue;
-                if (victim < 0 || hints[i].priority <= hints[static_cast<std::size_t>(victim)].priority)
-                    victim = static_cast<int>(i);
-            }
-            if (victim < 0) break;
-            keep[static_cast<std::size_t>(victim)] = false;
-        }
-        std::vector<Element> parts;
-        bool first = true;
-        for (std::size_t i = 0; i < hints.size(); ++i) {
-            if (!keep[i]) continue;
-            if (!first) parts.push_back(text(std::string(gap, ' ')));
-            first = false;
-            parts.push_back(text(hints[i].key + " ", fg_of(fg)));
-            parts.push_back(text(hints[i].label, fg_dim(muted)));
-        }
-        if (parts.empty()) return nothing();
-        return h(std::move(parts)).build();
-    });
-}
+// (moved to agentty/runtime/view/hints.hpp — shared with diff-review)
 
 } // namespace
 
