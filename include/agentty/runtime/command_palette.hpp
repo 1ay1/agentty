@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <climits>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -137,55 +138,115 @@ struct PaletteContext {
     }
 }
 
-// Case-insensitive substring filter over kCommands. Returns the matching
-// CommandDef pointers in their catalog order. Single source of truth for
-// "what's visible in the palette right now" — both the view (rendering)
-// and the dispatcher (resolving cursor index → Command) call this so they
-// can never disagree about which command sits at which row.
-//
-// The previous design had the view filter independently and the dispatcher
-// switch on the cursor's *raw* position into kCommands. With any non-empty
-// query the two indices drift: typing "thread" left "Open threads" at
-// visible row 1, but row 1 in the unfiltered enum was `ReviewChanges` —
-// pressing Enter ran the wrong command.
-[[nodiscard]] inline std::vector<const CommandDef*>
-filtered_commands(std::string_view query, PaletteContext ctx) {
-    auto lower = [](unsigned char c) -> char {
-        return static_cast<char>(std::tolower(c));
-    };
+// ── Fuzzy matcher ────────────────────────────────────────────────────
+// A SCORED subsequence match against a command's LABEL (the thing you're
+// selecting), tuned so "re" → Review / Reject / Rewind, not "New th-re-ad".
+// Rewards word-boundary hits (acronym typing: "rcb" → Run Code Block),
+// consecutive runs, and a leading-prefix; rejects a non-subsequence. Returns
+// the matched LABEL character offsets so the view can highlight them.
+struct LabelMatch {
+    int              score = INT_MIN;    // higher = better; INT_MIN = no match
+    std::vector<int> positions;          // matched byte offsets into the label
+    [[nodiscard]] bool matched() const noexcept { return score != INT_MIN; }
+};
+
+[[nodiscard]] inline bool palette_word_boundary(std::string_view s, std::size_t i) noexcept {
+    if (i == 0) return true;
+    char p = s[i - 1];
+    return p == ' ' || p == '-' || p == '/' || p == '_' || p == '(';
+}
+
+// `needle` must already be lowercased.
+[[nodiscard]] inline LabelMatch fuzzy_label(std::string_view label,
+                                            std::string_view needle) {
+    LabelMatch m;
+    if (needle.empty()) { m.score = 0; return m; }
+    if (needle.size() > label.size()) return m;
+    auto lc = [](char c){ return static_cast<char>(std::tolower((unsigned char)c)); };
+
+    int score = 0, skipped = 0;
+    std::size_t li = 0, ni = 0;
+    bool prev = false;
+    m.positions.reserve(needle.size());
+    while (ni < needle.size() && li < label.size()) {
+        if (lc(label[li]) == needle[ni]) {
+            score += 16;
+            if (prev)                              score += 18;  // consecutive run
+            if (palette_word_boundary(label, li))  score += 30;  // acronym / word start
+            if (li == 0)                           score += 25;  // leading prefix
+            m.positions.push_back(static_cast<int>(li));
+            prev = true; ++ni; ++li;
+        } else { prev = false; ++skipped; ++li; }
+    }
+    if (ni < needle.size()) return {};        // not a subsequence of the label
+    score -= skipped;                          // mild gap penalty
+    if (label.size() == needle.size()) score += 40;   // exact label
+    m.score = score;
+    return m;
+}
+
+// Case-insensitive substring test over a field (description / shortcut /
+// category) — used only to KEEP a row whose label didn't match, ranked below
+// every label match. Discovery-by-intent ("api" → Switch provider) without
+// letting description noise outrank a real label hit.
+[[nodiscard]] inline bool field_contains(const char* field, std::string_view needle) {
+    if (!field) return false;
+    std::string hay;
+    for (const char* p = field; *p; ++p) hay.push_back(
+        static_cast<char>(std::tolower((unsigned char)*p)));
+    return hay.find(needle) != std::string::npos;
+}
+
+// A scored, ranked match result carrying the label-highlight positions.
+struct CommandMatch {
+    const CommandDef* cmd;
+    int               score;
+    std::vector<int>  positions;   // label offsets to highlight (empty if none)
+};
+
+// THE matcher. Returns visible commands ranked best-first, each with its
+// label-highlight offsets. Single source of truth for view + dispatcher.
+[[nodiscard]] inline std::vector<CommandMatch>
+match_commands(std::string_view query, PaletteContext ctx) {
     std::string needle;
     needle.reserve(query.size());
-    for (char c : query) needle.push_back(lower(static_cast<unsigned char>(c)));
+    for (char c : query) needle.push_back(
+        static_cast<char>(std::tolower((unsigned char)c)));
 
-    std::vector<const CommandDef*> out;
+    std::vector<CommandMatch> out;
     out.reserve(kCommands.size());
     for (const auto& cmd : kCommands) {
         if (!command_visible(cmd, ctx)) continue;
-        if (needle.empty()) { out.push_back(&cmd); continue; }
-        // Match against label + description + shortcut + CATEGORY so discovery
-        // works by intent, not just the exact command name: "diff" finds
-        // "Review changes", "api" finds "Switch provider", "changes" surfaces
-        // the whole Changes cluster, "ctrl+g" finds "Run code block". Label
-        // matches still rank first (see the two-pass sort below).
-        std::string hay;
-        for (const char* field : {cmd.label, cmd.description, cmd.shortcut})
-            for (const char* p = field; p && *p; ++p)
-                hay.push_back(lower(static_cast<unsigned char>(*p)));
-        for (char c : category_label(cmd.category))
-            hay.push_back(lower(static_cast<unsigned char>(c)));
-        if (hay.find(needle) != std::string::npos)
-            out.push_back(&cmd);
+        if (needle.empty()) { out.push_back({&cmd, 0, {}}); continue; }
+
+        LabelMatch lm = fuzzy_label(cmd.label, needle);
+        if (lm.matched()) {
+            out.push_back({&cmd, lm.score + 1000, std::move(lm.positions)});
+        } else if (field_contains(cmd.description, needle)
+                || field_contains(cmd.shortcut, needle)
+                || (!category_label(cmd.category).empty()
+                    && field_contains(std::string{category_label(cmd.category)}.c_str(), needle))) {
+            // Description/shortcut/category hit: keep, but rank below every
+            // label match (no +1000) and by catalog position (index below).
+            out.push_back({&cmd, 0, {}});
+        }
     }
-    // Rank label hits above description/shortcut-only hits so typing a command
-    // name surfaces it at the top even when the same substring appears in some
-    // other row's description. Stable within each group (catalog order).
-    std::stable_partition(out.begin(), out.end(),
-        [&](const CommandDef* c) {
-            std::string lab;
-            for (const char* p = c->label; p && *p; ++p)
-                lab.push_back(lower(static_cast<unsigned char>(*p)));
-            return lab.find(needle) != std::string::npos;
-        });
+    if (!needle.empty())
+        std::stable_sort(out.begin(), out.end(),
+            [](const CommandMatch& a, const CommandMatch& b) {
+                return a.score > b.score;   // stable keeps catalog order within a tie
+            });
+    return out;
+}
+
+// Pointer-only view of match_commands, ranked. Kept for the dispatcher +
+// existing call sites/tests that only need "which command is at row N".
+[[nodiscard]] inline std::vector<const CommandDef*>
+filtered_commands(std::string_view query, PaletteContext ctx) {
+    auto matches = match_commands(query, ctx);
+    std::vector<const CommandDef*> out;
+    out.reserve(matches.size());
+    for (const auto& m : matches) out.push_back(m.cmd);
     return out;
 }
 
