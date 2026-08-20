@@ -181,10 +181,10 @@ struct Model {
 
         std::vector<FileChange>          pending_changes;
         // Whether the persistent "N changes" review strip renders after edits.
-        // Loaded from Settings at startup; toggled live via the palette. When
-        // off, edits still queue in pending_changes (Ctrl+R opens the pane),
-        // just without the always-on banner.
-        bool                             show_changes_strip = true;
+        // Loaded from Settings at startup; toggled live via the palette. OFF by
+        // default — edits still queue in pending_changes (Ctrl+R opens the
+        // pane), just without the always-on banner.
+        bool                             show_changes_strip = false;
         std::optional<PendingPermission> pending_permission;
 
         // Session-scoped "always allow" grants, keyed by tool name
