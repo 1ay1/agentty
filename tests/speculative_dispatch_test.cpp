@@ -30,6 +30,7 @@ static void install_stub_deps() {
     app::install_deps(app::Deps{
         .stream         = [](auto, auto) {},
         .save_thread    = [](const auto&) {},
+        .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },
         .load_thread    = [](const auto&) -> std::optional<Thread> { return std::nullopt; },
         .load_settings  = [] { return g_settings; },
