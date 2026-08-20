@@ -6,6 +6,7 @@
 // NOARGS = original was `int main()`.   ARGS = `int main(int, char**)`.
 
 FOLD_NOARGS(fork_test)
+FOLD_NOARGS(thread_delete_test)
 FOLD_NOARGS(cross_process_lock_test)
 FOLD_NOARGS(reveal_freeze_gate_probe)
 FOLD_NOARGS(toolset_e2e_test)

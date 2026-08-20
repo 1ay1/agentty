@@ -77,6 +77,59 @@ std::vector<int> model_filtered(const std::vector<ModelInfo>& models,
 } // namespace
 using maya::Cmd;
 
+// ── Fresh-thread reset ────────────────────────────────────────────────────
+// Swap the model over to a brand-new empty thread and return the terminal
+// reset that wipes the departing thread's rendered turns off-screen.
+//
+// This is the SHARED core behind two entry points: `NewThread` (^N / picker
+// `N`) and `ThreadListDelete` when the row removed is the active thread.
+// It is deliberately the part *after* the caller's save/delete decision —
+// NewThread persists the outgoing thread first, delete has just destroyed
+// it — so the caller owns that policy and this owns the reset. Keeping the
+// two callers on one code path is what stops them drifting (they had, and
+// the delete copy was missing the phase reset + kernel release + inline
+// wipe, which is exactly the machinery that makes a mid-stream swap safe).
+//
+// Returns the reset_inline Cmd so the caller can batch it with its own
+// commands (delete also kicks a thread-list refresh + a toast).
+[[nodiscard]] Cmd<Msg> reset_to_fresh_thread(Model& m) {
+    // Skill activations belong to the departing thread's context; the new
+    // thread must be able to re-load any skill from scratch.
+    tools::skills::reset_activations();
+    // Drop the whole render cache: every (tid,msg) entry belongs to the
+    // thread we're leaving, whose messages will never freeze again (freeze
+    // is the only per-entry drop, and it only runs on the CURRENT thread).
+    // Keys embed thread_id so there's no collision — this purely reclaims
+    // the old thread's staged/pinned entries so they don't linger.
+    m.ui.view_cache.clear();
+    m.d.current = Thread{};
+    m.d.current.id = deps().new_thread_id();
+    m.d.current.created_at = m.d.current.updated_at =
+        std::chrono::system_clock::now();
+    clear_frozen(m);
+    // Close every modal that framed the OLD thread: the picker we acted
+    // from, plus the palette / code-block picker whose contents belonged to
+    // the departing thread's last reply.
+    m.ui.thread_list      = pick::Closed{};
+    m.ui.command_palette  = palette::Closed{};
+    m.ui.code_blocks      = code_block_picker::Closed{};
+    // Wipe the whole composer draft — a pasted-but-unsent image (or any
+    // chip / queued message) belongs to the thread we're leaving. Leaking
+    // it once carried an empty-bytes image attachment into the new thread's
+    // first submit and 400'd the request.
+    reset_composer_draft(m.ui.composer);
+    // A fresh empty thread has no live turn — drop any streaming phase and
+    // hand the kernel back so a mid-stream swap can't leave the wire running
+    // against a thread that no longer exists.
+    m.s.phase = phase::Idle{};
+    release_to_kernel();
+    // Per maya's contract this is the ONE allowed wiring of reset_inline: an
+    // explicit, user-initiated content swap. `\x1b[3J` wipes saved-lines
+    // (including pre-agentty shell history), acceptable precisely because
+    // the user asked to switch threads. Do NOT extend it to per-turn paths.
+    return Cmd<Msg>::reset_inline();
+}
+
 Step model_picker_update(Model m, msg::ModelPickerMsg pm) {
     return std::visit(overload{
         [&](OpenModelPicker) -> Step {
@@ -718,10 +771,17 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 p->confirm_remove = key;
                 return done(std::move(m));
             }
-            // Second press — commit the delete.
+            // Second press — commit. Snapshot everything we need OUT of the
+            // vector element BEFORE erase(): the erase invalidates `target`,
+            // so reading target.title / target.id afterward is a
+            // use-after-free. Copy them here while the reference is live.
+            const ThreadId  target_id = target.id;
+            const bool      was_current = (target_id == m.d.current.id);
+            const std::string label =
+                target.title.empty() ? "(untitled)" : target.title;
+
             p->confirm_remove.clear();
-            deps().delete_thread(target.id);
-            const bool was_current = (target.id == m.d.current.id);
+            deps().delete_thread(target_id);
             m.d.threads.erase(m.d.threads.begin() + idx);
             // Clamp the cursor so it stays valid after removal.
             const int sz = static_cast<int>(m.d.threads.size());
@@ -730,21 +790,21 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             } else if (p->index >= sz) {
                 p->index = sz - 1;
             }
-            std::string label = target.title.empty() ? "(untitled)" : target.title;
             std::string msg = "deleted \"" + label + "\"";
             if (was_current) msg += " \xe2\x80\x94 started a new thread";
             auto toast = set_status_toast(m, std::move(msg));
-            // If the deleted thread was the active one, start fresh.
+            // Deleting the ACTIVE thread leaves m.d.current pointing at a
+            // thread whose file no longer exists — swap to a fresh empty
+            // thread through the SAME core NewThread uses. That single code
+            // path is what guarantees the phase reset + kernel release (so a
+            // mid-stream delete can't leave the wire running against a dead
+            // thread), the modal/skill/cache teardown, and the reset_inline
+            // that wipes the deleted thread's rendered turns off-screen.
             if (was_current) {
-                m.ui.view_cache.clear();
-                m.d.current = Thread{};
-                m.d.current.id = deps().new_thread_id();
-                m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
-                clear_frozen(m);
-                m.ui.thread_list = pick::Closed{};
-                reset_composer_draft(m.ui.composer);
+                auto reset = reset_to_fresh_thread(m);
                 return {std::move(m),
-                        Cmd<Msg>::batch(cmd::load_threads_async(), std::move(toast))};
+                        Cmd<Msg>::batch(cmd::load_threads_async(),
+                                        std::move(reset), std::move(toast))};
             }
             return {std::move(m), std::move(toast)};
         },
@@ -812,61 +872,13 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                                     std::move(toast))};
         },
         [&](NewThread) -> Step {
+            // Persist the outgoing thread before we drop it (delete's
+            // active-row path does the opposite — it just removed the
+            // thread, so it must NOT save). The shared reset below owns
+            // everything after this policy decision.
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
-            // Skill activations belong to the old thread's context;
-            // the new thread must be able to re-load any skill.
-            tools::skills::reset_activations();
-            // Drop the whole render cache: every (tid,msg) entry belongs
-            // to the thread we're leaving, whose messages will never
-            // freeze again (freeze is the only per-entry drop, and it
-            // only runs on the CURRENT thread). Keys embed thread_id so
-            // there's no collision — this is purely reclaiming the old
-            // thread's staged/pinned entries so they don't linger for the
-            // session. The empty new thread repopulates from scratch.
-            m.ui.view_cache.clear();
-            m.d.current = Thread{};
-            m.d.current.id = deps().new_thread_id();
-            m.d.current.created_at = m.d.current.updated_at = std::chrono::system_clock::now();
-            clear_frozen(m);
-            m.ui.thread_list = pick::Closed{};
-            m.ui.command_palette = palette::Closed{};
-            // Blocks belong to the OLD thread's last reply — running one
-            // against a fresh empty thread would be confusing.
-            m.ui.code_blocks = code_block_picker::Closed{};
-            // Wipe the whole composer draft — a pasted-but-unsent image (or
-            // any chip / queued message) belongs to the thread we're
-            // leaving. Leaking it carried an empty-bytes image attachment
-            // into the new thread's first submit and 400'd the request.
-            reset_composer_draft(m.ui.composer);
-            // any → Idle. Discards the active ctx if any was present
-            // (NewThread can fire mid-stream; the user-visible Esc
-            // wasn't pressed but the request is conceptually
-            // abandoned along with the thread).
-            m.s.phase = phase::Idle{};
-            release_to_kernel();
-            // Wholesale model swap into a fresh (empty) thread. The old
-            // thread typically overflowed the viewport, committing many
-            // rows to the terminal's native scrollback. Those rows are
-            // off-viewport and OWNED by the terminal emulator — neither
-            // force_redraw (viewport-only case-B) nor
-            // commit_scrollback_overflow (advances prev_rows but leaves
-            // physical off-viewport rows on the wire) can erase them.
-            // Result without reset_inline: the previous thread's tail
-            // turns sit stranded above the new welcome screen, visible
-            // as a fake "continuation" of the new thread above it.
-            //
-            // reset_inline emits `\x1b[2J\x1b[3J\x1b[H` — the ONLY path
-            // that reaches native scrollback. Per maya/app/app.hpp:
-            // "the correct recovery for a WHOLESALE CONTENT SWAP into
-            // shorter content (thread switch / new thread)."
-            //
-            // Cost: `\x1b[3J` wipes the terminal's saved-lines, including
-            // the user's pre-agentty shell history. This is an explicit,
-            // user-initiated content swap (^N / picker select) — wiping
-            // scrollback is acceptable here precisely because the user
-            // asked for it. Per maya's contract this is the ONE allowed
-            // wiring of reset_inline; do NOT extend it to per-turn paths.
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            auto reset = reset_to_fresh_thread(m);
+            return {std::move(m), std::move(reset)};
         },
         [&](ThreadsLoaded& e) -> Step {
             m.d.threads = std::move(e.threads);
