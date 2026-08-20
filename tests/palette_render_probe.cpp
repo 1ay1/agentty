@@ -58,13 +58,12 @@ static void diff_review_checks() {
     m.ui.diff_review = ui::pick::TwoAxis{ui::pick::OpenAtCell{0, 0}};
 
     std::string out = maya::render_to_string(ui::diff_review(m), 84);
-    check(has(out, "file 1/2"), "diff: file counter");
-    check(has(out, "hunks reviewed"), "diff: overall hunk progress");
-    // The header→hunks divider must be a SINGLE line, not maya's 2-edged sep.
-    // With the progress row above and the @@ header below, exactly ONE full
-    // rule of ─ should sit between them (the old sep painted two).
+    check(has(out, "login.cpp") && has(out, "README.md"),
+          "diff: file rail shows every file");
+    check(has(out, "reviewed"), "diff: overall hunk progress");
+    check(has(out, "hunk 1/"), "diff: labelled hunk dividers (not raw @@)");
+    check(!has(out, "@@ -"), "diff: raw git @@ headers are gone");
     check(has(out, "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"), "diff: has a rule");
-    check(has(out, "@@ -"), "diff: hunk headers shown");
     check(!has_mojibake(out), "diff: no mojibake");
 
     // All-reviewed state: mark every hunk accepted → the apply affordance.
