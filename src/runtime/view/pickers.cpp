@@ -14,6 +14,7 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/code_block_picker.hpp"  // extract_code_blocks (palette gating)
 #include "agentty/domain/routing_memory.hpp"
 #include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
@@ -669,41 +670,95 @@ Element command_palette(const Model& m) {
     auto* o = opened(m.ui.command_palette);
     if (!o) return nothing();
 
-    auto matches = filtered_commands(o->query, !m.s.update_latest.empty());
+    // Live visibility context — the SAME predicate the reducer uses, so a row
+    // the dispatcher would reject never renders (no dead Accept-all).
+    PaletteContext pctx;
+    pctx.update_available    = !m.s.update_latest.empty();
+    pctx.has_pending_changes = !m.d.pending_changes.empty();
+    pctx.has_code_block      = [&] {
+        for (auto it = m.d.current.messages.rbegin();
+             it != m.d.current.messages.rend(); ++it)
+            if (it->role == Role::Assistant && !it->text.empty()
+                && !code_block_picker::extract_code_blocks(it->text).empty())
+                return true;
+        return false;
+    }();
+    auto matches = filtered_commands(o->query, pctx);
 
     Picker::Config cfg;
     cfg.title      = " Command Palette ";
     cfg.accent     = highlight;
-    cfg.min_width  = 50;
+    cfg.min_width  = 54;
     cfg.viewport_h = picker_viewport_h();
     cfg.scroll     = &m.ui.command_palette_scroll;
     cfg.selected   = matches.empty() ? -1 : o->index;
 
-    cfg.header.push_back(h(text("› ", fg_bold(highlight)),
-        text(o->query.empty() ? "type to filter…" : o->query,
+    cfg.header.push_back(h(text("\xe2\x8c\x98 ", fg_bold(highlight)),   // ⌘
+        text(o->query.empty() ? "type to filter\xe2\x80\xa6" : o->query,
              o->query.empty() ? fg_italic(muted) : fg_of(fg))
     ).build());
     cfg.header.push_back(sep);
 
+    // Each category owns a hue so the flat list reads as coloured bands; the
+    // badge keeps its hue on the selected row (Picker contract), so the
+    // grouping survives the cursor. General rows carry no badge (Quit/Update
+    // don't need a section chip).
+    auto category_hue = [](Category c) -> Color {
+        switch (c) {
+            case Category::Thread:   return info;
+            case Category::Changes:  return success;
+            case Category::Navigate: return highlight;
+            case Category::Config:   return warn;
+            case Category::Account:  return muted;
+            case Category::General:  return muted;
+        }
+        return muted;
+    };
+
     if (matches.empty()) {
-        cfg.items.push_back(text("  no matches", fg_italic(muted)));
+        cfg.items.push_back(text(
+            o->query.empty() ? "  no commands available"
+                             : "  no command matches \"" + o->query + "\"",
+            fg_italic(muted)));
     } else {
+        // Pad every badge to a common width so the label column aligns into a
+        // clean vertical edge — same discipline as the code-block / tool-output
+        // pickers.
+        int badge_w = 0;
+        for (const auto* c : matches) {
+            auto lab = category_label(c->category);
+            if (!lab.empty())
+                badge_w = std::max(badge_w, string_width(std::string{lab}) + 2);
+        }
+
         cfg.rows.reserve(matches.size());
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
             Picker::Config::Row row;
-            // Smart Mode is a toggle — surface its live state in the label so
-            // the palette shows what pressing Enter will do.
+
+            // ── Category badge (hue-stable identity) ──
+            if (auto lab = category_label(cmd.category); !lab.empty()) {
+                std::string bd = " " + std::string{lab} + " ";
+                if (int bw = string_width(bd); bw < badge_w)
+                    bd.append(static_cast<std::size_t>(badge_w - bw), ' ');
+                row.badge       = std::move(bd);
+                row.badge_style = cmd.danger ? fg_dim(danger)
+                                             : fg_dim(category_hue(cmd.category));
+            } else if (badge_w > 0) {
+                // Keep General rows aligned under the badged ones.
+                row.badge = std::string(static_cast<std::size_t>(badge_w), ' ');
+            }
+
+            // ── Label, with live toggle/mode state folded in ──
+            std::string label{cmd.label};
             if (cmd.id == Command::SmartMode)
-                row.leading = std::string{cmd.label}
-                            + (m.d.smart.enabled ? "  (on)" : "  (off)");
-            else
-                row.leading = std::string{cmd.label};
-            row.leading_style  = fg_of(muted);
-            // Trailing carries the one-line description and — for commands
-            // that have a direct global keybinding — the shortcut, so the
-            // palette teaches the fast path instead of hiding it. Rows with
-            // no shortcut (palette-only actions) just show the description.
+                label += m.d.smart.enabled ? "  (on)" : "  (off)";
+            row.leading = std::move(label);
+            // Destructive actions read in the danger hue so "Reject all" /
+            // "Rewind" / "Sign out" never look identical to a benign row.
+            row.leading_style = cmd.danger ? fg_of(danger) : fg_of(fg);
+
+            // ── Trailing: description · shortcut (teaches the fast path) ──
             std::string trailing{cmd.description};
             if (cmd.shortcut && *cmd.shortcut) {
                 trailing += "  \xc2\xb7  ";
@@ -717,6 +772,13 @@ Element command_palette(const Model& m) {
     }
 
     cfg.footer.push_back(text(""));
+    // Count anchor when the list is scrolled — same grammar as the @ / # pickers.
+    if (static_cast<int>(matches.size()) > kViewportH) {
+        cfg.footer.push_back(text(
+            "  " + std::to_string(o->index + 1) + "/"
+                + std::to_string(matches.size()) + " commands",
+            fg_dim(muted)));
+    }
     cfg.footer.push_back(key_hints({
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},   // ↑↓
         {"type", "filter", 3},
