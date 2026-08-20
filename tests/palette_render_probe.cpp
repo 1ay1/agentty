@@ -1,7 +1,8 @@
 // palette_render_probe — renders the command palette and asserts its layout
-// invariants (sections on the empty query, flat when filtering, cursor off
-// headers, UTF-8-clean truncation). Lives in the fold suite so it links the
-// full runtime object tree and renders through the real maya path.
+// invariants: a TREE hierarchy on the empty query (┌─ header, │ spine, └
+// close), a flat list when filtering, gating hides dead rows, and UTF-8-clean
+// truncation. Lives in the fold suite so it links the full runtime object
+// tree and renders through the real maya path.
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/pickers.hpp"
 #include "agentty/runtime/command_palette.hpp"
@@ -21,8 +22,7 @@ static std::string render(const Model& m) {
 static bool has(const std::string& h, const std::string& n) {
     return h.find(n) != std::string::npos;
 }
-// The U+FFFD replacement char (EF BF BD) appears iff we split a UTF-8 codepoint.
-static bool has_mojibake(const std::string& s) {
+static bool has_mojibake(const std::string& s) {         // U+FFFD = split codepoint
     return s.find("\xef\xbf\xbd") != std::string::npos;
 }
 
@@ -31,27 +31,30 @@ int main() {
     m.ui.command_palette = palette::Open{};
     m.d.pending_changes.push_back(FileChange{});   // so the Changes section shows
 
-    // ── empty query: real section headers between groups ──────────────────
+    // ── empty query: a real TREE (bracket header + spine + close) ─────────
     {
         std::string out = render(m);
-        check(has(out, "THREAD") && has(out, "CHANGES") && has(out, "GO"),
-              "empty query renders uppercased section headers");
+        check(has(out, "\xe2\x94\x8c\xe2\x94\x80 THREAD"),   // ┌─ THREAD
+              "empty query renders a bracket-connector section header");
+        check(has(out, "\xe2\x94\x82"),                     // │ spine
+              "group members carry a vertical spine");
+        check(has(out, "\xe2\x94\x94"),                     // └ close
+              "the last member of a group closes the bracket");
         check(has(out, "New thread"), "commands render under their section");
         check(!has_mojibake(out), "no split-codepoint mojibake (empty)");
     }
 
-    // ── filtered: headers gone, flat list, labels intact ──────────────────
+    // ── filtered: tree gone, flat list, labels intact ────────────────────
     {
         auto* o = std::get_if<palette::Open>(&m.ui.command_palette);
         o->query = "th";
         std::string out = render(m);
-        check(!has(out, "THREAD ") && !has(out, "CONFIG"),
-              "typing suppresses section headers (flat view)");
+        check(!has(out, "\xe2\x94\x8c\xe2\x94\x80 THREAD"),
+              "typing collapses the tree to a flat list");
         check(has(out, "New thread") && has(out, "Fork thread"),
               "filtered rows keep whole labels");
         check(!has_mojibake(out), "no split-codepoint mojibake (filtered)");
 
-        // ── category-name search surfaces the whole cluster ───────────────
         o->query = "changes";
         std::string ch = render(m);
         check(has(ch, "Review changes") && has(ch, "Accept all")
@@ -64,8 +67,7 @@ int main() {
         Model m2;
         m2.ui.command_palette = palette::Open{};   // no pending_changes
         std::string out = render(m2);
-        check(!has(out, "Accept all changes"),
-              "no pending diff hides Accept-all");
+        check(!has(out, "Accept all changes"), "no pending diff hides Accept-all");
         check(has(out, "New thread"), "unrelated commands still shown");
     }
 

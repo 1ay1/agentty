@@ -739,16 +739,19 @@ Element command_palette(const Model& m) {
         for (int i = 0; i < static_cast<int>(matches.size()); ++i) {
             const auto& cmd = *matches[static_cast<std::size_t>(i)];
 
-            if (show_headers && (first_group || cmd.category != last_cat)) {
+            const bool group_start =
+                show_headers && (first_group || cmd.category != last_cat);
+            if (group_start) {
                 if (auto lab = category_label(cmd.category); !lab.empty()) {
                     Picker::Config::Row hdr;
-                    hdr.is_header     = true;
-                    // Uppercased section name — the classic palette group-header
-                    // look, distinct from the title-case command rows below it.
+                    hdr.is_header = true;
+                    // A connector header: "┌─ THREAD" so the eye reads it as the
+                    // TOP of a bracket whose │ spine (below) runs down the
+                    // group's rows — real visual containment, tree-style.
                     std::string up{lab};
                     for (char& ch : up) ch = static_cast<char>(std::toupper(
                         static_cast<unsigned char>(ch)));
-                    hdr.leading       = std::move(up);
+                    hdr.leading       = "\xe2\x94\x8c\xe2\x94\x80 " + up;   // ┌─ 
                     hdr.leading_style = fg_of(category_hue(cmd.category));
                     cfg.rows.push_back(std::move(hdr));
                     ++display_row;
@@ -759,10 +762,20 @@ Element command_palette(const Model& m) {
 
             Picker::Config::Row row;
 
-            // Category is carried by the SECTION HEADER on the empty query and
-            // is implicit once you've filtered by intent, so we don't spend a
-            // badge column on it — the label + description get the full width,
-            // which keeps long labels ("Rewind to checkpoint") legible.
+            // ── Tree spine ── on the sectioned (empty-query) view each command
+            // carries a │ gutter in its section's hue, so the group reads as a
+            // bracket hanging off its ┌─ header. The badge cell (between the
+            // cursor edge and the label) is exactly the right slot for it, and
+            // it stays coloured on the selected row (Picker keeps badge hue).
+            // The last row of a group closes the bracket with └.
+            if (show_headers) {
+                const bool group_end =
+                    (i + 1 >= static_cast<int>(matches.size()))
+                    || matches[static_cast<std::size_t>(i + 1)]->category != cmd.category;
+                row.badge       = group_end ? "\xe2\x94\x94 "    // └ 
+                                            : "\xe2\x94\x82 ";   // │ 
+                row.badge_style = fg_dim(category_hue(cmd.category));
+            }
 
             // ── Label, with live toggle/mode state folded in ──
             std::string label{cmd.label};
