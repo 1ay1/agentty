@@ -152,18 +152,20 @@ TEST_CASE("command palette — categories, gating, danger") {
               "\"changes\" surfaces the whole Changes category");
     }
 
-    // ── visibility gating: dead rows are hidden ───────────────────────────
+    // ── visibility gating: dead BULK rows are hidden, entry point stays ──
     {
-        // No pending diff → Review / Accept-all / Reject-all disappear.
+        // No pending diff → Accept-all / Reject-all disappear, but "Review
+        // changes" (the entry point) stays discoverable.
         PaletteContext no_diff;
         no_diff.has_pending_changes = false;
         auto r = filtered_commands("", no_diff);
-        check(!has_id(r, Command::AcceptAll) && !has_id(r, Command::RejectAll)
-              && !has_id(r, Command::ReviewChanges),
-              "no pending changes hides the Changes commands");
+        check(!has_id(r, Command::AcceptAll) && !has_id(r, Command::RejectAll),
+              "no pending changes hides the bulk Accept/Reject-all");
+        check(has_id(r, Command::ReviewChanges),
+              "Review changes stays visible (entry point, toasts when empty)");
         check(has_id(r, Command::NewThread), "unrelated commands stay visible");
 
-        // With a diff they come back.
+        // With a diff the bulk actions come back.
         PaletteContext with_diff;
         with_diff.has_pending_changes = true;
         check(has_id(filtered_commands("", with_diff), Command::AcceptAll),

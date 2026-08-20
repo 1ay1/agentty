@@ -132,7 +132,11 @@ struct PaletteContext {
                                           const PaletteContext& ctx) noexcept {
     switch (cmd.id) {
         case Command::UpdateAgentty: return ctx.update_available;
-        case Command::ReviewChanges:
+        // "Review changes" is the ENTRY POINT — keep it always discoverable so
+        // you can find it (it toasts "no pending changes to review" when the
+        // queue is empty). Only the BULK actions are gated: accepting/rejecting
+        // "all" is a genuine no-op with nothing pending, and a dead destructive
+        // row erodes trust.
         case Command::AcceptAll:
         case Command::RejectAll:     return ctx.has_pending_changes;
         case Command::RunCodeBlock:  return ctx.has_code_block;
