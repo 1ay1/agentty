@@ -426,15 +426,33 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
             case SpecialKey::Down:   return DiffReviewMove{+1};
             case SpecialKey::Left:   return DiffReviewPrevFile{};
             case SpecialKey::Right:  return DiffReviewNextFile{};
+            // Enter accepts the current hunk (the primary action), so a
+            // terminal with only Return + letters can still drive the review.
+            case SpecialKey::Enter:  return AcceptHunk{};
+            case SpecialKey::Tab:      return DiffReviewNextFile{};
+            case SpecialKey::BackTab:  return DiffReviewPrevFile{};
             default: break;
         }
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case 'y': case 'Y': return AcceptHunk{};
-            case 'n': case 'N': return RejectHunk{};
-            case 'a': case 'A': return AcceptAllChanges{};
-            case 'x': case 'X': return RejectAllChanges{};
+        char32_t c = ck->codepoint;
+        // Normalise a raw Ctrl-letter byte (legacy terminals) to its letter,
+        // matching the app-wide resilience pattern — harmless for the plain
+        // letters we accept here.
+        if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+        switch (c) {
+            case U'y': case U'Y': return AcceptHunk{};
+            case U'n': case U'N': return RejectHunk{};
+            case U'a': case U'A': return AcceptAllChanges{};
+            case U'x': case U'X': return RejectAllChanges{};
+            // vim-style fallbacks — no arrow keys needed (phone / legacy
+            // terminals), matching the tool-output viewer's j/k/h/l/q.
+            case U'j': case U'J': return DiffReviewMove{+1};
+            case U'k': case U'K': return DiffReviewMove{-1};
+            case U'h': case U'H': return DiffReviewPrevFile{};
+            case U'l': case U'L': return DiffReviewNextFile{};
+            case U'q': case U'Q': return CloseDiffReview{};
+            default: break;
         }
     }
     return std::nullopt;
