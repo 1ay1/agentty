@@ -122,6 +122,13 @@ struct Settings {
     // clears the in-memory set for the session (tightening the profile
     // re-arms prompts), but the grants reload on next launch.
     std::vector<std::string> always_allow_tools;
+    // DISCOVERED entitlement fact: this account's subscription rejected the
+    // context-1m-2025-08-07 beta (HTTP 400 "long context beta is not yet
+    // available for this subscription"). We only learn this by trying — the
+    // OAuth token doesn't say. Once set: the catalog stops offering `[1m]`
+    // picker variants and the wire never sends the beta header. Cleared on
+    // sign-out / account switch (the next account may be entitled).
+    bool                 context_1m_blocked = false;
     // User-configured RAG behaviour (the RAG settings picker). Defaults to
     // configured=false ⇒ the adapter keeps its env-derived config.
     RagConfig rag;

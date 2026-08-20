@@ -6,6 +6,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -56,7 +57,8 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
             // Clamp against the *visible* row count, not kCommands.size().
             // Without the upper bound the cursor used to walk off-screen
             // and Enter would silently fall through to the no-match path.
-            int sz = static_cast<int>(filtered_commands(o->query).size());
+            int sz = static_cast<int>(filtered_commands(
+                o->query, !m.s.update_latest.empty()).size());
             if (sz <= 0) { o->index = 0; return done(std::move(m)); }
             o->index = std::clamp(o->index + e.delta, 0, sz - 1);
             return done(std::move(m));
@@ -68,7 +70,8 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
             // the view rendered. The previous design switched on the raw
             // o->index against the unfiltered enum, which silently fired
             // the wrong command whenever any query was active.
-            auto matches = filtered_commands(o->query);
+            auto matches = filtered_commands(o->query,
+                                               !m.s.update_latest.empty());
             m.ui.command_palette = palette::Closed{};
             if (matches.empty()
                 || o->index < 0
@@ -120,6 +123,16 @@ Step palette_update(Model m, msg::CommandPaletteMsg pm) {
                     return agentty::app::update(std::move(m), Msg{OpenForkPicker{}});
                 case Command::OpenLogin:     return agentty::app::update(std::move(m), Msg{OpenLogin{}});
                 case Command::SignOut:       return agentty::app::update(std::move(m), Msg{SignOut{}});
+                case Command::UpdateAgentty: {
+                    if (m.s.update_latest.empty() || m.s.update_in_flight)
+                        return done(std::move(m));
+                    m.s.update_in_flight = true;
+                    std::string v = m.s.update_latest;
+                    // Sticky progress banner — UpdateApplied replaces it.
+                    m.s.status = "⬆ downloading agentty v" + v + "…";
+                    m.s.status_until = {};
+                    return {std::move(m), cmd::perform_self_update(std::move(v))};
+                }
                 case Command::Quit:          return agentty::app::update(std::move(m), Msg{Quit{}});
             }
             return done(std::move(m));

@@ -32,6 +32,7 @@ set(AGENTTY_IO_SOURCES
     src/io/clipboard.cpp
     src/util/base64.cpp
     src/util/dbglog.cpp
+    src/util/update.cpp
     src/domain/complexity.cpp
     src/domain/routing_memory.cpp
     src/domain/decomposition_memory.cpp

@@ -102,6 +102,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
             -DAGENTTY_BUILD_TESTS=ON
 
       - name: Build
@@ -166,6 +167,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
             -DAGENTTY_BUILD_TESTS=ON \
             -DAGENTTY_SANITIZE_ALL=address,undefined
       - name: Build sanitizer test set

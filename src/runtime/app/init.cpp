@@ -4,10 +4,14 @@
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/symbols.hpp"
 
+#include <cstdlib>
 #include <vector>
 
 namespace agentty::app {
@@ -40,6 +44,12 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
+    // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
+    // prior session. A persisted `[1m]` model id would re-send the beta on
+    // the very first turn and dead-end again — strip the marker up front.
+    if (settings.context_1m_blocked
+        && settings.model_id.value.find("[1m]") != std::string::npos)
+        settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
     if (!settings.model_id.empty()) {
         // Guard against a cross-provider model id collision. A persisted
         // model id belongs to whatever provider was active when it was
@@ -194,6 +204,21 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         m.s.status_until = {};
         cmds.push_back(cmd::refresh_oauth(std::move(*refresh)));
     }
+
+    // Background release check — 24h-cached (the fast path is one small
+    // file read on a worker), so this is effectively free on most
+    // launches; when a newer release exists, the status bar grows an
+    // unobtrusive "⬆ vX.Y.Z" chip and the palette gains "Update agentty".
+    // AGENTTY_NO_UPDATE_CHECK=1 (or airgap mode) disables it entirely.
+    if (!std::getenv("AGENTTY_NO_UPDATE_CHECK"))
+        cmds.push_back(cmd::check_for_update());
+
+    // Prewarm the composer's `@` (files) and `#` (symbols) indices on
+    // background threads NOW, so by the time the user types either trigger
+    // the picker opens instantly instead of blocking the UI thread on a
+    // multi-thousand-path walk / multi-second regex scan.
+    prewarm_workspace_files();
+    prewarm_workspace_symbols();
 
     return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
 }

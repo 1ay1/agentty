@@ -659,7 +659,6 @@ struct Retriever::Impl {
     std::uint64_t warm_memory_gen = 0;
 
     std::atomic<bool> warming{false};
-    std::jthread warmer;
 
     // Optional LLM seam for HyDE / multi-query (agentty's provider).
     Retriever::Generator generator;
@@ -672,6 +671,13 @@ struct Retriever::Impl {
     bool          code_initialized = false;
     std::string code_root;
     std::unordered_map<std::string, std::uint64_t> code_files;
+
+    // LAST data member ON PURPOSE: members destroy in reverse declaration
+    // order, so the jthread's destructor (which JOINS the warm worker) runs
+    // FIRST in ~Impl — the worker can never observe a partially-destroyed
+    // Impl. Declaring it any earlier means everything below it dies while
+    // the worker may still be running. Keep it last.
+    std::jthread warmer;
 
     Impl() : engine(make_engine_config()) {
         probe_ollama();
@@ -1290,8 +1296,8 @@ struct Retriever::Impl {
     }
 };
 
-Retriever::Retriever() : impl_(new Impl()) {}
-Retriever::~Retriever() { delete impl_; }
+Retriever::Retriever() : impl_(std::make_unique<Impl>()) {}
+Retriever::~Retriever() = default;
 
 void Retriever::set_generator(Generator g) {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -1788,21 +1794,41 @@ bool Retriever::warm() const {
     return !impl_->needs_reindex(root, /*skip_docs=*/false);
 }
 
+bool Retriever::code_warm() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (impl_->code_initialized) return true;
+    // A persisted code index from a prior session counts as warm: loading it
+    // is Engine::open() + a manifest stat-walk, not an embed-everything
+    // build. Its absence means an opportunistic query would pay the full
+    // cold build — refuse; only an explicit search_code call should do that.
+    std::error_code ec;
+    return fs::exists(impl_->code_ragdb_path(), ec) && !ec;
+}
+
 void Retriever::warm_async() {
     bool expected = false;
     if (!impl_->warming.compare_exchange_strong(expected, true)) return;
-    if (impl_->warmer.joinable()) impl_->warmer.join();
-    Impl* state = impl_;
-    impl_->warmer = std::jthread([state] {
-        try {
-            std::lock_guard<std::mutex> lock(state->mu);
-            auto root = resolve_docs_root(state->cfg.docs_root);
-            if (state->engine.corpus().chunk_count() == 0)
-                (void)state->try_load_persisted(root);
-            state->refresh_docs(root);
-        } catch (...) { /* best-effort */ }
-        state->warming.store(false);
-    });
+    // Reap a finished previous warmer + seat the new one under mu: even
+    // though today's callers are all on the UI thread, the join/assign of
+    // `warmer` must never race a concurrent warm_async — the atomic gate
+    // above only guarantees one LOGICAL warm at a time, not that the
+    // handle handoff itself is synchronized. mu makes it airtight from
+    // any thread, at the cost of a lock the warm path pays anyway.
+    Impl* state = impl_.get();
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->warmer.joinable()) impl_->warmer.join();
+        impl_->warmer = std::jthread([state] {
+            try {
+                std::lock_guard<std::mutex> lock(state->mu);
+                auto root = resolve_docs_root(state->cfg.docs_root);
+                if (state->engine.corpus().chunk_count() == 0)
+                    (void)state->try_load_persisted(root);
+                state->refresh_docs(root);
+            } catch (...) { /* best-effort */ }
+            state->warming.store(false);
+        });
+    }
 }
 
 // Replace the live configuration. Anything that changes the CORPUS shape
@@ -2180,7 +2206,7 @@ Config Config::from_env() {
 struct Retriever::Impl {};
 
 Retriever::Retriever() : impl_(nullptr) {}
-Retriever::~Retriever() { delete impl_; }
+Retriever::~Retriever() = default;
 
 void Retriever::set_generator(Generator /*g*/) {}
 

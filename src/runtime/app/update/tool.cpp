@@ -464,11 +464,20 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // agent_session never carves mid-stream and shows zero
             // corruption / zero slowdown on long runs (proven by the
             // long_session bench); we now do the same.
+            // A SPECULATIVE read-only tool (launched mid-stream at
+            // StreamToolUseEnd) can finish while the wire is still
+            // streaming this turn. Do NOT run kick_pending_tools then:
+            // it would pull the Active ctx out of phase::Streaming (or
+            // worse, see zero pending work and launch the continuation
+            // stream against a wire that is still delivering). Just land
+            // the output; StreamFinished → finalize_turn runs the normal
+            // kick and finds this tool already terminal.
+            if (m.s.is_streaming()) return done(std::move(m));
             auto kick = cmd::kick_pending_tools(m);
             return {std::move(m), std::move(kick)};
         },
 
-        // ── Permission ──────────────────────────────────────────────────
+        // ── Permission ──────────────────────────────────────────────
         [&](PermissionApprove) -> Step {
             if (!m.d.pending_permission) return done(std::move(m));
             auto id = m.d.pending_permission->id;

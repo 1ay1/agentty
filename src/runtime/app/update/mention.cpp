@@ -41,6 +41,12 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             auto* o = mention_opened(m.ui.mention_palette);
             if (o && static_cast<uint32_t>(e.ch) < 0x80
                   && e.ch >= 0x20) {
+                // Picker opened cold (index still warming) → empty snapshot.
+                // Fill it the moment the background walk has published, so
+                // typing progressively reveals results without a blocking
+                // open. One-shot: once files are in, this is a no-op.
+                if (o->files.empty() && files_ready())
+                    o->files = list_workspace_files();
                 o->query.push_back(static_cast<char>(e.ch));
                 o->index = 0;
             }
@@ -80,6 +86,10 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             std::string path = std::move(o->files[matches[
                 static_cast<std::size_t>(o->index)]]);
             m.ui.mention_palette = mention::Closed{};
+
+            // Frecency: this path just got referenced — rank it near the
+            // top of the next `@`. Cheap, bounded recency window.
+            note_file_referenced(path);
 
             // Append a FileRef attachment + insert its placeholder at
             // the composer cursor. Body is filled at submit time

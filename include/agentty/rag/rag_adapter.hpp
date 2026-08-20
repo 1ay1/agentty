@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -154,6 +155,13 @@ public:
     // (or is there no docs root, in which case retrieval is always warm)?
     [[nodiscard]] bool warm() const;
 
+    // Non-blocking: can retrieve_code() answer WITHOUT a cold index build?
+    // True when the code index is live in memory, or a persisted one exists
+    // on disk (loading it is cheap; only a from-scratch build is expensive).
+    // Gates OPPORTUNISTIC retrieval — e.g. search_structural's zero-hit
+    // semantic leads — so a side-effect query never triggers a cold build.
+    [[nodiscard]] bool code_warm() const;
+
     // Kick a detached background index build so a future turn is warm.
     // Single-flight; returns immediately.
     void warm_async();
@@ -169,7 +177,10 @@ public:
 
 private:
     struct Impl;
-    Impl* impl_;   // owned; raw so the header pulls in no rag:: type
+    // Owned. unique_ptr with the destructor defined in adapter.cpp (where
+    // Impl is complete) — the type system carries the ownership instead of
+    // a comment; the header still pulls in no rag:: type.
+    std::unique_ptr<Impl> impl_;
 };
 
 // ── Learning loop (write side) ─────────────────────────────────────────

@@ -200,6 +200,27 @@ using Phase = std::variant<phase::Idle, phase::Streaming,
     }, std::move(p));
 }
 
+// ── Reschedule combinator ───────────────────────────────────
+// The retry sites all perform the same dance: pull the ctx out of the
+// phase, bump its retry bookkeeping, and re-enter Streaming with the
+// Scheduled sentinel. Hand-rolled, that dance needs a `.value()` on the
+// take — a proof obligation ("phase IS active here") carried in a comment;
+// get it wrong (a late error after cancel dropped to Idle) and the reducer
+// throws bad_optional_access → std::terminate. This combinator makes the
+// operation TOTAL: the Idle case returns false (phase restored to Idle)
+// instead of aborting, and the caller branches on the bool. The mutator
+// runs exactly once, on a real ctx, before the phase is re-seated.
+template <class F>
+    requires std::invocable<F&, phase::Active&>
+[[nodiscard]] inline bool reschedule_streaming(Phase& p, F&& mutate) noexcept(
+    std::is_nothrow_invocable_v<F&, phase::Active&>) {
+    auto ctx = take_active_ctx(std::move(p));
+    if (!ctx) { p = phase::Idle{}; return false; }
+    mutate(*ctx);
+    p = phase::Streaming{std::move(*ctx)};
+    return true;
+}
+
 [[nodiscard]] constexpr std::string_view to_string(const Phase& p) noexcept {
     return std::visit([](const auto& v) -> std::string_view {
         using T = std::decay_t<decltype(v)>;
@@ -420,6 +441,17 @@ struct StreamState {
     std::chrono::steady_clock::time_point last_wire_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
+    // Prompt-cache telemetry for the LAST completed pricing (per turn).
+    // cache_hit_ratio = cache_read / (input + cache_read + cache_creation)
+    // — 1.0 means the whole prefix was served from cache (cheap + fast
+    // TTFT), ~0 means the prefix was re-priced cold (10-20x TTFT for a
+    // large context). A LOW ratio on an interior turn of a session is a
+    // bug signal: something (tool-catalog reorder, MCP reload, prompt
+    // nondeterminism) mutated the cached prefix and torched the cache.
+    // Surfaced via AGENTTY_CACHE_PROF=1 logging; -1 = no data yet.
+    double cache_hit_ratio = -1.0;
+    int    cache_read_tokens     = 0;
+    int    cache_creation_tokens = 0;
     int context_max = 200000;
     // Self-calibrating correction for the local byte-based token estimate.
     //
@@ -632,6 +664,16 @@ struct StreamState {
     // cleared by the `ModelsLoaded` handler, which fetch_models()
     // dispatches on BOTH success and failure.
     bool models_loading = false;
+
+    // ── Self-update signal ──────────────────────────────────
+    // Filled by UpdateCheckDone (background release check). Non-empty
+    // update_latest ⇒ the status bar shows an unobtrusive "⬆ vX.Y.Z" chip
+    // and the palette surfaces "Update agentty". update_in_flight gates
+    // double-launch from the palette while a download runs.
+    std::string update_latest;    // "" = up to date / not checked
+    std::string update_url;       // release page for the toast
+    bool        update_in_flight = false;
+
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
     // banner once now() passes this point and the reducer treats the

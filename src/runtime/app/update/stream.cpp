@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <ranges>
 #include <span>
@@ -21,6 +22,7 @@
 #include <maya/terminal/ansi.hpp>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"
 #include "agentty/domain/routing_memory.hpp"
 #include "agentty/domain/decomposition_memory.hpp"
 #include "agentty/domain/smart_tuning.hpp"
@@ -30,7 +32,9 @@
 #include "agentty/runtime/code_block_picker.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/view/cache.hpp"
+#include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/spec.hpp"
+#include "agentty/tool/tool.hpp"   // DynamicDispatch::needs_permission (speculative dispatch)
 #include <maya/widget/markdown.hpp>
 #include "agentty/tool/util/partial_json.hpp"
 
@@ -646,8 +650,8 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
             // same ctx — the just-incremented truncation_retries
             // counter persists so the kMaxTruncationRetries cap
             // works across retries within the turn.
-            auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-            m.s.phase = phase::Streaming{std::move(ctx)};
+            if (!reschedule_streaming(m.s.phase, [](phase::Active&) {}))
+                return Cmd<Msg>::none();   // late event from Idle: no-op
             m.s.status = "retrying (upstream cut off)…";
             return cmd::launch_stream(m);
         }
@@ -809,6 +813,29 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason) {
     }
 
     deps().save_thread(m.d.current);
+    // ── Batch-width KPI ─────────────────────────────────────────
+    // Tool calls per model round-trip is THE wall-clock lever in an agent
+    // session (each round-trip costs seconds of TTFT + stream). Log the
+    // width of this turn's tool batch so prompt-shaping work has a
+    // measurable target: rising avg width = fewer round-trips per task.
+    // Rides the same opt-in as the cache telemetry.
+    {
+        static const bool prof = [] {
+            const char* v = std::getenv("AGENTTY_CACHE_PROF");
+            return v && *v && *v != '0';
+        }();
+        if (prof && !m.d.current.messages.empty()
+            && m.d.current.messages.back().role == Role::Assistant
+            && !m.d.current.messages.back().tool_calls.empty()) {
+            static std::FILE* out =
+                std::fopen("/tmp/agentty-cache-prof.log", "a");
+            if (out) {
+                std::fprintf(out, "[batch] width=%zu\n",
+                    m.d.current.messages.back().tool_calls.size());
+                std::fflush(out);
+            }
+        }
+    }
     auto kp = cmd::kick_pending_tools(m);
     // Set by the idle-settle block below when the reply carries runnable
     // shell blocks; batched into whichever return path fires.
@@ -1044,6 +1071,31 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 if (!e.text.empty()) {
                     if (a->first_delta_at.time_since_epoch().count() == 0) {
                         a->first_delta_at = now;
+                        // TTFT sample — request launch to first content
+                        // byte, per model. Same opt-in as the cache
+                        // telemetry; feeds latency-aware routing with live
+                        // data (which model is FAST now, not just cheap).
+                        {
+                            static const bool prof = [] {
+                                const char* v = std::getenv("AGENTTY_CACHE_PROF");
+                                return v && *v && *v != '0';
+                            }();
+                            if (prof
+                                && a->started.time_since_epoch().count() != 0) {
+                                static std::FILE* out = std::fopen(
+                                    "/tmp/agentty-cache-prof.log", "a");
+                                if (out) {
+                                    const auto ttft = std::chrono::duration_cast<
+                                        std::chrono::milliseconds>(
+                                            now - a->started).count();
+                                    std::fprintf(out,
+                                        "[ttft] model=%s ms=%lld\n",
+                                        m.d.model_id.value.c_str(),
+                                        static_cast<long long>(ttft));
+                                    std::fflush(out);
+                                }
+                            }
+                        }
                         // First real byte of this stream attempt —
                         // the connection demonstrably works. Reset
                         // the retry budget so a later mid-stream
@@ -1297,6 +1349,63 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 // turn-level retry logic owns the single decision point.
             }
             resync_live_tool_viewer(m);
+            // ── Speculative read-only dispatch (mid-stream) ─────────────
+            // The wire just CLOSED this tool call's args — but the model is
+            // still streaming the rest of the turn (more tool calls, prose,
+            // message_stop are seconds away). The normal flow waits for
+            // StreamFinished → finalize_turn → kick_pending_tools, so every
+            // tool's execution serializes AFTER the full stream. For a pure
+            // READ-ONLY tool (read/grep/glob/list_dir…) that ordering is
+            // pessimal: it can't affect anything the model is still saying,
+            // so start it NOW and overlap its I/O with the remaining stream
+            // — on a multi-tool turn this hides 1-3 s of tool time inside
+            // stream time, every turn.
+            //
+            // Safety gates (all must hold — fail closed to the normal path):
+            //   • registry-known tool whose scheduling_effects ⊆ {ReadFs,
+            //     Net-free}: ReadFs-only. Anything with WriteFs/Exec/Net
+            //     waits for the planner (ordering + permission + sandbox
+            //     semantics unchanged). Net excluded: a mid-stream web
+            //     fetch could observe state the turn is about to change.
+            //   • no permission needed under the current profile and no
+            //     pending permission modal (never pre-empt a user decision).
+            //   • args parsed clean this event (is_pending + args object).
+            //   • phase is Streaming (not compacting — compaction streams
+            //     carry no runnable tools; not ExecutingTool — that path
+            //     already has the planner running).
+            // The started tool transitions Pending→Running through the SAME
+            // status machinery kick_pending_tools uses, so ToolExecOutput /
+            // cancel teardown / the wedge watchdog all see a normal Running
+            // tool. schedule_parallel_batch seeds active effects from
+            // Running tools, so later same-turn writers correctly defer
+            // until this read completes.
+            if (m.s.is_streaming() && !m.s.compacting
+                && !m.d.pending_permission) {
+                if (auto* tcp2 = find_streaming_tool(e.id);
+                    tcp2 && tcp2->is_pending() && !tcp2->args.is_null()) {
+                    auto& tc2 = *tcp2;
+                    const auto* def = tools::find(tc2.name.value);
+                    const bool read_only =
+                        def != nullptr
+                        && !def->scheduling_effects.has(tools::Effect::WriteFs)
+                        && !def->scheduling_effects.has(tools::Effect::Exec)
+                        && !def->scheduling_effects.has(tools::Effect::Net);
+                    const bool needs_perm =
+                        !m.d.session_grants.contains(tc2.name.value)
+                        && tool::DynamicDispatch::needs_permission(
+                               tc2.name.value, m.d.profile);
+                    if (read_only && !needs_perm) {
+                        const auto now2 = std::chrono::steady_clock::now();
+                        tc2.status = ToolUse::Running{now2, {}};
+                        auto cancel = active_ctx(m.s.phase)
+                            ? active_ctx(m.s.phase)->cancel
+                            : http::CancelTokenPtr{};
+                        return {std::move(m),
+                                cmd::run_tool(tc2.id, tc2.name, tc2.args,
+                                              std::move(cancel))};
+                    }
+                }
+            }
             return done(std::move(m));
         },
         [&](StreamObservedToolResult& e) -> Step {
@@ -1395,6 +1504,33 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 m.s.tokens_in = e.input_tokens
                                    + e.cache_read_input_tokens
                                    + e.cache_creation_input_tokens;
+                // Prompt-cache telemetry. A LOW hit ratio on an interior
+                // turn means the cached prefix was invalidated — the #1
+                // hidden TTFT cost on big sessions (a cold re-price of a
+                // 100k prefix is 10-20x slower than a cache read). Track
+                // it every turn; AGENTTY_CACHE_PROF=1 appends one line
+                // per pricing so prefix-stability bugs are catchable.
+                m.s.cache_read_tokens     = e.cache_read_input_tokens;
+                m.s.cache_creation_tokens = e.cache_creation_input_tokens;
+                m.s.cache_hit_ratio =
+                    static_cast<double>(e.cache_read_input_tokens)
+                    / static_cast<double>(m.s.tokens_in);
+                static const bool cache_prof = [] {
+                    const char* v = std::getenv("AGENTTY_CACHE_PROF");
+                    return v && *v && *v != '0';
+                }();
+                if (cache_prof) {
+                    static std::FILE* out =
+                        std::fopen("/tmp/agentty-cache-prof.log", "a");
+                    if (out) {
+                        std::fprintf(out,
+                            "[cache] in=%d read=%d create=%d hit=%.3f\n",
+                            e.input_tokens, e.cache_read_input_tokens,
+                            e.cache_creation_input_tokens,
+                            m.s.cache_hit_ratio);
+                        std::fflush(out);
+                    }
+                }
                 // Recalibrate the local byte-estimator against ground
                 // truth. The wire prefix the model just priced is the
                 // same transcript estimate_wire_tokens() would score, so
@@ -1553,11 +1689,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // rebuilds the same compaction request shape on
                     // RetryStream.
                     m.s.compaction_buffer.clear();
-                    auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                    ctx.transient_retries = prior + 1;
-                    ctx.last_failure_at   = std::chrono::steady_clock::now();
-                    ctx.retry             = retry::Scheduled{};
-                    m.s.phase = phase::Streaming{std::move(ctx)};
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior + 1;
+                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return done(std::move(m));
                     return {std::move(m),
                             Cmd<Msg>::after(delay, Msg{RetryStream{}})};
                 }
@@ -1594,13 +1731,20 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     if (next < 4000) next = 0;   // give up path below
                     const phase::Active* sctx = active_ctx(m.s.phase);
                     const int shrink_tries = sctx ? sctx->transient_retries : 0;
-                    if (next > 0 && shrink_tries < 6) {
+                    // Gate the retry on the ctx actually existing: sctx is
+                    // null-checked above because phase may NOT be Active here
+                    // (e.g. a late error after cancel dropped to Idle) —
+                    // taking .value() on that path was bad_optional_access →
+                    // std::terminate inside the reducer.
+                    if (next > 0 && shrink_tries < 6 && sctx) {
                         m.s.compaction_ceiling = next;
                         m.s.compaction_buffer.clear();
-                        auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                        ctx.transient_retries = shrink_tries + 1;
-                        ctx.retry = retry::Scheduled{};
-                        m.s.phase = phase::Streaming{std::move(ctx)};
+                        if (!reschedule_streaming(m.s.phase,
+                                [&](phase::Active& c) {
+                                    c.transient_retries = shrink_tries + 1;
+                                    c.retry = retry::Scheduled{};
+                                }))
+                            return done(std::move(m));
                         m.s.status = "forking \xc2\xb7 trimming to fit…";
                         m.s.status_until = {};
                         return {std::move(m),
@@ -1734,6 +1878,53 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                 }
             }
 
+            // ── Long-context entitlement 400: self-heal, don't dead-end ──
+            // The account's subscription rejected the context-1m beta the
+            // `[1m]` picker variant makes us send. This is a CAPABILITY
+            // DISCOVERY, not a transient failure — every retry with the
+            // marker will 400 identically, and without it the identical
+            // request succeeds at the plain 200K window. So: strip the
+            // marker from the active model, remember the entitlement fact
+            // (persisted — the picker stops offering `[1m]` variants, see
+            // list_models), toast a one-line explanation, and relaunch the
+            // SAME turn immediately. Nothing was committed (the 400 arrives
+            // before any content), so the relaunch is safe. Guarded on the
+            // marker actually being present so a server-side drift of this
+            // error text on a plain model can never loop us.
+            if (err_ctx && !has_committed
+                && m.d.model_id.value.find("[1m]") != std::string::npos
+                && provider::is_long_context_rejection(e.message, e.http_status)) {
+                m.d.model_id = ModelId{wire_model_id(m.d.model_id.value)};
+                m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
+                // Persist the discovery + the corrected model id so the next
+                // launch doesn't re-offer what this account can't use.
+                {
+                    auto s = deps().load_settings();
+                    s.context_1m_blocked = true;
+                    s.model_id = m.d.model_id;
+                    deps().save_settings(s);
+                }
+                // Drop `[1m]` rows from the live catalog so the picker
+                // reflects reality without waiting for a refetch.
+                std::erase_if(m.d.available_models, [](const ModelInfo& mi) {
+                    return mi.id.value.find("[1m]") != std::string::npos;
+                });
+                if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                        c.transient_retries = prior_transient + 1;
+                        c.last_failure_at   = std::chrono::steady_clock::now();
+                        c.retry             = retry::Scheduled{};
+                    }))
+                    return done(std::move(m));
+                auto toast = set_status_toast(m,
+                    "this account lacks the 1M-context beta — fell back to "
+                    "the standard 200K window and retried",
+                    std::chrono::seconds{8});
+                return {std::move(m), Cmd<Msg>::batch(
+                    std::move(toast),
+                    Cmd<Msg>::after(std::chrono::milliseconds{50},
+                                    Msg{RetryStream{}}))};
+            }
+
             // ── Auth (401/403): try a one-shot OAuth refresh ─────────
             // The bearer token expired (or was rotated) mid-session.
             // Deps still holds the stale header; load creds from disk
@@ -1766,11 +1957,12 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                     // cancel token was already reset at the top of this
                     // handler; we just rebuild the ctx with bumped
                     // counters and the Scheduled retry sentinel.
-                    auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                    ctx.transient_retries = prior_transient + 1;
-                    ctx.last_failure_at   = std::chrono::steady_clock::now();
-                    ctx.retry             = retry::Scheduled{};
-                    m.s.phase = phase::Streaming{std::move(ctx)};
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior_transient + 1;
+                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return done(std::move(m));
                     if (last) {
                         // Drop before pop — an uncommitted (textless)
                         // placeholder may hold a cache entry (pinned or
@@ -1862,12 +2054,13 @@ Step stream_update(Model m, msg::StreamMsg sm) {
                            + "/" + std::to_string(retry_cap) + ")…";
                 m.s.status_until = std::chrono::steady_clock::now()
                                  + delay + std::chrono::milliseconds{1500};
-                auto ctx = take_active_ctx(std::move(m.s.phase)).value();
-                ctx.transient_retries = attempt + 1;
-                if (mid_stream) ctx.mid_stream_failures = mid_prior + 1;
-                ctx.last_failure_at   = std::chrono::steady_clock::now();
-                ctx.retry             = retry::Scheduled{};
-                m.s.phase = phase::Streaming{std::move(ctx)};
+                if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                        c.transient_retries = attempt + 1;
+                        if (mid_stream) c.mid_stream_failures = mid_prior + 1;
+                        c.last_failure_at   = std::chrono::steady_clock::now();
+                        c.retry             = retry::Scheduled{};
+                    }))
+                    return done(std::move(m));
                 if (last) {
                     // Drop before pop — see the auth-retry pop above.
                     m.ui.view_cache.drop(m.d.current.id, last->id);

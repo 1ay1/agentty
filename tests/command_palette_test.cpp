@@ -30,7 +30,7 @@ static constexpr std::array kAll = {
     Command::RewindCheckpoint, Command::ForkThread,
     Command::OpenPlugins, Command::OpenCommands, Command::OpenAgents, Command::OpenHooks,
     Command::OpenRagSettings, Command::OpenLogin,
-    Command::SignOut, Command::Quit,
+    Command::SignOut, Command::UpdateAgentty, Command::Quit,
 };
 
 static bool has_id(const std::vector<const CommandDef*>& v, Command id) {

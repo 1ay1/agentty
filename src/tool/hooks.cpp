@@ -20,6 +20,7 @@
 #include "agentty/scope/scope.hpp"          // scope::Approvals (shared trust store)
 #include "agentty/tool/util/sandbox.hpp"    // run_shell_command
 #include "agentty/tool/util/subprocess.hpp"
+#include "agentty/tool/util/utf8.hpp"        // strip_terminal_controls, to_valid_utf8
 
 #include <nlohmann/json.hpp>
 
@@ -245,16 +246,31 @@ PreToolDecision run_pre_tool(std::string_view tool,
     json payload = {{"event", "pre_tool"},
                     {"tool", std::string{tool}},
                     {"args", args_json}};
-    const std::string body = payload.dump();
+    // error_handler_t::replace: args_json may embed lossy bytes; dump()
+    // THROWS on invalid UTF-8 by default — a crash inside the tool path.
+    const std::string body =
+        payload.dump(-1, ' ', false, json::error_handler_t::replace);
     for (const auto& h : hf.pre_tool) {
         if (!name_matches(h.match, tool)) continue;
         HookRun r = run_hook(h, "pre_tool", tool, body);
         if (r.exit_code != 0) {
             d.blocked = true;
-            d.reason  = r.output.empty()
-                ? ("blocked by pre_tool hook (`" + h.run + "` exited " +
-                   std::to_string(r.exit_code) + ")")
-                : r.output;
+            if (r.output.empty()) {
+                d.reason = "blocked by pre_tool hook (`" + h.run + "` exited "
+                         + std::to_string(r.exit_code) + ")";
+            } else {
+                // Hook stdout becomes the error the MODEL reads — scrub
+                // terminal controls, force valid UTF-8, and cap it (a 4 MB
+                // guard-script dump would blow the turn's token budget).
+                std::string reason = util::to_valid_utf8(
+                    util::strip_terminal_controls(r.output));
+                if (reason.size() > 4096) {
+                    reason.resize(4096);
+                    reason = util::to_valid_utf8(std::move(reason));
+                    reason += "\n[hook output truncated at 4 KiB]";
+                }
+                d.reason = std::move(reason);
+            }
             return d;
         }
     }
@@ -275,7 +291,10 @@ void run_post_tool(std::string_view tool, const std::string& args_json,
                      result_text.size() > kMaxPayloadBytes
                          ? result_text.substr(0, kMaxPayloadBytes)
                          : result_text}};
-    const std::string body = payload.dump();
+    // replace-handler: result_text is arbitrary tool output (bash can emit
+    // raw bytes); default dump() throws on invalid UTF-8.
+    const std::string body =
+        payload.dump(-1, ' ', false, json::error_handler_t::replace);
     for (const auto& h : hf.post_tool) {
         if (!name_matches(h.match, tool)) continue;
         (void)run_hook(h, "post_tool", tool, body);   // fire-and-forget

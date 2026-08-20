@@ -395,6 +395,11 @@ private:
 //   drift, and small edit sets update only changed files.
 class AgenttyCodeRetriever final : public mt::DocRetriever {
 public:
+    // Opportunistic queries (structural zero-hit leads, over-budget ordering)
+    // must never trigger a cold code-index build — only explicit search_code
+    // calls pay that. Warm ⇔ index live in memory or persisted on disk.
+    bool warm() const override { return shared_retriever().code_warm(); }
+
     std::vector<mt::DocPassage>
     retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
         std::vector<mt::DocPassage> out;

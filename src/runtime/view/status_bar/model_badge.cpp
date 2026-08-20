@@ -35,6 +35,17 @@ maya::Element model_badge_config(const Model& m) {
         return h(text("● ", fg_dim(muted)),
                  text(prov, fg_dim(muted))).build();
     }
+    // Update chip: when a newer release is known (background check), a
+    // compact "⬆ vX.Y.Z" rides beside the model badge — bright enough to
+    // notice, quiet enough to ignore. The palette's "Update agentty" (and
+    // `agentty update`) are the actions; this chip is only the signal.
+    if (!m.s.update_latest.empty()) {
+        return h(mb.build(),
+                 text(" · ", fg_dim(muted)),
+                 text(prov, fg_dim(muted)),
+                 text("  ⬆ v" + m.s.update_latest,
+                      fg_of(maya::Color::green()))).build();
+    }
     return h(mb.build(),
              text(" · ", fg_dim(muted)),
              text(prov, fg_dim(muted))).build();
