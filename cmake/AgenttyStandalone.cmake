@@ -97,6 +97,24 @@ if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     message(STATUS "agentty: LTO disabled on macOS+GCC "
                    "(Apple ld can't consume GCC LTO IR — would only bloat the binary)")
 endif()
+# MinGW / MSYS2 GCC (ucrt64) is an LTO minefield on GCC 16.x: linking the full
+# agentty.exe partitions whole-program GIMPLE into ~200 LTRANS jobs and lto1.exe
+# then dies mid-stream with an internal compiler error —
+#   "cannot read 'LTO_section_decls' from …ltransNN.o"
+# — a toolchain regression, NOT our code (every one of the 476 TUs compiles
+# clean; only the final -flto=auto whole-program link stage crashes). It's
+# non-deterministic in which partition trips, so there's no single TU to blame
+# or split out. The Windows release binary we actually ship is the MSVC build
+# (/GL+/LTCG, unaffected); the MSYS2 job is a *compile-only* portability gate.
+# Per-TU -O3 code is what links here anyway (MinGW gains little from cross-TU
+# LTO), so dropping IPO for this combo makes the gate pass with byte-identical
+# optimization and zero risk to any shipped artifact.
+if(MINGW OR (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"))
+    set(AGENTTY_IPO_OK FALSE)
+    message(STATUS "agentty: LTO disabled on MinGW/MSYS2 GCC "
+                   "(GCC 16 lto1 ICE 'cannot read LTO_section_decls' on the "
+                   "whole-program link — toolchain bug, not code)")
+endif()
 # Whole-tree sanitizer builds (-DAGENTTY_SANITIZE_ALL=...) must also disable
 # LTO here, BEFORE add_subdirectory(maya) below compiles maya's objects.
 # AGENTTY_SANITIZE_ALL is read early on purpose: a `-D` on the cmake command
@@ -120,17 +138,18 @@ if(AGENTTY_IPO_OK AND (CMAKE_BUILD_TYPE STREQUAL "Release"
                      OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"
                      OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-elseif(AGENTTY_SANITIZE_ALL)
+elseif(NOT AGENTTY_IPO_OK)
     # Set a DEFINED false value, not just "leave it unset". maya/CMakeLists.txt
     # has its own `if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION) set(...
     # ON)` fallback (so a bare `add_subdirectory(maya)` from an external
     # project still gets LTO) — if we only skip the TRUE branch above without
     # ever defining the variable, that fallback fires inside
     # add_subdirectory(maya) below and silently re-enables LTO out from under
-    # this sanitizer build, producing GCC slim-LTO bytecode objects in
-    # libmaya.a that the later `-fno-lto`-only link flags can't consume
-    # ("plugin needed to handle lto object"). Defining it FALSE here is the
-    # actual override maya's guard is designed to respect.
+    # a build we deliberately turned it off for (sanitizer link mismatch,
+    # macOS+GCC bloat, or the MinGW lto1 ICE above), producing GCC slim-LTO
+    # bytecode objects in libmaya.a that the later `-fno-lto`-only link flags
+    # can't consume ("plugin needed to handle lto object"). Defining it FALSE
+    # here is the actual override maya's guard is designed to respect.
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
