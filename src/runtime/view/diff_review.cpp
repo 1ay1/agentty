@@ -82,38 +82,50 @@ struct DiffLine { char sign; std::string code; int lineno; };
 [[nodiscard]] Element diff_code_line(const DiffLine& dl, syntax::Lang lang,
                                      int gutter_w) {
     const bool add = dl.sign == '+', del = dl.sign == '-';
-    // Gutter: line number (new side) or blank for removed lines.
+    Color sign_c = add ? success : del ? danger : muted;
+
+    // Build the WHOLE line as one string + per-byte-range StyledRuns, so it
+    // renders as a SINGLE text element that clips its tail cleanly at the pane
+    // width — an hstack of per-span text cells would instead squeeze every span
+    // when the line overflows (mangled). This is how maya's DiffView stays
+    // clean, applied with our syntax highlighting.
+    std::string content;
+    std::vector<StyledRun> runs;
+
+    // Gutter (right-aligned line number) + sign marker.
     std::string gut = dl.lineno > 0 ? std::to_string(dl.lineno) : "";
     gut.insert(gut.begin(), static_cast<std::size_t>(std::max(0, gutter_w - (int)gut.size())), ' ');
-    Color sign_c = add ? success : del ? danger : muted;
+    gut += " ";
+    runs.push_back({content.size(), gut.size(), Style{}.with_fg(muted).with_dim()});
+    content += gut;
     std::string sign_s = add ? "+ " : del ? "- " : "  ";
+    runs.push_back({content.size(), sign_s.size(), Style{}.with_fg(sign_c)});
+    content += sign_s;
 
-    std::vector<Element> parts;
-    parts.push_back(text(gut + " ", fg_dim(muted)));
-    parts.push_back(text(sign_s, fg_of(sign_c)));
-
-    // Syntax-highlight the code. Removed lines render dimmer (they're going
-    // away); context dimmer still; added lines at full strength.
+    // Syntax-highlighted code. Removed + context lines render dimmed so the
+    // eye tracks the additions.
+    const std::size_t code_off = content.size();
+    content += dl.code;
     auto spans = syntax::highlight(dl.code, lang);
     const auto& theme = syntax::themes::terminal;
-    std::size_t pos = 0;
-    auto emit = [&](std::size_t from, std::size_t to, syntax::Capture cap) {
-        if (to <= from || from >= dl.code.size()) return;
-        to = std::min(to, dl.code.size());
+    auto push = [&](std::size_t from, std::size_t to, syntax::Capture cap) {
+        if (to <= from) return;
         Style st = theme.style_for(cap);
-        if (del) st = st.with_dim();          // removed → faded
-        else if (dl.sign == ' ') st = st.with_dim();  // context → faded
-        parts.push_back(text(dl.code.substr(from, to - from), st));
+        if (del || dl.sign == ' ') st = st.with_dim();
+        runs.push_back({code_off + from, to - from, st});
     };
+    std::size_t pos = 0;
     for (const auto& sp : spans) {
-        if (sp.start > pos) emit(pos, sp.start, syntax::Capture::None);
-        emit(sp.start, sp.start + sp.len, sp.cap);
+        if (sp.start > pos) push(pos, sp.start, syntax::Capture::None);
+        push(sp.start, std::min<std::size_t>(sp.start + sp.len, dl.code.size()),
+             sp.cap);
         pos = sp.start + sp.len;
     }
-    if (pos < dl.code.size()) emit(pos, dl.code.size(), syntax::Capture::None);
-    if (dl.code.empty()) parts.push_back(text(std::string{}));
+    if (pos < dl.code.size()) push(pos, dl.code.size(), syntax::Capture::None);
 
-    return h(std::move(parts)).build();
+    return Element{TextElement{.content = std::move(content),
+                               .wrap = TextWrap::TruncateEnd,
+                               .runs = std::move(runs)}};
 }
 
 } // namespace
@@ -146,12 +158,16 @@ Element diff_review(const Model& m) {
 
     // ── File rail: every file, its net status + diffstat, current one lit ──
     // Shows the WHOLE changeset at a glance (SOTA: you never lose the forest).
+    // Built as ONE styled TextElement (TruncateEnd) so with many files it clips
+    // cleanly at the pane edge instead of squeezing every name.
     {
-        std::vector<Element> rail;
-        rail.push_back(text("  "));
+        std::string content = "  ";
+        std::vector<StyledRun> runs;
+        auto seg = [&](const std::string& s, Style st) {
+            runs.push_back({content.size(), s.size(), st}); content += s;
+        };
         for (int i = 0; i < static_cast<int>(m.d.pending_changes.size()); ++i) {
             const auto& f = m.d.pending_changes[static_cast<std::size_t>(i)];
-            // Per-file roll-up status: all-accepted / any-rejected / pending.
             bool anyrej = false, anypend = false;
             for (const auto& hk : f.hunks) {
                 if (hk.status == Hunk::Status::Rejected) anyrej = true;
@@ -161,17 +177,17 @@ Element diff_review(const Model& m) {
                               : anyrej  ? Hunk::Status::Rejected
                                         : Hunk::Status::Accepted;
             const bool cur = (i == fidx);
-            // basename only — the rail is a compact index, not full paths.
             std::string name = f.path;
             if (auto sl = name.rfind('/'); sl != std::string::npos) name = name.substr(sl + 1);
-            if (i > 0) rail.push_back(text("   "));
-            rail.push_back(text(std::string(status_dot(roll)) + " ",
-                                fg_of(status_color(roll))));
-            rail.push_back(text(name, cur ? fg_bold(fg) : fg_of(muted)));
-            rail.push_back(text(std::format(" +{}", f.added), fg_dim(success)));
-            rail.push_back(text(std::format(" -{}", f.removed), fg_dim(danger)));
+            if (i > 0) seg("   ", Style{});
+            seg(std::string(status_dot(roll)) + " ", Style{}.with_fg(status_color(roll)));
+            seg(name, cur ? Style{}.with_fg(fg).with_bold() : Style{}.with_fg(muted));
+            seg(std::format(" +{}", f.added), Style{}.with_fg(success).with_dim());
+            seg(std::format(" -{}", f.removed), Style{}.with_fg(danger).with_dim());
         }
-        rows.push_back(h(std::move(rail)).build());
+        rows.push_back(Element{TextElement{.content = std::move(content),
+                                           .wrap = TextWrap::TruncateEnd,
+                                           .runs = std::move(runs)}});
     }
 
     // ── Progress bar + counts ──
@@ -223,9 +239,11 @@ Element diff_review(const Model& m) {
         ).build());
 
         for (const auto& dl : parse_hunk(hk.patch)) {
-            Element line = diff_code_line(dl, lang, gut_w) | padding(0, 0, 0, 4);
-            if (hk.status != Hunk::Status::Pending && !sel) line = std::move(line) | dim();
-            rows.push_back(line.build());
+            auto base = diff_code_line(dl, lang, gut_w) | padding(0, 0, 0, 4);
+            Element line = (hk.status != Hunk::Status::Pending && !sel)
+                         ? (std::move(base) | dim()).build()
+                         : base.build();
+            rows.push_back(std::move(line));
         }
         if (hi + 1 < static_cast<int>(fc.hunks.size())) rows.push_back(text(""));
     }
