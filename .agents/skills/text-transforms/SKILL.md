@@ -26,6 +26,7 @@ this one spot" (that's `edit`).
 | **Rename** a literal/regex across many files | `replace` | many `edit`s |
 | Read **one concern** out of a big file | `read_filter` | reading it whole |
 | See a big file's **shape** before reading it | `outline` | reading it whole |
+| Query a **JSON** file by path (keys, values, filter) | `json_query` | grep on `.json` |
 | Find where something *is* | `grep` | — |
 | Change a code *shape* (calls, control flow) | `rewrite_structural` | `replace` |
 | Apply a **unified diff** you already have | `apply_patch` | many `edit`s |
