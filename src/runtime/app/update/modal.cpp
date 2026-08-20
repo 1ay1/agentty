@@ -41,6 +41,15 @@ Step submit_message(Model m) {
     if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
         return done(std::move(m));
 
+    // The pending-changes review strip covers ONE window: between the agent
+    // finishing its edits and the user's next message. Sending a new turn ends
+    // that window — the edits are already on disk, so submitting means "I've
+    // seen them, carry on" (implicit accept). Clear the queue so the strip
+    // doesn't linger across turns. Explicit review (Ctrl+R → reject) still runs
+    // BEFORE you'd send a new message; this only fires when you move on without
+    // rejecting.
+    m.d.pending_changes.clear();
+
     // ── Slash-command expansion ──────────────────────────────────
     // `/name args` → the command's template body with $ARGUMENTS/$1..$9
     // substituted, BEFORE any queue/checkpoint/wire path sees the text —
