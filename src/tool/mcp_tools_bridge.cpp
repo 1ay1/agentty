@@ -403,7 +403,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         "grep", "glob", "list_dir",
         "search_structural",
         "extract", "aggregate", "read_filter", "replace",
-        "repo_map",
+        "outline", "repo_map",
         "todo", "web_fetch", "web_search", "find_definition",
         "diagnostics", "test",
         "git_status", "git_diff", "git_log", "git_show", "git_blame", "git_commit",
