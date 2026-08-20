@@ -100,6 +100,7 @@ TEST_CASE("smart cascade decomposition gate") {
     agentty::app::install_deps(agentty::app::Deps{
         .stream        = [](provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
+        .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
         .load_thread   = [](const ThreadId&) { return std::optional<agentty::Thread>{}; },
         .load_settings = [] { return store::Settings{}; },

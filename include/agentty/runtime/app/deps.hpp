@@ -31,6 +31,7 @@ struct Deps {
 
     // ── Store seam (just the calls update.cpp actually makes) ────────────
     std::function<void(const Thread&)>          save_thread;
+    std::function<void(const ThreadId&)>        delete_thread;
     // Returns thread *metadata* (empty messages) for the picker. Full
     // bodies are fetched on demand via load_thread.
     std::function<std::vector<Thread>()>        load_threads;
