@@ -436,17 +436,31 @@ std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
         char32_t c = ck->codepoint;
-        // Normalise a raw Ctrl-letter byte (legacy terminals) to its letter,
-        // matching the app-wide resilience pattern — harmless for the plain
-        // letters we accept here.
-        if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+        // Legacy terminals deliver Ctrl-<letter> as the raw control byte
+        // 0x01..0x1A with NO ctrl-modifier flag; normalise to the letter and
+        // treat it as ctrl-held so the bulk shortcuts fire regardless of
+        // keyboard-protocol support.
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        const bool ctrl = ev.mods.ctrl || raw_ctrl;
+
+        // BULK actions are destructive/irreversible-ish, so they require
+        // Ctrl — Ctrl+A = accept all, Ctrl+X = reject all. This also frees
+        // plain a/x from being a one-key "reject everything" footgun.
+        if (ctrl) {
+            switch (c) {
+                case U'a': case U'A': return AcceptAllChanges{};
+                case U'x': case U'X': return RejectAllChanges{};
+                default: break;
+            }
+            return std::nullopt;   // don't let a ctrl-chord fall through to a per-hunk key
+        }
+
         switch (c) {
+            // Per-hunk decisions — frequent + safe, so plain keys.
             case U'y': case U'Y': return AcceptHunk{};
             case U'n': case U'N': return RejectHunk{};
-            case U'a': case U'A': return AcceptAllChanges{};
-            case U'x': case U'X': return RejectAllChanges{};
-            // vim-style fallbacks — no arrow keys needed (phone / legacy
-            // terminals), matching the tool-output viewer's j/k/h/l/q.
+            // vim-style nav — no arrow keys needed (phone / legacy terminals).
             case U'j': case U'J': return DiffReviewMove{+1};
             case U'k': case U'K': return DiffReviewMove{-1};
             case U'h': case U'H': return DiffReviewPrevFile{};
