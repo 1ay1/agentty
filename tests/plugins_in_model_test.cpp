@@ -251,3 +251,84 @@ TEST_CASE("plugins in model") {
         }
     }
 }
+
+TEST_CASE("settings nav skips non-actionable rows") {
+    using settings::Action;
+    auto opened = [](const Model& mm) {
+        return settings_list_opened(mm.ui.settings_list);
+    };
+
+    // Build a populated Plugins model: row 0 is the "N tools on the wire"
+    // header (Action::None), the server + its tools are actionable.
+    auto make_model = [] {
+        Model m;
+        mcp::ServerState s;
+        s.name = "date";
+        s.connected = true;
+        s.tools.push_back({"current_date", "d", true, false});
+        s.tools.push_back({"days_between", "m", true, false});
+        m.ui.plugins.servers.push_back(std::move(s));
+        return m;
+    };
+
+    // Opening lands on the FIRST actionable row, not the info header at 0.
+    {
+        auto [m, cmd] = app::update(make_model(),
+            Msg{OpenSettingsList{settings::Category::Plugins}});
+        auto rows = settings::items_for(m, settings::Category::Plugins);
+        auto* o = opened(m);
+        REQUIRE(o != nullptr);
+        check(rows[0].action == Action::None,
+              "row 0 is the informational header");
+        check(o->index > 0 && rows[o->index].action != Action::None,
+              "open lands on the first ACTIONABLE row, skipping the header");
+    }
+
+    // Moving up from the first actionable row does NOT drop back onto the
+    // header (no actionable row above → stays put or plain-steps, never lands
+    // on a dead header as a resting spot when it started actionable).
+    {
+        auto [m0, c0] = app::update(make_model(),
+            Msg{OpenSettingsList{settings::Category::Plugins}});
+        auto rows = settings::items_for(m0, settings::Category::Plugins);
+        auto [m1, c1] = app::update(std::move(m0), Msg{SettingsListMove{-1}});
+        auto* o = opened(m1);
+        REQUIRE(o != nullptr);
+        check(rows[o->index].action != Action::None,
+              "moving up from the top actionable row stays on an actionable row");
+    }
+
+    // Moving down hops between actionable rows (header never a landing spot).
+    {
+        auto [m0, c0] = app::update(make_model(),
+            Msg{OpenSettingsList{settings::Category::Plugins}});
+        auto rows = settings::items_for(m0, settings::Category::Plugins);
+        Model m = std::move(m0);
+        for (int i = 0; i < 4; ++i) {
+            auto [mn, cn] = app::update(std::move(m), Msg{SettingsListMove{1}});
+            m = std::move(mn);
+            auto* o = opened(m);
+            REQUIRE(o != nullptr);
+            check(rows[o->index].action != Action::None,
+                  "every down-step lands on an actionable row");
+        }
+    }
+
+    // A wholly-informational pane (Agents = built-ins, all Action::None) must
+    // still give a valid, in-range cursor and never crash on move.
+    {
+        auto [m0, c0] = app::update(Model{},
+            Msg{OpenSettingsList{settings::Category::Agents}});
+        auto rows = settings::items_for(m0, settings::Category::Agents);
+        auto* o = opened(m0);
+        REQUIRE(o != nullptr);
+        check(o->index >= 0 && o->index < static_cast<int>(rows.size()),
+              "agents pane: cursor in range even when all rows are informational");
+        auto [m1, c1] = app::update(std::move(m0), Msg{SettingsListMove{1}});
+        auto* o1 = opened(m1);
+        REQUIRE(o1 != nullptr);
+        auto rows1 = settings::items_for(m1, settings::Category::Agents);
+        check(o1->index >= 0 && o1->index < static_cast<int>(rows1.size()),
+              "agents pane: move keeps the cursor in range (scrolls, no stick)");
+    }
+}

@@ -36,12 +36,44 @@ namespace {
         return std::filesystem::path{row.config_dir} / "mcp.json";
     return tools::plugin::config_path(/*project=*/false);
 }
+
+// True when row `i` is one the user can act on (Enter/toggle/etc).
+[[nodiscard]] bool actionable_at(const std::vector<se::Item>& rows, int i) {
+    return i >= 0 && i < static_cast<int>(rows.size())
+        && rows[static_cast<std::size_t>(i)].action != se::Action::None;
+}
+
+// Cursor-landing SSOT for the settings list: the index of the first row the
+// user can ACT on, scanning from `start` in `dir` (+1 down / -1 up), `start`
+// included. Skips Action::None rows (headers, built-in listings, empty-state
+// placeholders). If nothing actionable exists that way, returns `start`
+// clamped — so a wholly-informational pane (e.g. Agents built-ins) still has
+// a valid, stable cursor and never lands out of range. Used by open, move,
+// and the plugins-refresh reconciler so "where the cursor sits" is decided in
+// ONE place.
+[[nodiscard]] int first_actionable(const std::vector<se::Item>& rows,
+                                   int start, int dir) {
+    const int n = static_cast<int>(rows.size());
+    if (n <= 0) return 0;
+    start = std::clamp(start, 0, n - 1);
+    const int step = dir < 0 ? -1 : 1;
+    for (int i = start; i >= 0 && i < n; i += step)
+        if (rows[static_cast<std::size_t>(i)].action != se::Action::None)
+            return i;
+    return start;
+}
 }  // namespace
 
 Step settings_list_update(Model m, msg::SettingsListMsg sm) {
     return std::visit(overload{
         [&](OpenSettingsList& e) -> Step {
-            m.ui.settings_list = se::ListOpen{e.concern, 0};
+            // Land the cursor on the first ACTIONABLE row, not a leading
+            // header (the Plugins pane opens with a "N tools on the wire"
+            // info row). first_actionable clamps to a valid index for a
+            // wholly-informational / empty pane too.
+            const int start =
+                first_actionable(se::items_for(m, e.concern), 0, +1);
+            m.ui.settings_list = se::ListOpen{e.concern, start};
             // Opening the Plugins panel is what CONNECTS the servers (and
             // refreshes the snapshot): the connection is driven by the update
             // loop, not a lazy side effect of the first tool call. Without
@@ -97,11 +129,13 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                             restored = i; break;
                         }
                 }
-                // Same row found → follow it; otherwise clamp the old index into
-                // range (the row it named is gone — e.g. removed server).
+                // Same row found → follow it; otherwise re-land on the
+                // first actionable row at/after the old index (never a stale
+                // header) — the row it named is gone (e.g. removed server).
                 o->index = restored >= 0
                     ? restored
-                    : std::clamp(o->index, 0, std::max(0, cnt - 1));
+                    : first_actionable(after,
+                          std::clamp(o->index, 0, std::max(0, cnt - 1)), +1);
             }
             return done(std::move(m));
         },
@@ -130,10 +164,41 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             auto* o = settings_list_opened(m.ui.settings_list);
             if (!o) return done(std::move(m));
             o->confirm_remove.clear();   // moving off a row disarms a pending `d`
-            const int n =
-                static_cast<int>(se::items_for(m, o->concern).size());
+            auto rows = se::items_for(m, o->concern);
+            const int n = static_cast<int>(rows.size());
             if (n <= 0) { o->index = 0; return done(std::move(m)); }
-            o->index = std::clamp(o->index + e.delta, 0, n - 1);
+
+            // Seamless nav: hop OVER purely informational rows (Action::None
+            // — the plugins "N tools on the wire" header, the agents built-in
+            // list, empty-state placeholders) so ↑↓ lands only on rows the
+            // user can actually act on. Each unit of delta advances one
+            // ACTIONABLE row via the shared first_actionable SSOT; when no
+            // actionable row remains that way we take a plain clamped step so
+            // an all-informational pane still scrolls and never gets stuck.
+            const int dir = e.delta > 0 ? 1 : (e.delta < 0 ? -1 : 0);
+            const int steps = dir == 0 ? 0 : std::abs(e.delta);
+            int idx = std::clamp(o->index, 0, n - 1);
+            const bool on_actionable = actionable_at(rows, idx);
+            for (int s = 0; s < steps; ++s) {
+                const int probe = idx + dir;
+                if (probe < 0 || probe >= n) break;   // at the edge
+                const int landed = first_actionable(rows, probe, dir);
+                if (actionable_at(rows, landed)) {
+                    idx = landed;                     // hopped onto a real row
+                } else if (on_actionable) {
+                    // We started on an actionable row and there's nothing
+                    // actionable ahead (only a header/footer). DON'T slide
+                    // onto that dead row — hold position; that's the seamless
+                    // feel (↑ at the top row is a no-op, not a jump to a
+                    // non-interactive header).
+                    break;
+                } else {
+                    // Started on an informational row (wholly-inert pane):
+                    // plain-step so the user can still scroll through it.
+                    idx = std::clamp(idx + dir, 0, n - 1);
+                }
+            }
+            o->index = idx;
             return done(std::move(m));
         },
         [&](SettingsListActivate) -> Step {
