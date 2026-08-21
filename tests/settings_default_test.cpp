@@ -14,6 +14,7 @@
 #include "agentty/io/persistence.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/runtime/settings_items.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -78,6 +79,65 @@ TEST_CASE("settings defaults + persistence round-trip") {
     }
     check(persistence::load_settings().profile == Profile::Minimal,
           "save/load round-trips Minimal");
+
+    fs::remove_all(tmp);
+}
+
+TEST_CASE("settings rows harden bad input") {
+    namespace S = agentty::settings;
+    auto tmp = fs::temp_directory_path()
+             / ("agentty_settings_harden_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    ::setenv("HOME", tmp.c_str(), 1);
+    ::unsetenv("USERPROFILE");
+
+    // create_starter: a ':'-namespaced command becomes a SUBDIRECTORY tree
+    // (git:fixup -> commands/git/fixup.md), matching the loader and never
+    // writing a ':' into a filename (illegal on Windows).
+    {
+        auto r = S::create_starter(S::Category::Commands, "git:fixup");
+        check(r.ok, "create_starter nests a colon name");
+        check(fs::is_regular_file(tmp / ".agentty" / "commands" / "git" / "fixup.md"),
+              "colon name written as git/fixup.md subdir tree");
+        check(!fs::exists(tmp / ".agentty" / "commands" / "git:fixup.md"),
+              "no literal-colon filename is created");
+    }
+    // A plain name is a single file.
+    {
+        auto r = S::create_starter(S::Category::Commands, "deploy");
+        check(r.ok && fs::is_regular_file(tmp / ".agentty" / "commands" / "deploy.md"),
+              "plain name -> deploy.md");
+    }
+    // Duplicate is refused, not silently overwritten.
+    check(!S::create_starter(S::Category::Commands, "deploy").ok,
+          "create_starter refuses an existing file");
+    // Path-escape and illegal shapes are rejected up front.
+    check(!S::create_starter(S::Category::Commands, "../evil").ok,
+          "'..' path escape rejected");
+    check(!S::create_starter(S::Category::Commands, "a/b").ok,
+          "raw slash rejected");
+    check(!S::create_starter(S::Category::Commands, ".hidden").ok,
+          "leading-dot segment rejected");
+    check(!S::create_starter(S::Category::Commands, "").ok,
+          "empty name rejected");
+    check(!S::create_starter(S::Category::Commands, std::string(200, 'x')).ok,
+          "over-long name rejected");
+    check(!S::create_starter(S::Category::Commands, "a:b:c:d").ok,
+          "too many nesting levels rejected");
+
+    // add_plugin_from_line: a misplaced flag as the name is rejected, a
+    // non-existent --python script is rejected, and a good spec is accepted.
+    check(!S::add_plugin_from_line("--http http://x").ok,
+          "leading-dash name (misplaced flag) rejected");
+    check(!S::add_plugin_from_line("tool --python /no/such/script_xyz.py").ok,
+          "non-existent --python script rejected");
+    {
+        auto script = tmp / "srv.py";
+        std::ofstream(script) << "print('hi')\n";
+        auto r = S::add_plugin_from_line("mysrv --python " + script.string());
+        check(r.ok, "valid --python plugin accepted");
+    }
 
     fs::remove_all(tmp);
 }
