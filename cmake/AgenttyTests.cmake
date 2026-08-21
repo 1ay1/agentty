@@ -35,7 +35,8 @@ set(_AGENTTY_CONSOLIDATED
     param_tag_repair_test sandbox_escape_test scope_test table_render_test
     plugin_config_test skills_engine_test slash_commands_test fuzzy_match_smoke
     provider_model_switch_test speculative_dispatch_test
-    oauth_proactive_refresh_test maya_host_sequence_test)
+    oauth_proactive_refresh_test maya_host_sequence_test
+    smart_slot_picker_stack_test)
 foreach(_t ${_AGENTTY_CONSOLIDATED})
     agentty_test(${_t} MODE consolidated)
 endforeach()
