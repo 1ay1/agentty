@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <string_view>
 
 namespace agentty::ui {
 
@@ -27,6 +29,71 @@ std::string pick_arg(const nlohmann::json& args,
             if (!s.empty()) return s;
         }
     }
+    return {};
+}
+
+std::string pick_streaming_string(std::string_view raw, std::string_view key) {
+    if (raw.empty() || key.empty()) return {};
+    // Locate `"key"` as a KEY token: the quote-wrapped key followed (after
+    // optional whitespace) by a ':'. Retry on false hits (the same text
+    // appearing as a VALUE elsewhere).
+    std::string needle;
+    needle.reserve(key.size() + 2);
+    needle.push_back('"');
+    needle.append(key);
+    needle.push_back('"');
+    std::size_t search = 0;
+    while (true) {
+        std::size_t k = raw.find(needle, search);
+        if (k == std::string_view::npos) return {};
+        std::size_t i = k + needle.size();
+        while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t'
+                                  || raw[i] == '\n' || raw[i] == '\r')) ++i;
+        if (i >= raw.size() || raw[i] != ':') { search = k + 1; continue; }
+        ++i;  // past ':'
+        while (i < raw.size() && (raw[i] == ' ' || raw[i] == '\t'
+                                  || raw[i] == '\n' || raw[i] == '\r')) ++i;
+        if (i >= raw.size() || raw[i] != '"') return {};  // value not (yet) a string
+        ++i;  // past opening quote
+        // Collect until the unescaped closing quote (or buffer end for a
+        // truncated stream). Decode the escapes we can see mid-stream.
+        std::string out;
+        while (i < raw.size()) {
+            char c = raw[i];
+            if (c == '\\') {
+                if (i + 1 >= raw.size()) break;   // dangling escape at EOF
+                char e = raw[i + 1];
+                switch (e) {
+                    case 'n': out.push_back('\n'); break;
+                    case 't': out.push_back('\t'); break;
+                    case 'r': break;              // drop CR
+                    case '"': out.push_back('"'); break;
+                    case '\\': out.push_back('\\'); break;
+                    case '/': out.push_back('/'); break;
+                    default:  out.push_back(e); break;  // \uXXXX etc: keep raw
+                }
+                i += 2;
+                continue;
+            }
+            if (c == '"') return out;             // closing quote → done
+            out.push_back(c);
+            ++i;
+        }
+        return out;  // truncated mid-value: return what streamed so far
+    }
+}
+
+std::string tool_path_arg(const ToolUse& tc) {
+    // Parsed args first — authoritative once the throttled reparse catches up.
+    if (auto p = pick_arg(tc.args,
+            {"path", "file_path", "filepath", "filename"}); !p.empty())
+        return p;
+    // Streaming fallback: scrape the raw partial JSON so the filename shows
+    // the instant its bytes arrive, not one throttle tick later.
+    const std::string_view raw{tc.args_streaming};
+    for (std::string_view key : {"path", "file_path", "filepath", "filename"})
+        if (auto p = pick_streaming_string(raw, key); !p.empty())
+            return p;
     return {};
 }
 

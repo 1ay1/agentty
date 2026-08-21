@@ -16,6 +16,7 @@
 #include "agentty/runtime/view/pickers.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "maya/widget/tool_body_preview.hpp"
 
 namespace A = agentty;
@@ -257,6 +258,53 @@ TEST_CASE("tool timeline adapter") {
         check(d.find("3 entries") != std::string::npos,
               "list_dir counts real entries, excluding desc + notice lines");
     }
+
+    // Edited-file visibility: the filename must show DURING streaming, before
+    // the throttled args reparse catches up. A Pending edit whose parsed args
+    // are still empty but whose raw stream already carries "path" must render
+    // the path, not a bare "…".
+    {
+        auto tc = make_tool("edit", A::ToolUse::Pending{});
+        tc.args = nlohmann::json::object();   // parse hasn't caught up
+        tc.args_streaming =
+            R"({"display_description":"fix","path":"src/foo.cpp","edits":[)";
+        const auto d = U::tool_timeline_detail(tc);
+        check(d.find("src/foo.cpp") != std::string::npos,
+              "edit shows the streaming path before args reparse");
+        check(d != "\xe2\x80\xa6", "edit is not a bare ellipsis while streaming");
+    }
+    {
+        // Truncated mid-path: show what streamed so far rather than nothing.
+        auto tc = make_tool("write", A::ToolUse::Pending{});
+        tc.args_streaming = R"({"path":"src/partial)";
+        check(U::tool_timeline_detail(tc).find("src/partial") != std::string::npos,
+              "write shows a truncated streaming path");
+    }
+    {
+        // Parsed args win once present (authoritative), stream ignored.
+        auto tc = make_tool("read", A::ToolUse::Done{{}, {}, "a\nb"},
+                            {{"path", "real.cpp"}});
+        tc.args_streaming = R"({"path":"stale.cpp"})";
+        check(U::tool_timeline_detail(tc).find("real.cpp") != std::string::npos,
+              "parsed path is authoritative over the streaming buffer");
+    }
+    {
+        // move: source/destination visible from the stream too.
+        auto tc = make_tool("move", A::ToolUse::Pending{});
+        tc.args_streaming = R"({"source":"a.txt","destination":"b.txt"})";
+        const auto d = U::tool_timeline_detail(tc);
+        check(d.find("a.txt") != std::string::npos
+                  && d.find("b.txt") != std::string::npos,
+              "move shows streaming source and destination");
+    }
+    // pick_streaming_string escape + key-vs-value handling.
+    check(U::pick_streaming_string(R"({"path":"a\/b\nc"})", "path") == "a/b\nc",
+          "pick_streaming_string decodes escapes");
+    check(U::pick_streaming_string(R"({"x":"path","path":"real"})", "path")
+              == "real",
+          "pick_streaming_string finds the KEY, not a same-named value");
+    check(U::pick_streaming_string(R"({"other":"x"})", "path").empty(),
+          "pick_streaming_string returns empty when key absent");
 
     const nlohmann::json malformed_edit_args = {{"edits", {
         {{"old_text", nlohmann::json::array()}, {"new_text", nullptr}}

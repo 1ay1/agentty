@@ -23,6 +23,25 @@ namespace agentty::ui {
 [[nodiscard]] std::string pick_arg(const nlohmann::json& args,
                                    std::initializer_list<const char*> keys);
 
+// The file path a tool is acting on, resolved to be visible AS EARLY AS
+// possible. During streaming the parsed `tc.args` lags the wire (it's
+// re-parsed from partial JSON on a ~120 ms throttle), so a card can show a
+// bare "…" for the first fraction of a second of an edit/write even though
+// the path bytes have already arrived. This first tries the parsed args
+// (path | file_path | filepath | filename), then falls back to scraping the
+// value straight out of tc.args_streaming so the filename appears the instant
+// its bytes land. Empty only when no path has been streamed at all yet.
+[[nodiscard]] std::string tool_path_arg(const ToolUse& tc);
+
+// Scrape the first string value for `key` out of a (possibly partial) JSON
+// document without parsing it — finds `"key"` then the next `: "..."`,
+// honouring backslash escapes and stopping at the closing quote (or the end
+// of a truncated buffer). Returns "" when the key or its value hasn't
+// streamed yet. Cheap: a single left-to-right scan, no allocation until a
+// value is found.
+[[nodiscard]] std::string pick_streaming_string(std::string_view raw_json,
+                                                std::string_view key);
+
 // Int read with default when missing / wrong type.
 [[nodiscard]] int safe_int_arg(const nlohmann::json& args, const char* key, int def);
 
