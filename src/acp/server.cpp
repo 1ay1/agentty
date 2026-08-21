@@ -951,9 +951,16 @@ void AgentServer::emit_config_state(const std::string& session_id,
         if (!s->model.empty()) model = s->model;
     }
     a::SU_ConfigOptions co;
-    co.configOptions.push_back(mode_config_option(mode_id_for(prof)));
+    // Clean cut: the permission MODE is a config option ONLY when the client
+    // negotiated v2+. A v1 client renders it from SessionModeState (the
+    // `modes` field on the session result) instead — exactly one surface per
+    // connection, never both. The model option is version-agnostic (config
+    // options exist in both, and v1 has no other model surface).
+    if (v2_config())
+        co.configOptions.push_back(mode_config_option(mode_id_for(prof)));
     if (auto opt = model_config_option(model))
         co.configOptions.push_back(std::move(*opt));
+    if (co.configOptions.empty()) return;   // nothing to advertise
     send_update(session_id, std::move(co));
 }
 
@@ -1038,6 +1045,8 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     // opted into the Draft via -DACP_ENABLE_V2_DRAFT). A v1-only client still
     // lands on v1; a v2 client lands on v2 only when we were built for it.
     r.protocolVersion = a::negotiate_version(a::kMaxProtocolVersion, p.protocolVersion);
+    // Latch the agreed version for the clean-cut config-surface gate (v2_config).
+    negotiated_version_.store(r.protocolVersion, std::memory_order_relaxed);
 
     r.agentInfo = a::Just<a::ImplementationInfo>(
         {"agentty", a::Nothing, a::Just<std::string>(AGENTTY_VERSION)});
@@ -1102,7 +1111,11 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
-    r.modes     = a::Just(mode_state(session_profile));
+    // Clean cut: v1 clients get the permission mode via SessionModeState here;
+    // v2+ clients get it as the `mode` config option (emit_config_state) and
+    // NOT via `modes` — one surface per connection, never both.
+    if (!v2_config())
+        r.modes = a::Just(mode_state(session_profile));
     // Populate Zed's slash-command menu and model dropdown for this session,
     // same as the native agent. Sent as session/update notifications right
     // after the result (outside the session lock). Model id defaults to the
@@ -1262,11 +1275,13 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
             s->profile = profile_from_mode_id(p.value, s->profile);
             applied = s->profile;
         }
-        // Mirror to the v1 mode surface so clients that track SessionModeState
-        // (rather than config options) also see the change — same dual-surface
-        // contract as emit_session_config.
-        send_update(p.sessionId.value,
-            a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
+        // Feedback goes on the ONE surface this connection uses: v2 clients
+        // get it via the emit_config_state() echo below (the `mode` config
+        // option); a v1 client that reached this path anyway still gets its
+        // SessionModeState surface updated. Never both.
+        if (!v2_config())
+            send_update(p.sessionId.value,
+                a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
     } else {
         // Surface an unknown config id rather than silently accepting and
         // dropping it — a client setting e.g. "temperatuer" deserves an error,
@@ -1363,7 +1378,8 @@ a::ResumeSessionResult AgentServer::on_resume_session(const a::ResumeSessionPara
     if (auto s = find_session(p.sessionId.value)) profile = s->profile;
 
     a::ResumeSessionResult r;
-    r.modes = a::Just(mode_state(profile));
+    if (!v2_config())
+        r.modes = a::Just(mode_state(profile));
     return r;
 }
 

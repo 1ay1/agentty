@@ -211,6 +211,16 @@ private:
     // (reader thread, before any prompt), read-only thereafter.
     std::atomic<bool>         client_supports_terminal_{false};
 
+    // The ACP protocol version agreed at initialize (min of ours + theirs).
+    // The clean-cut seam for v1-vs-v2 emission: a session's config surface is
+    // rendered ONE way per connection — v1 clients get SessionModeState, v2+
+    // clients get the `mode` config option — never both. Set once in
+    // on_initialize (reader thread, before any session), read-only thereafter.
+    std::atomic<int>          negotiated_version_{::acp::kProtocolVersion};
+    [[nodiscard]] bool v2_config() const noexcept {
+        return negotiated_version_.load(std::memory_order_relaxed) >= 2;
+    }
+
     std::once_flag                  tools_once_;   // unused (kept for ABI sanity)
     bool                            wire_tools_built_ = false;
     unsigned long                   wire_tools_gen_   = 0;
