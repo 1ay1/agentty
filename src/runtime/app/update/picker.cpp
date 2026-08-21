@@ -123,6 +123,16 @@ using maya::Cmd;
     // against a thread that no longer exists.
     m.s.phase = phase::Idle{};
     release_to_kernel();
+    // Re-warm the active provider's TLS socket. The launch-time prewarm in
+    // main() has usually aged out of the pool by now — a user reads a reply,
+    // composes, then hits ^N, and the 90 s idle TTL has evicted the warm
+    // connection. Without this the FIRST turn of every new thread re-pays
+    // the full DNS+TCP+TLS handshake (~150-300 ms) before its first SSE byte,
+    // which reads as a per-new-thread lag. Opening the socket now overlaps
+    // that cost with the user typing their first prompt. Non-blocking: spawns
+    // a tracked background dial and returns immediately; a no-op when the pool
+    // is already warm enough to serve the next request.
+    provider::prewarm_active_provider();
     // Per maya's contract this is the ONE allowed wiring of reset_inline: an
     // explicit, user-initiated content swap. `\x1b[3J` wipes saved-lines
     // (including pre-agentty shell history), acceptable precisely because
@@ -750,6 +760,11 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                     return done(std::move(m));
                 }
                 m.s.thread_loading = true;
+                // Warm the socket now so the first turn in the thread the user
+                // is switching INTO doesn't re-pay the handshake (the pool's
+                // idle TTL has usually evicted it during composer breathing
+                // room). Non-blocking; no-op if already warm.
+                provider::prewarm_active_provider();
                 cmd = cmd::load_thread_async(meta.id);
             }
             m.ui.thread_list = pick::Closed{};
@@ -859,6 +874,8 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // an un-persisted tail shouldn't be lost to a quick cycle.
             if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
             m.s.thread_loading = true;
+            // Warm the socket for the switched-into thread's first turn.
+            provider::prewarm_active_provider();
             // "thread k/N · title" — the positional readout that makes
             // repeated Alt+←/→ presses feel like flipping through a
             // deck rather than teleporting blind. Survives the swap
