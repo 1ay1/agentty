@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-21
+
 ### Added
 - **Tool-heavy turns finish faster — parallel batches + speculative reads.** Independent tool calls in one turn now run *concurrently* (only genuine conflicts serialize; the effect- and path-aware scheduler makes a wide batch always safe), and a pure read-only tool starts the instant its arguments finish streaming — while the model is still writing the rest of the turn — so its I/O overlaps the remaining stream instead of waiting for the turn to end. On a multi-tool turn this hides seconds of file/search time inside the model's own generation. Neither changes results, only when the work happens. The system prompt now nudges the model to fan out independent calls into one message. Optional per-turn telemetry (`AGENTTY_CACHE_PROF=1` → `/tmp/agentty-cache-prof.log`) records prompt-cache hit ratio, per-model TTFT, and tool batch-width. (`src/runtime/app/update/stream.cpp`, `src/runtime/app/cmd_factory.cpp`, `src/provider/anthropic/prompt.cpp`; `speculative_dispatch_test`.)
 - **The connection re-warms itself after an idle pause.** agentty already opens the TCP+TLS+HTTP/2 connection while you type so the first request skips the handshake; now, if a session sits idle long enough for the pooled connection to lapse (~90 s), the next keystroke silently re-dials in the background — so a message after a break is as fast as one mid-flow. (`src/runtime/app/update/composer.cpp`.)
