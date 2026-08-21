@@ -110,35 +110,44 @@ namespace {
 #include <unistd.h>
 
 void crash_handler(int sig) {
-    // Use raw write() — fprintf/backtrace_symbols both allocate, which
-    // re-enters a corrupted allocator and crashes again. Even backtrace()
-    // can crash if the stack is corrupted, so we write a simple message
-    // and exit immediately.
+    // Write to STDERR, not stdout: agentty's stdout is the live TUI render,
+    // so a backtrace on stdout lands mangled in the middle of the frame and
+    // can't be redirected. stderr is the conventional diagnostic channel and
+    // is separable with `2>crash.log`. Raw write() only — fprintf and
+    // backtrace_symbols both allocate, re-entering a possibly-corrupted
+    // allocator.
     if (sig == SIGSEGV) {
         const char msg[] = "\n=== agentty: SIGSEGV (segmentation fault) ===\n";
-        write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+        (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
     } else if (sig == SIGABRT) {
         const char msg[] = "\n=== agentty: SIGABRT (abort) ===\n";
-        write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+        (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
     }
     // backtrace()/backtrace_symbols_fd() are not strictly async-signal-safe
     // (they can allocate), but in a debug-only handler the extra frames are
     // worth it. If they crash on a corrupted stack the default disposition
-    // still gives us a core dump.
+    // (chained below via maya's emergency handler, or SIG_DFL) still gives a
+    // core dump.
     void* frames[32];
     int n = backtrace(frames, 32);
     if (n > 0) {
-        backtrace_symbols_fd(frames, n, STDOUT_FILENO);
+        backtrace_symbols_fd(frames, n, STDERR_FILENO);
     }
     const char end[] = "==================\n";
-    write(STDOUT_FILENO, end, sizeof(end) - 1);
-    // Use _exit (not exit) to avoid running atexit handlers that allocate.
-    _exit(sig);
+    (void)!write(STDERR_FILENO, end, sizeof(end) - 1);
+    // _exit (not exit) so no atexit handler runs in a corrupted process. Note
+    // maya's Terminal installs its own sigaction-based emergency restore once
+    // the TUI is up; because THIS handler is installed first (top of main),
+    // maya chains to it AFTER restoring the tty, so a mid-session crash both
+    // restores the terminal and prints this backtrace.
+    _exit(128 + sig);
 }
 
 void install_crash_handler() {
-    std::signal(SIGSEGV, crash_handler);
-    std::signal(SIGABRT, crash_handler);
+    // Best-effort: if signal() fails we simply run without the extra
+    // backtrace — maya's emergency restore (installed later) still runs.
+    (void)std::signal(SIGSEGV, crash_handler);
+    (void)std::signal(SIGABRT, crash_handler);
 }
 #else
 void install_crash_handler() {}
