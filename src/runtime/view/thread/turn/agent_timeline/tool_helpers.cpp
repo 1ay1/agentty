@@ -11,6 +11,7 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/tool/subagent.hpp"   // subagent::agent_origin (provenance tag)
 #include "agentty/tool/util/utf8.hpp"
+#include "agentty/util/home_dir.hpp"
 
 namespace agentty::ui {
 
@@ -133,8 +134,9 @@ std::string pretty_path(std::string p) {
     if (!ec && !cwd.empty() && p.size() > cwd.size()
         && p.compare(0, cwd.size(), cwd) == 0 && p[cwd.size()] == '/')
         return p.substr(cwd.size() + 1);
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        std::string h{home};
+    if (const auto home = agentty::util::home_dir();
+        !home.empty()) {
+        const std::string h = home.string();
         if (p.size() > h.size() && p.compare(0, h.size(), h) == 0
             && p[h.size()] == '/')
             return std::string{"~/"} + p.substr(h.size() + 1);
@@ -168,7 +170,46 @@ std::string pretty_path(std::string p) {
 // actual command for bash, the pattern for grep, etc. When the tool
 // has settled, folds in post-completion stats so the timeline doubles
 // as a compact result log without expanding individual cards.
-std::string tool_timeline_detail(const ToolUse& tc) {
+// Concise, human-readable failure reason for a Failed tool, pulled from its
+// output. Tool errors render as "[kind] detail" (ToolError::render); we want
+// the KIND ("invalid args", "out of workspace", "not found", …) plus a short
+// slice of detail so the header tells the user WHY at a glance instead of
+// looking identical to a success. Bash carries no [kind] tag — its failure is
+// an "[exit code N]" / "[terminated by signal …]" trailer instead — so we sniff
+// that too. Returns "" when there's nothing meaningful to show.
+static std::string tool_failure_reason(const ToolUse& tc) {
+    const std::string& out = tc.output();
+    if (out.empty()) return {};
+
+    // "[kind] detail" — the structured ToolError shape.
+    if (out.front() == '[') {
+        if (auto close = out.find(']'); close != std::string::npos && close > 1) {
+            std::string kind = out.substr(1, close - 1);
+            // A bracketed exit trailer ("[exit code 1]") is not a kind — fall
+            // through to the bash sniff below.
+            if (kind.rfind("exit code", 0) != 0
+             && kind.rfind("terminated", 0) != 0)
+                return kind;
+        }
+    }
+    // Bash-style trailer, wherever it lands in the output.
+    if (out.find("[terminated by signal") != std::string::npos)
+        return "terminated";
+    if (auto p = out.rfind("[exit code "); p != std::string::npos) {
+        auto e = out.find(']', p);
+        if (e != std::string::npos)
+            return out.substr(p + 1, e - p - 1);   // "exit code N"
+    }
+    // Unstructured error text: take the first short line.
+    std::string first = out.substr(0, out.find('\n'));
+    if (first.size() > 48) first = first.substr(0, 47) + "\xe2\x80\xa6";
+    return first;
+}
+
+// The per-tool detail body (success-shaped). tool_timeline_detail wraps this
+// to append a uniform failure summary, so no individual tool branch has to
+// remember to surface its own failure — one code path owns that.
+static std::string tool_timeline_detail_base(const ToolUse& tc) {
     auto safe = [&](const char* k) -> std::string { return safe_arg(tc.args, k); };
     auto path = pick_arg(tc.args, {"path", "file_path", "filepath", "filename"});
     const auto& n = tc.name.value;
@@ -547,11 +588,28 @@ std::string tool_timeline_detail(const ToolUse& tc) {
                     detail += "  \xc2\xb7  " + inner;
                 }
             }
-            if (tc.is_failed()) detail += "  \xc2\xb7  failed";
         }
         return detail;
     }
     return safe_arg(tc.args, "display_description");
+}
+
+// Public entry: the success-shaped detail plus, for a Failed tool, a uniform
+// "· reason" suffix so every failed tool tells the user WHY at a glance (a
+// failed edit/read/bash no longer looks identical to a successful one). One
+// code path owns the failure summary; individual tool branches stay
+// success-only. Rejected/aborted tools are intentionally left plain — they
+// weren't errors, and their glyph already says "skipped".
+std::string tool_timeline_detail(const ToolUse& tc) {
+    std::string detail = tool_timeline_detail_base(tc);
+    if (tc.is_failed()) {
+        std::string reason = tool_failure_reason(tc);
+        if (reason.empty()) reason = "failed";
+        // Avoid a redundant "· failed · failed" if a base branch already said it.
+        if (detail.find(reason) == std::string::npos)
+            detail += "  \xc2\xb7  " + reason;
+    }
+    return detail;
 }
 
 } // namespace agentty::ui
