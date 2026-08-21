@@ -151,6 +151,10 @@ private:
     // Sent as session/update notifications; call outside the session lock.
     void emit_session_config(const std::string& session_id,
                              const std::string& model_id);
+    // Complete config-option state (SSOT for the initial advertise + every
+    // post-change echo). Reads live session profile/model.
+    void emit_config_state(const std::string& session_id,
+                           const std::string& fallback_model);
 
     enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
     PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);

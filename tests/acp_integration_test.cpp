@@ -183,6 +183,8 @@ TEST_CASE("acp integration end-to-end") {
     std::atomic<int> config_opts{0};
     std::atomic<int> session_infos{0};
     std::atomic<bool> saw_model_option{false};
+    std::atomic<bool> saw_mode_option{false};
+    std::string last_mode_value;
     std::atomic<bool> saw_skill_or_compact_cmd{false};
     std::string last_session_title;
     std::string transcript;
@@ -239,8 +241,14 @@ TEST_CASE("acp integration end-to-end") {
             },
             [&](const SU_ConfigOptions& co) {
                 ++config_opts;
-                for (const auto& o : co.configOptions)
+                for (const auto& o : co.configOptions) {
                     if (o.id == "model") saw_model_option.store(true);
+                    if (o.id == "mode") {
+                        saw_mode_option.store(true);
+                        std::lock_guard lk(transcript_mu);
+                        last_mode_value = o.currentValue;
+                    }
+                }
             },
             [&](const SU_SessionInfo& si) {
                 ++session_infos;
@@ -318,6 +326,39 @@ TEST_CASE("acp integration end-to-end") {
     CHECK(saw_skill_or_compact_cmd.load());
     CHECK(config_opts.load() >= 1);
     CHECK(saw_model_option.load());
+    // SOTA config surface: the permission MODE is also advertised as a modern
+    // config option (category "mode"), in lockstep with the legacy `modes`
+    // field — so both v1 and config-option-aware clients see it.
+    CHECK(saw_mode_option.load());
+    { std::lock_guard lk(transcript_mu);
+      CHECK(last_mode_value == "ask"); }
+
+    // session/set_config_option round-trip: flipping the MODE via the modern
+    // path applies AND echoes the complete new config state (v2 contract), so
+    // last_mode_value tracks it. Then flip it back to Ask so the write below
+    // still gates on the user permission prompt.
+    agent.session_set_config_option(
+        SetConfigOptionParams{ns.sessionId, "mode", "write", Json::object()}).get();
+    { std::lock_guard lk(transcript_mu);
+      CHECK(last_mode_value == "write"); }
+    // Switching the MODEL via the same path is accepted and echoed.
+    agent.session_set_config_option(
+        SetConfigOptionParams{ns.sessionId, "model", "claude-sonnet-4-20250514",
+                              Json::object()}).get();
+    // An unknown configId is a hard error, not a silent no-op.
+    {
+        bool threw = false;
+        try {
+            agent.session_set_config_option(
+                SetConfigOptionParams{ns.sessionId, "temperatuer", "9",
+                                      Json::object()}).get();
+        } catch (...) { threw = true; }
+        CHECK(threw);
+    }
+    agent.session_set_config_option(
+        SetConfigOptionParams{ns.sessionId, "mode", "ask", Json::object()}).get();
+    { std::lock_guard lk(transcript_mu);
+      CHECK(last_mode_value == "ask"); }
 
     // set_mode round-trip (switch to minimal then back to ask). Keep the
     // session in Ask before the prompt so the `write` tool gates on the user.
