@@ -725,26 +725,33 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 static_cast<int>(msg.tool_calls.size()) * 12;
             const bool hidden_fits =
                 est_hidden_rows < ::maya::available_height() - 4;
-            // Reveal backlog: how many source bytes the typewriter cursor
-            // still has to catch up on before it reaches the live edge.
-            // debug_reveal_byte_clip() is the cursor's byte position; -1
-            // means it's already AT the edge (nothing to reveal).
+
+            // ── The ONE fact this whole seam keys off: the reveal backlog ──
             //
-            // The deferral exists ONLY to smooth a real burst — a big
-            // unrevealed tail that would paste in one frame at the text→tool
-            // seam. When the backlog is small there's nothing to smooth, so
-            // deferring only adds latency: the fresh tool card sits hidden
-            // through the 160 ms finalize ramp before it appears. That is the
-            // Anthropic-vs-OpenAI "liveness" asymmetry: Anthropic (and native
-            // ChatGPT) emit StreamTextBlockClosed at the seam, which arms
-            // request_finalize(160) — so reveal_in_progress() stays true
-            // through that ramp even with a trivial backlog and the card is
-            // needlessly held; OpenAI-compat transports never emit it, so
-            // their cursor is usually already at the edge and the card shows
-            // at once. Gating on an ACTUAL backlog size makes both paths pop a
-            // fresh tool card immediately for the common short-prose-then-tool
-            // case, while still smoothing a genuine large-backlog burst.
-            // ~2 wrapped rows of slack.
+            // reveal_backlog = source bytes the typewriter cursor still has
+            // to catch up on before it reaches the live edge
+            // (debug_reveal_byte_clip() is the cursor's byte position; -1 =
+            // already AT the edge). This is the single source of truth for
+            // "is there a burst to smooth here", and every branch below reads
+            // it — nothing consults reveal_in_progress() (a raw cursor<edge
+            // boolean that fires for a 3-byte tail as readily as a 3 KB one)
+            // or whether the provider sent a StreamTextBlockClosed event.
+            //
+            // Why this matters: the deferral hides a fresh tool card until
+            // the reveal cursor lands, purely to stop a big unrevealed tail
+            // from pasting in one frame at the text→tool seam. Below the
+            // threshold there's nothing to smooth, so deferring is pure
+            // latency — the card sits hidden for the finalize ramp before it
+            // appears. Keying the decision on reveal_in_progress() instead of
+            // the backlog SIZE was the Anthropic-vs-OpenAI "liveness"
+            // asymmetry: Anthropic ships prose in 50-100 char deltas with
+            // 90-200 ms gaps, so at the seam a small last-delta tail is
+            // almost always still gliding (reveal_in_progress() true → defer,
+            // card held); OpenAI-compat usually has the cursor already at the
+            // edge (false → card shows at once, "more live"). Gating on the
+            // backlog SIZE makes every provider behave identically: pop the
+            // card immediately for the common short-prose-then-tool case,
+            // still smooth a genuine large-backlog burst. ~2 wrapped rows.
             constexpr std::size_t kMinDeferBacklogBytes = 160;
             const std::size_t reveal_clip =
                 cache.streaming->debug_reveal_byte_clip();
@@ -755,9 +762,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                     : source.size() - reveal_clip;
             const bool backlog_worth_smoothing =
                 reveal_backlog >= kMinDeferBacklogBytes;
+
             const bool can_defer =
-                cache.streaming->reveal_in_progress()
-                && backlog_worth_smoothing
+                backlog_worth_smoothing
                 && is_tail_bottom
                 && all_pending
                 && hidden_fits
@@ -784,14 +791,15 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 // row before the ramp lands) yet reads as "catching up to
                 // land" rather than a paste.
                 //
-                // Two cases still finish IMMEDIATELY (no glide): the cursor is
-                // already at the edge (reveal_in_progress false — nothing to
-                // glide, the common already-caught-up case), or we never
-                // entered a live reveal (no backlog). Those keep the original
-                // single-frame behaviour, which is imperceptible.
+                // Two cases still finish IMMEDIATELY (no glide): the reveal
+                // backlog is below the smoothing threshold (the common
+                // already-caught-up / tiny-tail case — nothing to glide), or
+                // we never entered a live reveal. Those keep the original
+                // single-frame behaviour, which is imperceptible. Same
+                // backlog_worth_smoothing SSOT the defer gate uses — no second
+                // reveal_in_progress() reading with different semantics.
                 const bool was_deferring = cache.defer_tool_panel;
-                const bool has_backlog =
-                    cache.streaming->reveal_in_progress();
+                const bool has_backlog = backlog_worth_smoothing;
                 if (has_backlog) {
                     // Bounded glide, then defer the finish to the exit path.
                     cache.streaming->snap_reveal_to_edge(/*glide_ms=*/150);
