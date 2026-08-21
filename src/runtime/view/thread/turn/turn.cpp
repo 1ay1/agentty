@@ -725,8 +725,39 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m) {
                 static_cast<int>(msg.tool_calls.size()) * 12;
             const bool hidden_fits =
                 est_hidden_rows < ::maya::available_height() - 4;
+            // Reveal backlog: how many source bytes the typewriter cursor
+            // still has to catch up on before it reaches the live edge.
+            // debug_reveal_byte_clip() is the cursor's byte position; -1
+            // means it's already AT the edge (nothing to reveal).
+            //
+            // The deferral exists ONLY to smooth a real burst — a big
+            // unrevealed tail that would paste in one frame at the text→tool
+            // seam. When the backlog is small there's nothing to smooth, so
+            // deferring only adds latency: the fresh tool card sits hidden
+            // through the 160 ms finalize ramp before it appears. That is the
+            // Anthropic-vs-OpenAI "liveness" asymmetry: Anthropic (and native
+            // ChatGPT) emit StreamTextBlockClosed at the seam, which arms
+            // request_finalize(160) — so reveal_in_progress() stays true
+            // through that ramp even with a trivial backlog and the card is
+            // needlessly held; OpenAI-compat transports never emit it, so
+            // their cursor is usually already at the edge and the card shows
+            // at once. Gating on an ACTUAL backlog size makes both paths pop a
+            // fresh tool card immediately for the common short-prose-then-tool
+            // case, while still smoothing a genuine large-backlog burst.
+            // ~2 wrapped rows of slack.
+            constexpr std::size_t kMinDeferBacklogBytes = 160;
+            const std::size_t reveal_clip =
+                cache.streaming->debug_reveal_byte_clip();
+            const std::size_t reveal_backlog =
+                (reveal_clip == static_cast<std::size_t>(-1)
+                 || source.size() <= reveal_clip)
+                    ? 0                                   // cursor at the edge
+                    : source.size() - reveal_clip;
+            const bool backlog_worth_smoothing =
+                reveal_backlog >= kMinDeferBacklogBytes;
             const bool can_defer =
                 cache.streaming->reveal_in_progress()
+                && backlog_worth_smoothing
                 && is_tail_bottom
                 && all_pending
                 && hidden_fits
