@@ -10,6 +10,7 @@
 // after its command bytes change (the MCPoison / CVE-2025-54136 re-gate).
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/auth/auth.hpp"   // auth::sha256_hex
 
@@ -32,11 +33,7 @@ namespace {
 // (scope.cpp defines an identical anonymous-namespace home_dir(); concatenated
 // into one TU they'd collide). Same behaviour, file-local name.
 [[nodiscard]] fs::path trust_home_dir() noexcept {
-    if (const char* h = std::getenv("HOME"); h && *h) return fs::path{h};
-#if defined(_WIN32)
-    if (const char* u = std::getenv("USERPROFILE"); u && *u) return fs::path{u};
-#endif
-    return {};
+    return util::home_dir_or_empty();
 }
 
 // The approvals file lives under the USER .agentty dir — never the project's,

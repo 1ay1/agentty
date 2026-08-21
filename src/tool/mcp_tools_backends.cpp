@@ -14,6 +14,7 @@
 //   Built + installed by build_mcp_tool_defs() (mcp_tools_bridge.cpp).
 
 #include "agentty/tool/mcp_tools_backends.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/memory_store.hpp"
@@ -577,11 +578,7 @@ void refresh_user_agents_locked(UserAgentStore& store) {
                            fmt.time_since_epoch().count())) + ";";
         }
     };
-    auto home = [] {
-        if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
-        if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
-        return fs::path{};
-    }();
+    auto home = agentty::util::home_dir_or_empty();
     // Root ladder from scope::plan (Locus-major, Dialect-minor): project
     // .agentty ▷ .agents ▷ .claude ▷ the same three under ~. Same order the
     // hand-written array had; project stays cwd-relative. Built-ins still win

@@ -3,6 +3,7 @@
 // terminal); cli() is the argv shell over them.
 
 #include "agentty/tool/plugin.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
 
@@ -59,9 +60,7 @@ namespace {
 }
 
 [[nodiscard]] fs::path home_dir() {
-    if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
-    if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
-    return {};
+    return agentty::util::home_dir_or_empty();
 }
 
 // Read + parse the file. Distinguishes "absent" (fresh empty doc, ok=true)

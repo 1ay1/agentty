@@ -1,6 +1,7 @@
 // settings_items.cpp — build each category's rows live from the loaders.
 
 #include "agentty/runtime/settings_items.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/profile.hpp"
@@ -253,9 +254,7 @@ std::vector<Item> items_for(const Model& m, Category cat) {
 namespace {
 
 fs::path home_dir_() {
-    if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
-    if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
-    return {};
+    return util::home_dir_or_empty();
 }
 
 // Whitespace-split a line into tokens.

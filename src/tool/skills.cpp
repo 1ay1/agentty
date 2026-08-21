@@ -2,6 +2,7 @@
 // progressive-disclosure rationale and the discovery-root table.
 
 #include "agentty/tool/skills.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -21,11 +22,7 @@ namespace fs = std::filesystem;
 namespace {
 
 [[nodiscard]] fs::path home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
-#if defined(_WIN32)
-    if (auto* h = std::getenv("USERPROFILE"); h && *h) return fs::path{h};
-#endif
-    return {};
+    return agentty::util::home_dir_or_empty();
 }
 
 // Trim ASCII whitespace from both ends.

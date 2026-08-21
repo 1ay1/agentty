@@ -8,6 +8,7 @@
 //   • trust_of() + Approvals — the content-hash trust store (the MCPoison fix).
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/util/home_dir.hpp"
 
 #include "agentty/tool/util/fs_helpers.hpp"   // util::project_root()
 
@@ -50,11 +51,7 @@ constexpr Dialect kDialects[] = {Dialect::Agentty, Dialect::Agents, Dialect::Cla
 }
 
 [[nodiscard]] fs::path home_dir() noexcept {
-    if (const char* h = std::getenv("HOME"); h && *h) return fs::path{h};
-#if defined(_WIN32)
-    if (const char* u = std::getenv("USERPROFILE"); u && *u) return fs::path{u};
-#endif
-    return {};
+    return util::home_dir_or_empty();
 }
 
 // A Project/Local root only exists if project_root() is a real, non-root dir.
