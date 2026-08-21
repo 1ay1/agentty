@@ -19,6 +19,7 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/host_escape.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
@@ -29,6 +30,33 @@ namespace agentty::app::detail {
 using json = nlohmann::json;
 
 namespace {
+
+// Private OSC number for host (editor) integration escapes — see
+// ui::host::file_event_osc. 5379 is unclaimed by mainstream terminals; the
+// "agentty;" payload tag lets a host match ours and ignore other OSCs.
+constexpr int kHostOsc = 5379;
+
+// Build the host follow-along OSC payload for a finished FILE tool, or nullopt
+// for non-file tools / inactive integration. Only tools that name a concrete
+// path qualify (read/edit/write/move/list_dir); the path comes from the same
+// streaming-aware reader the timeline header uses, and read's 1-based offset
+// becomes the follow-along line.
+[[nodiscard]] std::optional<std::string> file_event_osc_for(const ToolUse& tc) {
+    const std::string& n = tc.name.value;
+    const bool is_file_tool =
+        n == "read" || n == "edit" || n == "write" || n == "move"
+        || n == "list_dir";
+    if (!is_file_tool) return std::nullopt;
+    std::string path = ui::tool_path_arg(tc);
+    if (n == "move" && path.empty())
+        path = ui::safe_arg(tc.args, "destination");
+    if (path.empty()) return std::nullopt;
+    std::optional<int> line;
+    if (n == "read") {
+        if (int off = ui::safe_int_arg(tc.args, "offset", 0); off > 0) line = off;
+    }
+    return ui::host::file_event_osc(n, path, line);
+}
 
 // Per-tool-output ceiling carried in the conversation. Tool runners
 // already cap their own captures (read = 1 MiB, grep = 8 MiB, bash =
@@ -474,6 +502,26 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);
+
+            // Cooperating-host follow-along: when running on an editor PTY
+            // (Emacs/vterm) that watches for our OSC, tell it which file the
+            // agent just touched so it can open / reveal / diff it natively.
+            // Frame-safe (maya Cmd::emit_osc, out-of-band), and a complete
+            // no-op on a normal terminal (integration_active() is false).
+            maya::Cmd<Msg> host_cmd = maya::Cmd<Msg>::none();
+            if (ui::host::integration_active()) {
+                for (const auto& msg_ : m.d.current.messages) {
+                    bool done_scan = false;
+                    for (const auto& tc : msg_.tool_calls) {
+                        if (tc.id != e.id || !tc.is_done()) continue;
+                        if (auto osc = file_event_osc_for(tc))
+                            host_cmd = maya::Cmd<Msg>::emit_osc(kHostOsc, *osc);
+                        done_scan = true; break;
+                    }
+                    if (done_scan) break;
+                }
+            }
+
             // No mid-run freeze or trim here. The single freeze site is
             // finalize_turn (the agent_session MessageStop analog) — the
             // whole agent turn is wrapped into one Turn Element and
@@ -496,9 +544,15 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // stream against a wire that is still delivering). Just land
             // the output; StreamFinished → finalize_turn runs the normal
             // kick and finds this tool already terminal.
-            if (m.s.is_streaming()) return done(std::move(m));
+            if (m.s.is_streaming()) {
+                if (host_cmd.is_none()) return done(std::move(m));
+                return {std::move(m), std::move(host_cmd)};
+            }
             auto kick = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(kick)};
+            if (host_cmd.is_none())
+                return {std::move(m), std::move(kick)};
+            return {std::move(m), maya::Cmd<Msg>::batch(
+                std::vector<maya::Cmd<Msg>>{std::move(kick), std::move(host_cmd)})};
         },
 
         // ── Permission ──────────────────────────────────────────────
