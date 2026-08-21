@@ -186,15 +186,13 @@ maya::Composer::Config composer_config(const Model& m) {
         cfg.line_estimate  = lines;
     }
 
-    // Pin to 2 rows so transient height changes (empty↔first-char,
-    // 1-line→42-line wrap, placeholder swap on phase change) cannot
-    // reshape the outer AppLayout vstack mid-stream. With the floor at
-    // 1, every keystroke that pushes the composer into a second wrapped
-    // row shifts the Thread above it by one canvas-Y, triggering a
-    // full-viewport row-diff repaint — the flicker users see during
-    // streaming. 2 rows costs one blank row of vertical space when idle
-    // and eliminates the bob.
-    cfg.min_body_rows   = 2;
+    // Start as a single-row composer: the box hugs one line of input
+    // until the user's own text wraps to a second row. A floor of 2
+    // (former default) kept a permanent blank row for streaming
+    // anti-flicker, but the single-row look is tighter and the
+    // cache_id below already holds the box stable across streaming
+    // frames, so the extra pinned row isn't needed to suppress the bob.
+    cfg.min_body_rows   = 1;
 
     // Idle blink-stop: hand the widget the last-interaction timestamp so
     // it stops blinking the painted cursor 15 s after the user goes idle
