@@ -42,6 +42,7 @@
 #include <mcp/tools/util/fs_helpers.hpp>
 #include <filesystem>
 #include "agentty/tool/skills.hpp"
+#include "agentty/provider/selection.hpp"   // prewarm_active_provider
 
 namespace agentty::app::detail {
 
@@ -199,6 +200,10 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             m.ui.thread_list = pick::Closed{};
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
+            // The fork's first turn hits the network fresh — warm the socket
+            // now (idle TTL has usually evicted the launch-time prewarm)
+            // so it doesn't re-pay the handshake. Non-blocking.
+            provider::prewarm_active_provider();
 
             auto toast = set_status_toast(
                 m, std::string{"forked \xc2\xb7 fresh context · "} +
