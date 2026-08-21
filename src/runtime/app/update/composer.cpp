@@ -20,6 +20,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/io/clipboard.hpp"
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
+#include "agentty/util/home_dir.hpp"
 #include "agentty/util/env.hpp"
 #include "agentty/runtime/command_palette.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -217,20 +218,33 @@ std::string normalize_path_candidate(std::string_view in) {
     std::string s;
     s.reserve(in.size());
     if (in.size() >= 2 && in[0] == '~' && in[1] == '/') {
-        if (const char* home = std::getenv("HOME"); home && *home) {
-            s.append(home);
+        // Unified home root ($HOME on POSIX/MSYS2, $USERPROFILE on native
+        // Windows) so a dropped `~/…` path expands on every platform.
+        const fs::path home = agentty::util::home_dir();
+        if (!home.empty()) {
+            s.append(home.string());
             in.remove_prefix(1);  // keep the '/'
         }
     }
+#ifdef _WIN32
+    // On Windows the backslash is the PATH SEPARATOR, not a shell escape:
+    // a dropped native path `C:\Users\foo\bar` must survive verbatim.
+    // Stripping `\` here would mangle it to `C:Usersfoobar`. Take the
+    // whole remainder as-is (drag/drop sources on Windows don't
+    // shell-escape).
+    s.append(in);
+#else
     for (std::size_t i = 0; i < in.size(); ++i) {
         if (in[i] == '\\' && i + 1 < in.size()) {
-            // Shell-style escape. Drop the backslash, keep the next char.
+            // Shell-style escape (macOS / Linux file managers backslash
+            // every shell-special char). Drop the backslash, keep the char.
             s.push_back(in[i + 1]);
             ++i;
             continue;
         }
         s.push_back(in[i]);
     }
+#endif
     return s;
 }
 

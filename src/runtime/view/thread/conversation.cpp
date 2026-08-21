@@ -14,6 +14,8 @@
 
 #include "agentty/runtime/view/thread/conversation.hpp"
 
+#include <filesystem>
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -412,7 +414,15 @@ maya::Conversation::Config conversation_config(const Model& m) {
         return e && *e && *e != '0';
     }();
     if (view_prof) {
-        static std::FILE* out = std::fopen("/tmp/agentty-view-prof.log", "a");
+        // Dev-only profiling log. Use the platform temp dir so the knob
+        // also works on Windows (which has no /tmp); computed once.
+        static std::FILE* out = []() -> std::FILE* {
+            std::error_code ec;
+            auto p = std::filesystem::temp_directory_path(ec);
+            if (ec) return nullptr;
+            p /= "agentty-view-prof.log";
+            return std::fopen(p.string().c_str(), "a");
+        }();
         if (out) {
             std::size_t live_msgs = (m.d.current.messages.size()
                 > m.ui.frozen_through)

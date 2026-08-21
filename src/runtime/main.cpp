@@ -18,6 +18,7 @@
 #    define NOMINMAX
 #  endif
 #  include <windows.h>
+#  include <shellapi.h>        // CommandLineToArgvW (UTF-8 argv recovery)
 #  include <mmsystem.h>          // timeBeginPeriod / timeEndPeriod
 #  include <io.h>               // _setmode
 #  include <fcntl.h>            // _O_BINARY
@@ -336,6 +337,47 @@ struct Win32PerfTuning {
         if (hi_res_timer) ::timeEndPeriod(1);
     }
 };
+
+// Windows delivers narrow argv in the process ANSI/OEM codepage, so a
+// non-ASCII path argument (`-w C:\Users\Ünïcode`, an @-mentioned unicode
+// filename) arrives as mojibake and every downstream fs::path / getenv
+// comparison misses. Recover the REAL command line via GetCommandLineW +
+// CommandLineToArgvW (always UTF-16) and re-encode each arg to UTF-8, which
+// is what the whole codebase already assumes narrow strings are. The
+// returned storage owns the strings; callers point argv at c_str()s that
+// live as long as it does.
+struct Utf8Argv {
+    std::vector<std::string> store;
+    std::vector<char*>       ptrs;
+    int                      argc = 0;
+    char**                   argv = nullptr;
+};
+
+Utf8Argv recover_utf8_argv() {
+    Utf8Argv out;
+    int wargc = 0;
+    LPWSTR* wargv = ::CommandLineToArgvW(::GetCommandLineW(), &wargc);
+    if (!wargv || wargc <= 0) { if (wargv) ::LocalFree(wargv); return out; }
+    out.store.reserve(static_cast<size_t>(wargc));
+    for (int i = 0; i < wargc; ++i) {
+        int need = ::WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1,
+                                         nullptr, 0, nullptr, nullptr);
+        std::string s;
+        if (need > 1) {
+            s.resize(static_cast<size_t>(need - 1));  // drop the NUL
+            ::WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, s.data(),
+                                  need, nullptr, nullptr);
+        }
+        out.store.push_back(std::move(s));
+    }
+    ::LocalFree(wargv);
+    out.ptrs.reserve(out.store.size() + 1);
+    for (auto& s : out.store) out.ptrs.push_back(s.data());
+    out.ptrs.push_back(nullptr);
+    out.argc = static_cast<int>(out.store.size());
+    out.argv = out.ptrs.data();
+    return out;
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -343,6 +385,14 @@ int main(int argc, char** argv) {
 
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
+    // Swap the ANSI-codepage narrow argv for a UTF-8 one recovered from the
+    // real UTF-16 command line, so non-ASCII path arguments survive. Keep the
+    // storage alive for the whole of main(); argc/argv below point into it.
+    Utf8Argv win32_argv = recover_utf8_argv();
+    if (win32_argv.argv && win32_argv.argc > 0) {
+        argc = win32_argv.argc;
+        argv = win32_argv.argv;
+    }
 #endif
 
     // ── Ignore SIGPIPE process-wide ────────────────────────────────────
