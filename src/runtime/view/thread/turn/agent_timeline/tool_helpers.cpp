@@ -258,7 +258,10 @@ static std::string tool_failure_reason(const ToolUse& tc) {
 // remember to surface its own failure — one code path owns that.
 static std::string tool_timeline_detail_base(const ToolUse& tc) {
     auto safe = [&](const char* k) -> std::string { return safe_arg(tc.args, k); };
-    auto path = pick_arg(tc.args, {"path", "file_path", "filepath", "filename"});
+    // Streaming-aware: shows the filename the instant its bytes arrive on the
+    // wire, not one throttle tick after the parsed args catch up — so an
+    // edit/write card never sits on a bare "…" while the path is right there.
+    auto path = tool_path_arg(tc);
     const auto& n = tc.name.value;
     const auto path_pp = pretty_path(path);
 
@@ -302,8 +305,13 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         return path_pp;
     }
     if (n == "move") {
-        auto src = pretty_path(safe("source"));
-        auto dst = pretty_path(safe("destination"));
+        // Streaming-aware, same rationale as the path above.
+        auto raw_src = safe("source");
+        if (raw_src.empty()) raw_src = pick_streaming_string(tc.args_streaming, "source");
+        auto raw_dst = safe("destination");
+        if (raw_dst.empty()) raw_dst = pick_streaming_string(tc.args_streaming, "destination");
+        auto src = pretty_path(raw_src);
+        auto dst = pretty_path(raw_dst);
         if (src.empty() && dst.empty()) return "\xe2\x80\xa6";
         return src + "  \xe2\x86\x92  " + dst;
     }
