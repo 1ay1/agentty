@@ -125,4 +125,49 @@ TEST_CASE("param tag repair") {
         expect("case5: genuine old_text preferred over in-content marker",
               usable, args.dump());
     }
+
+    // ── Case 6: a MULTI-edit call that leaked as XML. The model buried
+    //    two old_text/new_text pairs in one string value. All of them
+    //    must be recovered, in order — not just the first (the bug that
+    //    left large multi-hunk edits silently truncated).
+    {
+        json args = {
+            {"edit",
+             "<parameter name=\"path\">grid.el"
+             "<parameter name=\"old_text\">AAA"
+             "<parameter name=\"new_text\">aaa"
+             "<parameter name=\"old_text\">BBB"
+             "<parameter name=\"new_text\">bbb"},
+        };
+        bool changed = repair_param_tag_leak("edit", args);
+        expect("case6: multi-edit leak repaired", changed);
+        const auto& e = args["edits"];
+        expect("case6: both edits recovered",
+              e.is_array() && e.size() == 2, args.dump());
+        expect("case6: order + pairing preserved",
+              e.size() == 2
+              && e[0].value("old_text","") == "AAA"
+              && e[0].value("new_text","") == "aaa"
+              && e[1].value("old_text","") == "BBB"
+              && e[1].value("new_text","") == "bbb",
+              args.dump());
+        expect("case6: path recovered", args.value("path","") == "grid.el");
+    }
+
+    // ── Case 7: a leaked display_description must never survive verbatim
+    //    with its marker intact — it's dropped, not carried into the
+    //    rebuilt args (where it would confuse the tool card / re-leak).
+    {
+        json args = {
+            {"display_description",
+             "do it\n<parameter name=\"path\">x.txt"
+             "<parameter name=\"content\">hi\n"},
+        };
+        bool changed = repair_param_tag_leak("write", args);
+        expect("case7: write leak repaired", changed);
+        expect("case7: leaked description dropped",
+              !args.contains("display_description"), args.dump());
+        expect("case7: content recovered", args.value("content","") == "hi\n");
+        expect("case7: path recovered", args.value("path","") == "x.txt");
+    }
 }

@@ -21,11 +21,11 @@
 // file) has its required fields present and is never rewritten.
 
 #include <initializer_list>
-#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -34,14 +34,20 @@
 namespace agentty::app::detail {
 
 // Lift `<parameter name="K">V` segments out of every string value in
-// `args`. Each value runs from just after the `>` to the next
-// `<parameter name="` / `</parameter>` / end-of-string. First occurrence
-// of a given name wins; later duplicate tags are treated as noise.
-inline std::map<std::string, std::string>
+// `args`, IN ORDER, keeping DUPLICATE names. Each value runs from just
+// after the `>` to the next `<parameter name="` / `</parameter>` /
+// end-of-string. Order + duplicates are load-bearing: a multi-edit call
+// that leaked as XML carries several `old_text`/`new_text` tags in
+// sequence, and collapsing them (first-wins) would silently drop every
+// edit after the first. String values are visited in the JSON object's
+// key order so the reconstructed sequence matches the wire.
+using ParamTag = std::pair<std::string, std::string>;
+
+inline std::vector<ParamTag>
 extract_param_tags(const nlohmann::json& args) {
     constexpr std::string_view kOpen  = "<parameter name=\"";
     constexpr std::string_view kClose = "</parameter>";
-    std::map<std::string, std::string> out;
+    std::vector<ParamTag> out;
     if (!args.is_object()) return out;
     for (const auto& [k, v] : args.items()) {
         if (!v.is_string()) continue;
@@ -59,12 +65,21 @@ extract_param_tags(const nlohmann::json& args) {
             std::size_t val_end = std::min(
                 next  == std::string::npos ? s.size() : next,
                 close == std::string::npos ? s.size() : close);
-            out.emplace(s.substr(name_start, name_end - name_start),
-                        s.substr(val_start, val_end - val_start));
+            out.emplace_back(s.substr(name_start, name_end - name_start),
+                             s.substr(val_start, val_end - val_start));
             pos = val_end;
         }
     }
     return out;
+}
+
+// First value tagged with `name`, or nullopt. First-wins lookup for the
+// scalar fields (path / content / line) where duplicates are noise.
+inline std::optional<std::string>
+first_tag(const std::vector<ParamTag>& tags, std::string_view name) {
+    for (const auto& [k, v] : tags)
+        if (k == name && !v.empty()) return v;
+    return std::nullopt;
 }
 
 // Rewrites `args` into the canonical shape and returns true when an XML
@@ -92,7 +107,7 @@ inline bool repair_param_tag_leak(std::string_view tool_name,
     if (tags.empty()) return false;
 
     // Prefer a clean top-level string field (one that isn't itself a leak);
-    // fall back to the value recovered from a parameter tag.
+    // fall back to the FIRST value recovered from a parameter tag.
     auto pick = [&](std::initializer_list<const char*> names)
         -> std::optional<std::string> {
         for (const char* n : names)
@@ -101,34 +116,88 @@ inline bool repair_param_tag_leak(std::string_view tool_name,
                 if (!s.empty() && s.find(kOpen) == std::string::npos) return s;
             }
         for (const char* n : names)
-            if (auto it = tags.find(n); it != tags.end() && !it->second.empty())
-                return it->second;
+            if (auto v = first_tag(tags, n)) return v;
         return std::nullopt;
+    };
+
+    // A display_description carried through verbatim can itself be a leak
+    // (`\n<parameter name="...">...`). Only keep it when it's clean.
+    auto clean_description = [&](nlohmann::json& dst) {
+        if (auto it = args.find("display_description");
+            it != args.end() && it->is_string()) {
+            const std::string& s = it->template get_ref<const std::string&>();
+            if (s.find(kOpen) == std::string::npos)
+                dst["display_description"] = s;
+        }
     };
 
     using K = tools::spec::Kind;
     if (*kind == K::Edit) {
-        auto old_t = pick({"old_text", "old_string"});
-        if (!old_t) return false;   // nothing recoverable
-        auto new_t = pick({"new_text", "new_string"});
-        auto path  = pick({"path", "file_path", "filepath", "filename"});
-
-        json one = json::object();
-        one["old_text"] = std::move(*old_t);
-        one["new_text"] = new_t.value_or("");
-        if (auto it = tags.find("line"); it != tags.end()) {
-            try { one["line"] = std::stoi(it->second); } catch (...) {}
-        } else if (auto it = args.find("line");
-                   it != args.end() && it->is_number_integer()) {
-            one["line"] = *it;
+        // Reconstruct EVERY leaked edit, not just the first. A multi-edit
+        // call that leaked as XML carries old_text/new_text tags in
+        // sequence: pair each old_text with the new_text that follows it.
+        // Fall back to the top-level clean field for a single-edit leak
+        // where only one side smuggled a marker.
+        json edits = json::array();
+        std::optional<std::string> pending_old;
+        for (const auto& [k, v] : tags) {
+            if (k == "old_text" || k == "old_string") {
+                if (pending_old) {   // old with no matching new — flush as-is
+                    json e = json::object();
+                    e["old_text"] = std::move(*pending_old);
+                    e["new_text"] = "";
+                    edits.push_back(std::move(e));
+                }
+                pending_old = v;
+            } else if (k == "new_text" || k == "new_string") {
+                json e = json::object();
+                e["old_text"] = pending_old ? std::move(*pending_old)
+                                            : std::string{};
+                e["new_text"] = v;
+                pending_old.reset();
+                if (!e["old_text"].get_ref<const std::string&>().empty())
+                    edits.push_back(std::move(e));
+            }
+        }
+        if (pending_old && !pending_old->empty()) {
+            json e = json::object();
+            e["old_text"] = std::move(*pending_old);
+            // A dangling old_text with no matching new_text tag: the new
+            // side likely arrived as a CLEAN top-level key (case 1 — only
+            // old_text smuggled into the leaked string). Prefer it.
+            auto new_t = pick({"new_text", "new_string"});
+            e["new_text"] = new_t.value_or("");
+            edits.push_back(std::move(e));
         }
 
+        // Single-edit leak where one side is a clean top-level field: fall
+        // back to pick() so a `{"edit":"<parameter...>OLD","new_text":"NEW"}`
+        // shape (only old_text leaked) still recovers.
+        if (edits.empty()) {
+            auto old_t = pick({"old_text", "old_string"});
+            if (!old_t) return false;   // nothing recoverable
+            auto new_t = pick({"new_text", "new_string"});
+            json one = json::object();
+            one["old_text"] = std::move(*old_t);
+            one["new_text"] = new_t.value_or("");
+            edits.push_back(std::move(one));
+        }
+
+        // A single leaked `line` hint applies to the (sole) recovered edit.
+        if (edits.size() == 1) {
+            if (auto v = first_tag(tags, "line")) {
+                try { edits[0]["line"] = std::stoi(*v); } catch (...) {}
+            } else if (auto it = args.find("line");
+                       it != args.end() && it->is_number_integer()) {
+                edits[0]["line"] = *it;
+            }
+        }
+
+        auto path = pick({"path", "file_path", "filepath", "filename"});
         json rebuilt = json::object();
         if (path) rebuilt["path"] = std::move(*path);
-        if (auto it = args.find("display_description");
-            it != args.end() && it->is_string())
-            rebuilt["display_description"] = *it;
-        rebuilt["edits"] = json::array({std::move(one)});
+        clean_description(rebuilt);
+        rebuilt["edits"] = std::move(edits);
         args = std::move(rebuilt);
         return true;
     }
@@ -140,9 +209,7 @@ inline bool repair_param_tag_leak(std::string_view tool_name,
 
         json rebuilt = json::object();
         if (path) rebuilt["path"] = std::move(*path);
-        if (auto it = args.find("display_description");
-            it != args.end() && it->is_string())
-            rebuilt["display_description"] = *it;
+        clean_description(rebuilt);
         rebuilt["content"] = std::move(*content);
         args = std::move(rebuilt);
         return true;
