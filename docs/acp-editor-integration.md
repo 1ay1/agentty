@@ -29,15 +29,21 @@ type `config_options` carrying the **complete** option set:
 
 | configId | category | type | values | maps to |
 |----------|----------|------|--------|---------|
-| `mode`   | `mode`   | select | `ask` · `write` · `minimal` | agentty's permission profile |
+| `mode`   | `mode`   | select | `ask` · `write` · `minimal` | agentty's permission profile *(v2+ only)* |
 | `model`  | `model`  | select | the model catalog | the session's active model |
 
-- **`mode`** is *also* carried by the legacy `SessionModeState` (`modes` field
-  on the session result) and mirrored on change via `current_mode` — so a v1
-  client that only understands modes, and a config-option-aware client, both
-  see it. No gap either way.
-- **`model`** is best-effort: if the catalog can't be built, the option is
-  simply omitted (the session still works on the server default).
+- **`mode`** is surfaced **exactly one way per connection**, gated on the ACP
+  protocol version negotiated at `initialize` (clean cut, no dual-surface):
+  - a **v1** client gets the permission mode via `SessionModeState` (the
+    `modes` field on the session result + `current_mode` updates),
+  - a **v2+** client gets it as the `mode` **config option** and NOT via
+    `modes`.
+  It is never emitted on both surfaces, so a client never has to reconcile two
+  representations of the same setting. (agentty advertises v2 only when built
+  with `-DACP_ENABLE_V2_DRAFT`; the stable build negotiates v1.)
+- **`model`** is version-agnostic and best-effort: if the catalog can't be
+  built, the option is simply omitted (the session still works on the server
+  default).
 
 Each `config_options` notification is the **full state**, per the v2 contract —
 never a delta. Clients should replace their view of the options wholesale.
