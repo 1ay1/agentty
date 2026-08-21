@@ -121,9 +121,10 @@ void crash_handler(int sig) {
         const char msg[] = "\n=== agentty: SIGABRT (abort) ===\n";
         write(STDOUT_FILENO, msg, sizeof(msg) - 1);
     }
-    // Try backtrace — it uses _Unwind_Backtrace which doesn't allocate,
-    // but it may still crash if the stack itself is corrupted. If it
-    // crashes, the default handler kicks in and we still get a core dump.
+    // backtrace()/backtrace_symbols_fd() are not strictly async-signal-safe
+    // (they can allocate), but in a debug-only handler the extra frames are
+    // worth it. If they crash on a corrupted stack the default disposition
+    // still gives us a core dump.
     void* frames[32];
     int n = backtrace(frames, 32);
     if (n > 0) {
